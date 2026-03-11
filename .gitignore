@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# API specific
+tsa-api/config/database.js
+
+# Expo / React Native
+.expo/
+dist/
+web-build/
+npm-debug.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+expo-env.d.ts
+
+# Android
+tsa-app/android/.gradle/
+tsa-app/android/app/build/
+tsa-app/android/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
