@@ -1,7 +1,8 @@
 package handlers
 
 import (
-	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -12,27 +13,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// VerificationHandler holds dependencies for verification handlers.
-type VerificationHandler struct {
-	cfg *config.Config
-}
-
-// NewVerificationHandler creates a new VerificationHandler.
-func NewVerificationHandler(cfg *config.Config) *VerificationHandler {
-	return &VerificationHandler{cfg: cfg}
-}
-
 // SubmitForVerification handles POST /api/verification/submit (auth required).
-func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
+func (h *Handlers) SubmitForVerification(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -42,15 +32,10 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&dbUser)
+	err := config.DB.First(&dbUser, "id = ?", user.ID).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
@@ -65,10 +50,13 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 		return
 	}
 
+	docs := dbUser.GetDocuments()
+	fv := dbUser.GetFacialVerification()
+
 	// Check minimum requirements: at least one document
-	hasDocument := dbUser.Documents.DriversLicense.Front.URL != "" ||
-		dbUser.Documents.NIN.Front.URL != "" ||
-		dbUser.Documents.Passport.Photo.URL != ""
+	hasDocument := docs.DriversLicense.Front.URL != "" ||
+		docs.NIN.Front.URL != "" ||
+		docs.Passport.Photo.URL != ""
 
 	if !hasDocument {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -79,9 +67,9 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 	}
 
 	// Check facial images
-	hasFacialImages := dbUser.FacialVerification.FaceFront.URL != "" &&
-		dbUser.FacialVerification.FaceLeft.URL != "" &&
-		dbUser.FacialVerification.FaceRight.URL != ""
+	hasFacialImages := fv.FaceFront.URL != "" &&
+		fv.FaceLeft.URL != "" &&
+		fv.FaceRight.URL != ""
 
 	if !hasFacialImages {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -93,14 +81,11 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 
 	// Update verification status
 	now := time.Now()
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
-		"$set": bson.M{
-			"verificationStatus":         models.VerificationStatusInReview,
-			"submittedForVerificationAt": now,
-			"updatedAt":                  now,
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"verification_status":          models.VerificationStatusInReview,
+		"submitted_for_verification_at": now,
+		"updated_at":                   now,
+	}).Error; err != nil {
 		log.Printf("SubmitForVerification update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -110,17 +95,16 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 	}
 
 	// Create verification log
-	logCollection := config.GetCollection("verificationlogs")
-	_, err = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:        primitive.NewObjectID(),
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
 		UserID:    user.ID,
 		Action:    models.VerificationActionSubmitted,
 		Status:    models.VerificationLogStatusInReview,
 		Notes:     "User submitted documents for verification",
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
-	if err != nil {
+	}
+	if err := config.DB.Create(&verificationLog).Error; err != nil {
 		log.Printf("SubmitForVerification log error: %v", err)
 	}
 
@@ -134,8 +118,8 @@ func (h *VerificationHandler) SubmitForVerification(c *gin.Context) {
 	})
 }
 
-// GetVerificationStatus handles GET /api/verification/status (auth required).
-func (h *VerificationHandler) GetVerificationStatus(c *gin.Context) {
+// GetVerificationStatusV handles GET /api/verification/status (auth required).
+func (h *Handlers) GetVerificationStatusV(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -145,15 +129,10 @@ func (h *VerificationHandler) GetVerificationStatus(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&dbUser)
+	err := config.DB.First(&dbUser, "id = ?", user.ID).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
@@ -168,27 +147,30 @@ func (h *VerificationHandler) GetVerificationStatus(c *gin.Context) {
 		return
 	}
 
+	docs := dbUser.GetDocuments()
+	fv := dbUser.GetFacialVerification()
+
 	status := gin.H{
 		"overall":     dbUser.VerificationStatus,
 		"submittedAt": dbUser.SubmittedForVerificationAt,
 		"notes":       dbUser.VerificationNotes,
 		"documents": gin.H{
 			"driversLicense": gin.H{
-				"front": dbUser.Documents.DriversLicense.Front.Verified,
-				"back":  dbUser.Documents.DriversLicense.Back.Verified,
+				"front": docs.DriversLicense.Front.Verified,
+				"back":  docs.DriversLicense.Back.Verified,
 			},
 			"nin": gin.H{
-				"front": dbUser.Documents.NIN.Front.Verified,
-				"back":  dbUser.Documents.NIN.Back.Verified,
+				"front": docs.NIN.Front.Verified,
+				"back":  docs.NIN.Back.Verified,
 			},
-			"passport": dbUser.Documents.Passport.Photo.Verified,
-			"pvc":      dbUser.Documents.PVC.Card.Verified,
-			"bvn":      dbUser.Documents.BVN.Verified,
+			"passport": docs.Passport.Photo.Verified,
+			"pvc":      docs.PVC.Card.Verified,
+			"bvn":      docs.BVN.Verified,
 		},
 		"facial": gin.H{
-			"verified":   dbUser.FacialVerification.Verified,
-			"score":      dbUser.FacialVerification.VerificationScore,
-			"verifiedAt": dbUser.FacialVerification.VerifiedAt,
+			"verified":   fv.Verified,
+			"score":      fv.VerificationScore,
+			"verifiedAt": fv.VerifiedAt,
 		},
 		"nextSteps": getNextSteps(&dbUser),
 	}
@@ -205,7 +187,7 @@ type verifyBVNRequest struct {
 }
 
 // VerifyBVN handles POST /api/verification/bvn/verify (auth required).
-func (h *VerificationHandler) VerifyBVN(c *gin.Context) {
+func (h *Handlers) VerifyBVN(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -247,20 +229,27 @@ func (h *VerificationHandler) VerifyBVN(c *gin.Context) {
 
 	now := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Fetch current user to update documents JSONB
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", user.ID).Error; err != nil {
+		log.Printf("VerifyBVN fetch error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "BVN verification service temporarily unavailable",
+		})
+		return
+	}
 
-	collection := config.GetCollection("users")
+	docs := dbUser.GetDocuments()
+	docs.BVN.Number = req.BVN
+	docs.BVN.Verified = true
+	docs.BVN.VerifiedAt = &now
+	dbUser.SetDocuments(docs)
 
-	_, err := collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
-		"$set": bson.M{
-			"documents.bvn.number":     req.BVN,
-			"documents.bvn.verified":   true,
-			"documents.bvn.verifiedAt": now,
-			"updatedAt":                now,
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"documents":  dbUser.Documents,
+		"updated_at": now,
+	}).Error; err != nil {
 		log.Printf("VerifyBVN update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -270,16 +259,16 @@ func (h *VerificationHandler) VerifyBVN(c *gin.Context) {
 	}
 
 	// Create verification log
-	logCollection := config.GetCollection("verificationlogs")
-	_, _ = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:        primitive.NewObjectID(),
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
 		UserID:    user.ID,
 		Action:    models.VerificationActionBVNVerification,
 		Status:    models.VerificationLogStatusVerified,
 		Notes:     "BVN verified successfully",
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	_ = config.DB.Create(&verificationLog).Error
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -298,7 +287,7 @@ type verifyDocumentRequest struct {
 }
 
 // VerifyDocument handles POST /api/verification/document/verify (auth required).
-func (h *VerificationHandler) VerifyDocument(c *gin.Context) {
+func (h *Handlers) VerifyDocument(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -355,7 +344,7 @@ type verifyFacialRequest struct {
 }
 
 // VerifyFacialImages handles POST /api/verification/facial/verify (auth required).
-func (h *VerificationHandler) VerifyFacialImages(c *gin.Context) {
+func (h *Handlers) VerifyFacialImages(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -396,30 +385,34 @@ func (h *VerificationHandler) VerifyFacialImages(c *gin.Context) {
 
 	now := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	// For a real implementation, images would be uploaded to Cloudinary first.
-	// Here we use the provided URLs directly.
-	updateData := bson.M{
-		"facialVerification.faceFront.url":  req.Images[0],
-		"facialVerification.faceLeft.url":   req.Images[1],
-		"facialVerification.faceRight.url":  req.Images[2],
-		"facialVerification.faceUp.url":     req.Images[3],
-		"facialVerification.faceDown.url":   req.Images[4],
-		"facialVerification.verified":       isMatch,
-		"facialVerification.verificationScore": verificationScore,
-		"updatedAt": now,
+	// Fetch current user to update facial verification JSONB
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", user.ID).Error; err != nil {
+		log.Printf("VerifyFacialImages fetch error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Facial verification service error",
+		})
+		return
 	}
 
+	fv := dbUser.GetFacialVerification()
+	fv.FaceFront.URL = req.Images[0]
+	fv.FaceLeft.URL = req.Images[1]
+	fv.FaceRight.URL = req.Images[2]
+	fv.FaceUp.URL = req.Images[3]
+	fv.FaceDown.URL = req.Images[4]
+	fv.Verified = isMatch
+	fv.VerificationScore = verificationScore
 	if isMatch {
-		updateData["facialVerification.verifiedAt"] = now
+		fv.VerifiedAt = &now
 	}
+	dbUser.SetFacialVerification(fv)
 
-	_, err := collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{"$set": updateData})
-	if err != nil {
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"facial_verification": dbUser.FacialVerification,
+		"updated_at":          now,
+	}).Error; err != nil {
 		log.Printf("VerifyFacialImages update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -436,20 +429,22 @@ func (h *VerificationHandler) VerifyFacialImages(c *gin.Context) {
 		logStatus = models.VerificationLogStatusFailed
 	}
 
-	logCollection := config.GetCollection("verificationlogs")
-	_, _ = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:     primitive.NewObjectID(),
-		UserID: user.ID,
-		Action: models.VerificationActionFacialVerification,
-		Status: logStatus,
-		Notes:  message,
-		Metadata: gin.H{
-			"score":         verificationScore,
-			"livenessScore": livenessScore,
-		},
+	metadata, _ := json.Marshal(gin.H{
+		"score":         verificationScore,
+		"livenessScore": livenessScore,
+	})
+
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
+		UserID:    user.ID,
+		Action:    models.VerificationActionFacialVerification,
+		Status:    logStatus,
+		Notes:     message,
+		Metadata:  datatypes.JSON(metadata),
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	_ = config.DB.Create(&verificationLog).Error
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -465,7 +460,7 @@ func (h *VerificationHandler) VerifyFacialImages(c *gin.Context) {
 }
 
 // GetVerificationHistory handles GET /api/verification/history (auth required).
-func (h *VerificationHandler) GetVerificationHistory(c *gin.Context) {
+func (h *Handlers) GetVerificationHistory(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -475,29 +470,12 @@ func (h *VerificationHandler) GetVerificationHistory(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	logCollection := config.GetCollection("verificationlogs")
-
-	opts := options.Find().
-		SetSort(bson.M{"createdAt": -1}).
-		SetLimit(50)
-
-	cursor, err := logCollection.Find(ctx, bson.M{"userId": user.ID}, opts)
-	if err != nil {
-		log.Printf("GetVerificationHistory error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to get verification history",
-		})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var logs []models.VerificationLog
-	if err := cursor.All(ctx, &logs); err != nil {
-		log.Printf("GetVerificationHistory decode error: %v", err)
+	if err := config.DB.Where("user_id = ?", user.ID).
+		Order("created_at DESC").
+		Limit(50).
+		Find(&logs).Error; err != nil {
+		log.Printf("GetVerificationHistory error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to get verification history",
@@ -516,7 +494,7 @@ func (h *VerificationHandler) GetVerificationHistory(c *gin.Context) {
 }
 
 // ResendVerificationEmail handles POST /api/verification/resend-email (auth required).
-func (h *VerificationHandler) ResendVerificationEmail(c *gin.Context) {
+func (h *Handlers) ResendVerificationEmail(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -527,7 +505,7 @@ func (h *VerificationHandler) ResendVerificationEmail(c *gin.Context) {
 	}
 
 	// In a real application, this would send a verification email.
-	log.Printf("Verification email resent for user: %s", user.ID.Hex())
+	log.Printf("Verification email resent for user: %s", user.ID.String())
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -536,7 +514,7 @@ func (h *VerificationHandler) ResendVerificationEmail(c *gin.Context) {
 }
 
 // GetPendingVerifications handles GET /api/verification/admin/pending (admin only).
-func (h *VerificationHandler) GetPendingVerifications(c *gin.Context) {
+func (h *Handlers) GetPendingVerifications(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -563,18 +541,11 @@ func (h *VerificationHandler) GetPendingVerifications(c *gin.Context) {
 		limit = 20
 	}
 
-	skip := int64((page - 1) * limit)
-	limitInt64 := int64(limit)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-	filter := bson.M{"verificationStatus": models.VerificationStatusInReview}
+	db := config.DB.Model(&models.User{}).Where("verification_status = ?", models.VerificationStatusInReview)
 
 	// Count total
-	total, err := collection.CountDocuments(ctx, filter)
-	if err != nil {
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
 		log.Printf("GetPendingVerifications count error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -584,25 +555,10 @@ func (h *VerificationHandler) GetPendingVerifications(c *gin.Context) {
 	}
 
 	// Find users
-	opts := options.Find().
-		SetSort(bson.M{"submittedForVerificationAt": 1}).
-		SetSkip(skip).
-		SetLimit(limitInt64)
-
-	cursor, err := collection.Find(ctx, filter, opts)
-	if err != nil {
-		log.Printf("GetPendingVerifications find error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to get pending verifications",
-		})
-		return
-	}
-	defer cursor.Close(ctx)
-
+	skip := (page - 1) * limit
 	var users []models.User
-	if err := cursor.All(ctx, &users); err != nil {
-		log.Printf("GetPendingVerifications decode error: %v", err)
+	if err := db.Offset(skip).Limit(limit).Order("submitted_for_verification_at ASC").Find(&users).Error; err != nil {
+		log.Printf("GetPendingVerifications find error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to get pending verifications",
@@ -630,8 +586,8 @@ func (h *VerificationHandler) GetPendingVerifications(c *gin.Context) {
 	})
 }
 
-// GetUserVerificationDetails handles GET /api/verification/admin/:userId (admin only).
-func (h *VerificationHandler) GetUserVerificationDetails(c *gin.Context) {
+// GetUserVerificationDetails handles GET /api/verification/admin/:id (admin only).
+func (h *Handlers) GetUserVerificationDetails(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -649,7 +605,7 @@ func (h *VerificationHandler) GetUserVerificationDetails(c *gin.Context) {
 		return
 	}
 
-	userID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	userID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -658,15 +614,10 @@ func (h *VerificationHandler) GetUserVerificationDetails(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err = collection.FindOne(ctx, bson.M{"_id": userID}).Decode(&dbUser)
+	err = config.DB.First(&dbUser, "id = ?", userID).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
@@ -692,8 +643,8 @@ type approveVerificationRequest struct {
 	Notes string `json:"notes"`
 }
 
-// ApproveVerification handles POST /api/verification/admin/:userId/approve (admin only).
-func (h *VerificationHandler) ApproveVerification(c *gin.Context) {
+// ApproveVerification handles POST /api/verification/admin/:id/approve (admin only).
+func (h *Handlers) ApproveVerification(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -711,7 +662,7 @@ func (h *VerificationHandler) ApproveVerification(c *gin.Context) {
 		return
 	}
 
-	userID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	userID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -733,29 +684,42 @@ func (h *VerificationHandler) ApproveVerification(c *gin.Context) {
 
 	now := time.Now()
 
-	updateData := bson.M{
-		"verificationStatus":                      models.VerificationStatusVerified,
-		"verificationNotes":                        notes,
-		"documents.driversLicense.front.verified":  true,
-		"documents.driversLicense.back.verified":   true,
-		"documents.nin.front.verified":             true,
-		"documents.nin.back.verified":              true,
-		"documents.passport.photo.verified":        true,
-		"documents.pvc.card.verified":              true,
-		"documents.bvn.verified":                   true,
-		"documents.bvn.verifiedAt":                 now,
-		"facialVerification.verified":              true,
-		"facialVerification.verifiedAt":            now,
-		"updatedAt":                                now,
+	// Fetch user to update JSONB fields
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", userID).Error; err != nil {
+		log.Printf("ApproveVerification fetch error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to approve verification",
+		})
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Update documents - mark all as verified
+	docs := dbUser.GetDocuments()
+	docs.DriversLicense.Front.Verified = true
+	docs.DriversLicense.Back.Verified = true
+	docs.NIN.Front.Verified = true
+	docs.NIN.Back.Verified = true
+	docs.Passport.Photo.Verified = true
+	docs.PVC.Card.Verified = true
+	docs.BVN.Verified = true
+	docs.BVN.VerifiedAt = &now
+	dbUser.SetDocuments(docs)
 
-	collection := config.GetCollection("users")
+	// Update facial verification
+	fv := dbUser.GetFacialVerification()
+	fv.Verified = true
+	fv.VerifiedAt = &now
+	dbUser.SetFacialVerification(fv)
 
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{"$set": updateData})
-	if err != nil {
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"verification_status": models.VerificationStatusVerified,
+		"verification_notes":  notes,
+		"documents":           dbUser.Documents,
+		"facial_verification": dbUser.FacialVerification,
+		"updated_at":          now,
+	}).Error; err != nil {
 		log.Printf("ApproveVerification error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -765,10 +729,9 @@ func (h *VerificationHandler) ApproveVerification(c *gin.Context) {
 	}
 
 	// Create verification log
-	logCollection := config.GetCollection("verificationlogs")
 	adminID := currentUser.ID
-	_, _ = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:        primitive.NewObjectID(),
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
 		UserID:    userID,
 		Action:    models.VerificationActionAdminApproval,
 		Status:    models.VerificationLogStatusVerified,
@@ -776,9 +739,10 @@ func (h *VerificationHandler) ApproveVerification(c *gin.Context) {
 		AdminID:   &adminID,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	_ = config.DB.Create(&verificationLog).Error
 
-	log.Printf("Verification approved for user %s by admin %s", userID.Hex(), currentUser.ID.Hex())
+	log.Printf("Verification approved for user %s by admin %s", userID.String(), currentUser.ID.String())
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -794,8 +758,8 @@ type rejectVerificationRequest struct {
 	Reason string `json:"reason"`
 }
 
-// RejectVerification handles POST /api/verification/admin/:userId/reject (admin only).
-func (h *VerificationHandler) RejectVerification(c *gin.Context) {
+// RejectVerification handles POST /api/verification/admin/:id/reject (admin only).
+func (h *Handlers) RejectVerification(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -813,7 +777,7 @@ func (h *VerificationHandler) RejectVerification(c *gin.Context) {
 		return
 	}
 
-	userID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	userID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -833,19 +797,11 @@ func (h *VerificationHandler) RejectVerification(c *gin.Context) {
 
 	now := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
-		"$set": bson.M{
-			"verificationStatus": models.VerificationStatusRejected,
-			"verificationNotes":  req.Reason,
-			"updatedAt":          now,
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"verification_status": models.VerificationStatusRejected,
+		"verification_notes":  req.Reason,
+		"updated_at":          now,
+	}).Error; err != nil {
 		log.Printf("RejectVerification error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -855,10 +811,9 @@ func (h *VerificationHandler) RejectVerification(c *gin.Context) {
 	}
 
 	// Create verification log
-	logCollection := config.GetCollection("verificationlogs")
 	adminID := currentUser.ID
-	_, _ = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:        primitive.NewObjectID(),
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
 		UserID:    userID,
 		Action:    models.VerificationActionAdminRejection,
 		Status:    models.VerificationLogStatusRejected,
@@ -866,9 +821,10 @@ func (h *VerificationHandler) RejectVerification(c *gin.Context) {
 		AdminID:   &adminID,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	_ = config.DB.Create(&verificationLog).Error
 
-	log.Printf("Verification rejected for user %s by admin %s. Reason: %s", userID.Hex(), currentUser.ID.Hex(), req.Reason)
+	log.Printf("Verification rejected for user %s by admin %s. Reason: %s", userID.String(), currentUser.ID.String(), req.Reason)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -884,8 +840,8 @@ type requestMoreInfoRequest struct {
 	RequestedInfo string `json:"requestedInfo"`
 }
 
-// RequestMoreInfo handles POST /api/verification/admin/:userId/request-more-info (admin only).
-func (h *VerificationHandler) RequestMoreInfo(c *gin.Context) {
+// RequestMoreInfo handles POST /api/verification/admin/:id/request-more-info (admin only).
+func (h *Handlers) RequestMoreInfo(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -903,7 +859,7 @@ func (h *VerificationHandler) RequestMoreInfo(c *gin.Context) {
 		return
 	}
 
-	userID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	userID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -923,18 +879,10 @@ func (h *VerificationHandler) RequestMoreInfo(c *gin.Context) {
 
 	now := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
-		"$set": bson.M{
-			"verificationNotes": fmt.Sprintf("Additional information requested: %s", req.RequestedInfo),
-			"updatedAt":         now,
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"verification_notes": fmt.Sprintf("Additional information requested: %s", req.RequestedInfo),
+		"updated_at":         now,
+	}).Error; err != nil {
 		log.Printf("RequestMoreInfo error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -944,10 +892,9 @@ func (h *VerificationHandler) RequestMoreInfo(c *gin.Context) {
 	}
 
 	// Create verification log
-	logCollection := config.GetCollection("verificationlogs")
 	adminID := currentUser.ID
-	_, _ = logCollection.InsertOne(ctx, models.VerificationLog{
-		ID:        primitive.NewObjectID(),
+	verificationLog := models.VerificationLog{
+		ID:        uuid.New(),
 		UserID:    userID,
 		Action:    models.VerificationActionInfoRequested,
 		Status:    models.VerificationLogStatusInReview,
@@ -955,9 +902,10 @@ func (h *VerificationHandler) RequestMoreInfo(c *gin.Context) {
 		AdminID:   &adminID,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	_ = config.DB.Create(&verificationLog).Error
 
-	log.Printf("Info requested for user %s by admin %s", userID.Hex(), currentUser.ID.Hex())
+	log.Printf("Info requested for user %s by admin %s", userID.String(), currentUser.ID.String())
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -975,11 +923,13 @@ func getNextSteps(user *models.User) []string {
 		steps = append(steps, "Review the rejection reason and resubmit documents")
 	}
 
-	if !user.Documents.BVN.Verified {
+	docs := user.GetDocuments()
+	if !docs.BVN.Verified {
 		steps = append(steps, "Verify your BVN")
 	}
 
-	if !user.FacialVerification.Verified {
+	fv := user.GetFacialVerification()
+	if !fv.Verified {
 		steps = append(steps, "Complete facial verification")
 	}
 

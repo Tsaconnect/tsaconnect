@@ -1,19 +1,16 @@
 package handlers
 
 import (
-	"context"
+	"encoding/json"
 	"math"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"github.com/ojimcy/tsa-api-go/internal/services"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // riskMetrics holds mock portfolio risk metrics.
@@ -34,55 +31,32 @@ type allocationEntry struct {
 	Type       string  `json:"type"`
 }
 
-// PortfolioHandler handles portfolio-related HTTP requests.
-type PortfolioHandler struct {
-	priceService *services.PriceService
-}
-
-// NewPortfolioHandler creates a new PortfolioHandler.
-func NewPortfolioHandler(ps *services.PriceService) *PortfolioHandler {
-	return &PortfolioHandler{priceService: ps}
-}
-
-// GetPortfolioOverview returns a portfolio overview for the authenticated user.
+// GetPortfolio returns a portfolio overview for the authenticated user.
 // GET /api/portfolio/overview — auth, get/create portfolio, calc allocation, recent txns, top performers.
-func (h *PortfolioHandler) GetPortfolioOverview(c *gin.Context) {
+func (h *Handlers) GetPortfolio(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Get or create portfolio
-	portfolioCol := config.GetCollection("portfolios")
 	var portfolio models.Portfolio
-	err := portfolioCol.FindOne(ctx, bson.M{"userId": user.ID}).Decode(&portfolio)
-	if err != nil {
+	if err := config.DB.Where("user_id = ?", user.ID).First(&portfolio).Error; err != nil {
 		now := time.Now()
 		portfolio = models.Portfolio{
-			ID:        primitive.NewObjectID(),
+			ID:        uuid.New(),
 			UserID:    user.ID,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		_, _ = portfolioCol.InsertOne(ctx, portfolio)
+		config.DB.Create(&portfolio)
 	}
 
-	// Get user assets
-	assetsCol := config.GetCollection("assets")
-	cursor, err := assetsCol.Find(ctx, bson.M{"userId": user.ID, "isHidden": bson.M{"$ne": true}})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
-		return
-	}
-	defer cursor.Close(ctx)
-
+	// Get user assets (non-hidden)
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode assets"})
+	if err := config.DB.Where("user_id = ? AND is_hidden = ?", user.ID, false).Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
 		return
 	}
 
@@ -94,7 +68,7 @@ func (h *PortfolioHandler) GetPortfolioOverview(c *gin.Context) {
 	}
 
 	if len(symbols) > 0 {
-		prices, err := h.priceService.GetPrices(symbols)
+		prices, err := h.PriceService.GetPrices(symbols)
 		if err == nil {
 			for i := range assets {
 				if pd, ok := prices[assets[i].Symbol]; ok {
@@ -114,8 +88,9 @@ func (h *PortfolioHandler) GetPortfolioOverview(c *gin.Context) {
 			pct = (a.USDValue / totalValue) * 100
 		}
 		assetType := ""
-		if a.Details != nil {
-			assetType = a.Details.Type
+		details := a.GetDetails()
+		if details != nil {
+			assetType = details.Type
 		}
 		allocation = append(allocation, allocationEntry{
 			Symbol:     a.Symbol,
@@ -127,28 +102,20 @@ func (h *PortfolioHandler) GetPortfolioOverview(c *gin.Context) {
 	}
 
 	// Get recent transactions
-	txCol := config.GetCollection("transactions")
-	txOpts := options.Find().SetLimit(5).SetSort(bson.M{"createdAt": -1})
-	txCursor, err := txCol.Find(ctx, bson.M{"userId": user.ID}, txOpts)
 	var recentTxns []models.Transaction
-	if err == nil {
-		defer txCursor.Close(ctx)
-		_ = txCursor.All(ctx, &recentTxns)
-	}
+	config.DB.Where("user_id = ?", user.ID).Order("created_at DESC").Limit(5).Find(&recentTxns)
 
 	// Top performers
 	topPerformers := h.getTopPerformingAssets(assets)
 
 	// Update portfolio
 	now := time.Now()
-	_, _ = portfolioCol.UpdateOne(ctx,
-		bson.M{"_id": portfolio.ID},
-		bson.M{"$set": bson.M{
-			"totalValue.current": totalValue,
-			"updatedAt":          now,
-			"lastUpdated":        now,
-		}},
-	)
+	totalValueJSON, _ := json.Marshal(&models.PortfolioTotalValue{Current: totalValue})
+	config.DB.Model(&portfolio).Updates(map[string]interface{}{
+		"total_value":  totalValueJSON,
+		"updated_at":   now,
+		"last_updated": now,
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -166,9 +133,9 @@ func (h *PortfolioHandler) GetPortfolioOverview(c *gin.Context) {
 	})
 }
 
-// GetPortfolioPerformance returns portfolio performance over a time period.
+// GetPortfolioSummary returns portfolio performance over a time period.
 // GET /api/portfolio/performance — auth, period: week/month/year/all, filter history.
-func (h *PortfolioHandler) GetPortfolioPerformance(c *gin.Context) {
+func (h *Handlers) GetPortfolioSummary(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -191,13 +158,8 @@ func (h *PortfolioHandler) GetPortfolioPerformance(c *gin.Context) {
 		startDate = now.AddDate(0, -1, 0)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	portfolioCol := config.GetCollection("portfolios")
 	var portfolio models.Portfolio
-	err := portfolioCol.FindOne(ctx, bson.M{"userId": user.ID}).Decode(&portfolio)
-	if err != nil {
+	if err := config.DB.Where("user_id = ?", user.ID).First(&portfolio).Error; err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "No portfolio data available",
@@ -209,9 +171,15 @@ func (h *PortfolioHandler) GetPortfolioPerformance(c *gin.Context) {
 		return
 	}
 
+	// Unmarshal history from JSONB
+	var history []models.PortfolioHistoryEntry
+	if portfolio.History != nil {
+		json.Unmarshal(portfolio.History, &history)
+	}
+
 	// Filter history by period
 	var filteredHistory []models.PortfolioHistoryEntry
-	for _, entry := range portfolio.History {
+	for _, entry := range history {
 		if !startDate.IsZero() && entry.Date.Before(startDate) {
 			continue
 		}
@@ -243,27 +211,16 @@ func (h *PortfolioHandler) GetPortfolioPerformance(c *gin.Context) {
 
 // GetAssetAllocation returns the asset allocation for the user's portfolio.
 // GET /api/portfolio/allocation — auth, calc percentages, group by type.
-func (h *PortfolioHandler) GetAssetAllocation(c *gin.Context) {
+func (h *Handlers) GetAssetAllocation(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-	cursor, err := assetsCol.Find(ctx, bson.M{"userId": user.ID, "isHidden": bson.M{"$ne": true}})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode assets"})
+	if err := config.DB.Where("user_id = ? AND is_hidden = ?", user.ID, false).Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
 		return
 	}
 
@@ -283,8 +240,9 @@ func (h *PortfolioHandler) GetAssetAllocation(c *gin.Context) {
 			pct = (a.USDValue / totalValue) * 100
 		}
 		assetType := models.AssetTypeToken
-		if a.Details != nil && a.Details.Type != "" {
-			assetType = a.Details.Type
+		details := a.GetDetails()
+		if details != nil && details.Type != "" {
+			assetType = details.Type
 		}
 		allocation = append(allocation, allocationEntry{
 			Symbol:     a.Symbol,
@@ -323,51 +281,32 @@ func (h *PortfolioHandler) GetAssetAllocation(c *gin.Context) {
 
 // GetPortfolioAnalytics returns portfolio analytics.
 // GET /api/portfolio/analytics — auth, transaction analytics, risk metrics, diversification score.
-func (h *PortfolioHandler) GetPortfolioAnalytics(c *gin.Context) {
+func (h *Handlers) GetPortfolioAnalytics(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Get assets
-	assetsCol := config.GetCollection("assets")
-	cursor, err := assetsCol.Find(ctx, bson.M{"userId": user.ID})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode assets"})
+	if err := config.DB.Where("user_id = ?", user.ID).Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
 		return
 	}
 
 	// Transaction analytics
-	txCol := config.GetCollection("transactions")
 	thirtyDaysAgo := time.Now().AddDate(0, -1, 0)
-	txCursor, err := txCol.Find(ctx, bson.M{
-		"userId":    user.ID,
-		"createdAt": bson.M{"$gte": thirtyDaysAgo},
-	})
-
+	var txns []models.Transaction
 	var totalTxns int
 	var totalVolume float64
 	typeCounts := map[string]int{}
-	if err == nil {
-		defer txCursor.Close(ctx)
-		var txns []models.Transaction
-		if err := txCursor.All(ctx, &txns); err == nil {
-			totalTxns = len(txns)
-			for _, tx := range txns {
-				totalVolume += tx.USDValue
-				typeCounts[tx.Type]++
-			}
+
+	if err := config.DB.Where("user_id = ? AND created_at >= ?", user.ID, thirtyDaysAgo).Find(&txns).Error; err == nil {
+		totalTxns = len(txns)
+		for _, tx := range txns {
+			totalVolume += tx.USDValue
+			typeCounts[tx.Type]++
 		}
 	}
 
@@ -395,7 +334,7 @@ func (h *PortfolioHandler) GetPortfolioAnalytics(c *gin.Context) {
 // CreatePortfolioGoal creates a new portfolio goal.
 // POST /api/portfolio/goals — auth, validate name/targetAmount.
 // Goals are stored as embedded documents within the portfolio.
-func (h *PortfolioHandler) CreatePortfolioGoal(c *gin.Context) {
+func (h *Handlers) CreatePortfolioGoal(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -412,9 +351,6 @@ func (h *PortfolioHandler) CreatePortfolioGoal(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	goal := models.PortfolioGoal{
 		Name:          body.Name,
 		TargetAmount:  body.TargetAmount,
@@ -422,26 +358,40 @@ func (h *PortfolioHandler) CreatePortfolioGoal(c *gin.Context) {
 		TargetDate:    body.TargetDate,
 	}
 
-	portfolioCol := config.GetCollection("portfolios")
+	now := time.Now()
 
 	// Upsert portfolio and push the goal
-	now := time.Now()
-	result, err := portfolioCol.UpdateOne(ctx,
-		bson.M{"userId": user.ID},
-		bson.M{
-			"$push": bson.M{"goals": goal},
-			"$set":  bson.M{"updatedAt": now},
-			"$setOnInsert": bson.M{
-				"_id":       primitive.NewObjectID(),
-				"userId":    user.ID,
-				"createdAt": now,
-			},
-		},
-		options.Update().SetUpsert(true),
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create goal"})
-		return
+	var portfolio models.Portfolio
+	result := config.DB.Where("user_id = ?", user.ID).First(&portfolio)
+	if result.Error != nil {
+		// Create new portfolio with the goal
+		goalsJSON, _ := json.Marshal([]models.PortfolioGoal{goal})
+		portfolio = models.Portfolio{
+			ID:        uuid.New(),
+			UserID:    user.ID,
+			Goals:     goalsJSON,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := config.DB.Create(&portfolio).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create goal"})
+			return
+		}
+	} else {
+		// Unmarshal existing goals, append, marshal back
+		var goals []models.PortfolioGoal
+		if portfolio.Goals != nil {
+			json.Unmarshal(portfolio.Goals, &goals)
+		}
+		goals = append(goals, goal)
+		goalsJSON, _ := json.Marshal(goals)
+		if err := config.DB.Model(&portfolio).Updates(map[string]interface{}{
+			"goals":      goalsJSON,
+			"updated_at": now,
+		}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create goal"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -449,14 +399,14 @@ func (h *PortfolioHandler) CreatePortfolioGoal(c *gin.Context) {
 		"message": "Portfolio goal created successfully",
 		"data": gin.H{
 			"goal":     goal,
-			"modified": result.ModifiedCount + result.UpsertedCount,
+			"modified": 1,
 		},
 	})
 }
 
-// UpdatePortfolioGoal updates an existing portfolio goal by index (goalId used as goal name).
+// UpdatePortfolioGoal updates an existing portfolio goal by name (goalId used as goal name).
 // PUT /api/portfolio/goals/:goalId — auth.
-func (h *PortfolioHandler) UpdatePortfolioGoal(c *gin.Context) {
+func (h *Handlers) UpdatePortfolioGoal(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -476,31 +426,48 @@ func (h *PortfolioHandler) UpdatePortfolioGoal(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	portfolioCol := config.GetCollection("portfolios")
-
-	update := bson.M{"updatedAt": time.Now()}
-	if body.Name != "" {
-		update["goals.$.name"] = body.Name
-	}
-	if body.TargetAmount != nil {
-		update["goals.$.targetAmount"] = *body.TargetAmount
-	}
-	if body.CurrentAmount != nil {
-		update["goals.$.currentAmount"] = *body.CurrentAmount
-	}
-	if body.TargetDate != nil {
-		update["goals.$.targetDate"] = body.TargetDate
-	}
-
-	result, err := portfolioCol.UpdateOne(ctx,
-		bson.M{"userId": user.ID, "goals.name": goalName},
-		bson.M{"$set": update},
-	)
-	if err != nil || result.MatchedCount == 0 {
+	var portfolio models.Portfolio
+	if err := config.DB.Where("user_id = ?", user.ID).First(&portfolio).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Goal not found"})
+		return
+	}
+
+	var goals []models.PortfolioGoal
+	if portfolio.Goals != nil {
+		json.Unmarshal(portfolio.Goals, &goals)
+	}
+
+	found := false
+	for i, g := range goals {
+		if g.Name == goalName {
+			found = true
+			if body.Name != "" {
+				goals[i].Name = body.Name
+			}
+			if body.TargetAmount != nil {
+				goals[i].TargetAmount = *body.TargetAmount
+			}
+			if body.CurrentAmount != nil {
+				goals[i].CurrentAmount = *body.CurrentAmount
+			}
+			if body.TargetDate != nil {
+				goals[i].TargetDate = body.TargetDate
+			}
+			break
+		}
+	}
+
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Goal not found"})
+		return
+	}
+
+	goalsJSON, _ := json.Marshal(goals)
+	if err := config.DB.Model(&portfolio).Updates(map[string]interface{}{
+		"goals":      goalsJSON,
+		"updated_at": time.Now(),
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to update goal"})
 		return
 	}
 
@@ -509,13 +476,13 @@ func (h *PortfolioHandler) UpdatePortfolioGoal(c *gin.Context) {
 		"message": "Portfolio goal updated successfully",
 		"data": gin.H{
 			"goalName": goalName,
-			"modified": result.ModifiedCount,
+			"modified": 1,
 		},
 	})
 }
 
 // getTopPerformingAssets returns the top 5 assets by daily performance.
-func (h *PortfolioHandler) getTopPerformingAssets(assets []models.Asset) []gin.H {
+func (h *Handlers) getTopPerformingAssets(assets []models.Asset) []gin.H {
 	type assetPerf struct {
 		Symbol      string
 		Name        string
@@ -526,8 +493,9 @@ func (h *PortfolioHandler) getTopPerformingAssets(assets []models.Asset) []gin.H
 	perfs := make([]assetPerf, 0, len(assets))
 	for _, a := range assets {
 		daily := 0.0
-		if a.Performance != nil {
-			daily = a.Performance.DailyChange
+		perf := a.GetPerformance()
+		if perf != nil {
+			daily = perf.DailyChange
 		}
 		perfs = append(perfs, assetPerf{
 			Symbol:      a.Symbol,
@@ -559,7 +527,7 @@ func (h *PortfolioHandler) getTopPerformingAssets(assets []models.Asset) []gin.H
 }
 
 // calculateRiskMetrics returns mock risk metrics for the portfolio.
-func (h *PortfolioHandler) calculateRiskMetrics(assets []models.Asset) riskMetrics {
+func (h *Handlers) calculateRiskMetrics(assets []models.Asset) riskMetrics {
 	n := float64(len(assets))
 	if n == 0 {
 		return riskMetrics{}
@@ -575,7 +543,7 @@ func (h *PortfolioHandler) calculateRiskMetrics(assets []models.Asset) riskMetri
 }
 
 // calculateDiversificationScore calculates an HHI-based diversification score (0-100).
-func (h *PortfolioHandler) calculateDiversificationScore(assets []models.Asset) float64 {
+func (h *Handlers) calculateDiversificationScore(assets []models.Asset) float64 {
 	if len(assets) == 0 {
 		return 0
 	}

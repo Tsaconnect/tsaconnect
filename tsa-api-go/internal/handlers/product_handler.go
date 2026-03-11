@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -12,13 +11,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // CreateProduct handles POST /api/products/ - creates a new product with optional image uploads.
@@ -70,21 +67,17 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 
 	// Validate category if provided
 	categoryStr := c.PostForm("category")
-	var categoryID *primitive.ObjectID
+	var categoryID *uuid.UUID
 	var categoryName string
 	if categoryStr != "" {
-		catOID, err := primitive.ObjectIDFromHex(categoryStr)
+		catOID, err := uuid.Parse(categoryStr)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
 		var cat models.Category
-		err = config.GetCollection("categories").FindOne(ctx, bson.M{"_id": catOID}).Decode(&cat)
-		if err != nil {
+		if err := config.DB.First(&cat, "id = ?", catOID).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusNotFound, "Category not found")
 			return
 		}
@@ -125,39 +118,35 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 
 	now := time.Now()
 	product := models.Product{
+		ID:           uuid.New(),
 		UserID:       user.ID,
 		Name:         name,
 		Description:  description,
 		Price:        price,
 		Stock:        stock,
-		Category:     categoryID,
+		CategoryID:   categoryID,
 		CategoryName: categoryName,
 		Location:     location,
 		PhoneNumber:  phoneNumber,
 		Email:        strings.ToLower(strings.TrimSpace(email)),
 		CompanyName:  companyName,
-		Images:       uploadedImages,
-		Attributes:   parsedAttributes,
 		Status:       models.ProductStatusActive,
 		Type:         productType,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	product.SetImages(uploadedImages)
+	product.SetAttributes(parsedAttributes)
 
-	result, err := config.GetCollection("products").InsertOne(ctx, product)
-	if err != nil {
+	if err := config.DB.Create(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create product")
 		return
 	}
 
-	product.ID = result.InsertedID.(primitive.ObjectID)
-
 	// Update category product count
 	if categoryID != nil {
-		updateCategoryProductCount(ctx, *categoryID)
+		updateCategoryProductCount(*categoryID)
 	}
 
 	utils.SuccessResponse(c, http.StatusCreated, "Product created successfully", product)
@@ -183,60 +172,50 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 	status := c.Query("status")
 	category := c.Query("category")
 	search := c.Query("search")
-	sortBy := c.DefaultQuery("sortBy", "createdAt")
+	sortBy := c.DefaultQuery("sortBy", "created_at")
 	sortOrder := c.DefaultQuery("sortOrder", "desc")
 
-	filter := bson.M{"userId": user.ID}
+	query := config.DB.Model(&models.Product{}).Where("user_id = ?", user.ID)
+
 	if status != "" {
-		filter["status"] = status
+		query = query.Where("status = ?", status)
 	}
 	if category != "" {
-		catOID, err := primitive.ObjectIDFromHex(category)
+		catOID, err := uuid.Parse(category)
 		if err == nil {
-			filter["category"] = catOID
+			query = query.Where("category_id = ?", catOID)
 		}
 	}
 	if search != "" {
-		filter["$or"] = bson.A{
-			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"description": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"companyName": bson.M{"$regex": search, "$options": "i"}},
-		}
+		query = query.Where("(name ILIKE ? OR description ILIKE ? OR company_name ILIKE ?)",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
-	sortDir := -1
-	if sortOrder == "asc" {
-		sortDir = 1
-	}
-	skip := int64((page - 1) * limit)
-	limitInt := int64(limit)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
-	total, err := col.CountDocuments(ctx, filter)
-	if err != nil {
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products")
 		return
 	}
 
-	opts := options.Find().
-		SetSort(bson.D{{Key: sortBy, Value: sortDir}}).
-		SetSkip(skip).
-		SetLimit(limitInt)
-
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products")
-		return
+	// Map JSON field names to DB column names
+	sortFieldMap := map[string]string{
+		"createdAt": "created_at",
+		"updatedAt": "updated_at",
+		"price":     "price",
+		"name":      "name",
+		"views":     "views",
+		"sales":     "sales",
 	}
-	defer cursor.Close(ctx)
+	if mapped, ok := sortFieldMap[sortBy]; ok {
+		sortBy = mapped
+	}
+
+	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	offset := (page - 1) * limit
 
 	var products []models.Product
-	if err := cursor.All(ctx, &products); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode products")
+	if err := query.Order(orderClause).Offset(offset).Limit(limit).Find(&products).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products")
 		return
 	}
 
@@ -257,26 +236,20 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 
 // GetProductByID handles GET /api/products/:productId - returns a product and increments views.
 func (h *Handlers) GetProductByID(c *gin.Context) {
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.First(&product, "id = ?", productID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
 
 	// Increment views
-	_, _ = col.UpdateOne(ctx, bson.M{"_id": productID}, bson.M{"$inc": bson.M{"views": 1}})
+	config.DB.Model(&product).Update("views", product.Views+1)
 	product.Views++
 
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", product)
@@ -290,71 +263,66 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID, "userId": user.ID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", productID, user.ID).First(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
 
-	update := bson.M{}
+	updates := map[string]interface{}{}
 
 	if name := c.PostForm("name"); name != "" {
-		update["name"] = name
+		updates["name"] = name
 	}
 	if desc := c.PostForm("description"); desc != "" {
-		update["description"] = desc
+		updates["description"] = desc
 	}
 	if priceStr := c.PostForm("price"); priceStr != "" {
 		if p, err := strconv.ParseFloat(priceStr, 64); err == nil {
-			update["price"] = p
+			updates["price"] = p
 		}
 	}
 	if stockStr := c.PostForm("stock"); stockStr != "" {
 		if s, err := strconv.Atoi(stockStr); err == nil {
-			update["stock"] = s
+			updates["stock"] = s
 		}
 	}
 	if location := c.PostForm("location"); location != "" {
-		update["location"] = location
+		updates["location"] = location
 	}
 	if phone := c.PostForm("phoneNumber"); phone != "" {
-		update["phoneNumber"] = phone
+		updates["phone_number"] = phone
 	}
 	if email := c.PostForm("email"); email != "" {
-		update["email"] = strings.ToLower(strings.TrimSpace(email))
+		updates["email"] = strings.ToLower(strings.TrimSpace(email))
 	}
 	if company := c.PostForm("companyName"); company != "" {
-		update["companyName"] = company
+		updates["company_name"] = company
 	}
 	if t := c.PostForm("type"); t != "" {
-		update["type"] = t
+		updates["type"] = t
 	}
 
 	// Parse attributes
 	if attrStr := c.PostForm("attributes"); attrStr != "" {
 		var attrs []models.ProductAttribute
 		if err := json.Unmarshal([]byte(attrStr), &attrs); err == nil {
-			update["attributes"] = attrs
+			attrJSON, _ := json.Marshal(attrs)
+			updates["attributes"] = attrJSON
 		}
 	}
 
 	// Handle category update
 	if catStr := c.PostForm("category"); catStr != "" {
-		catOID, err := primitive.ObjectIDFromHex(catStr)
+		catOID, err := uuid.Parse(catStr)
 		if err == nil {
-			update["category"] = catOID
+			updates["category_id"] = catOID
 		}
 	}
 
@@ -362,7 +330,7 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	form, _ := c.MultipartForm()
 	if form != nil && form.File["images"] != nil && len(form.File["images"]) > 0 {
 		// Delete old images from Cloudinary
-		for _, img := range product.Images {
+		for _, img := range product.GetImages() {
 			if img.PublicID != "" {
 				_ = middleware.DeleteFromCloudinary(h.Config, img.PublicID)
 			}
@@ -392,29 +360,29 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 				Order:    i,
 			})
 		}
-		update["images"] = newImages
+		imagesJSON, _ := json.Marshal(newImages)
+		updates["images"] = imagesJSON
 	}
 
-	if len(update) == 0 {
+	if len(updates) == 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No fields to update")
 		return
 	}
-	update["updatedAt"] = time.Now()
+	updates["updated_at"] = time.Now()
 
-	_, err = col.UpdateOne(ctx, bson.M{"_id": productID}, bson.M{"$set": update})
-	if err != nil {
+	if err := config.DB.Model(&product).Updates(updates).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update product")
 		return
 	}
 
 	// Re-fetch updated product
 	var updated models.Product
-	_ = col.FindOne(ctx, bson.M{"_id": productID}).Decode(&updated)
+	config.DB.First(&updated, "id = ?", productID)
 
 	// Update category product count if category changed
-	if catID, ok := update["category"]; ok {
-		if oid, ok := catID.(primitive.ObjectID); ok {
-			updateCategoryProductCount(ctx, oid)
+	if catID, ok := updates["category_id"]; ok {
+		if oid, ok := catID.(uuid.UUID); ok {
+			updateCategoryProductCount(oid)
 		}
 	}
 
@@ -429,41 +397,34 @@ func (h *Handlers) DeleteProduct(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID, "userId": user.ID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", productID, user.ID).First(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
 
 	// Delete images from Cloudinary
-	for _, img := range product.Images {
+	for _, img := range product.GetImages() {
 		if img.PublicID != "" {
 			_ = middleware.DeleteFromCloudinary(h.Config, img.PublicID)
 		}
 	}
 
-	categoryID := product.Category
+	categoryID := product.CategoryID
 
-	_, err = col.DeleteOne(ctx, bson.M{"_id": productID})
-	if err != nil {
+	if err := config.DB.Delete(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to delete product")
 		return
 	}
 
 	if categoryID != nil {
-		updateCategoryProductCount(ctx, *categoryID)
+		updateCategoryProductCount(*categoryID)
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Product deleted successfully", nil)
@@ -477,7 +438,7 @@ func (h *Handlers) UpdateStock(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -491,15 +452,10 @@ func (h *Handlers) UpdateStock(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-	result, err := col.UpdateOne(ctx,
-		bson.M{"_id": productID, "userId": user.ID},
-		bson.M{"$set": bson.M{"stock": body.Quantity, "updatedAt": time.Now()}},
-	)
-	if err != nil || result.MatchedCount == 0 {
+	result := config.DB.Model(&models.Product{}).
+		Where("id = ? AND user_id = ?", productID, user.ID).
+		Updates(map[string]interface{}{"stock": body.Quantity, "updated_at": time.Now()})
+	if result.Error != nil || result.RowsAffected == 0 {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
@@ -517,7 +473,7 @@ func (h *Handlers) UpdateStatus(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -539,15 +495,10 @@ func (h *Handlers) UpdateStatus(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-	result, err := col.UpdateOne(ctx,
-		bson.M{"_id": productID, "userId": user.ID},
-		bson.M{"$set": bson.M{"status": body.Status, "updatedAt": time.Now()}},
-	)
-	if err != nil || result.MatchedCount == 0 {
+	result := config.DB.Model(&models.Product{}).
+		Where("id = ? AND user_id = ?", productID, user.ID).
+		Updates(map[string]interface{}{"status": body.Status, "updated_at": time.Now()})
+	if result.Error != nil || result.RowsAffected == 0 {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
@@ -565,7 +516,7 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -577,20 +528,15 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID, "userId": user.ID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", productID, user.ID).First(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
 
+	existingImages := product.GetImages()
 	var uploaded []models.ProductImage
-	existingCount := len(product.Images)
+	existingCount := len(existingImages)
 
 	for i, fileHeader := range form.File["images"] {
 		file, err := fileHeader.Open()
@@ -618,11 +564,10 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 	}
 
 	if len(uploaded) > 0 {
-		_, err = col.UpdateOne(ctx, bson.M{"_id": productID}, bson.M{
-			"$push":   bson.M{"images": bson.M{"$each": uploaded}},
-			"$set":    bson.M{"updatedAt": time.Now()},
-		})
-		if err != nil {
+		allImages := append(existingImages, uploaded...)
+		product.SetImages(allImages)
+		product.UpdatedAt = time.Now()
+		if err := config.DB.Save(&product).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to upload images")
 			return
 		}
@@ -633,41 +578,37 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 	})
 }
 
-// DeleteImage handles DELETE /api/products/:productId/images/:imageId - removes an image from a product.
-func (h *Handlers) DeleteImage(c *gin.Context) {
+// DeleteProductImage handles DELETE /api/products/:productId/images/:imageId - removes an image from a product.
+func (h *Handlers) DeleteProductImage(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("productId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	imageID, err := primitive.ObjectIDFromHex(c.Param("imageId"))
+	imageID, err := uuid.Parse(c.Param("imageId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid image ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID, "userId": user.ID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", productID, user.ID).First(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
 
+	images := product.GetImages()
+
 	// Find image
 	imageIndex := -1
-	for i, img := range product.Images {
+	for i, img := range images {
 		if img.ID == imageID {
 			imageIndex = i
 			break
@@ -679,23 +620,22 @@ func (h *Handlers) DeleteImage(c *gin.Context) {
 	}
 
 	// Delete from Cloudinary
-	if product.Images[imageIndex].PublicID != "" {
-		_ = middleware.DeleteFromCloudinary(h.Config, product.Images[imageIndex].PublicID)
+	if images[imageIndex].PublicID != "" {
+		_ = middleware.DeleteFromCloudinary(h.Config, images[imageIndex].PublicID)
 	}
 
 	// Remove from array and reorder
-	newImages := make([]models.ProductImage, 0, len(product.Images)-1)
-	for i, img := range product.Images {
+	newImages := make([]models.ProductImage, 0, len(images)-1)
+	for i, img := range images {
 		if i != imageIndex {
 			img.Order = len(newImages)
 			newImages = append(newImages, img)
 		}
 	}
 
-	_, err = col.UpdateOne(ctx, bson.M{"_id": productID}, bson.M{
-		"$set": bson.M{"images": newImages, "updatedAt": time.Now()},
-	})
-	if err != nil {
+	product.SetImages(newImages)
+	product.UpdatedAt = time.Now()
+	if err := config.DB.Save(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to delete image")
 		return
 	}
@@ -711,20 +651,14 @@ func (h *Handlers) ToggleFeatured(c *gin.Context) {
 		return
 	}
 
-	productID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
 	var product models.Product
-	err = col.FindOne(ctx, bson.M{"_id": productID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.First(&product, "id = ?", productID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
@@ -736,10 +670,10 @@ func (h *Handlers) ToggleFeatured(c *gin.Context) {
 	}
 
 	newFeatured := !product.IsFeatured
-	_, err = col.UpdateOne(ctx, bson.M{"_id": productID}, bson.M{
-		"$set": bson.M{"isFeatured": newFeatured, "updatedAt": time.Now()},
-	})
-	if err != nil {
+	if err := config.DB.Model(&product).Updates(map[string]interface{}{
+		"is_featured": newFeatured,
+		"updated_at":  time.Now(),
+	}).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Server error")
 		return
 	}
@@ -770,66 +704,34 @@ func (h *Handlers) GetProductStats(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	baseQuery := config.DB.Model(&models.Product{}).Where("user_id = ?", user.ID)
 
-	col := config.GetCollection("products")
+	var totalProducts int64
+	baseQuery.Count(&totalProducts)
 
-	// Aggregation: group by status
-	pipeline := bson.A{
-		bson.M{"$match": bson.M{"userId": user.ID}},
-		bson.M{"$group": bson.M{
-			"_id":        "$status",
-			"count":      bson.M{"$sum": 1},
-			"totalValue": bson.M{"$sum": bson.M{"$multiply": bson.A{"$price", "$stock"}}},
-			"totalStock": bson.M{"$sum": "$stock"},
-			"totalSales": bson.M{"$sum": "$sales"},
-			"totalViews": bson.M{"$sum": "$views"},
-		}},
+	// Status counts
+	type StatusCount struct {
+		Status     string  `json:"_id"`
+		Count      int64   `json:"count"`
+		TotalValue float64 `json:"totalValue"`
+		TotalStock int64   `json:"totalStock"`
+		TotalSales int64   `json:"totalSales"`
+		TotalViews int64   `json:"totalViews"`
 	}
 
-	cursor, err := col.Aggregate(ctx, pipeline)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch product statistics")
-		return
-	}
-	defer cursor.Close(ctx)
+	var stats []StatusCount
+	config.DB.Model(&models.Product{}).
+		Select("status as _id, COUNT(*) as count, COALESCE(SUM(price * stock), 0) as total_value, COALESCE(SUM(stock), 0) as total_stock, COALESCE(SUM(sales), 0) as total_sales, COALESCE(SUM(views), 0) as total_views").
+		Where("user_id = ?", user.ID).
+		Group("status").
+		Find(&stats)
 
-	var stats []bson.M
-	if err := cursor.All(ctx, &stats); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode statistics")
-		return
-	}
-
-	totalProducts, _ := col.CountDocuments(ctx, bson.M{"userId": user.ID})
-
-	// Total value aggregation
-	valuePipeline := bson.A{
-		bson.M{"$match": bson.M{"userId": user.ID}},
-		bson.M{"$group": bson.M{
-			"_id":   nil,
-			"total": bson.M{"$sum": bson.M{"$multiply": bson.A{"$price", "$stock"}}},
-		}},
-	}
-	valueCursor, err := col.Aggregate(ctx, valuePipeline)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch product statistics")
-		return
-	}
-	defer valueCursor.Close(ctx)
-
-	var valueResults []bson.M
-	_ = valueCursor.All(ctx, &valueResults)
-	totalValue := 0.0
-	if len(valueResults) > 0 {
-		if v, ok := valueResults[0]["total"].(float64); ok {
-			totalValue = v
-		} else if v, ok := valueResults[0]["total"].(int64); ok {
-			totalValue = float64(v)
-		} else if v, ok := valueResults[0]["total"].(int32); ok {
-			totalValue = float64(v)
-		}
-	}
+	// Total inventory value
+	var totalValue float64
+	config.DB.Model(&models.Product{}).
+		Select("COALESCE(SUM(price * stock), 0)").
+		Where("user_id = ?", user.ID).
+		Row().Scan(&totalValue)
 
 	utils.SuccessResponse(c, http.StatusOK, "Product statistics fetched successfully", gin.H{
 		"stats": stats,
@@ -842,21 +744,9 @@ func (h *Handlers) GetProductStats(c *gin.Context) {
 
 // GetNonFeaturedProducts handles GET /api/products/non-featured - returns non-featured products (admin/merchant).
 func (h *Handlers) GetNonFeaturedProducts(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("products")
-
-	cursor, err := col.Find(ctx, bson.M{"isFeatured": false})
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products")
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var products []models.Product
-	if err := cursor.All(ctx, &products); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode products")
+	if err := config.DB.Where("is_featured = ?", false).Find(&products).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products")
 		return
 	}
 
@@ -876,7 +766,7 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 
 	categoryIDStr := c.Query("categoryId")
 	subcategoryIDStr := c.Query("subcategoryId")
-	sortBy := c.DefaultQuery("sortBy", "createdAt")
+	sortBy := c.DefaultQuery("sortBy", "created_at")
 	sortOrder := c.DefaultQuery("sortOrder", "desc")
 	minPriceStr := c.Query("minPrice")
 	maxPriceStr := c.Query("maxPrice")
@@ -884,115 +774,83 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	status := c.DefaultQuery("status", "active")
 	search := c.Query("search")
 
-	filter := bson.M{}
+	query := config.DB.Model(&models.Product{})
 
 	if categoryIDStr != "" {
-		if catOID, err := primitive.ObjectIDFromHex(categoryIDStr); err == nil {
-			filter["category"] = catOID
+		if catOID, err := uuid.Parse(categoryIDStr); err == nil {
+			query = query.Where("category_id = ?", catOID)
 		}
 	}
 
 	if productType != "" && (productType == "Product" || productType == "Service") {
-		filter["type"] = productType
+		query = query.Where("type = ?", productType)
 	}
 
 	validStatuses := map[string]bool{"active": true, "inactive": true, "sold_out": true, "pending_review": true}
 	if validStatuses[status] {
-		filter["status"] = status
+		query = query.Where("status = ?", status)
 	} else {
-		filter["status"] = "active"
+		query = query.Where("status = ?", "active")
 	}
 
-	if minPriceStr != "" || maxPriceStr != "" {
-		priceFilter := bson.M{}
-		if minPriceStr != "" {
-			if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
-				priceFilter["$gte"] = v
-			}
+	if minPriceStr != "" {
+		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
+			query = query.Where("price >= ?", v)
 		}
-		if maxPriceStr != "" {
-			if v, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
-				priceFilter["$lte"] = v
-			}
-		}
-		if len(priceFilter) > 0 {
-			filter["price"] = priceFilter
+	}
+	if maxPriceStr != "" {
+		if v, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
+			query = query.Where("price <= ?", v)
 		}
 	}
 
 	if search != "" {
-		filter["$or"] = bson.A{
-			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"description": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"companyName": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"attributes.value": bson.M{"$regex": search, "$options": "i"}},
-		}
+		query = query.Where("(name ILIKE ? OR description ILIKE ? OR company_name ILIKE ?)",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	// Handle subcategory by name
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	if subcategoryIDStr != "" {
-		if _, err := primitive.ObjectIDFromHex(subcategoryIDStr); err != nil {
-			// Not a valid ObjectID, search by name
-			catCol := config.GetCollection("categories")
-			catCursor, err := catCol.Find(ctx, bson.M{
-				"title": bson.M{"$regex": subcategoryIDStr, "$options": "i"},
-			})
-			if err == nil {
-				var cats []models.Category
-				if catCursor.All(ctx, &cats) == nil && len(cats) > 0 {
-					ids := make(bson.A, len(cats))
-					for i, cat := range cats {
-						ids[i] = cat.ID
-					}
-					filter["category"] = bson.M{"$in": ids}
+		if _, err := uuid.Parse(subcategoryIDStr); err != nil {
+			// Not a valid UUID, search by name
+			var cats []models.Category
+			if config.DB.Where("title ILIKE ?", "%"+subcategoryIDStr+"%").Find(&cats).Error == nil && len(cats) > 0 {
+				ids := make([]uuid.UUID, len(cats))
+				for i, cat := range cats {
+					ids[i] = cat.ID
 				}
-				catCursor.Close(ctx)
+				query = query.Where("category_id IN ?", ids)
 			}
 		}
 	}
 
-	sortDir := -1
-	if sortOrder == "asc" {
-		sortDir = 1
+	// Map JSON sort field names to DB column names
+	sortFieldMap := map[string]string{
+		"createdAt":      "created_at",
+		"updatedAt":      "updated_at",
+		"price":          "price",
+		"name":           "name",
+		"views":          "views",
+		"sales":          "sales",
+		"rating.average": "rating->>'average'",
+	}
+	if mapped, ok := sortFieldMap[sortBy]; ok {
+		sortBy = mapped
+	}
+	if sortBy != "created_at" && sortBy != "updated_at" && sortBy != "price" &&
+		sortBy != "name" && sortBy != "views" && sortBy != "sales" && sortBy != "rating->>'average'" {
+		sortBy = "created_at"
 	}
 
-	validSortFields := map[string]bool{
-		"createdAt": true, "updatedAt": true, "price": true,
-		"name": true, "views": true, "sales": true, "rating.average": true,
-	}
-	if !validSortFields[sortBy] {
-		sortBy = "createdAt"
-	}
+	var total int64
+	query.Count(&total)
 
-	skip := int64((page - 1) * limit)
-	limitInt := int64(limit)
-
-	col := config.GetCollection("products")
-
-	total, err := col.CountDocuments(ctx, filter)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category")
-		return
-	}
-
-	opts := options.Find().
-		SetSort(bson.D{{Key: sortBy, Value: sortDir}}).
-		SetSkip(skip).
-		SetLimit(limitInt)
-
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category")
-		return
-	}
-	defer cursor.Close(ctx)
+	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	offset := (page - 1) * limit
 
 	var products []models.Product
-	if err := cursor.All(ctx, &products); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode products")
+	if err := query.Order(orderClause).Offset(offset).Limit(limit).Find(&products).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category")
 		return
 	}
 
@@ -1001,68 +859,67 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	// Get category details if categoryId is provided
 	var categoryDetails *models.Category
 	if categoryIDStr != "" {
-		if catOID, err := primitive.ObjectIDFromHex(categoryIDStr); err == nil {
+		if catOID, err := uuid.Parse(categoryIDStr); err == nil {
 			var cat models.Category
-			catCol := config.GetCollection("categories")
-			if catCol.FindOne(ctx, bson.M{"_id": catOID}).Decode(&cat) == nil {
+			if config.DB.First(&cat, "id = ?", catOID).Error == nil {
 				categoryDetails = &cat
 			}
 		}
 	}
 
-	// Price stats aggregation
-	statsPipeline := bson.A{
-		bson.M{"$match": filter},
-		bson.M{"$group": bson.M{
-			"_id":           nil,
-			"minPrice":      bson.M{"$min": "$price"},
-			"maxPrice":      bson.M{"$max": "$price"},
-			"avgPrice":      bson.M{"$avg": "$price"},
-			"totalProducts": bson.M{"$sum": 1},
-			"totalInStock":  bson.M{"$sum": bson.M{"$cond": bson.A{bson.M{"$gt": bson.A{"$stock", 0}}, 1, 0}}},
-		}},
+	// Price stats using simple queries
+	type PriceStats struct {
+		MinPrice      *float64 `json:"minPrice"`
+		MaxPrice      *float64 `json:"maxPrice"`
+		AvgPrice      *float64 `json:"avgPrice"`
+		TotalProducts int      `json:"totalProducts"`
+		TotalInStock  int      `json:"totalInStock"`
 	}
-
-	statsCursor, err := col.Aggregate(ctx, statsPipeline)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch product statistics")
-		return
-	}
-	defer statsCursor.Close(ctx)
-
-	var statsResults []bson.M
-	_ = statsCursor.All(ctx, &statsResults)
-
-	priceStats := gin.H{
-		"minPrice": 0, "maxPrice": 0, "avgPrice": 0, "totalProducts": 0, "totalInStock": 0,
-	}
-	if len(statsResults) > 0 {
-		priceStats = gin.H{
-			"minPrice":      statsResults[0]["minPrice"],
-			"maxPrice":      statsResults[0]["maxPrice"],
-			"avgPrice":      statsResults[0]["avgPrice"],
-			"totalProducts": statsResults[0]["totalProducts"],
-			"totalInStock":  statsResults[0]["totalInStock"],
+	var priceStats PriceStats
+	// We need a fresh query for stats since the original query has offset/limit applied
+	statsQuery := config.DB.Model(&models.Product{})
+	if categoryIDStr != "" {
+		if catOID, err := uuid.Parse(categoryIDStr); err == nil {
+			statsQuery = statsQuery.Where("category_id = ?", catOID)
 		}
 	}
-
-	totalProductsCount := 0
-	totalInStockCount := 0
-	if v, ok := priceStats["totalProducts"]; ok {
-		switch tv := v.(type) {
-		case int32:
-			totalProductsCount = int(tv)
-		case int64:
-			totalProductsCount = int(tv)
+	if productType != "" && (productType == "Product" || productType == "Service") {
+		statsQuery = statsQuery.Where("type = ?", productType)
+	}
+	if validStatuses[status] {
+		statsQuery = statsQuery.Where("status = ?", status)
+	} else {
+		statsQuery = statsQuery.Where("status = ?", "active")
+	}
+	if minPriceStr != "" {
+		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
+			statsQuery = statsQuery.Where("price >= ?", v)
 		}
 	}
-	if v, ok := priceStats["totalInStock"]; ok {
-		switch tv := v.(type) {
-		case int32:
-			totalInStockCount = int(tv)
-		case int64:
-			totalInStockCount = int(tv)
+	if maxPriceStr != "" {
+		if v, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
+			statsQuery = statsQuery.Where("price <= ?", v)
 		}
+	}
+	if search != "" {
+		statsQuery = statsQuery.Where("(name ILIKE ? OR description ILIKE ? OR company_name ILIKE ?)",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%")
+	}
+
+	statsQuery.Select("MIN(price) as min_price, MAX(price) as max_price, AVG(price) as avg_price, COUNT(*) as total_products, SUM(CASE WHEN stock > 0 THEN 1 ELSE 0 END) as total_in_stock").
+		Row().Scan(&priceStats.MinPrice, &priceStats.MaxPrice, &priceStats.AvgPrice, &priceStats.TotalProducts, &priceStats.TotalInStock)
+
+	minP := 0.0
+	maxP := 0.0
+	avgP := 0.0
+	if priceStats.MinPrice != nil {
+		minP = *priceStats.MinPrice
+	}
+	if priceStats.MaxPrice != nil {
+		maxP = *priceStats.MaxPrice
+	}
+	if priceStats.AvgPrice != nil {
+		avgP = *priceStats.AvgPrice
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Products fetched successfully", gin.H{
@@ -1087,14 +944,14 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 			},
 			"stats": gin.H{
 				"priceRange": gin.H{
-					"min":     priceStats["minPrice"],
-					"max":     priceStats["maxPrice"],
-					"average": priceStats["avgPrice"],
+					"min":     minP,
+					"max":     maxP,
+					"average": avgP,
 				},
 				"count": gin.H{
-					"total":      totalProductsCount,
-					"inStock":    totalInStockCount,
-					"outOfStock": totalProductsCount - totalInStockCount,
+					"total":      priceStats.TotalProducts,
+					"inStock":    priceStats.TotalInStock,
+					"outOfStock": priceStats.TotalProducts - priceStats.TotalInStock,
 				},
 			},
 		},
@@ -1104,7 +961,7 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 // GetProductsByCategoryTree handles GET /api/products/public/category/tree/:categoryId - products with subcategory grouping.
 func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 	categoryIDStr := c.Param("categoryId")
-	categoryID, err := primitive.ObjectIDFromHex(categoryIDStr)
+	categoryID, err := uuid.Parse(categoryIDStr)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")
 		return
@@ -1112,53 +969,29 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 
 	includeSubcategories := c.DefaultQuery("includeSubcategories", "true")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	catCol := config.GetCollection("categories")
-	prodCol := config.GetCollection("products")
-
 	// Collect category IDs
-	categoryIDs := bson.A{categoryID}
+	categoryIDs := []uuid.UUID{categoryID}
 	if includeSubcategories == "true" {
-		cursor, err := catCol.Find(ctx, bson.M{
-			"$or": bson.A{
-				bson.M{"_id": categoryID},
-				bson.M{"parentCategory": categoryID},
-			},
-		})
-		if err == nil {
-			var cats []models.Category
-			if cursor.All(ctx, &cats) == nil {
-				categoryIDs = make(bson.A, len(cats))
-				for i, cat := range cats {
-					categoryIDs[i] = cat.ID
-				}
+		var cats []models.Category
+		if err := config.DB.Where("id = ? OR parent_category_id = ?", categoryID, categoryID).Find(&cats).Error; err == nil {
+			categoryIDs = make([]uuid.UUID, len(cats))
+			for i, cat := range cats {
+				categoryIDs[i] = cat.ID
 			}
-			cursor.Close(ctx)
 		}
 	}
 
 	// Get products
-	cursor, err := prodCol.Find(ctx,
-		bson.M{"category": bson.M{"$in": categoryIDs}, "status": "active"},
-		options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}),
-	)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category tree")
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var products []models.Product
-	if err := cursor.All(ctx, &products); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode products")
+	if err := config.DB.Where("category_id IN ? AND status = ?", categoryIDs, "active").
+		Order("created_at DESC").Find(&products).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category tree")
 		return
 	}
 
 	// Main category details
 	var mainCategory models.Category
-	catCol.FindOne(ctx, bson.M{"_id": categoryID}).Decode(&mainCategory)
+	config.DB.First(&mainCategory, "id = ?", categoryID)
 
 	// Group by subcategory
 	groupedBySubcategory := make(map[string]gin.H)
@@ -1172,11 +1005,11 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 			outOfStockCount++
 		}
 
-		if p.Category != nil {
-			catID := p.Category.Hex()
+		if p.CategoryID != nil {
+			catID := p.CategoryID.String()
 			if _, ok := groupedBySubcategory[catID]; !ok {
 				groupedBySubcategory[catID] = gin.H{
-					"category": p.Category,
+					"category": p.CategoryID,
 					"products": []models.Product{},
 				}
 			}
@@ -1220,120 +1053,87 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	sortParam := c.DefaultQuery("sort", "recent")
 	search := c.Query("search")
 
-	filter := bson.M{"status": "active"}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	query := config.DB.Model(&models.Product{}).Where("status = ?", "active")
 
 	// Category filter
 	if category != "" {
-		if catOID, err := primitive.ObjectIDFromHex(category); err == nil {
-			filter["category"] = catOID
+		if catOID, err := uuid.Parse(category); err == nil {
+			query = query.Where("category_id = ?", catOID)
 		} else {
 			// Search by category name
-			catCol := config.GetCollection("categories")
-			catCursor, err := catCol.Find(ctx, bson.M{
-				"title": bson.M{"$regex": category, "$options": "i"},
-			})
-			if err == nil {
-				var cats []models.Category
-				if catCursor.All(ctx, &cats) == nil && len(cats) > 0 {
-					ids := make(bson.A, len(cats))
-					for i, cat := range cats {
-						ids[i] = cat.ID
-					}
-					filter["category"] = bson.M{"$in": ids}
+			var cats []models.Category
+			if config.DB.Where("title ILIKE ?", "%"+category+"%").Find(&cats).Error == nil && len(cats) > 0 {
+				ids := make([]uuid.UUID, len(cats))
+				for i, cat := range cats {
+					ids[i] = cat.ID
 				}
-				catCursor.Close(ctx)
+				query = query.Where("category_id IN ?", ids)
 			}
 		}
 	}
 
 	if productType != "" && (productType == "Product" || productType == "Service") {
-		filter["type"] = productType
+		query = query.Where("type = ?", productType)
 	}
 
 	if location != "" {
-		filter["location"] = bson.M{"$regex": location, "$options": "i"}
+		query = query.Where("location ILIKE ?", "%"+location+"%")
 	}
 
-	if minPriceStr != "" || maxPriceStr != "" {
-		priceFilter := bson.M{}
-		if minPriceStr != "" {
-			if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
-				priceFilter["$gte"] = v
-			}
+	if minPriceStr != "" {
+		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
+			query = query.Where("price >= ?", v)
 		}
-		if maxPriceStr != "" {
-			if v, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
-				priceFilter["$lte"] = v
-			}
-		}
-		if len(priceFilter) > 0 {
-			filter["price"] = priceFilter
+	}
+	if maxPriceStr != "" {
+		if v, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
+			query = query.Where("price <= ?", v)
 		}
 	}
 
 	if search != "" {
-		filter["$or"] = bson.A{
-			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"description": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"companyName": bson.M{"$regex": search, "$options": "i"}},
-		}
+		query = query.Where("(name ILIKE ? OR description ILIKE ? OR company_name ILIKE ?)",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
 	// Sort options
-	sortOptions := map[string]bson.D{
-		"recent":     {{Key: "createdAt", Value: -1}},
-		"popular":    {{Key: "views", Value: -1}, {Key: "sales", Value: -1}},
-		"price_low":  {{Key: "price", Value: 1}},
-		"price_high": {{Key: "price", Value: -1}},
-		"rating":     {{Key: "rating.average", Value: -1}, {Key: "rating.count", Value: -1}},
+	sortOptions := map[string]string{
+		"recent":     "created_at DESC",
+		"popular":    "views DESC, sales DESC",
+		"price_low":  "price ASC",
+		"price_high": "price DESC",
+		"rating":     "rating->>'average' DESC",
 	}
 
-	sortQuery, ok := sortOptions[sortParam]
+	sortClause, ok := sortOptions[sortParam]
 	if !ok {
-		sortQuery = sortOptions["recent"]
+		sortClause = sortOptions["recent"]
 	}
 
-	skip := int64((page - 1) * limit)
-	limitInt := int64(limit)
+	var total int64
+	query.Count(&total)
 
-	col := config.GetCollection("products")
-
-	total, err := col.CountDocuments(ctx, filter)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch marketplace products")
-		return
-	}
-
-	opts := options.Find().SetSort(sortQuery).SetSkip(skip).SetLimit(limitInt)
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch marketplace products")
-		return
-	}
-	defer cursor.Close(ctx)
+	offset := (page - 1) * limit
 
 	var products []models.Product
-	if err := cursor.All(ctx, &products); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode products")
+	if err := query.Order(sortClause).Offset(offset).Limit(limit).Find(&products).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch marketplace products")
 		return
 	}
 
-	// Get featured products
-	featuredFilter := bson.M{}
-	for k, v := range filter {
-		featuredFilter[k] = v
+	// Get featured products (same filters but featured only, limit 5)
+	featuredQuery := config.DB.Model(&models.Product{}).Where("status = ? AND is_featured = ?", "active", true)
+	if category != "" {
+		if catOID, err := uuid.Parse(category); err == nil {
+			featuredQuery = featuredQuery.Where("category_id = ?", catOID)
+		}
 	}
-	featuredFilter["isFeatured"] = true
+	if productType != "" && (productType == "Product" || productType == "Service") {
+		featuredQuery = featuredQuery.Where("type = ?", productType)
+	}
 
-	featuredCursor, err := col.Find(ctx, featuredFilter, options.Find().SetLimit(5))
 	var featuredProducts []models.Product
-	if err == nil {
-		_ = featuredCursor.All(ctx, &featuredProducts)
-		featuredCursor.Close(ctx)
-	}
+	featuredQuery.Limit(5).Find(&featuredProducts)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
@@ -1360,23 +1160,14 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 }
 
 // updateCategoryProductCount updates the productCount field for a category.
-func updateCategoryProductCount(ctx context.Context, categoryID primitive.ObjectID) {
-	prodCol := config.GetCollection("products")
-	catCol := config.GetCollection("categories")
-
-	count, err := prodCol.CountDocuments(ctx, bson.M{
-		"category": categoryID,
-		"status":   "active",
-	})
-	if err != nil {
-		log.Printf("Error counting products for category %s: %v", categoryID.Hex(), err)
+func updateCategoryProductCount(categoryID uuid.UUID) {
+	var count int64
+	if err := config.DB.Model(&models.Product{}).Where("category_id = ? AND status = ?", categoryID, "active").Count(&count).Error; err != nil {
+		log.Printf("Error counting products for category %s: %v", categoryID.String(), err)
 		return
 	}
 
-	_, err = catCol.UpdateOne(ctx, bson.M{"_id": categoryID}, bson.M{
-		"$set": bson.M{"productCount": count},
-	})
-	if err != nil {
+	if err := config.DB.Model(&models.Category{}).Where("id = ?", categoryID).Update("product_count", count).Error; err != nil {
 		log.Printf("Error updating category product count: %v", err)
 	}
 }

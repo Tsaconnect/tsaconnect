@@ -1,53 +1,60 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // AssetDetails contains technical details about an asset.
 type AssetDetails struct {
-	Type            string `bson:"type,omitempty" json:"type,omitempty"`
-	Chain           string `bson:"chain,omitempty" json:"chain,omitempty"`
-	ContractAddress string `bson:"contractAddress,omitempty" json:"contractAddress,omitempty"`
-	Decimals        int    `bson:"decimals" json:"decimals"`
-	IconURL         string `bson:"iconUrl,omitempty" json:"iconUrl,omitempty"`
-	Color           string `bson:"color,omitempty" json:"color,omitempty"`
+	Type            string `json:"type,omitempty"`
+	Chain           string `json:"chain,omitempty"`
+	ContractAddress string `json:"contractAddress,omitempty"`
+	Decimals        int    `json:"decimals"`
+	IconURL         string `json:"iconUrl,omitempty"`
+	Color           string `json:"color,omitempty"`
 }
 
 // AssetMetadata contains staking and reward metadata for an asset.
 type AssetMetadata struct {
-	APY              float64    `bson:"apy,omitempty" json:"apy,omitempty"`
-	StakedAmount     float64    `bson:"stakedAmount,omitempty" json:"stakedAmount,omitempty"`
-	UnstakingDate    *time.Time `bson:"unstakingDate,omitempty" json:"unstakingDate,omitempty"`
-	LockPeriod       int        `bson:"lockPeriod,omitempty" json:"lockPeriod,omitempty"`
-	LastRewardClaimed *time.Time `bson:"lastRewardClaimed,omitempty" json:"lastRewardClaimed,omitempty"`
+	APY               float64    `json:"apy,omitempty"`
+	StakedAmount      float64    `json:"stakedAmount,omitempty"`
+	UnstakingDate     *time.Time `json:"unstakingDate,omitempty"`
+	LockPeriod        int        `json:"lockPeriod,omitempty"`
+	LastRewardClaimed *time.Time `json:"lastRewardClaimed,omitempty"`
 }
 
 // AssetPerformance tracks price change percentages over various periods.
 type AssetPerformance struct {
-	DailyChange   float64 `bson:"dailyChange,omitempty" json:"dailyChange,omitempty"`
-	WeeklyChange  float64 `bson:"weeklyChange,omitempty" json:"weeklyChange,omitempty"`
-	MonthlyChange float64 `bson:"monthlyChange,omitempty" json:"monthlyChange,omitempty"`
+	DailyChange   float64 `json:"dailyChange,omitempty"`
+	WeeklyChange  float64 `json:"weeklyChange,omitempty"`
+	MonthlyChange float64 `json:"monthlyChange,omitempty"`
 }
 
 // Asset represents a digital asset owned by a user.
 type Asset struct {
-	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	UserID      primitive.ObjectID `bson:"userId" json:"userId"`
-	Symbol      string             `bson:"symbol" json:"symbol"`
-	Name        string             `bson:"name" json:"name"`
-	Balance     float64            `bson:"balance" json:"balance"`
-	USDValue    float64            `bson:"usdValue" json:"usdValue"`
-	IsSelected  bool               `bson:"isSelected" json:"isSelected"`
-	IsHidden    bool               `bson:"isHidden" json:"isHidden"`
-	Details     *AssetDetails      `bson:"details,omitempty" json:"details,omitempty"`
-	Metadata    *AssetMetadata     `bson:"metadata,omitempty" json:"metadata,omitempty"`
-	Performance *AssetPerformance  `bson:"performance,omitempty" json:"performance,omitempty"`
-	LastSynced  *time.Time         `bson:"lastSynced,omitempty" json:"lastSynced,omitempty"`
-	CreatedAt   time.Time          `bson:"createdAt" json:"createdAt"`
-	UpdatedAt   time.Time          `bson:"updatedAt" json:"updatedAt"`
+	ID          uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID      uuid.UUID      `gorm:"type:uuid;index" json:"userId"`
+	Symbol      string         `json:"symbol"`
+	Name        string         `json:"name"`
+	Balance     float64        `json:"balance"`
+	USDValue    float64        `json:"usdValue"`
+	IsSelected  bool           `json:"isSelected"`
+	IsHidden    bool           `json:"isHidden"`
+	Details     datatypes.JSON `gorm:"type:jsonb" json:"details,omitempty"`
+	Metadata    datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	Performance datatypes.JSON `gorm:"type:jsonb" json:"performance,omitempty"`
+	LastSynced  *time.Time     `json:"lastSynced,omitempty"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (Asset) TableName() string {
+	return "assets"
 }
 
 // Asset detail type constants.
@@ -69,3 +76,47 @@ const (
 	ChainSolana   = "solana"
 	ChainOther    = "other"
 )
+
+// GetDetails deserializes the Details JSONB field.
+func (a *Asset) GetDetails() *AssetDetails {
+	if a.Details == nil {
+		return nil
+	}
+	var d AssetDetails
+	if err := json.Unmarshal(a.Details, &d); err != nil {
+		return nil
+	}
+	return &d
+}
+
+// SetDetails serializes the AssetDetails struct into the JSONB field.
+func (a *Asset) SetDetails(d *AssetDetails) {
+	if d == nil {
+		a.Details = nil
+		return
+	}
+	data, _ := json.Marshal(d)
+	a.Details = data
+}
+
+// GetPerformance deserializes the Performance JSONB field.
+func (a *Asset) GetPerformance() *AssetPerformance {
+	if a.Performance == nil {
+		return nil
+	}
+	var p AssetPerformance
+	if err := json.Unmarshal(a.Performance, &p); err != nil {
+		return nil
+	}
+	return &p
+}
+
+// SetPerformance serializes the AssetPerformance struct into the JSONB field.
+func (a *Asset) SetPerformance(p *AssetPerformance) {
+	if p == nil {
+		a.Performance = nil
+		return
+	}
+	data, _ := json.Marshal(p)
+	a.Performance = data
+}

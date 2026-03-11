@@ -3,57 +3,63 @@ package models
 import (
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // WalletAddress represents a blockchain address associated with the wallet.
 type WalletAddress struct {
-	Blockchain string     `bson:"blockchain,omitempty" json:"blockchain,omitempty"`
-	Address    string     `bson:"address,omitempty" json:"address,omitempty"`
-	IsActive   bool       `bson:"isActive" json:"isActive"`
-	IsExternal bool       `bson:"isExternal" json:"isExternal"`
-	LastSynced *time.Time `bson:"lastSynced,omitempty" json:"lastSynced,omitempty"`
-	Nonce      int        `bson:"nonce" json:"nonce"`
+	Blockchain string     `json:"blockchain,omitempty"`
+	Address    string     `json:"address,omitempty"`
+	IsActive   bool       `json:"isActive"`
+	IsExternal bool       `json:"isExternal"`
+	LastSynced *time.Time `json:"lastSynced,omitempty"`
+	Nonce      int        `json:"nonce"`
 }
 
 // WithdrawalWhitelistEntry represents a whitelisted withdrawal address.
 type WithdrawalWhitelistEntry struct {
-	Address    string `bson:"address,omitempty" json:"address,omitempty"`
-	Blockchain string `bson:"blockchain,omitempty" json:"blockchain,omitempty"`
-	Label      string `bson:"label,omitempty" json:"label,omitempty"`
+	Address    string `json:"address,omitempty"`
+	Blockchain string `json:"blockchain,omitempty"`
+	Label      string `json:"label,omitempty"`
 }
 
 // WalletSecurity holds security settings for the wallet.
 type WalletSecurity struct {
-	WithdrawalWhitelist []WithdrawalWhitelistEntry `bson:"withdrawalWhitelist,omitempty" json:"withdrawalWhitelist,omitempty"`
-	DailyLimit          float64                    `bson:"dailyLimit" json:"dailyLimit"`
-	TransactionLimit    float64                    `bson:"transactionLimit" json:"transactionLimit"`
-	TwoFactorEnabled    bool                       `bson:"twoFactorEnabled" json:"twoFactorEnabled"`
+	WithdrawalWhitelist []WithdrawalWhitelistEntry `json:"withdrawalWhitelist,omitempty"`
+	DailyLimit          float64                    `json:"dailyLimit"`
+	TransactionLimit    float64                    `json:"transactionLimit"`
+	TwoFactorEnabled    bool                       `json:"twoFactorEnabled"`
 }
 
 // WalletSettings holds user preferences for the wallet.
 type WalletSettings struct {
-	DefaultCurrency string `bson:"defaultCurrency,omitempty" json:"defaultCurrency,omitempty"`
-	HideBalances    bool   `bson:"hideBalances" json:"hideBalances"`
-	PriceAlerts     bool   `bson:"priceAlerts" json:"priceAlerts"`
-	AutoSync        bool   `bson:"autoSync" json:"autoSync"`
+	DefaultCurrency string `json:"defaultCurrency,omitempty"`
+	HideBalances    bool   `json:"hideBalances"`
+	PriceAlerts     bool   `json:"priceAlerts"`
+	AutoSync        bool   `json:"autoSync"`
 }
 
 // Wallet represents a user's wallet.
 type Wallet struct {
-	ID               primitive.ObjectID  `bson:"_id,omitempty" json:"id,omitempty"`
-	UserID           primitive.ObjectID  `bson:"userId" json:"userId"`
-	TotalBalance     float64             `bson:"totalBalance" json:"totalBalance"`
-	TotalUSDValue    float64             `bson:"totalUsdValue" json:"totalUsdValue"`
-	SelectedAsset    *primitive.ObjectID `bson:"selectedAsset,omitempty" json:"selectedAsset,omitempty"`
-	Addresses        []WalletAddress     `bson:"addresses,omitempty" json:"addresses,omitempty"`
-	Security         WalletSecurity      `bson:"security" json:"security"`
-	Settings         WalletSettings      `bson:"settings" json:"settings"`
-	TransactionLimit float64             `bson:"transactionLimit" json:"transactionLimit"`
-	DailyLimit       float64             `bson:"dailyLimit" json:"dailyLimit"`
-	LastSynced       *time.Time          `bson:"lastSynced,omitempty" json:"lastSynced,omitempty"`
-	CreatedAt        time.Time           `bson:"createdAt" json:"createdAt"`
-	UpdatedAt        time.Time           `bson:"updatedAt" json:"updatedAt"`
+	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID           uuid.UUID      `gorm:"type:uuid;uniqueIndex" json:"userId"`
+	TotalBalance     float64        `json:"totalBalance"`
+	TotalUSDValue    float64        `json:"totalUsdValue"`
+	SelectedAsset    string         `json:"selectedAsset,omitempty"`
+	Addresses        datatypes.JSON `gorm:"type:jsonb" json:"addresses,omitempty"`
+	Security         datatypes.JSON `gorm:"type:jsonb" json:"security"`
+	Settings         datatypes.JSON `gorm:"type:jsonb" json:"settings"`
+	TransactionLimit float64        `json:"transactionLimit"`
+	DailyLimit       float64        `json:"dailyLimit"`
+	LastSynced       *time.Time     `json:"lastSynced,omitempty"`
+	CreatedAt        time.Time      `json:"createdAt"`
+	UpdatedAt        time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (Wallet) TableName() string {
+	return "wallets"
 }
 
 // Wallet security default constants.

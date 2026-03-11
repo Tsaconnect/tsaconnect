@@ -1,32 +1,19 @@
 package handlers
 
 import (
-	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"github.com/ojimcy/tsa-api-go/internal/services"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// AssetHandler handles asset-related HTTP requests.
-type AssetHandler struct {
-	priceService *services.PriceService
-}
-
-// NewAssetHandler creates a new AssetHandler.
-func NewAssetHandler(ps *services.PriceService) *AssetHandler {
-	return &AssetHandler{priceService: ps}
-}
-
-// GetUserAssets returns all assets for the authenticated user.
+// GetAssets returns all assets for the authenticated user.
 // GET /api/assets/ — auth, showHidden query param, fetch real-time prices, calculate totals.
-func (h *AssetHandler) GetUserAssets(c *gin.Context) {
+func (h *Handlers) GetAssets(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -35,25 +22,14 @@ func (h *AssetHandler) GetUserAssets(c *gin.Context) {
 
 	showHidden := c.Query("showHidden") == "true"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
-	filter := bson.M{"userId": user.ID}
+	query := config.DB.Where("user_id = ?", user.ID)
 	if !showHidden {
-		filter["isHidden"] = bson.M{"$ne": true}
+		query = query.Where("is_hidden = ?", false)
 	}
-
-	cursor, err := collection.Find(ctx, filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
-		return
-	}
-	defer cursor.Close(ctx)
 
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode assets"})
+	if err := query.Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
 		return
 	}
 
@@ -65,7 +41,7 @@ func (h *AssetHandler) GetUserAssets(c *gin.Context) {
 
 	var totalValue, totalChange float64
 	if len(symbols) > 0 {
-		prices, err := h.priceService.GetPrices(symbols)
+		prices, err := h.PriceService.GetPrices(symbols)
 		if err == nil {
 			for i := range assets {
 				if pd, ok := prices[assets[i].Symbol]; ok {
@@ -89,37 +65,32 @@ func (h *AssetHandler) GetUserAssets(c *gin.Context) {
 	})
 }
 
-// GetAssetDetails returns details for a specific asset.
-// GET /api/assets/:assetId — auth, market data + 30-day history.
-func (h *AssetHandler) GetAssetDetails(c *gin.Context) {
+// GetAssetByID returns details for a specific asset.
+// GET /api/assets/:id — auth, market data + 30-day history.
+func (h *Handlers) GetAssetByID(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	assetID, err := primitive.ObjectIDFromHex(c.Param("assetId"))
+	assetID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
 	var asset models.Asset
-	err = collection.FindOne(ctx, bson.M{"_id": assetID, "userId": user.ID}).Decode(&asset)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", assetID, user.ID).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
 
 	// Fetch market data
-	marketData, _ := h.priceService.GetMarketData(asset.Symbol)
+	marketData, _ := h.PriceService.GetMarketData(asset.Symbol)
 
 	// Fetch 30-day price history
-	history, _ := h.priceService.GetHistoricalPrice(asset.Symbol, 30)
+	history, _ := h.PriceService.GetHistoricalPrice(asset.Symbol, 30)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -134,7 +105,7 @@ func (h *AssetHandler) GetAssetDetails(c *gin.Context) {
 
 // SelectAsset selects an asset as active and unselects others.
 // POST /api/assets/select — auth, unselect others, select new, update wallet.
-func (h *AssetHandler) SelectAsset(c *gin.Context) {
+func (h *Handlers) SelectAsset(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -149,47 +120,55 @@ func (h *AssetHandler) SelectAsset(c *gin.Context) {
 		return
 	}
 
-	assetID, err := primitive.ObjectIDFromHex(body.AssetID)
+	assetID, err := uuid.Parse(body.AssetID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-
 	// Unselect all user assets
-	_, err = assetsCol.UpdateMany(ctx,
-		bson.M{"userId": user.ID},
-		bson.M{"$set": bson.M{"isSelected": false, "updatedAt": time.Now()}},
-	)
-	if err != nil {
+	if err := config.DB.Model(&models.Asset{}).Where("user_id = ?", user.ID).Updates(map[string]interface{}{
+		"is_selected": false,
+		"updated_at":  time.Now(),
+	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to unselect assets"})
 		return
 	}
 
 	// Select the target asset
-	result := assetsCol.FindOneAndUpdate(ctx,
-		bson.M{"_id": assetID, "userId": user.ID},
-		bson.M{"$set": bson.M{"isSelected": true, "updatedAt": time.Now()}},
-		options.FindOneAndUpdate().SetReturnDocument(options.After),
-	)
-
 	var asset models.Asset
-	if err := result.Decode(&asset); err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", assetID, user.ID).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
 
-	// Update wallet selected asset
-	walletsCol := config.GetCollection("wallets")
-	_, _ = walletsCol.UpdateOne(ctx,
-		bson.M{"userId": user.ID},
-		bson.M{"$set": bson.M{"selectedAsset": asset.Symbol, "updatedAt": time.Now()}},
-		options.Update().SetUpsert(true),
-	)
+	if err := config.DB.Model(&asset).Updates(map[string]interface{}{
+		"is_selected": true,
+		"updated_at":  time.Now(),
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to select asset"})
+		return
+	}
+
+	// Update wallet selected asset — upsert
+	var wallet models.Wallet
+	result := config.DB.Where("user_id = ?", user.ID).First(&wallet)
+	if result.Error != nil {
+		// Create wallet
+		wallet = models.Wallet{
+			ID:            uuid.New(),
+			UserID:        user.ID,
+			SelectedAsset: asset.Symbol,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
+		}
+		config.DB.Create(&wallet)
+	} else {
+		config.DB.Model(&wallet).Updates(map[string]interface{}{
+			"selected_asset": asset.Symbol,
+			"updated_at":     time.Now(),
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -199,38 +178,31 @@ func (h *AssetHandler) SelectAsset(c *gin.Context) {
 }
 
 // ToggleAssetVisibility toggles the hidden state of an asset.
-// PUT /api/assets/:assetId/visibility — auth.
-func (h *AssetHandler) ToggleAssetVisibility(c *gin.Context) {
+// PUT /api/assets/:id/visibility — auth.
+func (h *Handlers) ToggleAssetVisibility(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	assetID, err := primitive.ObjectIDFromHex(c.Param("assetId"))
+	assetID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
-
 	var asset models.Asset
-	err = collection.FindOne(ctx, bson.M{"_id": assetID, "userId": user.ID}).Decode(&asset)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", assetID, user.ID).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
 
 	newHidden := !asset.IsHidden
-	_, err = collection.UpdateOne(ctx,
-		bson.M{"_id": assetID},
-		bson.M{"$set": bson.M{"isHidden": newHidden, "updatedAt": time.Now()}},
-	)
-	if err != nil {
+	if err := config.DB.Model(&asset).Updates(map[string]interface{}{
+		"is_hidden":  newHidden,
+		"updated_at": time.Now(),
+	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to update visibility"})
 		return
 	}
@@ -239,7 +211,7 @@ func (h *AssetHandler) ToggleAssetVisibility(c *gin.Context) {
 		"success": true,
 		"message": "Asset visibility updated successfully",
 		"data": gin.H{
-			"assetId":  assetID.Hex(),
+			"assetId":  assetID.String(),
 			"isHidden": newHidden,
 		},
 	})
@@ -247,39 +219,28 @@ func (h *AssetHandler) ToggleAssetVisibility(c *gin.Context) {
 
 // RefreshAssetPrices refreshes prices for user assets.
 // POST /api/assets/refresh — auth, optional assetId query, update portfolio.
-func (h *AssetHandler) RefreshAssetPrices(c *gin.Context) {
+func (h *Handlers) RefreshAssetPrices(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-	filter := bson.M{"userId": user.ID}
+	query := config.DB.Where("user_id = ?", user.ID)
 
 	specificAssetID := c.Query("assetId")
 	if specificAssetID != "" {
-		oid, err := primitive.ObjectIDFromHex(specificAssetID)
+		oid, err := uuid.Parse(specificAssetID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 			return
 		}
-		filter["_id"] = oid
+		query = query.Where("id = ?", oid)
 	}
-
-	cursor, err := assetsCol.Find(ctx, filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
-		return
-	}
-	defer cursor.Close(ctx)
 
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode assets"})
+	if err := query.Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch assets"})
 		return
 	}
 
@@ -297,7 +258,7 @@ func (h *AssetHandler) RefreshAssetPrices(c *gin.Context) {
 		return
 	}
 
-	prices, err := h.priceService.GetPrices(symbols)
+	prices, err := h.PriceService.GetPrices(symbols)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch prices"})
 		return
@@ -310,27 +271,36 @@ func (h *AssetHandler) RefreshAssetPrices(c *gin.Context) {
 		if pd, ok := prices[asset.Symbol]; ok {
 			usdValue := asset.Balance * pd.USD
 			totalValue += usdValue
-			_, err := assetsCol.UpdateOne(ctx,
-				bson.M{"_id": asset.ID},
-				bson.M{"$set": bson.M{
-					"usdValue":   usdValue,
-					"lastSynced": now,
-					"updatedAt":  now,
-				}},
-			)
+			err := config.DB.Model(&models.Asset{}).Where("id = ?", asset.ID).Updates(map[string]interface{}{
+				"usd_value":   usdValue,
+				"last_synced": now,
+				"updated_at":  now,
+			}).Error
 			if err == nil {
 				updated++
 			}
 		}
 	}
 
-	// Update portfolio total
-	portfolioCol := config.GetCollection("portfolios")
-	_, _ = portfolioCol.UpdateOne(ctx,
-		bson.M{"userId": user.ID},
-		bson.M{"$set": bson.M{"totalValue": totalValue, "updatedAt": now}},
-		options.Update().SetUpsert(true),
-	)
+	// Update portfolio total — upsert
+	totalValueJSON, _ := json.Marshal(&models.PortfolioTotalValue{Current: totalValue})
+	var portfolio models.Portfolio
+	result := config.DB.Where("user_id = ?", user.ID).First(&portfolio)
+	if result.Error != nil {
+		portfolio = models.Portfolio{
+			ID:         uuid.New(),
+			UserID:     user.ID,
+			TotalValue: totalValueJSON,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		config.DB.Create(&portfolio)
+	} else {
+		config.DB.Model(&portfolio).Updates(map[string]interface{}{
+			"total_value": totalValueJSON,
+			"updated_at":  now,
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -342,9 +312,9 @@ func (h *AssetHandler) RefreshAssetPrices(c *gin.Context) {
 	})
 }
 
-// AddAsset adds a new asset for the user.
+// CreateAsset adds a new asset for the user.
 // POST /api/assets/ — auth, check duplicate, get current price, create.
-func (h *AssetHandler) AddAsset(c *gin.Context) {
+func (h *Handlers) CreateAsset(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -364,14 +334,9 @@ func (h *AssetHandler) AddAsset(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
-
 	// Check duplicate
-	count, err := collection.CountDocuments(ctx, bson.M{"userId": user.ID, "symbol": body.Symbol})
-	if err != nil {
+	var count int64
+	if err := config.DB.Model(&models.Asset{}).Where("user_id = ? AND symbol = ?", user.ID, body.Symbol).Count(&count).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to check for duplicates"})
 		return
 	}
@@ -382,7 +347,7 @@ func (h *AssetHandler) AddAsset(c *gin.Context) {
 
 	// Get current price
 	var usdValue float64
-	prices, err := h.priceService.GetPrices([]string{body.Symbol})
+	prices, err := h.PriceService.GetPrices([]string{body.Symbol})
 	if err == nil {
 		if pd, ok := prices[body.Symbol]; ok {
 			usdValue = body.Balance * pd.USD
@@ -400,7 +365,7 @@ func (h *AssetHandler) AddAsset(c *gin.Context) {
 
 	now := time.Now()
 	asset := models.Asset{
-		ID:         primitive.NewObjectID(),
+		ID:         uuid.New(),
 		UserID:     user.ID,
 		Symbol:     body.Symbol,
 		Name:       body.Name,
@@ -408,18 +373,17 @@ func (h *AssetHandler) AddAsset(c *gin.Context) {
 		USDValue:   usdValue,
 		IsSelected: false,
 		IsHidden:   false,
-		Details: &models.AssetDetails{
-			Type:    assetType,
-			Chain:   chain,
-			IconURL: body.Icon,
-		},
 		LastSynced: &now,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	asset.SetDetails(&models.AssetDetails{
+		Type:    assetType,
+		Chain:   chain,
+		IconURL: body.Icon,
+	})
 
-	_, err = collection.InsertOne(ctx, asset)
-	if err != nil {
+	if err := config.DB.Create(&asset).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create asset"})
 		return
 	}
@@ -432,15 +396,15 @@ func (h *AssetHandler) AddAsset(c *gin.Context) {
 }
 
 // UpdateAssetBalance updates the balance of an asset.
-// PUT /api/assets/:assetId/balance — auth, validate >= 0, update USD value.
-func (h *AssetHandler) UpdateAssetBalance(c *gin.Context) {
+// PUT /api/assets/:id/balance — auth, validate >= 0, update USD value.
+func (h *Handlers) UpdateAssetBalance(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	assetID, err := primitive.ObjectIDFromHex(c.Param("assetId"))
+	assetID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 		return
@@ -458,21 +422,15 @@ func (h *AssetHandler) UpdateAssetBalance(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
-
 	var asset models.Asset
-	err = collection.FindOne(ctx, bson.M{"_id": assetID, "userId": user.ID}).Decode(&asset)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", assetID, user.ID).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
 
 	// Calculate new USD value
 	var usdValue float64
-	prices, err := h.priceService.GetPrices([]string{asset.Symbol})
+	prices, err := h.PriceService.GetPrices([]string{asset.Symbol})
 	if err == nil {
 		if pd, ok := prices[asset.Symbol]; ok {
 			usdValue = body.Balance * pd.USD
@@ -480,15 +438,11 @@ func (h *AssetHandler) UpdateAssetBalance(c *gin.Context) {
 	}
 
 	now := time.Now()
-	_, err = collection.UpdateOne(ctx,
-		bson.M{"_id": assetID},
-		bson.M{"$set": bson.M{
-			"balance":   body.Balance,
-			"usdValue":  usdValue,
-			"updatedAt": now,
-		}},
-	)
-	if err != nil {
+	if err := config.DB.Model(&asset).Updates(map[string]interface{}{
+		"balance":    body.Balance,
+		"usd_value":  usdValue,
+		"updated_at": now,
+	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to update balance"})
 		return
 	}
@@ -497,7 +451,7 @@ func (h *AssetHandler) UpdateAssetBalance(c *gin.Context) {
 		"success": true,
 		"message": "Asset balance updated successfully",
 		"data": gin.H{
-			"assetId":  assetID.Hex(),
+			"assetId":  assetID.String(),
 			"balance":  body.Balance,
 			"usdValue": usdValue,
 		},
@@ -505,33 +459,28 @@ func (h *AssetHandler) UpdateAssetBalance(c *gin.Context) {
 }
 
 // GetAssetPerformance returns performance metrics for an asset.
-// GET /api/assets/:assetId/performance — auth, 90-day history, calculate daily/weekly/monthly/allTime.
-func (h *AssetHandler) GetAssetPerformance(c *gin.Context) {
+// GET /api/assets/:id/performance — auth, 90-day history, calculate daily/weekly/monthly/allTime.
+func (h *Handlers) GetAssetPerformance(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	assetID, err := primitive.ObjectIDFromHex(c.Param("assetId"))
+	assetID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid asset ID"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("assets")
 	var asset models.Asset
-	err = collection.FindOne(ctx, bson.M{"_id": assetID, "userId": user.ID}).Decode(&asset)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", assetID, user.ID).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
 
 	// Get 90-day price history
-	history, err := h.priceService.GetHistoricalPrice(asset.Symbol, 90)
+	history, err := h.PriceService.GetHistoricalPrice(asset.Symbol, 90)
 	if err != nil || len(history) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,

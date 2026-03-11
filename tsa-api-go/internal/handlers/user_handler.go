@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -12,27 +12,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// UserHandler holds dependencies for user management handlers.
-type UserHandler struct {
-	cfg *config.Config
-}
-
-// NewUserHandler creates a new UserHandler.
-func NewUserHandler(cfg *config.Config) *UserHandler {
-	return &UserHandler{cfg: cfg}
-}
-
 // GetProfile handles GET /api/users/profile (auth required).
-func (h *UserHandler) GetProfile(c *gin.Context) {
+func (h *Handlers) GetProfile(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -42,15 +30,10 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&dbUser)
+	err := config.DB.First(&dbUser, "id = ?", user.ID).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
@@ -81,7 +64,7 @@ type updateProfileRequest struct {
 }
 
 // UpdateProfile handles PUT /api/users/profile (auth required).
-func (h *UserHandler) UpdateProfile(c *gin.Context) {
+func (h *Handlers) UpdateProfile(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -100,12 +83,12 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	updates := bson.M{}
+	updates := map[string]interface{}{}
 	if req.Name != "" {
 		updates["name"] = req.Name
 	}
 	if req.PhoneNumber != "" {
-		updates["phoneNumber"] = req.PhoneNumber
+		updates["phone_number"] = req.PhoneNumber
 	}
 	if req.Address != "" {
 		updates["address"] = req.Address
@@ -125,22 +108,19 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	updates["updatedAt"] = time.Now()
+	updates["updated_at"] = time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 	var updatedUser models.User
-	err := collection.FindOneAndUpdate(
-		ctx,
-		bson.M{"_id": user.ID},
-		bson.M{"$set": updates},
-		opts,
-	).Decode(&updatedUser)
-	if err != nil {
+	if err := config.DB.First(&updatedUser, "id = ?", user.ID).Error; err != nil {
+		log.Printf("UpdateProfile error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to update profile",
+		})
+		return
+	}
+
+	if err := config.DB.Model(&updatedUser).Updates(updates).Error; err != nil {
 		log.Printf("UpdateProfile error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -157,7 +137,7 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 }
 
 // GetVerificationStatus handles GET /api/users/verification-status (auth required).
-func (h *UserHandler) GetVerificationStatus(c *gin.Context) {
+func (h *Handlers) GetVerificationStatus(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -167,13 +147,8 @@ func (h *UserHandler) GetVerificationStatus(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&dbUser)
+	err := config.DB.First(&dbUser, "id = ?", user.ID).Error
 	if err != nil {
 		log.Printf("GetVerificationStatus error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -183,16 +158,19 @@ func (h *UserHandler) GetVerificationStatus(c *gin.Context) {
 		return
 	}
 
+	docs := dbUser.GetDocuments()
+	fv := dbUser.GetFacialVerification()
+
 	status := gin.H{
 		"overall": dbUser.VerificationStatus,
 		"documents": gin.H{
-			"driversLicense": dbUser.Documents.DriversLicense.Front.Verified,
-			"nin":            dbUser.Documents.NIN.Front.Verified,
-			"passport":       dbUser.Documents.Passport.Photo.Verified,
-			"pvc":            dbUser.Documents.PVC.Card.Verified,
-			"bvn":            dbUser.Documents.BVN.Verified,
+			"driversLicense": docs.DriversLicense.Front.Verified,
+			"nin":            docs.NIN.Front.Verified,
+			"passport":       docs.Passport.Photo.Verified,
+			"pvc":            docs.PVC.Card.Verified,
+			"bvn":            docs.BVN.Verified,
 		},
-		"facial":    dbUser.FacialVerification.Verified,
+		"facial":    fv.Verified,
 		"completed": dbUser.VerificationStatus == models.VerificationStatusVerified,
 	}
 
@@ -203,7 +181,7 @@ func (h *UserHandler) GetVerificationStatus(c *gin.Context) {
 }
 
 // GetDocuments handles GET /api/users/documents (auth required).
-func (h *UserHandler) GetDocuments(c *gin.Context) {
+func (h *Handlers) GetDocuments(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -213,13 +191,8 @@ func (h *UserHandler) GetDocuments(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&dbUser)
+	err := config.DB.First(&dbUser, "id = ?", user.ID).Error
 	if err != nil {
 		log.Printf("GetDocuments error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -231,7 +204,7 @@ func (h *UserHandler) GetDocuments(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dbUser.Documents,
+		"data":    dbUser.GetDocuments(),
 	})
 }
 
@@ -241,7 +214,7 @@ type uploadProfilePhotoRequest struct {
 }
 
 // UploadProfilePhoto handles POST /api/users/profile-photo (auth required).
-func (h *UserHandler) UploadProfilePhoto(c *gin.Context) {
+func (h *Handlers) UploadProfilePhoto(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -260,29 +233,22 @@ func (h *UserHandler) UploadProfilePhoto(c *gin.Context) {
 		return
 	}
 
-	// In a full implementation, upload to Cloudinary here.
-	// For now, store the URL directly.
-	profilePhoto := models.ProfilePhoto{
-		URL: req.Image,
+	var updatedUser models.User
+	if err := config.DB.First(&updatedUser, "id = ?", user.ID).Error; err != nil {
+		log.Printf("UploadProfilePhoto error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to upload profile photo",
+		})
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	updatedUser.SetProfilePhoto(&models.ProfilePhoto{URL: req.Image})
 
-	collection := config.GetCollection("users")
-
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	var updatedUser models.User
-	err := collection.FindOneAndUpdate(
-		ctx,
-		bson.M{"_id": user.ID},
-		bson.M{"$set": bson.M{
-			"profilePhoto": profilePhoto,
-			"updatedAt":    time.Now(),
-		}},
-		opts,
-	).Decode(&updatedUser)
-	if err != nil {
+	if err := config.DB.Model(&updatedUser).Updates(map[string]interface{}{
+		"profile_photo": updatedUser.ProfilePhoto,
+		"updated_at":    time.Now(),
+	}).Error; err != nil {
 		log.Printf("UploadProfilePhoto error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -294,7 +260,7 @@ func (h *UserHandler) UploadProfilePhoto(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Profile photo updated successfully",
-		"data":    updatedUser.ProfilePhoto,
+		"data":    updatedUser.GetProfilePhoto(),
 	})
 }
 
@@ -305,7 +271,7 @@ type changePasswordRequest struct {
 }
 
 // ChangePassword handles PUT /api/users/change-password (auth required).
-func (h *UserHandler) ChangePassword(c *gin.Context) {
+func (h *Handlers) ChangePassword(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -362,18 +328,10 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
-		"$set": bson.M{
-			"password":  hashedPassword,
-			"updatedAt": time.Now(),
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+		"password":   hashedPassword,
+		"updated_at": time.Now(),
+	}).Error; err != nil {
 		log.Printf("ChangePassword update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -394,7 +352,7 @@ type deleteAccountRequest struct {
 }
 
 // DeleteAccount handles DELETE /api/users/account (auth required, soft delete).
-func (h *UserHandler) DeleteAccount(c *gin.Context) {
+func (h *Handlers) DeleteAccount(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -422,20 +380,12 @@ func (h *UserHandler) DeleteAccount(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	now := time.Now()
-	_, err := collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
-		"$set": bson.M{
-			"accountStatus": models.AccountStatusDeleted,
-			"deletedAt":     now,
-			"updatedAt":     now,
-		},
-	})
-	if err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+		"account_status": models.AccountStatusDeleted,
+		"deleted_at":     now,
+		"updated_at":     now,
+	}).Error; err != nil {
 		log.Printf("DeleteAccount error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -451,7 +401,7 @@ func (h *UserHandler) DeleteAccount(c *gin.Context) {
 }
 
 // GetReferralStats handles GET /api/users/referral-stats (auth required).
-func (h *UserHandler) GetReferralStats(c *gin.Context) {
+func (h *Handlers) GetReferralStats(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -461,37 +411,25 @@ func (h *UserHandler) GetReferralStats(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	type referralUser struct {
+		Name               string    `json:"name"`
+		Email              string    `json:"email"`
+		CreatedAt          time.Time `json:"createdAt"`
+		VerificationStatus string    `json:"verificationStatus"`
+	}
 
-	collection := config.GetCollection("users")
-
-	opts := options.Find().SetSort(bson.M{"createdAt": -1})
-	cursor, err := collection.Find(ctx, bson.M{"referredBy": user.ID}, opts)
-	if err != nil {
+	var referrals []referralUser
+	if err := config.DB.Model(&models.User{}).
+		Select("name, email, created_at, verification_status").
+		Where("referred_by = ?", user.ID).
+		Order("created_at DESC").
+		Find(&referrals).Error; err != nil {
 		log.Printf("GetReferralStats error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to get referral stats",
 		})
 		return
-	}
-	defer cursor.Close(ctx)
-
-	type referralUser struct {
-		Name               string    `bson:"name" json:"name"`
-		Email              string    `bson:"email" json:"email"`
-		CreatedAt          time.Time `bson:"createdAt" json:"createdAt"`
-		VerificationStatus string    `bson:"verificationStatus" json:"verificationStatus"`
-	}
-
-	var referrals []referralUser
-	for cursor.Next(ctx) {
-		var u referralUser
-		if err := cursor.Decode(&u); err != nil {
-			continue
-		}
-		referrals = append(referrals, u)
 	}
 
 	if referrals == nil {
@@ -521,7 +459,7 @@ func (h *UserHandler) GetReferralStats(c *gin.Context) {
 }
 
 // CheckUsernameAvailability handles GET /api/users/check-username/:username.
-func (h *UserHandler) CheckUsernameAvailability(c *gin.Context) {
+func (h *Handlers) CheckUsernameAvailability(c *gin.Context) {
 	username := c.Param("username")
 
 	if username == "" || len(username) < 3 {
@@ -532,15 +470,10 @@ func (h *UserHandler) CheckUsernameAvailability(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var existingUser models.User
-	err := collection.FindOne(ctx, bson.M{"username": strings.ToLower(username)}).Decode(&existingUser)
+	err := config.DB.Where("username = ?", strings.ToLower(username)).First(&existingUser).Error
 
-	available := err == mongo.ErrNoDocuments
+	available := errors.Is(err, gorm.ErrRecordNotFound)
 
 	var suggestions []string
 	if !available {
@@ -557,7 +490,7 @@ func (h *UserHandler) CheckUsernameAvailability(c *gin.Context) {
 }
 
 // CheckEmailAvailability handles GET /api/users/check-email/:email.
-func (h *UserHandler) CheckEmailAvailability(c *gin.Context) {
+func (h *Handlers) CheckEmailAvailability(c *gin.Context) {
 	email := c.Param("email")
 
 	if email == "" || !isValidEmail(email) {
@@ -568,15 +501,10 @@ func (h *UserHandler) CheckEmailAvailability(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var existingUser models.User
-	err := collection.FindOne(ctx, bson.M{"email": strings.ToLower(email)}).Decode(&existingUser)
+	err := config.DB.Where("email = ?", strings.ToLower(email)).First(&existingUser).Error
 
-	available := err == mongo.ErrNoDocuments
+	available := errors.Is(err, gorm.ErrRecordNotFound)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -586,8 +514,8 @@ func (h *UserHandler) CheckEmailAvailability(c *gin.Context) {
 	})
 }
 
-// GetUserByID handles GET /api/users/:userId (admin only).
-func (h *UserHandler) GetUserByID(c *gin.Context) {
+// GetUserByID handles GET /api/users/:id (admin only).
+func (h *Handlers) GetUserByID(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -605,7 +533,7 @@ func (h *UserHandler) GetUserByID(c *gin.Context) {
 		return
 	}
 
-	userID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	userID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -614,15 +542,10 @@ func (h *UserHandler) GetUserByID(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var dbUser models.User
-	err = collection.FindOne(ctx, bson.M{"_id": userID}).Decode(&dbUser)
+	err = config.DB.First(&dbUser, "id = ?", userID).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
@@ -644,7 +567,7 @@ func (h *UserHandler) GetUserByID(c *gin.Context) {
 }
 
 // GetAllUsers handles GET /api/users/ (admin only, with pagination and filters).
-func (h *UserHandler) GetAllUsers(c *gin.Context) {
+func (h *Handlers) GetAllUsers(c *gin.Context) {
 	currentUser := getUserFromContext(c)
 	if currentUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -675,32 +598,22 @@ func (h *UserHandler) GetAllUsers(c *gin.Context) {
 		limit = 20
 	}
 
-	filter := bson.M{}
+	db := config.DB.Model(&models.User{})
+
 	if status != "" {
-		filter["accountStatus"] = status
+		db = db.Where("account_status = ?", status)
 	}
 	if verificationStatus != "" {
-		filter["verificationStatus"] = verificationStatus
+		db = db.Where("verification_status = ?", verificationStatus)
 	}
 	if search != "" {
-		filter["$or"] = bson.A{
-			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"email": bson.M{"$regex": search, "$options": "i"}},
-			bson.M{"username": bson.M{"$regex": search, "$options": "i"}},
-		}
+		pat := "%" + search + "%"
+		db = db.Where("name ILIKE ? OR email ILIKE ? OR username ILIKE ?", pat, pat, pat)
 	}
 
-	skip := int64((page - 1) * limit)
-	limitInt64 := int64(limit)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	// Count total documents
-	total, err := collection.CountDocuments(ctx, filter)
-	if err != nil {
+	// Count total records
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
 		log.Printf("GetAllUsers count error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -710,25 +623,10 @@ func (h *UserHandler) GetAllUsers(c *gin.Context) {
 	}
 
 	// Find users
-	opts := options.Find().
-		SetSort(bson.M{"createdAt": -1}).
-		SetSkip(skip).
-		SetLimit(limitInt64)
-
-	cursor, err := collection.Find(ctx, filter, opts)
-	if err != nil {
-		log.Printf("GetAllUsers find error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to get users",
-		})
-		return
-	}
-	defer cursor.Close(ctx)
-
+	skip := (page - 1) * limit
 	var users []models.User
-	if err := cursor.All(ctx, &users); err != nil {
-		log.Printf("GetAllUsers decode error: %v", err)
+	if err := db.Offset(skip).Limit(limit).Order("created_at DESC").Find(&users).Error; err != nil {
+		log.Printf("GetAllUsers find error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to get users",

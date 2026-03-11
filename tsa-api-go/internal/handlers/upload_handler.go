@@ -12,48 +12,44 @@ import (
 	"github.com/cloudinary/cloudinary-go/v2/api/admin"
 	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"github.com/gin-gonic/gin"
-	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// UploadHandler handles file upload HTTP requests.
-type UploadHandler struct {
-	cloudinary *cloudinary.Cloudinary
-}
-
-// NewUploadHandler creates a new UploadHandler.
-func NewUploadHandler(cfg *config.Config) *UploadHandler {
+// getCloudinary creates a Cloudinary client from the handler config.
+func (h *Handlers) getCloudinary() *cloudinary.Cloudinary {
 	cld, err := cloudinary.NewFromParams(
-		cfg.CloudinaryCloudName,
-		cfg.CloudinaryAPIKey,
-		cfg.CloudinaryAPISecret,
+		h.Config.CloudinaryCloudName,
+		h.Config.CloudinaryAPIKey,
+		h.Config.CloudinaryAPISecret,
 	)
 	if err != nil {
-		// If cloudinary is not configured, handler will check for nil
-		return &UploadHandler{}
+		return nil
 	}
-	return &UploadHandler{cloudinary: cld}
+	return cld
 }
 
-func (h *UploadHandler) ensureCloudinary(c *gin.Context) bool {
-	if h.cloudinary == nil {
+func (h *Handlers) ensureCloudinary(c *gin.Context) *cloudinary.Cloudinary {
+	cld := h.getCloudinary()
+	if cld == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"success": false,
 			"message": "Cloudinary is not configured",
 		})
-		return false
+		return nil
 	}
-	return true
+	return cld
 }
 
-// UploadSingle uploads a single image file.
-// POST /api/upload/single — auth, multipart 'image', optimize, upload to Cloudinary.
-func (h *UploadHandler) UploadSingle(c *gin.Context) {
+// UploadFile uploads a single image file.
+// POST /api/upload/ — auth, multipart 'image', optimize, upload to Cloudinary.
+func (h *Handlers) UploadFile(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
@@ -73,7 +69,7 @@ func (h *UploadHandler) UploadSingle(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	result, err := h.cloudinary.Upload.Upload(ctx, f, uploader.UploadParams{
+	result, err := cld.Upload.Upload(ctx, f, uploader.UploadParams{
 		Folder:         "tsa",
 		Transformation: "q_auto,f_auto",
 	})
@@ -98,13 +94,14 @@ func (h *UploadHandler) UploadSingle(c *gin.Context) {
 
 // UploadMultiple uploads multiple image files (max 10).
 // POST /api/upload/multiple — auth, multipart 'images', max 10, optimize each.
-func (h *UploadHandler) UploadMultiple(c *gin.Context) {
+func (h *Handlers) UploadMultiple(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
@@ -128,23 +125,23 @@ func (h *UploadHandler) UploadMultiple(c *gin.Context) {
 	defer cancel()
 
 	results := make([]gin.H, 0, len(files))
-	errors := make([]gin.H, 0)
+	uploadErrors := make([]gin.H, 0)
 
 	for i, file := range files {
 		f, err := file.Open()
 		if err != nil {
-			errors = append(errors, gin.H{"index": i, "error": "Failed to read file"})
+			uploadErrors = append(uploadErrors, gin.H{"index": i, "error": "Failed to read file"})
 			continue
 		}
 
-		result, err := h.cloudinary.Upload.Upload(ctx, f, uploader.UploadParams{
+		result, err := cld.Upload.Upload(ctx, f, uploader.UploadParams{
 			Folder:         "tsa",
 			Transformation: "q_auto,f_auto",
 		})
 		f.Close()
 
 		if err != nil {
-			errors = append(errors, gin.H{"index": i, "error": "Failed to upload"})
+			uploadErrors = append(uploadErrors, gin.H{"index": i, "error": "Failed to upload"})
 			continue
 		}
 
@@ -163,7 +160,7 @@ func (h *UploadHandler) UploadMultiple(c *gin.Context) {
 		"message": fmt.Sprintf("Uploaded %d of %d images", len(results), len(files)),
 		"data": gin.H{
 			"uploaded": results,
-			"errors":   errors,
+			"errors":   uploadErrors,
 			"total":    len(files),
 		},
 	})
@@ -171,13 +168,14 @@ func (h *UploadHandler) UploadMultiple(c *gin.Context) {
 
 // UploadBase64 uploads a base64-encoded image.
 // POST /api/upload/base64 — validate base64, upload to Cloudinary.
-func (h *UploadHandler) UploadBase64(c *gin.Context) {
+func (h *Handlers) UploadBase64(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
@@ -203,13 +201,12 @@ func (h *UploadHandler) UploadBase64(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Upload data URI directly; Cloudinary accepts data URIs
 	uploadInput := body.Image
 	if !strings.HasPrefix(uploadInput, "data:") {
 		uploadInput = "data:image/png;base64," + imageData
 	}
 
-	result, err := h.cloudinary.Upload.Upload(ctx, uploadInput, uploader.UploadParams{
+	result, err := cld.Upload.Upload(ctx, uploadInput, uploader.UploadParams{
 		Folder:         "tsa",
 		Transformation: "q_auto,f_auto",
 	})
@@ -233,13 +230,14 @@ func (h *UploadHandler) UploadBase64(c *gin.Context) {
 
 // UploadFacial uploads facial verification images (base64 array, max 10).
 // POST /api/upload/facial — base64 array, max 10, upload each.
-func (h *UploadHandler) UploadFacial(c *gin.Context) {
+func (h *Handlers) UploadFacial(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
@@ -267,7 +265,6 @@ func (h *UploadHandler) UploadFacial(c *gin.Context) {
 	uploadErrors := make([]gin.H, 0)
 
 	for i, img := range body.Images {
-		// Ensure data URI prefix
 		uploadInput := img
 		if !strings.HasPrefix(uploadInput, "data:") {
 			imageData := img
@@ -277,7 +274,7 @@ func (h *UploadHandler) UploadFacial(c *gin.Context) {
 			uploadInput = "data:image/png;base64," + imageData
 		}
 
-		result, err := h.cloudinary.Upload.Upload(ctx, uploadInput, uploader.UploadParams{
+		result, err := cld.Upload.Upload(ctx, uploadInput, uploader.UploadParams{
 			Folder:         "tsa/facial",
 			Transformation: "q_auto,f_auto",
 		})
@@ -305,13 +302,14 @@ func (h *UploadHandler) UploadFacial(c *gin.Context) {
 
 // DeleteImage deletes an image from Cloudinary.
 // DELETE /api/upload/:publicId — auth, delete from Cloudinary.
-func (h *UploadHandler) DeleteImage(c *gin.Context) {
+func (h *Handlers) DeleteImage(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
@@ -324,7 +322,7 @@ func (h *UploadHandler) DeleteImage(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := h.cloudinary.Upload.Destroy(ctx, uploader.DestroyParams{
+	result, err := cld.Upload.Destroy(ctx, uploader.DestroyParams{
 		PublicID: publicID,
 	})
 	if err != nil {
@@ -344,27 +342,27 @@ func (h *UploadHandler) DeleteImage(c *gin.Context) {
 
 // GetUploadStats returns Cloudinary usage statistics.
 // GET /api/upload/stats — admin, Cloudinary usage.
-func (h *UploadHandler) GetUploadStats(c *gin.Context) {
+func (h *Handlers) GetUploadStats(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	// Check admin role
-	if user.Role != "admin" && user.Role != "super_admin" {
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "Admin access required"})
 		return
 	}
 
-	if !h.ensureCloudinary(c) {
+	cld := h.ensureCloudinary(c)
+	if cld == nil {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	usage, err := h.cloudinary.Admin.Usage(ctx, admin.UsageParams{})
+	usage, err := cld.Admin.Usage(ctx, admin.UsageParams{})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch upload stats"})
 		return
@@ -374,11 +372,11 @@ func (h *UploadHandler) GetUploadStats(c *gin.Context) {
 		"success": true,
 		"message": "Upload stats retrieved successfully",
 		"data": gin.H{
-			"plan":          usage.Plan,
-			"storage":       usage.Storage,
-			"bandwidth":     usage.Bandwidth,
-			"requests":      usage.Requests,
-			"resources":     usage.Resources,
+			"plan":            usage.Plan,
+			"storage":         usage.Storage,
+			"bandwidth":       usage.Bandwidth,
+			"requests":        usage.Requests,
+			"resources":       usage.Resources,
 			"transformations": usage.Transformations,
 		},
 	})

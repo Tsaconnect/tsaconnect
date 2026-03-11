@@ -1,27 +1,25 @@
 package config
 
-import (
-	"os"
-)
+import "os"
 
 type Config struct {
-	MongoDBURI         string
-	JWTSecret          string
-	FrontendURL        string
-	Port               string
-	Env                string
+	DatabaseURL         string
+	JWTSecret           string
+	FrontendURL         string
+	Port                string
+	Env                 string
 	CloudinaryCloudName string
-	CloudinaryAPIKey   string
+	CloudinaryAPIKey    string
 	CloudinaryAPISecret string
 }
 
 func Load() *Config {
 	return &Config{
-		MongoDBURI:          getEnv("MONGODB_URI", "mongodb://localhost:27017/tsa"),
+		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
 		Port:                getEnv("PORT", "5000"),
-		Env:                 getEnv("NODE_ENV", "development"),
+		Env:                 getEnv("ENV", "development"),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),

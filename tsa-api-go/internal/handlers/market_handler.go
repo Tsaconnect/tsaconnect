@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -9,33 +8,22 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
-
-// MarketHandler handles market data HTTP requests.
-type MarketHandler struct {
-	priceService *services.PriceService
-}
-
-// NewMarketHandler creates a new MarketHandler.
-func NewMarketHandler(ps *services.PriceService) *MarketHandler {
-	return &MarketHandler{priceService: ps}
-}
 
 // GetMarketOverview returns an overview of market data.
 // GET /api/market/overview — public, symbols query, prices + indices + trending.
-func (h *MarketHandler) GetMarketOverview(c *gin.Context) {
+func (h *Handlers) GetMarketOverview(c *gin.Context) {
 	symbolsParam := c.DefaultQuery("symbols", "BTC,ETH,SOL,MATIC,USDT,BNB,MCGP")
 	symbols := strings.Split(symbolsParam, ",")
 	for i := range symbols {
 		symbols[i] = strings.TrimSpace(strings.ToUpper(symbols[i]))
 	}
 
-	prices, err := h.priceService.GetPrices(symbols)
+	prices, err := h.PriceService.GetPrices(symbols)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch market data"})
 		return
@@ -66,7 +54,7 @@ func (h *MarketHandler) GetMarketOverview(c *gin.Context) {
 
 // GetAssetPriceHistory returns price history for a symbol.
 // GET /api/market/history/:symbol — public, days/interval params, sample data.
-func (h *MarketHandler) GetAssetPriceHistory(c *gin.Context) {
+func (h *Handlers) GetAssetPriceHistory(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "30"))
 	interval := c.DefaultQuery("interval", "1d")
@@ -78,7 +66,7 @@ func (h *MarketHandler) GetAssetPriceHistory(c *gin.Context) {
 		days = 365
 	}
 
-	history, err := h.priceService.GetHistoricalPrice(symbol, days)
+	history, err := h.PriceService.GetHistoricalPrice(symbol, days)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch price history"})
 		return
@@ -99,12 +87,12 @@ func (h *MarketHandler) GetAssetPriceHistory(c *gin.Context) {
 	})
 }
 
-// GetAssetDetails returns detailed market data for a symbol.
+// GetAssetMarketDetails returns detailed market data for a symbol.
 // GET /api/market/assets/:symbol — public, market data + mock news + similar assets.
-func (h *MarketHandler) GetAssetDetails(c *gin.Context) {
+func (h *Handlers) GetAssetMarketDetails(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 
-	marketData, err := h.priceService.GetMarketData(symbol)
+	marketData, err := h.PriceService.GetMarketData(symbol)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
@@ -123,7 +111,7 @@ func (h *MarketHandler) GetAssetDetails(c *gin.Context) {
 
 // SearchAssets searches for assets by query string.
 // GET /api/market/search/:query — public, mock search from predefined list.
-func (h *MarketHandler) SearchAssets(c *gin.Context) {
+func (h *Handlers) SearchAssets(c *gin.Context) {
 	query := strings.ToUpper(c.Param("query"))
 
 	allAssets := []gin.H{
@@ -169,27 +157,16 @@ func (h *MarketHandler) SearchAssets(c *gin.Context) {
 
 // GetWatchlist returns the user's watchlist (user assets as watchlist).
 // GET /api/market/watchlist — auth.
-func (h *MarketHandler) GetWatchlist(c *gin.Context) {
+func (h *Handlers) GetWatchlist(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-	cursor, err := assetsCol.Find(ctx, bson.M{"userId": user.ID})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch watchlist"})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var assets []models.Asset
-	if err := cursor.All(ctx, &assets); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode watchlist"})
+	if err := config.DB.Where("user_id = ?", user.ID).Find(&assets).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch watchlist"})
 		return
 	}
 
@@ -201,7 +178,7 @@ func (h *MarketHandler) GetWatchlist(c *gin.Context) {
 
 	watchlist := make([]gin.H, 0, len(assets))
 	if len(symbols) > 0 {
-		prices, _ := h.priceService.GetPrices(symbols)
+		prices, _ := h.PriceService.GetPrices(symbols)
 		for _, a := range assets {
 			entry := gin.H{
 				"symbol":  a.Symbol,
@@ -231,7 +208,7 @@ func (h *MarketHandler) GetWatchlist(c *gin.Context) {
 
 // AddToWatchlist adds an asset to the user's watchlist.
 // POST /api/market/watchlist — auth.
-func (h *MarketHandler) AddToWatchlist(c *gin.Context) {
+func (h *Handlers) AddToWatchlist(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -253,14 +230,9 @@ func (h *MarketHandler) AddToWatchlist(c *gin.Context) {
 		name = getAssetName(symbol)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-
 	// Check if already exists
-	count, err := assetsCol.CountDocuments(ctx, bson.M{"userId": user.ID, "symbol": symbol})
-	if err != nil {
+	var count int64
+	if err := config.DB.Model(&models.Asset{}).Where("user_id = ? AND symbol = ?", user.ID, symbol).Count(&count).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to check watchlist"})
 		return
 	}
@@ -271,22 +243,21 @@ func (h *MarketHandler) AddToWatchlist(c *gin.Context) {
 
 	now := time.Now()
 	asset := models.Asset{
-		ID:       primitive.NewObjectID(),
-		UserID:   user.ID,
-		Symbol:   symbol,
-		Name:     name,
-		Balance:  0,
-		USDValue: 0,
-		Details: &models.AssetDetails{
-			Type:  models.AssetTypeToken,
-			Chain: models.ChainEthereum,
-		},
+		ID:        uuid.New(),
+		UserID:    user.ID,
+		Symbol:    symbol,
+		Name:      name,
+		Balance:   0,
+		USDValue:  0,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	asset.SetDetails(&models.AssetDetails{
+		Type:  models.AssetTypeToken,
+		Chain: models.ChainEthereum,
+	})
 
-	_, err = assetsCol.InsertOne(ctx, asset)
-	if err != nil {
+	if err := config.DB.Create(&asset).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to add to watchlist"})
 		return
 	}
@@ -351,14 +322,14 @@ func getAssetNews(symbol string) []gin.H {
 // getSimilarAssets returns a predefined list of similar assets for a given symbol.
 func getSimilarAssets(symbol string) []gin.H {
 	similarMap := map[string][]string{
-		"BTC":  {"ETH", "SOL", "BNB"},
-		"ETH":  {"BTC", "SOL", "AVAX"},
-		"SOL":  {"ETH", "AVAX", "MATIC"},
+		"BTC":   {"ETH", "SOL", "BNB"},
+		"ETH":   {"BTC", "SOL", "AVAX"},
+		"SOL":   {"ETH", "AVAX", "MATIC"},
 		"MATIC": {"SOL", "AVAX", "DOT"},
-		"USDT": {"USDC", "DAI", "BUSD"},
-		"USDC": {"USDT", "DAI", "BUSD"},
-		"BNB":  {"ETH", "SOL", "AVAX"},
-		"MCGP": {"ETH", "SOL", "MATIC"},
+		"USDT":  {"USDC", "DAI", "BUSD"},
+		"USDC":  {"USDT", "DAI", "BUSD"},
+		"BNB":   {"ETH", "SOL", "AVAX"},
+		"MCGP":  {"ETH", "SOL", "MATIC"},
 	}
 
 	similar, ok := similarMap[symbol]
