@@ -12,14 +12,6 @@ import (
 
 // SetupRoutes registers all route groups and endpoints on the router.
 func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
-	// Health check
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"message": "TSA API is running",
-		})
-	})
-
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
