@@ -3,20 +3,26 @@ package models
 import (
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // VerificationLog records verification-related actions on a user's account.
 type VerificationLog struct {
-	ID        primitive.ObjectID  `bson:"_id,omitempty" json:"id,omitempty"`
-	UserID    primitive.ObjectID  `bson:"userId" json:"userId"`
-	Action    string              `bson:"action" json:"action"`
-	Status    string              `bson:"status" json:"status"`
-	Notes     string              `bson:"notes,omitempty" json:"notes,omitempty"`
-	Metadata  interface{}         `bson:"metadata,omitempty" json:"metadata,omitempty"`
-	AdminID   *primitive.ObjectID `bson:"adminId,omitempty" json:"adminId,omitempty"`
-	CreatedAt time.Time           `bson:"createdAt" json:"createdAt"`
-	UpdatedAt time.Time           `bson:"updatedAt" json:"updatedAt"`
+	ID        uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID    uuid.UUID      `gorm:"type:uuid;index" json:"userId"`
+	Action    string         `json:"action"`
+	Status    string         `json:"status"`
+	Notes     string         `json:"notes,omitempty"`
+	Metadata  datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	AdminID   *uuid.UUID     `gorm:"type:uuid" json:"adminId,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (VerificationLog) TableName() string {
+	return "verification_logs"
 }
 
 // Verification log action constants.

@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -9,27 +9,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"github.com/ojimcy/tsa-api-go/internal/services"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
-
-// TransactionHandler handles transaction-related HTTP requests.
-type TransactionHandler struct {
-	priceService *services.PriceService
-}
-
-// NewTransactionHandler creates a new TransactionHandler.
-func NewTransactionHandler(ps *services.PriceService) *TransactionHandler {
-	return &TransactionHandler{priceService: ps}
-}
 
 // GetTransactions returns paginated, filtered transactions.
 // GET /api/transactions/ — auth, pagination, filter by type/status/asset/dateRange.
-func (h *TransactionHandler) GetTransactions(c *gin.Context) {
+func (h *Handlers) GetTransactions(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -44,64 +31,40 @@ func (h *TransactionHandler) GetTransactions(c *gin.Context) {
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	skip := int64((page - 1) * limit)
+	offset := (page - 1) * limit
 
-	filter := bson.M{"userId": user.ID}
+	query := config.DB.Where("user_id = ?", user.ID)
 
 	if txType := c.Query("type"); txType != "" {
-		filter["type"] = txType
+		query = query.Where("type = ?", txType)
 	}
 	if status := c.Query("status"); status != "" {
-		filter["status"] = status
+		query = query.Where("status = ?", status)
 	}
 	if asset := c.Query("asset"); asset != "" {
-		filter["$or"] = bson.A{
-			bson.M{"fromAsset.symbol": asset},
-			bson.M{"toAsset.symbol": asset},
-		}
+		query = query.Where("(from_asset->>'symbol' = ? OR to_asset->>'symbol' = ?)", asset, asset)
 	}
 
-	dateFilter := bson.M{}
 	if startDate := c.Query("startDate"); startDate != "" {
 		if t, err := time.Parse(time.RFC3339, startDate); err == nil {
-			dateFilter["$gte"] = t
+			query = query.Where("created_at >= ?", t)
 		}
 	}
 	if endDate := c.Query("endDate"); endDate != "" {
 		if t, err := time.Parse(time.RFC3339, endDate); err == nil {
-			dateFilter["$lte"] = t
+			query = query.Where("created_at <= ?", t)
 		}
 	}
-	if len(dateFilter) > 0 {
-		filter["createdAt"] = dateFilter
-	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("transactions")
-
-	total, err := collection.CountDocuments(ctx, filter)
-	if err != nil {
+	var total int64
+	if err := query.Model(&models.Transaction{}).Count(&total).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to count transactions"})
 		return
 	}
 
-	opts := options.Find().
-		SetSkip(skip).
-		SetLimit(int64(limit)).
-		SetSort(bson.M{"createdAt": -1})
-
-	cursor, err := collection.Find(ctx, filter, opts)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch transactions"})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var transactions []models.Transaction
-	if err := cursor.All(ctx, &transactions); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode transactions"})
+	if err := query.Order("created_at DESC").Offset(offset).Limit(limit).Find(&transactions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch transactions"})
 		return
 	}
 
@@ -122,28 +85,23 @@ func (h *TransactionHandler) GetTransactions(c *gin.Context) {
 	})
 }
 
-// GetTransactionDetails returns details for a specific transaction.
-// GET /api/transactions/:transactionId — auth, include blockchain confirmation.
-func (h *TransactionHandler) GetTransactionDetails(c *gin.Context) {
+// GetTransactionByID returns details for a specific transaction.
+// GET /api/transactions/:id — auth, include blockchain confirmation.
+func (h *Handlers) GetTransactionByID(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
 
-	txID, err := primitive.ObjectIDFromHex(c.Param("transactionId"))
+	txID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid transaction ID"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("transactions")
 	var tx models.Transaction
-	err = collection.FindOne(ctx, bson.M{"_id": txID, "userId": user.ID}).Decode(&tx)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ?", txID, user.ID).First(&tx).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Transaction not found"})
 		return
 	}
@@ -176,7 +134,7 @@ func (h *TransactionHandler) GetTransactionDetails(c *gin.Context) {
 
 // GetTransactionStats returns transaction statistics/aggregation.
 // GET /api/transactions/stats/summary — auth, period: day/week/month/year, aggregation.
-func (h *TransactionHandler) GetTransactionStats(c *gin.Context) {
+func (h *Handlers) GetTransactionStats(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -199,25 +157,9 @@ func (h *TransactionHandler) GetTransactionStats(c *gin.Context) {
 		startDate = now.AddDate(0, -1, 0)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("transactions")
-	filter := bson.M{
-		"userId":    user.ID,
-		"createdAt": bson.M{"$gte": startDate},
-	}
-
-	cursor, err := collection.Find(ctx, filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch transactions"})
-		return
-	}
-	defer cursor.Close(ctx)
-
 	var transactions []models.Transaction
-	if err := cursor.All(ctx, &transactions); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to decode transactions"})
+	if err := config.DB.Where("user_id = ? AND created_at >= ?", user.ID, startDate).Find(&transactions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch transactions"})
 		return
 	}
 
@@ -248,9 +190,9 @@ func (h *TransactionHandler) GetTransactionStats(c *gin.Context) {
 	})
 }
 
-// CreateDeposit creates a deposit transaction.
+// CreateTransaction creates a deposit transaction.
 // POST /api/transactions/deposit — auth, validate assetSymbol/amount, create/get asset, calc USD value.
-func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
+func (h *Handlers) CreateTransaction(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -267,37 +209,33 @@ func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Get or create asset
-	assetsCol := config.GetCollection("assets")
 	var asset models.Asset
-	err := assetsCol.FindOne(ctx, bson.M{"userId": user.ID, "symbol": body.AssetSymbol}).Decode(&asset)
+	err := config.DB.Where("user_id = ? AND symbol = ?", user.ID, body.AssetSymbol).First(&asset).Error
 	if err != nil {
 		// Create the asset
 		now := time.Now()
 		asset = models.Asset{
-			ID:       primitive.NewObjectID(),
-			UserID:   user.ID,
-			Symbol:   body.AssetSymbol,
-			Name:     body.AssetSymbol,
-			Balance:  0,
-			IsHidden: false,
-			Details: &models.AssetDetails{
-				Type:  models.AssetTypeToken,
-				Chain: models.ChainEthereum,
-			},
+			ID:        uuid.New(),
+			UserID:    user.ID,
+			Symbol:    body.AssetSymbol,
+			Name:      body.AssetSymbol,
+			Balance:   0,
+			IsHidden:  false,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		_, _ = assetsCol.InsertOne(ctx, asset)
+		asset.SetDetails(&models.AssetDetails{
+			Type:  models.AssetTypeToken,
+			Chain: models.ChainEthereum,
+		})
+		config.DB.Create(&asset)
 	}
 
 	// Get price and calculate USD value
 	price := h.getAssetPrice(body.AssetSymbol)
 	usdValue := price * body.Amount
-	walletAddr := h.getWalletAddress(user.ID.Hex(), body.Network)
+	walletAddr := h.getWalletAddress(user.ID.String(), body.Network)
 
 	blockchain := body.Network
 	if blockchain == "" {
@@ -306,15 +244,10 @@ func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
 
 	now := time.Now()
 	tx := models.Transaction{
-		ID:     primitive.NewObjectID(),
-		UserID: user.ID,
-		Type:   models.TransactionTypeDeposit,
-		Status: models.TransactionStatusCompleted,
-		ToAsset: &models.TransactionAsset{
-			Symbol:  body.AssetSymbol,
-			Amount:  body.Amount,
-			Address: walletAddr,
-		},
+		ID:               uuid.New(),
+		UserID:           user.ID,
+		Type:             models.TransactionTypeDeposit,
+		Status:           models.TransactionStatusCompleted,
 		Amount:           body.Amount,
 		USDValue:         usdValue,
 		Blockchain:       blockchain,
@@ -323,10 +256,13 @@ func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
+	tx.SetToAsset(&models.TransactionAsset{
+		Symbol:  body.AssetSymbol,
+		Amount:  body.Amount,
+		Address: walletAddr,
+	})
 
-	txCol := config.GetCollection("transactions")
-	_, err = txCol.InsertOne(ctx, tx)
-	if err != nil {
+	if err := config.DB.Create(&tx).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create deposit"})
 		return
 	}
@@ -334,10 +270,11 @@ func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
 	// Update asset balance
 	newBalance := asset.Balance + body.Amount
 	newUSDValue := price * newBalance
-	_, _ = assetsCol.UpdateOne(ctx,
-		bson.M{"_id": asset.ID},
-		bson.M{"$set": bson.M{"balance": newBalance, "usdValue": newUSDValue, "updatedAt": now}},
-	)
+	config.DB.Model(&asset).Updates(map[string]interface{}{
+		"balance":    newBalance,
+		"usd_value":  newUSDValue,
+		"updated_at": now,
+	})
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
@@ -348,7 +285,7 @@ func (h *TransactionHandler) CreateDeposit(c *gin.Context) {
 
 // CreateWithdrawal creates a withdrawal transaction.
 // POST /api/transactions/withdraw — auth, check balance, check limits, calc fees: 0.5% platform + network.
-func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
+func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -366,14 +303,9 @@ func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Find the asset
-	assetsCol := config.GetCollection("assets")
 	var asset models.Asset
-	err := assetsCol.FindOne(ctx, bson.M{"userId": user.ID, "symbol": body.AssetSymbol}).Decode(&asset)
-	if err != nil {
+	if err := config.DB.Where("user_id = ? AND symbol = ?", user.ID, body.AssetSymbol).First(&asset).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Asset not found"})
 		return
 	}
@@ -400,7 +332,7 @@ func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
 	}
 
 	// Check withdrawal limits
-	if err := h.checkWithdrawalLimits(ctx, user.ID, body.Amount, body.AssetSymbol); err != nil {
+	if err := h.checkWithdrawalLimits(user.ID, body.Amount, body.AssetSymbol); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
@@ -416,37 +348,37 @@ func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
 
 	now := time.Now()
 	tx := models.Transaction{
-		ID:     primitive.NewObjectID(),
-		UserID: user.ID,
-		Type:   models.TransactionTypeWithdrawal,
-		Status: models.TransactionStatusPending,
-		FromAsset: &models.TransactionAsset{
-			Symbol:  body.AssetSymbol,
-			Amount:  body.Amount,
-			Address: h.getWalletAddress(user.ID.Hex(), body.Network),
-		},
-		ToAsset: &models.TransactionAsset{
-			Symbol:  body.AssetSymbol,
-			Amount:  body.Amount,
-			Address: body.WalletAddress,
-		},
-		Amount:   body.Amount,
-		USDValue: usdValue,
-		FeeUSD:   feeUSD,
-		Fees: &models.TransactionFees{
-			Platform: platformFee,
-			Network:  networkFee,
-		},
+		ID:               uuid.New(),
+		UserID:           user.ID,
+		Type:             models.TransactionTypeWithdrawal,
+		Status:           models.TransactionStatusPending,
+		Amount:           body.Amount,
+		USDValue:         usdValue,
+		FeeUSD:           feeUSD,
 		Blockchain:       blockchain,
 		Confirmations:    0,
 		RequiredConfirms: 12,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
+	tx.SetFromAsset(&models.TransactionAsset{
+		Symbol:  body.AssetSymbol,
+		Amount:  body.Amount,
+		Address: h.getWalletAddress(user.ID.String(), body.Network),
+	})
+	tx.SetToAsset(&models.TransactionAsset{
+		Symbol:  body.AssetSymbol,
+		Amount:  body.Amount,
+		Address: body.WalletAddress,
+	})
 
-	txCol := config.GetCollection("transactions")
-	_, err = txCol.InsertOne(ctx, tx)
-	if err != nil {
+	feesJSON, _ := json.Marshal(&models.TransactionFees{
+		Platform: platformFee,
+		Network:  networkFee,
+	})
+	tx.Fees = feesJSON
+
+	if err := config.DB.Create(&tx).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create withdrawal"})
 		return
 	}
@@ -454,10 +386,11 @@ func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
 	// Update asset balance
 	newBalance := asset.Balance - totalDeduction
 	newUSDValue := newBalance * price
-	_, _ = assetsCol.UpdateOne(ctx,
-		bson.M{"_id": asset.ID},
-		bson.M{"$set": bson.M{"balance": newBalance, "usdValue": newUSDValue, "updatedAt": now}},
-	)
+	config.DB.Model(&asset).Updates(map[string]interface{}{
+		"balance":    newBalance,
+		"usd_value":  newUSDValue,
+		"updated_at": now,
+	})
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
@@ -468,7 +401,7 @@ func (h *TransactionHandler) CreateWithdrawal(c *gin.Context) {
 
 // CreateSwap creates a swap transaction between two assets.
 // POST /api/transactions/swap — auth, check same asset, check balance, get exchange rate, 0.1% fee, update both balances.
-func (h *TransactionHandler) CreateSwap(c *gin.Context) {
+func (h *Handlers) CreateSwap(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
@@ -490,15 +423,9 @@ func (h *TransactionHandler) CreateSwap(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	assetsCol := config.GetCollection("assets")
-
 	// Find source asset
 	var fromAssetDoc models.Asset
-	err := assetsCol.FindOne(ctx, bson.M{"userId": user.ID, "symbol": body.FromAsset}).Decode(&fromAssetDoc)
-	if err != nil {
+	if err := config.DB.Where("user_id = ? AND symbol = ?", user.ID, body.FromAsset).First(&fromAssetDoc).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Source asset not found"})
 		return
 	}
@@ -534,80 +461,76 @@ func (h *TransactionHandler) CreateSwap(c *gin.Context) {
 
 	now := time.Now()
 	tx := models.Transaction{
-		ID:     primitive.NewObjectID(),
-		UserID: user.ID,
-		Type:   models.TransactionTypeSwap,
-		Status: models.TransactionStatusCompleted,
-		FromAsset: &models.TransactionAsset{
-			Symbol: body.FromAsset,
-			Amount: body.Amount,
-		},
-		ToAsset: &models.TransactionAsset{
-			Symbol: body.ToAsset,
-			Amount: toAmount,
-		},
-		Amount:   body.Amount,
-		USDValue: usdValue,
-		FeeUSD:   feeUSD,
-		Fees: &models.TransactionFees{
-			Platform: fee,
-		},
-		Metadata: &models.TransactionMetadata{
-			ExchangeRate: exchangeRate,
-		},
-		Blockchain: models.BlockchainInternal,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:               uuid.New(),
+		UserID:           user.ID,
+		Type:             models.TransactionTypeSwap,
+		Status:           models.TransactionStatusCompleted,
+		Amount:           body.Amount,
+		USDValue:         usdValue,
+		FeeUSD:           feeUSD,
+		Blockchain:       models.BlockchainInternal,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
+	tx.SetFromAsset(&models.TransactionAsset{
+		Symbol: body.FromAsset,
+		Amount: body.Amount,
+	})
+	tx.SetToAsset(&models.TransactionAsset{
+		Symbol: body.ToAsset,
+		Amount: toAmount,
+	})
 
-	txCol := config.GetCollection("transactions")
-	_, err = txCol.InsertOne(ctx, tx)
-	if err != nil {
+	feesJSON, _ := json.Marshal(&models.TransactionFees{
+		Platform: fee,
+	})
+	tx.Fees = feesJSON
+
+	metaJSON, _ := json.Marshal(&models.TransactionMetadata{
+		ExchangeRate: exchangeRate,
+	})
+	tx.Metadata = metaJSON
+
+	if err := config.DB.Create(&tx).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create swap"})
 		return
 	}
 
 	// Update from asset balance
 	newFromBalance := fromAssetDoc.Balance - totalDeduction
-	_, _ = assetsCol.UpdateOne(ctx,
-		bson.M{"_id": fromAssetDoc.ID},
-		bson.M{"$set": bson.M{
-			"balance":   newFromBalance,
-			"usdValue":  newFromBalance * fromPrice,
-			"updatedAt": now,
-		}},
-	)
+	config.DB.Model(&fromAssetDoc).Updates(map[string]interface{}{
+		"balance":    newFromBalance,
+		"usd_value":  newFromBalance * fromPrice,
+		"updated_at": now,
+	})
 
 	// Update or create to asset
 	var toAssetDoc models.Asset
-	err = assetsCol.FindOne(ctx, bson.M{"userId": user.ID, "symbol": body.ToAsset}).Decode(&toAssetDoc)
+	err := config.DB.Where("user_id = ? AND symbol = ?", user.ID, body.ToAsset).First(&toAssetDoc).Error
 	if err != nil {
 		// Create the to asset
 		toAssetDoc = models.Asset{
-			ID:       primitive.NewObjectID(),
-			UserID:   user.ID,
-			Symbol:   body.ToAsset,
-			Name:     body.ToAsset,
-			Balance:  toAmount,
-			USDValue: toAmount * toPrice,
-			Details: &models.AssetDetails{
-				Type:  models.AssetTypeToken,
-				Chain: models.ChainEthereum,
-			},
+			ID:        uuid.New(),
+			UserID:    user.ID,
+			Symbol:    body.ToAsset,
+			Name:      body.ToAsset,
+			Balance:   toAmount,
+			USDValue:  toAmount * toPrice,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		_, _ = assetsCol.InsertOne(ctx, toAssetDoc)
+		toAssetDoc.SetDetails(&models.AssetDetails{
+			Type:  models.AssetTypeToken,
+			Chain: models.ChainEthereum,
+		})
+		config.DB.Create(&toAssetDoc)
 	} else {
 		newToBalance := toAssetDoc.Balance + toAmount
-		_, _ = assetsCol.UpdateOne(ctx,
-			bson.M{"_id": toAssetDoc.ID},
-			bson.M{"$set": bson.M{
-				"balance":   newToBalance,
-				"usdValue":  newToBalance * toPrice,
-				"updatedAt": now,
-			}},
-		)
+		config.DB.Model(&toAssetDoc).Updates(map[string]interface{}{
+			"balance":    newToBalance,
+			"usd_value":  newToBalance * toPrice,
+			"updated_at": now,
+		})
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -618,8 +541,8 @@ func (h *TransactionHandler) CreateSwap(c *gin.Context) {
 }
 
 // getAssetPrice returns the current USD price for a symbol using the PriceService.
-func (h *TransactionHandler) getAssetPrice(symbol string) float64 {
-	prices, err := h.priceService.GetPrices([]string{symbol})
+func (h *Handlers) getAssetPrice(symbol string) float64 {
+	prices, err := h.PriceService.GetPrices([]string{symbol})
 	if err != nil {
 		return 0
 	}
@@ -630,7 +553,7 @@ func (h *TransactionHandler) getAssetPrice(symbol string) float64 {
 }
 
 // getWalletAddress generates a mock wallet address for a user and chain.
-func (h *TransactionHandler) getWalletAddress(userID string, chain string) string {
+func (h *Handlers) getWalletAddress(userID string, chain string) string {
 	padded := userID
 	for len(padded) < 40 {
 		padded = padded + padded
@@ -639,11 +562,9 @@ func (h *TransactionHandler) getWalletAddress(userID string, chain string) strin
 }
 
 // checkWithdrawalLimits checks if a withdrawal exceeds the user's wallet limits.
-func (h *TransactionHandler) checkWithdrawalLimits(ctx context.Context, userID primitive.ObjectID, amount float64, assetSymbol string) error {
-	walletsCol := config.GetCollection("wallets")
+func (h *Handlers) checkWithdrawalLimits(userID uuid.UUID, amount float64, assetSymbol string) error {
 	var wallet models.Wallet
-	err := walletsCol.FindOne(ctx, bson.M{"userId": userID}).Decode(&wallet)
-	if err != nil {
+	if err := config.DB.Where("user_id = ?", userID).First(&wallet).Error; err != nil {
 		// No wallet means no limits set — allow
 		return nil
 	}
@@ -655,24 +576,15 @@ func (h *TransactionHandler) checkWithdrawalLimits(ctx context.Context, userID p
 
 	// Check daily limit — sum today's withdrawals
 	todayStart := time.Now().Truncate(24 * time.Hour)
-	txCol := config.GetCollection("transactions")
 
-	cursor, err := txCol.Find(ctx, bson.M{
-		"userId":    userID,
-		"type":      models.TransactionTypeWithdrawal,
-		"createdAt": bson.M{"$gte": todayStart},
-	})
-	if err != nil {
+	var txs []models.Transaction
+	if err := config.DB.Where("user_id = ? AND type = ? AND created_at >= ?", userID, models.TransactionTypeWithdrawal, todayStart).Find(&txs).Error; err != nil {
 		return nil
 	}
-	defer cursor.Close(ctx)
 
 	var todayTotal float64
-	var txs []models.Transaction
-	if err := cursor.All(ctx, &txs); err == nil {
-		for _, tx := range txs {
-			todayTotal += tx.USDValue
-		}
+	for _, tx := range txs {
+		todayTotal += tx.USDValue
 	}
 
 	price := h.getAssetPrice(assetSymbol)
@@ -686,7 +598,7 @@ func (h *TransactionHandler) checkWithdrawalLimits(ctx context.Context, userID p
 }
 
 // calculateWithdrawalFees calculates platform and network fees for a withdrawal.
-func (h *TransactionHandler) calculateWithdrawalFees(assetSymbol string, network string, amount float64) map[string]float64 {
+func (h *Handlers) calculateWithdrawalFees(assetSymbol string, network string, amount float64) map[string]float64 {
 	// 0.5% platform fee
 	platformFee := amount * 0.005
 

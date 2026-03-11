@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -9,13 +9,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"gorm.io/gorm"
 )
 
 // GetCategories handles GET /api/products/category/all - returns categories with optional filters.
@@ -24,46 +23,29 @@ func (h *Handlers) GetCategories(c *gin.Context) {
 	parentFilter := c.Query("parent")
 	activeFilter := c.DefaultQuery("active", "true")
 
-	filter := bson.M{}
+	query := config.DB.Model(&models.Category{})
 
 	if typeFilter != "" {
-		filter["type"] = bson.M{"$in": bson.A{typeFilter, "Both"}}
+		query = query.Where("type IN ?", []string{typeFilter, "Both"})
 	}
 
 	if parentFilter != "" {
 		if parentFilter == "null" || parentFilter == "" {
-			filter["parentCategory"] = nil
+			query = query.Where("parent_category_id IS NULL")
 		} else {
-			if parentOID, err := primitive.ObjectIDFromHex(parentFilter); err == nil {
-				filter["parentCategory"] = parentOID
+			if parentOID, err := uuid.Parse(parentFilter); err == nil {
+				query = query.Where("parent_category_id = ?", parentOID)
 			}
 		}
 	}
 
 	if activeFilter != "" {
-		filter["isActive"] = activeFilter == "true"
+		query = query.Where("is_active = ?", activeFilter == "true")
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("categories")
-
-	opts := options.Find().SetSort(bson.D{
-		{Key: "order", Value: 1},
-		{Key: "title", Value: 1},
-	})
-
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch categories")
-		return
-	}
-	defer cursor.Close(ctx)
 
 	var categories []models.Category
-	if err := cursor.All(ctx, &categories); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode categories")
+	if err := query.Order("sort_order ASC, title ASC").Find(&categories).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch categories")
 		return
 	}
 
@@ -74,31 +56,14 @@ func (h *Handlers) GetCategories(c *gin.Context) {
 func (h *Handlers) GetCategoryTree(c *gin.Context) {
 	typeFilter := c.Query("type")
 
-	filter := bson.M{"isActive": true}
+	query := config.DB.Model(&models.Category{}).Where("is_active = ?", true)
 	if typeFilter != "" {
-		filter["type"] = bson.M{"$in": bson.A{typeFilter, "Both"}}
+		query = query.Where("type IN ?", []string{typeFilter, "Both"})
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("categories")
-
-	opts := options.Find().SetSort(bson.D{
-		{Key: "order", Value: 1},
-		{Key: "title", Value: 1},
-	})
-
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch category tree")
-		return
-	}
-	defer cursor.Close(ctx)
 
 	var categories []models.Category
-	if err := cursor.All(ctx, &categories); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode categories")
+	if err := query.Order("sort_order ASC, title ASC").Find(&categories).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch category tree")
 		return
 	}
 
@@ -109,15 +74,15 @@ func (h *Handlers) GetCategoryTree(c *gin.Context) {
 }
 
 // buildCategoryTree recursively builds a nested tree from a flat list of categories.
-func buildCategoryTree(categories []models.Category, parentID *primitive.ObjectID) []models.CategoryWithChildren {
+func buildCategoryTree(categories []models.Category, parentID *uuid.UUID) []models.CategoryWithChildren {
 	var result []models.CategoryWithChildren
 
 	for _, cat := range categories {
 		isMatch := false
 		if parentID == nil {
-			isMatch = cat.ParentCategory == nil
+			isMatch = cat.ParentCategoryID == nil
 		} else {
-			isMatch = cat.ParentCategory != nil && *cat.ParentCategory == *parentID
+			isMatch = cat.ParentCategoryID != nil && *cat.ParentCategoryID == *parentID
 		}
 
 		if isMatch {
@@ -135,48 +100,32 @@ func buildCategoryTree(categories []models.Category, parentID *primitive.ObjectI
 
 // GetCategoryByID handles GET /api/products/category/:categoryId - returns a category with children.
 func (h *Handlers) GetCategoryByID(c *gin.Context) {
-	categoryID, err := primitive.ObjectIDFromHex(c.Param("categoryId"))
+	categoryID, err := uuid.Parse(c.Param("categoryId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	catCol := config.GetCollection("categories")
-
 	var category models.Category
-	err = catCol.FindOne(ctx, bson.M{"_id": categoryID}).Decode(&category)
-	if err != nil {
+	if err := config.DB.First(&category, "id = ?", categoryID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Category not found")
 		return
 	}
 
 	// Get child categories
-	childCursor, err := catCol.Find(ctx, bson.M{
-		"parentCategory": categoryID,
-		"isActive":       true,
-	})
 	var children []models.Category
-	if err == nil {
-		_ = childCursor.All(ctx, &children)
-		childCursor.Close(ctx)
-	}
+	config.DB.Where("parent_category_id = ? AND is_active = ?", categoryID, true).Find(&children)
 
 	// Get product count
-	prodCol := config.GetCollection("products")
-	productCount, _ := prodCol.CountDocuments(ctx, bson.M{
-		"category": categoryID,
-		"status":   "active",
-	})
+	var productCount int64
+	config.DB.Model(&models.Product{}).Where("category_id = ? AND status = ?", categoryID, "active").Count(&productCount)
 
 	utils.SuccessResponse(c, http.StatusOK, "Category fetched successfully", gin.H{
 		"id":             category.ID,
 		"title":          category.Title,
 		"description":    category.Description,
 		"type":           category.Type,
-		"parentCategory": category.ParentCategory,
+		"parentCategory": category.ParentCategoryID,
 		"icon":           category.Icon,
 		"color":          category.Color,
 		"isActive":       category.IsActive,
@@ -214,36 +163,27 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 	orderStr := c.DefaultPostForm("order", "0")
 	order, _ := strconv.Atoi(orderStr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	catCol := config.GetCollection("categories")
-
 	// Check if category already exists (case-insensitive)
 	var existing models.Category
-	err := catCol.FindOne(ctx, bson.M{
-		"title": bson.M{"$regex": "^" + title + "$", "$options": "i"},
-	}).Decode(&existing)
-	if err == nil {
+	if err := config.DB.Where("LOWER(title) = LOWER(?)", title).First(&existing).Error; err == nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Category already exists")
 		return
 	}
 
 	// Validate parent category if provided
-	var parentCategory *primitive.ObjectID
+	var parentCategoryID *uuid.UUID
 	if parentCategoryStr != "" {
-		parentOID, err := primitive.ObjectIDFromHex(parentCategoryStr)
+		parentOID, err := uuid.Parse(parentCategoryStr)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid parent category ID")
 			return
 		}
 		var parent models.Category
-		err = catCol.FindOne(ctx, bson.M{"_id": parentOID}).Decode(&parent)
-		if err != nil {
+		if err := config.DB.First(&parent, "id = ?", parentOID).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusNotFound, "Parent category not found")
 			return
 		}
-		parentCategory = &parentOID
+		parentCategoryID = &parentOID
 	}
 
 	// Handle icon upload
@@ -267,25 +207,23 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 
 	now := time.Now()
 	category := models.Category{
-		Title:          title,
-		Description:    description,
-		Type:           catType,
-		ParentCategory: parentCategory,
-		Icon:           iconURL,
-		Color:          color,
-		IsActive:       true,
-		Order:          order,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:               uuid.New(),
+		Title:            title,
+		Description:      description,
+		Type:             catType,
+		ParentCategoryID: parentCategoryID,
+		Icon:             iconURL,
+		Color:            color,
+		IsActive:         true,
+		Order:            order,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 
-	result, err := catCol.InsertOne(ctx, category)
-	if err != nil {
+	if err := config.DB.Create(&category).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create category")
 		return
 	}
-
-	category.ID = result.InsertedID.(primitive.ObjectID)
 
 	utils.SuccessResponse(c, http.StatusCreated, "Category created successfully", category)
 }
@@ -303,20 +241,14 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		return
 	}
 
-	categoryID, err := primitive.ObjectIDFromHex(c.Param("categoryId"))
+	categoryID, err := uuid.Parse(c.Param("categoryId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	catCol := config.GetCollection("categories")
-
 	var category models.Category
-	err = catCol.FindOne(ctx, bson.M{"_id": categoryID}).Decode(&category)
-	if err != nil {
+	if err := config.DB.First(&category, "id = ?", categoryID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Category not found")
 		return
 	}
@@ -329,15 +261,12 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 
 	// Remove _id from updates
 	delete(updates, "_id")
+	delete(updates, "id")
 
 	// Check title uniqueness if being changed
 	if newTitle, ok := updates["title"].(string); ok && newTitle != category.Title {
 		var existing models.Category
-		err := catCol.FindOne(ctx, bson.M{
-			"title": bson.M{"$regex": "^" + newTitle + "$", "$options": "i"},
-			"_id":   bson.M{"$ne": categoryID},
-		}).Decode(&existing)
-		if err == nil {
+		if err := config.DB.Where("LOWER(title) = LOWER(?) AND id != ?", newTitle, categoryID).First(&existing).Error; err == nil {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Category title already exists")
 			return
 		}
@@ -348,36 +277,47 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		if parentStr != nil {
 			parentHex, ok := parentStr.(string)
 			if ok {
-				if parentHex == categoryID.Hex() {
+				if parentHex == categoryID.String() {
 					utils.ErrorResponse(c, http.StatusBadRequest, "Category cannot be its own parent")
 					return
 				}
-				parentOID, err := primitive.ObjectIDFromHex(parentHex)
+				parentOID, err := uuid.Parse(parentHex)
 				if err != nil {
 					utils.ErrorResponse(c, http.StatusBadRequest, "Invalid parent category ID")
 					return
 				}
 				var parent models.Category
-				err = catCol.FindOne(ctx, bson.M{"_id": parentOID}).Decode(&parent)
-				if err != nil {
+				if err := config.DB.First(&parent, "id = ?", parentOID).Error; err != nil {
 					utils.ErrorResponse(c, http.StatusNotFound, "Parent category not found")
 					return
 				}
-				updates["parentCategory"] = parentOID
+				updates["parent_category_id"] = parentOID
 			}
+		} else {
+			updates["parent_category_id"] = nil
 		}
+		delete(updates, "parentCategory")
 	}
 
-	updates["updatedAt"] = time.Now()
+	// Map JSON field names to DB column names
+	if v, ok := updates["isActive"]; ok {
+		updates["is_active"] = v
+		delete(updates, "isActive")
+	}
+	if v, ok := updates["order"]; ok {
+		updates["sort_order"] = v
+		delete(updates, "order")
+	}
 
-	_, err = catCol.UpdateOne(ctx, bson.M{"_id": categoryID}, bson.M{"$set": updates})
-	if err != nil {
+	updates["updated_at"] = time.Now()
+
+	if err := config.DB.Model(&category).Updates(updates).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update category")
 		return
 	}
 
 	var updated models.Category
-	_ = catCol.FindOne(ctx, bson.M{"_id": categoryID}).Decode(&updated)
+	config.DB.First(&updated, "id = ?", categoryID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Category updated successfully", updated)
 }
@@ -395,44 +335,44 @@ func (h *Handlers) DeleteCategory(c *gin.Context) {
 		return
 	}
 
-	categoryID, err := primitive.ObjectIDFromHex(c.Param("categoryId"))
+	categoryID, err := uuid.Parse(c.Param("categoryId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	catCol := config.GetCollection("categories")
-
 	var category models.Category
-	err = catCol.FindOne(ctx, bson.M{"_id": categoryID}).Decode(&category)
-	if err != nil {
+	if err := config.DB.First(&category, "id = ?", categoryID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Category not found")
 		return
 	}
 
 	// Check if category has products
-	prodCol := config.GetCollection("products")
-	productCount, _ := prodCol.CountDocuments(ctx, bson.M{"category": categoryID})
+	var productCount int64
+	config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID).Count(&productCount)
 	if productCount > 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot delete category with existing products")
 		return
 	}
 
 	// Check if category has subcategories
-	childCount, _ := catCol.CountDocuments(ctx, bson.M{"parentCategory": categoryID})
+	var childCount int64
+	config.DB.Model(&models.Category{}).Where("parent_category_id = ?", categoryID).Count(&childCount)
 	if childCount > 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot delete category with subcategories")
 		return
 	}
 
-	_, err = catCol.DeleteOne(ctx, bson.M{"_id": categoryID})
-	if err != nil {
+	if err := config.DB.Delete(&category).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to delete category")
 		return
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Category deleted successfully", nil)
 }
+
+// Ensure gorm and errors imports are used.
+var (
+	_ = (*gorm.DB)(nil)
+	_ = errors.New
+)

@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -9,40 +9,40 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // getActiveCart retrieves the active cart for a user, or returns nil.
-func getActiveCart(ctx context.Context, userID primitive.ObjectID) (*models.Cart, error) {
-	col := config.GetCollection("carts")
+func getActiveCart(userID uuid.UUID) (*models.Cart, error) {
 	var cart models.Cart
-	err := col.FindOne(ctx, bson.M{"user": userID, "status": "active"}).Decode(&cart)
-	if err != nil {
+	if err := config.DB.Where("user_id = ? AND status = ?", userID, "active").First(&cart).Error; err != nil {
 		return nil, err
 	}
 	return &cart, nil
 }
 
 // recalcAndSave recalculates the cart summary and saves it.
-func recalcAndSave(ctx context.Context, cart *models.Cart) error {
-	col := config.GetCollection("carts")
-	cart.Summary = cart.CalculateSummary()
+func recalcAndSave(cart *models.Cart) error {
+	items := cart.GetItems()
+	coupon := cart.GetAppliedCoupon()
+	currentSummary := cart.GetSummary()
+
+	summary := models.CalculateCartSummary(items, coupon, currentSummary.Shipping)
+	cart.SetSummary(summary)
+
 	now := time.Now()
 	cart.LastActivity = now
 	cart.UpdatedAt = now
 
 	// Reset expiry if cart is active and non-empty
-	if cart.Status == "active" && len(cart.Items) > 0 {
+	if cart.Status == "active" && len(items) > 0 {
 		cart.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
 	}
 
-	_, err := col.ReplaceOne(ctx, bson.M{"_id": cart.ID}, cart)
-	return err
+	return config.DB.Save(cart).Error
 }
 
 // GetOrCreateCart handles GET /api/cart/ - returns the user's active cart or creates a new one.
@@ -53,17 +53,13 @@ func (h *Handlers) GetOrCreateCart(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		// Create new cart
 		now := time.Now()
 		newCart := models.Cart{
-			User:           user.ID,
-			Items:          []models.CartItem{},
-			Summary:        models.CartSummary{},
+			ID:             uuid.New(),
+			UserID:         user.ID,
 			PaymentMethod:  "card",
 			ShippingMethod: "standard",
 			Currency:       "USD",
@@ -74,14 +70,13 @@ func (h *Handlers) GetOrCreateCart(c *gin.Context) {
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		}
+		newCart.SetItems([]models.CartItem{})
+		newCart.SetSummary(models.CartSummary{})
 
-		col := config.GetCollection("carts")
-		result, err := col.InsertOne(ctx, newCart)
-		if err != nil {
+		if err := config.DB.Create(&newCart).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create cart")
 			return
 		}
-		newCart.ID = result.InsertedID.(primitive.ObjectID)
 		cart = &newCart
 	}
 
@@ -116,20 +111,15 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		body.Quantity = 1
 	}
 
-	productOID, err := primitive.ObjectIDFromHex(body.ProductID)
+	productOID, err := uuid.Parse(body.ProductID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Get product details
-	prodCol := config.GetCollection("products")
 	var product models.Product
-	err = prodCol.FindOne(ctx, bson.M{"_id": productOID}).Decode(&product)
-	if err != nil {
+	if err := config.DB.First(&product, "id = ?", productOID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
@@ -145,13 +135,12 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 	}
 
 	// Get or create cart
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		now := time.Now()
 		newCart := models.Cart{
-			User:           user.ID,
-			Items:          []models.CartItem{},
-			Summary:        models.CartSummary{},
+			ID:             uuid.New(),
+			UserID:         user.ID,
 			PaymentMethod:  "card",
 			ShippingMethod: "standard",
 			Currency:       "USD",
@@ -162,19 +151,20 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		}
-		col := config.GetCollection("carts")
-		result, err := col.InsertOne(ctx, newCart)
-		if err != nil {
+		newCart.SetItems([]models.CartItem{})
+		newCart.SetSummary(models.CartSummary{})
+
+		if err := config.DB.Create(&newCart).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create cart")
 			return
 		}
-		newCart.ID = result.InsertedID.(primitive.ObjectID)
 		cart = &newCart
 	}
 
 	// Check if item already exists
+	items := cart.GetItems()
 	existingIndex := -1
-	for i, item := range cart.Items {
+	for i, item := range items {
 		if item.Product == productOID {
 			existingIndex = i
 			break
@@ -183,11 +173,11 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 
 	now := time.Now()
 	if existingIndex >= 0 {
-		cart.Items[existingIndex].Quantity += body.Quantity
-		cart.Items[existingIndex].UpdatedAt = now
+		items[existingIndex].Quantity += body.Quantity
+		items[existingIndex].UpdatedAt = now
 	} else {
-		cart.Items = append(cart.Items, models.CartItem{
-			ID:                 primitive.NewObjectID(),
+		items = append(items, models.CartItem{
+			ID:                 uuid.New(),
 			Product:            productOID,
 			Seller:             product.UserID,
 			Quantity:           body.Quantity,
@@ -199,7 +189,9 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 		})
 	}
 
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetItems(items)
+
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update cart")
 		return
 	}
@@ -215,7 +207,7 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 		return
 	}
 
-	itemID, err := primitive.ObjectIDFromHex(c.Param("itemId"))
+	itemID, err := uuid.Parse(c.Param("itemId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid item ID")
 		return
@@ -229,18 +221,16 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
 	// Find item in cart
+	items := cart.GetItems()
 	itemIndex := -1
-	for i, item := range cart.Items {
+	for i, item := range items {
 		if item.ID == itemID {
 			itemIndex = i
 			break
@@ -252,10 +242,8 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 	}
 
 	// Check stock
-	prodCol := config.GetCollection("products")
 	var product models.Product
-	err = prodCol.FindOne(ctx, bson.M{"_id": cart.Items[itemIndex].Product}).Decode(&product)
-	if err != nil {
+	if err := config.DB.First(&product, "id = ?", items[itemIndex].Product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
 		return
 	}
@@ -267,13 +255,15 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 
 	if body.Quantity < 1 {
 		// Remove item
-		cart.Items = append(cart.Items[:itemIndex], cart.Items[itemIndex+1:]...)
+		items = append(items[:itemIndex], items[itemIndex+1:]...)
 	} else {
-		cart.Items[itemIndex].Quantity = body.Quantity
-		cart.Items[itemIndex].UpdatedAt = time.Now()
+		items[itemIndex].Quantity = body.Quantity
+		items[itemIndex].UpdatedAt = time.Now()
 	}
 
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetItems(items)
+
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update cart")
 		return
 	}
@@ -289,24 +279,22 @@ func (h *Handlers) RemoveFromCart(c *gin.Context) {
 		return
 	}
 
-	itemID, err := primitive.ObjectIDFromHex(c.Param("itemId"))
+	itemID, err := uuid.Parse(c.Param("itemId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid item ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
+	items := cart.GetItems()
 	found := false
-	newItems := make([]models.CartItem, 0, len(cart.Items))
-	for _, item := range cart.Items {
+	newItems := make([]models.CartItem, 0, len(items))
+	for _, item := range items {
 		if item.ID == itemID {
 			found = true
 			continue
@@ -319,8 +307,8 @@ func (h *Handlers) RemoveFromCart(c *gin.Context) {
 		return
 	}
 
-	cart.Items = newItems
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetItems(newItems)
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update cart")
 		return
 	}
@@ -336,24 +324,21 @@ func (h *Handlers) ClearCart(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	cart.Items = []models.CartItem{}
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetItems([]models.CartItem{})
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to clear cart")
 		return
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Cart cleared successfully", gin.H{
 		"items":   []models.CartItem{},
-		"summary": cart.Summary,
+		"summary": cart.GetSummary(),
 	})
 }
 
@@ -373,16 +358,14 @@ func (h *Handlers) ApplyCoupon(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	if len(cart.Items) == 0 {
+	items := cart.GetItems()
+	if len(items) == 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot apply coupon to empty cart")
 		return
 	}
@@ -400,7 +383,7 @@ func (h *Handlers) ApplyCoupon(c *gin.Context) {
 
 	// Recalculate subtotal to check min purchase
 	subtotal := 0.0
-	for _, item := range cart.Items {
+	for _, item := range items {
 		subtotal += item.Price * float64(item.Quantity)
 	}
 
@@ -409,8 +392,8 @@ func (h *Handlers) ApplyCoupon(c *gin.Context) {
 		return
 	}
 
-	cart.AppliedCoupon = &couponData
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetAppliedCoupon(&couponData)
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to apply coupon")
 		return
 	}
@@ -426,17 +409,14 @@ func (h *Handlers) RemoveCoupon(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	cart.AppliedCoupon = nil
-	if err := recalcAndSave(ctx, cart); err != nil {
+	cart.SetAppliedCoupon(nil)
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to remove coupon")
 		return
 	}
@@ -463,17 +443,15 @@ func (h *Handlers) UpdateShippingAddress(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	cart.ShippingAddress = &address
-	if err := recalcAndSave(ctx, cart); err != nil {
+	addrJSON, _ := json.Marshal(address)
+	cart.ShippingAddress = addrJSON
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update shipping address")
 		return
 	}
@@ -495,30 +473,31 @@ func (h *Handlers) UpdateBillingAddress(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
 	if body.SameAsShipping && cart.ShippingAddress != nil {
-		body = models.BillingAddress{
-			SameAsShipping: true,
-			Name:           cart.ShippingAddress.Name,
-			PhoneNumber:    cart.ShippingAddress.PhoneNumber,
-			Address:        cart.ShippingAddress.Address,
-			City:           cart.ShippingAddress.City,
-			State:          cart.ShippingAddress.State,
-			Country:        cart.ShippingAddress.Country,
-			PostalCode:     cart.ShippingAddress.PostalCode,
+		var shippingAddr models.Address
+		if json.Unmarshal(cart.ShippingAddress, &shippingAddr) == nil {
+			body = models.BillingAddress{
+				SameAsShipping: true,
+				Name:           shippingAddr.Name,
+				PhoneNumber:    shippingAddr.PhoneNumber,
+				Address:        shippingAddr.Address,
+				City:           shippingAddr.City,
+				State:          shippingAddr.State,
+				Country:        shippingAddr.Country,
+				PostalCode:     shippingAddr.PostalCode,
+			}
 		}
 	}
 
-	cart.BillingAddress = &body
-	if err := recalcAndSave(ctx, cart); err != nil {
+	billingJSON, _ := json.Marshal(body)
+	cart.BillingAddress = billingJSON
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update billing address")
 		return
 	}
@@ -535,8 +514,8 @@ func (h *Handlers) UpdateShippingMethod(c *gin.Context) {
 	}
 
 	var body struct {
-		Method            string                  `json:"method"`
-		Provider          string                  `json:"provider"`
+		Method            string                    `json:"method"`
+		Provider          string                    `json:"provider"`
 		EstimatedDelivery *models.EstimatedDelivery `json:"estimatedDelivery"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -552,10 +531,7 @@ func (h *Handlers) UpdateShippingMethod(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
@@ -564,7 +540,8 @@ func (h *Handlers) UpdateShippingMethod(c *gin.Context) {
 	cart.ShippingMethod = body.Method
 	cart.ShippingProvider = body.Provider
 	if body.EstimatedDelivery != nil {
-		cart.EstimatedDelivery = body.EstimatedDelivery
+		edJSON, _ := json.Marshal(body.EstimatedDelivery)
+		cart.EstimatedDelivery = edJSON
 	}
 
 	// Update shipping cost
@@ -574,9 +551,11 @@ func (h *Handlers) UpdateShippingMethod(c *gin.Context) {
 		"next_day": 25.00,
 		"pickup":   0.00,
 	}
-	cart.Summary.Shipping = shippingCosts[body.Method]
+	summary := cart.GetSummary()
+	summary.Shipping = shippingCosts[body.Method]
+	cart.SetSummary(summary)
 
-	if err := recalcAndSave(ctx, cart); err != nil {
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update shipping method")
 		return
 	}
@@ -593,7 +572,7 @@ func (h *Handlers) UpdatePaymentMethod(c *gin.Context) {
 	}
 
 	var body struct {
-		Method  string                `json:"method"`
+		Method  string                 `json:"method"`
 		Details *models.PaymentDetails `json:"details"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -609,10 +588,7 @@ func (h *Handlers) UpdatePaymentMethod(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
@@ -620,10 +596,11 @@ func (h *Handlers) UpdatePaymentMethod(c *gin.Context) {
 
 	cart.PaymentMethod = body.Method
 	if body.Details != nil {
-		cart.PaymentDetails = body.Details
+		detailsJSON, _ := json.Marshal(body.Details)
+		cart.PaymentDetails = detailsJSON
 	}
 
-	if err := recalcAndSave(ctx, cart); err != nil {
+	if err := recalcAndSave(cart); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update payment method")
 		return
 	}
@@ -639,21 +616,25 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	if len(cart.Items) == 0 {
+	items := cart.GetItems()
+	if len(items) == 0 {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot convert empty cart to order")
 		return
 	}
 
-	if cart.ShippingAddress == nil || cart.ShippingAddress.Address == "" {
+	// Check shipping address
+	var shippingAddr models.Address
+	if cart.ShippingAddress == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Shipping address is required")
+		return
+	}
+	if err := json.Unmarshal(cart.ShippingAddress, &shippingAddr); err != nil || shippingAddr.Address == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Shipping address is required")
 		return
 	}
@@ -664,11 +645,9 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 	}
 
 	// Check product availability
-	prodCol := config.GetCollection("products")
-	for _, item := range cart.Items {
+	for _, item := range items {
 		var product models.Product
-		err := prodCol.FindOne(ctx, bson.M{"_id": item.Product}).Decode(&product)
-		if err != nil {
+		if err := config.DB.First(&product, "id = ?", item.Product).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusBadRequest, "A product in your cart is no longer available")
 			return
 		}
@@ -682,9 +661,9 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 	orderData := gin.H{
 		"orderId":           fmt.Sprintf("ORD-%d", time.Now().UnixMilli()),
 		"cartId":            cart.ID,
-		"summary":           cart.Summary,
-		"items":             cart.Items,
-		"shippingAddress":   cart.ShippingAddress,
+		"summary":           cart.GetSummary(),
+		"items":             items,
+		"shippingAddress":   shippingAddr,
 		"billingAddress":    cart.BillingAddress,
 		"paymentMethod":     cart.PaymentMethod,
 		"shippingMethod":    cart.ShippingMethod,
@@ -696,15 +675,13 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 	now := time.Now()
 	cart.Status = "converted"
 	cart.ConvertedAt = &now
-	cart.Items = []models.CartItem{}
-	cart.AppliedCoupon = nil
-	cart.Summary = cart.CalculateSummary()
+	cart.SetItems([]models.CartItem{})
+	cart.SetAppliedCoupon(nil)
+	cart.SetSummary(models.CalculateCartSummary([]models.CartItem{}, nil, 0))
 	cart.LastActivity = now
 	cart.UpdatedAt = now
 
-	col := config.GetCollection("carts")
-	_, err = col.ReplaceOne(ctx, bson.M{"_id": cart.ID}, cart)
-	if err != nil {
+	if err := config.DB.Save(cart).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert cart to order")
 		return
 	}
@@ -720,16 +697,14 @@ func (h *Handlers) ValidateCart(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
-	if len(cart.Items) == 0 {
+	items := cart.GetItems()
+	if len(items) == 0 {
 		utils.SuccessResponse(c, http.StatusOK, "Cart is empty", gin.H{
 			"valid":  true,
 			"issues": []interface{}{},
@@ -737,13 +712,12 @@ func (h *Handlers) ValidateCart(c *gin.Context) {
 		return
 	}
 
-	prodCol := config.GetCollection("products")
 	var validationResults []gin.H
 	var issues []gin.H
 
-	for _, item := range cart.Items {
+	for _, item := range items {
 		var product models.Product
-		err := prodCol.FindOne(ctx, bson.M{"_id": item.Product}).Decode(&product)
+		err := config.DB.First(&product, "id = ?", item.Product).Error
 
 		validation := gin.H{
 			"productId":         item.Product,
@@ -832,19 +806,18 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cart, err := getActiveCart(ctx, user.ID)
+	cart, err := getActiveCart(user.ID)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
 
+	items := cart.GetItems()
+
 	// Group items by seller
 	sellerGroups := make(map[string]gin.H)
-	for _, item := range cart.Items {
-		sellerID := item.Seller.Hex()
+	for _, item := range items {
+		sellerID := item.Seller.String()
 		if _, ok := sellerGroups[sellerID]; !ok {
 			sellerGroups[sellerID] = gin.H{
 				"seller":   item.Seller,
@@ -866,8 +839,8 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Cart summary retrieved successfully", gin.H{
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
-		"summary":         cart.Summary,
-		"appliedCoupon":   cart.AppliedCoupon,
+		"summary":         cart.GetSummary(),
+		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
 		"billingAddress":  cart.BillingAddress,
 		"paymentMethod":   cart.PaymentMethod,
@@ -883,24 +856,14 @@ func (h *Handlers) RestoreCart(c *gin.Context) {
 		return
 	}
 
-	cartID, err := primitive.ObjectIDFromHex(c.Param("cartId"))
+	cartID, err := uuid.Parse(c.Param("cartId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid cart ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("carts")
-
 	var cart models.Cart
-	err = col.FindOne(ctx, bson.M{
-		"_id":    cartID,
-		"user":   user.ID,
-		"status": "abandoned",
-	}).Decode(&cart)
-	if err != nil {
+	if err := config.DB.Where("id = ? AND user_id = ? AND status = ?", cartID, user.ID, "abandoned").First(&cart).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Abandoned cart not found")
 		return
 	}
@@ -911,8 +874,7 @@ func (h *Handlers) RestoreCart(c *gin.Context) {
 	cart.LastActivity = now
 	cart.UpdatedAt = now
 
-	_, err = col.ReplaceOne(ctx, bson.M{"_id": cart.ID}, cart)
-	if err != nil {
+	if err := config.DB.Save(&cart).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore cart")
 		return
 	}
@@ -945,38 +907,20 @@ func (h *Handlers) GetAbandonedCarts(c *gin.Context) {
 
 	cutoffDate := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 
-	filter := bson.M{
-		"status":       "abandoned",
-		"lastActivity": bson.M{"$lt": cutoffDate},
-	}
+	query := config.DB.Model(&models.Cart{}).
+		Where("status = ? AND last_activity < ?", "abandoned", cutoffDate)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("carts")
-
-	total, err := col.CountDocuments(ctx, filter)
-	if err != nil {
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve abandoned carts")
 		return
 	}
 
-	skip := int64((page - 1) * limit)
-	opts := options.Find().
-		SetSort(bson.D{{Key: "lastActivity", Value: -1}}).
-		SetSkip(skip).
-		SetLimit(int64(limit))
-
-	cursor, err := col.Find(ctx, filter, opts)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve abandoned carts")
-		return
-	}
-	defer cursor.Close(ctx)
+	offset := (page - 1) * limit
 
 	var carts []models.Cart
-	if err := cursor.All(ctx, &carts); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode carts")
+	if err := query.Order("last_activity DESC").Offset(offset).Limit(limit).Find(&carts).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve abandoned carts")
 		return
 	}
 
@@ -1012,20 +956,14 @@ func (h *Handlers) GetCartByID(c *gin.Context) {
 		return
 	}
 
-	cartID, err := primitive.ObjectIDFromHex(c.Param("cartId"))
+	cartID, err := uuid.Parse(c.Param("cartId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid cart ID")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("carts")
-
 	var cart models.Cart
-	err = col.FindOne(ctx, bson.M{"_id": cartID}).Decode(&cart)
-	if err != nil {
+	if err := config.DB.First(&cart, "id = ?", cartID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Cart not found")
 		return
 	}
@@ -1046,22 +984,14 @@ func (h *Handlers) CleanupExpiredCarts(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := config.GetCollection("carts")
-
-	result, err := col.DeleteMany(ctx, bson.M{
-		"expiresAt": bson.M{"$lt": time.Now()},
-		"status":    bson.M{"$ne": "converted"},
-	})
-	if err != nil {
+	result := config.DB.Where("expires_at < ? AND status != ?", time.Now(), "converted").Delete(&models.Cart{})
+	if result.Error != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cleanup expired carts")
 		return
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Expired carts cleaned up successfully", gin.H{
-		"deletedCount": result.DeletedCount,
+		"deletedCount": result.RowsAffected,
 		"timestamp":    time.Now(),
 	})
 }

@@ -1,18 +1,17 @@
 package middleware
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"gorm.io/gorm"
 )
 
 // AdminAuth is a Gin middleware that authenticates requests using JWT Bearer
@@ -62,7 +61,7 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		userID, err := primitive.ObjectIDFromHex(userIDStr)
+		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
@@ -71,14 +70,17 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// Look up user in MongoDB
-		collection := config.GetCollection("users")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
+		// Look up user in PostgreSQL
 		var user models.User
-		err = collection.FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
-		if err != nil {
+		result := config.DB.First(&user, "id = ?", userID)
+		if result.Error != nil {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"message": "Please authenticate",
+				})
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Please authenticate",

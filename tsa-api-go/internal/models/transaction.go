@@ -1,69 +1,76 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // TransactionAsset represents the from/to asset in a transaction.
 type TransactionAsset struct {
-	Symbol  string `bson:"symbol,omitempty" json:"symbol,omitempty"`
-	Amount  float64 `bson:"amount" json:"amount"`
-	Address string `bson:"address,omitempty" json:"address,omitempty"`
+	Symbol  string  `json:"symbol,omitempty"`
+	Amount  float64 `json:"amount"`
+	Address string  `json:"address,omitempty"`
 }
 
 // TransactionFees holds fee information for a transaction.
 type TransactionFees struct {
-	Network  float64 `bson:"network" json:"network"`
-	Platform float64 `bson:"platform" json:"platform"`
+	Network  float64 `json:"network"`
+	Platform float64 `json:"platform"`
 }
 
 // TransactionMetadata holds additional transaction details.
 type TransactionMetadata struct {
-	SenderAddress      string  `bson:"senderAddress,omitempty" json:"senderAddress,omitempty"`
-	ReceiverAddress    string  `bson:"receiverAddress,omitempty" json:"receiverAddress,omitempty"`
-	Memo               string  `bson:"memo,omitempty" json:"memo,omitempty"`
-	ExchangeRate       float64 `bson:"exchangeRate,omitempty" json:"exchangeRate,omitempty"`
-	GasUsed            int64   `bson:"gasUsed,omitempty" json:"gasUsed,omitempty"`
-	GasPrice           float64 `bson:"gasPrice,omitempty" json:"gasPrice,omitempty"`
-	ConfirmationBlocks int     `bson:"confirmationBlocks,omitempty" json:"confirmationBlocks,omitempty"`
-	Notes              string  `bson:"notes,omitempty" json:"notes,omitempty"`
+	SenderAddress      string  `json:"senderAddress,omitempty"`
+	ReceiverAddress    string  `json:"receiverAddress,omitempty"`
+	Memo               string  `json:"memo,omitempty"`
+	ExchangeRate       float64 `json:"exchangeRate,omitempty"`
+	GasUsed            int64   `json:"gasUsed,omitempty"`
+	GasPrice           float64 `json:"gasPrice,omitempty"`
+	ConfirmationBlocks int     `json:"confirmationBlocks,omitempty"`
+	Notes              string  `json:"notes,omitempty"`
 }
 
 // Transaction represents a financial transaction.
 type Transaction struct {
-	ID               primitive.ObjectID   `bson:"_id,omitempty" json:"id,omitempty"`
-	UserID           primitive.ObjectID   `bson:"userId" json:"userId"`
-	Type             string               `bson:"type" json:"type"`
-	Status           string               `bson:"status" json:"status"`
-	AssetSymbol      string               `bson:"assetSymbol,omitempty" json:"assetSymbol,omitempty"`
-	FromAsset        interface{}          `bson:"fromAsset,omitempty" json:"fromAsset,omitempty"`
-	ToAsset          interface{}          `bson:"toAsset,omitempty" json:"toAsset,omitempty"`
-	FromAmount       float64              `bson:"fromAmount,omitempty" json:"fromAmount,omitempty"`
-	ToAmount         float64              `bson:"toAmount,omitempty" json:"toAmount,omitempty"`
-	ExchangeRate     float64              `bson:"exchangeRate,omitempty" json:"exchangeRate,omitempty"`
-	Amount           float64              `bson:"amount" json:"amount"`
-	USDValue         float64              `bson:"usdValue,omitempty" json:"usdValue,omitempty"`
-	Fee              float64              `bson:"fee,omitempty" json:"fee,omitempty"`
-	FeeUSD           float64              `bson:"feeUsd,omitempty" json:"feeUsd,omitempty"`
-	PlatformFee      float64              `bson:"platformFee,omitempty" json:"platformFee,omitempty"`
-	NetworkFee       float64              `bson:"networkFee,omitempty" json:"networkFee,omitempty"`
-	Fees             *TransactionFees     `bson:"fees,omitempty" json:"fees,omitempty"`
-	Network          string               `bson:"network,omitempty" json:"network,omitempty"`
-	WalletAddress    string               `bson:"walletAddress,omitempty" json:"walletAddress,omitempty"`
-	TransactionHash  string               `bson:"transactionHash,omitempty" json:"transactionHash,omitempty"`
-	TxHash           string               `bson:"txHash,omitempty" json:"txHash,omitempty"`
-	Blockchain       string               `bson:"blockchain,omitempty" json:"blockchain,omitempty"`
-	Confirmations    int                  `bson:"confirmations,omitempty" json:"confirmations,omitempty"`
-	RequiredConfirms int                  `bson:"requiredConfirms,omitempty" json:"requiredConfirms,omitempty"`
-	Metadata         *TransactionMetadata `bson:"metadata,omitempty" json:"metadata,omitempty"`
-	Description      string               `bson:"description,omitempty" json:"description,omitempty"`
-	Tags             []string             `bson:"tags,omitempty" json:"tags,omitempty"`
-	CompletedAt      *time.Time           `bson:"completedAt,omitempty" json:"completedAt,omitempty"`
-	ConfirmedAt      *time.Time           `bson:"confirmedAt,omitempty" json:"confirmedAt,omitempty"`
-	CreatedAt        time.Time            `bson:"createdAt" json:"createdAt"`
-	UpdatedAt        time.Time            `bson:"updatedAt" json:"updatedAt"`
+	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID           uuid.UUID      `gorm:"type:uuid;index" json:"userId"`
+	Type             string         `json:"type"`
+	Status           string         `json:"status"`
+	AssetSymbol      string         `json:"assetSymbol,omitempty"`
+	FromAsset        datatypes.JSON `gorm:"type:jsonb" json:"fromAsset,omitempty"`
+	ToAsset          datatypes.JSON `gorm:"type:jsonb" json:"toAsset,omitempty"`
+	FromAmount       float64        `json:"fromAmount,omitempty"`
+	ToAmount         float64        `json:"toAmount,omitempty"`
+	ExchangeRate     float64        `json:"exchangeRate,omitempty"`
+	Amount           float64        `json:"amount"`
+	USDValue         float64        `json:"usdValue,omitempty"`
+	Fee              float64        `json:"fee,omitempty"`
+	FeeUSD           float64        `json:"feeUsd,omitempty"`
+	PlatformFee      float64        `json:"platformFee,omitempty"`
+	NetworkFee       float64        `json:"networkFee,omitempty"`
+	Fees             datatypes.JSON `gorm:"type:jsonb" json:"fees,omitempty"`
+	Network          string         `json:"network,omitempty"`
+	WalletAddress    string         `json:"walletAddress,omitempty"`
+	TransactionHash  string         `json:"transactionHash,omitempty"`
+	TxHash           string         `json:"txHash,omitempty"`
+	Blockchain       string         `json:"blockchain,omitempty"`
+	Confirmations    int            `json:"confirmations,omitempty"`
+	RequiredConfirms int            `json:"requiredConfirms,omitempty"`
+	Metadata         datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	Description      string         `json:"description,omitempty"`
+	Tags             datatypes.JSON `gorm:"type:jsonb" json:"tags,omitempty"`
+	CompletedAt      *time.Time     `json:"completedAt,omitempty"`
+	ConfirmedAt      *time.Time     `json:"confirmedAt,omitempty"`
+	CreatedAt        time.Time      `json:"createdAt"`
+	UpdatedAt        time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (Transaction) TableName() string {
+	return "transactions"
 }
 
 // TransactionStats holds aggregated transaction statistics.
@@ -104,3 +111,47 @@ const (
 	BlockchainSolana   = "solana"
 	BlockchainInternal = "internal"
 )
+
+// GetFromAsset deserializes the FromAsset JSONB field.
+func (t *Transaction) GetFromAsset() *TransactionAsset {
+	if t.FromAsset == nil {
+		return nil
+	}
+	var a TransactionAsset
+	if err := json.Unmarshal(t.FromAsset, &a); err != nil {
+		return nil
+	}
+	return &a
+}
+
+// SetFromAsset serializes the TransactionAsset struct into the FromAsset JSONB field.
+func (t *Transaction) SetFromAsset(a *TransactionAsset) {
+	if a == nil {
+		t.FromAsset = nil
+		return
+	}
+	data, _ := json.Marshal(a)
+	t.FromAsset = data
+}
+
+// GetToAsset deserializes the ToAsset JSONB field.
+func (t *Transaction) GetToAsset() *TransactionAsset {
+	if t.ToAsset == nil {
+		return nil
+	}
+	var a TransactionAsset
+	if err := json.Unmarshal(t.ToAsset, &a); err != nil {
+		return nil
+	}
+	return &a
+}
+
+// SetToAsset serializes the TransactionAsset struct into the ToAsset JSONB field.
+func (t *Transaction) SetToAsset(a *TransactionAsset) {
+	if a == nil {
+		t.ToAsset = nil
+		return
+	}
+	data, _ := json.Marshal(a)
+	t.ToAsset = data
+}

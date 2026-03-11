@@ -1,110 +1,117 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/datatypes"
 )
 
 // VerifiableImage represents an uploaded document image with verification status.
 type VerifiableImage struct {
-	URL      string `bson:"url,omitempty" json:"url,omitempty"`
-	PublicID string `bson:"publicId,omitempty" json:"publicId,omitempty"`
-	Verified bool   `bson:"verified,omitempty" json:"verified"`
+	URL      string `json:"url,omitempty"`
+	PublicID string `json:"publicId,omitempty"`
+	Verified bool   `json:"verified"`
 }
 
 // DriversLicense holds driver's license front and back images.
 type DriversLicense struct {
-	Front VerifiableImage `bson:"front,omitempty" json:"front,omitempty"`
-	Back  VerifiableImage `bson:"back,omitempty" json:"back,omitempty"`
+	Front VerifiableImage `json:"front,omitempty"`
+	Back  VerifiableImage `json:"back,omitempty"`
 }
 
 // NIN holds National Identification Number front and back images.
 type NIN struct {
-	Front VerifiableImage `bson:"front,omitempty" json:"front,omitempty"`
-	Back  VerifiableImage `bson:"back,omitempty" json:"back,omitempty"`
+	Front VerifiableImage `json:"front,omitempty"`
+	Back  VerifiableImage `json:"back,omitempty"`
 }
 
 // Passport holds the passport photo image.
 type Passport struct {
-	Photo VerifiableImage `bson:"photo,omitempty" json:"photo,omitempty"`
+	Photo VerifiableImage `json:"photo,omitempty"`
 }
 
 // PVC holds the Permanent Voter's Card image.
 type PVC struct {
-	Card VerifiableImage `bson:"card,omitempty" json:"card,omitempty"`
+	Card VerifiableImage `json:"card,omitempty"`
 }
 
 // BVN holds Bank Verification Number details.
 type BVN struct {
-	Number     string     `bson:"number,omitempty" json:"number,omitempty"`
-	Verified   bool       `bson:"verified,omitempty" json:"verified"`
-	VerifiedAt *time.Time `bson:"verifiedAt,omitempty" json:"verifiedAt,omitempty"`
+	Number     string     `json:"number,omitempty"`
+	Verified   bool       `json:"verified"`
+	VerifiedAt *time.Time `json:"verifiedAt,omitempty"`
 }
 
 // Documents holds all user verification documents.
 type Documents struct {
-	DriversLicense DriversLicense `bson:"driversLicense,omitempty" json:"driversLicense,omitempty"`
-	NIN            NIN            `bson:"nin,omitempty" json:"nin,omitempty"`
-	Passport       Passport       `bson:"passport,omitempty" json:"passport,omitempty"`
-	PVC            PVC            `bson:"pvc,omitempty" json:"pvc,omitempty"`
-	BVN            BVN            `bson:"bvn,omitempty" json:"bvn,omitempty"`
+	DriversLicense DriversLicense `json:"driversLicense,omitempty"`
+	NIN            NIN            `json:"nin,omitempty"`
+	Passport       Passport       `json:"passport,omitempty"`
+	PVC            PVC            `json:"pvc,omitempty"`
+	BVN            BVN            `json:"bvn,omitempty"`
 }
 
 // FaceImage represents a facial verification image with optional embeddings.
 type FaceImage struct {
-	URL        string    `bson:"url,omitempty" json:"url,omitempty"`
-	PublicID   string    `bson:"publicId,omitempty" json:"publicId,omitempty"`
-	Embeddings []float64 `bson:"embeddings,omitempty" json:"embeddings,omitempty"`
+	URL        string    `json:"url,omitempty"`
+	PublicID   string    `json:"publicId,omitempty"`
+	Embeddings []float64 `json:"embeddings,omitempty"`
 }
 
 // FacialVerification holds facial verification data.
 type FacialVerification struct {
-	FaceFront         FaceImage  `bson:"faceFront,omitempty" json:"faceFront,omitempty"`
-	FaceLeft          FaceImage  `bson:"faceLeft,omitempty" json:"faceLeft,omitempty"`
-	FaceRight         FaceImage  `bson:"faceRight,omitempty" json:"faceRight,omitempty"`
-	FaceUp            FaceImage  `bson:"faceUp,omitempty" json:"faceUp,omitempty"`
-	FaceDown          FaceImage  `bson:"faceDown,omitempty" json:"faceDown,omitempty"`
-	VerificationScore float64    `bson:"verificationScore,omitempty" json:"verificationScore,omitempty"`
-	Verified          bool       `bson:"verified,omitempty" json:"verified"`
-	VerifiedAt        *time.Time `bson:"verifiedAt,omitempty" json:"verifiedAt,omitempty"`
+	FaceFront         FaceImage  `json:"faceFront,omitempty"`
+	FaceLeft          FaceImage  `json:"faceLeft,omitempty"`
+	FaceRight         FaceImage  `json:"faceRight,omitempty"`
+	FaceUp            FaceImage  `json:"faceUp,omitempty"`
+	FaceDown          FaceImage  `json:"faceDown,omitempty"`
+	VerificationScore float64    `json:"verificationScore,omitempty"`
+	Verified          bool       `json:"verified"`
+	VerifiedAt        *time.Time `json:"verifiedAt,omitempty"`
 }
 
 // ProfilePhoto represents a user's profile photo.
 type ProfilePhoto struct {
-	URL      string `bson:"url,omitempty" json:"url,omitempty"`
-	PublicID string `bson:"publicId,omitempty" json:"publicId,omitempty"`
+	URL      string `json:"url,omitempty"`
+	PublicID string `json:"publicId,omitempty"`
 }
 
-// User represents a user document in MongoDB.
+// User represents a user record in PostgreSQL.
 type User struct {
-	ID                         primitive.ObjectID  `bson:"_id,omitempty" json:"id,omitempty"`
-	Name                       string              `bson:"name" json:"name"`
-	Username                   string              `bson:"username" json:"username"`
-	Email                      string              `bson:"email" json:"email"`
-	Password                   string              `bson:"password" json:"-"`
-	Role                       string              `bson:"role" json:"role"`
-	PhoneNumber                string              `bson:"phoneNumber" json:"phoneNumber"`
-	Country                    string              `bson:"country" json:"country"`
-	State                      string              `bson:"state,omitempty" json:"state,omitempty"`
-	City                       string              `bson:"city,omitempty" json:"city,omitempty"`
-	Address                    string              `bson:"address" json:"address"`
-	ProfilePhoto               *ProfilePhoto       `bson:"profilePhoto,omitempty" json:"profilePhoto,omitempty"`
-	ReferralCode               string              `bson:"referralCode,omitempty" json:"referralCode,omitempty"`
-	ReferredBy                 *primitive.ObjectID `bson:"referredBy,omitempty" json:"referredBy,omitempty"`
-	Documents                  Documents           `bson:"documents,omitempty" json:"documents,omitempty"`
-	FacialVerification         FacialVerification  `bson:"facialVerification,omitempty" json:"facialVerification,omitempty"`
-	VerificationStatus         string              `bson:"verificationStatus" json:"verificationStatus"`
-	VerificationNotes          string              `bson:"verificationNotes,omitempty" json:"verificationNotes,omitempty"`
-	AccountStatus              string              `bson:"accountStatus" json:"accountStatus"`
-	LastLogin                  *time.Time          `bson:"lastLogin,omitempty" json:"lastLogin,omitempty"`
-	LoginAttempts              int                 `bson:"loginAttempts" json:"loginAttempts"`
-	LockUntil                  *time.Time          `bson:"lockUntil,omitempty" json:"lockUntil,omitempty"`
-	DeletedAt                  *time.Time          `bson:"deletedAt,omitempty" json:"deletedAt,omitempty"`
-	SubmittedForVerificationAt *time.Time          `bson:"submittedForVerificationAt,omitempty" json:"submittedForVerificationAt,omitempty"`
-	CreatedAt                  time.Time           `bson:"createdAt" json:"createdAt"`
-	UpdatedAt                  time.Time           `bson:"updatedAt" json:"updatedAt"`
+	ID                         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name                       string         `gorm:"not null" json:"name"`
+	Username                   string         `gorm:"uniqueIndex;not null" json:"username"`
+	Email                      string         `gorm:"uniqueIndex;not null" json:"email"`
+	Password                   string         `gorm:"not null" json:"-"`
+	Role                       string         `gorm:"default:'user'" json:"role"`
+	PhoneNumber                string         `gorm:"uniqueIndex" json:"phoneNumber"`
+	Country                    string         `json:"country"`
+	State                      string         `json:"state,omitempty"`
+	City                       string         `json:"city,omitempty"`
+	Address                    string         `json:"address"`
+	ProfilePhoto               datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
+	ReferralCode               string         `json:"referralCode,omitempty"`
+	ReferredBy                 *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
+	Documents                  datatypes.JSON `gorm:"type:jsonb" json:"documents,omitempty"`
+	FacialVerification         datatypes.JSON `gorm:"type:jsonb" json:"facialVerification,omitempty"`
+	VerificationStatus         string         `gorm:"default:'pending'" json:"verificationStatus"`
+	VerificationNotes          string         `json:"verificationNotes,omitempty"`
+	AccountStatus              string         `gorm:"default:'active'" json:"accountStatus"`
+	LastLogin                  *time.Time     `json:"lastLogin,omitempty"`
+	LoginAttempts              int            `gorm:"default:0" json:"loginAttempts"`
+	LockUntil                  *time.Time     `json:"lockUntil,omitempty"`
+	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
+	SubmittedForVerificationAt *time.Time     `json:"submittedForVerificationAt,omitempty"`
+	CreatedAt                  time.Time      `json:"createdAt"`
+	UpdatedAt                  time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (User) TableName() string {
+	return "users"
 }
 
 // Constants for user roles.
@@ -164,4 +171,59 @@ func HashPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(bytes), nil
+}
+
+// GetDocuments deserializes the Documents JSONB field.
+func (u *User) GetDocuments() Documents {
+	var docs Documents
+	if u.Documents != nil {
+		_ = json.Unmarshal(u.Documents, &docs)
+	}
+	return docs
+}
+
+// SetDocuments serializes the Documents struct into the JSONB field.
+func (u *User) SetDocuments(docs Documents) {
+	data, _ := json.Marshal(docs)
+	u.Documents = data
+}
+
+// GetFacialVerification deserializes the FacialVerification JSONB field.
+func (u *User) GetFacialVerification() FacialVerification {
+	var fv FacialVerification
+	if u.FacialVerification != nil {
+		_ = json.Unmarshal(u.FacialVerification, &fv)
+	}
+	return fv
+}
+
+// SetFacialVerification serializes the FacialVerification struct into the JSONB field.
+func (u *User) SetFacialVerification(fv FacialVerification) {
+	data, _ := json.Marshal(fv)
+	u.FacialVerification = data
+}
+
+// GetProfilePhoto deserializes the ProfilePhoto JSONB field.
+func (u *User) GetProfilePhoto() *ProfilePhoto {
+	if u.ProfilePhoto == nil {
+		return nil
+	}
+	var pp ProfilePhoto
+	if err := json.Unmarshal(u.ProfilePhoto, &pp); err != nil {
+		return nil
+	}
+	if pp.URL == "" && pp.PublicID == "" {
+		return nil
+	}
+	return &pp
+}
+
+// SetProfilePhoto serializes the ProfilePhoto struct into the JSONB field.
+func (u *User) SetProfilePhoto(pp *ProfilePhoto) {
+	if pp == nil {
+		u.ProfilePhoto = nil
+		return
+	}
+	data, _ := json.Marshal(pp)
+	u.ProfilePhoto = data
 }

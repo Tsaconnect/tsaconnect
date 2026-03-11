@@ -27,16 +27,25 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	// Connect to MongoDB
-	client, err := config.ConnectDB(cfg)
+	// Connect to PostgreSQL
+	_, err := config.ConnectDB(cfg)
 	if err != nil {
-		log.Fatalf("Failed to connect to MongoDB: %v", err)
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+
+	// Auto-migrate database tables
+	if err := config.AutoMigrate(); err != nil {
+		log.Fatalf("Failed to auto-migrate database: %v", err)
+	}
+
+	// Get underlying sql.DB for health check and cleanup
+	sqlDB, err := config.DB.DB()
+	if err != nil {
+		log.Fatalf("Failed to get underlying sql.DB: %v", err)
 	}
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := client.Disconnect(ctx); err != nil {
-			log.Printf("Error disconnecting from MongoDB: %v", err)
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("Error closing database connection: %v", err)
 		}
 	}()
 
@@ -67,11 +76,8 @@ func main() {
 
 	// Override health check with DB status
 	router.GET("/health", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
 		dbStatus := "connected"
-		if err := client.Ping(ctx, nil); err != nil {
+		if err := sqlDB.Ping(); err != nil {
 			dbStatus = "disconnected"
 		}
 

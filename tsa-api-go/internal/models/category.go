@@ -3,28 +3,33 @@ package models
 import (
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
 )
 
 // Category represents a product/service category.
 type Category struct {
-	ID             primitive.ObjectID  `bson:"_id,omitempty" json:"id,omitempty"`
-	Title          string              `bson:"title" json:"title"`
-	Description    string              `bson:"description,omitempty" json:"description,omitempty"`
-	Type           string              `bson:"type,omitempty" json:"type,omitempty"`
-	ParentCategory *primitive.ObjectID `bson:"parentCategory,omitempty" json:"parentCategory,omitempty"`
-	Icon           string              `bson:"icon,omitempty" json:"icon,omitempty"`
-	Color          string              `bson:"color" json:"color"`
-	IsActive       bool                `bson:"isActive" json:"isActive"`
-	Order          int                 `bson:"order" json:"order"`
-	ProductCount   int                 `bson:"productCount" json:"productCount"`
-	CreatedAt      time.Time           `bson:"createdAt" json:"createdAt"`
-	UpdatedAt      time.Time           `bson:"updatedAt" json:"updatedAt"`
+	ID               uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Title            string     `gorm:"uniqueIndex;not null" json:"title"`
+	Description      string     `json:"description,omitempty"`
+	Type             string     `json:"type,omitempty"`
+	ParentCategoryID *uuid.UUID `gorm:"type:uuid;column:parent_category_id" json:"parentCategory,omitempty"`
+	Icon             string     `json:"icon,omitempty"`
+	Color            string     `json:"color"`
+	IsActive         bool       `json:"isActive"`
+	Order            int        `gorm:"column:sort_order" json:"order"`
+	ProductCount     int        `json:"productCount"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (Category) TableName() string {
+	return "categories"
 }
 
 // CategoryWithChildren extends Category with a recursive children list for tree views.
 type CategoryWithChildren struct {
-	Category `bson:",inline"`
+	Category
 	Children []CategoryWithChildren `json:"children"`
 }
 

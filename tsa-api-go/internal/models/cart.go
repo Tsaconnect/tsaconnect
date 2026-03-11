@@ -1,125 +1,132 @@
 package models
 
 import (
+	"encoding/json"
 	"math"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // CartItemAttribute represents a selected attribute on a cart item.
 type CartItemAttribute struct {
-	Name  string `bson:"name" json:"name"`
-	Value string `bson:"value" json:"value"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // CartItem represents an individual item in a shopping cart.
 type CartItem struct {
-	ID                 primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
-	Product            primitive.ObjectID  `bson:"product" json:"product"`
-	Seller             primitive.ObjectID  `bson:"seller" json:"seller"`
-	Quantity           int                 `bson:"quantity" json:"quantity"`
-	Price              float64             `bson:"price" json:"price"`
-	SelectedAttributes []CartItemAttribute `bson:"selectedAttributes,omitempty" json:"selectedAttributes,omitempty"`
-	Notes              string              `bson:"notes,omitempty" json:"notes,omitempty"`
-	AddedAt            time.Time           `bson:"addedAt" json:"addedAt"`
-	UpdatedAt          time.Time           `bson:"updatedAt" json:"updatedAt"`
+	ID                 uuid.UUID           `json:"id"`
+	Product            uuid.UUID           `json:"product"`
+	Seller             uuid.UUID           `json:"seller"`
+	Quantity           int                 `json:"quantity"`
+	Price              float64             `json:"price"`
+	SelectedAttributes []CartItemAttribute `json:"selectedAttributes,omitempty"`
+	Notes              string              `json:"notes,omitempty"`
+	AddedAt            time.Time           `json:"addedAt"`
+	UpdatedAt          time.Time           `json:"updatedAt"`
 }
 
 // CartSummary holds aggregated cart totals.
 type CartSummary struct {
-	TotalItems    int     `bson:"totalItems" json:"totalItems"`
-	TotalQuantity int     `bson:"totalQuantity" json:"totalQuantity"`
-	Subtotal      float64 `bson:"subtotal" json:"subtotal"`
-	Shipping      float64 `bson:"shipping" json:"shipping"`
-	Tax           float64 `bson:"tax" json:"tax"`
-	Discount      float64 `bson:"discount" json:"discount"`
-	Total         float64 `bson:"total" json:"total"`
+	TotalItems    int     `json:"totalItems"`
+	TotalQuantity int     `json:"totalQuantity"`
+	Subtotal      float64 `json:"subtotal"`
+	Shipping      float64 `json:"shipping"`
+	Tax           float64 `json:"tax"`
+	Discount      float64 `json:"discount"`
+	Total         float64 `json:"total"`
 }
 
 // Address represents a shipping address.
 type Address struct {
-	Name        string `bson:"name,omitempty" json:"name,omitempty"`
-	PhoneNumber string `bson:"phoneNumber,omitempty" json:"phoneNumber,omitempty"`
-	Address     string `bson:"address,omitempty" json:"address,omitempty"`
-	City        string `bson:"city,omitempty" json:"city,omitempty"`
-	State       string `bson:"state,omitempty" json:"state,omitempty"`
-	Country     string `bson:"country,omitempty" json:"country,omitempty"`
-	PostalCode  string `bson:"postalCode,omitempty" json:"postalCode,omitempty"`
-	IsDefault   bool   `bson:"isDefault,omitempty" json:"isDefault,omitempty"`
+	Name        string `json:"name,omitempty"`
+	PhoneNumber string `json:"phoneNumber,omitempty"`
+	Address     string `json:"address,omitempty"`
+	City        string `json:"city,omitempty"`
+	State       string `json:"state,omitempty"`
+	Country     string `json:"country,omitempty"`
+	PostalCode  string `json:"postalCode,omitempty"`
+	IsDefault   bool   `json:"isDefault,omitempty"`
 }
 
 // BillingAddress represents a billing address with a same-as-shipping flag.
 type BillingAddress struct {
-	SameAsShipping bool   `bson:"sameAsShipping" json:"sameAsShipping"`
-	Name           string `bson:"name,omitempty" json:"name,omitempty"`
-	PhoneNumber    string `bson:"phoneNumber,omitempty" json:"phoneNumber,omitempty"`
-	Address        string `bson:"address,omitempty" json:"address,omitempty"`
-	City           string `bson:"city,omitempty" json:"city,omitempty"`
-	State          string `bson:"state,omitempty" json:"state,omitempty"`
-	Country        string `bson:"country,omitempty" json:"country,omitempty"`
-	PostalCode     string `bson:"postalCode,omitempty" json:"postalCode,omitempty"`
+	SameAsShipping bool   `json:"sameAsShipping"`
+	Name           string `json:"name,omitempty"`
+	PhoneNumber    string `json:"phoneNumber,omitempty"`
+	Address        string `json:"address,omitempty"`
+	City           string `json:"city,omitempty"`
+	State          string `json:"state,omitempty"`
+	Country        string `json:"country,omitempty"`
+	PostalCode     string `json:"postalCode,omitempty"`
 }
 
 // PaymentDetails holds payment-related details for the cart.
 type PaymentDetails struct {
-	CardLastFour  string `bson:"cardLastFour,omitempty" json:"cardLastFour,omitempty"`
-	CardBrand     string `bson:"cardBrand,omitempty" json:"cardBrand,omitempty"`
-	BankName      string `bson:"bankName,omitempty" json:"bankName,omitempty"`
-	AccountNumber string `bson:"accountNumber,omitempty" json:"accountNumber,omitempty"`
-	WalletAddress string `bson:"walletAddress,omitempty" json:"walletAddress,omitempty"`
+	CardLastFour  string `json:"cardLastFour,omitempty"`
+	CardBrand     string `json:"cardBrand,omitempty"`
+	BankName      string `json:"bankName,omitempty"`
+	AccountNumber string `json:"accountNumber,omitempty"`
+	WalletAddress string `json:"walletAddress,omitempty"`
 }
 
 // AppliedCoupon represents a coupon applied to a cart.
 type AppliedCoupon struct {
-	Code          string    `bson:"code,omitempty" json:"code,omitempty"`
-	DiscountType  string    `bson:"discountType,omitempty" json:"discountType,omitempty"`
-	DiscountValue float64   `bson:"discountValue,omitempty" json:"discountValue,omitempty"`
-	MaxDiscount   float64   `bson:"maxDiscount,omitempty" json:"maxDiscount,omitempty"`
-	MinPurchase   float64   `bson:"minPurchase,omitempty" json:"minPurchase,omitempty"`
-	ExpiresAt     time.Time `bson:"expiresAt,omitempty" json:"expiresAt,omitempty"`
-	AppliedAt     time.Time `bson:"appliedAt,omitempty" json:"appliedAt,omitempty"`
+	Code          string    `json:"code,omitempty"`
+	DiscountType  string    `json:"discountType,omitempty"`
+	DiscountValue float64   `json:"discountValue,omitempty"`
+	MaxDiscount   float64   `json:"maxDiscount,omitempty"`
+	MinPurchase   float64   `json:"minPurchase,omitempty"`
+	ExpiresAt     time.Time `json:"expiresAt,omitempty"`
+	AppliedAt     time.Time `json:"appliedAt,omitempty"`
 }
 
 // EstimatedDelivery represents estimated delivery dates.
 type EstimatedDelivery struct {
-	From time.Time `bson:"from,omitempty" json:"from,omitempty"`
-	To   time.Time `bson:"to,omitempty" json:"to,omitempty"`
+	From time.Time `json:"from,omitempty"`
+	To   time.Time `json:"to,omitempty"`
 }
 
 // Cart represents a user's shopping cart.
 type Cart struct {
-	ID                primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	User              primitive.ObjectID `bson:"user" json:"user"`
-	Items             []CartItem         `bson:"items" json:"items"`
-	Summary           CartSummary        `bson:"summary" json:"summary"`
-	ShippingAddress   *Address           `bson:"shippingAddress,omitempty" json:"shippingAddress,omitempty"`
-	BillingAddress    *BillingAddress    `bson:"billingAddress,omitempty" json:"billingAddress,omitempty"`
-	PaymentMethod     string             `bson:"paymentMethod" json:"paymentMethod"`
-	PaymentDetails    *PaymentDetails    `bson:"paymentDetails,omitempty" json:"paymentDetails,omitempty"`
-	AppliedCoupon     *AppliedCoupon     `bson:"appliedCoupon,omitempty" json:"appliedCoupon,omitempty"`
-	ShippingMethod    string             `bson:"shippingMethod" json:"shippingMethod"`
-	ShippingProvider  string             `bson:"shippingProvider,omitempty" json:"shippingProvider,omitempty"`
-	EstimatedDelivery *EstimatedDelivery `bson:"estimatedDelivery,omitempty" json:"estimatedDelivery,omitempty"`
-	SessionID         string             `bson:"sessionId,omitempty" json:"sessionId,omitempty"`
-	Currency          string             `bson:"currency" json:"currency"`
-	Language          string             `bson:"language" json:"language"`
-	Status            string             `bson:"status" json:"status"`
-	LastActivity      time.Time          `bson:"lastActivity" json:"lastActivity"`
-	AbandonedAt       *time.Time         `bson:"abandonedAt,omitempty" json:"abandonedAt,omitempty"`
-	ConvertedAt       *time.Time         `bson:"convertedAt,omitempty" json:"convertedAt,omitempty"`
-	ExpiresAt         time.Time          `bson:"expiresAt" json:"expiresAt"`
-	CreatedAt         time.Time          `bson:"createdAt" json:"createdAt"`
-	UpdatedAt         time.Time          `bson:"updatedAt" json:"updatedAt"`
+	ID                uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID            uuid.UUID      `gorm:"type:uuid;column:user_id;index" json:"user"`
+	Items             datatypes.JSON `gorm:"type:jsonb" json:"items"`
+	Summary           datatypes.JSON `gorm:"type:jsonb" json:"summary"`
+	ShippingAddress   datatypes.JSON `gorm:"type:jsonb" json:"shippingAddress,omitempty"`
+	BillingAddress    datatypes.JSON `gorm:"type:jsonb" json:"billingAddress,omitempty"`
+	PaymentMethod     string         `json:"paymentMethod"`
+	PaymentDetails    datatypes.JSON `gorm:"type:jsonb" json:"paymentDetails,omitempty"`
+	AppliedCoupon     datatypes.JSON `gorm:"type:jsonb" json:"appliedCoupon,omitempty"`
+	ShippingMethod    string         `json:"shippingMethod"`
+	ShippingProvider  string         `json:"shippingProvider,omitempty"`
+	EstimatedDelivery datatypes.JSON `gorm:"type:jsonb" json:"estimatedDelivery,omitempty"`
+	SessionID         string         `json:"sessionId,omitempty"`
+	Currency          string         `json:"currency"`
+	Language          string         `json:"language"`
+	Status            string         `json:"status"`
+	LastActivity      time.Time      `json:"lastActivity"`
+	AbandonedAt       *time.Time     `json:"abandonedAt,omitempty"`
+	ConvertedAt       *time.Time     `json:"convertedAt,omitempty"`
+	ExpiresAt         time.Time      `json:"expiresAt"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
+}
+
+// TableName overrides the default table name.
+func (Cart) TableName() string {
+	return "carts"
 }
 
 // Cart payment method constants.
 const (
-	PaymentMethodCard            = "card"
-	PaymentMethodBankTransfer    = "bank_transfer"
-	PaymentMethodWallet          = "wallet"
-	PaymentMethodCashOnDelivery  = "cash_on_delivery"
-	PaymentMethodCrypto          = "crypto"
+	PaymentMethodCard           = "card"
+	PaymentMethodBankTransfer   = "bank_transfer"
+	PaymentMethodWallet         = "wallet"
+	PaymentMethodCashOnDelivery = "cash_on_delivery"
+	PaymentMethodCrypto         = "crypto"
 )
 
 // Cart shipping method constants.
@@ -139,14 +146,69 @@ const (
 	DefaultCartStatus   = CartStatusActive
 )
 
-// CalculateSummary recalculates the cart summary based on current items and coupon.
-func (c *Cart) CalculateSummary() CartSummary {
+// GetItems deserializes the Items JSONB field.
+func (c *Cart) GetItems() []CartItem {
+	var items []CartItem
+	if c.Items != nil {
+		_ = json.Unmarshal(c.Items, &items)
+	}
+	return items
+}
+
+// SetItems serializes the []CartItem slice into the JSONB field.
+func (c *Cart) SetItems(items []CartItem) {
+	data, _ := json.Marshal(items)
+	c.Items = data
+}
+
+// GetSummary deserializes the Summary JSONB field.
+func (c *Cart) GetSummary() CartSummary {
+	var s CartSummary
+	if c.Summary != nil {
+		_ = json.Unmarshal(c.Summary, &s)
+	}
+	return s
+}
+
+// SetSummary serializes the CartSummary struct into the JSONB field.
+func (c *Cart) SetSummary(s CartSummary) {
+	data, _ := json.Marshal(s)
+	c.Summary = data
+}
+
+// GetAppliedCoupon deserializes the AppliedCoupon JSONB field.
+func (c *Cart) GetAppliedCoupon() *AppliedCoupon {
+	if c.AppliedCoupon == nil {
+		return nil
+	}
+	var ac AppliedCoupon
+	if err := json.Unmarshal(c.AppliedCoupon, &ac); err != nil {
+		return nil
+	}
+	if ac.Code == "" {
+		return nil
+	}
+	return &ac
+}
+
+// SetAppliedCoupon serializes the AppliedCoupon struct into the JSONB field.
+func (c *Cart) SetAppliedCoupon(ac *AppliedCoupon) {
+	if ac == nil {
+		c.AppliedCoupon = nil
+		return
+	}
+	data, _ := json.Marshal(ac)
+	c.AppliedCoupon = data
+}
+
+// CalculateCartSummary computes the cart summary from deserialized items and coupon.
+func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShipping float64) CartSummary {
 	summary := CartSummary{
-		TotalItems: len(c.Items),
-		Shipping:   c.Summary.Shipping,
+		TotalItems: len(items),
+		Shipping:   currentShipping,
 	}
 
-	for _, item := range c.Items {
+	for _, item := range items {
 		summary.TotalQuantity += item.Quantity
 		summary.Subtotal += item.Price * float64(item.Quantity)
 	}
@@ -155,8 +217,7 @@ func (c *Cart) CalculateSummary() CartSummary {
 	summary.Tax = summary.Subtotal * 0.1
 
 	// Apply discount if coupon is applied
-	if c.AppliedCoupon != nil && c.AppliedCoupon.Code != "" {
-		coupon := c.AppliedCoupon
+	if coupon != nil && coupon.Code != "" {
 		switch coupon.DiscountType {
 		case "percentage":
 			discount := summary.Subtotal * (coupon.DiscountValue / 100)

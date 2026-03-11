@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"log"
 	"net/http"
 	"regexp"
@@ -11,23 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
-
-// AuthHandler holds dependencies for authentication handlers.
-type AuthHandler struct {
-	cfg *config.Config
-}
-
-// NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(cfg *config.Config) *AuthHandler {
-	return &AuthHandler{cfg: cfg}
-}
 
 // signupRequest defines the expected JSON body for signup.
 type signupRequest struct {
@@ -46,7 +35,7 @@ type signupRequest struct {
 }
 
 // Signup handles POST /api/auth/signup.
-func (h *AuthHandler) Signup(c *gin.Context) {
+func (h *Handlers) Signup(c *gin.Context) {
 	var req signupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -57,7 +46,7 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	}
 
 	// Validate required fields
-	var errors []gin.H
+	var validationErrors []gin.H
 	req.Name = strings.TrimSpace(req.Name)
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = strings.TrimSpace(req.Email)
@@ -66,59 +55,46 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	req.Address = strings.TrimSpace(req.Address)
 
 	if req.Name == "" {
-		errors = append(errors, gin.H{"field": "name", "message": "Name is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "name", "message": "Name is required"})
 	}
 	if req.Username == "" {
-		errors = append(errors, gin.H{"field": "username", "message": "Username is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "username", "message": "Username is required"})
 	}
 	if req.Email == "" || !isValidEmail(req.Email) {
-		errors = append(errors, gin.H{"field": "email", "message": "Please enter a valid email"})
+		validationErrors = append(validationErrors, gin.H{"field": "email", "message": "Please enter a valid email"})
 	}
 	if pwdErrors := validatePassword(req.Password); len(pwdErrors) > 0 {
 		for _, e := range pwdErrors {
-			errors = append(errors, gin.H{"field": "password", "message": e})
+			validationErrors = append(validationErrors, gin.H{"field": "password", "message": e})
 		}
 	}
 	if req.ConfirmPassword != req.Password {
-		errors = append(errors, gin.H{"field": "confirmPassword", "message": "Passwords do not match"})
+		validationErrors = append(validationErrors, gin.H{"field": "confirmPassword", "message": "Passwords do not match"})
 	}
 	if req.PhoneNumber == "" {
-		errors = append(errors, gin.H{"field": "phoneNumber", "message": "Phone number is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "phoneNumber", "message": "Phone number is required"})
 	}
 	if req.Country == "" {
-		errors = append(errors, gin.H{"field": "country", "message": "Country is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "country", "message": "Country is required"})
 	}
 	if req.Address == "" {
-		errors = append(errors, gin.H{"field": "address", "message": "Address is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "address", "message": "Address is required"})
 	}
 
-	if len(errors) > 0 {
+	if len(validationErrors) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"errors":  errors,
+			"errors":  validationErrors,
 		})
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
 
 	// Check for existing user (email, username, phoneNumber)
 	emailLower := strings.ToLower(req.Email)
 	usernameLower := strings.ToLower(req.Username)
 
-	filter := bson.M{
-		"$or": bson.A{
-			bson.M{"email": emailLower},
-			bson.M{"username": usernameLower},
-			bson.M{"phoneNumber": req.PhoneNumber},
-		},
-	}
-
 	var existingUser models.User
-	err := collection.FindOne(ctx, filter).Decode(&existingUser)
+	err := config.DB.Where("email = ? OR username = ? OR phone_number = ?", emailLower, usernameLower, req.PhoneNumber).First(&existingUser).Error
 	if err == nil {
 		// User exists - determine which field(s) conflict
 		var conflictErrors []gin.H
@@ -136,7 +112,7 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 			"errors":  conflictErrors,
 		})
 		return
-	} else if err != mongo.ErrNoDocuments {
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Printf("Signup DB error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -146,13 +122,10 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	}
 
 	// Handle referral code
-	var referredBy *primitive.ObjectID
+	var referredBy *uuid.UUID
 	if req.ReferralCode != "" {
 		var referrer models.User
-		err := collection.FindOne(ctx, bson.M{
-			"referralCode":  req.ReferralCode,
-			"accountStatus": models.AccountStatusActive,
-		}).Decode(&referrer)
+		err := config.DB.Where("referral_code = ? AND account_status = ?", req.ReferralCode, models.AccountStatusActive).First(&referrer).Error
 		if err == nil {
 			referredBy = &referrer.ID
 		}
@@ -169,10 +142,10 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 		return
 	}
 
-	// Build user document
+	// Build user record
 	now := time.Now()
 	user := models.User{
-		ID:                 primitive.NewObjectID(),
+		ID:                 uuid.New(),
 		Name:               req.Name,
 		Username:           usernameLower,
 		Email:              emailLower,
@@ -192,11 +165,10 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	}
 
 	if req.ProfilePhoto != "" {
-		user.ProfilePhoto = &models.ProfilePhoto{URL: req.ProfilePhoto}
+		user.SetProfilePhoto(&models.ProfilePhoto{URL: req.ProfilePhoto})
 	}
 
-	_, err = collection.InsertOne(ctx, user)
-	if err != nil {
+	if err := config.DB.Create(&user).Error; err != nil {
 		log.Printf("Signup insert error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -206,7 +178,7 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	}
 
 	// Generate JWT token
-	token, err := generateToken(user.ID, user.Email, h.cfg.JWTSecret)
+	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
 	if err != nil {
 		log.Printf("Token generation error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -220,7 +192,7 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 		"success": true,
 		"message": "Registration successful. Please proceed to identity verification.",
 		"data": gin.H{
-			"userId":   user.ID.Hex(),
+			"userId":   user.ID.String(),
 			"token":    token,
 			"nextStep": "identity_verification",
 		},
@@ -239,7 +211,7 @@ type identityRequest struct {
 }
 
 // UpdateIdentity handles POST /api/auth/identity (auth required).
-func (h *AuthHandler) UpdateIdentity(c *gin.Context) {
+func (h *Handlers) UpdateIdentity(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -258,66 +230,17 @@ func (h *AuthHandler) UpdateIdentity(c *gin.Context) {
 		return
 	}
 
-	updateData := bson.M{}
-	if req.DriversLicenseFront != "" {
-		updateData["documents.driversLicense.front.url"] = req.DriversLicenseFront
-		updateData["documents.driversLicense.front.verified"] = false
-	}
-	if req.DriversLicenseBack != "" {
-		updateData["documents.driversLicense.back.url"] = req.DriversLicenseBack
-		updateData["documents.driversLicense.back.verified"] = false
-	}
-	if req.NINFront != "" {
-		updateData["documents.nin.front.url"] = req.NINFront
-		updateData["documents.nin.front.verified"] = false
-	}
-	if req.NINBack != "" {
-		updateData["documents.nin.back.url"] = req.NINBack
-		updateData["documents.nin.back.verified"] = false
-	}
-	if req.PassportPhoto != "" {
-		updateData["documents.passport.photo.url"] = req.PassportPhoto
-		updateData["documents.passport.photo.verified"] = false
-	}
-	if req.PVCCard != "" {
-		updateData["documents.pvc.card.url"] = req.PVCCard
-		updateData["documents.pvc.card.verified"] = false
-	}
-	if req.BVN != "" {
-		updateData["documents.bvn.number"] = req.BVN
-		updateData["documents.bvn.verified"] = false
-	}
-
-	if len(updateData) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": "No documents provided",
-		})
-		return
-	}
-
-	updateData["updatedAt"] = time.Now()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	result := collection.FindOneAndUpdate(
-		ctx,
-		bson.M{"_id": user.ID},
-		bson.M{"$set": updateData},
-		nil,
-	)
-	if result.Err() != nil {
-		if result.Err() == mongo.ErrNoDocuments {
+	// Fetch current user to get existing documents
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", user.ID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
 			})
 			return
 		}
-		log.Printf("UpdateIdentity error: %v", result.Err())
+		log.Printf("UpdateIdentity error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",
@@ -325,11 +248,61 @@ func (h *AuthHandler) UpdateIdentity(c *gin.Context) {
 		return
 	}
 
-	// Fetch updated user to return documents
-	var updatedUser models.User
-	err := collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&updatedUser)
-	if err != nil {
-		log.Printf("UpdateIdentity fetch error: %v", err)
+	docs := dbUser.GetDocuments()
+	hasUpdate := false
+
+	if req.DriversLicenseFront != "" {
+		docs.DriversLicense.Front.URL = req.DriversLicenseFront
+		docs.DriversLicense.Front.Verified = false
+		hasUpdate = true
+	}
+	if req.DriversLicenseBack != "" {
+		docs.DriversLicense.Back.URL = req.DriversLicenseBack
+		docs.DriversLicense.Back.Verified = false
+		hasUpdate = true
+	}
+	if req.NINFront != "" {
+		docs.NIN.Front.URL = req.NINFront
+		docs.NIN.Front.Verified = false
+		hasUpdate = true
+	}
+	if req.NINBack != "" {
+		docs.NIN.Back.URL = req.NINBack
+		docs.NIN.Back.Verified = false
+		hasUpdate = true
+	}
+	if req.PassportPhoto != "" {
+		docs.Passport.Photo.URL = req.PassportPhoto
+		docs.Passport.Photo.Verified = false
+		hasUpdate = true
+	}
+	if req.PVCCard != "" {
+		docs.PVC.Card.URL = req.PVCCard
+		docs.PVC.Card.Verified = false
+		hasUpdate = true
+	}
+	if req.BVN != "" {
+		docs.BVN.Number = req.BVN
+		docs.BVN.Verified = false
+		hasUpdate = true
+	}
+
+	if !hasUpdate {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "No documents provided",
+		})
+		return
+	}
+
+	dbUser.SetDocuments(docs)
+	dbUser.UpdatedAt = time.Now()
+
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"documents":  dbUser.Documents,
+		"updated_at": dbUser.UpdatedAt,
+	}).Error; err != nil {
+		log.Printf("UpdateIdentity error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",
@@ -341,9 +314,9 @@ func (h *AuthHandler) UpdateIdentity(c *gin.Context) {
 		"success": true,
 		"message": "Identity documents updated successfully",
 		"data": gin.H{
-			"userId":    user.ID.Hex(),
+			"userId":    user.ID.String(),
 			"nextStep":  "facial_verification",
-			"documents": updatedUser.Documents,
+			"documents": dbUser.GetDocuments(),
 		},
 	})
 }
@@ -358,7 +331,7 @@ type facialRequest struct {
 }
 
 // UpdateFacial handles POST /api/auth/facial (auth required).
-func (h *AuthHandler) UpdateFacial(c *gin.Context) {
+func (h *Handlers) UpdateFacial(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -377,47 +350,51 @@ func (h *AuthHandler) UpdateFacial(c *gin.Context) {
 		return
 	}
 
-	updateData := bson.M{}
-	if req.FaceFront != "" {
-		updateData["facialVerification.faceFront.url"] = req.FaceFront
-	}
-	if req.FaceLeft != "" {
-		updateData["facialVerification.faceLeft.url"] = req.FaceLeft
-	}
-	if req.FaceRight != "" {
-		updateData["facialVerification.faceRight.url"] = req.FaceRight
-	}
-	if req.FaceUp != "" {
-		updateData["facialVerification.faceUp.url"] = req.FaceUp
-	}
-	if req.FaceDown != "" {
-		updateData["facialVerification.faceDown.url"] = req.FaceDown
-	}
-
-	// Set verification status to in_review
-	updateData["verificationStatus"] = models.VerificationStatusInReview
-	updateData["updatedAt"] = time.Now()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
-	result := collection.FindOneAndUpdate(
-		ctx,
-		bson.M{"_id": user.ID},
-		bson.M{"$set": updateData},
-		nil,
-	)
-	if result.Err() != nil {
-		if result.Err() == mongo.ErrNoDocuments {
+	// Fetch current user to get existing facial verification data
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", user.ID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"success": false,
 				"message": "User not found",
 			})
 			return
 		}
-		log.Printf("UpdateFacial error: %v", result.Err())
+		log.Printf("UpdateFacial error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Internal server error",
+		})
+		return
+	}
+
+	fv := dbUser.GetFacialVerification()
+
+	if req.FaceFront != "" {
+		fv.FaceFront.URL = req.FaceFront
+	}
+	if req.FaceLeft != "" {
+		fv.FaceLeft.URL = req.FaceLeft
+	}
+	if req.FaceRight != "" {
+		fv.FaceRight.URL = req.FaceRight
+	}
+	if req.FaceUp != "" {
+		fv.FaceUp.URL = req.FaceUp
+	}
+	if req.FaceDown != "" {
+		fv.FaceDown.URL = req.FaceDown
+	}
+
+	dbUser.SetFacialVerification(fv)
+	now := time.Now()
+
+	if err := config.DB.Model(&dbUser).Updates(map[string]interface{}{
+		"facial_verification": dbUser.FacialVerification,
+		"verification_status": models.VerificationStatusInReview,
+		"updated_at":          now,
+	}).Error; err != nil {
+		log.Printf("UpdateFacial error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",
@@ -429,7 +406,7 @@ func (h *AuthHandler) UpdateFacial(c *gin.Context) {
 		"success": true,
 		"message": "Facial verification images uploaded successfully. Verification is in progress.",
 		"data": gin.H{
-			"userId":             user.ID.Hex(),
+			"userId":             user.ID.String(),
 			"verificationStatus": models.VerificationStatusInReview,
 			"estimatedTime":      "24-48 hours",
 		},
@@ -443,7 +420,7 @@ type loginRequest struct {
 }
 
 // Login handles POST /api/auth/login.
-func (h *AuthHandler) Login(c *gin.Context) {
+func (h *Handlers) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -454,30 +431,25 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	// Validate
-	var errors []gin.H
+	var validationErrors []gin.H
 	if req.Email == "" || !isValidEmail(req.Email) {
-		errors = append(errors, gin.H{"field": "email", "message": "Please enter a valid email"})
+		validationErrors = append(validationErrors, gin.H{"field": "email", "message": "Please enter a valid email"})
 	}
 	if req.Password == "" {
-		errors = append(errors, gin.H{"field": "password", "message": "Password is required"})
+		validationErrors = append(validationErrors, gin.H{"field": "password", "message": "Password is required"})
 	}
-	if len(errors) > 0 {
+	if len(validationErrors) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
-			"errors":  errors,
+			"errors":  validationErrors,
 		})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	collection := config.GetCollection("users")
-
 	var user models.User
-	err := collection.FindOne(ctx, bson.M{"email": strings.ToLower(req.Email)}).Decode(&user)
+	err := config.DB.Where("email = ?", strings.ToLower(req.Email)).First(&user).Error
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Invalid credentials",
@@ -505,16 +477,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err := user.ComparePassword(req.Password); err != nil {
 		// Increment login attempts
 		attempts, lockUntil := user.IncrementLoginAttempts()
-		update := bson.M{
-			"$set": bson.M{
-				"loginAttempts": attempts,
-				"updatedAt":     time.Now(),
-			},
+		updates := map[string]interface{}{
+			"login_attempts": attempts,
+			"updated_at":     time.Now(),
 		}
 		if lockUntil != nil {
-			update["$set"].(bson.M)["lockUntil"] = lockUntil
+			updates["lock_until"] = lockUntil
 		}
-		_, _ = collection.UpdateOne(ctx, bson.M{"_id": user.ID}, update)
+		config.DB.Model(&user).Updates(updates)
 
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
@@ -525,13 +495,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Reset login attempts on success
 	now := time.Now()
-	_, _ = collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
-		"$set":   bson.M{"loginAttempts": 0, "lastLogin": now, "updatedAt": now},
-		"$unset": bson.M{"lockUntil": ""},
+	config.DB.Model(&user).Updates(map[string]interface{}{
+		"login_attempts": 0,
+		"last_login":     now,
+		"updated_at":     now,
+		"lock_until":     nil,
 	})
 
 	// Generate JWT token
-	token, err := generateToken(user.ID, user.Email, h.cfg.JWTSecret)
+	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
 	if err != nil {
 		log.Printf("Token generation error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -545,7 +517,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		"success": true,
 		"message": "Login successful",
 		"data": gin.H{
-			"userId":             user.ID.Hex(),
+			"userId":             user.ID.String(),
 			"role":               user.Role,
 			"token":              token,
 			"name":               user.Name,
@@ -557,9 +529,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 // generateToken creates a JWT token with userId and email claims, 7-day expiry.
-func generateToken(userID primitive.ObjectID, email, secret string) (string, error) {
+func generateToken(userID uuid.UUID, email, secret string) (string, error) {
 	claims := jwt.MapClaims{
-		"userId": userID.Hex(),
+		"userId": userID.String(),
 		"email":  email,
 		"exp":    time.Now().Add(7 * 24 * time.Hour).Unix(),
 		"iat":    time.Now().Unix(),

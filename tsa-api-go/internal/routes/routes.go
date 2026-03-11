@@ -41,8 +41,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	{
 		authGroup.POST("/signup", h.Signup)
 		authGroup.POST("/login", h.Login)
-		authGroup.POST("/identity", auth, h.SubmitIdentity)
-		authGroup.POST("/facial", auth, h.SubmitFacial)
+		authGroup.POST("/identity", auth, h.UpdateIdentity)
+		authGroup.POST("/facial", auth, h.UpdateFacial)
 	}
 
 	// User routes
@@ -51,7 +51,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	{
 		userGroup.GET("/profile", h.GetProfile)
 		userGroup.PUT("/profile", h.UpdateProfile)
-		userGroup.GET("/", h.GetUsers)
+		userGroup.GET("/", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 	}
 
@@ -59,7 +59,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	verificationGroup := api.Group("/verification")
 	{
 		verificationGroup.GET("/status", auth, h.GetVerificationStatus)
-		verificationGroup.POST("/submit", auth, h.SubmitVerification)
+		verificationGroup.POST("/submit", auth, h.SubmitForVerification)
 		verificationGroup.POST("/approve/:id", adminAuth, h.ApproveVerification)
 		verificationGroup.POST("/reject/:id", adminAuth, h.RejectVerification)
 	}
@@ -100,9 +100,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	// Market routes (mix of public and authenticated)
 	marketGroup := api.Group("/market")
 	{
-		marketGroup.GET("/prices", h.GetMarketPrices)
-		marketGroup.GET("/history/:symbol", h.GetMarketHistory)
-		marketGroup.GET("/data/:symbol", h.GetMarketDataBySymbol)
+		marketGroup.GET("/overview", h.GetMarketOverview)
+		marketGroup.GET("/history/:symbol", h.GetAssetPriceHistory)
+		marketGroup.GET("/assets/:symbol", h.GetAssetMarketDetails)
+		marketGroup.GET("/search/:query", h.SearchAssets)
 		marketGroup.GET("/watchlist", auth, h.GetWatchlist)
 		marketGroup.POST("/watchlist", auth, h.AddToWatchlist)
 	}

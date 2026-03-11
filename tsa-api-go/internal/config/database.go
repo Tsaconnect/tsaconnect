@@ -1,37 +1,37 @@
 package config
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"time"
 
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-var DB *mongo.Database
+var DB *gorm.DB
 
-func ConnectDB(cfg *Config) (*mongo.Client, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	clientOptions := options.Client().ApplyURI(cfg.MongoDBURI)
-	client, err := mongo.Connect(ctx, clientOptions)
+func ConnectDB(cfg *Config) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
 
-	// Ping to verify connection
-	if err := client.Ping(ctx, nil); err != nil {
-		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
-	}
-
-	DB = client.Database("tsa")
-	log.Println("Connected to MongoDB successfully")
-	return client, nil
+	DB = db
+	log.Println("Connected to PostgreSQL successfully")
+	return db, nil
 }
 
-func GetCollection(name string) *mongo.Collection {
-	return DB.Collection(name)
+func AutoMigrate() error {
+	return DB.AutoMigrate(
+		&models.User{},
+		&models.Asset{},
+		&models.Product{},
+		&models.Cart{},
+		&models.Category{},
+		&models.Portfolio{},
+		&models.Transaction{},
+		&models.Wallet{},
+		&models.VerificationLog{},
+	)
 }
