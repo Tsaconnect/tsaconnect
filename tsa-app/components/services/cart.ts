@@ -1,7 +1,7 @@
 // components/services/cart.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE_URL = 'https://api.locoh.org/api';
+import { API_BASE_URL } from '../../constants/api/config';
 
 // Types based on your backend response structure
 export interface ProductImage {
