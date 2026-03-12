@@ -23,16 +23,16 @@ const BankDetails = ({ accountNumber, accountName, bankName, id }) => {
       <View style={{ marginTop: 200 }}>
         <View style={styles.bankDetails}>
           <Text style={styles.labelText}>Bank Name</Text>
-          <Text style={styles.valueText}>{bankName || "Access Bank"}</Text>
+          <Text style={styles.valueText}>{bankName || "N/A"}</Text>
         </View>
         <View style={styles.bankDetails}>
           <Text style={styles.labelText}>Account Number</Text>
-          <Text style={styles.valueText}>{accountNumber || "0049005958"}</Text>
+          <Text style={styles.valueText}>{accountNumber || "N/A"}</Text>
         </View>
         <View style={styles.bankDetails}>
           <Text style={styles.labelText}>Account Name</Text>
           <Text style={styles.valueText}>
-            {accountName || "Tsenongo Jacob"}
+            {accountName || "N/A"}
           </Text>
         </View>
         <TouchableOpacity

@@ -1,6 +1,7 @@
 import axios from "axios"
+import { API_BASE_URL } from "./config"
 
-export const apiClient=axios.create({
-    baseURL:'https://z7o86ryl3l.execute-api.us-east-1.amazonaws.com/v1'
+export const apiClient = axios.create({
+    baseURL: API_BASE_URL
 })
-export const baseUrl='https://z7o86ryl3l.execute-api.us-east-1.amazonaws.com/v1'
+export { API_BASE_URL as baseUrl } from "./config"

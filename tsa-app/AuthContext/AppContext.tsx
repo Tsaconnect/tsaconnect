@@ -2,7 +2,7 @@ import React, { createContext, useState, useContext, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 
-const API_BASE_URL = 'http:// 10.39.157.143:5000/api';
+import { API_BASE_URL } from '../constants/api/config';
 
 interface AuthContextType {
   token: string | null;

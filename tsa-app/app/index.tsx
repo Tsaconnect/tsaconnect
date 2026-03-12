@@ -1,6 +1,5 @@
 import { StyleSheet, Text, View, ActivityIndicator } from "react-native";
 import React, { useEffect, useState } from "react";
-import Products from "../components/onboarding/products";
 import { router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import api from "@/components/services/api";
@@ -18,51 +17,43 @@ const Dashboard = () => {
       const isAuthenticated = await api.checkAuth();
 
       if (!isAuthenticated) {
-        // Not authenticated, redirect to login
-        await api.clearAuth(); // Clear any stale data
-       // router.replace("/login");
+        await api.clearAuth();
+        router.replace("/login");
         return;
       }
 
-      // Get user role from AsyncStorage
       const role = await AsyncStorage.getItem("role");
       const token = await api.getStoredToken();
 
       if (!token) {
-        // No token found, redirect to login
         await api.clearAuth();
-       // router.replace("/login");
+        router.replace("/login");
         return;
       }
 
-      // Set token in api service
       api.setToken(token);
 
-      // Verify token by making a simple API call
       try {
-        // You can use any endpoint that requires authentication
-        // Here we'll use the getProfile endpoint
         const profileResponse = await api.getProfile();
 
         if (!profileResponse.success) {
-          // Token is invalid or expired
           await api.clearAuth();
-         // router.replace("/login");
+          router.replace("/login");
           return;
         }
       } catch (error) {
         console.error("Token verification error:", error);
         await api.clearAuth();
-      //  router.replace("/login");
+        router.replace("/login");
         return;
       }
 
       // Navigate based on role
-      console.log('User role:', role);
+      const role_value = role?.toLowerCase();
 
-      if (role === "admin") {
+      if (role_value === "admin" || role_value === "superadmin") {
         router.replace("/admin/dashboard");
-      } else if (role === "merchant") {
+      } else if (role_value === "merchant") {
         router.replace("/merchants/dashboard");
       } else {
         router.replace("/home");
@@ -72,9 +63,8 @@ const Dashboard = () => {
       console.error("Dashboard initialization error:", error);
       setError(error.message || "Failed to initialize app");
 
-      // Clear auth data and redirect to login on error
       await api.clearAuth();
-     // router.replace("/login");
+      router.replace("/login");
     } finally {
       setLoading(false);
     }
@@ -105,10 +95,10 @@ const Dashboard = () => {
     );
   }
 
-  // This will only render briefly before redirecting
+  // Brief loading state while redirect happens
   return (
-    <View style={styles.container}>
-      <Products />
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator size="large" color="#0000ff" />
     </View>
   );
 };

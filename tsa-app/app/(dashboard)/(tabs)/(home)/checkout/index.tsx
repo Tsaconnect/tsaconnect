@@ -1,32 +1,149 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable } from 'react-native';
+import React, { useEffect, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable, ActivityIndicator, Alert, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useAuth } from '@/AuthContext/AuthContext';
+import { cartService, CartSummaryResponse, CartItem, Product } from '@/components/services/cart';
 
 const CheckoutScreen = () => {
-    const [shippingAddress, setShippingAddress] = React.useState({
-        name: 'John Doe',
-        address: '123 Main Street',
-        city: 'New York',
-        state: 'NY',
-        zipCode: '10001',
-    });
+    const { currentUser, token } = useAuth();
+    const [cartData, setCartData] = useState<CartSummaryResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [checkingOut, setCheckingOut] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-    const orderItems = [
-        { name: 'Product 1', quantity: 2, price: 45.00 },
-        { name: 'Product 2', quantity: 1, price: 30.00 },
-    ];
+    const loadCart = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        if (token) {
+            cartService.setToken(token);
+        } else {
+            await cartService.initializeToken();
+        }
+        const response = await cartService.getCartSummary();
+        if (response.success && response.data) {
+            setCartData(response.data);
+        } else {
+            setError(response.message || 'Failed to load cart');
+        }
+        setLoading(false);
+    }, [token]);
 
-    const calculateSubtotal = () => {
-        return orderItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    useEffect(() => {
+        loadCart();
+    }, [loadCart]);
+
+    const handleCheckout = async () => {
+        if (!cartData || cartData.cart.items.length === 0) {
+            Alert.alert('Empty Cart', 'Add items to your cart before checking out.');
+            return;
+        }
+
+        setCheckingOut(true);
+        const response = await cartService.checkout();
+        setCheckingOut(false);
+
+        if (response.success && response.data) {
+            Alert.alert(
+                'Order Placed',
+                `Your order #${response.data.orderId} has been placed successfully.`,
+                [{ text: 'OK', onPress: () => router.replace('/(dashboard)/(tabs)/(home)') }]
+            );
+        } else {
+            Alert.alert('Checkout Failed', response.message || 'Something went wrong. Please try again.');
+        }
     };
 
-    const subtotal = calculateSubtotal();
-    const shipping = 5.00;
-    const tax = 10.00;
-    const total = subtotal + shipping + tax;
+    const getProductData = (item: CartItem): { name: string; imageUrl: string | null } => {
+        if (typeof item.product === 'object') {
+            const product = item.product as Product;
+            const primaryImage = product.images?.find(img => img.isPrimary) || product.images?.[0];
+            return {
+                name: product.name,
+                imageUrl: primaryImage?.url || null,
+            };
+        }
+        return { name: 'Product', imageUrl: null };
+    };
+
+    const shippingName = currentUser?.name || currentUser?.username || '';
+    const shippingAddress = cartData?.shippingAddress || {
+        address: currentUser?.address || '',
+        city: currentUser?.city || '',
+        state: currentUser?.state || '',
+        country: currentUser?.country || '',
+    };
+
+    if (loading) {
+        return (
+            <SafeAreaView style={styles.container}>
+                <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
+                    <View style={styles.header}>
+                        <Pressable onPress={() => router.back()} style={styles.backButton}>
+                            <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
+                        </Pressable>
+                        <Text style={styles.headerTitle}>Checkout</Text>
+                        <View style={{ width: 24 }} />
+                    </View>
+                    <View style={styles.centered}>
+                        <ActivityIndicator size="large" color="#8B5A2B" />
+                        <Text style={styles.loadingText}>Loading cart...</Text>
+                    </View>
+                </LinearGradient>
+            </SafeAreaView>
+        );
+    }
+
+    if (error) {
+        return (
+            <SafeAreaView style={styles.container}>
+                <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
+                    <View style={styles.header}>
+                        <Pressable onPress={() => router.back()} style={styles.backButton}>
+                            <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
+                        </Pressable>
+                        <Text style={styles.headerTitle}>Checkout</Text>
+                        <View style={{ width: 24 }} />
+                    </View>
+                    <View style={styles.centered}>
+                        <Ionicons name="alert-circle-outline" size={48} color="#8B5A2B" />
+                        <Text style={styles.errorText}>{error}</Text>
+                        <TouchableOpacity onPress={loadCart} style={styles.retryButton}>
+                            <Text style={styles.retryText}>Try Again</Text>
+                        </TouchableOpacity>
+                    </View>
+                </LinearGradient>
+            </SafeAreaView>
+        );
+    }
+
+    const items = cartData?.cart.items || [];
+    const summary = cartData?.summary || { subtotal: 0, shipping: 0, tax: 0, discount: 0, total: 0, totalItems: 0, totalQuantity: 0 };
+
+    if (items.length === 0) {
+        return (
+            <SafeAreaView style={styles.container}>
+                <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
+                    <View style={styles.header}>
+                        <Pressable onPress={() => router.back()} style={styles.backButton}>
+                            <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
+                        </Pressable>
+                        <Text style={styles.headerTitle}>Checkout</Text>
+                        <View style={{ width: 24 }} />
+                    </View>
+                    <View style={styles.centered}>
+                        <Ionicons name="cart-outline" size={48} color="#D9B68B" />
+                        <Text style={styles.emptyText}>Your cart is empty</Text>
+                        <TouchableOpacity onPress={() => router.back()} style={styles.retryButton}>
+                            <Text style={styles.retryText}>Continue Shopping</Text>
+                        </TouchableOpacity>
+                    </View>
+                </LinearGradient>
+            </SafeAreaView>
+        );
+    }
 
     return (
         <SafeAreaView style={styles.container}>
@@ -53,19 +170,23 @@ const CheckoutScreen = () => {
                                 <Ionicons name="location-outline" size={20} color="#8B5A2B" />
                                 <Text style={styles.sectionTitle}>Shipping Address</Text>
                             </View>
-                            <Pressable style={styles.editButton}>
-                                <Text style={styles.editText}>Change</Text>
-                            </Pressable>
                         </View>
                         <View style={styles.card}>
-                            <View style={styles.addressHeader}>
-                                <Text style={styles.cardBoldText}>{shippingAddress.name}</Text>
-                                <View style={styles.defaultBadge}>
-                                    <Text style={styles.defaultBadgeText}>DEFAULT</Text>
-                                </View>
-                            </View>
-                            <Text style={styles.cardText}>{shippingAddress.address}</Text>
-                            <Text style={styles.cardText}>{shippingAddress.city}, {shippingAddress.state} {shippingAddress.zipCode}</Text>
+                            {shippingName ? (
+                                <>
+                                    <Text style={styles.cardBoldText}>{shippingName}</Text>
+                                    {shippingAddress.address ? (
+                                        <Text style={styles.cardText}>{shippingAddress.address}</Text>
+                                    ) : null}
+                                    <Text style={styles.cardText}>
+                                        {[shippingAddress.city, shippingAddress.state, shippingAddress.country]
+                                            .filter(Boolean)
+                                            .join(', ')}
+                                    </Text>
+                                </>
+                            ) : (
+                                <Text style={styles.cardText}>No shipping address on file. Please update your profile.</Text>
+                            )}
                         </View>
                     </View>
 
@@ -73,23 +194,17 @@ const CheckoutScreen = () => {
                     <View style={styles.section}>
                         <View style={styles.sectionHeader}>
                             <View style={styles.sectionTitleContainer}>
-                                <Ionicons name="card-outline" size={20} color="#8B5A2B" />
-                                <Text style={styles.sectionTitle}>Payment Method</Text>
+                                <Ionicons name="wallet-outline" size={20} color="#8B5A2B" />
+                                <Text style={styles.sectionTitle}>Payment</Text>
                             </View>
-                            <Pressable style={styles.editButton}>
-                                <Text style={styles.editText}>Change</Text>
-                            </Pressable>
                         </View>
                         <View style={styles.cardRow}>
                             <View style={styles.cardIconContainer}>
-                                <Ionicons name="card" size={24} color="#FFF" />
+                                <Ionicons name="wallet" size={24} color="#FFF" />
                             </View>
                             <View style={styles.cardDetails}>
-                                <Text style={styles.cardNumber}>**** **** **** 4242</Text>
-                                <Text style={styles.cardExpiry}>Expires 12/25</Text>
-                            </View>
-                            <View style={styles.cardBrand}>
-                                <Text style={styles.cardBrandText}>VISA</Text>
+                                <Text style={styles.cardNumber}>Wallet Payment</Text>
+                                <Text style={styles.cardExpiry}>USDT / USDC / MCGP</Text>
                             </View>
                         </View>
                     </View>
@@ -101,21 +216,28 @@ const CheckoutScreen = () => {
                                 <Ionicons name="bag-outline" size={20} color="#8B5A2B" />
                                 <Text style={styles.sectionTitle}>Order Items</Text>
                             </View>
-                            <Text style={styles.itemCount}>{orderItems.length} items</Text>
+                            <Text style={styles.itemCount}>{summary.totalQuantity} item{summary.totalQuantity !== 1 ? 's' : ''}</Text>
                         </View>
 
-                        {orderItems.map((item, index) => (
-                            <View key={index} style={styles.orderItem}>
-                                <View style={styles.itemImagePlaceholder}>
-                                    <Ionicons name="image-outline" size={24} color="#D9B68B" />
+                        {items.map((item, index) => {
+                            const { name, imageUrl } = getProductData(item);
+                            return (
+                                <View key={item._id || index} style={styles.orderItem}>
+                                    <View style={styles.itemImagePlaceholder}>
+                                        {imageUrl ? (
+                                            <Image source={{ uri: imageUrl }} style={styles.itemImage} />
+                                        ) : (
+                                            <Ionicons name="image-outline" size={24} color="#D9B68B" />
+                                        )}
+                                    </View>
+                                    <View style={styles.itemDetails}>
+                                        <Text style={styles.itemName} numberOfLines={2}>{name}</Text>
+                                        <Text style={styles.itemQuantity}>Qty: {item.quantity}</Text>
+                                    </View>
+                                    <Text style={styles.itemPrice}>${(item.price * item.quantity).toFixed(2)}</Text>
                                 </View>
-                                <View style={styles.itemDetails}>
-                                    <Text style={styles.itemName}>{item.name}</Text>
-                                    <Text style={styles.itemQuantity}>Qty: {item.quantity}</Text>
-                                </View>
-                                <Text style={styles.itemPrice}>${(item.price * item.quantity).toFixed(2)}</Text>
-                            </View>
-                        ))}
+                            );
+                        })}
                     </View>
 
                     {/* Order Summary */}
@@ -128,16 +250,18 @@ const CheckoutScreen = () => {
                         <View style={styles.summaryContainer}>
                             <View style={styles.summaryRow}>
                                 <Text style={styles.summaryLabel}>Subtotal</Text>
-                                <Text style={styles.summaryValue}>${subtotal.toFixed(2)}</Text>
+                                <Text style={styles.summaryValue}>${summary.subtotal.toFixed(2)}</Text>
                             </View>
                             <View style={styles.summaryRow}>
                                 <Text style={styles.summaryLabel}>Shipping</Text>
-                                <Text style={styles.summaryValue}>${shipping.toFixed(2)}</Text>
+                                <Text style={styles.summaryValue}>${summary.shipping.toFixed(2)}</Text>
                             </View>
-                            <View style={styles.summaryRow}>
-                                <Text style={styles.summaryLabel}>Tax</Text>
-                                <Text style={styles.summaryValue}>${tax.toFixed(2)}</Text>
-                            </View>
+                            {summary.discount > 0 && (
+                                <View style={styles.summaryRow}>
+                                    <Text style={styles.summaryLabel}>Discount</Text>
+                                    <Text style={[styles.summaryValue, { color: '#2E7D32' }]}>-${summary.discount.toFixed(2)}</Text>
+                                </View>
+                            )}
 
                             <View style={styles.divider} />
 
@@ -145,39 +269,39 @@ const CheckoutScreen = () => {
                                 <Text style={styles.totalLabel}>Total</Text>
                                 <View style={styles.totalAmountContainer}>
                                     <Text style={styles.currencySymbol}>USD</Text>
-                                    <Text style={styles.totalValue}>${total.toFixed(2)}</Text>
+                                    <Text style={styles.totalValue}>${summary.total.toFixed(2)}</Text>
                                 </View>
                             </View>
                         </View>
-                    </View>
-
-                    {/* Delivery Estimate */}
-                    <View style={[styles.section, styles.deliverySection]}>
-                        <Ionicons name="time-outline" size={20} color="#8B5A2B" />
-                        <Text style={styles.deliveryText}>
-                            Estimated delivery: <Text style={styles.deliveryDate}>Mar 15 - Mar 18</Text>
-                        </Text>
                     </View>
                 </ScrollView>
 
                 <View style={styles.footer}>
                     <View style={styles.footerTotal}>
                         <Text style={styles.footerTotalLabel}>Total Amount</Text>
-                        <Text style={styles.footerTotalValue}>${total.toFixed(2)}</Text>
+                        <Text style={styles.footerTotalValue}>${summary.total.toFixed(2)}</Text>
                     </View>
 
                     <TouchableOpacity
                         style={styles.checkoutButton}
                         activeOpacity={0.8}
+                        onPress={handleCheckout}
+                        disabled={checkingOut}
                     >
                         <LinearGradient
-                            colors={['#8B5A2B', '#6B4226']}
+                            colors={checkingOut ? ['#B89B7A', '#A68B6A'] : ['#8B5A2B', '#6B4226']}
                             start={{ x: 0, y: 0 }}
                             end={{ x: 1, y: 0 }}
                             style={styles.gradientButton}
                         >
-                            <Text style={styles.checkoutButtonText}>Place Order</Text>
-                            <Ionicons name="arrow-forward" size={20} color="#FFF" />
+                            {checkingOut ? (
+                                <ActivityIndicator size="small" color="#FFF" />
+                            ) : (
+                                <>
+                                    <Text style={styles.checkoutButtonText}>Place Order</Text>
+                                    <Ionicons name="arrow-forward" size={20} color="#FFF" />
+                                </>
+                            )}
                         </LinearGradient>
                     </TouchableOpacity>
                 </View>
@@ -223,6 +347,37 @@ const styles = StyleSheet.create({
         padding: 20,
         paddingTop: 8,
     },
+    centered: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 12,
+    },
+    loadingText: {
+        color: '#8B5A2B',
+        fontSize: 16,
+    },
+    errorText: {
+        color: '#4A2C1A',
+        fontSize: 16,
+        textAlign: 'center',
+        paddingHorizontal: 32,
+    },
+    emptyText: {
+        color: '#A67C52',
+        fontSize: 16,
+    },
+    retryButton: {
+        marginTop: 8,
+        paddingHorizontal: 24,
+        paddingVertical: 10,
+        backgroundColor: '#8B5A2B',
+        borderRadius: 12,
+    },
+    retryText: {
+        color: '#FFF',
+        fontWeight: '600',
+    },
     section: {
         marginBottom: 24,
     },
@@ -242,15 +397,6 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         color: '#4A2C1A',
     },
-    editButton: {
-        paddingHorizontal: 12,
-        paddingVertical: 4,
-    },
-    editText: {
-        color: '#8B5A2B',
-        fontWeight: '600',
-        fontSize: 14,
-    },
     card: {
         backgroundColor: '#FFF',
         padding: 16,
@@ -262,23 +408,6 @@ const styles = StyleSheet.create({
         shadowOpacity: 0.05,
         shadowRadius: 4,
         elevation: 2,
-    },
-    addressHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        marginBottom: 8,
-    },
-    defaultBadge: {
-        backgroundColor: '#F5E6D3',
-        paddingHorizontal: 8,
-        paddingVertical: 2,
-        borderRadius: 12,
-    },
-    defaultBadgeText: {
-        color: '#8B5A2B',
-        fontSize: 10,
-        fontWeight: '700',
     },
     cardRow: {
         flexDirection: 'row',
@@ -316,21 +445,11 @@ const styles = StyleSheet.create({
         fontSize: 12,
         color: '#A67C52',
     },
-    cardBrand: {
-        backgroundColor: '#F5E6D3',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 8,
-    },
-    cardBrandText: {
-        color: '#8B5A2B',
-        fontWeight: '700',
-        fontSize: 12,
-    },
     cardBoldText: {
         fontWeight: '600',
         color: '#4A2C1A',
         fontSize: 16,
+        marginBottom: 4,
     },
     cardText: {
         color: '#A67C52',
@@ -358,6 +477,12 @@ const styles = StyleSheet.create({
         backgroundColor: '#F5E6D3',
         justifyContent: 'center',
         alignItems: 'center',
+        overflow: 'hidden',
+    },
+    itemImage: {
+        width: 50,
+        height: 50,
+        borderRadius: 8,
     },
     itemDetails: {
         flex: 1,
@@ -430,26 +555,6 @@ const styles = StyleSheet.create({
     totalValue: {
         fontSize: 24,
         fontWeight: '800',
-        color: '#8B5A2B',
-    },
-    deliverySection: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#FFF9F2',
-        padding: 16,
-        borderRadius: 12,
-        gap: 8,
-        borderWidth: 1,
-        borderColor: '#E8D5C0',
-        borderStyle: 'dashed',
-    },
-    deliveryText: {
-        fontSize: 14,
-        color: '#4A2C1A',
-        flex: 1,
-    },
-    deliveryDate: {
-        fontWeight: '700',
         color: '#8B5A2B',
     },
     footer: {

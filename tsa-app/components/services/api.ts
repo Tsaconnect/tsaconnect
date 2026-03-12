@@ -1,7 +1,7 @@
 // services/api.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE_URL = 'https://api.locoh.org/api';
+import { API_BASE_URL } from '../../constants/api/config';
 
 export interface ApiResponse<T = any> {
   success: boolean;
