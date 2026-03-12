@@ -42,11 +42,9 @@ export default function Login() {
     try {
       const response = await api.login(email.trim(), password.trim());
       if (response.success) {
-        Alert.alert("Success", "Login successful!");
         setEmail("");
         setPassword("");
         const role = await AsyncStorage.getItem("role");
-        console.log('checking for error', role);
         if (role === "admin") {
           return router.replace("/admin/dashboard");
         } else if (role === "merchant") {

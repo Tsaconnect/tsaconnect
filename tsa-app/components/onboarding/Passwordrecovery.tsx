@@ -1,136 +1,205 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert } from 'react-native';
-import { COLORS, SIZES } from '../../constants/theme';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { COLORS } from '../../constants/theme';
 import { router } from 'expo-router';
 
 export default function PasswordRecovery() {
   const [emailOrPhone, setEmailOrPhone] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handlePasswordRecovery = () => {
-    if (newPassword !== confirmPassword) {
-      Alert.alert('Error', 'Passwords do not match.');
+  const handleSendCode = async () => {
+    if (!emailOrPhone.trim()) {
+      setError('Please enter your email or phone number');
       return;
     }
-    Alert.alert('Success', 'Password recovery successful!');
-    //@ts-ignore
-router.push({pathname:'/otp'})
+
+    setError('');
+    setLoading(true);
+
+    try {
+      // TODO: Call password recovery API endpoint when available
+      // await api.requestPasswordReset(emailOrPhone.trim());
+
+      // Navigate to OTP screen with email context
+      router.push({
+        pathname: '/passwordOTP',
+        params: { emailOrPhone: emailOrPhone.trim() },
+      });
+    } catch (err: any) {
+      setError(err.message || 'Failed to send recovery code. Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <View style={styles.container}>
-       <View style={styles.cover}>
-       <Text style={styles.title}>Recover Your Password</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Enter Email/Phone"
-        value={emailOrPhone}
-        onChangeText={setEmailOrPhone}
-        autoCapitalize="none"
-      />
-      <TextInput
-        style={styles.input}
-        placeholder="New Password"
-        secureTextEntry={true}
-        value={newPassword}
-        onChangeText={setNewPassword}
-      />
-      <TextInput
-        style={styles.input}
-        placeholder="Confirm Password"
-        secureTextEntry={true}
-        value={confirmPassword}
-        onChangeText={setConfirmPassword}
-      />
-     
-       </View>
-       <TouchableOpacity style={styles.button} onPress={handlePasswordRecovery}>
-        <Text style={styles.buttonText}>Continue</Text>
-      </TouchableOpacity>
-      <TouchableOpacity onPress={()=>router.push('/signup')}>
-        <View style={{marginTop:15}}>
-        <Text >New To TSA?
-        <Text style={styles.signupText}> Signup</Text>  
-           </Text>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <View style={styles.content}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <MaterialIcons name="arrow-back" size={24} color={COLORS.primary} />
+        </TouchableOpacity>
+
+        <Text style={styles.title}>Recover Password</Text>
+        <Text style={styles.subtitle}>
+          Enter the email or phone number associated with your account and we'll send you a verification code.
+        </Text>
+
+        <View style={[styles.inputContainer, error ? styles.inputError : null]}>
+          <MaterialIcons name="email" size={20} color={error ? COLORS.danger : COLORS.gray} style={styles.inputIcon} />
+          <TextInput
+            style={styles.input}
+            placeholder="Email or Phone Number"
+            placeholderTextColor="#999"
+            value={emailOrPhone}
+            onChangeText={(text) => {
+              setEmailOrPhone(text);
+              if (error) setError('');
+            }}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            editable={!loading}
+          />
         </View>
-        
-      </TouchableOpacity>
-    </View>
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        <TouchableOpacity
+          style={[styles.button, loading && styles.buttonDisabled]}
+          onPress={handleSendCode}
+          disabled={loading}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Send Code</Text>
+          )}
+        </TouchableOpacity>
+
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Remember your password? </Text>
+          <TouchableOpacity onPress={() => router.push('/login')} disabled={loading}>
+            <Text style={styles.loginLink}>Login</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>New to TSA? </Text>
+          <TouchableOpacity onPress={() => router.push('/signup')} disabled={loading}>
+            <Text style={styles.loginLink}>Create Account</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: "center",
+    backgroundColor: '#fff',
+  },
+  content: {
+    flex: 1,
+    justifyContent: 'center',
     padding: 20,
-    backgroundColor: "#fff",
+  },
+  backButton: {
+    position: 'absolute',
+    top: 60,
+    left: 20,
+    padding: 8,
+    zIndex: 1,
   },
   title: {
-    fontSize: 24,
-    fontWeight: "medium",
-    marginBottom: 20,
-    left: "5%",
+    fontSize: 28,
+    fontWeight: '700',
     color: COLORS.primary,
+    marginBottom: 10,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: COLORS.gray,
+    marginBottom: 30,
+    lineHeight: 20,
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    paddingHorizontal: 15,
+    marginBottom: 4,
+  },
+  inputError: {
+    borderColor: COLORS.danger,
+    borderWidth: 1.5,
+    backgroundColor: '#fff5f5',
+  },
+  inputIcon: {
+    marginRight: 10,
   },
   input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    borderWidth: 1,
-    marginTop: 10,
-    padding: 10,
-    borderRadius: 10,
-    marginHorizontal:SIZES.width * 0.05,
+    flex: 1,
+    height: 56,
+    fontSize: 16,
+    color: COLORS.dark,
+  },
+  errorText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    marginLeft: 15,
+    marginBottom: 8,
   },
   button: {
     backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    padding: 10,
-    alignItems: "center",
-    marginTop: 10,
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
+    borderRadius: 12,
+    height: 56,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 20,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 5,
   },
-  emailButton: {
-    backgroundColor: COLORS.white,
-    width: SIZES.width * 0.9,
-    padding: 10,
-    alignItems: "center",
-    marginTop: 10,
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  emailButtonText: {
-    fontWeight:'semibold'
+  buttonDisabled: {
+    backgroundColor: COLORS.lightGray,
+    opacity: 0.7,
   },
   buttonText: {
-    color: "#fff",
-    fontSize: 16,
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
   },
-  forgotPassword: {
-    marginTop: 5,
-    marginBottom: 10,
-    position: "relative",
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  footerText: {
+    color: COLORS.gray,
+    fontSize: 14,
+  },
+  loginLink: {
     color: COLORS.primary,
-    paddingLeft: -25,
+    fontWeight: '600',
+    fontSize: 14,
   },
-  orText: {
-    marginVertical: 10,
-  },
-  signupText: {
-    marginTop: 10,
-    color: COLORS.primary,
-  },
-  question: {
-    marginTop: 10,
-  },
-  cover:{
-    position:'absolute',
-    top: SIZES.height*(0.1212),
-  }
 });

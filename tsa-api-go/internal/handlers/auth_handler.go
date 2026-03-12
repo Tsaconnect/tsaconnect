@@ -68,17 +68,11 @@ func (h *Handlers) Signup(c *gin.Context) {
 			validationErrors = append(validationErrors, gin.H{"field": "password", "message": e})
 		}
 	}
-	if req.ConfirmPassword != req.Password {
+	if req.ConfirmPassword != "" && req.ConfirmPassword != req.Password {
 		validationErrors = append(validationErrors, gin.H{"field": "confirmPassword", "message": "Passwords do not match"})
 	}
 	if req.PhoneNumber == "" {
 		validationErrors = append(validationErrors, gin.H{"field": "phoneNumber", "message": "Phone number is required"})
-	}
-	if req.Country == "" {
-		validationErrors = append(validationErrors, gin.H{"field": "country", "message": "Country is required"})
-	}
-	if req.Address == "" {
-		validationErrors = append(validationErrors, gin.H{"field": "address", "message": "Address is required"})
 	}
 
 	if len(validationErrors) > 0 {
@@ -96,7 +90,6 @@ func (h *Handlers) Signup(c *gin.Context) {
 	var existingUser models.User
 	err := config.DB.Where("email = ? OR username = ? OR phone_number = ?", emailLower, usernameLower, req.PhoneNumber).First(&existingUser).Error
 	if err == nil {
-		// User exists - determine which field(s) conflict
 		var conflictErrors []gin.H
 		if existingUser.Email == emailLower {
 			conflictErrors = append(conflictErrors, gin.H{"field": "email", "message": "Email already registered"})
