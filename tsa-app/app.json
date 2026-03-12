@@ -46,6 +46,7 @@
     },
     "runtimeVersion": "1.0.0",
     "updates": {
+      "enabled": false,
       "url": "https://u.expo.dev/30b67bc1-0e2e-4d9d-86aa-46076fa69e15"
     },
     "owner": "tsa-connect"
