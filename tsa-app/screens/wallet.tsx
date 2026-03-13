@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,8 +11,10 @@ import {
   Platform,
   ActivityIndicator,
   Modal,
+  RefreshControl,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
+import { getWalletBalances } from '../services/walletApi';
 
 // Types and interfaces
 interface Asset {
@@ -197,53 +199,51 @@ const AssetCard: React.FC<AssetCardProps> = ({
 
 
 const WalletScreen: React.FC = () => {
-  // Asset Data - Only MCGP, USDT, and USDC
-  const initialAssets: Asset[] = [
+  // Default empty assets (shown while loading)
+  const defaultAssets: Asset[] = [
     {
       id: '1',
       symbol: 'MCGP',
-      name: 'MaticGold Pro',
-      balance: 1500.75,
-      usdValue: 1500.75,
+      name: 'MCG Protocol',
+      balance: 0,
+      usdValue: 0,
       details: {
         type: 'Gold-Backed Token',
-        chain: 'Polygon',
-        address: '0x742d35Cc6634C0532925a3b844Bc9e...'
+        chain: 'Sonic',
       },
     },
     {
       id: '2',
       symbol: 'USDT',
       name: 'Tether',
-      balance: 2500.25,
-      usdValue: 2500.25,
+      balance: 0,
+      usdValue: 0,
       details: {
         type: 'Stablecoin',
-        chain: 'Ethereum',
-        address: '0xdAC17F958D2ee523a2206206994597C...'
+        chain: 'Sonic',
       },
     },
     {
       id: '3',
       symbol: 'USDC',
       name: 'USD Coin',
-      balance: 1800.50,
-      usdValue: 1800.50,
+      balance: 0,
+      usdValue: 0,
       details: {
         type: 'Stablecoin',
-        chain: 'Ethereum',
-        address: '0xA0b86991c6218b36c1d19D4a2e9Eb0c...'
+        chain: 'Sonic',
       },
     },
   ];
 
   // State Management
-  const [assets, setAssets] = useState<Asset[]>(initialAssets);
+  const [assets, setAssets] = useState<Asset[]>(defaultAssets);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [isAssetListExpanded, setIsAssetListExpanded] = useState(false);
   const [expandedAssetId, setExpandedAssetId] = useState<string | null>(null);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showFundModal, setShowFundModal] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
 
@@ -252,14 +252,41 @@ const WalletScreen: React.FC = () => {
   const rotationAnimation = useRef(new Animated.Value(0)).current;
   const selectionAnimation = useRef(new Animated.Value(1)).current;
 
-  // Initialize with USDT as default
-  useEffect(() => {
-    const defaultAsset = assets.find(asset => asset.symbol === 'USDT');
-    if (defaultAsset) {
-      handleAssetSelect(defaultAsset, false);
-      console.log('Default asset set: USDT');
+  // Fetch wallet balances from API
+  const fetchBalances = useCallback(async () => {
+    try {
+      const result = await getWalletBalances();
+      if (result.success && result.data) {
+        const balancesMap = result.data.balances || result.data;
+        const updatedAssets = defaultAssets.map(asset => {
+          const rawBalance = balancesMap[asset.symbol];
+          const balance = rawBalance ? parseFloat(rawBalance) : 0;
+          // For stablecoins, usdValue ≈ balance
+          const usdValue = balance * (asset.symbol === 'MCGP' ? 1.0 : 1.0);
+          return { ...asset, balance, usdValue };
+        });
+        setAssets(updatedAssets);
+        // Select USDT by default or the first asset with balance
+        const usdt = updatedAssets.find(a => a.symbol === 'USDT');
+        const withBalance = updatedAssets.find(a => a.balance > 0);
+        handleAssetSelect(withBalance || usdt || updatedAssets[0], false);
+      } else {
+        // API failed — select USDT with zero balance
+        const usdt = defaultAssets.find(a => a.symbol === 'USDT');
+        if (usdt) handleAssetSelect(usdt, false);
+      }
+    } catch (err) {
+      console.error('Failed to fetch wallet balances:', err);
+      const usdt = defaultAssets.find(a => a.symbol === 'USDT');
+      if (usdt) handleAssetSelect(usdt, false);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    fetchBalances();
+  }, [fetchBalances]);
 
   // Handle asset selection via radio button or select button
   const handleAssetSelect = (asset: Asset, shouldCollapseList: boolean = true) => {
@@ -348,14 +375,11 @@ const WalletScreen: React.FC = () => {
     });
   };
 
-  // Refresh assets
+  // Refresh assets from API
   const refreshAssets = async () => {
-    setIsLoading(true);
-    // Simulate API refresh
-    setTimeout(() => {
-      console.log('Assets refreshed');
-      setIsLoading(false);
-    }, 1500);
+    setIsRefreshing(true);
+    await fetchBalances();
+    setIsRefreshing(false);
   };
 
   // Animation interpolations
@@ -621,7 +645,13 @@ const WalletScreen: React.FC = () => {
   );
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      style={styles.container}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={isRefreshing} onRefresh={refreshAssets} tintColor={GOLD_COLORS.primary} />
+      }
+    >
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Wallet</Text>
