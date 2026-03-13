@@ -17,6 +17,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { api, Asset, AssetsResponse, PortfolioTotals } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getWalletBalances } from '../services/walletApi';
 
 // Types and interfaces
 interface AssetCardProps {
@@ -294,11 +295,42 @@ const Dashboard: React.FC = () => {
   const [showFundModal, setShowFundModal] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [showBackupBanner, setShowBackupBanner] = useState(false);
 
   // Animation References
   const listAnimation = useRef(new Animated.Value(0)).current;
   const rotationAnimation = useRef(new Animated.Value(0)).current;
   const selectionAnimation = useRef(new Animated.Value(1)).current;
+
+  // Check if seed phrase needs backup
+  useEffect(() => {
+    const checkBackupStatus = async () => {
+      try {
+        const backedUp = await AsyncStorage.getItem('seedPhraseBackedUp');
+        if (backedUp === 'true') return;
+
+        const dismissed = await AsyncStorage.getItem('backupBannerDismissed');
+        if (dismissed === 'true') return;
+
+        const remindAt = await AsyncStorage.getItem('backupBannerRemindAt');
+        if (remindAt && new Date().getTime() < parseInt(remindAt, 10)) return;
+
+        setShowBackupBanner(true);
+      } catch (_) {}
+    };
+    checkBackupStatus();
+  }, []);
+
+  const handleBackupRemindTomorrow = async () => {
+    setShowBackupBanner(false);
+    const tomorrow = new Date().getTime() + 24 * 60 * 60 * 1000;
+    await AsyncStorage.setItem('backupBannerRemindAt', tomorrow.toString());
+  };
+
+  const handleBackupNever = async () => {
+    setShowBackupBanner(false);
+    await AsyncStorage.setItem('backupBannerDismissed', 'true');
+  };
 
   // Get auth token on mount
   useEffect(() => {
@@ -328,46 +360,28 @@ const Dashboard: React.FC = () => {
     try {
       if (!authToken) {
         console.log('No auth token, using default zero balances');
-        setUserBalance({
-          mcpgBalance: 0,
-          usdcBalance: 0,
-          usdtBalance: 0,
-          totalBalance: 0,
-        });
+        setUserBalance({ mcpgBalance: 0, usdcBalance: 0, usdtBalance: 0, totalBalance: 0 });
         return;
       }
 
-      // Fetch user profile to get balance
-      const profileResponse = await api.getProfile();
-      
-      if (profileResponse.success && profileResponse.data) {
-        const userData = profileResponse.data;
-        console.log('User profile data:', userData);
-        
-        // Extract balances from user data - adjust based on your API structure
-        const mcpgBalance = userData.mcpgBalance || userData.mcpg_balance || userData.balance?.mcpg || 0;
-        const usdcBalance = userData.usdcBalance || userData.usdc_balance || userData.balance?.usdc || 0;
-        const usdtBalance = userData.usdtBalance || userData.usdt_balance || userData.balance?.usdt || 0;
-        
-        const totalBalance = mcpgBalance + usdcBalance + usdtBalance;
-        
-        setUserBalance({
-          mcpgBalance,
-          usdcBalance,
-          usdtBalance,
-          totalBalance,
-        });
+      // Fetch real on-chain balances from wallet API
+      const result = await getWalletBalances();
 
-        // Update assets with user balances
+      if (result.success && result.data) {
+        const balancesMap = result.data.balances || result.data;
+        const mcpgBalance = parseFloat(balancesMap['MCGP'] || '0');
+        const usdcBalance = parseFloat(balancesMap['USDC'] || '0');
+        const usdtBalance = parseFloat(balancesMap['USDT'] || '0');
+        const totalBalance = mcpgBalance + usdcBalance + usdtBalance;
+
+        setUserBalance({ mcpgBalance, usdcBalance, usdtBalance, totalBalance });
         updateAssetsWithBalances(mcpgBalance, usdcBalance, usdtBalance);
       } else {
-        console.warn('Failed to fetch user profile:', profileResponse.message);
-        // Use zero balances as fallback
+        console.warn('Failed to fetch wallet balances:', result.message);
         updateAssetsWithBalances(0, 0, 0);
       }
     } catch (error) {
       console.error('Error fetching user balance:', error);
-      // Use zero balances as fallback
       updateAssetsWithBalances(0, 0, 0);
     }
   };
@@ -952,6 +966,38 @@ const Dashboard: React.FC = () => {
         </View>
       </View>
 
+      {/* Seed phrase backup banner */}
+      {showBackupBanner && (
+        <View style={styles.backupBanner}>
+          <Pressable
+            style={styles.backupBannerContent}
+            onPress={() => router.push('/wallet/seedphrase')}
+          >
+            <Icon name="shield" size={20} color="#92400E" />
+            <Text style={styles.backupBannerText}>
+              Back up your seed phrase to protect your funds
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              Alert.alert(
+                'Dismiss Reminder',
+                'When would you like to be reminded?',
+                [
+                  { text: 'Remind Tomorrow', onPress: handleBackupRemindTomorrow },
+                  { text: 'Never', style: 'destructive', onPress: handleBackupNever },
+                  { text: 'Cancel', style: 'cancel' },
+                ]
+              );
+            }}
+            style={styles.backupBannerClose}
+            hitSlop={8}
+          >
+            <Icon name="close" size={18} color="#92400E" />
+          </Pressable>
+        </View>
+      )}
+
       {/* Total Balance */}
       <View style={styles.balanceCard}>
         <Text style={styles.balanceLabel}>Total Balance</Text>
@@ -1241,6 +1287,31 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: GOLD_COLORS.background,
+  },
+  backupBanner: {
+    backgroundColor: '#FEF3C7',
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  backupBannerContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  backupBannerText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#92400E',
+    fontWeight: '500',
+  },
+  backupBannerClose: {
+    padding: 4,
   },
   loadingContainer: {
     flex: 1,

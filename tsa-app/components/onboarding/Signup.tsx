@@ -19,6 +19,9 @@ import PhoneNumber from "../country/phoneNumber";
 import { countries } from "../../constants/api/statesConstants";
 import CustomPickerWithSearch from "../country/dropdown";
 import Icon from "@expo/vector-icons/MaterialCommunityIcons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { generateWallet, storePrivateKey, storeMnemonic } from "../../services/wallet";
+import { registerWalletAddress } from "../../services/walletApi";
 
 interface Country {
   cca2: string;
@@ -74,10 +77,44 @@ const Signup = () => {
     };
 
     try {
-      const result = await signup(payLoad);
+      const result = await signup(payLoad) as any;
       if (result.success) {
+        // Auto-generate wallet for new user
+        try {
+          // Store the auth token first so wallet registration API works
+          if (result.data?.token) {
+            await AsyncStorage.setItem('authToken', result.data.token);
+          }
+          const wallet = await generateWallet();
+          await storePrivateKey(wallet.privateKey);
+          await storeMnemonic(wallet.mnemonic);
+          await AsyncStorage.setItem('walletAddress', wallet.address);
+          await AsyncStorage.setItem('seedPhraseBackedUp', 'false');
+          await registerWalletAddress(wallet.address);
+        } catch (walletErr) {
+          console.warn('Auto wallet generation failed, user can set up later:', walletErr);
+          setLoading(false);
+          router.push("/home");
+          return;
+        }
+
         setLoading(false);
-        router.push("/home");
+        // Ask user if they want to back up their seed phrase now
+        Alert.alert(
+          "Secure Your Wallet",
+          "Your wallet has been created. Would you like to back up your seed phrase now? This protects your funds if you lose your device.",
+          [
+            {
+              text: "Later",
+              style: "cancel",
+              onPress: () => router.push("/home"),
+            },
+            {
+              text: "Back Up Now",
+              onPress: () => router.push("/wallet/seedphrase"),
+            },
+          ]
+        );
       } else {
         setIsError(true);
         Alert.alert(
