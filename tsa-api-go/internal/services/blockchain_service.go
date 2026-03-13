@@ -1,6 +1,14 @@
 package services
 
-import "time"
+import (
+	"log"
+	"math/big"
+	"time"
+
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
+	"github.com/ojimcy/tsa-api-go/internal/config"
+)
 
 // TransactionReceipt represents a blockchain transaction receipt.
 type TransactionReceipt struct {
@@ -22,61 +30,131 @@ type GasPrices struct {
 
 // TransactionVerification represents the result of a transaction verification.
 type TransactionVerification struct {
-	TxHash    string `json:"txHash"`
-	Chain     string `json:"chain"`
-	Verified  bool   `json:"verified"`
-	Status    string `json:"status"`
-	Message   string `json:"message"`
+	TxHash   string `json:"txHash"`
+	Chain    string `json:"chain"`
+	Verified bool   `json:"verified"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
 }
 
-// BlockchainService provides mock blockchain interaction methods.
-type BlockchainService struct{}
-
-// NewBlockchainService creates a new BlockchainService.
-func NewBlockchainService() *BlockchainService {
-	return &BlockchainService{}
+// BlockchainService provides blockchain interaction methods via the Sonic RPC client.
+type BlockchainService struct {
+	client *blockchain.SonicClient
 }
 
-// GetTransactionReceipt returns a mock transaction receipt.
-func (bs *BlockchainService) GetTransactionReceipt(txHash, blockchain string) *TransactionReceipt {
+// NewBlockchainService creates a new BlockchainService connected to the Sonic network.
+func NewBlockchainService(cfg *config.Config) *BlockchainService {
+	client, err := blockchain.NewSonicClient(cfg)
+	if err != nil {
+		log.Printf("Warning: failed to initialize Sonic blockchain client: %v", err)
+		return &BlockchainService{}
+	}
+	log.Printf("Sonic blockchain client connected (chain ID: %s, RPC: %s)", client.ChainID().String(), cfg.SonicRPCURL)
+	return &BlockchainService{client: client}
+}
+
+// Client returns the underlying SonicClient (may be nil if connection failed).
+func (bs *BlockchainService) Client() *blockchain.SonicClient {
+	return bs.client
+}
+
+// GetTransactionReceipt fetches a real transaction receipt from the Sonic network.
+func (bs *BlockchainService) GetTransactionReceipt(txHash, chain string) *TransactionReceipt {
+	if bs.client == nil {
+		return &TransactionReceipt{
+			TxHash:     txHash,
+			Blockchain: chain,
+			Status:     "error",
+			Timestamp:  time.Now().Unix(),
+		}
+	}
+
+	receipt, err := bs.client.GetTransactionReceipt(txHash)
+	if err != nil {
+		return &TransactionReceipt{
+			TxHash:     txHash,
+			Blockchain: chain,
+			Status:     "not_found",
+			Timestamp:  time.Now().Unix(),
+		}
+	}
+
+	status := "failed"
+	if receipt.Status == types.ReceiptStatusSuccessful {
+		status = "confirmed"
+	}
+
 	return &TransactionReceipt{
 		TxHash:      txHash,
-		Blockchain:  blockchain,
-		Status:      "confirmed",
-		BlockNumber: 1234567,
-		GasUsed:     21000,
+		Blockchain:  chain,
+		Status:      status,
+		BlockNumber: receipt.BlockNumber.Int64(),
+		GasUsed:     int64(receipt.GasUsed),
 		Timestamp:   time.Now().Unix(),
 	}
 }
 
-// GetGasPrices returns mock gas prices for the specified chain.
+// GetGasPrices returns current gas prices from the Sonic network.
 func (bs *BlockchainService) GetGasPrices(chain string) *GasPrices {
-	prices := map[string]*GasPrices{
-		"ethereum": {Chain: "ethereum", Slow: 20, Average: 35, Fast: 60},
-		"bsc":      {Chain: "bsc", Slow: 3, Average: 5, Fast: 8},
-		"polygon":  {Chain: "polygon", Slow: 30, Average: 50, Fast: 80},
-		"solana":   {Chain: "solana", Slow: 0.000005, Average: 0.000005, Fast: 0.000005},
+	if bs.client == nil {
+		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
 
-	if gp, ok := prices[chain]; ok {
-		return gp
+	gasPrice, err := bs.client.SuggestGasPrice()
+	if err != nil {
+		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
+
+	// Convert wei to gwei
+	gwei := new(big.Float).Quo(
+		new(big.Float).SetInt(gasPrice),
+		new(big.Float).SetFloat64(1e9),
+	)
+	avg, _ := gwei.Float64()
 
 	return &GasPrices{
 		Chain:   chain,
-		Slow:    10,
-		Average: 20,
-		Fast:    40,
+		Slow:    avg * 0.8,
+		Average: avg,
+		Fast:    avg * 1.5,
 	}
 }
 
-// VerifyTransaction returns a mock transaction verification.
+// VerifyTransaction verifies a transaction on the Sonic network.
 func (bs *BlockchainService) VerifyTransaction(txHash, chain string) *TransactionVerification {
+	if bs.client == nil {
+		return &TransactionVerification{
+			TxHash:  txHash,
+			Chain:   chain,
+			Status:  "error",
+			Message: "blockchain client not available",
+		}
+	}
+
+	receipt, err := bs.client.GetTransactionReceipt(txHash)
+	if err != nil {
+		return &TransactionVerification{
+			TxHash:   txHash,
+			Chain:    chain,
+			Verified: false,
+			Status:   "not_found",
+			Message:  "Transaction not found or not yet mined",
+		}
+	}
+
+	verified := receipt.Status == types.ReceiptStatusSuccessful
+	status := "failed"
+	message := "Transaction failed"
+	if verified {
+		status = "confirmed"
+		message = "Transaction verified successfully"
+	}
+
 	return &TransactionVerification{
 		TxHash:   txHash,
 		Chain:    chain,
-		Verified: true,
-		Status:   "confirmed",
-		Message:  "Transaction verified successfully",
+		Verified: verified,
+		Status:   status,
+		Message:  message,
 	}
 }

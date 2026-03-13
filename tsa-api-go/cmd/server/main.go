@@ -56,7 +56,7 @@ func main() {
 
 	// Initialize services
 	priceService := services.NewPriceService()
-	blockchainService := services.NewBlockchainService()
+	blockchainService := services.NewBlockchainService(cfg)
 
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg)
