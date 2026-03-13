@@ -32,6 +32,7 @@ func AutoMigrate() error {
 		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},
+		&models.WalletTransaction{},
 		&models.VerificationLog{},
 	)
 }

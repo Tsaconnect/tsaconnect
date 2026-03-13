@@ -124,4 +124,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		cartGroup.GET("/abandoned", adminAuth, h.GetAbandonedCarts)
 		cartGroup.POST("/cleanup", adminAuth, h.CleanupExpiredCarts)
 	}
+
+	// Wallet routes
+	walletGroup := api.Group("/wallet")
+	walletGroup.Use(auth)
+	{
+		walletGroup.POST("/register", h.RegisterWalletAddress)
+		walletGroup.GET("/balances", h.GetWalletBalances)
+		walletGroup.POST("/prepare-tx", h.PrepareSendTransaction)
+		walletGroup.POST("/submit-tx", h.SubmitTransaction)
+		walletGroup.GET("/transactions", h.GetTransactionHistory)
+		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
+	}
 }
