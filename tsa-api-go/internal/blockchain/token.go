@@ -13,13 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TokenInfo describes a supported ERC-20 token.
-type TokenInfo struct {
-	Address  string `json:"address"`
-	Symbol   string `json:"symbol"`
-	Decimals uint8  `json:"decimals"`
-}
-
 // UnsignedTx represents an unsigned transaction ready for client-side signing.
 type UnsignedTx struct {
 	Nonce    uint64 `json:"nonce"`
@@ -85,23 +78,6 @@ func (c *EVMClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.In
 	}
 
 	return balance, nil
-}
-
-// GetAllBalances returns token balances for the given tokens.
-// The map keys are token symbols (e.g. "MCGP", "USDT", "USDC").
-func (c *EVMClient) GetAllBalances(walletAddress string, tokens []TokenInfo) (map[string]*big.Int, error) {
-	balances := make(map[string]*big.Int)
-
-	for _, token := range tokens {
-		balance, err := c.GetTokenBalance(token.Address, walletAddress)
-		if err != nil {
-			balances[token.Symbol] = big.NewInt(0)
-			continue
-		}
-		balances[token.Symbol] = balance
-	}
-
-	return balances, nil
 }
 
 // PrepareNativeTransfer builds an unsigned native token transfer transaction and returns it as JSON bytes.
