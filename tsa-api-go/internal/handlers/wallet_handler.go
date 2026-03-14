@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -178,7 +179,17 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		}
 
 		// ERC-20 token balances
-		tokenBalances, err := client.GetAllBalances(user.WalletAddress)
+		tokens := []blockchain.TokenInfo{}
+		if h.Config.MCGPTokenAddress != "" {
+			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.MCGPTokenAddress, Symbol: "MCGP", Decimals: 18})
+		}
+		if h.Config.USDTTokenAddress != "" {
+			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.USDTTokenAddress, Symbol: "USDT", Decimals: 6})
+		}
+		if h.Config.USDCTokenAddress != "" {
+			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.USDCTokenAddress, Symbol: "USDC", Decimals: 6})
+		}
+		tokenBalances, err := client.GetAllBalances(user.WalletAddress, tokens)
 		if err == nil {
 			for symbol, balance := range tokenBalances {
 				decimals := 18
