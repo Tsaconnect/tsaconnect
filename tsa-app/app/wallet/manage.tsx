@@ -11,7 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
@@ -25,8 +25,9 @@ import { registerWalletAddress } from '../../services/walletApi';
 type Mode = 'menu' | 'import';
 
 const WalletManage = () => {
+  const { mode: initialMode } = useLocalSearchParams<{ mode?: string }>();
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<Mode>('menu');
+  const [mode, setMode] = useState<Mode>(initialMode === 'import' ? 'import' : 'menu');
   const [mnemonicInput, setMnemonicInput] = useState('');
   const [error, setError] = useState('');
 

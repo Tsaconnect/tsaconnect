@@ -1,10 +1,11 @@
 // services/wallet.ts
 // Core crypto wallet service for TSA Connect
+import 'react-native-get-random-values';
 import { ethers } from 'ethers';
-import * as Keychain from 'react-native-keychain';
+import * as SecureStore from 'expo-secure-store';
 
-const WALLET_SERVICE = 'tsa-wallet-key';
-const MNEMONIC_SERVICE = 'tsa-wallet-mnemonic';
+const WALLET_KEY = 'tsa-wallet-key';
+const MNEMONIC_KEY = 'tsa-wallet-mnemonic';
 
 // Sonic testnet configuration
 export const SONIC_TESTNET = {
@@ -39,46 +40,25 @@ export async function generateWallet(): Promise<WalletInfo> {
 }
 
 /**
- * Store private key in secure storage (Keychain / Keystore)
- * Uses biometric or device passcode protection
+ * Store private key in secure storage
  */
 export async function storePrivateKey(privateKey: string): Promise<void> {
-  await Keychain.setGenericPassword('wallet', privateKey, {
-    service: WALLET_SERVICE,
-    accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY_OR_DEVICE_PASSCODE,
-    accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-  });
+  await SecureStore.setItemAsync(WALLET_KEY, privateKey);
 }
 
 /**
  * Store mnemonic phrase in secure storage (separate from private key)
- * This is stored so the user can view their backup phrase later
  */
 export async function storeMnemonic(mnemonic: string): Promise<void> {
-  await Keychain.setGenericPassword('mnemonic', mnemonic, {
-    service: MNEMONIC_SERVICE,
-    accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY_OR_DEVICE_PASSCODE,
-    accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-  });
+  await SecureStore.setItemAsync(MNEMONIC_KEY, mnemonic);
 }
 
 /**
  * Retrieve private key from secure storage
- * Triggers biometric prompt for authorization
  */
 export async function getPrivateKey(): Promise<string | null> {
   try {
-    const credentials = await Keychain.getGenericPassword({
-      service: WALLET_SERVICE,
-      authenticationPrompt: {
-        title: 'Authenticate to access wallet',
-      },
-    });
-
-    if (credentials) {
-      return credentials.password;
-    }
-    return null;
+    return await SecureStore.getItemAsync(WALLET_KEY);
   } catch (error) {
     console.error('Failed to retrieve private key:', error);
     return null;
@@ -87,21 +67,10 @@ export async function getPrivateKey(): Promise<string | null> {
 
 /**
  * Retrieve stored mnemonic phrase from secure storage
- * Triggers biometric prompt for authorization
  */
 export async function getMnemonic(): Promise<string | null> {
   try {
-    const credentials = await Keychain.getGenericPassword({
-      service: MNEMONIC_SERVICE,
-      authenticationPrompt: {
-        title: 'Authenticate to view seed phrase',
-      },
-    });
-
-    if (credentials) {
-      return credentials.password;
-    }
-    return null;
+    return await SecureStore.getItemAsync(MNEMONIC_KEY);
   } catch (error) {
     console.error('Failed to retrieve mnemonic:', error);
     return null;
@@ -112,13 +81,12 @@ export async function getMnemonic(): Promise<string | null> {
  * Delete private key and mnemonic from secure storage
  */
 export async function deletePrivateKey(): Promise<void> {
-  await Keychain.resetGenericPassword({ service: WALLET_SERVICE });
-  await Keychain.resetGenericPassword({ service: MNEMONIC_SERVICE });
+  await SecureStore.deleteItemAsync(WALLET_KEY);
+  await SecureStore.deleteItemAsync(MNEMONIC_KEY);
 }
 
 /**
  * Sign a transaction with the stored private key
- * Triggers biometric authentication before signing
  */
 export async function signTransaction(unsignedTx: ethers.TransactionLike): Promise<string> {
   const privateKey = await getPrivateKey();
@@ -133,7 +101,6 @@ export async function signTransaction(unsignedTx: ethers.TransactionLike): Promi
 
 /**
  * Import a wallet from an existing mnemonic (seed phrase)
- * Validates the mnemonic, derives the wallet, and stores the key securely
  */
 export async function importWalletFromMnemonic(mnemonic: string): Promise<{ address: string }> {
   const trimmed = mnemonic.trim().toLowerCase();

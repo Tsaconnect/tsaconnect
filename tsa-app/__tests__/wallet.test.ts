@@ -3,7 +3,7 @@
 import { ethers } from 'ethers';
 
 // We test the pure logic functions without native module dependencies
-// (react-native-keychain is mocked away since it requires native bindings)
+// (expo-secure-store is mocked away since it requires native bindings)
 
 describe('Wallet Service - Core Logic', () => {
   describe('generateWallet', () => {

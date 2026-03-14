@@ -7,34 +7,108 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
-import { getMnemonic } from '../../services/wallet';
-import { confirmSeedPhraseBackup } from '../../services/walletApi';
+import { ethers } from 'ethers';
+import {
+  getMnemonic,
+  generateWallet,
+  storePrivateKey,
+  storeMnemonic,
+  importWalletFromMnemonic,
+} from '../../services/wallet';
+import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/walletApi';
 
-type Step = 'warning' | 'display' | 'verify' | 'success';
+type Step = 'loading' | 'setup' | 'warning' | 'display' | 'verify' | 'success';
 
 const SeedPhrase = () => {
-  const [step, setStep] = useState<Step>('warning');
+  const [step, setStep] = useState<Step>('loading');
   const [words, setWords] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [mnemonicInput, setMnemonicInput] = useState('');
 
   // Verification state: 4 random word indices to verify
   const [verifyIndices, setVerifyIndices] = useState<number[]>([]);
   const [userSelections, setUserSelections] = useState<Record<number, string>>({});
   const [shuffledOptions, setShuffledOptions] = useState<Record<number, string[]>>({});
+  const [copied, setCopied] = useState(false);
+
+  // On mount, check if a valid wallet already exists
+  useEffect(() => {
+    (async () => {
+      const mnemonic = await getMnemonic();
+      if (mnemonic && ethers.Mnemonic.isValidMnemonic(mnemonic)) {
+        setStep('warning');
+      } else {
+        setStep('setup');
+      }
+    })();
+  }, []);
+
+  const handleCreateNewWallet = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const wallet = await generateWallet();
+      await storePrivateKey(wallet.privateKey);
+      await storeMnemonic(wallet.mnemonic);
+      await AsyncStorage.setItem('walletAddress', wallet.address);
+      await AsyncStorage.setItem('seedPhraseBackedUp', 'false');
+      try {
+        await registerWalletAddress(wallet.address);
+      } catch (_) {}
+      setWords(wallet.mnemonic.split(' '));
+      setStep('display');
+    } catch (err: any) {
+      setError(err.message || 'Failed to create wallet.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleImportWallet = async () => {
+    if (!mnemonicInput.trim()) {
+      setError('Please enter your seed phrase.');
+      return;
+    }
+    const inputWords = mnemonicInput.trim().split(/\s+/);
+    if (inputWords.length !== 12) {
+      setError('Seed phrase must be exactly 12 words.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const { address } = await importWalletFromMnemonic(mnemonicInput);
+      await AsyncStorage.setItem('walletAddress', address);
+      await AsyncStorage.setItem('seedPhraseBackedUp', 'true');
+      try {
+        await registerWalletAddress(address);
+      } catch (_) {}
+      router.replace('/wallet/home');
+    } catch (err: any) {
+      setError(err.message || 'Failed to import wallet. Check your seed phrase.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadMnemonic = async () => {
     setLoading(true);
     try {
       const mnemonic = await getMnemonic();
-      if (mnemonic) {
+      if (mnemonic && ethers.Mnemonic.isValidMnemonic(mnemonic)) {
         setWords(mnemonic.split(' '));
       } else {
-        setError('Could not retrieve seed phrase. Authentication may have failed.');
+        // Mnemonic missing or corrupted — show setup
+        setStep('setup');
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load seed phrase.');
@@ -123,6 +197,85 @@ const SeedPhrase = () => {
     }
   };
 
+  // Loading check
+  if (step === 'loading') {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+      </View>
+    );
+  }
+
+  // Step 0: No wallet found — offer create or import
+  if (step === 'setup') {
+    return (
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+              <Text style={styles.backText}>Back</Text>
+            </TouchableOpacity>
+            <Text style={styles.title}>Set Up Wallet</Text>
+            <Text style={styles.subtitle}>
+              No wallet found on this device. Create a new wallet or import an existing one using your seed phrase.
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.primaryButton, loading && styles.disabledButton]}
+            onPress={handleCreateNewWallet}
+            disabled={loading}
+          >
+            {loading && !mnemonicInput.trim() ? (
+              <ActivityIndicator color={COLORS.white} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Create New Wallet</Text>
+            )}
+          </TouchableOpacity>
+
+          <View style={styles.separatorRow}>
+            <View style={styles.separatorLine} />
+            <Text style={styles.separatorText}>OR</Text>
+            <View style={styles.separatorLine} />
+          </View>
+
+          <Text style={styles.label}>Import Existing Wallet</Text>
+          <TextInput
+            style={styles.mnemonicInput}
+            placeholder="Enter your 12-word seed phrase separated by spaces"
+            placeholderTextColor={COLORS.gray}
+            value={mnemonicInput}
+            onChangeText={(text) => {
+              setMnemonicInput(text);
+              setError('');
+            }}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            textAlignVertical="top"
+          />
+
+          <TouchableOpacity
+            style={[styles.secondaryButton, loading && styles.disabledButton]}
+            onPress={handleImportWallet}
+            disabled={loading}
+          >
+            {loading && mnemonicInput.trim() ? (
+              <ActivityIndicator color={COLORS.primary} />
+            ) : (
+              <Text style={styles.secondaryButtonText}>Restore Wallet</Text>
+            )}
+          </TouchableOpacity>
+
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
+
   // Step 1: Warning
   if (step === 'warning') {
     return (
@@ -191,6 +344,19 @@ const SeedPhrase = () => {
               </View>
             ))}
           </View>
+
+          <TouchableOpacity
+            style={styles.copyButton}
+            onPress={async () => {
+              await Clipboard.setStringAsync(words.join(' '));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            }}
+          >
+            <Text style={styles.copyButtonText}>
+              {copied ? 'Copied!' : 'Copy to Clipboard'}
+            </Text>
+          </TouchableOpacity>
 
           <TouchableOpacity style={styles.primaryButton} onPress={handleProceedToVerify}>
             <Text style={styles.primaryButtonText}>I've Written It Down</Text>
@@ -269,7 +435,7 @@ const SeedPhrase = () => {
           Your wallet is now fully secured. Keep your seed phrase safe and never share it.
         </Text>
         <TouchableOpacity
-          style={styles.primaryButton}
+          style={[styles.primaryButton, { width: '100%' }]}
           onPress={() => router.replace('/wallet/home')}
         >
           <Text style={styles.primaryButtonText}>Go to Wallet</Text>
@@ -361,6 +527,50 @@ const styles = StyleSheet.create({
     marginTop: 12,
     textAlign: 'center',
   },
+  secondaryButton: {
+    backgroundColor: COLORS.white,
+    paddingVertical: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+  },
+  secondaryButtonText: {
+    ...FONTS.h4,
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  separatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 24,
+  },
+  separatorLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLORS.lightGray,
+  },
+  separatorText: {
+    ...FONTS.body4,
+    color: COLORS.gray,
+    marginHorizontal: 16,
+  },
+  label: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: COLORS.dark,
+    marginBottom: 8,
+  },
+  mnemonicInput: {
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    borderRadius: 12,
+    padding: 16,
+    ...FONTS.body3,
+    color: COLORS.dark,
+    minHeight: 120,
+    marginBottom: 16,
+  },
   // Word grid
   wordGrid: {
     flexDirection: 'row',
@@ -390,6 +600,16 @@ const styles = StyleSheet.create({
     ...FONTS.body3,
     color: COLORS.dark,
     fontWeight: '500',
+  },
+  copyButton: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  copyButtonText: {
+    ...FONTS.body4,
+    color: COLORS.primary,
+    fontWeight: '600',
   },
   // Verify
   verifyGroup: {
