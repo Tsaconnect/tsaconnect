@@ -47,7 +47,7 @@ const ReceiveToken = () => {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.subtitle}>
-          Share your address or QR code to receive tokens on the Sonic network.
+          Share your address or QR code to receive tokens on supported networks (BNB Smart Chain or Sonic).
         </Text>
       </View>
 
@@ -88,8 +88,8 @@ const ReceiveToken = () => {
 
       <View style={styles.infoBox}>
         <Text style={styles.infoText}>
-          Only send tokens on the Sonic network to this address. Sending tokens from other
-          networks may result in permanent loss.
+          Only send tokens on supported networks (BNB Smart Chain or Sonic) to this address.
+          Sending tokens on unsupported networks may result in permanent loss.
         </Text>
       </View>
     </View>
