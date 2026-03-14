@@ -2,26 +2,19 @@ package blockchain
 
 import (
 	"testing"
-
-	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
-func testConfig() *config.Config {
-	return &config.Config{
-		SonicRPCURL:         "https://rpc.testnet.soniclabs.com",
-		SonicChainID:        14601,
-		MCGPTokenAddress:    "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
-		USDTTokenAddress:    "",
-		USDCTokenAddress:    "",
-		SystemWalletAddress: "0xaF326D5D242C9A55590540f14658adDDd3586A8d",
-	}
-}
+const (
+	testRPCURL  = "https://rpc.testnet.soniclabs.com"
+	testChainID = 14601
+	testMCGP    = "0x517600323e5E2938207fA2e2e915B9D80e5B2b21"
+	testSystem  = "0xaF326D5D242C9A55590540f14658adDDd3586A8d"
+)
 
-func TestNewSonicClient(t *testing.T) {
-	cfg := testConfig()
-	client, err := NewSonicClient(cfg)
+func TestNewEVMClient(t *testing.T) {
+	client, err := NewEVMClient(testRPCURL, testChainID)
 	if err != nil {
-		t.Fatalf("NewSonicClient failed: %v", err)
+		t.Fatalf("NewEVMClient failed: %v", err)
 	}
 	if client == nil {
 		t.Fatal("expected non-nil client")
@@ -32,13 +25,12 @@ func TestNewSonicClient(t *testing.T) {
 }
 
 func TestGetBalance(t *testing.T) {
-	cfg := testConfig()
-	client, err := NewSonicClient(cfg)
+	client, err := NewEVMClient(testRPCURL, testChainID)
 	if err != nil {
-		t.Fatalf("NewSonicClient failed: %v", err)
+		t.Fatalf("NewEVMClient failed: %v", err)
 	}
 
-	balance, err := client.GetBalance(cfg.SystemWalletAddress)
+	balance, err := client.GetBalance(testSystem)
 	if err != nil {
 		t.Fatalf("GetBalance failed: %v", err)
 	}
@@ -49,13 +41,12 @@ func TestGetBalance(t *testing.T) {
 }
 
 func TestGetNonce(t *testing.T) {
-	cfg := testConfig()
-	client, err := NewSonicClient(cfg)
+	client, err := NewEVMClient(testRPCURL, testChainID)
 	if err != nil {
-		t.Fatalf("NewSonicClient failed: %v", err)
+		t.Fatalf("NewEVMClient failed: %v", err)
 	}
 
-	nonce, err := client.GetNonce(cfg.SystemWalletAddress)
+	nonce, err := client.GetNonce(testSystem)
 	if err != nil {
 		t.Fatalf("GetNonce failed: %v", err)
 	}
@@ -63,10 +54,9 @@ func TestGetNonce(t *testing.T) {
 }
 
 func TestSuggestGasPrice(t *testing.T) {
-	cfg := testConfig()
-	client, err := NewSonicClient(cfg)
+	client, err := NewEVMClient(testRPCURL, testChainID)
 	if err != nil {
-		t.Fatalf("NewSonicClient failed: %v", err)
+		t.Fatalf("NewEVMClient failed: %v", err)
 	}
 
 	gasPrice, err := client.SuggestGasPrice()
