@@ -12,9 +12,12 @@ import {
   ActivityIndicator,
   Modal,
   RefreshControl,
+  Image,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { getWalletBalances } from '../services/walletApi';
+import { useTokens } from '../hooks/useTokens';
+import { CHAINS, type ChainKey } from '../constants/chains';
 
 // Types and interfaces
 interface Asset {
@@ -23,10 +26,12 @@ interface Asset {
   name: string;
   balance: number;
   usdValue: number;
+  iconColor: string;
+  iconUrl?: string;
   details?: {
     type: string;
-    chain?: string;
-    address?: string;
+    chain: string;
+    chainKey: ChainKey;
   };
 }
 
@@ -71,173 +76,165 @@ const AssetCard: React.FC<AssetCardProps> = ({
 
   const heightInterpolation = animation.interpolate({
     inputRange: [0, 1],
-    outputRange: [70, 160],
+    outputRange: [0, 160],
   });
 
   return (
-    <TouchableOpacity
-      onPress={onCardPress}
-      activeOpacity={0.7}
-      style={[
-        styles.assetCardContainer,
-        isSelected && styles.selectedAssetCardContainer,
-      ]}
-    >
-      <Animated.View style={[styles.assetCard, { height: heightInterpolation }]}>
-        {/* Asset Header - Always Visible */}
+    <View style={[styles.assetCardContainer, isSelected && styles.selectedAssetCardContainer]}>
+      <TouchableOpacity
+        onPress={onCardPress}
+        activeOpacity={0.7}
+        style={styles.assetCard}
+      >
+        {/* Asset Header Row */}
         <View style={styles.assetHeader}>
           <View style={styles.assetInfo}>
-            <View style={[
-              styles.assetIcon,
-              isSelected && styles.selectedAssetIcon
-            ]}>
-              <Text style={styles.assetIconText}>
-                {asset.symbol.charAt(0)}
-              </Text>
+            <View style={[styles.assetIcon, { backgroundColor: asset.iconColor + '20' }, isSelected && { backgroundColor: asset.iconColor + '40' }]}>
+              {asset.iconUrl ? (
+                <Image source={{ uri: asset.iconUrl }} style={styles.assetIconImage} />
+              ) : (
+                <Text style={[styles.assetIconText, { color: asset.iconColor }]}>
+                  {asset.symbol.charAt(0)}
+                </Text>
+              )}
             </View>
             <View style={styles.assetTextInfo}>
               <View style={styles.assetTitleRow}>
-                <Text style={[
-                  styles.assetSymbol,
-                  isSelected && styles.selectedAssetSymbol
-                ]}>
-                  {asset.symbol}
-                </Text>
+                <Text style={styles.assetSymbol}>{asset.symbol}</Text>
                 {isSelected && (
                   <View style={styles.selectedBadge}>
-                    <Icon name="check-circle" size={14} color="#000000" />
+                    <Icon name="check-circle" size={12} color="#000" />
                     <Text style={styles.selectedBadgeText}>Selected</Text>
                   </View>
                 )}
               </View>
               <Text style={styles.assetName}>{asset.name}</Text>
+              {asset.details?.chain && (
+                <View style={styles.chainTag}>
+                  <View style={[styles.chainDot, { backgroundColor: asset.details.chainKey ? CHAINS[asset.details.chainKey].iconColor : '#999' }]} />
+                  <Text style={styles.chainTagText}>{asset.details.chain}</Text>
+                </View>
+              )}
             </View>
           </View>
-
           <View style={styles.rightSection}>
             <View style={styles.assetBalanceInfo}>
               <Text style={styles.assetBalance}>
-                {isHidden ? '••••••' : asset.balance.toFixed(2)}
+                {isHidden ? '••••' : asset.balance.toFixed(asset.details?.type === 'Native Token' ? 4 : 2)}
               </Text>
               <Text style={styles.assetUSDValue}>
                 {isHidden ? '••••' : `$${asset.usdValue.toLocaleString()}`}
               </Text>
             </View>
-
-            {/* Radio Button for Selection */}
             <TouchableOpacity
-              onPress={(e) => {
-                e.stopPropagation();
-                onRadioSelect();
-              }}
-              style={styles.radioButtonContainer}
-              activeOpacity={0.7}
+              onPress={onRadioSelect}
+              style={[styles.radioButtonContainer, isSelected ? styles.radioButtonSelected : styles.radioButtonUnselected]}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              {isSelected ? (
-                <View style={styles.radioButtonSelected}>
-                  <Icon name="radio-button-checked" size={24} color={GOLD_COLORS.primary} />
-                </View>
-              ) : (
-                <View style={styles.radioButtonUnselected}>
-                  <Icon name="radio-button-unchecked" size={24} color="#CCCCCC" />
-                </View>
-              )}
+              <Icon
+                name={isSelected ? 'radio-button-checked' : 'radio-button-unchecked'}
+                size={24}
+                color={isSelected ? GOLD_COLORS.dark : '#C7C7CC'}
+              />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Expanded Details */}
-        {isExpanded && (
+        {/* Expandable Details */}
+        <Animated.View style={{ height: heightInterpolation, opacity: animation, overflow: 'hidden' }}>
           <View style={styles.assetDetails}>
             <View style={styles.detailSection}>
               <Text style={styles.detailSectionTitle}>Asset Details</Text>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Type:</Text>
-                <Text style={styles.detailValue}>{asset.details?.type || 'N/A'}</Text>
+                <Text style={styles.detailValue}>{asset.details?.type}</Text>
               </View>
-              {asset.details?.chain && (
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Chain:</Text>
-                  <Text style={styles.detailValue}>{asset.details.chain}</Text>
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Chain:</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 2, justifyContent: 'flex-end' }}>
+                  <View style={{
+                    width: 8, height: 8, borderRadius: 4,
+                    backgroundColor: asset.details?.chainKey ? CHAINS[asset.details.chainKey].iconColor : '#999',
+                    marginRight: 6,
+                  }} />
+                  <Text style={styles.detailValue}>{asset.details?.chain}</Text>
                 </View>
-              )}
-              {asset.details?.address && (
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Address:</Text>
-                  <Text style={styles.detailAddress} numberOfLines={1}>
-                    {asset.details.address}
-                  </Text>
-                </View>
-              )}
+              </View>
             </View>
-
-            {/* Select Button - Only show if not already selected */}
-            {!isSelected && (
+            {!isSelected ? (
               <TouchableOpacity
                 onPress={onSelectPress}
                 style={styles.selectButton}
                 activeOpacity={0.8}
               >
-                <Icon name="check-circle" size={20} color="#000000" style={styles.selectIcon} />
-                <Text style={styles.selectButtonText}>Select {asset.symbol}</Text>
+                <Icon name="check-circle" size={20} color="#000" style={styles.selectIcon} />
+                <Text style={styles.selectButtonText}>Select as Debit Account</Text>
               </TouchableOpacity>
-            )}
-
-            {/* Already Selected Indicator */}
-            {isSelected && (
+            ) : (
               <View style={styles.alreadySelected}>
-                <Icon name="verified" size={24} color={GOLD_COLORS.primary} />
+                <Icon name="verified" size={20} color={GOLD_COLORS.dark} />
                 <Text style={styles.alreadySelectedText}>Currently Selected</Text>
               </View>
             )}
           </View>
-        )}
-      </Animated.View>
-    </TouchableOpacity>
+        </Animated.View>
+      </TouchableOpacity>
+    </View>
   );
 };
 
-
 const WalletScreen: React.FC = () => {
-  // Default empty assets (shown while loading)
-  const defaultAssets: Asset[] = [
-    {
-      id: '1',
-      symbol: 'MCGP',
-      name: 'MCG Protocol',
-      balance: 0,
-      usdValue: 0,
-      details: {
-        type: 'Gold-Backed Token',
-        chain: 'Sonic',
-      },
-    },
-    {
-      id: '2',
-      symbol: 'USDT',
-      name: 'Tether',
-      balance: 0,
-      usdValue: 0,
-      details: {
-        type: 'Stablecoin',
-        chain: 'Sonic',
-      },
-    },
-    {
-      id: '3',
-      symbol: 'USDC',
-      name: 'USD Coin',
-      balance: 0,
-      usdValue: 0,
-      details: {
-        type: 'Stablecoin',
-        chain: 'Sonic',
-      },
-    },
-  ];
+  const { tokens, tokenList } = useTokens();
+
+  // Build asset list from token config + chain config (including native tokens)
+  const buildAssetList = useCallback((): Asset[] => {
+    const assetList: Asset[] = [];
+    let idCounter = 1;
+
+    // Add native tokens for each chain
+    for (const [chainKey, chain] of Object.entries(CHAINS)) {
+      assetList.push({
+        id: String(idCounter++),
+        symbol: chain.nativeCurrency.symbol,
+        name: `${chain.name} Native`,
+        balance: 0,
+        usdValue: 0,
+        iconColor: chain.iconColor,
+        iconUrl: chain.iconUrl,
+        details: {
+          type: 'Native Token',
+          chain: chain.name,
+          chainKey: chainKey as ChainKey,
+        },
+      });
+    }
+
+    // Add ERC-20 tokens per chain they support
+    for (const token of tokenList) {
+      for (const chainKey of token.chains) {
+        const chain = CHAINS[chainKey];
+        assetList.push({
+          id: String(idCounter++),
+          symbol: token.symbol,
+          name: token.name,
+          balance: 0,
+          usdValue: 0,
+          iconColor: token.iconColor,
+          iconUrl: token.iconUrl,
+          details: {
+            type: token.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Stablecoin',
+            chain: chain.name,
+            chainKey,
+          },
+        });
+      }
+    }
+
+    return assetList;
+  }, [tokenList]);
 
   // State Management
-  const [assets, setAssets] = useState<Asset[]>(defaultAssets);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [isAssetListExpanded, setIsAssetListExpanded] = useState(false);
   const [expandedAssetId, setExpandedAssetId] = useState<string | null>(null);
@@ -254,35 +251,47 @@ const WalletScreen: React.FC = () => {
 
   // Fetch wallet balances from API
   const fetchBalances = useCallback(async () => {
+    const assetList = buildAssetList();
     try {
       const result = await getWalletBalances();
       if (result.success && result.data) {
-        const balancesMap = result.data.balances || result.data;
-        const updatedAssets = defaultAssets.map(asset => {
-          const rawBalance = balancesMap[asset.symbol];
+        // API returns: { balances: { sonic: { S: "0", MCGP: "0", ... }, bsc: { tBNB: "0.000145", ... } } }
+        const balancesData = result.data.balances || result.data;
+
+        const updatedAssets = assetList.map(asset => {
+          const chainKey = asset.details?.chainKey;
+          if (!chainKey) return asset;
+
+          const chainBalances = balancesData[chainKey];
+          if (!chainBalances) return asset;
+
+          const rawBalance = chainBalances[asset.symbol];
           const balance = rawBalance ? parseFloat(rawBalance) : 0;
-          // For stablecoins, usdValue ≈ balance
-          const usdValue = balance * (asset.symbol === 'MCGP' ? 1.0 : 1.0);
+          // For stablecoins, usdValue ≈ balance. For others, use balance as placeholder.
+          const usdValue = balance * 1.0;
           return { ...asset, balance, usdValue };
         });
+
         setAssets(updatedAssets);
-        // Select USDT by default or the first asset with balance
-        const usdt = updatedAssets.find(a => a.symbol === 'USDT');
+
+        // Select first asset with a balance, or USDT on Sonic, or the first asset
         const withBalance = updatedAssets.find(a => a.balance > 0);
+        const usdt = updatedAssets.find(a => a.symbol === 'USDT' && a.details?.chainKey === 'sonic');
         handleAssetSelect(withBalance || usdt || updatedAssets[0], false);
       } else {
-        // API failed — select USDT with zero balance
-        const usdt = defaultAssets.find(a => a.symbol === 'USDT');
+        setAssets(assetList);
+        const usdt = assetList.find(a => a.symbol === 'USDT' && a.details?.chainKey === 'sonic');
         if (usdt) handleAssetSelect(usdt, false);
       }
     } catch (err) {
       console.error('Failed to fetch wallet balances:', err);
-      const usdt = defaultAssets.find(a => a.symbol === 'USDT');
+      setAssets(assetList);
+      const usdt = assetList.find(a => a.symbol === 'USDT' && a.details?.chainKey === 'sonic');
       if (usdt) handleAssetSelect(usdt, false);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [buildAssetList]);
 
   useEffect(() => {
     fetchBalances();
@@ -290,9 +299,6 @@ const WalletScreen: React.FC = () => {
 
   // Handle asset selection via radio button or select button
   const handleAssetSelect = (asset: Asset, shouldCollapseList: boolean = true) => {
-    console.log(`Asset selected via radio: ${asset.symbol}`);
-
-    // Animate selection feedback
     selectionAnimation.setValue(0);
     Animated.spring(selectionAnimation, {
       toValue: 1,
@@ -301,38 +307,26 @@ const WalletScreen: React.FC = () => {
       useNativeDriver: true,
     }).start();
 
-    // Set new selected asset - This instantly replaces any previous selection
     setSelectedAsset(asset);
-
-    // Collapse any expanded asset card (optional)
     setExpandedAssetId(null);
 
-    // Collapse the entire asset list if needed
     if (shouldCollapseList && isAssetListExpanded) {
       collapseAssetList();
     }
-
-    // Log selection for debugging
-    console.log(`UI Updated: Selected ${asset.symbol}, Balance: ${asset.balance}`);
   };
 
-  // Handle radio button selection (different from card tap)
   const handleRadioSelect = (asset: Asset) => {
-    handleAssetSelect(asset, false); // Don't collapse list on radio selection
+    handleAssetSelect(asset, false);
   };
 
-  // Handle card press for expansion (not for selection)
   const handleAssetCardPress = (assetId: string) => {
     if (expandedAssetId === assetId) {
-      // Collapse if already expanded
       setExpandedAssetId(null);
     } else {
-      // Expand new asset and collapse previous
       setExpandedAssetId(assetId);
     }
   };
 
-  // Toggle asset list expansion
   const toggleAssetList = () => {
     if (isAssetListExpanded) {
       collapseAssetList();
@@ -375,7 +369,6 @@ const WalletScreen: React.FC = () => {
     });
   };
 
-  // Refresh assets from API
   const refreshAssets = async () => {
     setIsRefreshing(true);
     await fetchBalances();
@@ -383,9 +376,10 @@ const WalletScreen: React.FC = () => {
   };
 
   // Animation interpolations
+  const maxListHeight = Math.min(assets.length * 80 + 100, 500);
   const listHeight = listAnimation.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, 380],
+    outputRange: [0, maxListHeight],
   });
 
   const rotateIcon = rotationAnimation.interpolate({
@@ -398,41 +392,37 @@ const WalletScreen: React.FC = () => {
     outputRange: [0.95, 1.05, 1],
   });
 
-  // Render asset icon
-  const renderAssetIcon = (symbol: string, size: number = 40) => (
-    <View style={[styles.selectorIcon, { width: size, height: size, borderRadius: size / 2 }]}>
-      <Text style={[styles.selectorIconText, { fontSize: size / 2 }]}>
-        {symbol.charAt(0)}
-      </Text>
+  // Render asset icon with token logo or fallback letter
+  const renderAssetIcon = (symbol: string, color: string, size: number = 40, iconUrl?: string) => (
+    <View style={[styles.selectorIcon, { width: size, height: size, borderRadius: size / 2, backgroundColor: color + '30' }]}>
+      {iconUrl ? (
+        <Image source={{ uri: iconUrl }} style={{ width: size * 0.6, height: size * 0.6, borderRadius: size * 0.3 }} />
+      ) : (
+        <Text style={[styles.selectorIconText, { fontSize: size / 2, color }]}>
+          {symbol.charAt(0)}
+        </Text>
+      )}
     </View>
   );
 
   const handleTransfer = () => {
-      router.push(`/transfer`);
-    };
-  // Handle quick action button press
-  const handleQuickAction = (action: string) => {
-    console.log(`Quick action: ${action}`);
+    router.push(`/transfer`);
+  };
 
+  const handleQuickAction = (action: string) => {
     if (action === 'fund') {
-      // Show modal for fund selection
       setShowFundModal(true);
     } else if (action === 'send') {
-      // Show modal for send selection
       setShowSendModal(true);
     } else {
-      // For other actions, navigate directly
       //@ts-expect-error
       router.push(`/${action}`);
     }
   };
 
-  // Handle fund option selection
   const handleFundOption = (option: 'fiat' | 'crypto') => {
-    console.log(`Selected fund option: ${option}`);
     setShowFundModal(false);
     if (option === 'crypto') {
-      // Navigate to FundScreen with the selected option
       router.push(`/fund`);
     }
     if (option === 'fiat') {
@@ -440,9 +430,7 @@ const WalletScreen: React.FC = () => {
     }
   };
 
-  // Handle send option selection
   const handleSendOption = (option: 'fiat' | 'crypto') => {
-    console.log(`Selected send option: ${option}`);
     setShowSendModal(false);
     if (option === 'crypto') {
       router.push(`/send`);
@@ -509,22 +497,22 @@ const WalletScreen: React.FC = () => {
               onPress={() => handleFundOption('crypto')}
               activeOpacity={0.8}
             >
-              <View style={[styles.optionIcon, { backgroundColor: '#E8F5E9' }]}>
-                <Icon name="currency-bitcoin" size={32} color="#2E7D32" />
+              <View style={[styles.optionIcon, { backgroundColor: '#FFF3E0' }]}>
+                <Icon name="account-balance-wallet" size={32} color="#E65100" />
               </View>
               <View style={styles.optionContent}>
                 <Text style={styles.optionTitle}>Crypto Deposit</Text>
                 <Text style={styles.optionDescription}>
-                  Deposit cryptocurrencies from external wallets or exchanges
+                  Deposit cryptocurrency from external wallets or exchanges
                 </Text>
                 <View style={styles.optionDetails}>
                   <View style={styles.detailItem}>
                     <Icon name="check-circle" size={16} color="#4CAF50" />
-                    <Text style={styles.detailText}>USDT, USDC, ETH</Text>
+                    <Text style={styles.detailText}>External Wallets</Text>
                   </View>
                   <View style={styles.detailItem}>
                     <Icon name="check-circle" size={16} color="#4CAF50" />
-                    <Text style={styles.detailText}>External Wallets</Text>
+                    <Text style={styles.detailText}>Crypto Exchanges</Text>
                   </View>
                 </View>
               </View>
@@ -564,7 +552,7 @@ const WalletScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          <Text style={styles.modalSubtitle}>Choose how you want to withdraw your funds</Text>
+          <Text style={styles.modalSubtitle}>Choose how you want to send funds</Text>
 
           <View style={styles.optionsContainer}>
             {/* Withdraw as Fiat Option */}
@@ -573,13 +561,13 @@ const WalletScreen: React.FC = () => {
               onPress={() => handleSendOption('fiat')}
               activeOpacity={0.8}
             >
-              <View style={[styles.optionIcon, { backgroundColor: '#FFF3E0' }]}>
-                <Icon name="attach-money" size={32} color="#F57C00" />
+              <View style={[styles.optionIcon, { backgroundColor: '#E8F5E9' }]}>
+                <Icon name="attach-money" size={32} color="#2E7D32" />
               </View>
               <View style={styles.optionContent}>
                 <Text style={styles.optionTitle}>Withdraw as Fiat</Text>
                 <Text style={styles.optionDescription}>
-                  Convert to USD and withdraw to your bank account or card
+                  Withdraw funds to your bank account or mobile money
                 </Text>
                 <View style={styles.optionDetails}>
                   <View style={styles.detailItem}>
@@ -588,11 +576,7 @@ const WalletScreen: React.FC = () => {
                   </View>
                   <View style={styles.detailItem}>
                     <Icon name="check-circle" size={16} color="#4CAF50" />
-                    <Text style={styles.detailText}>Debit Card</Text>
-                  </View>
-                  <View style={styles.detailItem}>
-                    <Icon name="schedule" size={16} color="#2196F3" />
-                    <Text style={styles.detailText}>Direct Transaction</Text>
+                    <Text style={styles.detailText}>Mobile Money</Text>
                   </View>
                 </View>
               </View>
@@ -669,12 +653,13 @@ const WalletScreen: React.FC = () => {
 
       {/* Total Balance */}
       <View style={styles.balanceCard}>
-        <Text style={styles.balanceLabel}>Total Balance</Text>
+        <Text style={styles.balanceLabelHeader}>Total Balance</Text>
         <Text style={styles.balanceAmount}>
           {isValuesHidden ? '••••••' : `$${assets.reduce((sum, asset) => sum + asset.usdValue, 0).toLocaleString()}`}
         </Text>
       </View>
-   {/* Quick Actions - Updated to Fund, Swap, Send, More */}
+
+      {/* Quick Actions */}
       <View style={styles.quickActionsContainer}>
         <View style={styles.quickActionsGrid}>
           <TouchableOpacity
@@ -722,6 +707,7 @@ const WalletScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
       </View>
+
       {/* Debit Account Selector */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Debit Account</Text>
@@ -737,7 +723,7 @@ const WalletScreen: React.FC = () => {
               <View style={styles.selectorLeft}>
                 {selectedAsset ? (
                   <View style={styles.selectedAssetDisplay}>
-                    {renderAssetIcon(selectedAsset.symbol, 44)}
+                    {renderAssetIcon(selectedAsset.symbol, selectedAsset.iconColor, 44, selectedAsset.iconUrl)}
                     <View style={styles.selectedAssetInfo}>
                       <Text style={styles.selectedAssetSymbol}>
                         {selectedAsset.symbol}
@@ -746,7 +732,7 @@ const WalletScreen: React.FC = () => {
                         {selectedAsset.name}
                       </Text>
                       <Text style={styles.selectedAssetBalance}>
-                        Available: {isValuesHidden ? '••••••' : selectedAsset.balance.toFixed(2)} {selectedAsset.symbol}
+                        Available: {isValuesHidden ? '••••••' : selectedAsset.balance.toFixed(selectedAsset.details?.type === 'Native Token' ? 4 : 2)} {selectedAsset.symbol}
                       </Text>
                     </View>
                   </View>
@@ -815,7 +801,7 @@ const WalletScreen: React.FC = () => {
         )}
       </View>
 
-      {/* Selected Asset Summary - Only show when an asset is selected */}
+      {/* Selected Asset Summary */}
       {selectedAsset && (
         <Animated.View
           style={[
@@ -832,11 +818,18 @@ const WalletScreen: React.FC = () => {
 
           <View style={styles.summaryContent}>
             <View style={styles.summaryAssetInfo}>
-              {renderAssetIcon(selectedAsset.symbol, 48)}
+              {renderAssetIcon(selectedAsset.symbol, selectedAsset.iconColor, 48, selectedAsset.iconUrl)}
               <View>
                 <Text style={styles.summarySymbol}>{selectedAsset.symbol}</Text>
                 <Text style={styles.summaryName}>{selectedAsset.name}</Text>
-                <Text style={styles.summaryType}>{selectedAsset.details?.type}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginLeft: 16, marginTop: 4 }}>
+                  <View style={{
+                    width: 8, height: 8, borderRadius: 4,
+                    backgroundColor: selectedAsset.details?.chainKey ? CHAINS[selectedAsset.details.chainKey].iconColor : '#999',
+                    marginRight: 4,
+                  }} />
+                  <Text style={styles.summaryType}>{selectedAsset.details?.chain}</Text>
+                </View>
               </View>
             </View>
 
@@ -844,7 +837,7 @@ const WalletScreen: React.FC = () => {
               <View style={styles.balanceRow}>
                 <Text style={styles.balanceLabel}>Balance:</Text>
                 <Text style={styles.balanceValue}>
-                  {isValuesHidden ? '••••••' : selectedAsset.balance.toFixed(2)} {selectedAsset.symbol}
+                  {isValuesHidden ? '••••••' : selectedAsset.balance.toFixed(selectedAsset.details?.type === 'Native Token' ? 4 : 2)} {selectedAsset.symbol}
                 </Text>
               </View>
               <View style={styles.balanceRow}>
@@ -858,8 +851,6 @@ const WalletScreen: React.FC = () => {
         </Animated.View>
       )}
 
-   
-
       {/* Fund Selection Modal */}
       <FundSelectionModal />
 
@@ -869,7 +860,6 @@ const WalletScreen: React.FC = () => {
   );
 };
 
-// Updated Styles with Modal Styles
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -906,12 +896,11 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 6,
   },
-  balanceLabel: {
+  balanceLabelHeader: {
     fontSize: 12,
     color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 8,
     fontWeight: '600',
-    marginRight: 8,
   },
   balanceAmount: {
     fontSize: 22,
@@ -973,12 +962,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   selectorIcon: {
-    backgroundColor: GOLD_COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
   },
   selectorIconText: {
-    color: '#000000',
     fontWeight: '900',
   },
   selectedAssetInfo: {
@@ -1010,7 +997,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#E5E5EA',
-    maxHeight: 380,
   },
   assetListHeader: {
     flexDirection: 'row',
@@ -1067,16 +1053,16 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: '#E5E5EA',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
   },
-  selectedAssetIcon: {
-    backgroundColor: GOLD_COLORS.primary,
+  assetIconImage: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
   },
   assetIconText: {
-    color: '#000000',
     fontWeight: '800',
     fontSize: 18,
   },
@@ -1109,6 +1095,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#666666',
   },
+  chainTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 3,
+  },
+  chainDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 4,
+  },
+  chainTagText: {
+    fontSize: 11,
+    color: '#999999',
+    fontWeight: '500',
+  },
   rightSection: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1138,6 +1140,7 @@ const styles = StyleSheet.create({
   assetDetails: {
     marginTop: 16,
     paddingTop: 16,
+    paddingBottom: 12,
     borderTopWidth: 1,
     borderTopColor: '#E5E5EA',
   },
@@ -1164,14 +1167,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#000000',
     fontWeight: '600',
-    flex: 2,
-    textAlign: 'right',
-  },
-  detailAddress: {
-    fontSize: 12,
-    color: '#666666',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    flex: 2,
     textAlign: 'right',
   },
   selectButton: {
@@ -1230,6 +1225,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     marginHorizontal: 15,
     marginTop: 20,
+    marginBottom: 40,
     borderRadius: 16,
     padding: 10,
     shadowColor: '#000',
@@ -1285,8 +1281,6 @@ const styles = StyleSheet.create({
   summaryType: {
     fontSize: 12,
     color: GOLD_COLORS.dark,
-    marginLeft: 16,
-    marginTop: 4,
     fontWeight: '600',
   },
   summaryBalance: {
@@ -1297,7 +1291,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
-  //@ts-expect-error
   balanceLabel: {
     fontSize: 12,
     color: '#666666',
@@ -1324,12 +1317,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 4,
     elevation: 2,
-  },
-  quickActionsTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 16,
   },
   quickActionsGrid: {
     flexDirection: 'row',

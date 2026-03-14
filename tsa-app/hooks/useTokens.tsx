@@ -36,6 +36,12 @@ export function TokenProvider({ children }: { children: ReactNode }) {
       if (cached) {
         const parsed = JSON.parse(cached) as Record<string, TokenConfig>;
         if (Object.keys(parsed).length > 0) {
+          // Merge iconUrl from defaults in case cache is missing them
+          for (const sym of Object.keys(parsed)) {
+            if (!parsed[sym].iconUrl && DEFAULT_TOKENS[sym]?.iconUrl) {
+              parsed[sym].iconUrl = DEFAULT_TOKENS[sym].iconUrl;
+            }
+          }
           setTokens(parsed);
         }
       }
@@ -53,6 +59,7 @@ export function TokenProvider({ children }: { children: ReactNode }) {
               name: t.name,
               decimals: t.decimals,
               iconColor: t.iconColor,
+              iconUrl: DEFAULT_TOKENS[t.symbol]?.iconUrl,
               chains: validChains,
             };
           }
