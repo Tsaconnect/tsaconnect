@@ -37,30 +37,73 @@ type TransactionVerification struct {
 	Message  string `json:"message"`
 }
 
-// BlockchainService provides blockchain interaction methods via the Sonic RPC client.
+// BlockchainService provides blockchain interaction methods via EVM RPC clients.
 type BlockchainService struct {
-	client *blockchain.SonicClient
+	clients map[string]*blockchain.EVMClient // keyed by chain name: "sonic", "bsc"
+	cfg     *config.Config
 }
 
-// NewBlockchainService creates a new BlockchainService connected to the Sonic network.
+// NewBlockchainService creates a BlockchainService connected to all configured chains.
 func NewBlockchainService(cfg *config.Config) *BlockchainService {
-	client, err := blockchain.NewSonicClient(cfg)
-	if err != nil {
-		log.Printf("Warning: failed to initialize Sonic blockchain client: %v", err)
-		return &BlockchainService{}
+	bs := &BlockchainService{
+		clients: make(map[string]*blockchain.EVMClient),
+		cfg:     cfg,
 	}
-	log.Printf("Sonic blockchain client connected (chain ID: %s, RPC: %s)", client.ChainID().String(), cfg.SonicRPCURL)
-	return &BlockchainService{client: client}
+
+	for name, chain := range cfg.Chains {
+		client, err := blockchain.NewEVMClient(chain.RPCURL, chain.ChainID)
+		if err != nil {
+			log.Printf("Warning: failed to connect to %s (chain ID %d): %v", name, chain.ChainID, err)
+			continue
+		}
+		bs.clients[name] = client
+		log.Printf("%s blockchain client connected (chain ID: %d, RPC: %s)", name, chain.ChainID, chain.RPCURL)
+	}
+
+	return bs
 }
 
-// Client returns the underlying SonicClient (may be nil if connection failed).
-func (bs *BlockchainService) Client() *blockchain.SonicClient {
-	return bs.client
+// ClientForChain returns the EVMClient for the given chain name.
+func (bs *BlockchainService) ClientForChain(chain string) *blockchain.EVMClient {
+	if bs.clients == nil {
+		return nil
+	}
+	return bs.clients[chain]
 }
 
-// GetTransactionReceipt fetches a real transaction receipt from the Sonic network.
+// ClientForChainID returns the EVMClient matching the given numeric chain ID.
+func (bs *BlockchainService) ClientForChainID(chainID int64) (*blockchain.EVMClient, string) {
+	if bs.cfg == nil {
+		return nil, ""
+	}
+	for name, chain := range bs.cfg.Chains {
+		if chain.ChainID == chainID {
+			if bs.clients == nil {
+				return nil, name
+			}
+			return bs.clients[name], name
+		}
+	}
+	return nil, ""
+}
+
+// Client returns the Sonic client for backward compatibility.
+func (bs *BlockchainService) Client() *blockchain.EVMClient {
+	return bs.ClientForChain("sonic")
+}
+
+// TokenAddress returns the contract address for a token on a chain.
+func (bs *BlockchainService) TokenAddress(chain, symbol string) string {
+	if bs.cfg == nil {
+		return ""
+	}
+	return bs.cfg.TokenAddresses[chain+":"+symbol]
+}
+
+// GetTransactionReceipt fetches a transaction receipt from the specified chain.
 func (bs *BlockchainService) GetTransactionReceipt(txHash, chain string) *TransactionReceipt {
-	if bs.client == nil {
+	client := bs.ClientForChain(chain)
+	if client == nil {
 		return &TransactionReceipt{
 			TxHash:     txHash,
 			Blockchain: chain,
@@ -69,7 +112,7 @@ func (bs *BlockchainService) GetTransactionReceipt(txHash, chain string) *Transa
 		}
 	}
 
-	receipt, err := bs.client.GetTransactionReceipt(txHash)
+	receipt, err := client.GetTransactionReceipt(txHash)
 	if err != nil {
 		return &TransactionReceipt{
 			TxHash:     txHash,
@@ -94,18 +137,18 @@ func (bs *BlockchainService) GetTransactionReceipt(txHash, chain string) *Transa
 	}
 }
 
-// GetGasPrices returns current gas prices from the Sonic network.
+// GetGasPrices returns current gas prices from the specified chain.
 func (bs *BlockchainService) GetGasPrices(chain string) *GasPrices {
-	if bs.client == nil {
+	client := bs.ClientForChain(chain)
+	if client == nil {
 		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
 
-	gasPrice, err := bs.client.SuggestGasPrice()
+	gasPrice, err := client.SuggestGasPrice()
 	if err != nil {
 		return &GasPrices{Chain: chain, Slow: 10, Average: 20, Fast: 40}
 	}
 
-	// Convert wei to gwei
 	gwei := new(big.Float).Quo(
 		new(big.Float).SetInt(gasPrice),
 		new(big.Float).SetFloat64(1e9),
@@ -120,9 +163,10 @@ func (bs *BlockchainService) GetGasPrices(chain string) *GasPrices {
 	}
 }
 
-// VerifyTransaction verifies a transaction on the Sonic network.
+// VerifyTransaction verifies a transaction on the specified chain.
 func (bs *BlockchainService) VerifyTransaction(txHash, chain string) *TransactionVerification {
-	if bs.client == nil {
+	client := bs.ClientForChain(chain)
+	if client == nil {
 		return &TransactionVerification{
 			TxHash:  txHash,
 			Chain:   chain,
@@ -131,7 +175,7 @@ func (bs *BlockchainService) VerifyTransaction(txHash, chain string) *Transactio
 		}
 	}
 
-	receipt, err := bs.client.GetTransactionReceipt(txHash)
+	receipt, err := client.GetTransactionReceipt(txHash)
 	if err != nil {
 		return &TransactionVerification{
 			TxHash:   txHash,
