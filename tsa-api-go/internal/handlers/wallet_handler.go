@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -308,70 +309,73 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-
 	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered. Please register a wallet address first")
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
 	}
 
 	var req submitTxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "signedTx, txType, tokenSymbol, toAddress, and amount are required")
+		utils.ErrorResponse(c, http.StatusBadRequest, "signedTx, txType, tokenSymbol, toAddress, amount, and chainId are required")
 		return
 	}
 
-	// Validate tx type.
 	validTxTypes := map[string]bool{
-		models.TxTypeSend:    true,
-		models.TxTypeReceive: true,
-		models.TxTypeApprove: true,
-		models.TxTypeEscrow:  true,
+		models.TxTypeSend: true, models.TxTypeReceive: true,
+		models.TxTypeApprove: true, models.TxTypeEscrow: true,
 	}
 	if !validTxTypes[req.TxType] {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid transaction type. Must be: send, receive, approve, or escrow")
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid transaction type")
 		return
 	}
 
-	// Validate token symbol.
 	tokenUpper := strings.ToUpper(req.TokenSymbol)
-	if !models.SupportedTokens[tokenUpper] {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Supported tokens: MCGP, USDT, USDC, S")
-		return
-	}
-
-	// Validate destination address.
 	if !isValidEthAddress(req.ToAddress) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid destination address format")
 		return
 	}
-
-	// Validate amount.
 	if !isPositiveAmount(req.Amount) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Amount must be a positive number")
 		return
 	}
 
-	// TODO: Integrate with BlockchainService / SonicClient to submit the signed transaction.
-	// Example future implementation:
-	//   txHash, err := h.BlockchainService.SonicClient.SendRawTransaction(req.SignedTx)
-	//
-	// For now, generate a mock tx hash.
-	mockTxHash := "0x" + uuid.New().String()[:32] + "00000000"
+	client, chainName := h.BlockchainService.ClientForChainID(req.ChainID)
+	if client == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported chain ID")
+		return
+	}
 
-	// Create wallet transaction record.
+	signedTxBytes, err := hexutil.Decode(req.SignedTx)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction format")
+		return
+	}
+
+	txHash, err := client.SendRawTransaction(signedTxBytes)
+	if err != nil {
+		log.Printf("Failed to submit tx to %s: %v", chainName, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to submit transaction to blockchain")
+		return
+	}
+
 	walletTx := models.WalletTransaction{
 		UserID:      user.ID,
-		TxHash:      mockTxHash,
+		TxHash:      txHash,
 		TokenSymbol: tokenUpper,
 		TxType:      req.TxType,
 		FromAddress: user.WalletAddress,
 		ToAddress:   req.ToAddress,
 		Amount:      req.Amount,
 		Status:      models.TxStatusPending,
+		Chain:       chainName,
+		ChainID:     req.ChainID,
 	}
 
 	if err := config.DB.Create(&walletTx).Error; err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to record transaction")
+		log.Printf("tx submitted (hash=%s) but failed to record in DB: %v", txHash, err)
+		utils.SuccessResponse(c, http.StatusCreated, "Transaction submitted but failed to record", gin.H{
+			"txHash": txHash,
+		})
 		return
 	}
 
