@@ -13,6 +13,7 @@ export interface ChainConfig {
     decimals: number;
   };
   iconColor: string;
+  iconUrl?: string;
 }
 
 export interface TokenConfig {
@@ -20,6 +21,7 @@ export interface TokenConfig {
   name: string;
   decimals: number;
   iconColor: string;
+  iconUrl?: string;
   chains: ChainKey[];
 }
 
@@ -34,6 +36,7 @@ export const CHAINS = {
     explorerUrl: 'https://testnet.sonicscan.org',
     nativeCurrency: { symbol: 'S', decimals: 18 },
     iconColor: '#5B6EF5',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/38108/small/200x200_Sonic_Logo.png',
   },
   bsc: {
     chainId: 97,
@@ -43,6 +46,7 @@ export const CHAINS = {
     explorerUrl: 'https://testnet.bscscan.com',
     nativeCurrency: { symbol: 'tBNB', decimals: 18 },
     iconColor: '#F0B90B',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
   },
 } as const satisfies Record<string, ChainConfig>;
 
@@ -54,6 +58,7 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     name: 'Tether',
     decimals: 6,
     iconColor: '#26A17B',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/325/small/Tether.png',
     chains: ['sonic', 'bsc'],
   },
   USDC: {
@@ -61,6 +66,7 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     name: 'USD Coin',
     decimals: 6,
     iconColor: '#2775CA',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/usdc.png',
     chains: ['sonic', 'bsc'],
   },
   MCGP: {
