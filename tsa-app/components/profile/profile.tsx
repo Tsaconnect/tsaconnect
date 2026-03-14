@@ -8,7 +8,7 @@ import {
   Alert,
   ScrollView,
 } from "react-native";
-import { Avatar, Icon, Card } from "react-native-elements";
+import { Avatar, Icon } from "react-native-elements";
 import { router } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
@@ -125,7 +125,7 @@ const ProfileScreen = () => {
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false}>
-          <Card containerStyle={styles.card}>
+          <View style={styles.card}>
             <TouchableOpacity
               style={styles.editIcon}
               onPress={() =>
@@ -180,7 +180,7 @@ const ProfileScreen = () => {
                 <Text style={styles.verifiedText}>Verified</Text>
               </View>
             )}
-          </Card>
+          </View>
           <View style={styles.linksContainer}>
             {user?.role === "admin" ? (
               <TouchableOpacity
@@ -217,10 +217,6 @@ const ProfileScreen = () => {
                 <Text style={styles.balanceText}>My Balance</Text>
               </View>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.profileLink} onPress={handleLogout}>
-              <Icon name="exit-to-app" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Logout</Text>
-            </TouchableOpacity>
             <TouchableOpacity style={styles.profileLink}>
               <Icon name="share" size={20} color="#9D6B38" />
               <View style={styles.referralRow}>
@@ -233,36 +229,18 @@ const ProfileScreen = () => {
                 </TouchableOpacity>
               </View>
             </TouchableOpacity>
-          </View>
 
-          {/* Wallet Management */}
-          <View style={styles.sectionContainer}>
-            <Text style={styles.sectionTitle}>Wallet</Text>
             <TouchableOpacity
               style={styles.profileLink}
-              onPress={() => router.push("/wallet/seedphrase")}
+              onPress={() => router.push("/(dashboard)/settings")}
             >
-              <Icon name="security" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Back Up Seed Phrase</Text>
+              <Icon name="settings" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>Settings</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() => router.push("/wallet/manage")}
-            >
-              <Icon name="add-circle-outline" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Create New Wallet</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() =>
-                router.push({
-                  pathname: "/wallet/manage",
-                  params: { mode: "import" },
-                })
-              }
-            >
-              <Icon name="file-download" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Import Wallet</Text>
+
+            <TouchableOpacity style={styles.profileLink} onPress={handleLogout}>
+              <Icon name="exit-to-app" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>Logout</Text>
             </TouchableOpacity>
           </View>
         </ScrollView>
@@ -313,17 +291,6 @@ const styles = StyleSheet.create({
   linksContainer: {
     marginTop: 20,
     minHeight: 300,
-  },
-  sectionContainer: {
-    marginTop: 20,
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#9D6B38",
-    paddingHorizontal: 20,
-    paddingBottom: 8,
   },
   profileLink: {
     flexDirection: "row",

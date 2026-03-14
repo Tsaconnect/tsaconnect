@@ -1,14 +1,14 @@
- import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Stack } from "expo-router";
+import { defaultScreenOptions } from "../../../../constants/navigation";
+
 export default function Layout() {
   return (
     <GestureHandlerRootView>
-      <Stack>
+      <Stack screenOptions={defaultScreenOptions}>
         <Stack.Screen
           name="digital"
-          options={{
-            headerShown: false,
-          }}
+          options={{ headerShown: false }}
         />
       </Stack>
     </GestureHandlerRootView>

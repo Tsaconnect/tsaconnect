@@ -238,17 +238,6 @@ const FiatDepositScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.scrollContainer}>
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => router.back()}
-            style={styles.backButton}
-          >
-            <Icon name="arrow-back" size={24} color="#000000" />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Fiat Deposit</Text>
-        </View>
-
         {/* Main Content */}
         <View style={styles.content}>
           <Text style={styles.sectionTitle}>Select Deposit Method</Text>

@@ -12,7 +12,7 @@ import {
   Platform,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { router } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import { ethers } from 'ethers';
@@ -28,6 +28,7 @@ import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/w
 type Step = 'loading' | 'setup' | 'warning' | 'display' | 'verify' | 'success';
 
 const SeedPhrase = () => {
+  const navigation = useNavigation();
   const [step, setStep] = useState<Step>('loading');
   const [words, setWords] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -39,6 +40,18 @@ const SeedPhrase = () => {
   const [userSelections, setUserSelections] = useState<Record<number, string>>({});
   const [shuffledOptions, setShuffledOptions] = useState<Record<number, string[]>>({});
   const [copied, setCopied] = useState(false);
+
+  React.useEffect(() => {
+    const titles: Record<Step, string> = {
+      loading: 'Seed Phrase',
+      setup: 'Set Up Wallet',
+      warning: 'Back Up Seed Phrase',
+      display: 'Your Seed Phrase',
+      verify: 'Verify Seed Phrase',
+      success: 'Seed Phrase',
+    };
+    navigation.setOptions({ title: titles[step] });
+  }, [step, navigation]);
 
   // On mount, check if a valid wallet already exists
   useEffect(() => {
@@ -215,10 +228,6 @@ const SeedPhrase = () => {
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>Set Up Wallet</Text>
             <Text style={styles.subtitle}>
               No wallet found on this device. Create a new wallet or import an existing one using your seed phrase.
             </Text>
@@ -281,12 +290,7 @@ const SeedPhrase = () => {
     return (
       <View style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.header}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>Back Up Seed Phrase</Text>
-          </View>
+          <View style={styles.header} />
 
           <View style={styles.warningCard}>
             <Text style={styles.warningTitle}>Important: Read carefully</Text>
@@ -330,7 +334,6 @@ const SeedPhrase = () => {
       <View style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
-            <Text style={styles.title}>Your Seed Phrase</Text>
             <Text style={styles.subtitle}>
               Write down these 12 words in order. You will need to verify them next.
             </Text>
@@ -372,7 +375,6 @@ const SeedPhrase = () => {
       <View style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
-            <Text style={styles.title}>Verify Seed Phrase</Text>
             <Text style={styles.subtitle}>
               Select the correct word for each numbered position.
             </Text>
@@ -458,19 +460,6 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: 24,
-  },
-  backButton: {
-    marginBottom: 16,
-    paddingVertical: 8,
-  },
-  backText: {
-    ...FONTS.body3,
-    color: COLORS.primary,
-  },
-  title: {
-    ...FONTS.h1,
-    color: COLORS.dark,
-    marginBottom: 8,
   },
   subtitle: {
     ...FONTS.body3,

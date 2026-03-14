@@ -230,12 +230,6 @@ const SendToken = () => {
       <View style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
-            <TouchableOpacity
-              onPress={() => setScreenState('form')}
-              style={styles.backButton}
-            >
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
             <Text style={styles.title}>Confirm Transaction</Text>
           </View>
 
@@ -280,12 +274,6 @@ const SendToken = () => {
     >
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => router.back()}
-            style={styles.backButton}
-          >
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
           <Text style={styles.title}>Send</Text>
         </View>
 
@@ -406,14 +394,6 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: 24,
-  },
-  backButton: {
-    marginBottom: 16,
-    paddingVertical: 8,
-  },
-  backText: {
-    ...FONTS.body3,
-    color: COLORS.primary,
   },
   title: {
     ...FONTS.h1,

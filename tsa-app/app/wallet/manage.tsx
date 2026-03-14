@@ -11,7 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
@@ -26,10 +26,17 @@ type Mode = 'menu' | 'import';
 
 const WalletManage = () => {
   const { mode: initialMode } = useLocalSearchParams<{ mode?: string }>();
+  const navigation = useNavigation();
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>(initialMode === 'import' ? 'import' : 'menu');
   const [mnemonicInput, setMnemonicInput] = useState('');
   const [error, setError] = useState('');
+
+  React.useEffect(() => {
+    navigation.setOptions({
+      title: mode === 'import' ? 'Import Wallet' : 'Manage Wallet',
+    });
+  }, [mode, navigation]);
 
   const handleGenerateNewWallet = () => {
     Alert.alert(
@@ -111,10 +118,6 @@ const WalletManage = () => {
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
-            <TouchableOpacity onPress={() => setMode('menu')} style={styles.backButton}>
-              <Text style={styles.backText}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>Import Wallet</Text>
             <Text style={styles.subtitle}>
               Enter your 12-word seed phrase to restore your wallet. This will replace your current wallet.
             </Text>
@@ -160,10 +163,6 @@ const WalletManage = () => {
     <View style={styles.container}>
       <View style={styles.content}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-            <Text style={styles.backText}>Back</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Manage Wallet</Text>
           <Text style={styles.subtitle}>
             Import an existing wallet, generate a new one, or view your seed phrase.
           </Text>
@@ -234,19 +233,6 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: 32,
-  },
-  backButton: {
-    marginBottom: 16,
-    paddingVertical: 8,
-  },
-  backText: {
-    ...FONTS.body3,
-    color: COLORS.primary,
-  },
-  title: {
-    ...FONTS.h1,
-    color: COLORS.dark,
-    marginBottom: 8,
   },
   subtitle: {
     ...FONTS.body3,

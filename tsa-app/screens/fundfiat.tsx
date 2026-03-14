@@ -1583,18 +1583,6 @@ const DepositScreen: React.FC = () => {
         style={styles.container}
       >
         <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-          {/* Header */}
-          <View style={styles.header}>
-            <Text style={styles.headerTitle}>Deposit Fiat</Text>
-            <TouchableOpacity
-              style={styles.helpButton}
-              onPress={handleBuyPress}
-            >
-              <Icon name="shopping-cart" size={24} color={GOLD_COLORS.primary} />
-              <Text style={styles.buyButtonText}>Buy USDT</Text>
-            </TouchableOpacity>
-          </View>
-
           {/* Step Indicator */}
           <View style={styles.stepIndicator}>
             {[1, 2, 3].map((stepNum) => (

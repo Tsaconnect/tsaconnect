@@ -121,6 +121,9 @@ const Layout = () => {
                 case "orderlist":
                   iconName = "ticket-percent";
                   break;
+                case "settings":
+                  iconName = "cog";
+                  break;
                 case "Saved Items":
                   iconName = "heart";
                   break;
@@ -258,10 +261,24 @@ const Layout = () => {
           }}
         />
         <Drawer.Screen
+          name="settings"
+          options={{
+            title: "Settings",
+            drawerActiveTintColor: COLORS.primary,
+          }}
+        />
+        <Drawer.Screen
           name="categories"
           options={{
             title: "Category",
             drawerActiveTintColor: COLORS.primary,
+          }}
+        />
+        <Drawer.Screen
+          name="kyc"
+          options={{
+            title: "KYC Verification",
+            drawerItemStyle: { display: "none" },
           }}
         />
       </Drawer>

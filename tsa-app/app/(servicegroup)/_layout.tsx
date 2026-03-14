@@ -1,27 +1,22 @@
-import { StyleSheet, Text, View } from 'react-native'
-import React, { useContext } from 'react'
+import React, { useContext } from 'react';
 import { Stack } from "expo-router";
 import { AppContext } from '../../AuthContext/AuthContext';
+import { defaultScreenOptions } from '../../constants/navigation';
+
 const Layout = () => {
-    const {category}=useContext(AppContext)
+  const { category } = useContext(AppContext);
   return (
-    <Stack>
+    <Stack screenOptions={defaultScreenOptions}>
       <Stack.Screen
         name="categoryservice"
-        options={{
-          headerTitle: `${category} Services`,
-        }}
+        options={{ title: `${category} Services` }}
       />
       <Stack.Screen
         name="servicedetail"
-        options={{
-          headerTitle: `${category} Service Details`,
-        }}
+        options={{ title: `Service Details` }}
       />
-      </Stack>
-  )
-}
+    </Stack>
+  );
+};
 
-export default Layout
-
-const styles = StyleSheet.create({})
+export default Layout;

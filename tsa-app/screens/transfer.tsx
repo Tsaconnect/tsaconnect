@@ -586,20 +586,6 @@ const TransferScreen: React.FC = () => {
         style={styles.container}
       >
         <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-          {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity
-              onPress={() => router.back()}
-              style={styles.backButton}
-            >
-              <Icon name="arrow-back" size={24} color="#000000" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Send Crypto</Text>
-            <TouchableOpacity style={styles.helpButton}>
-              <Icon name="help-outline" size={24} color={GOLD_COLORS.dark} />
-            </TouchableOpacity>
-          </View>
-
           {/* Withdrawal Method Selection */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Select Withdraw Method</Text>
