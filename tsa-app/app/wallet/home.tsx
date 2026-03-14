@@ -17,21 +17,18 @@ import {
   WalletBalance,
   Transaction,
 } from '../../services/walletApi';
-
-// Token icon colors for visual differentiation
-const TOKEN_COLORS: Record<string, string> = {
-  MCGP: '#9D6B38',
-  USDT: '#26A17B',
-  USDC: '#2775CA',
-};
-
-const TOKEN_ICONS: Record<string, string> = {
-  MCGP: 'M',
-  USDT: 'T',
-  USDC: 'C',
-};
+import { useTokens } from '../../hooks/useTokens';
 
 const WalletHome = () => {
+  const { tokens, tokenList } = useTokens();
+
+  const TOKEN_COLORS: Record<string, string> = Object.fromEntries(
+    tokenList.map(t => [t.symbol, t.iconColor])
+  );
+  const TOKEN_ICONS: Record<string, string> = Object.fromEntries(
+    tokenList.map(t => [t.symbol, t.symbol[0]])
+  );
+
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -58,11 +55,11 @@ const WalletHome = () => {
         setBalances(balanceResult.data);
       } else {
         // Show default empty balances
-        setBalances([
-          { symbol: 'MCGP', name: 'MCG Protocol', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 18 },
-          { symbol: 'USDT', name: 'Tether USD', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
-          { symbol: 'USDC', name: 'USD Coin', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
-        ]);
+        setBalances(
+          tokenList.map(t => ({
+            symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
+          }))
+        );
       }
 
       if (txResult.success && txResult.data) {

@@ -12,6 +12,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
+import { getSupportedNetworkNames } from '../../constants/chains';
 
 const ReceiveToken = () => {
   const [walletAddress, setWalletAddress] = useState('');
@@ -47,7 +48,7 @@ const ReceiveToken = () => {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.subtitle}>
-          Share your address or QR code to receive tokens on supported networks (BNB Smart Chain or Sonic).
+          Share your address or QR code to receive tokens on supported networks ({getSupportedNetworkNames()}).
         </Text>
       </View>
 
@@ -88,7 +89,7 @@ const ReceiveToken = () => {
 
       <View style={styles.infoBox}>
         <Text style={styles.infoText}>
-          Only send tokens on supported networks (BNB Smart Chain or Sonic) to this address.
+          Only send tokens on supported networks ({getSupportedNetworkNames()}) to this address.
           Sending tokens on unsupported networks may result in permanent loss.
         </Text>
       </View>

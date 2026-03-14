@@ -129,6 +129,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	walletGroup := api.Group("/wallet")
 	walletGroup.Use(auth)
 	{
+		walletGroup.GET("/supported-tokens", h.GetSupportedTokens)
 		walletGroup.POST("/register", h.RegisterWalletAddress)
 		walletGroup.GET("/balances", h.GetWalletBalances)
 		walletGroup.POST("/prepare-tx", h.PrepareSendTransaction)

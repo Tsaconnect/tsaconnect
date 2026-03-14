@@ -3,16 +3,13 @@
 import 'react-native-get-random-values';
 import { ethers } from 'ethers';
 import * as SecureStore from 'expo-secure-store';
+import { CHAINS, type ChainKey, type ChainConfig } from '../constants/chains';
 
 const WALLET_KEY = 'tsa-wallet-key';
 const MNEMONIC_KEY = 'tsa-wallet-mnemonic';
 
-// Sonic testnet configuration
-export const SONIC_TESTNET = {
-  chainId: 14601,
-  rpcUrl: 'https://rpc.testnet.soniclabs.com',
-  name: 'Sonic Testnet',
-};
+// Provider cache — one instance per chain
+const providerCache = new Map<ChainKey, ethers.JsonRpcProvider>();
 
 export interface WalletInfo {
   mnemonic: string;
@@ -22,7 +19,8 @@ export interface WalletInfo {
 
 /**
  * Generate a new HD wallet using ethers.js
- * Creates a random 12-word BIP-39 mnemonic and derives private key + address
+ * Creates a random 12-word BIP-39 mnemonic and derives private key + address.
+ * The same address works on all EVM chains.
  */
 export async function generateWallet(): Promise<WalletInfo> {
   const wallet = ethers.Wallet.createRandom();
@@ -118,18 +116,26 @@ export async function importWalletFromMnemonic(mnemonic: string): Promise<{ addr
 }
 
 /**
- * Validate that a string is a valid Ethereum/Sonic address
+ * Validate that a string is a valid EVM address
  */
 export function isValidAddress(address: string): boolean {
   return ethers.isAddress(address);
 }
 
 /**
- * Get a provider connected to Sonic testnet
+ * Get a JSON-RPC provider for a given chain.
+ * Providers are cached so repeated calls return the same instance.
  */
-export function getSonicProvider(): ethers.JsonRpcProvider {
-  return new ethers.JsonRpcProvider(SONIC_TESTNET.rpcUrl, {
-    chainId: SONIC_TESTNET.chainId,
-    name: SONIC_TESTNET.name,
+export function getProvider(chainKey: ChainKey): ethers.JsonRpcProvider {
+  const cached = providerCache.get(chainKey);
+  if (cached) return cached;
+
+  const chain: ChainConfig = CHAINS[chainKey];
+  const provider = new ethers.JsonRpcProvider(chain.rpcUrl, {
+    chainId: chain.chainId,
+    name: chain.name,
   });
+
+  providerCache.set(chainKey, provider);
+  return provider;
 }

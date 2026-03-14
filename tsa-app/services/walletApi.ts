@@ -22,6 +22,7 @@ export interface Transaction {
   toAddress: string;
   status: string;
   gasUsed: string;
+  chainId?: number;
   createdAt: string;
 }
 
@@ -74,12 +75,14 @@ export async function registerWalletAddress(address: string): Promise<ApiRespons
 }
 
 /**
- * Fetch wallet balances for all supported tokens
+ * Fetch wallet balances for supported tokens.
+ * Pass chainId to filter by chain, or omit to get all balances.
  */
-export async function getWalletBalances(): Promise<ApiResponse<WalletBalance[]>> {
+export async function getWalletBalances(chainId?: number): Promise<ApiResponse<WalletBalance[]>> {
   try {
     const headers = await getAuthHeaders();
-    const response = await fetch(`${API_BASE_URL}/wallet/balances`, {
+    const params = chainId ? `?chainId=${chainId}` : '';
+    const response = await fetch(`${API_BASE_URL}/wallet/balances${params}`, {
       method: 'GET',
       headers,
     });
@@ -96,14 +99,15 @@ export async function getWalletBalances(): Promise<ApiResponse<WalletBalance[]>>
 export async function prepareSendTransaction(
   tokenSymbol: string,
   toAddress: string,
-  amount: string
+  amount: string,
+  chainId: number
 ): Promise<ApiResponse<PreparedTransaction>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/wallet/prepare-tx`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ tokenSymbol, toAddress, amount }),
+      body: JSON.stringify({ tokenSymbol, toAddress, amount, chainId }),
     });
     return await response.json();
   } catch (error: any) {
@@ -120,14 +124,15 @@ export async function submitTransaction(
   txType: string,
   tokenSymbol: string,
   toAddress: string,
-  amount: string
+  amount: string,
+  chainId: number
 ): Promise<ApiResponse<{ txHash: string }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/wallet/submit-tx`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ signedTx, txType, tokenSymbol, toAddress, amount }),
+      body: JSON.stringify({ signedTx, txType, tokenSymbol, toAddress, amount, chainId }),
     });
     return await response.json();
   } catch (error: any) {
@@ -137,16 +142,20 @@ export async function submitTransaction(
 }
 
 /**
- * Fetch transaction history with pagination
+ * Fetch transaction history with pagination.
+ * Pass chainId to filter by chain.
  */
 export async function getTransactionHistory(
   page: number = 1,
-  limit: number = 10
+  limit: number = 10,
+  chainId?: number
 ): Promise<ApiResponse<{ transactions: Transaction[]; total: number }>> {
   try {
     const headers = await getAuthHeaders();
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (chainId) params.append('chainId', String(chainId));
     const response = await fetch(
-      `${API_BASE_URL}/wallet/transactions?page=${page}&limit=${limit}`,
+      `${API_BASE_URL}/wallet/transactions?${params.toString()}`,
       {
         method: 'GET',
         headers,
@@ -157,6 +166,32 @@ export async function getTransactionHistory(
     console.error('Get transaction history error:', error);
     return { success: false, message: error.message || 'Failed to fetch transactions' };
   }
+}
+
+/**
+ * Fetch supported tokens from the backend.
+ * Returns token configs with their chain availability.
+ */
+export async function fetchSupportedTokens(): Promise<ApiResponse<SupportedTokenResponse[]>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/wallet/supported-tokens`, {
+      method: 'GET',
+      headers,
+    });
+    return await response.json();
+  } catch (error: any) {
+    console.error('Fetch supported tokens error:', error);
+    return { success: false, message: error.message || 'Failed to fetch supported tokens' };
+  }
+}
+
+export interface SupportedTokenResponse {
+  symbol: string;
+  name: string;
+  decimals: number;
+  iconColor: string;
+  chains: string[];
 }
 
 /**
