@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
@@ -396,6 +397,78 @@ func (h *Handlers) GetTransactionHistory(c *gin.Context) {
 			"totalPages": totalPages,
 		},
 	})
+}
+
+// GetSupportedTokens handles GET /api/wallet/supported-tokens.
+// Returns the list of active tokens with their chain availability.
+// If no tokens exist in the database yet, seeds default tokens and returns them.
+func (h *Handlers) GetSupportedTokens(c *gin.Context) {
+	var tokens []models.SupportedToken
+	if err := config.DB.Where("is_active = ?", true).Order("symbol ASC").Find(&tokens).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch supported tokens")
+		return
+	}
+
+	// Seed defaults if table is empty (first-time setup).
+	if len(tokens) == 0 {
+		tokens = seedDefaultTokens()
+	}
+
+	// Map to the response shape the frontend expects.
+	result := make([]gin.H, 0, len(tokens))
+	for _, t := range tokens {
+		// Parse chains from JSON.
+		var chains []string
+		if err := json.Unmarshal(t.Chains, &chains); err != nil {
+			chains = []string{}
+		}
+		result = append(result, gin.H{
+			"symbol":    t.Symbol,
+			"name":      t.Name,
+			"decimals":  t.Decimals,
+			"iconColor": t.IconColor,
+			"chains":    chains,
+		})
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Supported tokens retrieved", result)
+}
+
+// seedDefaultTokens inserts the default token set into the database.
+func seedDefaultTokens() []models.SupportedToken {
+	type tokenDef struct {
+		Symbol    string
+		Name      string
+		Decimals  int
+		IconColor string
+		Chains    []string
+	}
+
+	defaults := []tokenDef{
+		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc"}},
+		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc"}},
+		{"MCGP", "MCG Protocol", 18, "#FFD700", []string{"sonic"}},
+	}
+
+	var created []models.SupportedToken
+	for _, d := range defaults {
+		chainsJSON, _ := json.Marshal(d.Chains)
+		token := models.SupportedToken{
+			ID:        uuid.New(),
+			Symbol:    d.Symbol,
+			Name:      d.Name,
+			Decimals:  d.Decimals,
+			IconColor: d.IconColor,
+			Chains:    chainsJSON,
+			IsActive:  true,
+		}
+		if err := config.DB.Create(&token).Error; err != nil {
+			log.Printf("Failed to seed token %s: %v", d.Symbol, err)
+			continue
+		}
+		created = append(created, token)
+	}
+	return created
 }
 
 // ConfirmSeedPhraseBackup handles POST /api/wallet/seed-phrase-backed-up.

@@ -9,57 +9,16 @@ import {
   Alert,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
-
-// Types
-interface Asset {
-  id: string;
-  symbol: string;
-  name: string;
-  iconColor: string;
-  networks: Network[];
-}
-
-interface Network {
-  id: string;
-  name: string;
-  shortName: string;
-  chainType: 'BSC' | 'SONIC';
-}
-
-// Supported networks
-const NETWORKS: Network[] = [
-  { id: 'bsc', name: 'BNB Smart Chain', shortName: 'BEP20', chainType: 'BSC' },
-  { id: 'sonic', name: 'Sonic Network', shortName: 'SONIC', chainType: 'SONIC' },
-];
-
-// Supported assets with their available networks
-const ASSETS: Asset[] = [
-  {
-    id: 'usdt',
-    symbol: 'USDT',
-    name: 'Tether',
-    iconColor: '#26A17B',
-    networks: NETWORKS,
-  },
-  {
-    id: 'usdc',
-    symbol: 'USDC',
-    name: 'USD Coin',
-    iconColor: '#2775CA',
-    networks: NETWORKS,
-  },
-  {
-    id: 'mcgp',
-    symbol: 'MCGP',
-    name: 'MCG Protocol',
-    iconColor: '#FFD700',
-    networks: [NETWORKS[1]], // MCGP only on Sonic
-  },
-];
+import {
+  getSupportedNetworkNames,
+  type ChainKey,
+  type ChainConfig,
+  type TokenConfig,
+} from '../constants/chains';
+import { useTokens, type ChainWithKey } from '../hooks/useTokens';
 
 // Gold color palette
 const GOLD_COLORS = {
@@ -73,8 +32,9 @@ const GOLD_COLORS = {
 };
 
 const FundScreen: React.FC = () => {
-  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
-  const [selectedNetwork, setSelectedNetwork] = useState<Network | null>(null);
+  const { tokenList, getChainsForToken } = useTokens();
+  const [selectedAsset, setSelectedAsset] = useState<TokenConfig | null>(null);
+  const [selectedChain, setSelectedChain] = useState<ChainWithKey | null>(null);
   const [walletAddress, setWalletAddress] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -86,18 +46,18 @@ const FundScreen: React.FC = () => {
     loadAddress();
   }, []);
 
-  const handleAssetSelect = (asset: Asset) => {
+  const handleAssetSelect = (asset: TokenConfig) => {
     setSelectedAsset(asset);
-    // Auto-select network if only one available
-    if (asset.networks.length === 1) {
-      setSelectedNetwork(asset.networks[0]);
+    const chains = getChainsForToken(asset.symbol);
+    if (chains.length === 1) {
+      setSelectedChain(chains[0]);
     } else {
-      setSelectedNetwork(null);
+      setSelectedChain(null);
     }
   };
 
-  const handleNetworkSelect = (network: Network) => {
-    setSelectedNetwork(network);
+  const handleNetworkSelect = (chain: ChainWithKey) => {
+    setSelectedChain(chain);
   };
 
   const handleCopyAddress = async () => {
@@ -110,7 +70,8 @@ const FundScreen: React.FC = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const showDepositInfo = selectedAsset && selectedNetwork && walletAddress;
+  const availableChains = selectedAsset ? getChainsForToken(selectedAsset.symbol) : [];
+  const showDepositInfo = selectedAsset && selectedChain && walletAddress;
 
   return (
     <ScrollView
@@ -143,11 +104,11 @@ const FundScreen: React.FC = () => {
           </View>
 
           <View style={styles.assetGrid}>
-            {ASSETS.map(asset => {
-              const isSelected = selectedAsset?.id === asset.id;
+            {tokenList.map(asset => {
+              const isSelected = selectedAsset?.symbol === asset.symbol;
               return (
                 <TouchableOpacity
-                  key={asset.id}
+                  key={asset.symbol}
                   style={[styles.assetCard, isSelected && styles.assetCardSelected]}
                   onPress={() => handleAssetSelect(asset)}
                   activeOpacity={0.7}
@@ -180,13 +141,13 @@ const FundScreen: React.FC = () => {
               <Text style={styles.sectionTitle}>Select Network</Text>
             </View>
 
-            {selectedAsset.networks.map(network => {
-              const isSelected = selectedNetwork?.id === network.id;
+            {availableChains.map(chain => {
+              const isSelected = selectedChain?.key === chain.key;
               return (
                 <TouchableOpacity
-                  key={network.id}
+                  key={chain.key}
                   style={[styles.networkCard, isSelected && styles.networkCardSelected]}
-                  onPress={() => handleNetworkSelect(network)}
+                  onPress={() => handleNetworkSelect(chain)}
                   activeOpacity={0.7}
                 >
                   <View style={styles.networkInfo}>
@@ -197,9 +158,9 @@ const FundScreen: React.FC = () => {
                     />
                     <View style={styles.networkText}>
                       <Text style={[styles.networkName, isSelected && styles.networkNameSelected]}>
-                        {network.name}
+                        {chain.name}
                       </Text>
-                      <Text style={styles.networkType}>{network.shortName}</Text>
+                      <Text style={styles.networkType}>{chain.shortName}</Text>
                     </View>
                   </View>
                   {isSelected ? (
@@ -232,7 +193,7 @@ const FundScreen: React.FC = () => {
                 <View style={styles.summaryText}>
                   <Text style={styles.summaryAsset}>{selectedAsset.symbol}</Text>
                   <Text style={styles.summaryNetwork}>
-                    {selectedNetwork.name} ({selectedNetwork.shortName})
+                    {selectedChain.name} ({selectedChain.shortName})
                   </Text>
                 </View>
               </View>
@@ -274,7 +235,7 @@ const FundScreen: React.FC = () => {
                 <Icon name="warning" size={18} color="#92400E" />
                 <Text style={styles.warningText}>
                   Only send {selectedAsset.symbol} on the{' '}
-                  <Text style={styles.warningBold}>{selectedNetwork.name}</Text> to this address.
+                  <Text style={styles.warningBold}>{selectedChain.name}</Text> to this address.
                   Sending tokens on other networks may result in permanent loss.
                 </Text>
               </View>
@@ -283,7 +244,7 @@ const FundScreen: React.FC = () => {
         )}
 
         {/* No wallet warning */}
-        {selectedAsset && selectedNetwork && !walletAddress && (
+        {selectedAsset && selectedChain && !walletAddress && (
           <View style={styles.noWalletCard}>
             <Icon name="account-balance-wallet" size={40} color="#CCCCCC" />
             <Text style={styles.noWalletTitle}>No Wallet Set Up</Text>
@@ -314,7 +275,7 @@ const FundScreen: React.FC = () => {
           <View style={styles.noteItem}>
             <Icon name="check-circle" size={14} color={GOLD_COLORS.success} />
             <Text style={styles.noteText}>
-              Supported networks: BNB Smart Chain (BEP20) and Sonic Network
+              Supported networks: {getSupportedNetworkNames()}
             </Text>
           </View>
         </View>
@@ -395,7 +356,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#000000',
   },
-  // Asset grid
   assetGrid: {
     flexDirection: 'row',
     gap: 12,
@@ -445,7 +405,6 @@ const styles = StyleSheet.create({
     top: 8,
     right: 8,
   },
-  // Network cards
   networkCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -483,7 +442,6 @@ const styles = StyleSheet.create({
     color: '#666666',
     marginTop: 2,
   },
-  // Deposit section
   depositSection: {
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
@@ -532,7 +490,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 2,
   },
-  // QR Code
   qrContainer: {
     alignItems: 'center',
     marginBottom: 20,
@@ -544,7 +501,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E5E5EA',
   },
-  // Address
   addressContainer: {
     marginBottom: 16,
   },
@@ -585,7 +541,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 6,
   },
-  // Warning
   warningBox: {
     flexDirection: 'row',
     backgroundColor: '#FEF3C7',
@@ -602,7 +557,6 @@ const styles = StyleSheet.create({
   warningBold: {
     fontWeight: '700',
   },
-  // No wallet
   noWalletCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
@@ -628,7 +582,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-  // Notes
   notesCard: {
     backgroundColor: GOLD_COLORS.light,
     borderRadius: 16,

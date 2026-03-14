@@ -7,13 +7,14 @@ import {
   TextInput,
   ScrollView,
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
+import { CHAINS, type ChainKey } from '../../constants/chains';
+import { useTokens } from '../../hooks/useTokens';
 import { isValidAddress, signTransaction } from '../../services/wallet';
 import {
   getWalletBalances,
@@ -22,12 +23,12 @@ import {
   WalletBalance,
 } from '../../services/walletApi';
 
-const TOKENS = ['MCGP', 'USDT', 'USDC'];
-
 type ScreenState = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
 const SendToken = () => {
+  const { tokens, tokenList, getChainsForToken } = useTokens();
   const [selectedToken, setSelectedToken] = useState('MCGP');
+  const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
@@ -37,10 +38,19 @@ const SendToken = () => {
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
+  const [showNetworkPicker, setShowNetworkPicker] = useState(false);
 
   useEffect(() => {
     loadBalances();
   }, []);
+
+  // When token changes, auto-select chain if only one available
+  useEffect(() => {
+    const tokenChains = tokens[selectedToken]?.chains ?? [];
+    if (!tokenChains.includes(selectedChain)) {
+      setSelectedChain(tokenChains[0]);
+    }
+  }, [selectedToken]);
 
   const loadBalances = async () => {
     try {
@@ -73,6 +83,9 @@ const SendToken = () => {
     setAmount(getSelectedBalance());
   };
 
+  const availableChains = getChainsForToken(selectedToken);
+  const activeChain = CHAINS[selectedChain];
+
   const validateForm = (): string | null => {
     if (!toAddress.trim()) return 'Please enter a recipient address.';
     if (!isValidAddress(toAddress.trim())) return 'Invalid wallet address.';
@@ -93,15 +106,18 @@ const SendToken = () => {
     }
     setError('');
 
-    // Get gas estimate from backend
     try {
       setLoading(true);
-      const prepResult = await prepareSendTransaction(selectedToken, toAddress.trim(), amount);
+      const prepResult = await prepareSendTransaction(
+        selectedToken,
+        toAddress.trim(),
+        amount,
+        activeChain.chainId
+      );
       if (prepResult.success && prepResult.data) {
         const gasPrice = BigInt(prepResult.data.gasPrice || '0');
         const gasLimit = BigInt(prepResult.data.gasLimit || '21000');
         const gasCostWei = gasPrice * gasLimit;
-        // Convert from wei to a readable value (rough estimate)
         const gasCostEth = Number(gasCostWei) / 1e18;
         setGasEstimate(gasCostEth.toFixed(6));
       }
@@ -118,11 +134,11 @@ const SendToken = () => {
     setError('');
 
     try {
-      // Prepare transaction from backend
       const prepResult = await prepareSendTransaction(
         selectedToken,
         toAddress.trim(),
-        amount
+        amount,
+        activeChain.chainId
       );
 
       if (!prepResult.success || !prepResult.data) {
@@ -131,7 +147,6 @@ const SendToken = () => {
 
       const unsignedTx = prepResult.data;
 
-      // Sign transaction (triggers biometric)
       const signedTx = await signTransaction({
         to: unsignedTx.to,
         data: unsignedTx.data,
@@ -142,13 +157,13 @@ const SendToken = () => {
         chainId: unsignedTx.chainId,
       });
 
-      // Submit signed transaction
       const submitResult = await submitTransaction(
         signedTx,
         'send',
         selectedToken,
         toAddress.trim(),
-        amount
+        amount,
+        activeChain.chainId
       );
 
       if (submitResult.success && submitResult.data) {
@@ -190,7 +205,7 @@ const SendToken = () => {
           </Text>
           <Text style={styles.resultMessage}>
             {isSuccess
-              ? `${amount} ${selectedToken} sent successfully.`
+              ? `${amount} ${selectedToken} sent on ${activeChain.name}.`
               : error || 'Something went wrong.'}
           </Text>
           {txHash ? (
@@ -239,6 +254,10 @@ const SendToken = () => {
               <Text style={styles.confirmValue}>{selectedToken}</Text>
             </View>
             <View style={styles.confirmRow}>
+              <Text style={styles.confirmLabel}>Network</Text>
+              <Text style={styles.confirmValue}>{activeChain.name}</Text>
+            </View>
+            <View style={styles.confirmRow}>
               <Text style={styles.confirmLabel}>Amount</Text>
               <Text style={styles.confirmValue}>{amount}</Text>
             </View>
@@ -254,7 +273,9 @@ const SendToken = () => {
             </View>
             <View style={[styles.confirmRow, { borderBottomWidth: 0 }]}>
               <Text style={styles.confirmLabel}>Est. Gas Fee</Text>
-              <Text style={styles.confirmValue}>{gasEstimate} S</Text>
+              <Text style={styles.confirmValue}>
+                {gasEstimate} {activeChain.nativeCurrency.symbol}
+              </Text>
             </View>
           </View>
 
@@ -282,7 +303,10 @@ const SendToken = () => {
           <Text style={styles.label}>Token</Text>
           <TouchableOpacity
             style={styles.tokenSelector}
-            onPress={() => setShowTokenPicker(!showTokenPicker)}
+            onPress={() => {
+              setShowTokenPicker(!showTokenPicker);
+              setShowNetworkPicker(false);
+            }}
           >
             <Text style={styles.tokenSelectorText}>{selectedToken}</Text>
             <Text style={styles.tokenSelectorArrow}>
@@ -291,7 +315,7 @@ const SendToken = () => {
           </TouchableOpacity>
           {showTokenPicker && (
             <View style={styles.tokenPickerDropdown}>
-              {TOKENS.map((token) => (
+              {tokenList.map(({ symbol: token }) => (
                 <TouchableOpacity
                   key={token}
                   style={[
@@ -318,6 +342,63 @@ const SendToken = () => {
           <Text style={styles.balanceHint}>
             Balance: {getSelectedBalance()} {selectedToken}
           </Text>
+        </View>
+
+        {/* Network selector */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Network</Text>
+          <TouchableOpacity
+            style={styles.tokenSelector}
+            onPress={() => {
+              if (availableChains.length > 1) {
+                setShowNetworkPicker(!showNetworkPicker);
+                setShowTokenPicker(false);
+              }
+            }}
+          >
+            <Text style={styles.tokenSelectorText}>
+              {activeChain.name} ({activeChain.shortName})
+            </Text>
+            {availableChains.length > 1 && (
+              <Text style={styles.tokenSelectorArrow}>
+                {showNetworkPicker ? 'v' : '>'}
+              </Text>
+            )}
+          </TouchableOpacity>
+          {showNetworkPicker && (
+            <View style={styles.tokenPickerDropdown}>
+              {availableChains.map((chain) => {
+                const isActive = chain.key === selectedChain;
+                return (
+                  <TouchableOpacity
+                    key={chain.key}
+                    style={[
+                      styles.tokenPickerItem,
+                      isActive && styles.tokenPickerItemActive,
+                    ]}
+                    onPress={() => {
+                      setSelectedChain(chain.key);
+                      setShowNetworkPicker(false);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.tokenPickerItemText,
+                        isActive && styles.tokenPickerItemTextActive,
+                      ]}
+                    >
+                      {chain.name} ({chain.shortName})
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+          {availableChains.length === 1 && (
+            <Text style={styles.balanceHint}>
+              {selectedToken} is only available on {activeChain.name}
+            </Text>
+          )}
         </View>
 
         {/* Recipient address */}
