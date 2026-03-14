@@ -17,6 +17,8 @@ type WalletTransaction struct {
 	ToAddress   string    `gorm:"not null" json:"toAddress"`
 	Amount      string    `gorm:"not null" json:"amount"`                       // stored as string to avoid precision loss
 	Status      string    `gorm:"not null;default:'pending'" json:"status"`     // pending, confirmed, failed
+	Chain       string    `gorm:"not null;default:'sonic'" json:"chain"`       // sonic, bsc
+	ChainID     int64     `gorm:"not null;default:14601" json:"chainId"`
 	BlockNumber *int64    `json:"blockNumber,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
