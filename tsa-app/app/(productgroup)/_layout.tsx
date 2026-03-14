@@ -1,63 +1,46 @@
-import { StyleSheet, Text, View } from "react-native";
 import React, { useContext } from "react";
 import { Stack } from "expo-router";
 import { AppContext } from "../../AuthContext/AuthContext";
+import { defaultScreenOptions } from "../../constants/navigation";
+
 const Layout = () => {
   const { category } = useContext(AppContext);
   return (
-    <Stack>
+    <Stack screenOptions={defaultScreenOptions}>
       <Stack.Screen
         name="categoryproducts"
-        options={{
-          headerTitle: `${category} Products`,
-        }}
+        options={{ title: `${category} Products` }}
       />
       <Stack.Screen
         name="orderproduct"
-        options={{
-          headerTitle: `Order Product(s)`,
-        }}
+        options={{ title: "Order Product(s)" }}
       />
       <Stack.Screen
         name="productdetails"
-        options={{
-          headerTitle: `Product Detail`,
-        }}
+        options={{ title: "Product Detail" }}
       />
       <Stack.Screen
         name="paymenttype"
-        options={{
-          headerTitle: `Payment Method`,
-        }}
+        options={{ title: "Payment Method" }}
       />
       <Stack.Screen
         name="paymentproof"
-        options={{
-          headerTitle: `Payment Proof`,
-        }}
+        options={{ title: "Payment Proof" }}
       />
       <Stack.Screen
         name="paymentdetail"
-        options={{
-          headerTitle: `Payment Details`,
-        }}
+        options={{ title: "Payment Details" }}
       />
       <Stack.Screen
         name="confirmation"
-        options={{
-          headerTitle: `Confirmation Page`,
-        }}
+        options={{ title: "Confirmation" }}
       />
       <Stack.Screen
         name="cryptodetails"
-        options={{
-          headerTitle: `Crypto Details`,
-        }}
+        options={{ title: "Crypto Details" }}
       />
     </Stack>
   );
 };
 
 export default Layout;
-
-const styles = StyleSheet.create({});

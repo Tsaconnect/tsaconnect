@@ -892,11 +892,6 @@ You may now send funds to the copied address.`,
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Fund Wallet</Text>
-        <View style={styles.headerRight} />
-      </View>
-
       <View style={styles.content}>
         <View style={styles.instructionsCard}>
           <Icon name="info" size={24} color={GOLD_COLORS.primary} />

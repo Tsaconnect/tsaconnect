@@ -46,10 +46,6 @@ const ReceiveToken = () => {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backText}>Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Receive</Text>
         <Text style={styles.subtitle}>
           Share your address or QR code to receive tokens on the Sonic network.
         </Text>
@@ -110,19 +106,6 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: 32,
-  },
-  backButton: {
-    marginBottom: 16,
-    paddingVertical: 8,
-  },
-  backText: {
-    ...FONTS.body3,
-    color: COLORS.primary,
-  },
-  title: {
-    ...FONTS.h1,
-    color: COLORS.dark,
-    marginBottom: 8,
   },
   subtitle: {
     ...FONTS.body3,

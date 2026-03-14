@@ -59,20 +59,6 @@ const TradeAndEarnScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.scrollContainer}>
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => router.back()}
-            style={styles.backButton}
-          >
-            <Icon name="arrow-back" size={24} color="#000000" />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Trade & Earn (T&E)</Text>
-          <TouchableOpacity style={styles.helpButton}>
-            <Icon name="help-outline" size={24} color={GOLD_COLORS.dark} />
-          </TouchableOpacity>
-        </View>
-
         {/* Main Content */}
         <View style={styles.content}>
           {/* Hero Banner */}

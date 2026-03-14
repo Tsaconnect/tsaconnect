@@ -464,14 +464,6 @@ const MultiAssetSwapScreen: React.FC = () => {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Multi-Asset Swap to MCGP</Text>
-          <TouchableOpacity style={styles.headerButton}>
-            <Icon name="history" size={24} color="#000000" />
-          </TouchableOpacity>
-        </View>
-
         {/* Promotion Banner */}
         <View style={styles.promotionBanner}>
           <Icon name="swap-horiz" size={24} color={GOLD_COLORS.primary} />

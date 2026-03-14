@@ -1070,20 +1070,6 @@ const WithdrawalScreen: React.FC = () => {
         style={styles.container}
       >
         <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-          {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity
-              onPress={() => router.back()}
-              style={styles.backButton}
-            >
-              <Icon name="arrow-back" size={24} color="#000000" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Withdraw Fiat</Text>
-            <TouchableOpacity style={styles.helpButton}>
-              <Icon name="help-outline" size={24} color={GOLD_COLORS.dark} />
-            </TouchableOpacity>
-          </View>
-
           {/* Step Indicator */}
           <View style={styles.stepIndicator}>
             {[1, 2, 3].map((stepNum) => (
