@@ -32,6 +32,7 @@ type prepareTxRequest struct {
 	TokenSymbol string `json:"tokenSymbol" binding:"required"`
 	ToAddress   string `json:"toAddress" binding:"required"`
 	Amount      string `json:"amount" binding:"required"`
+	ChainID     int64  `json:"chainId" binding:"required"`
 }
 
 // submitTxRequest is the request body for SubmitTransaction.
@@ -41,6 +42,7 @@ type submitTxRequest struct {
 	TokenSymbol string `json:"tokenSymbol" binding:"required"`
 	ToAddress   string `json:"toAddress" binding:"required"`
 	Amount      string `json:"amount" binding:"required"`
+	ChainID     int64  `json:"chainId" binding:"required"`
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -74,6 +76,22 @@ func formatTokenBalance(balance *big.Int, decimals int) string {
 	result := fmt.Sprintf(format, whole.String(), remainder)
 	result = strings.TrimRight(result, "0")
 	return result
+}
+
+func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
+	f, ok := new(big.Float).SetString(amount)
+	if !ok {
+		return nil, false
+	}
+	multiplier := new(big.Float).SetInt(
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil),
+	)
+	f.Mul(f, multiplier)
+	result, _ := f.Int(nil)
+	if result.Sign() <= 0 {
+		return nil, false
+	}
+	return result, true
 }
 
 // RegisterWalletAddress handles POST /api/wallet/register.
@@ -217,52 +235,65 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-
 	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered. Please register a wallet address first")
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
 	}
 
 	var req prepareTxRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "tokenSymbol, toAddress, and amount are required")
+		utils.ErrorResponse(c, http.StatusBadRequest, "tokenSymbol, toAddress, amount, and chainId are required")
 		return
 	}
 
-	// Validate token symbol.
 	tokenUpper := strings.ToUpper(req.TokenSymbol)
-	if !models.SupportedTokens[tokenUpper] {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Supported tokens: MCGP, USDT, USDC, S")
-		return
-	}
-
-	// Validate destination address.
 	if !isValidEthAddress(req.ToAddress) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid destination address format")
 		return
 	}
-
-	// Validate amount.
 	if !isPositiveAmount(req.Amount) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Amount must be a positive number")
 		return
 	}
 
-	// TODO: Integrate with BlockchainService / SonicClient to build unsigned transaction data.
-	// Example future implementation:
-	//   unsignedTx, err := h.BlockchainService.SonicClient.BuildTransferTx(tokenUpper, user.WalletAddress, req.ToAddress, req.Amount)
-	//
-	// For now, return stub transaction data.
-	txData := gin.H{
-		"from":        user.WalletAddress,
-		"to":          req.ToAddress,
-		"tokenSymbol": tokenUpper,
-		"amount":      req.Amount,
-		"chainId":     "0xFA",  // Sonic chain ID placeholder
-		"data":        "0x",    // Encoded contract call data placeholder
-		"gasLimit":    "65000", // Estimated gas limit placeholder
-		"nonce":       "0",     // Nonce placeholder
+	client, chainName := h.BlockchainService.ClientForChainID(req.ChainID)
+	if client == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported chain ID")
+		return
 	}
+
+	decimals := 18
+	if tokenUpper == "USDT" || tokenUpper == "USDC" {
+		decimals = 6
+	}
+	amountWei, ok := parseTokenAmount(req.Amount, decimals)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")
+		return
+	}
+
+	var txBytes []byte
+	var err error
+
+	if tokenUpper == "S" || tokenUpper == "TBNB" {
+		txBytes, err = client.PrepareNativeTransfer(user.WalletAddress, req.ToAddress, amountWei)
+	} else {
+		tokenAddr := h.BlockchainService.TokenAddress(chainName, tokenUpper)
+		if tokenAddr == "" {
+			utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
+			return
+		}
+		txBytes, err = client.PrepareERC20Transfer(tokenAddr, user.WalletAddress, req.ToAddress, amountWei)
+	}
+
+	if err != nil {
+		log.Printf("Failed to prepare tx: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare transaction")
+		return
+	}
+
+	var txData map[string]interface{}
+	json.Unmarshal(txBytes, &txData)
 
 	utils.SuccessResponse(c, http.StatusOK, "Transaction prepared", gin.H{
 		"transaction": txData,
