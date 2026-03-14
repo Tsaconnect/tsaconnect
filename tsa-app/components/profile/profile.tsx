@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  ScrollView,
 } from "react-native";
 import { Avatar, Icon, Card } from "react-native-elements";
 import { router } from "expo-router";
@@ -123,7 +124,7 @@ const ProfileScreen = () => {
           <ActivityIndicator size={24} color="#9D6B38" />
         </View>
       ) : (
-        <>
+        <ScrollView showsVerticalScrollIndicator={false}>
           <Card containerStyle={styles.card}>
             <TouchableOpacity
               style={styles.editIcon}
@@ -232,9 +233,39 @@ const ProfileScreen = () => {
                 </TouchableOpacity>
               </View>
             </TouchableOpacity>
-
           </View>
-        </>
+
+          {/* Wallet Management */}
+          <View style={styles.sectionContainer}>
+            <Text style={styles.sectionTitle}>Wallet</Text>
+            <TouchableOpacity
+              style={styles.profileLink}
+              onPress={() => router.push("/wallet/seedphrase")}
+            >
+              <Icon name="security" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>Back Up Seed Phrase</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.profileLink}
+              onPress={() => router.push("/wallet/manage")}
+            >
+              <Icon name="add-circle-outline" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>Create New Wallet</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.profileLink}
+              onPress={() =>
+                router.push({
+                  pathname: "/wallet/manage",
+                  params: { mode: "import" },
+                })
+              }
+            >
+              <Icon name="file-download" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>Import Wallet</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
       )}
     </View>
   );
@@ -282,6 +313,17 @@ const styles = StyleSheet.create({
   linksContainer: {
     marginTop: 20,
     minHeight: 300,
+  },
+  sectionContainer: {
+    marginTop: 20,
+    marginBottom: 20,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#9D6B38",
+    paddingHorizontal: 20,
+    paddingBottom: 8,
   },
   profileLink: {
     flexDirection: "row",

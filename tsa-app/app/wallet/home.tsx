@@ -7,7 +7,6 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
-  FlatList,
 } from 'react-native';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -55,7 +54,7 @@ const WalletHome = () => {
         getTransactionHistory(1, 5),
       ]);
 
-      if (balanceResult.success && balanceResult.data) {
+      if (balanceResult.success && Array.isArray(balanceResult.data)) {
         setBalances(balanceResult.data);
       } else {
         // Show default empty balances
@@ -72,6 +71,11 @@ const WalletHome = () => {
     } catch (err: any) {
       console.error('Fetch wallet data error:', err);
       setError('Failed to load wallet data');
+      setBalances([
+        { symbol: 'MCGP', name: 'MCG Protocol', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 18 },
+        { symbol: 'USDT', name: 'Tether USD', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
+        { symbol: 'USDC', name: 'USD Coin', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
+      ]);
     } finally {
       setLoading(false);
     }
@@ -169,6 +173,23 @@ const WalletHome = () => {
     );
   }
 
+  if (!walletAddress) {
+    return (
+      <View style={styles.noWalletContainer}>
+        <Text style={styles.noWalletTitle}>No Wallet Found</Text>
+        <Text style={styles.noWalletSubtitle}>
+          Create a new wallet or import an existing one to get started.
+        </Text>
+        <TouchableOpacity
+          style={styles.noWalletButton}
+          onPress={() => router.push('/wallet/seedphrase')}
+        >
+          <Text style={styles.noWalletButtonText}>Set Up Wallet</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
     <ScrollView
       style={styles.container}
@@ -191,12 +212,6 @@ const WalletHome = () => {
 
       {/* Total balance */}
       <View style={styles.balanceCard}>
-        <TouchableOpacity
-          style={styles.settingsButton}
-          onPress={() => router.push('/wallet/manage')}
-        >
-          <Text style={styles.settingsButtonText}>...</Text>
-        </TouchableOpacity>
         <Text style={styles.balanceLabel}>Total Balance</Text>
         <Text style={styles.balanceAmount}>${totalUsdValue.toFixed(2)}</Text>
         <Text style={styles.addressText} numberOfLines={1} ellipsizeMode="middle">
@@ -306,26 +321,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 24,
     alignItems: 'center',
-    position: 'relative',
     ...SHADOWS.large,
-  },
-  settingsButton: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1,
-  },
-  settingsButtonText: {
-    color: COLORS.white,
-    fontWeight: '700',
-    fontSize: 18,
-    lineHeight: 20,
   },
   balanceLabel: {
     ...FONTS.body4,
@@ -499,5 +495,37 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: '600',
     marginTop: 4,
+  },
+  noWalletContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+    backgroundColor: COLORS.white,
+  },
+  noWalletTitle: {
+    ...FONTS.h2,
+    color: COLORS.dark,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  noWalletSubtitle: {
+    ...FONTS.body3,
+    color: COLORS.gray,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 32,
+  },
+  noWalletButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 16,
+    paddingHorizontal: 48,
+    borderRadius: 12,
+    ...SHADOWS.medium,
+  },
+  noWalletButtonText: {
+    ...FONTS.h4,
+    color: COLORS.white,
+    fontWeight: '600',
   },
 });
