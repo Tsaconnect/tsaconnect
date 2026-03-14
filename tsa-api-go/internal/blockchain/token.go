@@ -49,37 +49,8 @@ func init() {
 	}
 }
 
-// GetSupportedTokens returns the list of configured tokens on the Sonic network.
-func (sc *SonicClient) GetSupportedTokens() []TokenInfo {
-	tokens := []TokenInfo{}
-
-	if sc.Config.MCGPTokenAddress != "" {
-		tokens = append(tokens, TokenInfo{
-			Address:  sc.Config.MCGPTokenAddress,
-			Symbol:   "MCGP",
-			Decimals: 18,
-		})
-	}
-	if sc.Config.USDTTokenAddress != "" {
-		tokens = append(tokens, TokenInfo{
-			Address:  sc.Config.USDTTokenAddress,
-			Symbol:   "USDT",
-			Decimals: 6,
-		})
-	}
-	if sc.Config.USDCTokenAddress != "" {
-		tokens = append(tokens, TokenInfo{
-			Address:  sc.Config.USDCTokenAddress,
-			Symbol:   "USDC",
-			Decimals: 6,
-		})
-	}
-
-	return tokens
-}
-
 // GetTokenBalance returns the ERC-20 token balance of a wallet address.
-func (sc *SonicClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.Int, error) {
+func (c *EVMClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -91,7 +62,7 @@ func (sc *SonicClient) GetTokenBalance(tokenAddress, walletAddress string) (*big
 		return nil, fmt.Errorf("failed to pack balanceOf call: %w", err)
 	}
 
-	result, err := sc.Client.CallContract(ctx, ethereum.CallMsg{
+	result, err := c.Client.CallContract(ctx, ethereum.CallMsg{
 		To:   &tokenAddr,
 		Data: data,
 	}, nil)
@@ -116,15 +87,14 @@ func (sc *SonicClient) GetTokenBalance(tokenAddress, walletAddress string) (*big
 	return balance, nil
 }
 
-// GetAllBalances returns token balances for all configured tokens.
+// GetAllBalances returns token balances for the given tokens.
 // The map keys are token symbols (e.g. "MCGP", "USDT", "USDC").
-func (sc *SonicClient) GetAllBalances(walletAddress string) (map[string]*big.Int, error) {
+func (c *EVMClient) GetAllBalances(walletAddress string, tokens []TokenInfo) (map[string]*big.Int, error) {
 	balances := make(map[string]*big.Int)
 
-	for _, token := range sc.GetSupportedTokens() {
-		balance, err := sc.GetTokenBalance(token.Address, walletAddress)
+	for _, token := range tokens {
+		balance, err := c.GetTokenBalance(token.Address, walletAddress)
 		if err != nil {
-			// Log warning but continue — a missing token contract shouldn't break all balances
 			balances[token.Symbol] = big.NewInt(0)
 			continue
 		}
@@ -134,8 +104,45 @@ func (sc *SonicClient) GetAllBalances(walletAddress string) (map[string]*big.Int
 	return balances, nil
 }
 
+// PrepareNativeTransfer builds an unsigned native token transfer transaction and returns it as JSON bytes.
+func (c *EVMClient) PrepareNativeTransfer(from, to string, amountWei *big.Int) ([]byte, error) {
+	fromAddr := common.HexToAddress(from)
+	toAddr := common.HexToAddress(to)
+
+	nonce, err := c.GetNonce(from)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get nonce: %w", err)
+	}
+
+	gasPrice, err := c.SuggestGasPrice()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gas price: %w", err)
+	}
+
+	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
+		From:  fromAddr,
+		To:    &toAddr,
+		Value: amountWei,
+	})
+	if err != nil {
+		gasLimit = 21000
+	}
+
+	tx := UnsignedTx{
+		Nonce:    nonce,
+		GasPrice: gasPrice.String(),
+		GasLimit: gasLimit,
+		To:       to,
+		Value:    amountWei.String(),
+		Data:     "",
+		ChainID:  c.chainID.String(),
+	}
+
+	return json.Marshal(tx)
+}
+
 // PrepareERC20Transfer builds an unsigned ERC-20 transfer transaction and returns it as JSON bytes.
-func (sc *SonicClient) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
+func (c *EVMClient) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
 	toAddr := common.HexToAddress(to)
 	tokenAddr := common.HexToAddress(tokenAddress)
 	fromAddr := common.HexToAddress(from)
@@ -145,17 +152,17 @@ func (sc *SonicClient) PrepareERC20Transfer(tokenAddress, from, to string, amoun
 		return nil, fmt.Errorf("failed to pack transfer call: %w", err)
 	}
 
-	nonce, err := sc.GetNonce(from)
+	nonce, err := c.GetNonce(from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
 
-	gasPrice, err := sc.SuggestGasPrice()
+	gasPrice, err := c.SuggestGasPrice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
 
-	gasLimit, err := sc.EstimateGas(ethereum.CallMsg{
+	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
 		From: fromAddr,
 		To:   &tokenAddr,
 		Data: data,
@@ -172,14 +179,14 @@ func (sc *SonicClient) PrepareERC20Transfer(tokenAddress, from, to string, amoun
 		To:       tokenAddress,
 		Value:    "0",
 		Data:     common.Bytes2Hex(data),
-		ChainID:  sc.chainID.String(),
+		ChainID:  c.chainID.String(),
 	}
 
 	return json.Marshal(tx)
 }
 
 // PrepareERC20Approve builds an unsigned ERC-20 approve transaction and returns it as JSON bytes.
-func (sc *SonicClient) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
+func (c *EVMClient) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
 	spenderAddr := common.HexToAddress(spender)
 	tokenAddr := common.HexToAddress(tokenAddress)
 	ownerAddr := common.HexToAddress(owner)
@@ -189,17 +196,17 @@ func (sc *SonicClient) PrepareERC20Approve(tokenAddress, owner, spender string, 
 		return nil, fmt.Errorf("failed to pack approve call: %w", err)
 	}
 
-	nonce, err := sc.GetNonce(owner)
+	nonce, err := c.GetNonce(owner)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
 
-	gasPrice, err := sc.SuggestGasPrice()
+	gasPrice, err := c.SuggestGasPrice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
 
-	gasLimit, err := sc.EstimateGas(ethereum.CallMsg{
+	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
 		From: ownerAddr,
 		To:   &tokenAddr,
 		Data: data,
@@ -215,7 +222,7 @@ func (sc *SonicClient) PrepareERC20Approve(tokenAddress, owner, spender string, 
 		To:       tokenAddress,
 		Value:    "0",
 		Data:     common.Bytes2Hex(data),
-		ChainID:  sc.chainID.String(),
+		ChainID:  c.chainID.String(),
 	}
 
 	return json.Marshal(tx)
