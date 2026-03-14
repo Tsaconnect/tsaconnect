@@ -11,45 +11,42 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
-// SonicClient wraps an Ethereum-compatible JSON-RPC client configured for the Sonic network.
-type SonicClient struct {
+// EVMClient wraps an Ethereum-compatible JSON-RPC client.
+type EVMClient struct {
 	Client  *ethclient.Client
-	Config  *config.Config
 	chainID *big.Int
 }
 
-// NewSonicClient connects to the Sonic RPC endpoint and returns a ready client.
-func NewSonicClient(cfg *config.Config) (*SonicClient, error) {
+// NewEVMClient connects to the given RPC endpoint and returns a ready client.
+func NewEVMClient(rpcURL string, chainID int64) (*EVMClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	client, err := ethclient.DialContext(ctx, cfg.SonicRPCURL)
+	client, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Sonic RPC at %s: %w", cfg.SonicRPCURL, err)
+		return nil, fmt.Errorf("failed to connect to RPC at %s: %w", rpcURL, err)
 	}
 
-	return &SonicClient{
+	return &EVMClient{
 		Client:  client,
-		Config:  cfg,
-		chainID: big.NewInt(cfg.SonicChainID),
+		chainID: big.NewInt(chainID),
 	}, nil
 }
 
 // ChainID returns the configured chain ID.
-func (sc *SonicClient) ChainID() *big.Int {
-	return sc.chainID
+func (c *EVMClient) ChainID() *big.Int {
+	return c.chainID
 }
 
-// GetBalance returns the native S token balance for the given address in wei.
-func (sc *SonicClient) GetBalance(address string) (*big.Int, error) {
+// GetBalance returns the native token balance for the given address in wei.
+func (c *EVMClient) GetBalance(address string) (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	addr := common.HexToAddress(address)
-	balance, err := sc.Client.BalanceAt(ctx, addr, nil)
+	balance, err := c.Client.BalanceAt(ctx, addr, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get balance for %s: %w", address, err)
 	}
@@ -57,12 +54,12 @@ func (sc *SonicClient) GetBalance(address string) (*big.Int, error) {
 }
 
 // GetNonce returns the next nonce for the given address.
-func (sc *SonicClient) GetNonce(address string) (uint64, error) {
+func (c *EVMClient) GetNonce(address string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	addr := common.HexToAddress(address)
-	nonce, err := sc.Client.PendingNonceAt(ctx, addr)
+	nonce, err := c.Client.PendingNonceAt(ctx, addr)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get nonce for %s: %w", address, err)
 	}
@@ -70,11 +67,11 @@ func (sc *SonicClient) GetNonce(address string) (uint64, error) {
 }
 
 // EstimateGas estimates the gas needed for the given call message.
-func (sc *SonicClient) EstimateGas(msg ethereum.CallMsg) (uint64, error) {
+func (c *EVMClient) EstimateGas(msg ethereum.CallMsg) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	gas, err := sc.Client.EstimateGas(ctx, msg)
+	gas, err := c.Client.EstimateGas(ctx, msg)
 	if err != nil {
 		return 0, fmt.Errorf("failed to estimate gas: %w", err)
 	}
@@ -82,11 +79,11 @@ func (sc *SonicClient) EstimateGas(msg ethereum.CallMsg) (uint64, error) {
 }
 
 // SuggestGasPrice returns the currently suggested gas price.
-func (sc *SonicClient) SuggestGasPrice() (*big.Int, error) {
+func (c *EVMClient) SuggestGasPrice() (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	price, err := sc.Client.SuggestGasPrice(ctx)
+	price, err := c.Client.SuggestGasPrice(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to suggest gas price: %w", err)
 	}
@@ -94,7 +91,7 @@ func (sc *SonicClient) SuggestGasPrice() (*big.Int, error) {
 }
 
 // SendRawTransaction submits an RLP-encoded signed transaction and returns the tx hash.
-func (sc *SonicClient) SendRawTransaction(signedTx []byte) (string, error) {
+func (c *EVMClient) SendRawTransaction(signedTx []byte) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -103,7 +100,7 @@ func (sc *SonicClient) SendRawTransaction(signedTx []byte) (string, error) {
 		return "", fmt.Errorf("failed to decode signed transaction: %w", err)
 	}
 
-	if err := sc.Client.SendTransaction(ctx, tx); err != nil {
+	if err := c.Client.SendTransaction(ctx, tx); err != nil {
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
@@ -111,12 +108,12 @@ func (sc *SonicClient) SendRawTransaction(signedTx []byte) (string, error) {
 }
 
 // GetTransactionReceipt retrieves the receipt for a mined transaction.
-func (sc *SonicClient) GetTransactionReceipt(txHash string) (*types.Receipt, error) {
+func (c *EVMClient) GetTransactionReceipt(txHash string) (*types.Receipt, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	hash := common.HexToHash(txHash)
-	receipt, err := sc.Client.TransactionReceipt(ctx, hash)
+	receipt, err := c.Client.TransactionReceipt(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipt for %s: %w", txHash, err)
 	}
