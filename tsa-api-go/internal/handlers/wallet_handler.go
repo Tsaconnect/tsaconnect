@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -167,64 +166,88 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 }
 
 // GetWalletBalances handles GET /api/wallet/balances.
-// Returns token balances for the user's registered wallet address by querying the Sonic blockchain.
+// Returns token balances for the user's registered wallet address across configured chains.
 func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-
 	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered. Please register a wallet address first")
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
 	}
 
-	balances := gin.H{
-		"MCGP": "0",
-		"USDT": "0",
-		"USDC": "0",
-		"S":    "0",
+	chainIDParam := c.Query("chainId")
+
+	type chainQuery struct {
+		name string
+		cfg  config.ChainConfig
+	}
+	var chains []chainQuery
+
+	if chainIDParam != "" {
+		cid, err := strconv.ParseInt(chainIDParam, 10, 64)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid chainId")
+			return
+		}
+		for name, cfg := range h.Config.Chains {
+			if cfg.ChainID == cid {
+				chains = append(chains, chainQuery{name, cfg})
+				break
+			}
+		}
+		if len(chains) == 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported chain ID")
+			return
+		}
+	} else {
+		for name, cfg := range h.Config.Chains {
+			chains = append(chains, chainQuery{name, cfg})
+		}
 	}
 
-	// Query real on-chain balances if blockchain client is available.
-	client := h.BlockchainService.Client()
-	if client != nil {
-		// Native S token balance (18 decimals)
-		if sBalance, err := client.GetBalance(user.WalletAddress); err == nil {
-			balances["S"] = formatTokenBalance(sBalance, 18)
-		} else {
-			log.Printf("Failed to fetch S balance for %s: %v", user.WalletAddress, err)
+	var supportedTokens []models.SupportedToken
+	config.DB.Where("is_active = ?", true).Find(&supportedTokens)
+
+	result := make(map[string]map[string]string)
+
+	for _, cq := range chains {
+		client := h.BlockchainService.ClientForChain(cq.name)
+		chainBalances := make(map[string]string)
+
+		if client != nil {
+			if nativeBal, err := client.GetBalance(user.WalletAddress); err == nil {
+				chainBalances[cq.cfg.NativeCurrency] = formatTokenBalance(nativeBal, 18)
+			}
 		}
 
-		// ERC-20 token balances
-		tokens := []blockchain.TokenInfo{}
-		if h.Config.MCGPTokenAddress != "" {
-			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.MCGPTokenAddress, Symbol: "MCGP", Decimals: 18})
-		}
-		if h.Config.USDTTokenAddress != "" {
-			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.USDTTokenAddress, Symbol: "USDT", Decimals: 6})
-		}
-		if h.Config.USDCTokenAddress != "" {
-			tokens = append(tokens, blockchain.TokenInfo{Address: h.Config.USDCTokenAddress, Symbol: "USDC", Decimals: 6})
-		}
-		tokenBalances, err := client.GetAllBalances(user.WalletAddress, tokens)
-		if err == nil {
-			for symbol, balance := range tokenBalances {
-				decimals := 18
-				if symbol == "USDT" || symbol == "USDC" {
-					decimals = 6
+		for _, tok := range supportedTokens {
+			var tokenChains []string
+			json.Unmarshal(tok.Chains, &tokenChains)
+			for _, tc := range tokenChains {
+				if tc == cq.name {
+					tokenAddr := h.BlockchainService.TokenAddress(cq.name, tok.Symbol)
+					if tokenAddr != "" && client != nil {
+						if bal, err := client.GetTokenBalance(tokenAddr, user.WalletAddress); err == nil {
+							chainBalances[tok.Symbol] = formatTokenBalance(bal, tok.Decimals)
+						} else {
+							chainBalances[tok.Symbol] = "0"
+						}
+					} else {
+						chainBalances[tok.Symbol] = "0"
+					}
 				}
-				balances[symbol] = formatTokenBalance(balance, decimals)
 			}
-		} else {
-			log.Printf("Failed to fetch token balances for %s: %v", user.WalletAddress, err)
 		}
+
+		result[cq.name] = chainBalances
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
 		"walletAddress": user.WalletAddress,
-		"balances":      balances,
+		"balances":      result,
 	})
 }
 
@@ -413,6 +436,15 @@ func (h *Handlers) GetTransactionHistory(c *gin.Context) {
 	if txType != "" {
 		query = query.Where("tx_type = ?", txType)
 		countQuery = countQuery.Where("tx_type = ?", txType)
+	}
+
+	chainIDFilter := c.Query("chainId")
+	if chainIDFilter != "" {
+		cid, _ := strconv.ParseInt(chainIDFilter, 10, 64)
+		if cid > 0 {
+			query = query.Where("chain_id = ?", cid)
+			countQuery = countQuery.Where("chain_id = ?", cid)
+		}
 	}
 
 	// Get total count.

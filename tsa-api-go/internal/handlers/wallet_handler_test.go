@@ -3,341 +3,571 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-// setupTestRouter creates a Gin engine in test mode with the user injected into context.
-func setupTestRouter(user *models.User) (*gin.Engine, *Handlers) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	h := &Handlers{}
-
-	// Middleware to inject user into context.
-	router.Use(func(c *gin.Context) {
-		if user != nil {
-			c.Set("user", *user)
-		}
-		c.Next()
+func setupTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
 
-	return router, h
+	// Create tables with SQLite-compatible SQL (no gen_random_uuid()).
+	sqls := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			username TEXT NOT NULL UNIQUE,
+			email TEXT NOT NULL UNIQUE,
+			password TEXT NOT NULL,
+			role TEXT DEFAULT 'user',
+			phone_number TEXT,
+			country TEXT,
+			state TEXT,
+			city TEXT,
+			address TEXT,
+			profile_photo TEXT,
+			referral_code TEXT,
+			referred_by TEXT,
+			documents TEXT,
+			facial_verification TEXT,
+			verification_status TEXT DEFAULT 'pending',
+			verification_notes TEXT,
+			account_status TEXT DEFAULT 'active',
+			last_login DATETIME,
+			login_attempts INTEGER DEFAULT 0,
+			lock_until DATETIME,
+			wallet_address TEXT UNIQUE,
+			seed_phrase_backed_up INTEGER DEFAULT 0,
+			deleted_at DATETIME,
+			submitted_for_verification_at DATETIME,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS wallets (
+			id TEXT PRIMARY KEY,
+			user_id TEXT UNIQUE,
+			total_balance REAL,
+			total_usd_value REAL,
+			selected_asset TEXT,
+			addresses TEXT,
+			security TEXT,
+			settings TEXT,
+			transaction_limit REAL,
+			daily_limit REAL,
+			last_synced DATETIME,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS wallet_transactions (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			tx_hash TEXT NOT NULL UNIQUE,
+			token_symbol TEXT NOT NULL,
+			tx_type TEXT NOT NULL,
+			from_address TEXT NOT NULL,
+			to_address TEXT NOT NULL,
+			amount TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			chain TEXT NOT NULL DEFAULT 'sonic',
+			chain_id INTEGER NOT NULL DEFAULT 14601,
+			block_number INTEGER,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS supported_tokens (
+			id TEXT PRIMARY KEY,
+			symbol TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			decimals INTEGER NOT NULL DEFAULT 18,
+			icon_color TEXT NOT NULL DEFAULT '#888888',
+			chains TEXT NOT NULL,
+			is_active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+	}
+	for _, s := range sqls {
+		if err := db.Exec(s).Error; err != nil {
+			t.Fatalf("failed to create table: %v", err)
+		}
+	}
+
+	config.DB = db
+	return db
 }
 
-// testUser returns a test user with the given wallet address.
-func testUser(walletAddress string) *models.User {
-	return &models.User{
-		ID:            uuid.New(),
-		Name:          "Test User",
-		Username:      "testuser",
-		Email:         "test@example.com",
-		WalletAddress: walletAddress,
+func setupTestHandlers(t *testing.T) *Handlers {
+	t.Helper()
+	cfg := config.Load()
+	return &Handlers{
+		BlockchainService: services.NewBlockchainService(cfg),
+		Config:            cfg,
 	}
 }
 
-func TestIsValidEthAddress(t *testing.T) {
-	tests := []struct {
-		name    string
-		address string
-		valid   bool
-	}{
-		{"valid lowercase", "0x1234567890abcdef1234567890abcdef12345678", true},
-		{"valid uppercase", "0x1234567890ABCDEF1234567890ABCDEF12345678", true},
-		{"valid mixed case", "0x1234567890AbCdEf1234567890aBcDeF12345678", true},
-		{"missing 0x prefix", "1234567890abcdef1234567890abcdef12345678", false},
-		{"too short", "0x1234567890abcdef", false},
-		{"too long", "0x1234567890abcdef1234567890abcdef1234567890", false},
-		{"invalid chars", "0x1234567890ghijkl1234567890abcdef12345678", false},
-		{"empty string", "", false},
-		{"just 0x", "0x", false},
+func createTestUser(t *testing.T, db *gorm.DB) *models.User {
+	t.Helper()
+	user := &models.User{
+		ID:       uuid.New(),
+		Name:     "Test User",
+		Username: "testuser_" + uuid.New().String()[:8],
+		Email:    "test_" + uuid.New().String()[:8] + "@example.com",
+		Password: "$2a$10$fakehash",
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidEthAddress(tt.address)
-			if got != tt.valid {
-				t.Errorf("isValidEthAddress(%q) = %v, want %v", tt.address, got, tt.valid)
-			}
-		})
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("failed to create test user: %v", err)
 	}
+	return user
 }
 
-func TestIsPositiveAmount(t *testing.T) {
-	tests := []struct {
-		name   string
-		amount string
-		valid  bool
-	}{
-		{"positive integer", "10", true},
-		{"positive decimal", "10.5", true},
-		{"zero", "0", false},
-		{"negative", "-5", false},
-		{"not a number", "abc", false},
-		{"empty", "", false},
-		{"very small positive", "0.001", true},
-	}
+func setUserWallet(t *testing.T, db *gorm.DB, user *models.User, addr string) {
+	t.Helper()
+	db.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", addr)
+	user.WalletAddress = addr
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isPositiveAmount(tt.amount)
-			if got != tt.valid {
-				t.Errorf("isPositiveAmount(%q) = %v, want %v", tt.amount, got, tt.valid)
-			}
-		})
+// ---------- RegisterWalletAddress tests ----------
+
+func TestRegisterWalletAddress_Valid(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"walletAddress": "0x0000000000000000000000000000000000000001",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.RegisterWalletAddress(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 }
 
 func TestRegisterWalletAddress_InvalidFormat(t *testing.T) {
-	user := testUser("")
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/register", h.RegisterWalletAddress)
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
 
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"walletAddress": "not-an-address",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.RegisterWalletAddress(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterWalletAddress_Duplicate(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+
+	addr := "0x0000000000000000000000000000000000000001"
+
+	// Create first user and assign the address.
+	otherUser := createTestUser(t, db)
+	setUserWallet(t, db, otherUser, addr)
+
+	// Create second user and try to register the same address.
+	user := createTestUser(t, db)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"walletAddress": addr,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.RegisterWalletAddress(c)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+	}
+}
+
+// ---------- PrepareSendTransaction validation tests ----------
+
+func TestPrepareTx_InvalidAddress(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "S",
+		"toAddress":   "not-valid",
+		"amount":      "1.0",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestPrepareTx_InvalidAmount(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "-1",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestPrepareTx_NoWallet(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1.0",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestPrepareTx_UnsupportedChain(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1.0",
+		"chainId":     99999,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- SubmitTransaction validation tests ----------
+
+func TestSubmitTx_InvalidSignedTx(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    "not-valid-hex",
+		"txType":      "send",
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1.0",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitTx_InvalidTxType(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    "0xdeadbeef",
+		"txType":      "invalid_type",
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1.0",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitTx_UnsupportedChain(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    "0xdeadbeef",
+		"txType":      "send",
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1.0",
+		"chainId":     99999,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- ConfirmSeedPhraseBackup ----------
+
+func TestConfirmSeedPhraseBackup(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	h.ConfirmSeedPhraseBackup(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Verify DB was updated.
+	var updated models.User
+	if err := db.First(&updated, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("failed to reload user: %v", err)
+	}
+	if !updated.SeedPhraseBackedUp {
+		t.Error("expected SeedPhraseBackedUp to be true after confirmation")
+	}
+}
+
+// ---------- GetTransactionHistory ----------
+
+func TestGetTransactionHistory(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+
+	// Create 3 transaction records.
+	for i := 1; i <= 3; i++ {
+		tx := models.WalletTransaction{
+			ID:          uuid.New(),
+			UserID:      user.ID,
+			TxHash:      fmt.Sprintf("0x%064x", i),
+			TokenSymbol: "S",
+			TxType:      models.TxTypeSend,
+			FromAddress: "0x0000000000000000000000000000000000000001",
+			ToAddress:   "0x0000000000000000000000000000000000000002",
+			Amount:      "1.0",
+			Status:      models.TxStatusPending,
+			Chain:       "sonic",
+			ChainID:     14601,
+		}
+		if err := db.Create(&tx).Error; err != nil {
+			t.Fatalf("failed to create test tx %d: %v", i, err)
+		}
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	c.Request, _ = http.NewRequest("GET", "/?page=1&limit=20", nil)
+
+	h.GetTransactionHistory(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an object, got %T", resp["data"])
+	}
+
+	txs, ok := data["transactions"].([]interface{})
+	if !ok {
+		t.Fatalf("expected transactions to be an array, got %T", data["transactions"])
+	}
+
+	if len(txs) != 3 {
+		t.Errorf("expected 3 transactions, got %d", len(txs))
+	}
+}
+
+// ---------- GetSupportedTokens ----------
+
+func TestGetSupportedTokens_AutoSeed(t *testing.T) {
+	setupTestDB(t)
+	h := setupTestHandlers(t)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	c.Request, _ = http.NewRequest("GET", "/", nil)
+
+	h.GetSupportedTokens(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	data, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an array, got %T", resp["data"])
+	}
+
+	if len(data) < 3 {
+		t.Errorf("expected at least 3 seeded tokens, got %d", len(data))
+	}
+}
+
+// ---------- parseTokenAmount ----------
+
+func TestParseTokenAmount(t *testing.T) {
 	tests := []struct {
-		name    string
-		address string
-		code    int
+		amount   string
+		decimals int
+		wantStr  string
+		wantOK   bool
 	}{
-		{"no 0x prefix", "1234567890abcdef1234567890abcdef12345678", http.StatusBadRequest},
-		{"too short", "0x12345678", http.StatusBadRequest},
-		{"invalid hex chars", "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG", http.StatusBadRequest},
-		{"empty address", "", http.StatusBadRequest},
+		{"1", 18, "1000000000000000000", true},
+		{"0.5", 18, "500000000000000000", true},
+		{"10.5", 6, "10500000", true},
+		{"0", 18, "", false},
+		{"-1", 18, "", false},
+		{"abc", 18, "", false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body, _ := json.Marshal(map[string]string{"walletAddress": tt.address})
-			req, _ := http.NewRequest("POST", "/api/wallet/register", bytes.NewBuffer(body))
-			req.Header.Set("Content-Type", "application/json")
-
-			w := httptest.NewRecorder()
-			router.ServeHTTP(w, req)
-
-			if w.Code != tt.code {
-				t.Errorf("expected status %d, got %d. Body: %s", tt.code, w.Code, w.Body.String())
+		t.Run(fmt.Sprintf("%s/%d", tt.amount, tt.decimals), func(t *testing.T) {
+			result, ok := parseTokenAmount(tt.amount, tt.decimals)
+			if ok != tt.wantOK {
+				t.Errorf("parseTokenAmount(%q, %d): got ok=%v, want ok=%v", tt.amount, tt.decimals, ok, tt.wantOK)
+				return
 			}
-
-			var resp map[string]interface{}
-			json.Unmarshal(w.Body.Bytes(), &resp)
-			if resp["success"] != false {
-				t.Errorf("expected success=false, got %v", resp["success"])
+			if ok && result.String() != tt.wantStr {
+				t.Errorf("parseTokenAmount(%q, %d) = %s, want %s", tt.amount, tt.decimals, result.String(), tt.wantStr)
 			}
 		})
-	}
-}
-
-func TestRegisterWalletAddress_SameAddress(t *testing.T) {
-	existingAddr := "0x1234567890abcdef1234567890abcdef12345678"
-	user := testUser(existingAddr)
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/register", h.RegisterWalletAddress)
-
-	body, _ := json.Marshal(map[string]string{
-		"walletAddress": existingAddr,
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d. Body: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["success"] != true {
-		t.Errorf("expected success=true, got %v", resp["success"])
-	}
-}
-
-// TestRegisterWalletAddress_ReplaceExisting requires a database connection
-// and is covered by integration tests.
-
-func TestRegisterWalletAddress_Unauthenticated(t *testing.T) {
-	router, h := setupTestRouter(nil)
-	router.POST("/api/wallet/register", h.RegisterWalletAddress)
-
-	body, _ := json.Marshal(map[string]string{
-		"walletAddress": "0x1234567890abcdef1234567890abcdef12345678",
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/register", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
-	}
-}
-
-func TestGetWalletBalances_NoWalletAddress(t *testing.T) {
-	user := testUser("")
-	router, h := setupTestRouter(user)
-	router.GET("/api/wallet/balances", h.GetWalletBalances)
-
-	req, _ := http.NewRequest("GET", "/api/wallet/balances", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestGetWalletBalances_WithWalletAddress(t *testing.T) {
-	user := testUser("0x1234567890abcdef1234567890abcdef12345678")
-	router, h := setupTestRouter(user)
-	router.GET("/api/wallet/balances", h.GetWalletBalances)
-
-	req, _ := http.NewRequest("GET", "/api/wallet/balances", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d. Body: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["success"] != true {
-		t.Errorf("expected success=true, got %v", resp["success"])
-	}
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected data to be a map")
-	}
-	balances, ok := data["balances"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected balances to be a map")
-	}
-	for _, token := range []string{"MCGP", "USDT", "USDC", "S"} {
-		if _, exists := balances[token]; !exists {
-			t.Errorf("expected balance for %s", token)
-		}
-	}
-}
-
-func TestPrepareSendTransaction_InvalidToken(t *testing.T) {
-	user := testUser("0x1234567890abcdef1234567890abcdef12345678")
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/prepare-tx", h.PrepareSendTransaction)
-
-	body, _ := json.Marshal(map[string]string{
-		"tokenSymbol": "INVALID",
-		"toAddress":   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		"amount":      "10",
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/prepare-tx", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPrepareSendTransaction_InvalidAmount(t *testing.T) {
-	user := testUser("0x1234567890abcdef1234567890abcdef12345678")
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/prepare-tx", h.PrepareSendTransaction)
-
-	body, _ := json.Marshal(map[string]string{
-		"tokenSymbol": "USDT",
-		"toAddress":   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		"amount":      "-5",
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/prepare-tx", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPrepareSendTransaction_Valid(t *testing.T) {
-	user := testUser("0x1234567890abcdef1234567890abcdef12345678")
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/prepare-tx", h.PrepareSendTransaction)
-
-	body, _ := json.Marshal(map[string]string{
-		"tokenSymbol": "USDT",
-		"toAddress":   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		"amount":      "10.5",
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/prepare-tx", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d. Body: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["success"] != true {
-		t.Errorf("expected success=true, got %v", resp["success"])
-	}
-}
-
-func TestConfirmSeedPhraseBackup_Unauthenticated(t *testing.T) {
-	router, h := setupTestRouter(nil)
-	router.POST("/api/wallet/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
-
-	req, _ := http.NewRequest("POST", "/api/wallet/seed-phrase-backed-up", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
-	}
-}
-
-func TestSubmitTransaction_InvalidTxType(t *testing.T) {
-	user := testUser("0x1234567890abcdef1234567890abcdef12345678")
-	router, h := setupTestRouter(user)
-	router.POST("/api/wallet/submit-tx", h.SubmitTransaction)
-
-	body, _ := json.Marshal(map[string]string{
-		"signedTx":    "0xabcdef",
-		"txType":      "invalid",
-		"tokenSymbol": "USDT",
-		"toAddress":   "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		"amount":      "10",
-	})
-	req, _ := http.NewRequest("POST", "/api/wallet/submit-tx", bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d. Body: %s", http.StatusBadRequest, w.Code, w.Body.String())
-	}
-}
-
-func TestGetTransactionHistory_Unauthenticated(t *testing.T) {
-	router, h := setupTestRouter(nil)
-	router.GET("/api/wallet/transactions", h.GetTransactionHistory)
-
-	req, _ := http.NewRequest("GET", "/api/wallet/transactions", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
 	}
 }
