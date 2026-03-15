@@ -105,7 +105,7 @@ const SeedPhrase = () => {
       try {
         await registerWalletAddress(address);
       } catch (_) {}
-      router.replace('/wallet/home');
+      router.replace('/tokenization');
     } catch (err: any) {
       setError(err.message || 'Failed to import wallet. Check your seed phrase.');
     } finally {
@@ -438,7 +438,7 @@ const SeedPhrase = () => {
         </Text>
         <TouchableOpacity
           style={[styles.primaryButton, { width: '100%' }]}
-          onPress={() => router.replace('/wallet/home')}
+          onPress={() => router.replace('/tokenization')}
         >
           <Text style={styles.primaryButtonText}>Go to Wallet</Text>
         </TouchableOpacity>

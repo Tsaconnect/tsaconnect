@@ -215,7 +215,7 @@ const SendToken = () => {
           ) : null}
           <TouchableOpacity
             style={styles.primaryButton}
-            onPress={() => router.replace('/wallet/home')}
+            onPress={() => router.replace('/tokenization')}
           >
             <Text style={styles.primaryButtonText}>Back to Wallet</Text>
           </TouchableOpacity>

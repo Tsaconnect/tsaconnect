@@ -63,7 +63,7 @@ const WalletManage = () => {
                 console.warn('Backend wallet registration failed:', result.message);
               }
 
-              router.replace('/wallet/home');
+              router.replace('/tokenization');
             } catch (err: any) {
               console.error('Generate wallet error:', err);
               setError(err.message || 'Failed to generate wallet. Please try again.');
@@ -101,7 +101,7 @@ const WalletManage = () => {
         console.warn('Backend wallet registration failed:', result.message);
       }
 
-      router.replace('/wallet/home');
+      router.replace('/tokenization');
     } catch (err: any) {
       console.error('Import wallet error:', err);
       setError(err.message || 'Failed to import wallet. Check your seed phrase.');
