@@ -5,6 +5,15 @@ import { AuthProvider } from '@/contexts/auth-context';
 import { AppLayout } from '@/components/layout/app-layout';
 import LoginPage from '@/pages/auth/login';
 import DashboardPage from '@/pages/dashboard/index';
+import UsersPage from '@/pages/users/index';
+import ProductsPage from '@/pages/products/index';
+import CategoriesPage from '@/pages/categories/index';
+import OrdersPage from '@/pages/orders/index';
+import OrderDetailPage from '@/pages/orders/[id]';
+import AdvertRequestsPage from '@/pages/advert-requests/index';
+import DepositsPage from '@/pages/deposits/index';
+import VerificationsPage from '@/pages/verifications/index';
+import SettingsPage from '@/pages/settings/index';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,6 +40,15 @@ export default function App() {
             <Route path="/" element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<DashboardPage />} />
+              <Route path="users" element={<UsersPage />} />
+              <Route path="products" element={<ProductsPage />} />
+              <Route path="categories" element={<CategoriesPage />} />
+              <Route path="orders" element={<OrdersPage />} />
+              <Route path="orders/:id" element={<OrderDetailPage />} />
+              <Route path="advert-requests" element={<AdvertRequestsPage />} />
+              <Route path="deposits" element={<DepositsPage />} />
+              <Route path="verifications" element={<VerificationsPage />} />
+              <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Routes>
         </BrowserRouter>
