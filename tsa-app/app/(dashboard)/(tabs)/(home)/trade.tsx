@@ -26,7 +26,7 @@ const services = () => {
     if (token) {
       fetchCategories();
     }
-  }, []);
+  }, [token]);
   return (
     <View style={{ flex: 1, backgroundColor: COLORS.white }}>
      

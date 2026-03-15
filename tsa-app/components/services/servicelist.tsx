@@ -29,8 +29,8 @@ const ServiceList = () => {
         setCategories(fetchedCategories);
       } catch (error) {}
     };
-    fetchCategories();
-  }, []);
+    if (token) fetchCategories();
+  }, [token]);
 
   return (
     <ScrollView style={styles.container}>

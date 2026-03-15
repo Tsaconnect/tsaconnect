@@ -158,8 +158,8 @@ const AddService = () => {
         setCategories(fetchedCategories);
       } catch (error) {}
     };
-    fetchCategories();
-  }, []);
+    if (token) fetchCategories();
+  }, [token]);
 
   return (
     <ScrollView style={styles.cover}>
