@@ -6,22 +6,30 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Modal,
-  ToastAndroid,
+  Alert,
+  Platform,
+  KeyboardAvoidingView,
+  ActivityIndicator,
 } from "react-native";
 import React, { useState, useEffect, useCallback } from "react";
-import { COLORS, SIZES } from "../../constants/theme";
-import Icon from "@expo/vector-icons/FontAwesome";
+import Icon from "react-native-vector-icons/MaterialIcons";
 import * as ImagePicker from "expo-image-picker";
-import { LinearProgress } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { Picker } from "@react-native-picker/picker";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 
+const GOLD = {
+  primary: '#FFD700',
+  dark: '#B8860B',
+  light: '#FFF8DC',
+  muted: '#F5DEB3',
+  bg: '#FAF9F6',
+};
+
 const AddProduct = () => {
   const { token } = useAuth();
-  const [productImages, setProductImages] = useState([]);
+  const [productImages, setProductImages] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [productName, setProductName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -29,74 +37,58 @@ const AddProduct = () => {
   const [location, setLocation] = useState("");
   const [category, setCategory] = useState("");
   const [companyName, setCompanyName] = useState("");
-  const [price, setPrice] = useState(0);
-  const [stock, setStock] = useState(0);
-  const [attributes, setAttributes] = useState([]);
+  const [price, setPrice] = useState("");
+  const [stock, setStock] = useState("");
+  const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const { setLoading, loading } = useAuth();
-  const [isModalVisible, setIsModalVisible] = useState(false);
-  const [categories, setCategories] = useState([]);
-  const maxDescriptionLength = 100;
+  const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
+  const maxDescriptionLength = 500;
 
-  const delay = useCallback((duration: any) => {
+  const delay = useCallback((duration: number) => {
     return new Promise((resolve) => setTimeout(resolve, duration));
   }, []);
 
   useEffect(() => {
     const fetchCategories = async () => {
       try {
-        const response = await axios.get(`${baseUrl}/category?type=Product`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        }); // Adjust the endpoint based on your API
-        const fetchedCategories = response.data.results;
-        setCategories(fetchedCategories);
-      } catch (error) {}
+        const response = await axios.get(
+          `${baseUrl}/products/category/all?type=Product&active=true`,
+          { headers: { Authorization: token } }
+        );
+        const data = response.data.data;
+        setCategories(Array.isArray(data) ? data : []);
+      } catch (error) {
+        // Categories will show empty picker
+      }
     };
-    fetchCategories();
-  }, []);
+    if (token) fetchCategories();
+  }, [token]);
 
   const pickProductImages = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") {
-      ToastAndroid.show(
-        "Permission to access media library denied!",
-        ToastAndroid.SHORT
-      );
+      Alert.alert("Permission Required", "Please allow access to your photo library.");
       return;
     }
 
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
-      quality: 1,
+      quality: 0.8,
       allowsMultipleSelection: true,
     });
 
     if (!result.canceled) {
-      //@ts-ignore
       setProductImages(result.assets.map((asset) => asset.uri));
-    } else {
-      ToastAndroid.show("You did not select any images!", ToastAndroid.SHORT);
     }
   };
 
+  const removeImage = (index: number) => {
+    setProductImages(prev => prev.filter((_, i) => i !== index));
+  };
+
   const createProduct = async () => {
-    if (
-      !productName ||
-      !location ||
-      !phoneNumber ||
-      !email ||
-      !category ||
-      !description ||
-      !price ||
-      productImages.length === 0
-    ) {
-      await delay(3000);
-      setIsModalVisible(true);
-      ToastAndroid.show(
-        "Please fill all the fields and upload images!",
-        ToastAndroid.SHORT
-      );
+    if (!productName || !location || !phoneNumber || !email || !category || !description || !price || productImages.length === 0) {
+      Alert.alert("Missing Fields", "Please fill all required fields and upload at least one image.");
       return;
     }
     setLoading(true);
@@ -121,15 +113,13 @@ const AddProduct = () => {
     //@ts-ignore
     formData.append("price", parseInt(price));
     //@ts-ignore
-    formData.append("stock", parseInt(stock));
+    formData.append("stock", parseInt(stock || "0"));
     attributes.forEach((attribute, index) => {
-      //@ts-ignore
       formData.append(`attributes[${index}].name`, attribute.name);
-      //@ts-ignore
       formData.append(`attributes[${index}].value`, attribute.value);
     });
     try {
-      const response = await axios.post(`${baseUrl}/adverts`, formData, {
+      const response = await axios.post(`${baseUrl}/products`, formData, {
         headers: {
           Authorization: token,
           "Content-Type": "multipart/form-data",
@@ -137,26 +127,12 @@ const AddProduct = () => {
       });
       if (response) {
         setLoading(false);
-        setIsModalVisible(true);
-        ToastAndroid.show(
-          "The product was created successfully!",
-          ToastAndroid.SHORT
-        );
-        await delay(2000);
-        setIsModalVisible(false);
+        Alert.alert("Success", "Product created successfully!");
         resetForm();
       }
     } catch (error: any) {
-      console.log(error);
-      alert(error.response?.data.message);
       setLoading(false);
-      setIsModalVisible(true);
-      ToastAndroid.show(
-        "An error occurred while creating product!",
-        ToastAndroid.SHORT
-      );
-      await delay(4000);
-      setIsModalVisible(false);
+      Alert.alert("Error", error.response?.data?.message || "Failed to create product.");
     }
   };
 
@@ -168,196 +144,241 @@ const AddProduct = () => {
     setLocation("");
     setProductImages([]);
     setProductName("");
-    //@ts-ignore
     setPrice("");
-    //@ts-ignore
     setStock("");
     setAttributes([]);
+    setCompanyName("");
   };
 
   const handleAddAttribute = () => {
-    //@ts-ignore
     setAttributes([...attributes, { name: "", value: "" }]);
   };
 
-  const handleRemoveAttribute = (index: any) => {
-    const newAttributes = [...attributes];
-    newAttributes.splice(index, 1);
-    setAttributes(newAttributes);
+  const handleRemoveAttribute = (index: number) => {
+    setAttributes(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleAttributeChange = (index: number, field: any, value: any) => {
-    const newAttributes = [...attributes];
-    //@ts-ignore
-    newAttributes[index][field] = value;
-    setAttributes(newAttributes);
+  const handleAttributeChange = (index: number, field: "name" | "value", value: string) => {
+    const updated = [...attributes];
+    updated[index][field] = value;
+    setAttributes(updated);
   };
 
   return (
-    <ScrollView style={styles.cover}>
-      <Modal visible={isModalVisible} style={styles.modal} transparent={true}>
-        <TouchableOpacity
-          onPress={() => {
-            setIsModalVisible(false);
-          }}
-          style={styles.closeButton}
-        >
-          <Text style={styles.closeButtonText}>Close</Text>
-        </TouchableOpacity>
-      </Modal>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <Text style={styles.title}>Add Product</Text>
+        <Text style={styles.subtitle}>Fill in the details to list your product</Text>
 
-      <Text style={styles.label}>Enter product name</Text>
-      <TextInput
-        style={styles.input}
-        value={productName}
-        onChangeText={setProductName}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Location</Text>
-      <TextInput
-        style={styles.input}
-        value={location}
-        onChangeText={setLocation}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid phone number</Text>
-      <TextInput
-        style={styles.input}
-        value={phoneNumber}
-        onChangeText={setPhoneNumber}
-        keyboardType="phone-pad"
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid Email</Text>
-      <TextInput
-        style={styles.input}
-        value={email}
-        onChangeText={setEmail}
-        keyboardType="email-address"
-      />
-      <Text style={styles.label}>Company Name</Text>
-      <TextInput
-        style={styles.input}
-        value={companyName}
-        onChangeText={setCompanyName}
-      />
-      <Text style={styles.label}>Enter Category</Text>
-      <Picker
-        style={styles.input}
-        selectedValue={category}
-        onValueChange={(itemValue) => setCategory(itemValue)}
-      >
-        <Picker.Item label={"Select Category"} value={""} />
-        {categories.map((item, index) => (
-          <Picker.Item
-            key={index}
-            //@ts-ignore
-            label={item.title}
-            //@ts-ignore
-            value={item.id}
+        {/* Image Upload */}
+        <Text style={styles.sectionTitle}>Photos</Text>
+        <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
+          <Icon name="add-a-photo" size={32} color={GOLD.dark} />
+          <Text style={styles.imageUploadText}>Tap to upload images</Text>
+          <Text style={styles.imageUploadHint}>High quality photos help sell faster</Text>
+        </TouchableOpacity>
+
+        {productImages.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
+            {productImages.map((uri, index) => (
+              <View key={index} style={styles.imagePreviewWrapper}>
+                <Image source={{ uri }} style={styles.imagePreview} />
+                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
+                  <Icon name="close" size={16} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+
+        {/* Product Details */}
+        <Text style={styles.sectionTitle}>Product Details</Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Product Name *</Text>
+          <TextInput
+            style={styles.input}
+            value={productName}
+            onChangeText={setProductName}
+            placeholder="e.g. Organic Honey 500ml"
+            placeholderTextColor="#bbb"
           />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Category *</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={category}
+              onValueChange={(val) => setCategory(val)}
+              style={styles.picker}
+            >
+              <Picker.Item label="Select a category" value="" color="#bbb" />
+              {categories.map((item) => (
+                <Picker.Item key={item.id} label={item.title} value={item.id} />
+              ))}
+            </Picker>
+          </View>
+        </View>
+
+        <View style={styles.row}>
+          <View style={[styles.inputGroup, { flex: 1, marginRight: 8 }]}>
+            <Text style={styles.label}>Price (USDT) *</Text>
+            <TextInput
+              style={styles.input}
+              value={price}
+              onChangeText={setPrice}
+              keyboardType="numeric"
+              placeholder="0.00"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+          <View style={[styles.inputGroup, { flex: 1, marginLeft: 8 }]}>
+            <Text style={styles.label}>Stock</Text>
+            <TextInput
+              style={styles.input}
+              value={stock}
+              onChangeText={setStock}
+              keyboardType="numeric"
+              placeholder="0"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Description *</Text>
+          <TextInput
+            style={styles.textArea}
+            placeholder="Describe your product..."
+            placeholderTextColor="#bbb"
+            numberOfLines={5}
+            multiline
+            maxLength={maxDescriptionLength}
+            value={description}
+            onChangeText={setDescription}
+            textAlignVertical="top"
+          />
+          <Text style={styles.charCount}>
+            {description.length}/{maxDescriptionLength}
+          </Text>
+        </View>
+
+        {/* Contact & Location */}
+        <Text style={styles.sectionTitle}>Contact & Location</Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Company Name</Text>
+          <TextInput
+            style={styles.input}
+            value={companyName}
+            onChangeText={setCompanyName}
+            placeholder="Your business name"
+            placeholderTextColor="#bbb"
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Location *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="location-on" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={location}
+              onChangeText={setLocation}
+              placeholder="City, State"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Phone Number *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={phoneNumber}
+              onChangeText={setPhoneNumber}
+              keyboardType="phone-pad"
+              placeholder="+234 800 000 0000"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Email *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              placeholder="you@example.com"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        {/* Attributes */}
+        <Text style={styles.sectionTitle}>Attributes</Text>
+        <Text style={styles.attributeHint}>Add custom details like size, color, weight, etc.</Text>
+
+        {attributes.map((attribute, index) => (
+          <View key={index} style={styles.attributeRow}>
+            <TextInput
+              style={[styles.input, { flex: 1, marginRight: 8 }]}
+              placeholder="Name"
+              placeholderTextColor="#bbb"
+              value={attribute.name}
+              onChangeText={(value) => handleAttributeChange(index, "name", value)}
+            />
+            <TextInput
+              style={[styles.input, { flex: 1, marginRight: 8 }]}
+              placeholder="Value"
+              placeholderTextColor="#bbb"
+              value={attribute.value}
+              onChangeText={(value) => handleAttributeChange(index, "value", value)}
+            />
+            <TouchableOpacity onPress={() => handleRemoveAttribute(index)} style={styles.removeAttrBtn}>
+              <Icon name="delete-outline" size={22} color="#e53935" />
+            </TouchableOpacity>
+          </View>
         ))}
-      </Picker>
-      <Text style={styles.label}>Price</Text>
-      <TextInput
-        style={styles.input}
-        value={String(price)}
-        //@ts-ignore
-        onChangeText={(value) => setPrice(value)}
-        keyboardType="numeric"
-      />
 
-      <Text style={styles.label}>Stock</Text>
-      <TextInput
-        style={styles.input}
-        value={String(stock)}
-        //@ts-ignore
-        onChangeText={(value) => setStock(value)}
-        keyboardType="numeric"
-      />
-
-      <Text style={styles.label}>Upload Quality product images</Text>
-      <View style={styles.multipleImageContainer}>
-        <TouchableOpacity onPress={pickProductImages}>
-          <Icon name="upload" size={25} color="#aaa" />
+        <TouchableOpacity style={styles.addAttrBtn} onPress={handleAddAttribute} activeOpacity={0.7}>
+          <Icon name="add" size={20} color={GOLD.dark} />
+          <Text style={styles.addAttrText}>Add Attribute</Text>
         </TouchableOpacity>
-      </View>
 
-      <View style={styles.imageContainer}>
-        {productImages &&
-          productImages.map((uri, index) => (
-            <Image key={index} source={{ uri }} style={styles.uploadedImage} />
-          ))}
-      </View>
-      <Text style={styles.label}>Description</Text>
-      <View style={styles.textAreaContainer}>
-        <TextInput
-          style={styles.textArea}
-          placeholder="Description"
-          placeholderTextColor="grey"
-          numberOfLines={10}
-          multiline={true}
-          maxLength={maxDescriptionLength}
-          value={description}
-          onChangeText={setDescription}
-        />
-        <Text style={styles.charCount}>
-          {description.length}/{maxDescriptionLength}
-        </Text>
-      </View>
+        {/* Submit */}
+        {loading && (
+          <View style={{ marginTop: 16 }}>
+            <ActivityIndicator size="small" color={GOLD.dark} />
+            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
+          </View>
+        )}
 
-      <Text style={styles.label}>Attributes</Text>
-      {attributes.map((attribute, index) => (
-        <View key={index} style={styles.attributeGroup}>
-          <TextInput
-            style={styles.attributeInput}
-            placeholder="Attribute Name"
-            //@ts-ignore
-            value={attribute.name}
-            onChangeText={(value) =>
-              handleAttributeChange(index, "name", value)
-            }
-          />
-          <TextInput
-            style={styles.attributeInput}
-            placeholder="Attribute Value"
-            //@ts-ignore
-            value={attribute.value}
-            onChangeText={(value) =>
-              handleAttributeChange(index, "value", value)
-            }
-          />
-          <TouchableOpacity
-            style={styles.removeAttributeButton}
-            onPress={() => handleRemoveAttribute(index)}
-          >
-            <Icon name="trash" size={20} color="red" />
-          </TouchableOpacity>
-        </View>
-      ))}
-      <TouchableOpacity
-        style={styles.addAttributeButton}
-        onPress={handleAddAttribute}
-      >
-        <Text style={styles.addAttributeButtonText}>Add Attribute</Text>
-      </TouchableOpacity>
-
-      {loading && (
-        <View style={styles.progressContainer}>
-          <LinearProgress color={COLORS.primary} />
-          <Text style={styles.loadingText}>Submitting...</Text>
-        </View>
-      )}
-      <View style={{ alignItems: "center" }}>
         <TouchableOpacity
-          style={[styles.button, loading && styles.buttonLoading]}
+          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
           onPress={createProduct}
           disabled={loading}
+          activeOpacity={0.8}
         >
-          <Text style={styles.buttonText}>Continue</Text>
+          <Icon name="publish" size={22} color="#000" />
+          <Text style={styles.submitBtnText}>Publish Product</Text>
         </TouchableOpacity>
-      </View>
-    </ScrollView>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -365,178 +386,177 @@ export default AddProduct;
 
 const styles = StyleSheet.create({
   container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
+    flex: 1,
+    backgroundColor: GOLD.bg,
+    paddingHorizontal: 20,
   },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
+  title: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#000',
+    marginTop: 20,
   },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 30,
+  subtitle: {
+    fontSize: 14,
+    color: '#999',
+    marginTop: 4,
+    marginBottom: 24,
   },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
+    marginTop: 24,
+    marginBottom: 12,
   },
-  cover: {
-    top: 10,
-    marginBottom: 15,
-    backgroundColor: COLORS.white,
+  inputGroup: {
+    marginBottom: 16,
   },
   label: {
-    marginHorizontal: SIZES.width * 0.05,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#555',
+    marginBottom: 6,
   },
-  priceRangeContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-  priceInput: {
-    flex: 1,
-  },
-  priceSeparator: {
-    marginHorizontal: 10,
-  },
-  multipleImageContainer: {
-    alignItems: "center",
-    backgroundColor: COLORS.gray,
-    width: SIZES.width * 0.9,
-    height: 0.285407725 * SIZES.height,
-    marginHorizontal: SIZES.width * 0.05,
-    justifyContent: "center",
-    marginBottom: 20,
-  },
-  uploadedImage: {
-    width: 100,
-    height: 100,
-    resizeMode: "contain",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  imageContainer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-  },
-  textAreaContainer: {
-    width: SIZES.width * 0.9,
-    borderColor: "gray",
+  input: {
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderRadius: 5,
-    padding: 10,
-    backgroundColor: "#f9f9f9",
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    fontSize: 15,
+    color: '#000',
+  },
+  inputWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
+  },
+  pickerWrapper: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  picker: {
+    marginHorizontal: 4,
+  },
+  row: {
+    flexDirection: 'row',
   },
   textArea: {
-    height: 150,
-    justifyContent: "flex-start",
-    textAlignVertical: "top",
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 15,
+    color: '#000',
+    minHeight: 120,
   },
   charCount: {
-    textAlign: "right",
-    color: "gray",
+    textAlign: 'right',
+    color: '#bbb',
     fontSize: 12,
+    marginTop: 4,
   },
-  progressContainer: {
-    marginTop: 20,
-    alignItems: "center",
+  imageUploadArea: {
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: GOLD.muted,
+    borderStyle: 'dashed',
+    borderRadius: 16,
+    paddingVertical: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
+  imageUploadText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: GOLD.dark,
+    marginTop: 8,
   },
-  buttonLoading: {
-    backgroundColor: "#d4ba92", // Change to your desired color when loading
+  imageUploadHint: {
+    fontSize: 12,
+    color: '#bbb',
+    marginTop: 4,
   },
-  dropdown: {
-    width: "90%",
-    height: 50,
-    borderColor: "#ccc",
-    borderWidth: 1,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
+  imagePreviewRow: {
+    marginTop: 12,
+    marginBottom: 4,
   },
-  dropdownContainer: {
-    borderColor: "#ccc",
-    borderWidth: 1,
-  },
-  icon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-  },
-  placeholderIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#ccc",
-  },
-  modal: {
-    justifyContent: "center",
-    alignContent: "center",
-    alignItems: "center",
-    width: "50%",
-    height: "55%",
-  },
-  closeButton: {
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 10,
-    backgroundColor: COLORS.primary,
-    borderRadius: 5,
-  },
-  closeButtonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  attributeGroup: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 10,
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  attributeInput: {
-    flex: 1,
-    borderColor: "gray",
-    borderWidth: 1,
-    borderRadius: 5,
-    padding: 10,
-    backgroundColor: COLORS.gray,
+  imagePreviewWrapper: {
     marginRight: 10,
+    position: 'relative',
   },
-  removeAttributeButton: {
-    padding: 10,
+  imagePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#eee',
   },
-  addAttributeButton: {
-    backgroundColor: COLORS.primary,
-    padding: 10,
-    borderRadius: 5,
-    alignItems: "center",
-    marginBottom: 20,
-    marginHorizontal: SIZES.width * 0.05,
+  imageRemoveBtn: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  addAttributeButtonText: {
-    color: "#fff",
-    fontSize: 16,
+  attributeHint: {
+    fontSize: 13,
+    color: '#999',
+    marginBottom: 12,
+    marginTop: -4,
+  },
+  attributeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  removeAttrBtn: {
+    padding: 8,
+  },
+  addAttrBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    borderRadius: 12,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  addAttrText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: GOLD.dark,
+    marginLeft: 6,
+  },
+  submitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: GOLD.primary,
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginTop: 24,
+    gap: 8,
+  },
+  submitBtnText: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
   },
 });
