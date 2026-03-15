@@ -100,13 +100,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		marketGroup.POST("/watchlist", auth, h.AddToWatchlist)
 	}
 
+	// Category routes (must be registered before /products/:id to avoid conflicts)
+	categoryGroup := api.Group("/products/category")
+	{
+		categoryGroup.GET("/all", h.GetCategories)
+		categoryGroup.GET("/tree", h.GetCategoryTree)
+		categoryGroup.GET("/:categoryId", h.GetCategoryByID)
+		categoryGroup.POST("/", adminAuth, h.CreateCategory)
+		categoryGroup.PUT("/:categoryId", adminAuth, h.UpdateCategory)
+		categoryGroup.DELETE("/:categoryId", adminAuth, h.DeleteCategory)
+	}
+
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
 		productGroup.GET("/", h.GetMarketplaceProducts)
-		productGroup.GET("/:id", h.GetProductByID)
-		productGroup.GET("/category/:id", h.GetProductsByCategory)
 		productGroup.GET("/user", auth, h.GetUserProducts)
+		productGroup.GET("/:id", h.GetProductByID)
 		productGroup.POST("/", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
