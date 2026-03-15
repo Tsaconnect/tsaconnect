@@ -35,5 +35,6 @@ func AutoMigrate() error {
 		&models.WalletTransaction{},
 		&models.SupportedToken{},
 		&models.VerificationLog{},
+		&models.Order{},
 	)
 }
