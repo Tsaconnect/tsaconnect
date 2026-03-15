@@ -120,6 +120,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       if (response.status === 200) {
         const jwtToken = "Bearer " + response.data.tokens.access.token;
         await AsyncStorage.setItem("token", jwtToken);
+        await AsyncStorage.setItem("authToken", jwtToken);
         setToken(jwtToken);
         setCurrentUser(response.data.user);
         setUsername(username);
@@ -306,7 +307,8 @@ async function signup(payload: SignupPayload) {
       const jwtToken = "Bearer " + response.data.tokens.access.token;
       
       // Save token and authentication state
-      await AsyncStorage.setItem('userToken', jwtToken);
+      await AsyncStorage.setItem('token', jwtToken);
+      await AsyncStorage.setItem('authToken', jwtToken);
       setToken(jwtToken);
       setAuthenticated(true);
       
@@ -401,20 +403,42 @@ const register = async (formData: FormData) => {
       return config;
     });
     await AsyncStorage.removeItem("token");
+    await AsyncStorage.removeItem("authToken");
     setCurrentUser(null);
     //@ts-ignore
     router.push("/login");
   }
 
-  async function loggedInUser() {
+  async function hydrateAuth() {
     try {
-      const response = await getCurrentUser();
-      setCurrentUser(response.data);
-    } catch (err) {}
+      // Check both storage keys — api.ts uses "authToken", legacy uses "token"
+      const storedToken = await AsyncStorage.getItem("authToken") || await AsyncStorage.getItem("token");
+      if (storedToken) {
+        setToken(storedToken);
+        setAuthenticated(true);
+        // Sync both keys
+        await AsyncStorage.setItem("authToken", storedToken);
+        await AsyncStorage.setItem("token", storedToken);
+        // Set up axios interceptor
+        apiClient.interceptors.request.use((config: any) => {
+          config.headers.Authorization = storedToken;
+          return config;
+        });
+        // Fetch user profile
+        try {
+          const response = await getCurrentUser();
+          setCurrentUser(response.data?.data ?? response.data);
+        } catch (err) {
+          // Token may be expired — don't force logout, let screens handle it
+        }
+      }
+    } catch (err) {
+      console.error("Error hydrating auth:", err);
+    }
   }
 
   useEffect(() => {
-    loggedInUser();
+    hydrateAuth();
   }, []);
 
   return (

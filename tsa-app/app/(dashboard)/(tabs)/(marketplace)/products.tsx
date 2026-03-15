@@ -31,7 +31,7 @@ const Products = () => {
     if (token) {
       fetchCategories();
     }
-  }, []);
+  }, [token]);
 
   return (
     <View style={styles.container}>

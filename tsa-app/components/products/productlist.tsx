@@ -58,8 +58,8 @@ const ProductList = () => {
       }
     };
 
-    fetchCategories();
-  }, []);
+    if (token) fetchCategories();
+  }, [token]);
 
   if (loading) {
     return (
