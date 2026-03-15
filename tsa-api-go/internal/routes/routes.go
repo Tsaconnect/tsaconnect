@@ -109,17 +109,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		categoryGroup.POST("/", adminAuth, h.CreateCategory)
 		categoryGroup.PUT("/:categoryId", adminAuth, h.UpdateCategory)
 		categoryGroup.DELETE("/:categoryId", adminAuth, h.DeleteCategory)
+		categoryGroup.PATCH("/reorder", adminAuth, h.ReorderCategories)
 	}
 
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
 		productGroup.GET("/", h.GetMarketplaceProducts)
+		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
 		productGroup.GET("/:id", h.GetProductByID)
+		productGroup.GET("/category/:id", h.GetProductsByCategory)
 		productGroup.POST("/", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
+		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
 	}
 
 	// Cart routes

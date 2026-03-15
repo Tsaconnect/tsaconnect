@@ -371,6 +371,32 @@ func (h *Handlers) DeleteCategory(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Category deleted successfully", nil)
 }
 
+// ReorderCategories handles PATCH /api/products/category/reorder - bulk reorder categories (admin only).
+func (h *Handlers) ReorderCategories(c *gin.Context) {
+	var body struct {
+		Orders []struct {
+			ID    uuid.UUID `json:"id" binding:"required"`
+			Order int       `json:"order"`
+		} `json:"orders" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	tx := config.DB.Begin()
+	for _, item := range body.Orders {
+		if err := tx.Model(&models.Category{}).Where("id = ?", item.ID).Update("sort_order", item.Order).Error; err != nil {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reorder categories")
+			return
+		}
+	}
+	tx.Commit()
+
+	utils.SuccessResponse(c, http.StatusOK, "Categories reordered successfully", nil)
+}
+
 // Ensure gorm and errors imports are used.
 var (
 	_ = (*gorm.DB)(nil)
