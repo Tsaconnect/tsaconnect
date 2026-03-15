@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -651,6 +652,57 @@ func (h *Handlers) GetAllUsers(c *gin.Context) {
 				"pages": pages,
 			},
 		},
+	})
+}
+
+// UpdateUserRole handles PATCH /api/users/:id/role - super admin only.
+func (h *Handlers) UpdateUserRole(c *gin.Context) {
+	caller := getUserFromContext(c)
+	if caller == nil || caller.Role != models.RoleSuperAdmin {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only super admins can change roles")
+		return
+	}
+
+	userID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid user ID")
+		return
+	}
+
+	var body struct {
+		Role string `json:"role" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Role is required")
+		return
+	}
+
+	validRoles := map[string]bool{
+		models.RoleUser:       true,
+		models.RoleAdmin:      true,
+		models.RoleSuperAdmin: true,
+		models.RoleMerchant:   true,
+		models.RoleSupport:    true,
+	}
+	if !validRoles[body.Role] {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid role")
+		return
+	}
+
+	var user models.User
+	if err := config.DB.First(&user, "id = ?", userID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "User not found")
+		return
+	}
+
+	if err := config.DB.Model(&user).Update("role", body.Role).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update role")
+		return
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Role updated successfully", gin.H{
+		"userId": user.ID,
+		"role":   body.Role,
 	})
 }
 

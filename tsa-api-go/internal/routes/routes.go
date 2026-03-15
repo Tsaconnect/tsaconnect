@@ -45,6 +45,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		userGroup.PUT("/profile", h.UpdateProfile)
 		userGroup.GET("/", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
+		userGroup.PATCH("/:id/role", h.UpdateUserRole)
+	}
+
+	// Admin routes
+	adminGroup := api.Group("/admin")
+	adminGroup.Use(adminAuth)
+	{
+		adminGroup.GET("/stats", h.GetAdminStats)
 	}
 
 	// Verification routes
