@@ -4,7 +4,7 @@ import OrderList from '../../components/orders/orderList'
 
 const Orders = () => {
   return (
-    <View>
+    <View style={{ flex: 1 }}>
      <OrderList/>
     </View>
   )

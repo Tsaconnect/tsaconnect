@@ -9,67 +9,62 @@ import {
   TextInput,
   Alert,
 } from "react-native";
-import { COLORS, SIZES } from "../../constants/theme";
-import { useAuth } from "../../AuthContext/AuthContext";
-import { baseUrl } from "../../constants/api/apiClient";
-import axios from "axios";
+import { COLORS } from "../../constants/theme";
 import { router } from "expo-router";
 import Icon from "@expo/vector-icons/FontAwesome";
+import api from "@/components/services/api";
 
 import LoadingSpinner from "../../components/others/LoadingSpinner";
 
 const Categories = () => {
-  const { token } = useAuth();
-  const [categories, setCategories] = useState([]);
+  const [categories, setCategories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [filteredCategories, setFilteredCategories] = useState([]);
+  const [filteredCategories, setFilteredCategories] = useState<any[]>([]);
+  const [userRole, setUserRole] = useState<string | null>(null);
 
-  const [user, setUser] = useState();
-
-  async function getLoggedInUser() {
+  const initialize = async () => {
     try {
-      const { data } = await axios.get(`${baseUrl}/users/me`, {
-        headers: {
-          Authorization: `${token}`,
-        },
-      });
-      setUser(data);
+      // Ensure api has token loaded
+      const token = await api.getStoredToken();
+      if (token) {
+        api.setToken(token);
+      }
+
+      // Fetch user profile for role check
+      const profileRes = await api.getProfile();
+      if (profileRes.success && profileRes.data) {
+        setUserRole(profileRes.data.role);
+      }
+
+      // Fetch categories
+      const response = await api.getCategories({ active: true });
+      if (response.success && response.data) {
+        const list = Array.isArray(response.data) ? response.data : [];
+        setCategories(list);
+        setFilteredCategories(list);
+      } else {
+        setCategories([]);
+        setFilteredCategories([]);
+      }
     } catch (error: any) {
-      alert(error?.response.data.message);
-    }
-  }
-
-  const fetchCategories = async () => {
-    try {
-      setLoading(true);
-      const response = await axios.get(`${baseUrl}/category`, {
-        headers: {
-          Authorization: `${token}`,
-        },
-      });
-      setCategories(response.data.results);
-      setFilteredCategories(response.data.results);
-    } catch (error) {
-      console.error("Error fetching categories:", error);
+      console.error("Error loading categories:", error);
+      setCategories([]);
+      setFilteredCategories([]);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (token) {
-      getLoggedInUser();
-      fetchCategories();
-    }
-  }, [token]);
+    initialize();
+  }, []);
 
   useEffect(() => {
     setFilteredCategories(
       categories.filter((category) =>
-        //@ts-ignore
-        category.title.toLowerCase().includes(searchQuery.toLowerCase())
+        category.title?.toLowerCase().includes(searchQuery.toLowerCase())
       )
     );
   }, [searchQuery, categories]);
@@ -77,14 +72,13 @@ const Categories = () => {
   const handleDelete = async (id: any) => {
     try {
       setLoading(true);
-      await axios.delete(`${baseUrl}/category/${id}`, {
-        headers: {
-          Authorization: `${token}`,
-        },
-      });
-      //@ts-ignore
-      setCategories(categories.filter((category) => category.id !== id));
-      Alert.alert("success", "The category was deleted successfully.");
+      const response = await api.deleteCategory(id);
+      if (response.success) {
+        setCategories(categories.filter((category) => category.id !== id));
+        Alert.alert("Success", "The category was deleted successfully.");
+      } else {
+        Alert.alert("Error", response.message || "Error deleting category");
+      }
     } catch (error) {
       console.error("Error deleting category:", error);
       Alert.alert("Error", "Error Deleting Category");
@@ -104,7 +98,7 @@ const Categories = () => {
         />
         <TouchableOpacity
           style={styles.addButton}
-          onPress={() => router.push("/category/add")}
+          onPress={() => router.push("/admin/category/add")}
         >
           <Text style={styles.addButtonText}>Add Category</Text>
         </TouchableOpacity>
@@ -112,74 +106,58 @@ const Categories = () => {
       {loading ? (
         <LoadingSpinner />
       ) : (
-        <>
-          <FlatList
-            data={
-              showAll ? filteredCategories : filteredCategories.slice(0, 20)
-            }
-            //@ts-ignore
-            keyExtractor={(item) => item.id.toString()}
-            renderItem={({ item }) => (
-              <View style={styles.categoryContainer}>
-                <Image
-                  //@ts-ignore
-                  source={{ uri: item.image }}
-                  style={styles.categoryImage}
-                />
-                <View style={styles.categoryInfo}>
-                  <Text
-                    //@ts-ignore
-                    style={styles.categoryTitle}
-                  >
-                    {
-                      //@ts-ignore
-                      item.title
-                    }
-                  </Text>
-                  {
-                    //@ts-ignore
-                    user?.role === "admin" && (
-                      <View style={styles.actions}>
-                        <TouchableOpacity
-                          style={styles.actionButton}
-                          onPress={() =>
-                            router.push({
-                              pathname: `/category/edit`,
-                              params: item,
-                            })
-                          }
-                        >
-                          <Icon name="edit" size={20} color={COLORS.primary} />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.actionButton}
-                          //@ts-ignore
-                          onPress={() => handleDelete(item.id)}
-                        >
-                          <Icon
-                            name="trash"
-                            size={20}
-                            color={COLORS.secondary}
-                          />
-                        </TouchableOpacity>
-                      </View>
-                    )
-                  }
-                </View>
+        <FlatList
+          data={showAll ? filteredCategories : filteredCategories.slice(0, 20)}
+          keyExtractor={(item) => item.id?.toString() || item._id}
+          renderItem={({ item }) => (
+            <View style={styles.categoryContainer}>
+              <Image
+                source={{ uri: item.image }}
+                style={styles.categoryImage}
+              />
+              <View style={styles.categoryInfo}>
+                <Text style={styles.categoryTitle}>{item.title}</Text>
+                {userRole === "admin" && (
+                  <View style={styles.actions}>
+                    <TouchableOpacity
+                      style={styles.actionButton}
+                      onPress={() =>
+                        router.push({
+                          pathname: `/admin/category/add`,
+                          params: { editId: item.id, ...item },
+                        })
+                      }
+                    >
+                      <Icon name="edit" size={20} color={COLORS.primary} />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.actionButton}
+                      onPress={() => handleDelete(item.id)}
+                    >
+                      <Icon name="trash" size={20} color={COLORS.secondary} />
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
-            )}
-            ListFooterComponent={
-              !showAll && filteredCategories.length > 20 ? (
-                <TouchableOpacity
-                  style={styles.viewAllButton}
-                  onPress={() => setShowAll(true)}
-                >
-                  <Text style={styles.viewAllButtonText}>View All</Text>
-                </TouchableOpacity>
-              ) : null
-            }
-          />
-        </>
+            </View>
+          )}
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Icon name="folder-open" size={48} color="#D4B896" />
+              <Text style={styles.emptyTitle}>No categories found</Text>
+            </View>
+          }
+          ListFooterComponent={
+            !showAll && filteredCategories.length > 20 ? (
+              <TouchableOpacity
+                style={styles.viewAllButton}
+                onPress={() => setShowAll(true)}
+              >
+                <Text style={styles.viewAllButtonText}>View All</Text>
+              </TouchableOpacity>
+            ) : null
+          }
+        />
       )}
     </View>
   );
@@ -214,7 +192,8 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     borderRadius: 5,
     padding: 10,
-    width: "60%",
+    flex: 1,
+    marginRight: 10,
     backgroundColor: "#f9f9f9",
   },
   categoryContainer: {
@@ -242,12 +221,24 @@ const styles = StyleSheet.create({
   categoryTitle: {
     fontSize: 16,
     fontWeight: "bold",
+    flex: 1,
   },
   actions: {
     flexDirection: "row",
   },
   actionButton: {
     marginLeft: 10,
+  },
+  emptyContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 80,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: "#999",
+    marginTop: 16,
   },
   viewAllButton: {
     padding: 10,
