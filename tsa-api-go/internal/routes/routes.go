@@ -126,6 +126,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
 	}
 
+	// Order routes (admin)
+	orderGroup := api.Group("/orders")
+	orderGroup.Use(adminAuth)
+	{
+		orderGroup.GET("/", h.GetOrders)
+		orderGroup.GET("/:id", h.GetOrderByID)
+		orderGroup.PATCH("/:id/status", h.UpdateOrderStatus)
+	}
+
 	// Cart routes
 	cartGroup := api.Group("/cart")
 	{
