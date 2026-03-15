@@ -22,36 +22,33 @@ const MyAdvertsScreen = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchAdverts();
-  }, []);
+    if (token) {
+      fetchAdverts();
+    } else {
+      setLoading(false);
+    }
+  }, [token]);
 
   const fetchAdverts = async () => {
-    ///users/me
     try {
-      const { data } = await axios.get(
-        `${baseUrl}/users/me`,
-
-        {
-          headers: {
-            Authorization: `${token}`,
-          },
-        }
-      );
-      setCurrentUser(data);
       const response = await axios.get(
-        `${baseUrl}/adverts?createdBy=${data.id}`,
+        `${baseUrl}/products/user`,
         {
-          method: "GET",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `${token}`,
+            Authorization: token,
           },
         }
       );
-      setAdverts(response.data.results);
-    } catch (error) {
-      console.error("Error fetching adverts:", error);
-      Alert.alert("Error", "Failed to fetch adverts. Please try again later.");
+      setAdverts(response.data.data?.products || []);
+    } catch (error: any) {
+      if (error?.response?.status === 401) {
+        // Token invalid or expired — show empty state silently
+        setAdverts([]);
+      } else {
+        console.error("Error fetching adverts:", error);
+        Alert.alert("Error", "Failed to fetch adverts. Please try again later.");
+      }
     } finally {
       setLoading(false);
     }
@@ -70,7 +67,7 @@ const MyAdvertsScreen = () => {
           text: "Delete",
           onPress: async () => {
             try {
-              await axios.delete(`${baseUrl}/adverts/${id}`, {
+              await axios.delete(`${baseUrl}/products/${id}`, {
                 headers: {
                   "Content-Type": "application/json",
                   Authorization: `${token}`,
@@ -92,13 +89,28 @@ const MyAdvertsScreen = () => {
     );
   };
 
+  const getFirstImage = (images: any): string | undefined => {
+    if (!images) return undefined;
+    if (Array.isArray(images)) return images[0];
+    try {
+      const parsed = typeof images === 'string' ? JSON.parse(images) : images;
+      return Array.isArray(parsed) ? parsed[0] : undefined;
+    } catch { return undefined; }
+  };
+
   const renderItem = ({ item }: { item: any }) => (
     <Card containerStyle={styles.card}>
-      <Image
-        source={{ uri: item.featuredImage || item.images[0] }}
-        style={styles.image}
-        resizeMode="contain"
-      />
+      {getFirstImage(item.images) ? (
+        <Image
+          source={{ uri: getFirstImage(item.images) }}
+          style={styles.image}
+          resizeMode="contain"
+        />
+      ) : (
+        <View style={[styles.image, { backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center' }]}>
+          <Icon name="image" size={40} color="#ccc" />
+        </View>
+      )}
       <View style={styles.infoContainer}>
         <Text style={styles.title}>{item.name}</Text>
         {item.type === ADVERT_TYPE_PRODUCT && (
@@ -157,19 +169,26 @@ const MyAdvertsScreen = () => {
         keyExtractor={(item) => item.id.toString()}
         renderItem={renderItem}
         ListEmptyComponent={
-          <Text style={styles.info}>
-            No adverts found.{" "}
+          <View style={styles.emptyContainer}>
+            <Icon name="inventory" size={72} color="#D4B896" />
+            <Text style={styles.emptyTitle}>No adverts yet</Text>
+            <Text style={styles.emptySubtitle}>
+              Products and services you post will appear here
+            </Text>
             <TouchableOpacity
+              style={styles.emptyButton}
               onPress={() => {
                 router.push({
                   pathname: "/serviceaction",
                   params: { index: 0 },
                 });
               }}
+              activeOpacity={0.8}
             >
-              <Text style={styles.registerLink}>Register</Text>
+              <Icon name="add" size={20} color="#000" />
+              <Text style={styles.emptyButtonText}>Post your first advert</Text>
             </TouchableOpacity>
-          </Text>
+          </View>
         }
       />
     </View>
@@ -242,11 +261,39 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontStyle: "italic",
   },
-  info: {
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 80,
+    paddingHorizontal: 32,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#333',
+    marginTop: 16,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: '#999',
     textAlign: 'center',
-    marginTop: 20,
+    marginTop: 8,
+    lineHeight: 20,
+  },
+  emptyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFD700',
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
+    marginTop: 24,
+    gap: 8,
+  },
+  emptyButtonText: {
     fontSize: 16,
-    color: '#666',
+    fontWeight: '700',
+    color: '#000',
   },
 });
 

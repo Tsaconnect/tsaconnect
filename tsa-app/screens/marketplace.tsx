@@ -2,6 +2,7 @@
 import { router } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
+  Alert,
   View,
   Text,
   TouchableOpacity,
@@ -117,8 +118,9 @@ const MarketplaceScreen: React.FC = () => {
         parent: 'null' // Get only parent categories initially
       });
 
-      if (response.success && response.data) {
-        const transformedCategories = transformBackendCategories(response.data);
+      if (response.success) {
+        const categories = Array.isArray(response.data) ? response.data : response.data?.categories ?? [];
+        const transformedCategories = transformBackendCategories(categories);
 
         if (type === 'Product') {
           setProductCategories(transformedCategories);
@@ -388,7 +390,7 @@ const MarketplaceScreen: React.FC = () => {
                 styles.filterButton,
                 styles.locationButton,
               ]}
-              onPress={() => router.push('/marketplace/filter')}
+              onPress={() => Alert.alert('Coming Soon', 'Location filtering will be available soon.')}
             >
               <Icon name="location-on" size={16} color={GOLD_COLORS.dark} />
               <Text style={styles.filterButtonText}>Location</Text>
@@ -399,7 +401,7 @@ const MarketplaceScreen: React.FC = () => {
                 styles.filterButton,
                 styles.categoryButton,
               ]}
-              onPress={() => router.push('/marketplace/all-categories')}
+              onPress={() => Alert.alert('Coming Soon', 'All categories view will be available soon.')}
             >
               <Icon name="category" size={16} color={GOLD_COLORS.dark} />
               <Text style={styles.filterButtonText}>All Categories</Text>
@@ -571,7 +573,7 @@ const MarketplaceScreen: React.FC = () => {
               <View style={styles.quickLinksGrid}>
                 <TouchableOpacity
                   style={styles.quickLink}
-                  onPress={() => router.push('/marketplace/featured')}
+                  onPress={() => Alert.alert('Coming Soon', 'Featured listings will be available soon.')}
                 >
                   <View style={[styles.quickLinkIcon, { backgroundColor: '#FFF3E0' }]}>
                     <Icon name="star" size={24} color="#F57C00" />
@@ -581,7 +583,7 @@ const MarketplaceScreen: React.FC = () => {
 
                 <TouchableOpacity
                   style={styles.quickLink}
-                  onPress={() => router.push('/marketplace/deals')}
+                  onPress={() => Alert.alert('Coming Soon', 'Deals will be available soon.')}
                 >
                   <View style={[styles.quickLinkIcon, { backgroundColor: '#E8F5E9' }]}>
                     <Icon name="local-offer" size={24} color="#2E7D32" />
@@ -591,7 +593,7 @@ const MarketplaceScreen: React.FC = () => {
 
                 <TouchableOpacity
                   style={styles.quickLink}
-                  onPress={() => router.push('/marketplace/trending')}
+                  onPress={() => Alert.alert('Coming Soon', 'Trending listings will be available soon.')}
                 >
                   <View style={[styles.quickLinkIcon, { backgroundColor: '#E3F2FD' }]}>
                     <Icon name="trending-up" size={24} color="#1976D2" />
@@ -601,7 +603,7 @@ const MarketplaceScreen: React.FC = () => {
 
                 <TouchableOpacity
                   style={styles.quickLink}
-                  onPress={() => router.push('/marketplace/nearby')}
+                  onPress={() => Alert.alert('Coming Soon', 'Nearby listings will be available soon.')}
                 >
                   <View style={[styles.quickLinkIcon, { backgroundColor: '#F3E5F5' }]}>
                     <Icon name="near-me" size={24} color="#7B1FA2" />
@@ -616,7 +618,7 @@ const MarketplaceScreen: React.FC = () => {
           {(selectedCategory === 'products' || selectedCategory === 'services') && (
             <TouchableOpacity
               style={styles.merchantBanner}
-              onPress={() => router.push('/merchant/register')}
+              onPress={() => Alert.alert('Coming Soon', 'Merchant registration will be available soon.')}
               activeOpacity={0.8}
             >
               <View style={styles.bannerContent}>
