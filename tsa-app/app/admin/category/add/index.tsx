@@ -112,8 +112,10 @@ const AddCategoryScreen = () => {
         try {
             setCategoriesLoading(true);
             const response = await api.getParentCategories(formData.type === "" ? undefined : formData.type);
-            if (response.success && response.data) {
+            if (response.success && Array.isArray(response.data)) {
                 setParentCategories(response.data);
+            } else {
+                setParentCategories([]);
             }
         } catch (error) {
             console.error("Error fetching parent categories:", error);
@@ -168,7 +170,7 @@ const AddCategoryScreen = () => {
                 const filename = featuredImage.split('/').pop() || `cat_${Date.now()}.jpg`;
                 const match = /\.(\w+)$/.exec(filename);
                 const type = match ? `image/${match[1]}` : 'image/jpeg';
-                formDataToSend.append('image', { uri: featuredImage, name: filename, type } as any);
+                formDataToSend.append('icon', { uri: featuredImage, name: filename, type } as any);
             }
 
             formDataToSend.append('title', formData.title);
@@ -190,10 +192,11 @@ const AddCategoryScreen = () => {
                 setFormData({ title: "", description: "", type: "", isActive: true, parentCategory: "" });
                 setFeaturedImage(null);
                 setHasParent(false);
-                return;
+            } else {
+                Alert.alert("Error", response.message || "Failed to create category");
             }
-        } catch (error) {
-            Alert.alert("Error", "Failed to create category");
+        } catch (error: any) {
+            Alert.alert("Error", error.message || "Failed to create category");
         } finally {
             setLoading(false);
         }
