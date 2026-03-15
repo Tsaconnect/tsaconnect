@@ -36,5 +36,6 @@ func AutoMigrate() error {
 		&models.SupportedToken{},
 		&models.VerificationLog{},
 		&models.Order{},
+		&models.Deposit{},
 	)
 }
