@@ -7,7 +7,7 @@ import AddService from '../../../../components/services/AddService'
 const ServiceDetails = () => {
   const {index}=useLocalSearchParams();
   return (
-    <View>
+    <View style={{ flex: 1 }}>
       {index==='0'&&<AddProduct/>}
       {index==='1'&&<AddService/>}
 
