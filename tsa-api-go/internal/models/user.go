@@ -122,6 +122,7 @@ const (
 	RoleAdmin      = "admin"
 	RoleSuperAdmin = "super_admin"
 	RoleMerchant   = "merchant"
+	RoleSupport    = "support"
 )
 
 // Constants for verification statuses.
