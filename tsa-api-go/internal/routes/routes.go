@@ -126,6 +126,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
 	}
 
+	// Deposit routes (admin)
+	depositGroup := api.Group("/deposits")
+	depositGroup.Use(adminAuth)
+	{
+		depositGroup.GET("/", h.GetDeposits)
+		depositGroup.PATCH("/:id/status", h.UpdateDepositStatus)
+	}
+
 	// Order routes (admin)
 	orderGroup := api.Group("/orders")
 	orderGroup.Use(adminAuth)
