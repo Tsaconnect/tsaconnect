@@ -163,7 +163,7 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	t.Helper()
 	cfg := &config.Config{
 		ProductEscrowAddress:  "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
-		ServiceContactAddress: "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f",
+		ServiceContractAddress: "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f",
 		USDCTokenAddress:      "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
 		MCGPTokenAddress:      "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
 		Chains:                map[string]config.ChainConfig{},
@@ -299,8 +299,8 @@ func TestDetectShippingZone_International(t *testing.T) {
 
 func TestDetectShippingZone_MissingLocation(t *testing.T) {
 	zone := DetectShippingZone("", "", "", "Lagos", "Lagos", "Nigeria")
-	if zone != ShippingZoneInternational {
-		t.Errorf("expected %s for missing location, got %s", ShippingZoneInternational, zone)
+	if zone != ShippingZoneSameCountry {
+		t.Errorf("expected %s for missing location, got %s", ShippingZoneSameCountry, zone)
 	}
 }
 
@@ -636,7 +636,7 @@ func TestAdminResolveDispute_RequiresRefundRequestedStatus(t *testing.T) {
 
 // ---------- Prepare escrow tests ----------
 
-func TestPrepareEscrow_ReturnsUnsignedTx(t *testing.T) {
+func TestPrepareEscrow_Returns503WhenNoClient(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
 
@@ -657,30 +657,50 @@ func TestPrepareEscrow_ReturnsUnsignedTx(t *testing.T) {
 
 	ch.PrepareEscrow(c)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	// Without a blockchain client, should return 503 Service Unavailable
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d, got %d: %s", http.StatusServiceUnavailable, w.Code, w.Body.String())
+	}
+}
+
+func TestPrepareEscrow_ValidationChecks(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
+
+	// Test without wallet address
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.PrepareEscrow(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for no wallet, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	// Test wrong status
+	escrowedOrder := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
+	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
 
-	data := resp["data"].(map[string]interface{})
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Set("user", buyer)
+	c2.Params = gin.Params{{Key: "id", Value: escrowedOrder.ID.String()}}
+	c2.Request, _ = http.NewRequest("POST", "/", nil)
 
-	// Check createOrderTx has proper fields
-	createOrderTx, ok := data["createOrderTx"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected createOrderTx in response")
-	}
-	if createOrderTx["to"] == nil {
-		t.Error("expected createOrderTx to have 'to' field")
-	}
-	if createOrderTx["data"] == nil {
-		t.Error("expected createOrderTx to have 'data' field (ABI-encoded)")
-	}
+	ch.PrepareEscrow(c2)
 
-	// Check contractOrderId is present
-	if data["contractOrderId"] == nil {
-		t.Error("expected contractOrderId in response")
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for already escrowed order, got %d: %s", http.StatusBadRequest, w2.Code, w2.Body.String())
 	}
 }
 
@@ -809,6 +829,420 @@ func TestGetOrderDetail_AccessControl(t *testing.T) {
 
 	if w2.Code != http.StatusOK {
 		t.Errorf("expected %d for buyer, got %d", http.StatusOK, w2.Code)
+	}
+}
+
+// ---------- SubmitEscrow tests (T1) ----------
+
+func TestSubmitEscrow_WrongBuyer(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
+
+	// Try as seller (not the buyer)
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"approveTxHash": "0xaaa",
+		"escrowTxHash":  "0xbbb",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.SubmitEscrow(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected %d, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitEscrow_WrongStatus(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"approveTxHash": "0xaaa",
+		"escrowTxHash":  "0xbbb",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.SubmitEscrow(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for already escrowed order, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitEscrow_MissingFields(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"approveTxHash": "0xaaa",
+		// missing escrowTxHash
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.SubmitEscrow(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for missing fields, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- SubmitConfirm tests (T2) ----------
+
+func TestSubmitConfirm_WrongBuyer(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"txHash": "0xccc",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.SubmitConfirm(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected %d, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitConfirm_WrongStatus(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"txHash": "0xccc",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.SubmitConfirm(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for pending_payment order, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- RequestRefund tests (T3) ----------
+
+func TestRequestRefund_Escrowed(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.RequestRefund(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d for escrowed refund, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["refundTx"] == nil {
+		t.Error("expected refundTx in response for escrowed order")
+	}
+}
+
+func TestRequestRefund_Delivered(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.RequestRefund(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d for delivered refund, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Should update status to refund_requested
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["status"] != models.OrderStatusRefundRequested {
+		t.Errorf("expected status %s, got %v", models.OrderStatusRefundRequested, data["status"])
+	}
+
+	// Verify DB was updated
+	var updated models.Order
+	config.DB.First(&updated, "id = ?", order.ID)
+	if updated.Status != models.OrderStatusRefundRequested {
+		t.Errorf("expected DB status %s, got %s", models.OrderStatusRefundRequested, updated.Status)
+	}
+}
+
+func TestRequestRefund_WrongStatus(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusCompleted, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.RequestRefund(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for completed order, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestRequestRefund_OnlyBuyer(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.RequestRefund(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected %d for seller requesting refund, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+	}
+}
+
+// ---------- CancelOrder happy path tests (T4) ----------
+
+func TestCancelOrder_HappyPath(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000003")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.CancelOrder(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["cancelTx"] == nil {
+		t.Error("expected cancelTx in response")
+	}
+}
+
+func TestCancelOrder_WrongStatus(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000003")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+
+	// pending_payment can be cancelled (valid transition) — test with delivered which can't
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", nil)
+
+	ch.CancelOrder(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for delivered order, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- Stock validation tests ----------
+
+func TestCreateOrderFromCart_InsufficientStock(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+
+	// Create product with only 1 in stock
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	db.Model(product).Update("stock", 1)
+
+	items := []models.CartItem{
+		{
+			ID:       uuid.New(),
+			Product:  product.ID,
+			Seller:   seller.ID,
+			Quantity: 5, // Request more than available
+			Price:    10.0,
+			AddedAt:  time.Now(),
+		},
+	}
+	createTestCart(t, db, buyer.ID, items)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"token": "USDC",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.CreateOrderFromCart(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d for insufficient stock, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// ---------- toWei string-based conversion tests ----------
+
+func TestToWei_StringBased(t *testing.T) {
+	tests := []struct {
+		amount   string
+		decimals int
+		expected string
+	}{
+		{"10.0", 6, "10000000"},
+		{"10.5", 6, "10500000"},
+		{"0.000001", 6, "1"},
+		{"1", 18, "1000000000000000000"},
+		{"0.1", 18, "100000000000000000"},
+		{"100", 6, "100000000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_%d", tt.amount, tt.decimals), func(t *testing.T) {
+			result, err := toWei(tt.amount, tt.decimals)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.String() != tt.expected {
+				t.Errorf("toWei(%s, %d) = %s, want %s", tt.amount, tt.decimals, result.String(), tt.expected)
+			}
+		})
+	}
+}
+
+// ---------- isValidTransition tests ----------
+
+func TestIsValidTransition(t *testing.T) {
+	if !isValidTransition(models.OrderStatusPendingPayment, models.OrderStatusEscrowed) {
+		t.Error("pending_payment -> escrowed should be valid")
+	}
+	if isValidTransition(models.OrderStatusCompleted, models.OrderStatusEscrowed) {
+		t.Error("completed -> escrowed should not be valid")
+	}
+	if !isValidTransition(models.OrderStatusDelivered, models.OrderStatusCompleted) {
+		t.Error("delivered -> completed should be valid")
 	}
 }
 

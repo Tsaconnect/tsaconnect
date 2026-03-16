@@ -20,7 +20,6 @@ import (
 
 // CheckoutHandler handles checkout and order escrow endpoints.
 type CheckoutHandler struct {
-	DB                interface{} // unused — uses config.DB like other handlers
 	Config            *config.Config
 	BlockchainService *services.BlockchainService
 	EscrowService     *services.EscrowService
@@ -54,7 +53,7 @@ func DetectShippingZone(buyerCity, buyerState, buyerCountry, sellerCity, sellerS
 	sci := strings.ToLower(strings.TrimSpace(sellerCity))
 
 	if bc == "" || sc == "" {
-		return ShippingZoneInternational
+		return ShippingZoneSameCountry
 	}
 
 	if bc != sc {
@@ -108,13 +107,51 @@ func tokenDecimals(token string) int {
 	}
 }
 
-// toWei converts a float64 amount to a big.Int with the given decimals.
-func toWei(amount float64, decimals int) *big.Int {
-	f := new(big.Float).SetFloat64(amount)
-	multiplier := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
-	f.Mul(f, multiplier)
-	result, _ := f.Int(nil)
-	return result
+// toWei converts a decimal string amount (e.g. "10.5") to a big.Int in the smallest unit.
+// Uses string-based parsing to avoid float64 precision loss.
+func toWei(amountStr string, decimals int) (*big.Int, error) {
+	// Split on decimal point
+	parts := strings.Split(amountStr, ".")
+	intPart := parts[0]
+	fracPart := ""
+	if len(parts) == 2 {
+		fracPart = parts[1]
+	} else if len(parts) > 2 {
+		return nil, fmt.Errorf("invalid decimal amount: %s", amountStr)
+	}
+
+	// Pad or truncate fractional part to match decimals
+	if len(fracPart) > decimals {
+		fracPart = fracPart[:decimals]
+	} else {
+		for len(fracPart) < decimals {
+			fracPart += "0"
+		}
+	}
+
+	// Combine into a single integer string
+	combined := intPart + fracPart
+
+	result, ok := new(big.Int).SetString(combined, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %s", amountStr)
+	}
+	return result, nil
+}
+
+// floatToDecimalStr converts a float64 to a string with enough precision.
+func floatToDecimalStr(f float64, decimals int) string {
+	return strconv.FormatFloat(f, 'f', decimals, 64)
+}
+
+// isValidTransition checks whether a status transition is allowed.
+func isValidTransition(currentStatus, newStatus string) bool {
+	for _, s := range models.ValidNextStatuses(currentStatus) {
+		if s == newStatus {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Request/Response types ---
@@ -209,18 +246,45 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	decimals := tokenDecimals(token)
 	var orders []models.Order
 
+	// Wrap everything in a DB transaction
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
 	for _, group := range groups {
-		// For each item in this seller group, create a separate order
 		for _, item := range group.items {
 			var product models.Product
-			if err := config.DB.First(&product, "id = ?", item.Product).Error; err != nil {
+			if err := tx.First(&product, "id = ?", item.Product).Error; err != nil {
+				tx.Rollback()
 				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Product %s not found", item.Product))
+				return
+			}
+
+			// Stock validation
+			if product.Stock < item.Quantity {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Insufficient stock for %s (available: %d, requested: %d)", product.Name, product.Stock, item.Quantity))
+				return
+			}
+
+			// Decrement stock
+			if err := tx.Model(&product).Update("stock", product.Stock-item.Quantity).Error; err != nil {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update product stock")
 				return
 			}
 
 			// Get seller for shipping zone detection
 			var seller models.User
-			if err := config.DB.First(&seller, "id = ?", group.sellerID).Error; err != nil {
+			if err := tx.First(&seller, "id = ?", group.sellerID).Error; err != nil {
+				tx.Rollback()
 				utils.ErrorResponse(c, http.StatusBadRequest, "Seller not found")
 				return
 			}
@@ -228,9 +292,22 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			zone := DetectShippingZone(buyerCity, buyerState, buyerCountry, seller.City, seller.State, seller.Country)
 			shippingRate := GetShippingRate(&product, zone)
 
-			// Convert to wei
-			productAmountWei := toWei(product.Price*float64(item.Quantity), decimals)
-			shippingAmountWei := toWei(shippingRate*float64(item.Quantity), decimals)
+			// Convert to wei using string-based math (no float64 precision loss)
+			productTotal := product.Price * float64(item.Quantity)
+			shippingTotal := shippingRate * float64(item.Quantity)
+
+			productAmountWei, err := toWei(floatToDecimalStr(productTotal, decimals), decimals)
+			if err != nil {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert product amount")
+				return
+			}
+			shippingAmountWei, err := toWei(floatToDecimalStr(shippingTotal, decimals), decimals)
+			if err != nil {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert shipping amount")
+				return
+			}
 			platformFeeWei := CalculatePlatformFee(productAmountWei, token)
 			totalAmountWei := new(big.Int).Add(productAmountWei, shippingAmountWei)
 			totalAmountWei.Add(totalAmountWei, platformFeeWei)
@@ -239,7 +316,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			buyerUpline := ""
 			if user.ReferredBy != nil {
 				var referrer models.User
-				if err := config.DB.First(&referrer, "id = ?", *user.ReferredBy).Error; err == nil {
+				if err := tx.First(&referrer, "id = ?", *user.ReferredBy).Error; err == nil {
 					buyerUpline = referrer.WalletAddress
 				}
 			}
@@ -262,7 +339,8 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				UpdatedAt:      time.Now(),
 			}
 
-			if err := config.DB.Create(&order).Error; err != nil {
+			if err := tx.Create(&order).Error; err != nil {
+				tx.Rollback()
 				log.Printf("Failed to create order: %v", err)
 				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
 				return
@@ -276,7 +354,16 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	now := time.Now()
 	cart.Status = "converted"
 	cart.ConvertedAt = &now
-	config.DB.Save(&cart)
+	if err := tx.Save(&cart).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update cart")
+		return
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
 		"orders": orders,
@@ -308,8 +395,8 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusPendingPayment {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order is not in pending_payment status")
+	if !isValidTransition(order.Status, models.OrderStatusEscrowed) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status))
 		return
 	}
 
@@ -342,28 +429,29 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
-	productAmount, _ := new(big.Int).SetString(order.ProductAmount, 10)
-	shippingAmount, _ := new(big.Int).SetString(order.ShippingAmount, 10)
+	productAmount, ok := new(big.Int).SetString(order.ProductAmount, 10)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Invalid product amount")
+		return
+	}
+	shippingAmount, ok := new(big.Int).SetString(order.ShippingAmount, 10)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Invalid shipping amount")
+		return
+	}
 
 	// Prepare approve tx
 	client := ch.BlockchainService.ClientForChain("sonic")
-	var approveTxBytes []byte
-	if client != nil {
-		approveTxBytes, err = client.PrepareERC20Approve(tokenAddr, user.WalletAddress, ch.Config.ProductEscrowAddress, totalAmount)
-		if err != nil {
-			log.Printf("Failed to prepare approve tx: %v", err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
-			return
-		}
-	} else {
-		// Fallback: build minimal tx data when no blockchain client available
-		approveData := map[string]interface{}{
-			"to":      tokenAddr,
-			"value":   "0",
-			"data":    "approve",
-			"chainId": "14601",
-		}
-		approveTxBytes, _ = json.Marshal(approveData)
+	if client == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain service unavailable")
+		return
+	}
+
+	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, ch.Config.ProductEscrowAddress, totalAmount)
+	if err != nil {
+		log.Printf("Failed to prepare approve tx: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
+		return
 	}
 
 	// Prepare createOrder tx
@@ -389,8 +477,14 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 	}
 
 	var approveTx, createOrderTx map[string]interface{}
-	json.Unmarshal(approveTxBytes, &approveTx)
-	json.Unmarshal(createOrderTxBytes, &createOrderTx)
+	if err := json.Unmarshal(approveTxBytes, &approveTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode approve transaction")
+		return
+	}
+	if err := json.Unmarshal(createOrderTxBytes, &createOrderTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode escrow transaction")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Escrow transactions prepared", gin.H{
 		"approveTx":       approveTx,
@@ -430,15 +524,24 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusPendingPayment {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order is not in pending_payment status")
+	if !isValidTransition(order.Status, models.OrderStatusEscrowed) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
 		return
 	}
 
 	// Verify approve tx
 	approveReceipt := ch.BlockchainService.GetTransactionReceipt(req.ApproveTxHash, "sonic")
-	if approveReceipt.Status != "confirmed" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Approve transaction not confirmed")
+	switch approveReceipt.Status {
+	case "confirmed":
+		// OK
+	case "error":
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify approve transaction — try again later")
+		return
+	case "pending":
+		utils.ErrorResponse(c, http.StatusConflict, "Approve transaction is still pending — please wait and retry")
+		return
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "Approve transaction failed on-chain")
 		return
 	}
 
@@ -503,8 +606,8 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusEscrowed {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order must be in escrowed status to mark as delivered")
+	if !isValidTransition(order.Status, models.OrderStatusDelivered) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
 		return
 	}
 
@@ -552,8 +655,8 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusDelivered && order.Status != models.OrderStatusEscrowed {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order must be in delivered or escrowed status")
+	if !isValidTransition(order.Status, models.OrderStatusCompleted) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot confirm receipt: order is in %s status", order.Status))
 		return
 	}
 
@@ -570,7 +673,10 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 	}
 
 	var confirmTx map[string]interface{}
-	json.Unmarshal(confirmTxBytes, &confirmTx)
+	if err := json.Unmarshal(confirmTxBytes, &confirmTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode confirm transaction")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Confirm transaction prepared", gin.H{
 		"confirmTx": confirmTx,
@@ -608,15 +714,24 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusDelivered && order.Status != models.OrderStatusEscrowed {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order must be in delivered or escrowed status")
+	if !isValidTransition(order.Status, models.OrderStatusCompleted) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot confirm receipt: order is in %s status", order.Status))
 		return
 	}
 
 	// Verify tx
 	receipt := ch.BlockchainService.GetTransactionReceipt(req.TxHash, "sonic")
-	if receipt.Status != "confirmed" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Confirm transaction not confirmed on-chain")
+	switch receipt.Status {
+	case "confirmed":
+		// OK
+	case "error":
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify confirm transaction — try again later")
+		return
+	case "pending":
+		utils.ErrorResponse(c, http.StatusConflict, "Confirm transaction is still pending — please wait and retry")
+		return
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "Confirm transaction failed on-chain")
 		return
 	}
 
@@ -679,7 +794,10 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 			return
 		}
 		var refundTx map[string]interface{}
-		json.Unmarshal(refundTxBytes, &refundTx)
+		if err := json.Unmarshal(refundTxBytes, &refundTx); err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode refund transaction")
+			return
+		}
 
 		utils.SuccessResponse(c, http.StatusOK, "Refund transaction prepared", gin.H{
 			"refundTx": refundTx,
@@ -726,8 +844,8 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusEscrowed {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order can only be cancelled when escrowed (before delivery)")
+	if !isValidTransition(order.Status, models.OrderStatusCancelled) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot cancel: order is in %s status", order.Status))
 		return
 	}
 
@@ -744,7 +862,10 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 	}
 
 	var cancelTx map[string]interface{}
-	json.Unmarshal(cancelTxBytes, &cancelTx)
+	if err := json.Unmarshal(cancelTxBytes, &cancelTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode cancel transaction")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Cancel transaction prepared", gin.H{
 		"cancelTx": cancelTx,
@@ -910,7 +1031,7 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 	}
 
 	if order.Status != models.OrderStatusRefundRequested {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Order must be in refund_requested status to resolve")
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot resolve dispute: order is in %s status, must be %s", order.Status, models.OrderStatusRefundRequested))
 		return
 	}
 
@@ -927,7 +1048,10 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 	}
 
 	var resolveTx map[string]interface{}
-	json.Unmarshal(resolveTxBytes, &resolveTx)
+	if err := json.Unmarshal(resolveTxBytes, &resolveTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode resolve transaction")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Resolve transaction prepared", gin.H{
 		"resolveTx":   resolveTx,
