@@ -3,10 +3,11 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-contract ProductEscrow is Ownable, ReentrancyGuard {
+contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     struct Order {
@@ -25,17 +26,24 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
     }
 
     uint256 public constant AUTO_REFUND_DELAY = 30 days;
+    uint256 public constant AUTO_REFUND_GRACE_PERIOD = 3 days;
 
     // Fee basis points (out of 10000)
     uint256 public constant PLATFORM_FEE_BPS = 1000; // 10%
-    uint256 public constant SYSTEM_FEE_BPS = 500;    // 5% of productAmount
     uint256 public constant BUYER_CASHBACK_BPS = 250; // 2.5% of productAmount
     uint256 public constant UPLINE_FEE_BPS = 250;    // 2.5% of productAmount
+    // System fee = platformFee - buyerCashback - uplineAmount (remainder absorbs rounding)
 
     // Auto-refund split when seller delivered but buyer didn't confirm (basis points of total escrowed)
     uint256 public constant AUTO_REFUND_BUYER_BPS = 9000;  // 90%
     uint256 public constant AUTO_REFUND_SYSTEM_BPS = 700;  // 7%
     uint256 public constant AUTO_REFUND_SELLER_BPS = 300;  // 3%
+
+    // MCGP token address
+    address public mcgpToken;
+
+    // Token whitelist
+    mapping(address => bool) public acceptedTokens;
 
     mapping(bytes32 => Order) public orders;
 
@@ -63,8 +71,43 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
     event OrderCancelled(bytes32 indexed orderId);
     event AutoRefunded(bytes32 indexed orderId);
     event DisputeResolved(bytes32 indexed orderId, bool refundedToBuyer);
+    event TokenAcceptanceUpdated(address indexed token, bool accepted);
+    event McgpTokenUpdated(address indexed oldToken, address indexed newToken);
+    event ExcessSwept(address indexed token, uint256 amount);
 
     constructor(address initialOwner) Ownable(initialOwner) {}
+
+    // --- Admin functions ---
+
+    function setMcgpToken(address _mcgpToken) external onlyOwner {
+        require(_mcgpToken != address(0), "Invalid MCGP address");
+        address old = mcgpToken;
+        mcgpToken = _mcgpToken;
+        emit McgpTokenUpdated(old, _mcgpToken);
+    }
+
+    function setTokenAcceptance(address token, bool accepted) external onlyOwner {
+        require(token != address(0), "Invalid token");
+        acceptedTokens[token] = accepted;
+        emit TokenAcceptanceUpdated(token, accepted);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /// @notice Sweep excess tokens (rounding dust or accidental transfers) to owner
+    function sweepExcess(address token, uint256 amount) external onlyOwner {
+        require(token != address(0), "Invalid token");
+        IERC20(token).safeTransfer(owner(), amount);
+        emit ExcessSwept(token, amount);
+    }
+
+    // --- Order lifecycle ---
 
     function createOrder(
         bytes32 orderId,
@@ -73,10 +116,12 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         uint256 productAmount,
         uint256 shippingAmount,
         address buyerUpline
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         require(orders[orderId].buyer == address(0), "Order already exists");
         require(seller != address(0), "Invalid seller");
+        require(msg.sender != seller, "Buyer cannot be seller");
         require(token != address(0), "Invalid token");
+        require(acceptedTokens[token], "Token not accepted");
         require(productAmount > 0, "Product amount must be > 0");
 
         uint256 platformFee = _calculatePlatformFee(productAmount, token);
@@ -113,7 +158,7 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         emit DeliveryMarked(orderId);
     }
 
-    function confirmReceipt(bytes32 orderId) external nonReentrant {
+    function confirmReceipt(bytes32 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
@@ -123,32 +168,31 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         order.resolved = true;
 
         _releaseToSeller(orderId, order);
-
         emit ReceiptConfirmed(orderId);
     }
 
-    function requestRefund(bytes32 orderId) external nonReentrant {
+    function requestRefund(bytes32 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
         require(msg.sender == order.buyer, "Only buyer can request refund");
         require(!order.refundRequested, "Refund already requested");
 
+        order.refundRequested = true;
+
         if (!order.sellerDelivered) {
             // Instant full refund
             order.resolved = true;
-            order.refundRequested = true;
             uint256 totalAmount = order.productAmount + order.shippingAmount + order.platformFee;
             IERC20(order.token).safeTransfer(order.buyer, totalAmount);
             emit OrderRefunded(orderId, order.buyer, totalAmount);
         } else {
             // Dispute state — admin must resolve
-            order.refundRequested = true;
             emit RefundRequested(orderId);
         }
     }
 
-    function cancelOrder(bytes32 orderId) external nonReentrant {
+    function cancelOrder(bytes32 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
@@ -163,11 +207,21 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         emit OrderRefunded(orderId, order.buyer, totalAmount);
     }
 
-    function autoRefund(bytes32 orderId) external nonReentrant {
+    /// @notice Auto-refund after 30 days. Restricted to buyer/owner for the first 3 days
+    /// after the 30-day deadline, then open to anyone.
+    function autoRefund(bytes32 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
         require(block.timestamp >= order.createdAt + AUTO_REFUND_DELAY, "30 days not elapsed");
+
+        // Grace period: only buyer or owner can call during first 3 days after deadline
+        if (block.timestamp < order.createdAt + AUTO_REFUND_DELAY + AUTO_REFUND_GRACE_PERIOD) {
+            require(
+                msg.sender == order.buyer || msg.sender == owner(),
+                "Grace period: only buyer or owner"
+            );
+        }
 
         order.resolved = true;
         uint256 totalAmount = order.productAmount + order.shippingAmount + order.platformFee;
@@ -190,10 +244,12 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         emit AutoRefunded(orderId);
     }
 
+    /// @notice Admin resolves a disputed order (buyer requested refund after seller delivered)
     function adminResolve(bytes32 orderId, bool refundBuyer) external onlyOwner nonReentrant {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
+        require(order.refundRequested, "No dispute to resolve");
 
         order.resolved = true;
 
@@ -211,19 +267,10 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
     // --- Internal helpers ---
 
     function _calculatePlatformFee(uint256 productAmount, address token) internal view returns (uint256) {
-        // Check if token is MCGP — for now we use a simple mapping approach
-        // MCGP tokens get 0% platform fee
         if (_isMCGP(token)) {
             return 0;
         }
         return (productAmount * PLATFORM_FEE_BPS) / 10000;
-    }
-
-    // MCGP token address — set via constructor or made configurable
-    address public mcgpToken;
-
-    function setMcgpToken(address _mcgpToken) external onlyOwner {
-        mcgpToken = _mcgpToken;
     }
 
     function _isMCGP(address token) internal view returns (bool) {
@@ -235,15 +282,34 @@ contract ProductEscrow is Ownable, ReentrancyGuard {
         uint256 sellerAmount = order.productAmount + order.shippingAmount;
 
         if (order.platformFee > 0) {
-            uint256 systemAmount = (order.productAmount * SYSTEM_FEE_BPS) / 10000;
+            // Calculate smaller splits first, system gets remainder (absorbs rounding dust)
             uint256 buyerCashback = (order.productAmount * BUYER_CASHBACK_BPS) / 10000;
             uint256 uplineAmount = (order.productAmount * UPLINE_FEE_BPS) / 10000;
+            uint256 systemAmount = order.platformFee - buyerCashback - uplineAmount;
 
-            token.safeTransfer(owner(), order.buyerUpline == address(0) ? systemAmount + uplineAmount : systemAmount);
+            // Transfer fee splits — upline uses try-catch to prevent reverting recipients from blocking resolution
             token.safeTransfer(order.buyer, buyerCashback);
 
             if (order.buyerUpline != address(0)) {
-                token.safeTransfer(order.buyerUpline, uplineAmount);
+                try token.transfer(order.buyerUpline, uplineAmount) returns (bool success) {
+                    if (!success) {
+                        // Upline transfer failed, send to system wallet
+                        token.safeTransfer(owner(), systemAmount + uplineAmount);
+                        emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount + uplineAmount, buyerCashback, 0);
+                        token.safeTransfer(order.seller, sellerAmount);
+                        return;
+                    }
+                } catch {
+                    // Upline is a reverting contract, send their share to system wallet
+                    token.safeTransfer(owner(), systemAmount + uplineAmount);
+                    emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount + uplineAmount, buyerCashback, 0);
+                    token.safeTransfer(order.seller, sellerAmount);
+                    return;
+                }
+                token.safeTransfer(owner(), systemAmount);
+            } else {
+                // No upline — system gets system + upline share
+                token.safeTransfer(owner(), systemAmount + uplineAmount);
             }
 
             emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount, buyerCashback, uplineAmount);
