@@ -97,8 +97,8 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// Check role - must be admin or merchant
-		allowedRoles := []string{models.RoleAdmin, models.RoleMerchant}
+		// Check role - must be admin, super_admin, merchant, or support
+		allowedRoles := []string{models.RoleAdmin, models.RoleSuperAdmin, models.RoleMerchant, models.RoleSupport}
 		roleAllowed := false
 		for _, role := range allowedRoles {
 			if user.Role == role {
