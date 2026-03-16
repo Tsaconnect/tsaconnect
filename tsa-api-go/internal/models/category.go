@@ -14,6 +14,7 @@ type Category struct {
 	Type             string     `json:"type,omitempty"`
 	ParentCategoryID *uuid.UUID `gorm:"type:uuid;column:parent_category_id" json:"parentCategory,omitempty"`
 	Icon             string     `json:"icon,omitempty"`
+	Image            string     `json:"image,omitempty"`
 	Color            string     `json:"color"`
 	IsActive         bool       `json:"isActive"`
 	Order            int        `gorm:"column:sort_order" json:"order"`
