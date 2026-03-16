@@ -24,6 +24,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       getProfile()
         .then((res) => {
           if (res.success && res.data) {
+            const allowedRoles = ['super_admin', 'admin', 'support'];
+            if (!allowedRoles.includes(res.data.role)) {
+              sessionStorage.removeItem('authToken');
+              localStorage.removeItem('authToken');
+              setToken(null);
+              return;
+            }
             setUser(res.data);
           }
         })

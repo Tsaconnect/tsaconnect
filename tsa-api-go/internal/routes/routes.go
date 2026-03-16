@@ -45,7 +45,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		userGroup.PUT("/profile", h.UpdateProfile)
 		userGroup.GET("/", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
-		userGroup.PATCH("/:id/role", h.UpdateUserRole)
+		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
 	}
 
 	// Admin routes
@@ -126,8 +126,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		productGroup.GET("/", h.GetMarketplaceProducts)
 		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
-		productGroup.GET("/:id", h.GetProductByID)
 		productGroup.GET("/category/:id", h.GetProductsByCategory)
+		productGroup.GET("/:id", h.GetProductByID)
 		productGroup.POST("/", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)

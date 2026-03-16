@@ -646,10 +646,10 @@ func (h *Handlers) GetAllUsers(c *gin.Context) {
 		"data": gin.H{
 			"users": users,
 			"pagination": gin.H{
-				"page":  page,
-				"limit": limit,
-				"total": total,
-				"pages": pages,
+				"page":       page,
+				"limit":      limit,
+				"total":      total,
+				"totalPages": pages,
 			},
 		},
 	})

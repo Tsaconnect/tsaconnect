@@ -56,6 +56,16 @@ func (h *Handlers) GetDeposits(c *gin.Context) {
 
 // UpdateDepositStatus handles PATCH /api/deposits/:id/status.
 func (h *Handlers) UpdateDepositStatus(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only admins can approve or reject deposits")
+		return
+	}
+
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid deposit ID")
@@ -87,7 +97,6 @@ func (h *Handlers) UpdateDepositStatus(c *gin.Context) {
 		return
 	}
 
-	user := getUserFromContext(c)
 	now := time.Now()
 
 	updates := map[string]interface{}{
