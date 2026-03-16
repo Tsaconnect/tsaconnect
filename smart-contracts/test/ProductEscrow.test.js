@@ -7,6 +7,7 @@ const {
 
 describe("ProductEscrow", function () {
   const THIRTY_DAYS = 30 * 24 * 60 * 60;
+  const THREE_DAYS = 3 * 24 * 60 * 60;
 
   async function deployFixture() {
     const [owner, buyer, seller, upline, other] = await ethers.getSigners();
@@ -22,8 +23,10 @@ describe("ProductEscrow", function () {
     const ProductEscrow = await ethers.getContractFactory("ProductEscrow");
     const escrow = await ProductEscrow.deploy(owner.address);
 
-    // Set MCGP token address
+    // Set MCGP token address and whitelist tokens
     await escrow.setMcgpToken(await mcgp.getAddress());
+    await escrow.setTokenAcceptance(await usdt.getAddress(), true);
+    await escrow.setTokenAcceptance(await mcgp.getAddress(), true);
 
     // Mint tokens to buyer
     const mintAmount6 = 10000_000000n; // 10,000 USDT (6 decimals)
@@ -63,7 +66,7 @@ describe("ProductEscrow", function () {
       const { escrow, usdt, owner, buyer, seller, upline } = await loadFixture(
         deployFixture
       );
-      const { orderId, productAmount, shippingAmount } =
+      const { orderId, productAmount, shippingAmount, platformFee } =
         await createStandardOrder(escrow, usdt, buyer, seller, upline);
 
       // Seller marks delivered
@@ -78,10 +81,10 @@ describe("ProductEscrow", function () {
       // Buyer confirms receipt
       await escrow.connect(buyer).confirmReceipt(orderId);
 
-      // Calculate expected splits (basis points of productAmount)
-      const systemFee = (productAmount * 500n) / 10000n; // 5%
+      // Calculate expected splits
       const buyerCashback = (productAmount * 250n) / 10000n; // 2.5%
       const uplineFee = (productAmount * 250n) / 10000n; // 2.5%
+      const systemFee = platformFee - buyerCashback - uplineFee; // remainder
       const sellerAmount = productAmount + shippingAmount;
 
       expect(await usdt.balanceOf(seller.address)).to.equal(
@@ -101,6 +104,41 @@ describe("ProductEscrow", function () {
       const order = await escrow.orders(orderId);
       expect(order.resolved).to.be.true;
       expect(order.buyerConfirmed).to.be.true;
+    });
+
+    it("should handle rounding dust correctly for small amounts", async function () {
+      const { escrow, usdt, owner, buyer, seller, upline } = await loadFixture(
+        deployFixture
+      );
+
+      const orderId = ethers.id("small-order");
+      const productAmount = 33n; // small amount to trigger rounding
+      const shippingAmount = 1n;
+      // platformFee = 33 * 1000 / 10000 = 3
+      const platformFee = 3n;
+      const totalAmount = productAmount + shippingAmount + platformFee;
+
+      await usdt.connect(buyer).approve(await escrow.getAddress(), totalAmount);
+      await escrow
+        .connect(buyer)
+        .createOrder(
+          orderId,
+          seller.address,
+          await usdt.getAddress(),
+          productAmount,
+          shippingAmount,
+          upline.address
+        );
+
+      await escrow.connect(seller).markDelivered(orderId);
+
+      const contractBefore = await usdt.balanceOf(await escrow.getAddress());
+
+      await escrow.connect(buyer).confirmReceipt(orderId);
+
+      // Contract should have 0 balance — no dust locked
+      const contractAfter = await usdt.balanceOf(await escrow.getAddress());
+      expect(contractAfter).to.equal(0n);
     });
   });
 
@@ -169,7 +207,8 @@ describe("ProductEscrow", function () {
       // Advance time by 30 days
       await time.increase(THIRTY_DAYS);
 
-      await escrow.autoRefund(orderId);
+      // Buyer can call during grace period
+      await escrow.connect(buyer).autoRefund(orderId);
 
       expect(await usdt.balanceOf(buyer.address)).to.equal(
         buyerBefore + totalAmount
@@ -202,7 +241,7 @@ describe("ProductEscrow", function () {
       // Advance time by 30 days
       await time.increase(THIRTY_DAYS);
 
-      await escrow.autoRefund(orderId);
+      await escrow.connect(buyer).autoRefund(orderId);
 
       const buyerShare = (totalAmount * 9000n) / 10000n; // 90%
       const systemShare = (totalAmount * 700n) / 10000n; // 7%
@@ -231,9 +270,57 @@ describe("ProductEscrow", function () {
         upline
       );
 
-      await expect(escrow.autoRefund(orderId)).to.be.revertedWith(
-        "30 days not elapsed"
+      await expect(
+        escrow.connect(buyer).autoRefund(orderId)
+      ).to.be.revertedWith("30 days not elapsed");
+    });
+
+    it("should restrict to buyer/owner during 3-day grace period", async function () {
+      const { escrow, usdt, buyer, seller, upline, other } = await loadFixture(
+        deployFixture
       );
+      const { orderId } = await createStandardOrder(
+        escrow,
+        usdt,
+        buyer,
+        seller,
+        upline
+      );
+
+      await escrow.connect(seller).markDelivered(orderId);
+
+      // Advance to exactly 30 days (within grace period)
+      await time.increase(THIRTY_DAYS);
+
+      // Random caller should be rejected during grace period
+      await expect(
+        escrow.connect(other).autoRefund(orderId)
+      ).to.be.revertedWith("Grace period: only buyer or owner");
+
+      // Buyer should succeed
+      await escrow.connect(buyer).autoRefund(orderId);
+    });
+
+    it("should allow anyone after grace period expires", async function () {
+      const { escrow, usdt, buyer, seller, upline, other } = await loadFixture(
+        deployFixture
+      );
+      const { orderId } = await createStandardOrder(
+        escrow,
+        usdt,
+        buyer,
+        seller,
+        upline
+      );
+
+      // Advance past 30 days + 3 day grace period
+      await time.increase(THIRTY_DAYS + THREE_DAYS);
+
+      // Anyone can call now
+      await escrow.connect(other).autoRefund(orderId);
+
+      const order = await escrow.orders(orderId);
+      expect(order.resolved).to.be.true;
     });
   });
 
@@ -269,7 +356,7 @@ describe("ProductEscrow", function () {
       const { escrow, usdt, buyer, seller, upline } = await loadFixture(
         deployFixture
       );
-      const { orderId, totalAmount } = await createStandardOrder(
+      const { orderId } = await createStandardOrder(
         escrow,
         usdt,
         buyer,
@@ -408,6 +495,24 @@ describe("ProductEscrow", function () {
       const order = await escrow.orders(orderId);
       expect(order.resolved).to.be.true;
     });
+
+    it("should reject adminResolve when no dispute exists", async function () {
+      const { escrow, usdt, owner, buyer, seller, upline } = await loadFixture(
+        deployFixture
+      );
+      const { orderId } = await createStandardOrder(
+        escrow,
+        usdt,
+        buyer,
+        seller,
+        upline
+      );
+
+      // No refund requested — no dispute
+      await expect(
+        escrow.connect(owner).adminResolve(orderId, true)
+      ).to.be.revertedWith("No dispute to resolve");
+    });
   });
 
   describe("Cannot operate on resolved orders", function () {
@@ -504,9 +609,9 @@ describe("ProductEscrow", function () {
 
       await time.increase(THIRTY_DAYS);
 
-      await expect(escrow.autoRefund(orderId)).to.be.revertedWith(
-        "Order already resolved"
-      );
+      await expect(
+        escrow.connect(buyer).autoRefund(orderId)
+      ).to.be.revertedWith("Order already resolved");
     });
   });
 
@@ -624,13 +729,13 @@ describe("ProductEscrow", function () {
       await escrow.connect(seller).markDelivered(orderId);
 
       const ownerBefore = await usdt.balanceOf(owner.address);
-      const sellerBefore = await usdt.balanceOf(seller.address);
 
       await escrow.connect(buyer).confirmReceipt(orderId);
 
-      // System gets 5% + 2.5% (upline's share) = 7.5%
-      const systemFee = (productAmount * 500n) / 10000n;
+      // System gets systemFee (remainder) + upline share
+      const buyerCashback = (productAmount * 250n) / 10000n;
       const uplineFee = (productAmount * 250n) / 10000n;
+      const systemFee = platformFee - buyerCashback - uplineFee;
       expect(await usdt.balanceOf(owner.address)).to.equal(
         ownerBefore + systemFee + uplineFee
       );
@@ -718,6 +823,137 @@ describe("ProductEscrow", function () {
 
       const order = await escrow.orders(orderId);
       expect(order.shippingAmount).to.equal(0n);
+    });
+
+    it("should reject buyer == seller (self-dealing)", async function () {
+      const { escrow, usdt, buyer, upline } = await loadFixture(deployFixture);
+
+      const orderId = ethers.id("self-deal");
+      const productAmount = 100_000000n;
+      const totalAmount = productAmount + 10_000000n; // + platformFee
+
+      await usdt.connect(buyer).approve(await escrow.getAddress(), totalAmount);
+
+      await expect(
+        escrow
+          .connect(buyer)
+          .createOrder(
+            orderId,
+            buyer.address, // buyer == seller
+            await usdt.getAddress(),
+            productAmount,
+            0,
+            upline.address
+          )
+      ).to.be.revertedWith("Buyer cannot be seller");
+    });
+
+    it("should reject non-whitelisted token", async function () {
+      const { escrow, buyer, seller, upline } = await loadFixture(
+        deployFixture
+      );
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const badToken = await MockERC20.deploy("Bad", "BAD", 6);
+      await badToken.mint(buyer.address, 10000_000000n);
+
+      const orderId = ethers.id("bad-token");
+      await badToken
+        .connect(buyer)
+        .approve(await escrow.getAddress(), 10000_000000n);
+
+      await expect(
+        escrow
+          .connect(buyer)
+          .createOrder(
+            orderId,
+            seller.address,
+            await badToken.getAddress(),
+            100_000000n,
+            0,
+            upline.address
+          )
+      ).to.be.revertedWith("Token not accepted");
+    });
+  });
+
+  describe("Pausable", function () {
+    it("should prevent createOrder when paused", async function () {
+      const { escrow, usdt, buyer, seller, upline } = await loadFixture(
+        deployFixture
+      );
+
+      await escrow.pause();
+
+      const orderId = ethers.id("paused-order");
+      await usdt.connect(buyer).approve(await escrow.getAddress(), 1000n);
+
+      await expect(
+        escrow
+          .connect(buyer)
+          .createOrder(
+            orderId,
+            seller.address,
+            await usdt.getAddress(),
+            100n,
+            0,
+            upline.address
+          )
+      ).to.be.revertedWithCustomError(escrow, "EnforcedPause");
+    });
+
+    it("should allow operations after unpause", async function () {
+      const { escrow, usdt, buyer, seller, upline } = await loadFixture(
+        deployFixture
+      );
+
+      await escrow.pause();
+      await escrow.unpause();
+
+      // Should work again
+      const orderId = ethers.id("unpaused-order");
+      const productAmount = 100_000000n;
+      const platformFee = 10_000000n;
+      const totalAmount = productAmount + platformFee;
+
+      await usdt.connect(buyer).approve(await escrow.getAddress(), totalAmount);
+      await escrow
+        .connect(buyer)
+        .createOrder(
+          orderId,
+          seller.address,
+          await usdt.getAddress(),
+          productAmount,
+          0,
+          upline.address
+        );
+
+      const order = await escrow.orders(orderId);
+      expect(order.buyer).to.equal(buyer.address);
+    });
+  });
+
+  describe("sweepExcess", function () {
+    it("should allow owner to sweep excess tokens", async function () {
+      const { escrow, usdt, owner } = await loadFixture(deployFixture);
+
+      // Directly mint tokens to the contract (simulating accidental transfer)
+      await usdt.mint(await escrow.getAddress(), 1000n);
+
+      const ownerBefore = await usdt.balanceOf(owner.address);
+      await escrow.sweepExcess(await usdt.getAddress(), 1000n);
+
+      expect(await usdt.balanceOf(owner.address)).to.equal(
+        ownerBefore + 1000n
+      );
+    });
+
+    it("should reject non-owner sweep", async function () {
+      const { escrow, usdt, other } = await loadFixture(deployFixture);
+
+      await expect(
+        escrow.connect(other).sweepExcess(await usdt.getAddress(), 1000n)
+      ).to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
     });
   });
 
@@ -862,7 +1098,7 @@ describe("ProductEscrow", function () {
 
       await time.increase(THIRTY_DAYS);
 
-      await expect(escrow.autoRefund(orderId))
+      await expect(escrow.connect(buyer).autoRefund(orderId))
         .to.emit(escrow, "AutoRefunded")
         .withArgs(orderId);
     });

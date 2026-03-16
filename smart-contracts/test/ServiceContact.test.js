@@ -6,6 +6,7 @@ const {
 
 describe("ServiceContact", function () {
   const FEE_AMOUNT = 100000n; // $0.10 in 6-decimal tokens
+  const MIN_FEE = 10000n;
 
   async function deployFixture() {
     const [owner, caller, provider, upline, other] = await ethers.getSigners();
@@ -51,11 +52,11 @@ describe("ServiceContact", function () {
           await usdt.getAddress()
         );
 
-      // Expected splits: $0.05 system, $0.025 provider, $0.0125 caller, $0.0125 upline
-      const systemAmount = (FEE_AMOUNT * 5000n) / 10000n; // 50000
+      // Expected splits — system gets remainder
       const providerAmount = (FEE_AMOUNT * 2500n) / 10000n; // 25000
       const callerCashback = (FEE_AMOUNT * 1250n) / 10000n; // 12500
-      const uplineAmount = FEE_AMOUNT - systemAmount - providerAmount - callerCashback; // 12500
+      const uplineAmount = (FEE_AMOUNT * 1250n) / 10000n; // 12500
+      const systemAmount = FEE_AMOUNT - providerAmount - callerCashback - uplineAmount; // 50000
 
       expect(await usdt.balanceOf(owner.address)).to.equal(
         ownerBefore + systemAmount
@@ -70,6 +71,26 @@ describe("ServiceContact", function () {
       expect(await usdt.balanceOf(upline.address)).to.equal(
         uplineBefore + uplineAmount
       );
+    });
+
+    it("should leave no dust in the contract", async function () {
+      const { service, usdt, caller, provider, upline } = await loadFixture(
+        deployFixture
+      );
+
+      await usdt
+        .connect(caller)
+        .approve(await service.getAddress(), FEE_AMOUNT);
+
+      await service
+        .connect(caller)
+        .payContactFee(
+          provider.address,
+          upline.address,
+          await usdt.getAddress()
+        );
+
+      expect(await usdt.balanceOf(await service.getAddress())).to.equal(0n);
     });
   });
 
@@ -93,8 +114,10 @@ describe("ServiceContact", function () {
           await usdt.getAddress()
         );
 
-      const systemAmount = (FEE_AMOUNT * 5000n) / 10000n;
-      const uplineAmount = FEE_AMOUNT - systemAmount - (FEE_AMOUNT * 2500n) / 10000n - (FEE_AMOUNT * 1250n) / 10000n;
+      const providerAmount = (FEE_AMOUNT * 2500n) / 10000n;
+      const callerCashback = (FEE_AMOUNT * 1250n) / 10000n;
+      const uplineAmount = (FEE_AMOUNT * 1250n) / 10000n;
+      const systemAmount = FEE_AMOUNT - providerAmount - callerCashback - uplineAmount;
 
       // Owner gets system + upline share
       expect(await usdt.balanceOf(owner.address)).to.equal(
@@ -138,12 +161,19 @@ describe("ServiceContact", function () {
       );
     });
 
-    it("should reject zero fee amount", async function () {
+    it("should reject fee below minimum", async function () {
       const { service, owner } = await loadFixture(deployFixture);
 
       await expect(
-        service.connect(owner).setFeeAmount(0)
-      ).to.be.revertedWith("Fee must be > 0");
+        service.connect(owner).setFeeAmount(MIN_FEE - 1n)
+      ).to.be.revertedWith("Fee below minimum");
+    });
+
+    it("should accept fee at exactly minimum", async function () {
+      const { service, owner } = await loadFixture(deployFixture);
+
+      await service.connect(owner).setFeeAmount(MIN_FEE);
+      expect(await service.feeAmount()).to.equal(MIN_FEE);
     });
   });
 
@@ -254,6 +284,96 @@ describe("ServiceContact", function () {
     });
   });
 
+  describe("Self-service prevention", function () {
+    it("should reject caller paying for own contact", async function () {
+      const { service, usdt, caller, upline } = await loadFixture(
+        deployFixture
+      );
+
+      await usdt
+        .connect(caller)
+        .approve(await service.getAddress(), FEE_AMOUNT);
+
+      await expect(
+        service
+          .connect(caller)
+          .payContactFee(
+            caller.address, // caller == provider
+            upline.address,
+            await usdt.getAddress()
+          )
+      ).to.be.revertedWith("Cannot pay for own contact");
+    });
+  });
+
+  describe("Pausable", function () {
+    it("should prevent payContactFee when paused", async function () {
+      const { service, usdt, owner, caller, provider, upline } =
+        await loadFixture(deployFixture);
+
+      await service.connect(owner).pause();
+
+      await usdt
+        .connect(caller)
+        .approve(await service.getAddress(), FEE_AMOUNT);
+
+      await expect(
+        service
+          .connect(caller)
+          .payContactFee(
+            provider.address,
+            upline.address,
+            await usdt.getAddress()
+          )
+      ).to.be.revertedWithCustomError(service, "EnforcedPause");
+    });
+
+    it("should allow operations after unpause", async function () {
+      const { service, usdt, owner, caller, provider, upline } =
+        await loadFixture(deployFixture);
+
+      await service.connect(owner).pause();
+      await service.connect(owner).unpause();
+
+      await usdt
+        .connect(caller)
+        .approve(await service.getAddress(), FEE_AMOUNT);
+
+      await service
+        .connect(caller)
+        .payContactFee(
+          provider.address,
+          upline.address,
+          await usdt.getAddress()
+        );
+
+      // Should succeed — just verify no revert
+    });
+  });
+
+  describe("sweepExcess", function () {
+    it("should allow owner to sweep excess tokens", async function () {
+      const { service, usdt, owner } = await loadFixture(deployFixture);
+
+      await usdt.mint(await service.getAddress(), 5000n);
+
+      const ownerBefore = await usdt.balanceOf(owner.address);
+      await service.sweepExcess(await usdt.getAddress(), 5000n);
+
+      expect(await usdt.balanceOf(owner.address)).to.equal(
+        ownerBefore + 5000n
+      );
+    });
+
+    it("should reject non-owner sweep", async function () {
+      const { service, usdt, other } = await loadFixture(deployFixture);
+
+      await expect(
+        service.connect(other).sweepExcess(await usdt.getAddress(), 1000n)
+      ).to.be.revertedWithCustomError(service, "OwnableUnauthorizedAccount");
+    });
+  });
+
   describe("Events", function () {
     it("should emit ContactFeePaid on successful payment", async function () {
       const { service, usdt, caller, provider, upline } = await loadFixture(
@@ -303,6 +423,16 @@ describe("ServiceContact", function () {
       )
         .to.emit(service, "TokenAcceptanceUpdated")
         .withArgs(await usdt.getAddress(), false);
+    });
+
+    it("should emit ExcessSwept on sweep", async function () {
+      const { service, usdt, owner } = await loadFixture(deployFixture);
+
+      await usdt.mint(await service.getAddress(), 1000n);
+
+      await expect(service.sweepExcess(await usdt.getAddress(), 1000n))
+        .to.emit(service, "ExcessSwept")
+        .withArgs(await usdt.getAddress(), 1000n);
     });
   });
 });
