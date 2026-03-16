@@ -145,7 +145,7 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin {
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}
@@ -205,6 +205,25 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		}
 	}
 
+	// Handle image upload
+	var imageURL string
+	imgFile, err := c.FormFile("image")
+	if err == nil && imgFile != nil {
+		f, err := imgFile.Open()
+		if err == nil {
+			fileData, err := io.ReadAll(f)
+			f.Close()
+			if err == nil {
+				result, err := middleware.UploadToCloudinary(h.Config, fileData, "categories")
+				if err == nil {
+					imageURL = result.URL
+				} else {
+					log.Printf("Cloudinary upload error: %v", err)
+				}
+			}
+		}
+	}
+
 	now := time.Now()
 	category := models.Category{
 		ID:               uuid.New(),
@@ -213,6 +232,7 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		Type:             catType,
 		ParentCategoryID: parentCategoryID,
 		Icon:             iconURL,
+		Image:            imageURL,
 		Color:            color,
 		IsActive:         true,
 		Order:            order,
@@ -236,7 +256,7 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin {
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}
@@ -321,6 +341,24 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		}
 	}
 
+	// Handle image upload
+	imgFile, err := c.FormFile("image")
+	if err == nil && imgFile != nil {
+		f, err := imgFile.Open()
+		if err == nil {
+			fileData, err := io.ReadAll(f)
+			f.Close()
+			if err == nil {
+				result, err := middleware.UploadToCloudinary(h.Config, fileData, "categories")
+				if err == nil {
+					updates["image"] = result.URL
+				} else {
+					log.Printf("Cloudinary upload error: %v", err)
+				}
+			}
+		}
+	}
+
 	updates["updated_at"] = time.Now()
 
 	if err := config.DB.Model(&category).Updates(updates).Error; err != nil {
@@ -342,7 +380,7 @@ func (h *Handlers) DeleteCategory(c *gin.Context) {
 		return
 	}
 
-	if user.Role != models.RoleAdmin {
+	if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
 		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
 		return
 	}

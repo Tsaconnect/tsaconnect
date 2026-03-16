@@ -43,7 +43,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	{
 		userGroup.GET("/profile", h.GetProfile)
 		userGroup.PUT("/profile", h.UpdateProfile)
-		userGroup.GET("/", h.GetAllUsers)
+		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
 	}
@@ -68,32 +68,32 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	uploadGroup := api.Group("/upload")
 	uploadGroup.Use(auth)
 	{
-		uploadGroup.POST("/", h.UploadFile)
+		uploadGroup.POST("", h.UploadFile)
 	}
 
 	// Asset routes
 	assetGroup := api.Group("/assets")
 	assetGroup.Use(auth)
 	{
-		assetGroup.GET("/", h.GetAssets)
+		assetGroup.GET("", h.GetAssets)
 		assetGroup.GET("/:id", h.GetAssetByID)
-		assetGroup.POST("/", h.CreateAsset)
+		assetGroup.POST("", h.CreateAsset)
 	}
 
 	// Transaction routes
 	transactionGroup := api.Group("/transactions")
 	transactionGroup.Use(auth)
 	{
-		transactionGroup.GET("/", h.GetTransactions)
+		transactionGroup.GET("", h.GetTransactions)
 		transactionGroup.GET("/:id", h.GetTransactionByID)
-		transactionGroup.POST("/", h.CreateTransaction)
+		transactionGroup.POST("", h.CreateTransaction)
 	}
 
 	// Portfolio routes
 	portfolioGroup := api.Group("/portfolio")
 	portfolioGroup.Use(auth)
 	{
-		portfolioGroup.GET("/", h.GetPortfolio)
+		portfolioGroup.GET("", h.GetPortfolio)
 		portfolioGroup.GET("/summary", h.GetPortfolioSummary)
 	}
 
@@ -114,7 +114,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		categoryGroup.GET("/all", h.GetCategories)
 		categoryGroup.GET("/tree", h.GetCategoryTree)
 		categoryGroup.GET("/:categoryId", h.GetCategoryByID)
-		categoryGroup.POST("/", adminAuth, h.CreateCategory)
+		categoryGroup.POST("", adminAuth, h.CreateCategory)
 		categoryGroup.PUT("/:categoryId", adminAuth, h.UpdateCategory)
 		categoryGroup.DELETE("/:categoryId", adminAuth, h.DeleteCategory)
 		categoryGroup.PATCH("/reorder", adminAuth, h.ReorderCategories)
@@ -123,12 +123,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
-		productGroup.GET("/", h.GetMarketplaceProducts)
+		productGroup.GET("", h.GetMarketplaceProducts)
 		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
-		productGroup.GET("/category/:id", h.GetProductsByCategory)
 		productGroup.GET("/:id", h.GetProductByID)
-		productGroup.POST("/", adminAuth, h.CreateProduct)
+		productGroup.POST("", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
 		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
@@ -138,7 +137,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	depositGroup := api.Group("/deposits")
 	depositGroup.Use(adminAuth)
 	{
-		depositGroup.GET("/", h.GetDeposits)
+		depositGroup.GET("", h.GetDeposits)
 		depositGroup.PATCH("/:id/status", h.UpdateDepositStatus)
 	}
 
@@ -146,7 +145,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	orderGroup := api.Group("/orders")
 	orderGroup.Use(adminAuth)
 	{
-		orderGroup.GET("/", h.GetOrders)
+		orderGroup.GET("", h.GetOrders)
 		orderGroup.GET("/:id", h.GetOrderByID)
 		orderGroup.PATCH("/:id/status", h.UpdateOrderStatus)
 	}
@@ -154,7 +153,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 	// Cart routes
 	cartGroup := api.Group("/cart")
 	{
-		cartGroup.GET("/", auth, h.GetOrCreateCart)
+		cartGroup.GET("", auth, h.GetOrCreateCart)
 		cartGroup.POST("/items", auth, h.AddToCart)
 		cartGroup.DELETE("/items/:id", auth, h.RemoveFromCart)
 		cartGroup.POST("/checkout", auth, h.ConvertToOrder)

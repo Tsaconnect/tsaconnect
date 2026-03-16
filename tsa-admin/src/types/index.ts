@@ -47,6 +47,7 @@ export interface Category {
   type: 'Product' | 'Service' | 'Both';
   parentCategory?: string;
   icon?: string;
+  image?: string;
   color: string;
   isActive: boolean;
   order: number;

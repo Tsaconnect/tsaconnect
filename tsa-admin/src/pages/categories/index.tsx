@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Card, CardContent } from '@/components/ui/card';
-import { Plus, Pencil, Trash2, FolderTree } from 'lucide-react';
+import { Plus, Pencil, Trash2, FolderTree, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { usePermission } from '@/hooks/use-permission';
 import type { Category } from '@/types';
@@ -26,6 +26,8 @@ export default function CategoriesPage() {
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Category | null>(null);
   const [form, setForm] = useState({ title: '', description: '', type: 'Product' as string, isActive: true });
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['categories', typeFilter],
@@ -61,18 +63,33 @@ export default function CategoriesPage() {
     fd.append('description', form.description);
     fd.append('type', form.type);
     fd.append('isActive', String(form.isActive));
+    if (imageFile) {
+      fd.append('image', imageFile);
+    }
     saveMutation.mutate(fd);
+  };
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setImageFile(file);
+      setImagePreview(URL.createObjectURL(file));
+    }
   };
 
   const openEdit = (cat: Category) => {
     setEditingCategory(cat);
     setForm({ title: cat.title, description: cat.description || '', type: cat.type, isActive: cat.isActive });
+    setImageFile(null);
+    setImagePreview(cat.image || null);
     setModalOpen(true);
   };
 
   const openCreate = () => {
     setEditingCategory(null);
     setForm({ title: '', description: '', type: 'Product', isActive: true });
+    setImageFile(null);
+    setImagePreview(null);
     setModalOpen(true);
   };
 
@@ -108,7 +125,11 @@ export default function CategoriesPage() {
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <FolderTree className="h-5 w-5 text-blue-600" />
+                    {cat.image ? (
+                      <img src={cat.image} alt={cat.title} className="h-10 w-10 rounded-lg object-cover" />
+                    ) : (
+                      <FolderTree className="h-5 w-5 text-blue-600" />
+                    )}
                     <div>
                       <p className="font-medium text-slate-900">{cat.title}</p>
                       <p className="text-xs text-slate-500">{cat.type} · {cat.productCount} products</p>
@@ -155,6 +176,21 @@ export default function CategoriesPage() {
                   <SelectItem value="Both">Both</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div>
+              <Label>Image</Label>
+              <div className="mt-1">
+                {imagePreview && (
+                  <div className="mb-2 relative w-full h-32 rounded-lg overflow-hidden border border-slate-200">
+                    <img src={imagePreview} alt="Preview" className="w-full h-full object-cover" />
+                  </div>
+                )}
+                <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-dashed border-slate-300 p-3 hover:border-blue-400 transition-colors">
+                  <Upload className="h-4 w-4 text-slate-500" />
+                  <span className="text-sm text-slate-600">{imageFile ? imageFile.name : 'Choose image...'}</span>
+                  <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
+                </label>
+              </div>
             </div>
           </div>
           <DialogFooter>
