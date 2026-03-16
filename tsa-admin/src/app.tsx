@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { AuthProvider } from '@/contexts/auth-context';
+import { useAuth } from '@/hooks/use-auth';
 import { AppLayout } from '@/components/layout/app-layout';
 import LoginPage from '@/pages/auth/login';
 import DashboardPage from '@/pages/dashboard/index';
@@ -25,8 +26,10 @@ const queryClient = new QueryClient({
 });
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, isLoading } = useAuth();
   const token = sessionStorage.getItem('authToken') || localStorage.getItem('authToken');
-  if (!token) return <Navigate to="/login" replace />;
+  if (isLoading) return null;
+  if (!token || !user) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
 

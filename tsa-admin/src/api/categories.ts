@@ -31,6 +31,7 @@ export async function deleteCategory(id: string) {
 }
 
 export async function reorderCategories(orderedIds: string[]) {
-  const { data } = await client.patch<ApiResponse>('/products/category/reorder', { ids: orderedIds });
+  const orders = orderedIds.map((id, index) => ({ id, order: index }));
+  const { data } = await client.patch<ApiResponse>('/products/category/reorder', { orders });
   return data;
 }

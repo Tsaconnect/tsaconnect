@@ -253,60 +253,72 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		return
 	}
 
-	var updates map[string]interface{}
-	if err := c.ShouldBindJSON(&updates); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
-		return
+	updates := map[string]interface{}{}
+
+	if title := c.PostForm("title"); title != "" {
+		if title != category.Title {
+			var existing models.Category
+			if err := config.DB.Where("LOWER(title) = LOWER(?) AND id != ?", title, categoryID).First(&existing).Error; err == nil {
+				utils.ErrorResponse(c, http.StatusBadRequest, "Category title already exists")
+				return
+			}
+		}
+		updates["title"] = title
+	}
+	if desc := c.PostForm("description"); desc != "" {
+		updates["description"] = desc
+	}
+	if catType := c.PostForm("type"); catType != "" {
+		updates["type"] = catType
+	}
+	if color := c.PostForm("color"); color != "" {
+		updates["color"] = color
+	}
+	if orderStr := c.PostForm("order"); orderStr != "" {
+		if o, err := strconv.Atoi(orderStr); err == nil {
+			updates["sort_order"] = o
+		}
+	}
+	if isActiveStr := c.PostForm("isActive"); isActiveStr != "" {
+		updates["is_active"] = isActiveStr == "true"
 	}
 
-	// Remove _id from updates
-	delete(updates, "_id")
-	delete(updates, "id")
-
-	// Check title uniqueness if being changed
-	if newTitle, ok := updates["title"].(string); ok && newTitle != category.Title {
-		var existing models.Category
-		if err := config.DB.Where("LOWER(title) = LOWER(?) AND id != ?", newTitle, categoryID).First(&existing).Error; err == nil {
-			utils.ErrorResponse(c, http.StatusBadRequest, "Category title already exists")
+	// Handle parent category
+	parentCategoryStr := c.PostForm("parentCategory")
+	if parentCategoryStr != "" {
+		if parentCategoryStr == categoryID.String() {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Category cannot be its own parent")
 			return
 		}
-	}
-
-	// Validate parent category if being changed
-	if parentStr, ok := updates["parentCategory"]; ok {
-		if parentStr != nil {
-			parentHex, ok := parentStr.(string)
-			if ok {
-				if parentHex == categoryID.String() {
-					utils.ErrorResponse(c, http.StatusBadRequest, "Category cannot be its own parent")
-					return
-				}
-				parentOID, err := uuid.Parse(parentHex)
-				if err != nil {
-					utils.ErrorResponse(c, http.StatusBadRequest, "Invalid parent category ID")
-					return
-				}
-				var parent models.Category
-				if err := config.DB.First(&parent, "id = ?", parentOID).Error; err != nil {
-					utils.ErrorResponse(c, http.StatusNotFound, "Parent category not found")
-					return
-				}
-				updates["parent_category_id"] = parentOID
-			}
-		} else {
-			updates["parent_category_id"] = nil
+		parentOID, err := uuid.Parse(parentCategoryStr)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid parent category ID")
+			return
 		}
-		delete(updates, "parentCategory")
+		var parent models.Category
+		if err := config.DB.First(&parent, "id = ?", parentOID).Error; err != nil {
+			utils.ErrorResponse(c, http.StatusNotFound, "Parent category not found")
+			return
+		}
+		updates["parent_category_id"] = parentOID
 	}
 
-	// Map JSON field names to DB column names
-	if v, ok := updates["isActive"]; ok {
-		updates["is_active"] = v
-		delete(updates, "isActive")
-	}
-	if v, ok := updates["order"]; ok {
-		updates["sort_order"] = v
-		delete(updates, "order")
+	// Handle icon upload
+	file, err := c.FormFile("icon")
+	if err == nil && file != nil {
+		f, err := file.Open()
+		if err == nil {
+			fileData, err := io.ReadAll(f)
+			f.Close()
+			if err == nil {
+				result, err := middleware.UploadToCloudinary(h.Config, fileData, "categories")
+				if err == nil {
+					updates["icon"] = result.URL
+				} else {
+					log.Printf("Cloudinary upload error: %v", err)
+				}
+			}
+		}
 	}
 
 	updates["updated_at"] = time.Now()
