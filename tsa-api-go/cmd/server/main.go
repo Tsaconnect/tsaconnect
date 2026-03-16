@@ -58,8 +58,13 @@ func main() {
 	priceService := services.NewPriceService()
 	blockchainService := services.NewBlockchainService(cfg)
 
+	// Initialize escrow service (sonic chain client)
+	sonicClient := blockchainService.ClientForChain("sonic")
+	escrowService := services.NewEscrowService(sonicClient, cfg)
+
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg)
+	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService)
 
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
@@ -89,7 +94,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h)
+	routes.SetupRoutes(router, cfg, h, ch)
 
 	// Configure HTTP server
 	port := cfg.Port
