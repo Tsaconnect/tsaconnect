@@ -38,7 +38,7 @@ type Config struct {
 
 	// Smart contract addresses
 	ProductEscrowAddress  string
-	ServiceContactAddress string
+	ServiceContractAddress string
 
 	// Multi-chain configuration (populated in Load)
 	Chains         map[string]ChainConfig
@@ -71,7 +71,7 @@ func Load() *Config {
 
 		// Smart contract addresses
 		ProductEscrowAddress:  getEnv("PRODUCT_ESCROW_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"),
-		ServiceContactAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f"),
+		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f"),
 	}
 
 	cfg.Chains = map[string]ChainConfig{

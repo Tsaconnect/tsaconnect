@@ -149,7 +149,10 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
 // buildUnsignedTx creates an UnsignedTx JSON for the escrow contract.
 func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, error) {
 	if s.client == nil {
-		// Return a mock tx when client is unavailable (useful for tests)
+		if s.cfg != nil && s.cfg.Env == "production" {
+			return nil, fmt.Errorf("blockchain client not available")
+		}
+		// Return a minimal tx in non-production (e.g. tests) with valid ABI-encoded data
 		tx := blockchain.UnsignedTx{
 			To:    s.escrowAddress,
 			Value: "0",
@@ -177,7 +180,7 @@ func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, e
 		Data: callData,
 	})
 	if err != nil {
-		gasLimit = 300000
+		return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
 	}
 
 	tx := blockchain.UnsignedTx{

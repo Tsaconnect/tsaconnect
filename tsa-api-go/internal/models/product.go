@@ -67,9 +67,9 @@ type Product struct {
 	Rating       datatypes.JSON `gorm:"type:jsonb" json:"rating"`
 	Metadata              datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
 	ShippingSameCity      float64        `gorm:"default:0" json:"shippingSameCity"`
-	ShippingSameState     float64        `json:"shippingSameState"`
-	ShippingSameCountry   float64        `json:"shippingSameCountry"`
-	ShippingInternational float64        `json:"shippingInternational"`
+	ShippingSameState     float64        `gorm:"default:0" json:"shippingSameState"`
+	ShippingSameCountry   float64        `gorm:"default:0" json:"shippingSameCountry"`
+	ShippingInternational float64        `gorm:"default:0" json:"shippingInternational"`
 	CreatedAt             time.Time      `json:"createdAt"`
 	UpdatedAt             time.Time      `json:"updatedAt"`
 }
