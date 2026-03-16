@@ -45,6 +45,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		userGroup.PUT("/profile", h.UpdateProfile)
 		userGroup.GET("/", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
+		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
+	}
+
+	// Admin routes
+	adminGroup := api.Group("/admin")
+	adminGroup.Use(adminAuth)
+	{
+		adminGroup.GET("/stats", h.GetAdminStats)
 	}
 
 	// Verification routes
@@ -109,17 +117,38 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		categoryGroup.POST("/", adminAuth, h.CreateCategory)
 		categoryGroup.PUT("/:categoryId", adminAuth, h.UpdateCategory)
 		categoryGroup.DELETE("/:categoryId", adminAuth, h.DeleteCategory)
+		categoryGroup.PATCH("/reorder", adminAuth, h.ReorderCategories)
 	}
 
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
 		productGroup.GET("/", h.GetMarketplaceProducts)
+		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
+		productGroup.GET("/category/:id", h.GetProductsByCategory)
 		productGroup.GET("/:id", h.GetProductByID)
 		productGroup.POST("/", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
+		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
+	}
+
+	// Deposit routes (admin)
+	depositGroup := api.Group("/deposits")
+	depositGroup.Use(adminAuth)
+	{
+		depositGroup.GET("/", h.GetDeposits)
+		depositGroup.PATCH("/:id/status", h.UpdateDepositStatus)
+	}
+
+	// Order routes (admin)
+	orderGroup := api.Group("/orders")
+	orderGroup.Use(adminAuth)
+	{
+		orderGroup.GET("/", h.GetOrders)
+		orderGroup.GET("/:id", h.GetOrderByID)
+		orderGroup.PATCH("/:id/status", h.UpdateOrderStatus)
 	}
 
 	// Cart routes

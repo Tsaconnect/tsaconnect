@@ -657,22 +657,46 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 		}
 	}
 
-	// Save order data before clearing
-	orderData := gin.H{
-		"orderId":           fmt.Sprintf("ORD-%d", time.Now().UnixMilli()),
-		"cartId":            cart.ID,
-		"summary":           cart.GetSummary(),
-		"items":             items,
-		"shippingAddress":   shippingAddr,
-		"billingAddress":    cart.BillingAddress,
-		"paymentMethod":     cart.PaymentMethod,
-		"shippingMethod":    cart.ShippingMethod,
-		"estimatedDelivery": cart.EstimatedDelivery,
-		"createdAt":         time.Now(),
+	// Build order items
+	summary := cart.GetSummary()
+	var orderItems []models.OrderItem
+	for _, item := range items {
+		var product models.Product
+		config.DB.First(&product, "id = ?", item.Product)
+		orderItems = append(orderItems, models.OrderItem{
+			ProductID: item.Product,
+			Name:      product.Name,
+			Quantity:  item.Quantity,
+			UnitPrice: item.Price,
+			Total:     item.Price * float64(item.Quantity),
+		})
+	}
+
+	// Determine seller (use first item's seller)
+	sellerID := items[0].Seller
+
+	addrJSON, _ := json.Marshal(shippingAddr)
+
+	now := time.Now()
+	order := models.Order{
+		ID:              uuid.New(),
+		BuyerID:         user.ID,
+		SellerID:        sellerID,
+		Total:           summary.Total,
+		Currency:        cart.Currency,
+		Status:          models.OrderStatusPending,
+		ShippingAddress: string(addrJSON),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	order.SetItems(orderItems)
+
+	if err := config.DB.Create(&order).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+		return
 	}
 
 	// Convert cart
-	now := time.Now()
 	cart.Status = "converted"
 	cart.ConvertedAt = &now
 	cart.SetItems([]models.CartItem{})
@@ -686,7 +710,7 @@ func (h *Handlers) ConvertToOrder(c *gin.Context) {
 		return
 	}
 
-	utils.SuccessResponse(c, http.StatusOK, "Order created successfully", orderData)
+	utils.SuccessResponse(c, http.StatusOK, "Order created successfully", order)
 }
 
 // ValidateCart handles GET /api/cart/validate - validates all cart items.

@@ -17,6 +17,7 @@ type Config struct {
 	DatabaseURL         string
 	JWTSecret           string
 	FrontendURL         string
+	AdminURL            string
 	Port                string
 	Env                 string
 	CloudinaryCloudName string
@@ -45,6 +46,7 @@ func Load() *Config {
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
+		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173"),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 getEnv("ENV", "development"),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),
