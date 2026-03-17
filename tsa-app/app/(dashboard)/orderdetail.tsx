@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -22,36 +22,8 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
-import { signTransaction, getProvider } from '@/services/wallet';
-
-const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
-  pending_payment: { bg: '#FFF3CD', text: '#856404' },
-  escrowed: { bg: '#D1ECF1', text: '#0C5460' },
-  delivered: { bg: '#D4EDDA', text: '#155724' },
-  completed: { bg: '#D1FAE5', text: '#065F46' },
-  refund_requested: { bg: '#F8D7DA', text: '#721C24' },
-  refunded: { bg: '#E2E3E5', text: '#383D41' },
-  cancelled: { bg: '#F5F5F5', text: '#6C757D' },
-};
-
-const formatStatus = (status: string): string =>
-  status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
-const formatDate = (dateStr?: string): string => {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return dateStr;
-  }
-};
+import { signAndBroadcast } from '@/services/transaction';
+import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
 
 const truncateHash = (hash?: string): string => {
   if (!hash) return '—';
@@ -66,7 +38,7 @@ const OrderDetailScreen = () => {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchOrder = async () => {
+  const fetchOrder = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError(null);
@@ -77,28 +49,11 @@ const OrderDetailScreen = () => {
       setError(result.message || 'Failed to load order');
     }
     setLoading(false);
-  };
+  }, [id]);
 
   useEffect(() => {
     fetchOrder();
-  }, [id]);
-
-  const signAndBroadcast = async (unsignedTx: any): Promise<string> => {
-    const dataHex = unsignedTx.data.startsWith('0x') ? unsignedTx.data : '0x' + unsignedTx.data;
-    const signedTx = await signTransaction({
-      to: unsignedTx.to,
-      value: unsignedTx.value,
-      data: dataHex,
-      nonce: unsignedTx.nonce,
-      gasPrice: unsignedTx.gasPrice,
-      gasLimit: unsignedTx.gasLimit,
-      chainId: parseInt(unsignedTx.chainId),
-    });
-    const provider = getProvider('sonic');
-    const txResponse = await provider.broadcastTransaction(signedTx);
-    const receipt = await txResponse.wait();
-    return receipt!.hash;
-  };
+  }, [fetchOrder]);
 
   const handleConfirmReceipt = () => {
     Alert.alert(
@@ -157,10 +112,13 @@ const OrderDetailScreen = () => {
                 throw new Error(result.message || 'Failed to request refund');
               }
 
-              // If escrowed, we get a refundTx to sign
+              // If escrowed, we get a refundTx to sign and broadcast
               if (order.status === 'escrowed' && result.data?.refundTx) {
                 const txHash = await signAndBroadcast(result.data.refundTx);
-                Alert.alert('Success', 'Refund transaction submitted.');
+                Alert.alert(
+                  'Refund Requested',
+                  `On-chain refund request submitted.\nTx: ${txHash.slice(0, 16)}...`,
+                );
               } else {
                 Alert.alert('Success', 'Refund request submitted for review.');
               }
@@ -310,15 +268,15 @@ const OrderDetailScreen = () => {
           {/* Timeline */}
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Timeline</Text>
-            <InfoRow label="Created" value={formatDate(order.createdAt)} />
+            <InfoRow label="Created" value={formatDate(order.createdAt, true)} />
             {order.sellerDeliveredAt && (
-              <InfoRow label="Delivered" value={formatDate(order.sellerDeliveredAt)} />
+              <InfoRow label="Delivered" value={formatDate(order.sellerDeliveredAt, true)} />
             )}
             {order.buyerConfirmedAt && (
-              <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt)} />
+              <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt, true)} />
             )}
             {order.escrowExpiresAt && (
-              <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt)} />
+              <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt, true)} />
             )}
           </View>
 

@@ -52,13 +52,28 @@ export interface ApiResponse<T = any> {
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const token = await AsyncStorage.getItem('authToken');
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (!token) {
+    throw new Error('Not authenticated. Please log in again.');
   }
-  return headers;
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  };
+}
+
+// --- Response helper ---
+
+async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    return { success: false, message: `HTTP ${response.status}: ${response.statusText}` };
+  }
+  if (!response.ok) {
+    return { success: false, message: data.message || `Request failed with status ${response.status}` };
+  }
+  return { success: true, ...data };
 }
 
 // --- Wei formatting ---
@@ -92,7 +107,7 @@ export async function createOrders(
       headers,
       body: JSON.stringify({ token, buyerCity, buyerState, buyerCountry }),
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Create orders error:', error);
     return { success: false, message: error.message || 'Failed to create orders' };
@@ -116,7 +131,7 @@ export async function getOrders(params: {
       method: 'GET',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Get orders error:', error);
     return { success: false, message: error.message || 'Failed to fetch orders' };
@@ -130,7 +145,7 @@ export async function getOrderById(id: string): Promise<ApiResponse<Order>> {
       method: 'GET',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Get order error:', error);
     return { success: false, message: error.message || 'Failed to fetch order' };
@@ -146,7 +161,7 @@ export async function prepareEscrow(
       method: 'POST',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Prepare escrow error:', error);
     return { success: false, message: error.message || 'Failed to prepare escrow' };
@@ -165,7 +180,7 @@ export async function submitEscrow(
       headers,
       body: JSON.stringify({ approveTxHash, escrowTxHash }),
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Submit escrow error:', error);
     return { success: false, message: error.message || 'Failed to submit escrow' };
@@ -181,7 +196,7 @@ export async function prepareConfirm(
       method: 'POST',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Prepare confirm error:', error);
     return { success: false, message: error.message || 'Failed to prepare confirm' };
@@ -199,7 +214,7 @@ export async function submitConfirm(
       headers,
       body: JSON.stringify({ txHash }),
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Submit confirm error:', error);
     return { success: false, message: error.message || 'Failed to submit confirm' };
@@ -213,7 +228,7 @@ export async function requestRefund(orderId: string): Promise<ApiResponse<any>> 
       method: 'POST',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Request refund error:', error);
     return { success: false, message: error.message || 'Failed to request refund' };
@@ -238,7 +253,7 @@ export async function getShippingEstimate(
       method: 'GET',
       headers,
     });
-    return await response.json();
+    return await handleResponse(response);
   } catch (error: any) {
     console.error('Shipping estimate error:', error);
     return { success: false, message: error.message || 'Failed to get shipping estimate' };

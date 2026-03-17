@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
+import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
 
 const STATUS_FILTERS = [
   { key: '', label: 'All' },
@@ -21,29 +22,6 @@ const STATUS_FILTERS = [
   { key: 'refund_requested', label: 'Refund' },
   { key: 'refunded', label: 'Refunded' },
 ];
-
-const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
-  pending_payment: { bg: '#FFF3CD', text: '#856404' },
-  escrowed: { bg: '#D1ECF1', text: '#0C5460' },
-  delivered: { bg: '#D4EDDA', text: '#155724' },
-  completed: { bg: '#D1FAE5', text: '#065F46' },
-  refund_requested: { bg: '#F8D7DA', text: '#721C24' },
-  refunded: { bg: '#E2E3E5', text: '#383D41' },
-  cancelled: { bg: '#F5F5F5', text: '#6C757D' },
-};
-
-const formatDate = (dateStr: string): string => {
-  try {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return dateStr;
-  }
-};
-
-const formatStatus = (status: string): string => {
-  return status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-};
 
 const OrderList = () => {
   const [orders, setOrders] = useState<Order[]>([]);
