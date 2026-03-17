@@ -57,23 +57,32 @@ export interface Category {
   updatedAt?: string;
 }
 
-export interface OrderItem {
-  productId: string;
-  name: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
-}
+export type OrderStatus =
+  | 'pending_payment' | 'escrowed' | 'delivered'
+  | 'completed' | 'refund_requested' | 'refunded' | 'cancelled';
 
 export interface Order {
   id: string;
   buyerId: string;
   sellerId: string;
-  items: OrderItem[];
-  total: number;
-  currency: string;
-  status: 'pending' | 'processing' | 'shipped' | 'completed' | 'cancelled';
-  shippingAddress?: string;
+  productId: string;
+  quantity: number;
+  token: string;
+  productAmount: string;
+  shippingAmount: string;
+  platformFee: string;
+  totalAmount: string;
+  shippingZone: string;
+  status: OrderStatus;
+  contractOrderId?: string;
+  escrowTxHash?: string;
+  approveTxHash?: string;
+  releaseTxHash?: string;
+  buyerUpline?: string;
+  deliveryProofUrl?: string;
+  buyerConfirmedAt?: string;
+  sellerDeliveredAt?: string;
+  escrowExpiresAt?: string;
   notes?: string;
   createdAt: string;
   updatedAt: string;
