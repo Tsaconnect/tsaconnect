@@ -37,5 +37,6 @@ func AutoMigrate() error {
 		&models.VerificationLog{},
 		&models.Order{},
 		&models.Deposit{},
+		&models.ServiceContactPayment{},
 	)
 }
