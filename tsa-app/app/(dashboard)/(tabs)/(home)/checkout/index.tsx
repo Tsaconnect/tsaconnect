@@ -20,12 +20,10 @@ import {
   createOrders,
   prepareEscrow,
   submitEscrow,
-  getShippingEstimate,
   formatTokenAmount,
   Order,
-  UnsignedTx,
 } from '@/services/orderApi';
-import { signTransaction, getProvider } from '@/services/wallet';
+import { signAndBroadcast } from '@/services/transaction';
 
 type CheckoutStep = 'review' | 'signing' | 'success';
 type SigningPhase =
@@ -59,18 +57,23 @@ const CheckoutScreen = () => {
   const loadCart = useCallback(async () => {
     setLoading(true);
     setError(null);
-    if (token) {
-      cartService.setToken(token);
-    } else {
-      await cartService.initializeToken();
+    try {
+      if (token) {
+        cartService.setToken(token);
+      } else {
+        await cartService.initializeToken();
+      }
+      const response = await cartService.getCartSummary();
+      if (response.success && response.data) {
+        setCartData(response.data);
+      } else {
+        setError(response.message || 'Failed to load cart');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to load cart');
+    } finally {
+      setLoading(false);
     }
-    const response = await cartService.getCartSummary();
-    if (response.success && response.data) {
-      setCartData(response.data);
-    } else {
-      setError(response.message || 'Failed to load cart');
-    }
-    setLoading(false);
   }, [token]);
 
   useEffect(() => {
@@ -98,24 +101,6 @@ const CheckoutScreen = () => {
     country: currentUser?.country || '',
   };
 
-  // --- Sign and broadcast a single unsigned tx ---
-  const signAndBroadcast = async (unsignedTx: UnsignedTx): Promise<string> => {
-    const dataHex = unsignedTx.data.startsWith('0x') ? unsignedTx.data : '0x' + unsignedTx.data;
-    const signedTx = await signTransaction({
-      to: unsignedTx.to,
-      value: unsignedTx.value,
-      data: dataHex,
-      nonce: unsignedTx.nonce,
-      gasPrice: unsignedTx.gasPrice,
-      gasLimit: unsignedTx.gasLimit,
-      chainId: parseInt(unsignedTx.chainId),
-    });
-    const provider = getProvider('sonic');
-    const txResponse = await provider.broadcastTransaction(signedTx);
-    const receipt = await txResponse.wait();
-    return receipt!.hash;
-  };
-
   // --- Main escrow checkout flow ---
   const handleCreateOrders = async () => {
     if (!cartData || cartData.cart.items.length === 0) {
@@ -126,6 +111,7 @@ const CheckoutScreen = () => {
     setStep('signing');
     setSigningPhase('creating_orders');
     setSigningError(null);
+    setCompletedOrders([]);
 
     try {
       // Step 1: Create orders
@@ -158,11 +144,25 @@ const CheckoutScreen = () => {
 
         // Sign and broadcast approve tx
         setSigningPhase('approving_token');
-        const approveTxHash = await signAndBroadcast(approveTx);
+        let approveTxHash: string;
+        try {
+          approveTxHash = await signAndBroadcast(approveTx);
+        } catch (approveErr: any) {
+          throw new Error(`Token approval failed: ${approveErr.message}`);
+        }
 
         // Sign and broadcast createOrder tx
+        // C3: If this fails, the approve succeeded but escrow didn't — tell user
         setSigningPhase('creating_escrow');
-        const escrowTxHash = await signAndBroadcast(createOrderTx);
+        let escrowTxHash: string;
+        try {
+          escrowTxHash = await signAndBroadcast(createOrderTx);
+        } catch (escrowErr: any) {
+          throw new Error(
+            `Token was approved (tx: ${approveTxHash.slice(0, 10)}...) but escrow creation failed: ${escrowErr.message}. ` +
+            `The allowance will be used on retry. Check your order list.`
+          );
+        }
 
         // Submit to backend
         setSigningPhase('submitting');
@@ -362,24 +362,25 @@ const CheckoutScreen = () => {
                     Check your order list for details.
                   </Text>
                 )}
-                <TouchableOpacity
-                  style={styles.retryButton}
-                  onPress={() => {
-                    setStep('review');
-                    setSigningError(null);
-                    setSigningPhase('idle');
-                    setOrders([]);
-                    setCompletedOrders([]);
-                  }}
-                >
-                  <Text style={styles.retryText}>Back to Checkout</Text>
-                </TouchableOpacity>
-                {completedOrders.length > 0 && (
+                {completedOrders.length > 0 ? (
                   <TouchableOpacity
-                    style={[styles.retryButton, { marginTop: 12, backgroundColor: '#2E7D32' }]}
-                    onPress={() => router.push('/(dashboard)/orderlist')}
+                    style={[styles.retryButton, { backgroundColor: '#2E7D32' }]}
+                    onPress={() => router.replace('/(dashboard)/orderlist')}
                   >
                     <Text style={styles.retryText}>View Orders</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.retryButton}
+                    onPress={() => {
+                      setStep('review');
+                      setSigningError(null);
+                      setSigningPhase('idle');
+                      setOrders([]);
+                      setCompletedOrders([]);
+                    }}
+                  >
+                    <Text style={styles.retryText}>Back to Checkout</Text>
                   </TouchableOpacity>
                 )}
               </>
@@ -579,7 +580,14 @@ const CheckoutScreen = () => {
         <View style={styles.footer}>
           <View style={styles.footerTotal}>
             <Text style={styles.footerTotalLabel}>Pay with {selectedToken}</Text>
-            <Text style={styles.footerTotalValue}>${summary.total.toFixed(2)}</Text>
+            <Text style={styles.footerTotalValue}>
+              ${(
+                summary.subtotal +
+                summary.shipping +
+                (selectedToken !== 'MCGP' ? summary.subtotal * 0.1 : 0) -
+                summary.discount
+              ).toFixed(2)}
+            </Text>
           </View>
 
           <TouchableOpacity
