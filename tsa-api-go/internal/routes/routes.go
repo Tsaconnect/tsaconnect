@@ -128,6 +128,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	productGroup := api.Group("/products")
 	{
 		productGroup.GET("", h.GetMarketplaceProducts)
+		productGroup.GET("/public/category", h.GetProductsByCategory)
+		productGroup.GET("/public/category/tree/:categoryId", h.GetProductsByCategoryTree)
 		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
 		productGroup.GET("/:id", h.GetProductByID)
