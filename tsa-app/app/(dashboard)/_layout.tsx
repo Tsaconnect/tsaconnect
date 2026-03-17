@@ -275,6 +275,13 @@ const Layout = () => {
           }}
         />
         <Drawer.Screen
+          name="orderdetail"
+          options={{
+            title: "Order Detail",
+            drawerItemStyle: { display: "none" },
+          }}
+        />
+        <Drawer.Screen
           name="kyc"
           options={{
             title: "KYC Verification",
