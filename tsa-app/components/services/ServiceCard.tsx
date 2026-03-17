@@ -4,11 +4,11 @@ import { COLORS, SIZES } from "../../constants";
 import CardButton from "../buttons/CardButton";
 import { router } from "expo-router";
 //@ts-ignore
-const ServiceCard = ({ title, image, description }) => {
+const ServiceCard = ({ id, title, image, description }) => {
   function selectService() {
     router.push({
       pathname: "/servicedetail",
-      params: { title, image, description },
+      params: { id, title, image, description },
     });
   }
   return (

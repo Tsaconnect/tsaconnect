@@ -55,6 +55,8 @@ const Services = () => {
             <ServiceCard
               key={index}
               //@ts-ignore
+              id={item._id || item.id}
+              //@ts-ignore
               title={item.name}
               //@ts-ignore
               description={item.description}

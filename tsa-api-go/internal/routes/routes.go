@@ -11,10 +11,10 @@ import (
 )
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, checkoutHandlers ...*handlers.CheckoutHandler) {
-	var ch *handlers.CheckoutHandler
-	if len(checkoutHandlers) > 0 {
-		ch = checkoutHandlers[0]
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, serviceContactHandlers ...*handlers.ServiceContactHandler) {
+	var sch *handlers.ServiceContactHandler
+	if len(serviceContactHandlers) > 0 {
+		sch = serviceContactHandlers[0]
 	}
 	// API info
 	router.GET("/api", func(c *gin.Context) {
@@ -194,5 +194,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.POST("/submit-tx", h.SubmitTransaction)
 		walletGroup.GET("/transactions", h.GetTransactionHistory)
 		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
+	}
+
+	// Service contact fee routes (authenticated)
+	if sch != nil {
+		serviceGroup := api.Group("/services")
+		serviceGroup.Use(auth)
+		{
+			serviceGroup.POST("/:id/prepare-contact-fee", sch.PrepareContactFee)
+			serviceGroup.POST("/:id/submit-contact-fee", sch.SubmitContactFee)
+			serviceGroup.GET("/:id/contact", sch.GetServiceContact)
+		}
 	}
 }
