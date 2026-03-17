@@ -11,7 +11,7 @@ export default function Layout() {
           options={{ headerShown: false }}
         />
         <Stack.Screen
-          name="checkout"
+          name="checkout/index"
           options={{ title: "Checkout" }}
         />
         <Stack.Screen
