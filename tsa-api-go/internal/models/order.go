@@ -1,33 +1,36 @@
 package models
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/datatypes"
 )
 
-type OrderItem struct {
-	ProductID uuid.UUID `json:"productId"`
-	Name      string    `json:"name"`
-	Quantity  int       `json:"quantity"`
-	UnitPrice float64   `json:"unitPrice"`
-	Total     float64   `json:"total"`
-}
-
 type Order struct {
-	ID              uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	BuyerID         uuid.UUID      `gorm:"type:uuid;index" json:"buyerId"`
-	SellerID        uuid.UUID      `gorm:"type:uuid;index" json:"sellerId"`
-	Items           datatypes.JSON `gorm:"type:jsonb" json:"items"`
-	Total           float64        `json:"total"`
-	Currency        string         `gorm:"default:'NGN'" json:"currency"`
-	Status          string         `gorm:"default:'pending'" json:"status"`
-	ShippingAddress string         `json:"shippingAddress,omitempty"`
-	Notes           string         `json:"notes,omitempty"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	ID               uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	BuyerID          uuid.UUID  `gorm:"type:uuid;not null;index" json:"buyerId"`
+	SellerID         uuid.UUID  `gorm:"type:uuid;not null;index" json:"sellerId"`
+	ProductID        uuid.UUID  `gorm:"type:uuid;not null" json:"productId"`
+	Quantity         int        `gorm:"not null;default:1" json:"quantity"`
+	Token            string     `gorm:"not null" json:"token"`
+	ProductAmount    string     `gorm:"not null" json:"productAmount"`
+	ShippingAmount   string     `gorm:"not null;default:'0'" json:"shippingAmount"`
+	PlatformFee      string     `gorm:"not null;default:'0'" json:"platformFee"`
+	TotalAmount      string     `gorm:"not null" json:"totalAmount"`
+	ShippingZone     string     `json:"shippingZone"`
+	ContractOrderID  string     `json:"contractOrderId,omitempty"`
+	EscrowTxHash     string     `json:"escrowTxHash,omitempty"`
+	ApproveTxHash    string     `json:"approveTxHash,omitempty"`
+	ReleaseTxHash    string     `json:"releaseTxHash,omitempty"`
+	BuyerUpline      string     `json:"buyerUpline,omitempty"`
+	DeliveryProofURL string     `json:"deliveryProofUrl,omitempty"`
+	Status           string     `gorm:"not null;default:'pending_payment';index" json:"status"`
+	BuyerConfirmedAt *time.Time `json:"buyerConfirmedAt,omitempty"`
+	SellerDeliveredAt *time.Time `json:"sellerDeliveredAt,omitempty"`
+	EscrowExpiresAt  *time.Time `json:"escrowExpiresAt,omitempty"`
+	Notes            string     `json:"notes,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 func (Order) TableName() string {
@@ -35,40 +38,33 @@ func (Order) TableName() string {
 }
 
 const (
-	OrderStatusPending    = "pending"
-	OrderStatusProcessing = "processing"
-	OrderStatusShipped    = "shipped"
-	OrderStatusCompleted  = "completed"
-	OrderStatusCancelled  = "cancelled"
+	OrderStatusPendingPayment  = "pending_payment"
+	OrderStatusEscrowed        = "escrowed"
+	OrderStatusDelivered       = "delivered"
+	OrderStatusCompleted       = "completed"
+	OrderStatusRefundRequested = "refund_requested"
+	OrderStatusRefunded        = "refunded"
+	OrderStatusCancelled       = "cancelled"
 )
 
 // ValidNextStatuses returns valid transitions from the current status.
 func ValidNextStatuses(current string) []string {
 	switch current {
-	case OrderStatusPending:
-		return []string{OrderStatusProcessing, OrderStatusCancelled}
-	case OrderStatusProcessing:
-		return []string{OrderStatusShipped, OrderStatusCancelled}
-	case OrderStatusShipped:
-		return []string{OrderStatusCompleted, OrderStatusCancelled}
+	case OrderStatusPendingPayment:
+		return []string{OrderStatusEscrowed, OrderStatusCancelled}
+	case OrderStatusEscrowed:
+		return []string{OrderStatusDelivered, OrderStatusRefunded, OrderStatusCancelled}
+	case OrderStatusDelivered:
+		return []string{OrderStatusCompleted, OrderStatusRefundRequested}
+	case OrderStatusRefundRequested:
+		return []string{OrderStatusRefunded, OrderStatusCompleted}
 	case OrderStatusCompleted:
+		return []string{}
+	case OrderStatusRefunded:
 		return []string{}
 	case OrderStatusCancelled:
 		return []string{}
 	default:
 		return []string{}
 	}
-}
-
-func (o *Order) GetItems() []OrderItem {
-	var items []OrderItem
-	if o.Items != nil {
-		_ = json.Unmarshal(o.Items, &items)
-	}
-	return items
-}
-
-func (o *Order) SetItems(items []OrderItem) {
-	data, _ := json.Marshal(items)
-	o.Items = data
 }

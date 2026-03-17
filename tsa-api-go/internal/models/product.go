@@ -65,9 +65,13 @@ type Product struct {
 	Views        int            `json:"views"`
 	Sales        int            `json:"sales"`
 	Rating       datatypes.JSON `gorm:"type:jsonb" json:"rating"`
-	Metadata     datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
-	CreatedAt    time.Time      `json:"createdAt"`
-	UpdatedAt    time.Time      `json:"updatedAt"`
+	Metadata              datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	ShippingSameCity      float64        `gorm:"default:0" json:"shippingSameCity"`
+	ShippingSameState     float64        `gorm:"default:0" json:"shippingSameState"`
+	ShippingSameCountry   float64        `gorm:"default:0" json:"shippingSameCountry"`
+	ShippingInternational float64        `gorm:"default:0" json:"shippingInternational"`
+	CreatedAt             time.Time      `json:"createdAt"`
+	UpdatedAt             time.Time      `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.

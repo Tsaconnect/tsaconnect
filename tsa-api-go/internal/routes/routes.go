@@ -11,7 +11,11 @@ import (
 )
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, checkoutHandlers ...*handlers.CheckoutHandler) {
+	var ch *handlers.CheckoutHandler
+	if len(checkoutHandlers) > 0 {
+		ch = checkoutHandlers[0]
+	}
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -141,13 +145,29 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers) {
 		depositGroup.PATCH("/:id/status", h.UpdateDepositStatus)
 	}
 
-	// Order routes (admin)
+	// Order/checkout routes (authenticated)
 	orderGroup := api.Group("/orders")
-	orderGroup.Use(adminAuth)
-	{
-		orderGroup.GET("", h.GetOrders)
-		orderGroup.GET("/:id", h.GetOrderByID)
-		orderGroup.PATCH("/:id/status", h.UpdateOrderStatus)
+	orderGroup.Use(auth)
+	if ch != nil {
+		orderGroup.POST("", ch.CreateOrderFromCart)
+		orderGroup.GET("", ch.GetUserOrders)
+		orderGroup.GET("/shipping-estimate", ch.GetShippingEstimate)
+		orderGroup.GET("/:id", ch.GetOrderDetail)
+		orderGroup.POST("/:id/prepare-escrow", ch.PrepareEscrow)
+		orderGroup.POST("/:id/submit-escrow", ch.SubmitEscrow)
+		orderGroup.POST("/:id/deliver", ch.MarkDelivered)
+		orderGroup.POST("/:id/prepare-confirm", ch.PrepareConfirm)
+		orderGroup.POST("/:id/submit-confirm", ch.SubmitConfirm)
+		orderGroup.POST("/:id/request-refund", ch.RequestRefund)
+		orderGroup.POST("/:id/cancel", ch.CancelOrder)
+	}
+
+	// Admin order routes
+	adminOrderGroup := api.Group("/admin/orders")
+	adminOrderGroup.Use(adminAuth)
+	if ch != nil {
+		adminOrderGroup.GET("", ch.GetAllOrders)
+		adminOrderGroup.POST("/:id/resolve", ch.AdminResolveDispute)
 	}
 
 	// Cart routes

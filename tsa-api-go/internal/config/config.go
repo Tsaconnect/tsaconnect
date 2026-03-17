@@ -36,6 +36,10 @@ type Config struct {
 	BSCRPCURL  string
 	BSCChainID int64
 
+	// Smart contract addresses
+	ProductEscrowAddress  string
+	ServiceContractAddress string
+
 	// Multi-chain configuration (populated in Load)
 	Chains         map[string]ChainConfig
 	TokenAddresses map[string]string // "chain:symbol" → contract address
@@ -64,6 +68,10 @@ func Load() *Config {
 		// BSC blockchain
 		BSCRPCURL:  getEnv("BSC_RPC_URL", "https://data-seed-prebsc-1-s1.binance.org:8545"),
 		BSCChainID: getEnvInt64("BSC_CHAIN_ID", 97),
+
+		// Smart contract addresses
+		ProductEscrowAddress:  getEnv("PRODUCT_ESCROW_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"),
+		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f"),
 	}
 
 	cfg.Chains = map[string]ChainConfig{
