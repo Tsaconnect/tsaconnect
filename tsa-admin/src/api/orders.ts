@@ -1,8 +1,8 @@
 import client from './client';
 import type { ApiResponse, Order, PaginationMeta } from '@/types';
 
-export async function getOrders(params: { page?: number; limit?: number; status?: string }) {
-  const { data } = await client.get<ApiResponse<{ orders: Order[]; pagination: PaginationMeta }>>('/orders', { params });
+export async function getAdminOrders(params: { page?: number; limit?: number; status?: string; search?: string }) {
+  const { data } = await client.get<ApiResponse<{ orders: Order[]; pagination: PaginationMeta }>>('/admin/orders', { params });
   return data;
 }
 
@@ -11,7 +11,7 @@ export async function getOrderById(id: string) {
   return data;
 }
 
-export async function updateOrderStatus(id: string, status: string, notes?: string) {
-  const { data } = await client.patch<ApiResponse>(`/orders/${id}/status`, { status, notes });
+export async function resolveDispute(id: string, refundBuyer: boolean) {
+  const { data } = await client.post<ApiResponse>(`/admin/orders/${id}/resolve`, { refundBuyer });
   return data;
 }

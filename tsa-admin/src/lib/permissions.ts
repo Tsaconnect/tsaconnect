@@ -16,6 +16,7 @@ export type Permission =
   | 'categories.delete'
   | 'orders.view'
   | 'orders.update_status'
+  | 'orders.resolve_dispute'
   | 'deposits.view'
   | 'deposits.approve'
   | 'verifications.view'
@@ -27,7 +28,7 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'dashboard.view', 'users.view', 'users.edit', 'users.delete', 'users.manage_roles',
     'products.view', 'products.approve', 'products.edit', 'products.delete',
     'categories.view', 'categories.create', 'categories.edit', 'categories.delete',
-    'orders.view', 'orders.update_status',
+    'orders.view', 'orders.update_status', 'orders.resolve_dispute',
     'deposits.view', 'deposits.approve',
     'verifications.view', 'verifications.approve',
     'settings.view',
@@ -36,7 +37,7 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'dashboard.view', 'users.view', 'users.edit',
     'products.view', 'products.approve', 'products.edit', 'products.delete',
     'categories.view', 'categories.create', 'categories.edit',
-    'orders.view', 'orders.update_status',
+    'orders.view', 'orders.update_status', 'orders.resolve_dispute',
     'deposits.view', 'deposits.approve',
     'verifications.view', 'verifications.approve',
   ],

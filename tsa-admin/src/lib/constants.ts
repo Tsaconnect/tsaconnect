@@ -1,17 +1,21 @@
 export const ORDER_STATUS_LABELS: Record<string, string> = {
-  pending: 'Pending',
-  processing: 'Processing',
-  shipped: 'Shipped',
+  pending_payment: 'Pending Payment',
+  escrowed: 'Escrowed',
+  delivered: 'Delivered',
   completed: 'Completed',
+  refund_requested: 'Refund Requested',
+  refunded: 'Refunded',
   cancelled: 'Cancelled',
 };
 
 export const ORDER_STATUS_COLORS: Record<string, string> = {
-  pending: 'bg-amber-100 text-amber-700',
-  processing: 'bg-blue-100 text-blue-700',
-  shipped: 'bg-purple-100 text-purple-700',
+  pending_payment: 'bg-amber-100 text-amber-700',
+  escrowed: 'bg-blue-100 text-blue-700',
+  delivered: 'bg-purple-100 text-purple-700',
   completed: 'bg-green-100 text-green-700',
-  cancelled: 'bg-red-100 text-red-700',
+  refund_requested: 'bg-orange-100 text-orange-700',
+  refunded: 'bg-red-100 text-red-700',
+  cancelled: 'bg-slate-100 text-slate-700',
 };
 
 export const DEPOSIT_STATUS_COLORS: Record<string, string> = {
