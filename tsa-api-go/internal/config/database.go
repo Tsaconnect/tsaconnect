@@ -38,5 +38,6 @@ func AutoMigrate() error {
 		&models.Order{},
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
+		&models.MerchantRequest{},
 	)
 }
