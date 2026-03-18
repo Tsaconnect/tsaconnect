@@ -11,11 +11,7 @@ import (
 )
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, serviceContactHandlers ...*handlers.ServiceContactHandler) {
-	var sch *handlers.ServiceContactHandler
-	if len(serviceContactHandlers) > 0 {
-		sch = serviceContactHandlers[0]
-	}
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -196,6 +192,25 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.POST("/submit-tx", h.SubmitTransaction)
 		walletGroup.GET("/transactions", h.GetTransactionHistory)
 		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
+	}
+
+	// Merchant request routes (authenticated user)
+	if mrh != nil {
+		merchantReqGroup := api.Group("/merchant-requests")
+		merchantReqGroup.Use(auth)
+		{
+			merchantReqGroup.POST("", mrh.SubmitMerchantRequest)
+			merchantReqGroup.GET("/my-request", mrh.GetMyMerchantRequest)
+		}
+
+		// Admin merchant request routes
+		adminMerchantReqGroup := api.Group("/admin/merchant-requests")
+		adminMerchantReqGroup.Use(adminAuth)
+		{
+			adminMerchantReqGroup.GET("", mrh.ListMerchantRequests)
+			adminMerchantReqGroup.POST("/:id/approve", mrh.ApproveMerchantRequest)
+			adminMerchantReqGroup.POST("/:id/reject", mrh.RejectMerchantRequest)
+		}
 	}
 
 	// Service contact fee routes (authenticated)
