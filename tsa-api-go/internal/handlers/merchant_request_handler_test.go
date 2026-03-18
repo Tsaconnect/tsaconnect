@@ -136,6 +136,106 @@ func validMerchantInput() map[string]interface{} {
 	}
 }
 
+// ---------- Unauthenticated ----------
+
+func TestSubmitMerchantRequest_Unauthenticated(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validMerchantInput(), nil)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected %d, got %d: %s", http.StatusUnauthorized, w.Code, w.Body.String())
+	}
+}
+
+func TestApproveMerchantRequest_Unauthenticated(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/fake/approve", nil, nil)
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected %d, got %d: %s", http.StatusUnauthorized, w.Code, w.Body.String())
+	}
+}
+
+func TestRejectMerchantRequest_Unauthenticated(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/fake/reject", nil, nil)
+	h.RejectMerchantRequest(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected %d, got %d: %s", http.StatusUnauthorized, w.Code, w.Body.String())
+	}
+}
+
+// ---------- Invalid UUID / Not Found ----------
+
+func TestApproveMerchantRequest_InvalidUUID(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	admin := createMerchantTestUser(t, db, "admin")
+
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/not-a-uuid/approve", nil, admin)
+	c.Params = gin.Params{{Key: "id", Value: "not-a-uuid"}}
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestRejectMerchantRequest_InvalidUUID(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	admin := createMerchantTestUser(t, db, "admin")
+
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/not-a-uuid/reject",
+		map[string]interface{}{"note": "test"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: "not-a-uuid"}}
+	h.RejectMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestApproveMerchantRequest_NotFound(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	admin := createMerchantTestUser(t, db, "admin")
+
+	fakeID := uuid.New().String()
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+fakeID+"/approve", nil, admin)
+	c.Params = gin.Params{{Key: "id", Value: fakeID}}
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+}
+
+func TestRejectMerchantRequest_NotFound(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	admin := createMerchantTestUser(t, db, "admin")
+
+	fakeID := uuid.New().String()
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+fakeID+"/reject",
+		map[string]interface{}{"note": "test"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: fakeID}}
+	h.RejectMerchantRequest(c)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+}
+
 // ---------- Submit Merchant Request ----------
 
 func TestSubmitMerchantRequest_Success(t *testing.T) {
@@ -359,6 +459,15 @@ func TestRejectMerchantRequest_Success(t *testing.T) {
 
 	if w2.Code != http.StatusOK {
 		t.Errorf("expected %d, got %d: %s", http.StatusOK, w2.Code, w2.Body.String())
+	}
+
+	// Verify user role is still "user" (rejection must NOT upgrade role)
+	var updatedUser models.User
+	if err := db.First(&updatedUser, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("failed to reload user: %v", err)
+	}
+	if updatedUser.Role != "user" {
+		t.Errorf("expected role %q after rejection, got %q", "user", updatedUser.Role)
 	}
 }
 

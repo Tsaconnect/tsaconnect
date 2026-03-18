@@ -103,11 +103,12 @@ export interface Deposit {
 }
 
 export type MerchantRequestStatus = 'pending' | 'approved' | 'rejected';
+export type BusinessType = 'general_products' | 'digital_products' | 'p2p_merchant' | 'service_provider';
 
 export interface MerchantRequest {
   id: string;
   userId: string;
-  businessType: string;
+  businessType: BusinessType;
   businessName: string;
   businessDescription?: string;
   address: string;

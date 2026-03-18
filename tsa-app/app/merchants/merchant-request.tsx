@@ -43,11 +43,18 @@ export default function MerchantRequestScreen() {
 
   const fetchExistingRequest = async () => {
     setLoading(true);
-    const res = await getMyMerchantRequest();
-    if (res.success && res.data) {
-      setExistingRequest(res.data);
+    try {
+      const res = await getMyMerchantRequest();
+      if (res.success && res.data) {
+        setExistingRequest(res.data);
+      } else if (!res.success) {
+        Alert.alert('Error', res.message || 'Could not check your application status. Please try again.');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Network error. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleSubmit = async () => {
