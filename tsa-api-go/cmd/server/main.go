@@ -69,6 +69,7 @@ func main() {
 	h := handlers.NewHandlers(priceService, blockchainService, cfg)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
+	mrh := handlers.NewMerchantRequestHandler(config.DB)
 
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
@@ -98,7 +99,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, sch)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch)
 
 	// Configure HTTP server
 	port := cfg.Port
