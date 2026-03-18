@@ -69,9 +69,10 @@ const AppServiceList: React.FC = () => {
               }else if (index === 5) {
                 //@ts-ignore
                 router.push("/sellp2p");
-              }
-              
-              else {
+              } else if (index === 2) {
+                //@ts-ignore
+                router.push("/merchants/merchant-request");
+              } else {
                 alert("Service coming soon");
               }
             }

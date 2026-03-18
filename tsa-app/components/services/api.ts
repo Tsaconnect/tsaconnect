@@ -1489,6 +1489,48 @@ export interface CategoryWithDetails extends Category {
   productCount: number;
 }
 
+export async function getMyMerchantRequest(): Promise<ApiResponse> {
+  try {
+    const token = await AsyncStorage.getItem('token');
+    const response = await fetch(`${API_BASE_URL}/merchant-requests/my-request`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    return response.json();
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to fetch merchant request' };
+  }
+}
+
+export async function submitMerchantRequest(data: {
+  businessType: string;
+  businessName: string;
+  businessDescription?: string;
+  address: string;
+  city: string;
+  state: string;
+  country: string;
+  phone: string;
+  registrationNumber?: string;
+}): Promise<ApiResponse> {
+  try {
+    const token = await AsyncStorage.getItem('token');
+    const response = await fetch(`${API_BASE_URL}/merchant-requests`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    });
+    return response.json();
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to submit merchant request' };
+  }
+}
+
 // Create singleton instance
 export const api = new APIService();
 
