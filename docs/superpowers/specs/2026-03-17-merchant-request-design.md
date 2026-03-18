@@ -101,7 +101,7 @@ Auth: Bearer token (any authenticated user)
 - `businessName`, `address`, `city`, `state`, `country`, `phone` are required
 - `registrationNumber` is optional
 - User must not already be a merchant (`role != "merchant"`)
-- User must not have an existing `pending` request
+- User must not have an existing request with `status = "pending"` (rejected/approved requests don't block re-application)
 
 **Response (201):**
 ```json
@@ -176,7 +176,7 @@ Auth: Admin/Super Admin
 }
 ```
 
-**Actions:**
+**Actions (wrapped in a DB transaction):**
 1. Set request `status` = `approved`, `reviewedBy` = admin user ID, `reviewedAt` = now, `adminNote` = note
 2. Update user `role` = `merchant`
 
