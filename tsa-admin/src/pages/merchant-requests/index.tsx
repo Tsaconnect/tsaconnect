@@ -40,7 +40,10 @@ export default function MerchantRequestsPage() {
       setShowApprove(false);
       setApproveNote('');
     },
-    onError: () => toast.error('Failed to approve request'),
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || error?.message || 'Failed to approve request';
+      toast.error(message);
+    },
   });
 
   const rejectMutation = useMutation({
@@ -51,7 +54,10 @@ export default function MerchantRequestsPage() {
       setShowReject(false);
       setRejectNote('');
     },
-    onError: () => toast.error('Failed to reject request'),
+    onError: (error: any) => {
+      const message = error?.response?.data?.message || error?.message || 'Failed to reject request';
+      toast.error(message);
+    },
   });
 
   const requests = data?.data?.requests ?? [];

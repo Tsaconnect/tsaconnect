@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"slices"
 	"strconv"
@@ -37,7 +39,15 @@ type adminNoteInput struct {
 	Note string `json:"note"`
 }
 
-// SubmitMerchantRequest handles POST /api/merchant-requests
+var validStatuses = []string{
+	models.MerchantRequestStatusPending,
+	models.MerchantRequestStatusApproved,
+	models.MerchantRequestStatusRejected,
+}
+
+// SubmitMerchantRequest handles POST /api/merchant-requests.
+// Rejects if the caller is already a merchant or has a pending/approved request.
+// Users with previously rejected requests may re-apply.
 func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -62,9 +72,20 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	}
 
 	var existing models.MerchantRequest
-	err := h.DB.Where("user_id = ? AND status = ?", user.ID, models.MerchantRequestStatusPending).First(&existing).Error
+	err := h.DB.Where("user_id = ? AND status IN ?", user.ID,
+		[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
+		First(&existing).Error
 	if err == nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "You already have a pending merchant request")
+		if existing.Status == models.MerchantRequestStatusApproved {
+			utils.ErrorResponse(c, http.StatusBadRequest, "You already have an approved merchant request")
+		} else {
+			utils.ErrorResponse(c, http.StatusBadRequest, "You already have a pending merchant request")
+		}
+		return
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("SubmitMerchantRequest: failed to check existing requests: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check existing requests")
 		return
 	}
 
@@ -83,6 +104,7 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	}
 
 	if err := h.DB.Create(&req).Error; err != nil {
+		log.Printf("SubmitMerchantRequest: failed to create: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create merchant request")
 		return
 	}
@@ -90,7 +112,8 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Merchant request submitted successfully", req)
 }
 
-// GetMyMerchantRequest handles GET /api/merchant-requests/my-request
+// GetMyMerchantRequest handles GET /api/merchant-requests/my-request.
+// Returns the most recent request for the caller, or 200 with nil data if none exists.
 func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -101,14 +124,20 @@ func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 	var req models.MerchantRequest
 	err := h.DB.Where("user_id = ?", user.ID).Order("created_at DESC").First(&req).Error
 	if err != nil {
-		utils.SuccessResponse(c, http.StatusOK, "Merchant request retrieved", nil)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			utils.SuccessResponse(c, http.StatusOK, "No merchant request found", nil)
+			return
+		}
+		log.Printf("GetMyMerchantRequest: DB error: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve merchant request")
 		return
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request retrieved", req)
 }
 
-// ListMerchantRequests handles GET /api/admin/merchant-requests
+// ListMerchantRequests handles GET /api/admin/merchant-requests.
+// Supports optional status filter and pagination via page/limit query params.
 func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 	status := c.Query("status")
 	page := 1
@@ -127,18 +156,30 @@ func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 
 	query := h.DB.Model(&models.MerchantRequest{})
 	if status != "" {
+		if !slices.Contains(validStatuses, status) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid status filter")
+			return
+		}
 		query = query.Where("status = ?", status)
 	}
 
 	var total int64
-	query.Count(&total)
+	if err := query.Count(&total).Error; err != nil {
+		log.Printf("ListMerchantRequests: count error: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to count merchant requests")
+		return
+	}
 
 	var requests []models.MerchantRequest
-	query.Preload("User").Preload("Reviewer").
+	if err := query.Preload("User").Preload("Reviewer").
 		Order("created_at DESC").
 		Offset((page - 1) * limit).
 		Limit(limit).
-		Find(&requests)
+		Find(&requests).Error; err != nil {
+		log.Printf("ListMerchantRequests: find error: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve merchant requests")
+		return
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant requests retrieved", gin.H{
 		"requests": requests,
@@ -148,7 +189,8 @@ func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 	})
 }
 
-// ApproveMerchantRequest handles POST /api/admin/merchant-requests/:id/approve
+// ApproveMerchantRequest handles POST /api/admin/merchant-requests/:id/approve.
+// Atomically marks the request as approved and upgrades the user's role to merchant.
 func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	admin := getUserFromContext(c)
 	if admin == nil {
@@ -163,7 +205,12 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	}
 
 	var input adminNoteInput
-	c.ShouldBindJSON(&input)
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&input); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+	}
 
 	var req models.MerchantRequest
 	if err := h.DB.First(&req, "id = ?", id).Error; err != nil {
@@ -197,16 +244,20 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	})
 
 	if txErr != nil {
+		log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
 		return
 	}
 
-	h.DB.Preload("User").First(&req, "id = ?", id)
+	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
+		log.Printf("ApproveMerchantRequest: reload error: %v", err)
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 }
 
-// RejectMerchantRequest handles POST /api/admin/merchant-requests/:id/reject
+// RejectMerchantRequest handles POST /api/admin/merchant-requests/:id/reject.
+// A note explaining the rejection reason is required.
 func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 	admin := getUserFromContext(c)
 	if admin == nil {
@@ -244,11 +295,14 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		"reviewed_at": now,
 		"admin_note":  input.Note,
 	}).Error; err != nil {
+		log.Printf("RejectMerchantRequest: update error: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reject merchant request")
 		return
 	}
 
-	h.DB.Preload("User").First(&req, "id = ?", id)
+	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
+		log.Printf("RejectMerchantRequest: reload error: %v", err)
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request rejected", req)
 }

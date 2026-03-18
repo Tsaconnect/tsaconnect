@@ -1498,6 +1498,10 @@ export async function getMyMerchantRequest(): Promise<ApiResponse> {
         'Content-Type': 'application/json',
       },
     });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      return { success: false, message: body?.message || `Server error (${response.status})` };
+    }
     return response.json();
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to fetch merchant request' };
@@ -1525,6 +1529,10 @@ export async function submitMerchantRequest(data: {
       },
       body: JSON.stringify(data),
     });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      return { success: false, message: body?.message || `Server error (${response.status})` };
+    }
     return response.json();
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to submit merchant request' };
