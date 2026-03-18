@@ -38,3 +38,22 @@ export const ROLE_LABELS: Record<string, string> = {
   user: 'User',
   merchant: 'Merchant',
 };
+
+export const MERCHANT_REQUEST_STATUS_LABELS: Record<string, string> = {
+  pending: 'Pending',
+  approved: 'Approved',
+  rejected: 'Rejected',
+};
+
+export const MERCHANT_REQUEST_STATUS_COLORS: Record<string, string> = {
+  pending: 'bg-amber-100 text-amber-700',
+  approved: 'bg-green-100 text-green-700',
+  rejected: 'bg-red-100 text-red-700',
+};
+
+export const BUSINESS_TYPE_LABELS: Record<string, string> = {
+  general_products: 'General Products',
+  digital_products: 'Digital Products',
+  p2p_merchant: 'P2P Merchant',
+  service_provider: 'Service Provider',
+};
