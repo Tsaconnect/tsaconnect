@@ -66,7 +66,15 @@ export default function MerchantLayout() {
                     drawerIcon: ({ color, size }) => <Ionicons name="person-outline" size={size} color={color} />,
                 }}
             />
-
+            <Drawer.Screen
+                name="merchant-request"
+                options={{
+                    drawerLabel: 'Merchant Application',
+                    title: 'Merchant Application',
+                    drawerItemStyle: { display: 'none' },
+                    drawerIcon: ({ color, size }) => <Ionicons name="document-text-outline" size={size} color={color} />,
+                }}
+            />
         </Drawer>
     );
 }
