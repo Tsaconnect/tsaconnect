@@ -4,7 +4,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { canAccessRoute } from '@/lib/permissions';
 import {
   LayoutDashboard, Users, Package, FolderTree, ShoppingCart,
-  Megaphone, Wallet, ShieldCheck, Settings, ChevronLeft, LogOut,
+  Megaphone, Wallet, ShieldCheck, Store, Settings, ChevronLeft, LogOut,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ROLE_LABELS } from '@/lib/constants';
@@ -36,6 +36,7 @@ const navGroups = [
       { path: '/advert-requests', label: 'Advert Requests', icon: Megaphone },
       { path: '/deposits', label: 'Deposits', icon: Wallet },
       { path: '/verifications', label: 'Verifications', icon: ShieldCheck },
+      { path: '/merchant-requests', label: 'Merchant Requests', icon: Store },
     ],
   },
   {

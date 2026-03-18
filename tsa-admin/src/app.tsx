@@ -14,6 +14,7 @@ import OrderDetailPage from '@/pages/orders/[id]';
 import AdvertRequestsPage from '@/pages/advert-requests/index';
 import DepositsPage from '@/pages/deposits/index';
 import VerificationsPage from '@/pages/verifications/index';
+import MerchantRequestsPage from '@/pages/merchant-requests/index';
 import SettingsPage from '@/pages/settings/index';
 
 const queryClient = new QueryClient({
@@ -51,6 +52,7 @@ export default function App() {
               <Route path="advert-requests" element={<AdvertRequestsPage />} />
               <Route path="deposits" element={<DepositsPage />} />
               <Route path="verifications" element={<VerificationsPage />} />
+              <Route path="merchant-requests" element={<MerchantRequestsPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Routes>

@@ -102,6 +102,30 @@ export interface Deposit {
   updatedAt: string;
 }
 
+export type MerchantRequestStatus = 'pending' | 'approved' | 'rejected';
+
+export interface MerchantRequest {
+  id: string;
+  userId: string;
+  businessType: string;
+  businessName: string;
+  businessDescription?: string;
+  address: string;
+  city: string;
+  state: string;
+  country: string;
+  phone: string;
+  registrationNumber?: string;
+  status: MerchantRequestStatus;
+  adminNote?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  user?: User;
+  reviewer?: User;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AdminStats {
   totalUsers: number;
   totalProducts: number;

@@ -21,7 +21,9 @@ export type Permission =
   | 'deposits.approve'
   | 'verifications.view'
   | 'verifications.approve'
-  | 'settings.view';
+  | 'settings.view'
+  | 'merchant_requests.view'
+  | 'merchant_requests.approve';
 
 const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   super_admin: [
@@ -31,6 +33,7 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'orders.view', 'orders.update_status', 'orders.resolve_dispute',
     'deposits.view', 'deposits.approve',
     'verifications.view', 'verifications.approve',
+    'merchant_requests.view', 'merchant_requests.approve',
     'settings.view',
   ],
   admin: [
@@ -40,6 +43,7 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'orders.view', 'orders.update_status', 'orders.resolve_dispute',
     'deposits.view', 'deposits.approve',
     'verifications.view', 'verifications.approve',
+    'merchant_requests.view', 'merchant_requests.approve',
   ],
   support: [
     'dashboard.view', 'users.view',
@@ -48,6 +52,7 @@ const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'orders.view', 'orders.update_status',
     'deposits.view',
     'verifications.view',
+    'merchant_requests.view',
   ],
 };
 
@@ -67,6 +72,7 @@ export function canAccessRoute(role: Role, path: string): boolean {
     '/advert-requests': 'products.view',
     '/deposits': 'deposits.view',
     '/verifications': 'verifications.view',
+    '/merchant-requests': 'merchant_requests.view',
     '/settings': 'settings.view',
   };
 
