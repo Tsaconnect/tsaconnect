@@ -96,12 +96,6 @@ const Categories = () => {
           value={searchQuery}
           onChangeText={(text) => setSearchQuery(text)}
         />
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => router.push("/admin/category/add")}
-        >
-          <Text style={styles.addButtonText}>Add Category</Text>
-        </TouchableOpacity>
       </View>
       {loading ? (
         <LoadingSpinner />
@@ -117,27 +111,6 @@ const Categories = () => {
               />
               <View style={styles.categoryInfo}>
                 <Text style={styles.categoryTitle}>{item.title}</Text>
-                {userRole === "admin" && (
-                  <View style={styles.actions}>
-                    <TouchableOpacity
-                      style={styles.actionButton}
-                      onPress={() =>
-                        router.push({
-                          pathname: `/admin/category/add`,
-                          params: { editId: item.id, ...item },
-                        })
-                      }
-                    >
-                      <Icon name="edit" size={20} color={COLORS.primary} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.actionButton}
-                      onPress={() => handleDelete(item.id)}
-                    >
-                      <Icon name="trash" size={20} color={COLORS.secondary} />
-                    </TouchableOpacity>
-                  </View>
-                )}
               </View>
             </View>
           )}

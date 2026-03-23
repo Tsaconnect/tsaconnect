@@ -9,7 +9,7 @@ const ProfileLayout = () => {
       <Stack.Screen name="edit-advert" options={{ title: "Edit Advert" }} />
       <Stack.Screen name="advert-details" options={{ title: "Advert Details" }} />
       <Stack.Screen name="verify-email" options={{ title: "Verify Email" }} />
-      <Stack.Screen name="admin/dashboard" options={{ title: "Admin Dashboard" }} />
+
     </Stack>
   );
 };

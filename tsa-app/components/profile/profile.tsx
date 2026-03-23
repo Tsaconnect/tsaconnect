@@ -182,16 +182,6 @@ const ProfileScreen = () => {
             )}
           </View>
           <View style={styles.linksContainer}>
-            {user?.role === "admin" ? (
-              <TouchableOpacity
-                style={styles.profileLink}
-                onPress={() => router.push("/profile/admin/dashboard")}
-              >
-                <Icon name="description" size={20} color="#9D6B38" />
-                <Text style={styles.linkText}>Manage Accounts</Text>
-              </TouchableOpacity>
-            ) : null}
-
             <TouchableOpacity
               style={styles.profileLink}
               onPress={() => router.push("/myAdverts")}
