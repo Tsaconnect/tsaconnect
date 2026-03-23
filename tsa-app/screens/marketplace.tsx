@@ -10,13 +10,13 @@ import {
   StyleSheet,
   Platform,
   TextInput,
-  FlatList,
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import TradeAndEarnScreen from './TradeAndEarnScreen';
 import DepositScreen from './fundfiat';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import api, { Category } from '@/components/services/api';
 
 // Gold color palette
@@ -53,6 +53,7 @@ const MarketplaceScreen: React.FC = () => {
   const [serviceCategories, setServiceCategories] = useState<CategoryData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [userRole, setUserRole] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Transform backend categories to frontend format
@@ -151,6 +152,32 @@ const MarketplaceScreen: React.FC = () => {
   }, [transformBackendCategories]);
 
   // Load categories based on selected tab
+  // Load user role and refresh it from the server
+  const refreshUserRole = useCallback(async () => {
+    try {
+      const token = await api.getStoredToken();
+      if (token) {
+        api.setToken(token);
+        const profileRes = await api.getProfile();
+        if (profileRes.success && profileRes.data?.role) {
+          const role = profileRes.data.role.toLowerCase();
+          setUserRole(role);
+          await AsyncStorage.setItem('role', role);
+          return;
+        }
+      }
+      const stored = await AsyncStorage.getItem('role');
+      setUserRole(stored?.toLowerCase() || null);
+    } catch {
+      const stored = await AsyncStorage.getItem('role');
+      setUserRole(stored?.toLowerCase() || null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshUserRole();
+  }, [refreshUserRole]);
+
   useEffect(() => {
     if (selectedCategory === 'products') {
       fetchCategories('Product');
@@ -162,12 +189,13 @@ const MarketplaceScreen: React.FC = () => {
   // Handle refresh
   const onRefresh = useCallback(() => {
     setRefreshing(true);
+    refreshUserRole();
     if (selectedCategory === 'products') {
       fetchCategories('Product');
     } else if (selectedCategory === 'services') {
       fetchCategories('Service');
     }
-  }, [selectedCategory, fetchCategories]);
+  }, [selectedCategory, fetchCategories, refreshUserRole]);
 
   // Handle category expansion
   const toggleCategory = (categoryId: string) => {
@@ -523,13 +551,13 @@ const MarketplaceScreen: React.FC = () => {
                   <Text style={styles.emptyStateText}>No product categories found</Text>
                 </View>
               ) : (
-                <FlatList
-                  data={productCategories}
-                  renderItem={renderProductCategory}
-                  keyExtractor={(item) => item.id}
-                  scrollEnabled={false}
-                  showsVerticalScrollIndicator={false}
-                />
+                <View>
+                  {productCategories.map((item) => (
+                    <View key={item.id}>
+                      {renderProductCategory({ item })}
+                    </View>
+                  ))}
+                </View>
               )}
             </>
           )}
@@ -542,13 +570,13 @@ const MarketplaceScreen: React.FC = () => {
                   <Text style={styles.emptyStateText}>No service categories found</Text>
                 </View>
               ) : (
-                <FlatList
-                  data={serviceCategories}
-                  renderItem={renderServiceCategory}
-                  keyExtractor={(item) => item.id}
-                  scrollEnabled={false}
-                  showsVerticalScrollIndicator={false}
-                />
+                <View>
+                  {serviceCategories.map((item) => (
+                    <View key={item.id}>
+                      {renderServiceCategory({ item })}
+                    </View>
+                  ))}
+                </View>
               )}
             </>
           )}
@@ -614,24 +642,43 @@ const MarketplaceScreen: React.FC = () => {
             </View>
           )}
 
-          {/* Merchant Registration Banner */}
+          {/* Merchant Banner - role-aware */}
           {(selectedCategory === 'products' || selectedCategory === 'services') && (
-            <TouchableOpacity
-              style={styles.merchantBanner}
-              onPress={() => Alert.alert('Coming Soon', 'Merchant registration will be available soon.')}
-              activeOpacity={0.8}
-            >
-              <View style={styles.bannerContent}>
-                <Icon name="store" size={32} color="#000000" />
-                <View style={styles.bannerText}>
-                  <Text style={styles.bannerTitle}>Become a Merchant</Text>
-                  <Text style={styles.bannerDescription}>
-                    Sell your products & services on our platform
-                  </Text>
+            userRole === 'merchant' ? (
+              <TouchableOpacity
+                style={[styles.merchantBanner, { backgroundColor: '#E8F5E9', borderColor: '#4CAF50' }]}
+                onPress={() => router.push('/merchants/dashboard')}
+                activeOpacity={0.8}
+              >
+                <View style={styles.bannerContent}>
+                  <Icon name="storefront" size={32} color="#2E7D32" />
+                  <View style={styles.bannerText}>
+                    <Text style={[styles.bannerTitle, { color: '#2E7D32' }]}>Merchant Dashboard</Text>
+                    <Text style={styles.bannerDescription}>
+                      Manage your products, orders & inventory
+                    </Text>
+                  </View>
+                  <Icon name="chevron-right" size={24} color="#2E7D32" />
                 </View>
-                <Icon name="chevron-right" size={24} color="#000000" />
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
+            ) : userRole === 'admin' || userRole === 'superadmin' ? null : (
+              <TouchableOpacity
+                style={styles.merchantBanner}
+                onPress={() => router.push('/merchants/merchant-request')}
+                activeOpacity={0.8}
+              >
+                <View style={styles.bannerContent}>
+                  <Icon name="store" size={32} color="#000000" />
+                  <View style={styles.bannerText}>
+                    <Text style={styles.bannerTitle}>Become a Merchant</Text>
+                    <Text style={styles.bannerDescription}>
+                      Sell your products & services on our platform
+                    </Text>
+                  </View>
+                  <Icon name="chevron-right" size={24} color="#000000" />
+                </View>
+              </TouchableOpacity>
+            )
           )}
         </View>
       </ScrollView>

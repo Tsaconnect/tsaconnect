@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -12,37 +12,50 @@ import {
   Platform,
   Dimensions,
   ActivityIndicator,
-  FlatList,
+  TouchableOpacity,
 } from 'react-native';
 import { router } from 'expo-router';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-//import { api } from '../../services/api';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
-// Color palette with brown as primary
 const COLORS = {
-  primary: '#8B4513', // Saddle Brown
-  primaryLight: '#A0522D', // Sienna
-  primaryDark: '#654321', // Dark Brown
-  secondary: '#D2691E', // Chocolate
-  accent: '#DEB887', // Burlywood
-  background: '#F5F5DC', // Beige
-  surface: '#FFF8DC', // Cornsilk
+  primary: '#8B4513',
+  primaryLight: '#A0522D',
+  primaryDark: '#654321',
+  secondary: '#D2691E',
+  accent: '#DEB887',
+  background: '#F5F5DC',
+  surface: '#FFF8DC',
   text: '#333333',
   textLight: '#666666',
   textLighter: '#999999',
-  border: '#D2B48C', // Tan
-  success: '#228B22', // Forest Green
-  error: '#DC143C', // Crimson
-  warning: '#FF8C00', // Dark Orange
+  border: '#D2B48C',
+  success: '#228B22',
+  error: '#DC143C',
+  warning: '#FF8C00',
   white: '#FFFFFF',
   gray: '#E8E8E8',
   darkGray: '#A9A9A9',
+};
+
+const CategoryAvatar = ({ category }: { category: any }) => {
+  if (category.icon) {
+    return (
+      <Image source={{ uri: category.icon }} style={styles.categoryItemImage} />
+    );
+  }
+  const initial = (category.title || '?')[0].toUpperCase();
+  const bgColor = category.color || COLORS.primary;
+  return (
+    <View style={[styles.categoryItemAvatar, { backgroundColor: bgColor }]}>
+      <Text style={styles.categoryItemAvatarText}>{initial}</Text>
+    </View>
+  );
 };
 
 const AddProduct = () => {
@@ -50,14 +63,14 @@ const AddProduct = () => {
   const [loading, setLoading] = useState(false);
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [modalMessage, setModalMessage] = useState('');
-  const [modalType, setModalType] = useState('success'); // 'success' | 'error' | 'info'
+  const [modalType, setModalType] = useState<'success' | 'error' | 'info'>('success');
 
-  // Form states
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
   const [price, setPrice] = useState('');
   const [stock, setStock] = useState('0');
-  const [category, setCategory] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const [categoryName, setCategoryName] = useState('');
   const [location, setLocation] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
@@ -66,13 +79,19 @@ const AddProduct = () => {
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
 
-  // Form validation
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Max description length
   const maxDescriptionLength = 500;
 
-  // Fetch categories on mount
+  const descriptionRef = useRef<TextInput>(null);
+  const priceRef = useRef<TextInput>(null);
+  const stockRef = useRef<TextInput>(null);
+  const locationRef = useRef<TextInput>(null);
+  const phoneRef = useRef<TextInput>(null);
+  const emailRef = useRef<TextInput>(null);
+  const companyRef = useRef<TextInput>(null);
+  const scrollRef = useRef<ScrollView>(null);
+
   useEffect(() => {
     fetchCategories();
   }, []);
@@ -82,13 +101,19 @@ const AddProduct = () => {
       const response = await api.getCategories({ type: 'Product', active: true });
       if (response.success && response.data) {
         setCategories(response.data);
+        if (response.data.length === 1) {
+          const cat = response.data[0];
+          if (cat._id && cat.title) {
+            setCategoryId(cat._id);
+            setCategoryName(cat.title);
+          }
+        }
       }
     } catch (error) {
       showModal('error', 'Failed to load categories');
     }
   };
 
-  // Image picker
   const pickProductImages = async () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -114,12 +139,10 @@ const AddProduct = () => {
     }
   };
 
-  // Remove image
   const removeImage = (index: number) => {
     setProductImages(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Take photo
   const takePhoto = async () => {
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -142,7 +165,6 @@ const AddProduct = () => {
     }
   };
 
-  // Attribute management
   const handleAddAttribute = () => {
     setAttributes([...attributes, { name: '', value: '' }]);
   };
@@ -159,7 +181,6 @@ const AddProduct = () => {
     setAttributes(newAttributes);
   };
 
-  // Form validation
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
 
@@ -170,14 +191,13 @@ const AddProduct = () => {
     if (isNaN(parseFloat(price)) || parseFloat(price) <= 0) newErrors.price = 'Price must be a positive number';
     if (!stock.trim()) newErrors.stock = 'Stock is required';
     if (isNaN(parseInt(stock)) || parseInt(stock) < 0) newErrors.stock = 'Stock must be a non-negative number';
-    if (!category) newErrors.category = 'Category is required';
+    if (!categoryId) newErrors.category = 'Category is required';
     if (!location.trim()) newErrors.location = 'Location is required';
     if (!phoneNumber.trim()) newErrors.phoneNumber = 'Phone number is required';
     if (!email.trim()) newErrors.email = 'Email is required';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = 'Invalid email address';
+    if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = 'Invalid email address';
     if (productImages.length === 0) newErrors.images = 'At least one image is required';
 
-    // Validate attributes
     attributes.forEach((attr, index) => {
       if (!attr.name.trim()) newErrors[`attr_name_${index}`] = 'Attribute name is required';
       if (!attr.value.trim()) newErrors[`attr_value_${index}`] = 'Attribute value is required';
@@ -187,7 +207,6 @@ const AddProduct = () => {
     return Object.keys(newErrors).length === 0;
   };
 
-  // Create product
   const createProduct = async () => {
     if (!validateForm()) {
       showModal('error', 'Please fix all errors before submitting');
@@ -197,10 +216,8 @@ const AddProduct = () => {
     setLoading(true);
 
     try {
-      // Create FormData
       const formData = new FormData();
 
-      // Add images
       productImages.forEach((uri, index) => {
         const filename = uri.split('/').pop() || `image_${index}.jpg`;
         const match = /\.(\w+)$/.exec(filename);
@@ -213,12 +230,11 @@ const AddProduct = () => {
         });
       });
 
-      // Add other fields
       formData.append('name', productName);
       formData.append('description', description);
       formData.append('price', parseFloat(price).toString());
       formData.append('stock', parseInt(stock).toString());
-      formData.append('category', category);
+      formData.append('category', categoryId);
       formData.append('location', location);
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
@@ -227,13 +243,11 @@ const AddProduct = () => {
         formData.append('attributes', JSON.stringify(attributes));
       }
 
-      // Call API
       const response = await api.createProduct(formData);
 
       if (response.success) {
         showModal('success', 'Product created successfully!');
         resetForm();
-        // Navigate back after delay
         setTimeout(() => {
           if (router.canGoBack()) {
             router.back();
@@ -250,13 +264,13 @@ const AddProduct = () => {
     }
   };
 
-  // Reset form
   const resetForm = () => {
     setProductName('');
     setDescription('');
     setPrice('');
     setStock('0');
-    setCategory('');
+    setCategoryId('');
+    setCategoryName('');
     setLocation('');
     setPhoneNumber('');
     setEmail('');
@@ -266,27 +280,25 @@ const AddProduct = () => {
     setErrors({});
   };
 
-  // Show modal
   const showModal = (type: 'success' | 'error' | 'info', message: string) => {
     setModalType(type);
     setModalMessage(message);
     setIsModalVisible(true);
   };
 
-  // Render attribute item
   const renderAttributeItem = ({ item, index }: { item: { name: string; value: string }; index: number }) => (
     <View style={styles.attributeItem}>
       <View style={styles.attributeInputs}>
         <TextInput
           style={[styles.attributeInput, errors[`attr_name_${index}`] && styles.inputError]}
-          placeholder="Attribute Name"
+          placeholder="e.g. Size"
           placeholderTextColor={COLORS.textLighter}
           value={item.name}
           onChangeText={(value) => handleAttributeChange(index, 'name', value)}
         />
         <TextInput
           style={[styles.attributeInput, errors[`attr_value_${index}`] && styles.inputError]}
-          placeholder="Value"
+          placeholder="e.g. Large"
           placeholderTextColor={COLORS.textLighter}
           value={item.value}
           onChangeText={(value) => handleAttributeChange(index, 'value', value)}
@@ -301,54 +313,36 @@ const AddProduct = () => {
     </View>
   );
 
-  // Render image item
-  const renderImageItem = ({ item, index }: { item: string; index: number }) => (
-    <View style={styles.imageItem}>
-      <Image source={{ uri: item }} style={styles.productImage} />
-      <Pressable
-        style={styles.removeImageButton}
-        onPress={() => removeImage(index)}
-      >
-        <Icon name="close" size={20} color={COLORS.white} />
-      </Pressable>
-    </View>
-  );
-
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={styles.container}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       <LinearGradient
         colors={[COLORS.background, COLORS.surface]}
         style={styles.gradientBackground}
       >
         <ScrollView
+          ref={scrollRef}
           style={styles.scrollView}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
         >
           {/* Header */}
           <View style={styles.header}>
-            <Pressable
-              style={styles.backButton}
-              onPress={() => router.back()}
-            >
+            <Pressable style={styles.backButton} onPress={() => router.back()}>
               <Icon name="arrow-back" size={28} color={COLORS.primary} />
             </Pressable>
             <Text style={styles.headerTitle}>Add New Product</Text>
-            <Pressable
-              style={styles.resetButton}
-              onPress={resetForm}
-              disabled={loading}
-            >
+            <Pressable style={styles.resetButton} onPress={resetForm} disabled={loading}>
               <Icon name="refresh" size={24} color={COLORS.primary} />
             </Pressable>
           </View>
 
-          {/* Main Form */}
           <View style={styles.formContainer}>
-            {/* Basic Information Card */}
+            {/* Basic Information */}
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <Icon name="info" size={24} color={COLORS.primary} />
@@ -363,16 +357,17 @@ const AddProduct = () => {
                   placeholderTextColor={COLORS.textLighter}
                   value={productName}
                   onChangeText={setProductName}
+                  returnKeyType="next"
+                  onSubmitEditing={() => descriptionRef.current?.focus()}
                 />
-                {errors.productName && (
-                  <Text style={styles.errorText}>{errors.productName}</Text>
-                )}
+                {errors.productName && <Text style={styles.errorText}>{errors.productName}</Text>}
               </View>
 
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Description *</Text>
                 <View style={[styles.textAreaContainer, errors.description && styles.inputError]}>
                   <TextInput
+                    ref={descriptionRef}
                     style={styles.textArea}
                     placeholder="Describe your product..."
                     placeholderTextColor={COLORS.textLighter}
@@ -386,15 +381,14 @@ const AddProduct = () => {
                     {description.length}/{maxDescriptionLength}
                   </Text>
                 </View>
-                {errors.description && (
-                  <Text style={styles.errorText}>{errors.description}</Text>
-                )}
+                {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
               </View>
 
               <View style={styles.row}>
                 <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>Price ($) *</Text>
                   <TextInput
+                    ref={priceRef}
                     style={[styles.input, errors.price && styles.inputError]}
                     placeholder="0.00"
                     placeholderTextColor={COLORS.textLighter}
@@ -402,14 +396,13 @@ const AddProduct = () => {
                     value={price}
                     onChangeText={setPrice}
                   />
-                  {errors.price && (
-                    <Text style={styles.errorText}>{errors.price}</Text>
-                  )}
+                  {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
                 </View>
 
                 <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>Stock *</Text>
                   <TextInput
+                    ref={stockRef}
                     style={[styles.input, errors.stock && styles.inputError]}
                     placeholder="0"
                     placeholderTextColor={COLORS.textLighter}
@@ -417,54 +410,54 @@ const AddProduct = () => {
                     value={stock}
                     onChangeText={setStock}
                   />
-                  {errors.stock && (
-                    <Text style={styles.errorText}>{errors.stock}</Text>
-                  )}
+                  {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
                 </View>
               </View>
 
+              {/* Category Picker */}
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Category *</Text>
-                <View style={[styles.pickerContainer, errors.category && styles.inputError]}>
-                  <Icon name="category" size={20} color={COLORS.primary} style={styles.pickerIcon} />
-                  <View style={styles.pickerWrapper}>
-                    {categories.length > 0 ? (
-                      <FlatList
-                        data={categories}
-                        keyExtractor={(item) => item._id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        renderItem={({ item }) => (
-                          <Pressable
-                            style={[
-                              styles.categoryChip,
-                              category === item._id && styles.categoryChipSelected,
-                            ]}
-                            onPress={() => setCategory(item._id)}
-                          >
-                            <Text
-                              style={[
-                                styles.categoryChipText,
-                                category === item._id && styles.categoryChipTextSelected,
-                              ]}
-                            >
-                              {item.title}
-                            </Text>
-                          </Pressable>
-                        )}
-                      />
-                    ) : (
-                      <Text style={styles.noCategoriesText}>No categories available</Text>
-                    )}
+                {categories.length === 0 ? (
+                  <View style={styles.categoryLoadingRow}>
+                    <ActivityIndicator size="small" color={COLORS.primary} />
+                    <Text style={styles.categoryLoadingText}>Loading categories...</Text>
                   </View>
-                </View>
-                {errors.category && (
-                  <Text style={styles.errorText}>{errors.category}</Text>
+                ) : (
+                  <View style={styles.categoryChipsContainer}>
+                    {categories.map((item, index) => (
+                      <TouchableOpacity
+                        key={item._id || index.toString()}
+                        activeOpacity={0.7}
+                        style={[
+                          styles.categoryChip,
+                          categoryId === item._id && styles.categoryChipSelected,
+                          errors.category && styles.categoryChipError,
+                        ]}
+                        onPress={() => {
+                          setCategoryId(item._id);
+                          setCategoryName(item.title);
+                          setErrors(prev => { const { category, ...rest } = prev; return rest; });
+                        }}
+                      >
+                        <CategoryAvatar category={item} />
+                        <Text style={[
+                          styles.categoryChipText,
+                          categoryId === item._id && styles.categoryChipTextSelected,
+                        ]}>
+                          {item.title}
+                        </Text>
+                        {categoryId === item._id && (
+                          <Icon name="check-circle" size={20} color={COLORS.primary} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
                 )}
+                {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
               </View>
             </View>
 
-            {/* Contact Information Card */}
+            {/* Contact Information */}
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <Icon name="contact-phone" size={24} color={COLORS.primary} />
@@ -474,35 +467,38 @@ const AddProduct = () => {
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Location *</Text>
                 <TextInput
+                  ref={locationRef}
                   style={[styles.input, errors.location && styles.inputError]}
                   placeholder="Enter location"
                   placeholderTextColor={COLORS.textLighter}
                   value={location}
                   onChangeText={setLocation}
+                  returnKeyType="next"
+                  onSubmitEditing={() => phoneRef.current?.focus()}
                 />
-                {errors.location && (
-                  <Text style={styles.errorText}>{errors.location}</Text>
-                )}
+                {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
               </View>
 
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Phone Number *</Text>
                 <TextInput
+                  ref={phoneRef}
                   style={[styles.input, errors.phoneNumber && styles.inputError]}
                   placeholder="Enter phone number"
                   placeholderTextColor={COLORS.textLighter}
                   keyboardType="phone-pad"
                   value={phoneNumber}
                   onChangeText={setPhoneNumber}
+                  returnKeyType="next"
+                  onSubmitEditing={() => emailRef.current?.focus()}
                 />
-                {errors.phoneNumber && (
-                  <Text style={styles.errorText}>{errors.phoneNumber}</Text>
-                )}
+                {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
               </View>
 
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Email *</Text>
                 <TextInput
+                  ref={emailRef}
                   style={[styles.input, errors.email && styles.inputError]}
                   placeholder="Enter email address"
                   placeholderTextColor={COLORS.textLighter}
@@ -510,134 +506,100 @@ const AddProduct = () => {
                   autoCapitalize="none"
                   value={email}
                   onChangeText={setEmail}
+                  returnKeyType="next"
+                  onSubmitEditing={() => companyRef.current?.focus()}
                 />
-                {errors.email && (
-                  <Text style={styles.errorText}>{errors.email}</Text>
-                )}
+                {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
               </View>
 
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Company Name (Optional)</Text>
                 <TextInput
+                  ref={companyRef}
                   style={styles.input}
                   placeholder="Enter company name"
                   placeholderTextColor={COLORS.textLighter}
                   value={companyName}
                   onChangeText={setCompanyName}
+                  returnKeyType="done"
                 />
               </View>
             </View>
 
-            {/* Images Card */}
+            {/* Images */}
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <Icon name="photo-library" size={24} color={COLORS.primary} />
                 <Text style={styles.cardTitle}>Product Images *</Text>
-                <Text style={styles.imageCount}>
-                  ({productImages.length}/10)
-                </Text>
+                <Text style={styles.imageCount}>({productImages.length}/10)</Text>
               </View>
 
-              {errors.images && (
-                <Text style={styles.errorText}>{errors.images}</Text>
+              {errors.images && <Text style={styles.errorText}>{errors.images}</Text>}
+
+              {/* Image thumbnails */}
+              {productImages.length > 0 && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.imagesScroll}
+                  contentContainerStyle={styles.imagesList}
+                >
+                  {productImages.map((uri, index) => (
+                    <View key={index} style={styles.imageItem}>
+                      <Image source={{ uri }} style={styles.productImage} />
+                      <Pressable style={styles.removeImageButton} onPress={() => removeImage(index)}>
+                        <Icon name="close" size={16} color={COLORS.white} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </ScrollView>
               )}
 
-              <View style={styles.imageUploadContainer}>
-                <Pressable
-                  style={styles.imageUploadButton}
-                  onPress={pickProductImages}
-                >
-                  <LinearGradient
-                    colors={[COLORS.primaryLight, COLORS.primary]}
-                    style={styles.uploadButtonGradient}
-                  >
-                    <Icon name="photo-library" size={32} color={COLORS.white} />
-                    <Text style={styles.uploadButtonText}>Gallery</Text>
-                  </LinearGradient>
-                </Pressable>
-
-                <Pressable
-                  style={styles.imageUploadButton}
-                  onPress={takePhoto}
-                >
-                  <LinearGradient
-                    colors={[COLORS.secondary, COLORS.primaryDark]}
-                    style={styles.uploadButtonGradient}
-                  >
-                    <Icon name="camera-alt" size={32} color={COLORS.white} />
-                    <Text style={styles.uploadButtonText}>Camera</Text>
-                  </LinearGradient>
-                </Pressable>
-              </View>
-
-              {productImages.length > 0 && (
-                <View style={styles.imagesContainer}>
-                  <FlatList
-                    data={productImages}
-                    keyExtractor={(item, index) => index.toString()}
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    renderItem={renderImageItem}
-                    contentContainerStyle={styles.imagesList}
-                  />
+              {/* Upload buttons - compact row */}
+              {productImages.length < 10 && (
+                <View style={styles.imageUploadRow}>
+                  <Pressable style={styles.uploadBtn} onPress={pickProductImages}>
+                    <Icon name="photo-library" size={22} color={COLORS.white} />
+                    <Text style={styles.uploadBtnText}>Gallery</Text>
+                  </Pressable>
+                  <Pressable style={[styles.uploadBtn, { backgroundColor: COLORS.secondary }]} onPress={takePhoto}>
+                    <Icon name="camera-alt" size={22} color={COLORS.white} />
+                    <Text style={styles.uploadBtnText}>Camera</Text>
+                  </Pressable>
                 </View>
               )}
             </View>
 
-            {/* Attributes Card */}
+            {/* Attributes */}
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <Icon name="tune" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Product Attributes</Text>
-                <Pressable
-                  style={styles.addAttributeHeaderButton}
-                  onPress={handleAddAttribute}
-                >
+                <Text style={styles.cardTitle}>Attributes (Optional)</Text>
+                <Pressable style={styles.addAttributeHeaderButton} onPress={handleAddAttribute}>
                   <Icon name="add" size={24} color={COLORS.primary} />
                 </Pressable>
               </View>
 
               {attributes.length > 0 ? (
-                <FlatList
-                  data={attributes}
-                  keyExtractor={(item, index) => index.toString()}
-                  renderItem={renderAttributeItem}
-                  scrollEnabled={false}
-                />
-              ) : (
-                <View style={styles.noAttributesContainer}>
-                  <Icon name="tune" size={48} color={COLORS.border} />
-                  <Text style={styles.noAttributesText}>
-                    No attributes added yet
-                  </Text>
-                  <Text style={styles.noAttributesSubtext}>
-                    Add attributes like size, color, material, etc.
-                  </Text>
-                  <Pressable
-                    style={styles.addFirstAttributeButton}
-                    onPress={handleAddAttribute}
-                  >
-                    <Text style={styles.addFirstAttributeButtonText}>
-                      Add First Attribute
-                    </Text>
+                <>
+                  {attributes.map((item, index) => (
+                    <View key={index}>
+                      {renderAttributeItem({ item, index })}
+                    </View>
+                  ))}
+                  <Pressable style={styles.addAttributeButton} onPress={handleAddAttribute}>
+                    <Icon name="add-circle" size={20} color={COLORS.primary} />
+                    <Text style={styles.addAttributeButtonText}>Add Another</Text>
                   </Pressable>
-                </View>
-              )}
-
-              {attributes.length > 0 && (
-                <Pressable
-                  style={styles.addAttributeButton}
-                  onPress={handleAddAttribute}
-                >
-                  <Icon name="add-circle" size={24} color={COLORS.primary} />
-                  <Text style={styles.addAttributeButtonText}>
-                    Add Another Attribute
-                  </Text>
-                </Pressable>
+                </>
+              ) : (
+                <Text style={styles.noAttributesHint}>
+                  Add attributes like size, color, material, etc.
+                </Text>
               )}
             </View>
 
-            {/* Submit Button */}
+            {/* Submit */}
             <Pressable
               style={[styles.submitButton, loading && styles.submitButtonDisabled]}
               onPress={createProduct}
@@ -660,12 +622,9 @@ const AddProduct = () => {
               </LinearGradient>
             </Pressable>
 
-            {/* Form Help */}
             <View style={styles.helpContainer}>
-              <Icon name="help" size={18} color={COLORS.textLight} />
-              <Text style={styles.helpText}>
-                Fields marked with * are required
-              </Text>
+              <Icon name="help" size={16} color={COLORS.textLight} />
+              <Text style={styles.helpText}>Fields marked with * are required</Text>
             </View>
           </View>
         </ScrollView>
@@ -687,23 +646,16 @@ const AddProduct = () => {
               modalType === 'info' && styles.modalIconInfo,
             ]}>
               <Icon
-                name={
-                  modalType === 'success' ? 'check-circle' :
-                    modalType === 'error' ? 'error' : 'info'
-                }
+                name={modalType === 'success' ? 'check-circle' : modalType === 'error' ? 'error' : 'info'}
                 size={48}
                 color={COLORS.white}
               />
             </View>
             <Text style={styles.modalTitle}>
-              {modalType === 'success' ? 'Success!' :
-                modalType === 'error' ? 'Error!' : 'Information'}
+              {modalType === 'success' ? 'Success!' : modalType === 'error' ? 'Error!' : 'Information'}
             </Text>
             <Text style={styles.modalMessage}>{modalMessage}</Text>
-            <Pressable
-              style={styles.modalButton}
-              onPress={() => setIsModalVisible(false)}
-            >
+            <Pressable style={styles.modalButton} onPress={() => setIsModalVisible(false)}>
               <Text style={styles.modalButtonText}>
                 {modalType === 'success' ? 'Continue' : 'Try Again'}
               </Text>
@@ -716,33 +668,20 @@ const AddProduct = () => {
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  gradientBackground: {
-    flex: 1,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingBottom: 30,
-  },
+  container: { flex: 1, backgroundColor: COLORS.background },
+  gradientBackground: { flex: 1 },
+  scrollView: { flex: 1 },
+  scrollContent: { paddingBottom: 40 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingBottom: 20,
+    paddingTop: Platform.OS === 'ios' ? 60 : 20,
+    paddingBottom: 16,
     backgroundColor: COLORS.white,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
     elevation: 3,
   },
   backButton: {
@@ -762,59 +701,53 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: COLORS.accent + '20',
   },
-  formContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-  },
+  formContainer: { paddingHorizontal: 16, paddingTop: 16 },
   card: {
     backgroundColor: COLORS.white,
     borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
+    padding: 16,
+    marginBottom: 16,
     shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
     borderWidth: 1,
     borderColor: COLORS.border + '30',
   },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 20,
-    paddingBottom: 12,
+    marginBottom: 16,
+    paddingBottom: 10,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border + '30',
   },
   cardTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
     color: COLORS.primary,
-    marginLeft: 12,
+    marginLeft: 10,
     flex: 1,
   },
   imageCount: {
     fontSize: 14,
     fontWeight: '500',
     color: COLORS.textLight,
-    marginLeft: 8,
   },
-  formGroup: {
-    marginBottom: 16,
-  },
+  formGroup: { marginBottom: 14 },
   label: {
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.primaryDark,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   input: {
     backgroundColor: COLORS.gray,
     borderRadius: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
+    paddingVertical: 12,
+    fontSize: 15,
     color: COLORS.text,
     borderWidth: 1,
     borderColor: COLORS.border + '50',
@@ -834,58 +767,58 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.border + '50',
-    minHeight: 120,
+    minHeight: 100,
   },
   textArea: {
-    padding: 16,
-    fontSize: 16,
+    padding: 14,
+    fontSize: 15,
     color: COLORS.text,
     textAlignVertical: 'top',
-    minHeight: 100,
+    minHeight: 80,
   },
   charCount: {
     textAlign: 'right',
     fontSize: 12,
     color: COLORS.textLight,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingHorizontal: 14,
+    paddingBottom: 8,
   },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  halfWidth: {
-    width: '48%',
-  },
-  pickerContainer: {
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border + '50',
+  row: { flexDirection: 'row', justifyContent: 'space-between' },
+  halfWidth: { width: '48%' },
+
+  // Category selector
+  categoryLoadingRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    minHeight: 56,
+    paddingVertical: 12,
   },
-  pickerIcon: {
-    marginRight: 12,
+  categoryLoadingText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginLeft: 8,
   },
-  pickerWrapper: {
-    flex: 1,
+  categoryChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
   },
   categoryChip: {
-    backgroundColor: COLORS.white,
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.gray,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: COLORS.border + '50',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
   },
   categoryChipSelected: {
-    backgroundColor: COLORS.primary,
     borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '10',
+  },
+  categoryChipError: {
+    borderColor: '#ef4444',
   },
   categoryChipText: {
     fontSize: 14,
@@ -893,189 +826,238 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   categoryChipTextSelected: {
-    color: COLORS.white,
+    color: COLORS.primary,
+    fontWeight: '600',
   },
-  noCategoriesText: {
+
+  // Category picker modal
+  pickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  pickerOverlayDismiss: {
+    flex: 1,
+  },
+  pickerModal: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '60%',
+    paddingBottom: Platform.OS === 'ios' ? 30 : 16,
+  },
+  pickerModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.gray,
+  },
+  pickerModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.primaryDark,
+  },
+  pickerEmpty: {
+    padding: 40,
+    alignItems: 'center',
+  },
+  pickerEmptyText: {
+    marginTop: 12,
     fontSize: 14,
     color: COLORS.textLight,
-    fontStyle: 'italic',
+  },
+  categoryListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  imageUploadContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 20,
+  categoryListItemSelected: {
+    backgroundColor: COLORS.accent + '20',
   },
-  imageUploadButton: {
-    width: width * 0.4,
-    height: width * 0.4,
-    borderRadius: 16,
-    overflow: 'hidden',
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
+  categoryItemImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.gray,
   },
-  uploadButtonGradient: {
-    flex: 1,
+  categoryItemAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  uploadButtonText: {
-    fontSize: 16,
+  categoryItemAvatarText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  categoryListItemInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  categoryListItemTitle: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: COLORS.text,
+  },
+  categoryListItemTitleSelected: {
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  categoryListItemDesc: {
+    fontSize: 12,
+    color: COLORS.textLighter,
+    marginTop: 2,
+  },
+  categoryListSeparator: {
+    height: 1,
+    backgroundColor: COLORS.gray,
+    marginHorizontal: 16,
+  },
+
+  // Image upload - compact
+  imageUploadRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+  },
+  uploadBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  uploadBtnText: {
+    fontSize: 14,
     fontWeight: '600',
     color: COLORS.white,
-    marginTop: 12,
   },
-  imagesContainer: {
-    marginTop: 10,
+  imagesScroll: {
+    marginBottom: 8,
   },
   imagesList: {
-    paddingVertical: 10,
+    paddingVertical: 4,
+    gap: 10,
   },
   imageItem: {
     position: 'relative',
-    marginRight: 12,
   },
   productImage: {
-    width: 120,
-    height: 120,
-    borderRadius: 12,
-    borderWidth: 2,
+    width: 90,
+    height: 90,
+    borderRadius: 10,
+    borderWidth: 1,
     borderColor: COLORS.border,
   },
   removeImageButton: {
     position: 'absolute',
-    top: -8,
-    right: -8,
+    top: -6,
+    right: -6,
     backgroundColor: COLORS.error,
-    borderRadius: 12,
-    width: 24,
-    height: 24,
+    borderRadius: 10,
+    width: 22,
+    height: 22,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: COLORS.error,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 3,
   },
+
+  // Attributes
   attributeItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 10,
   },
   attributeInputs: {
     flex: 1,
     flexDirection: 'row',
+    gap: 8,
   },
   attributeInput: {
     flex: 1,
     backgroundColor: COLORS.gray,
     borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
     color: COLORS.text,
     borderWidth: 1,
     borderColor: COLORS.border + '50',
-    marginRight: 12,
   },
   removeAttributeButton: {
     padding: 8,
-    borderRadius: 12,
-    backgroundColor: COLORS.error + '10',
+    marginLeft: 4,
   },
   addAttributeHeaderButton: {
     padding: 4,
     borderRadius: 12,
     backgroundColor: COLORS.accent + '20',
   },
-  noAttributesContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-  },
-  noAttributesText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.textLight,
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  noAttributesSubtext: {
-    fontSize: 14,
+  noAttributesHint: {
+    fontSize: 13,
     color: COLORS.textLighter,
     textAlign: 'center',
-    marginBottom: 24,
-  },
-  addFirstAttributeButton: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-  },
-  addFirstAttributeButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.white,
+    paddingVertical: 8,
   },
   addAttributeButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.accent + '20',
-    borderRadius: 12,
-    paddingVertical: 14,
-    marginTop: 8,
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginTop: 4,
+    gap: 6,
   },
   addAttributeButtonText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: COLORS.primary,
-    marginLeft: 8,
   },
+
+  // Submit
   submitButton: {
     borderRadius: 16,
     overflow: 'hidden',
-    marginTop: 10,
-    marginBottom: 20,
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    marginTop: 8,
+    marginBottom: 16,
+    elevation: 4,
   },
-  submitButtonDisabled: {
-    opacity: 0.7,
-  },
+  submitButtonDisabled: { opacity: 0.7 },
   submitButtonGradient: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 18,
+    paddingVertical: 16,
+    gap: 10,
   },
   submitButtonText: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
     color: COLORS.white,
-    marginLeft: 12,
   },
   helpContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 10,
+    gap: 6,
   },
   helpText: {
-    fontSize: 14,
+    fontSize: 13,
     color: COLORS.textLight,
-    marginLeft: 8,
   },
+
+  // Result modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
@@ -1083,55 +1065,44 @@ const styles = StyleSheet.create({
   modalContainer: {
     backgroundColor: COLORS.white,
     borderRadius: 20,
-    padding: 30,
+    padding: 28,
     width: '100%',
     maxWidth: 400,
     alignItems: 'center',
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.3,
-    shadowRadius: 20,
-    elevation: 10,
   },
   modalIconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  modalIconSuccess: {
-    backgroundColor: COLORS.success,
-  },
-  modalIconError: {
-    backgroundColor: COLORS.error,
-  },
-  modalIconInfo: {
-    backgroundColor: COLORS.warning,
-  },
+  modalIconSuccess: { backgroundColor: COLORS.success },
+  modalIconError: { backgroundColor: COLORS.error },
+  modalIconInfo: { backgroundColor: COLORS.warning },
   modalTitle: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
     color: COLORS.primary,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   modalMessage: {
-    fontSize: 16,
+    fontSize: 15,
     color: COLORS.text,
     textAlign: 'center',
-    marginBottom: 24,
-    lineHeight: 24,
+    marginBottom: 20,
+    lineHeight: 22,
   },
   modalButton: {
     backgroundColor: COLORS.primary,
     borderRadius: 12,
-    paddingHorizontal: 32,
-    paddingVertical: 14,
+    paddingHorizontal: 28,
+    paddingVertical: 12,
     width: '100%',
   },
   modalButtonText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.white,
     textAlign: 'center',

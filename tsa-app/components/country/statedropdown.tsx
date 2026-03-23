@@ -31,6 +31,9 @@ const DropDownState: React.FC<DropDownStateProps> = ({
 
   useEffect(() => {
     setFilteredData(data);
+    if (data.length === 1 && selectedItem !== data[0].name) {
+      handleSelectItem(data[0].name);
+    }
   }, [data]);
 
   const handleSearch = (text: string) => {
@@ -78,6 +81,7 @@ const DropDownState: React.FC<DropDownStateProps> = ({
             />
             <FlatList
               data={filteredData}
+              nestedScrollEnabled
               keyExtractor={(item, index) => index.toString()}
               renderItem={({ item }) => (
                 <TouchableOpacity

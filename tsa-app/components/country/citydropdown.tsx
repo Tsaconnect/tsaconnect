@@ -23,6 +23,9 @@ const CityDropDown: React.FC<CityDropDownProps> = ({ data, selectedItem, setSele
 
   useEffect(() => {
     setFilteredData(data);
+    if (data.length === 1 && selectedItem !== data[0]) {
+      handleSelectItem(data[0]);
+    }
   }, [data]);
 
   const handleSearch = (text: string) => {
@@ -67,6 +70,7 @@ const CityDropDown: React.FC<CityDropDownProps> = ({ data, selectedItem, setSele
             />
             <FlatList
               data={filteredData}
+              nestedScrollEnabled
               keyExtractor={(item, index) => index.toString()}
               renderItem={({ item }) => (
                 <TouchableOpacity

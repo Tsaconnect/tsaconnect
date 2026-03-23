@@ -1,5 +1,5 @@
 // components/country/dropdowns.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   TextInput,
@@ -38,6 +38,12 @@ const CustomPickerWithSearch: React.FC<CustomPickerWithSearchProps> = ({
 }) => {
   const [modalVisible, setModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    if (data.length === 1 && selectedItem !== data[0]) {
+      setSelectedItem(data[0]);
+    }
+  }, [data]);
 
   const filteredData = data.filter(item =>
     item.toLowerCase().includes(searchQuery.toLowerCase())
@@ -114,6 +120,7 @@ const CustomPickerWithSearch: React.FC<CustomPickerWithSearchProps> = ({
             ) : (
               <FlatList
                 data={filteredData}
+                nestedScrollEnabled
                 keyExtractor={(item, index) => index.toString()}
                 renderItem={({ item }) => (
                   <TouchableOpacity
