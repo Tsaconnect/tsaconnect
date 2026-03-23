@@ -62,8 +62,8 @@ export function useSubcategoryProducts({
 
             if (!sellersMap.has(sellerKey)) {
                 sellersMap.set(sellerKey, {
-                    sellerId: product._id || Math.random().toString(),
-                    name: product.companyName || product.email.split('@')[0] || 'Unknown Seller',
+                    sellerId: product._id || product.id || product.userId || Math.random().toString(),
+                    name: product.companyName || product.email?.split('@')[0] || 'Unknown Seller',
                     email: product.email,
                     companyName: product.companyName,
                     location: product.location,

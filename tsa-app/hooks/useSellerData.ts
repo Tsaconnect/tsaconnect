@@ -82,7 +82,7 @@ export function useSellerData({
                     );
 
                     const seller: SellerData = {
-                        sellerId: sellerId || firstProduct._id || `seller-${sellerEmail}`,
+                        sellerId: sellerId || firstProduct._id || firstProduct.id || firstProduct.userId || `seller-${sellerEmail}`,
                         name: firstProduct.companyName || sellerEmail.split('@')[0] || 'Seller',
                         email: sellerEmail,
                         companyName: firstProduct.companyName,
