@@ -32,8 +32,6 @@ const Dashboard = () => {
 
       if (role === "admin" || role === "superadmin") {
         router.replace("/admin/dashboard");
-      } else if (role === "merchant") {
-        router.replace("/merchants/dashboard");
       } else {
         router.replace("/home");
       }

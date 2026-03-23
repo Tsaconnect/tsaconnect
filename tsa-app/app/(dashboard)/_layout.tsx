@@ -1,12 +1,17 @@
 import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 import React, { useEffect, useState } from "react";
 import { Drawer } from "expo-router/drawer";
+import {
+  DrawerContentScrollView,
+  DrawerItemList,
+  DrawerItem,
+} from "@react-navigation/drawer";
 import { COLORS } from "../../constants";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import { router } from "expo-router";
 import { Avatar } from "react-native-elements";
 import api from "@/components/services/api";
-//import { api } from "../../services/api"; // Direct import of API service
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 interface UserProfile {
   _id: string;
@@ -21,6 +26,7 @@ const Layout = () => {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userRole, setUserRole] = useState<string | null>(null);
 
   // Check authentication and fetch user profile on mount
   useEffect(() => {
@@ -33,12 +39,16 @@ const Layout = () => {
         if (authenticated) {
           // Fetch user profile
           const profileResponse = await api.getProfile();
-          
+
           if (profileResponse.success && profileResponse.data) {
             setCurrentUser(profileResponse.data);
           } else {
             console.warn('Failed to fetch profile:', profileResponse.message);
           }
+
+          // Get user role
+          const role = await AsyncStorage.getItem("role");
+          setUserRole(role?.toLowerCase() || null);
         }
       } catch (error) {
         console.error('Error checking auth or fetching profile:', error);
@@ -96,9 +106,96 @@ const Layout = () => {
     return (names[0].charAt(0) + names[names.length - 1].charAt(0)).toUpperCase();
   };
 
+  const isMerchant = userRole === "merchant";
+
+  const CustomDrawerContent = (props: any) => (
+    <DrawerContentScrollView {...props}>
+      <DrawerItemList {...props} />
+      {isMerchant && (
+        <View style={styles.merchantSection}>
+          <View style={styles.merchantDivider} />
+          <Text style={styles.merchantSectionTitle}>Merchant</Text>
+          <DrawerItem
+            label="Merchant Dashboard"
+            icon={({ color, size }) => (
+              <Icon name="view-dashboard-outline" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/dashboard");
+            }}
+          />
+          <DrawerItem
+            label="Products & Services"
+            icon={({ color, size }) => (
+              <Icon name="shopping-outline" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/inventory");
+            }}
+          />
+          <DrawerItem
+            label="Add Product"
+            icon={({ color, size }) => (
+              <Icon name="plus-circle-outline" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/inventory/add");
+            }}
+          />
+          <DrawerItem
+            label="Sell USDT for Fiat"
+            icon={({ color, size }) => (
+              <Icon name="trending-up" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/sell-usdt");
+            }}
+          />
+          <DrawerItem
+            label="Buy Crypto with Cash"
+            icon={({ color, size }) => (
+              <Icon name="cash-multiple" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/buy-usdt");
+            }}
+          />
+          <DrawerItem
+            label="Digital Assets"
+            icon={({ color, size }) => (
+              <Icon name="wallet-outline" size={25} color={color} style={styles.merchantIcon} />
+            )}
+            activeTintColor={COLORS.primary}
+            labelStyle={styles.merchantDrawerLabel}
+            onPress={() => {
+              props.navigation.closeDrawer();
+              router.push("/merchants/digital");
+            }}
+          />
+        </View>
+      )}
+    </DrawerContentScrollView>
+  );
+
   return (
     <>
       <Drawer
+        drawerContent={(props) => <CustomDrawerContent {...props} />}
         screenOptions={
           //@ts-ignore
           ({ route, navigation }) => ({
@@ -316,5 +413,32 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: COLORS.primary,
     fontWeight: 'bold',
+  },
+  merchantSection: {
+    marginTop: 5,
+  },
+  merchantDivider: {
+    height: 1,
+    backgroundColor: COLORS.lightGray || '#e0e0e0',
+    marginHorizontal: 20,
+    marginBottom: 8,
+  },
+  merchantSectionTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.gray || '#999',
+    paddingHorizontal: 20,
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  merchantDrawerLabel: {
+    marginHorizontal: -20,
+    fontSize: 16,
+  },
+  merchantIcon: {
+    marginVertical: -5,
+    marginRight: 15,
+    marginLeft: -10,
   },
 });

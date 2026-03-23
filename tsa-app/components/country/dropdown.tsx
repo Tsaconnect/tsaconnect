@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   TextInput,
@@ -32,6 +32,13 @@ const CustomPickerWithSearch: React.FC<CustomPickerWithSearchProps> = ({
   const [searchQuery, setSearchQuery] = useState("");
   const [filteredData, setFilteredData] = useState(data);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+
+  useEffect(() => {
+    setFilteredData(data);
+    if (data.length === 1 && selectedItem !== data[0]) {
+      handleSelectItem(data[0]);
+    }
+  }, [data]);
 
   const handleSearch = (text: string) => {
     setSearchQuery(text);
@@ -79,6 +86,7 @@ const CustomPickerWithSearch: React.FC<CustomPickerWithSearchProps> = ({
             />
             <FlatList
               data={filteredData}
+              nestedScrollEnabled
               keyExtractor={(item, index) => index.toString()}
               renderItem={({ item }) => (
                 <TouchableOpacity

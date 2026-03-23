@@ -1491,10 +1491,10 @@ export interface CategoryWithDetails extends Category {
 
 export async function getMyMerchantRequest(): Promise<ApiResponse> {
   try {
-    const token = await AsyncStorage.getItem('token');
+    const token = await AsyncStorage.getItem('authToken');
     const response = await fetch(`${API_BASE_URL}/merchant-requests/my-request`, {
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': token ? `Bearer ${token}` : '',
         'Content-Type': 'application/json',
       },
     });
@@ -1520,11 +1520,11 @@ export async function submitMerchantRequest(data: {
   registrationNumber?: string;
 }): Promise<ApiResponse> {
   try {
-    const token = await AsyncStorage.getItem('token');
+    const token = await AsyncStorage.getItem('authToken');
     const response = await fetch(`${API_BASE_URL}/merchant-requests`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': token ? `Bearer ${token}` : '',
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,8 +8,11 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS } from '../../constants';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
@@ -22,7 +25,7 @@ const BUSINESS_TYPES = [
 ];
 
 export default function MerchantRequestScreen() {
-  const { user } = useAuth();
+  const { currentUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [existingRequest, setExistingRequest] = useState<any>(null);
@@ -34,8 +37,18 @@ export default function MerchantRequestScreen() {
   const [city, setCity] = useState('');
   const [state, setState] = useState('');
   const [country, setCountry] = useState('');
-  const [phone, setPhone] = useState(user?.phoneNumber || '');
+  const [phone, setPhone] = useState(currentUser?.phoneNumber || '');
   const [registrationNumber, setRegistrationNumber] = useState('');
+
+  const scrollRef = useRef<ScrollView>(null);
+  const businessNameRef = useRef<TextInput>(null);
+  const descriptionRef = useRef<TextInput>(null);
+  const addressRef = useRef<TextInput>(null);
+  const cityRef = useRef<TextInput>(null);
+  const stateRef = useRef<TextInput>(null);
+  const countryRef = useRef<TextInput>(null);
+  const phoneRef = useRef<TextInput>(null);
+  const regNumberRef = useRef<TextInput>(null);
 
   useEffect(() => {
     fetchExistingRequest();
@@ -47,6 +60,9 @@ export default function MerchantRequestScreen() {
       const res = await getMyMerchantRequest();
       if (res.success && res.data) {
         setExistingRequest(res.data);
+        if (res.data.status === 'approved') {
+          await AsyncStorage.setItem('role', 'merchant');
+        }
       } else if (!res.success) {
         Alert.alert('Error', res.message || 'Could not check your application status. Please try again.');
       }
@@ -107,6 +123,12 @@ export default function MerchantRequestScreen() {
             <Text style={styles.statusText}>
               Your merchant application for "{existingRequest.businessName}" is being reviewed. We'll update your status soon.
             </Text>
+            <TouchableOpacity
+              style={[styles.submitButton, { marginTop: 24 }]}
+              onPress={() => router.back()}
+            >
+              <Text style={styles.submitButtonText}>Go Back</Text>
+            </TouchableOpacity>
           </View>
         </View>
       );
@@ -165,60 +187,142 @@ export default function MerchantRequestScreen() {
   }
 
   return (
-    <ScrollView style={styles.container}>
-      <Stack.Screen options={{ title: 'Merchant Application' }} />
-      <Text style={styles.heading}>Become a Merchant</Text>
-      <Text style={styles.subheading}>Fill in your business details to apply</Text>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      <ScrollView
+        ref={scrollRef}
+        style={styles.container}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ paddingBottom: 60 }}
+      >
+        <Stack.Screen options={{ title: 'Merchant Application' }} />
+        <Text style={styles.heading}>Become a Merchant</Text>
+        <Text style={styles.subheading}>Fill in your business details to apply</Text>
 
-      <Text style={styles.label}>Business Type *</Text>
-      <View style={styles.pickerRow}>
-        {BUSINESS_TYPES.map((bt) => (
-          <TouchableOpacity
-            key={bt.value}
-            style={[styles.pickerOption, businessType === bt.value && styles.pickerOptionSelected]}
-            onPress={() => setBusinessType(bt.value)}
-          >
-            <Text style={[styles.pickerText, businessType === bt.value && styles.pickerTextSelected]}>
-              {bt.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+        <Text style={styles.label}>Business Type *</Text>
+        <View style={styles.pickerRow}>
+          {BUSINESS_TYPES.map((bt) => (
+            <TouchableOpacity
+              key={bt.value}
+              style={[styles.pickerOption, businessType === bt.value && styles.pickerOptionSelected]}
+              onPress={() => setBusinessType(bt.value)}
+            >
+              <Text style={[styles.pickerText, businessType === bt.value && styles.pickerTextSelected]}>
+                {bt.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
-      <Text style={styles.label}>Business Name *</Text>
-      <TextInput style={styles.input} value={businessName} onChangeText={setBusinessName} placeholder="e.g. Ojay Electronics" />
+        <Text style={styles.label}>Business Name *</Text>
+        <TextInput
+          ref={businessNameRef}
+          style={styles.input}
+          value={businessName}
+          onChangeText={setBusinessName}
+          placeholder="e.g. Business Name"
+          returnKeyType="next"
+          onSubmitEditing={() => descriptionRef.current?.focus()}
 
-      <Text style={styles.label}>Business Description</Text>
-      <TextInput style={[styles.input, { height: 80 }]} value={businessDescription} onChangeText={setBusinessDescription} placeholder="Describe your business..." multiline />
+        />
 
-      <Text style={styles.label}>Address *</Text>
-      <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder="Street address" />
+        <Text style={styles.label}>Business Description</Text>
+        <TextInput
+          ref={descriptionRef}
+          style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
+          value={businessDescription}
+          onChangeText={setBusinessDescription}
+          placeholder="Describe your business..."
+          multiline
+          returnKeyType="next"
+          blurOnSubmit={true}
+          onSubmitEditing={() => addressRef.current?.focus()}
+        />
 
-      <Text style={styles.label}>City *</Text>
-      <TextInput style={styles.input} value={city} onChangeText={setCity} placeholder="City" />
+        <Text style={styles.label}>Address *</Text>
+        <TextInput
+          ref={addressRef}
+          style={styles.input}
+          value={address}
+          onChangeText={setAddress}
+          placeholder="Street address"
+          returnKeyType="next"
+          onSubmitEditing={() => cityRef.current?.focus()}
 
-      <Text style={styles.label}>State *</Text>
-      <TextInput style={styles.input} value={state} onChangeText={setState} placeholder="State" />
+        />
 
-      <Text style={styles.label}>Country *</Text>
-      <TextInput style={styles.input} value={country} onChangeText={setCountry} placeholder="Country" />
+        <Text style={styles.label}>City *</Text>
+        <TextInput
+          ref={cityRef}
+          style={styles.input}
+          value={city}
+          onChangeText={setCity}
+          placeholder="City"
+          returnKeyType="next"
+          onSubmitEditing={() => stateRef.current?.focus()}
 
-      <Text style={styles.label}>Phone *</Text>
-      <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="+234..." keyboardType="phone-pad" />
+        />
 
-      <Text style={styles.label}>Registration Number (optional)</Text>
-      <TextInput style={styles.input} value={registrationNumber} onChangeText={setRegistrationNumber} placeholder="e.g. RC-123456" />
+        <Text style={styles.label}>State *</Text>
+        <TextInput
+          ref={stateRef}
+          style={styles.input}
+          value={state}
+          onChangeText={setState}
+          placeholder="State"
+          returnKeyType="next"
+          onSubmitEditing={() => countryRef.current?.focus()}
 
-      <TouchableOpacity style={styles.submitButton} onPress={handleSubmit} disabled={submitting}>
-        {submitting ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={styles.submitButtonText}>Submit Application</Text>
-        )}
-      </TouchableOpacity>
+        />
 
-      <View style={{ height: 40 }} />
-    </ScrollView>
+        <Text style={styles.label}>Country *</Text>
+        <TextInput
+          ref={countryRef}
+          style={styles.input}
+          value={country}
+          onChangeText={setCountry}
+          placeholder="Country"
+          returnKeyType="next"
+          onSubmitEditing={() => phoneRef.current?.focus()}
+
+        />
+
+        <Text style={styles.label}>Phone *</Text>
+        <TextInput
+          ref={phoneRef}
+          style={styles.input}
+          value={phone}
+          onChangeText={setPhone}
+          placeholder="+234..."
+          keyboardType="phone-pad"
+          returnKeyType="next"
+          onSubmitEditing={() => regNumberRef.current?.focus()}
+
+        />
+
+        <Text style={styles.label}>Registration Number (optional)</Text>
+        <TextInput
+          ref={regNumberRef}
+          style={styles.input}
+          value={registrationNumber}
+          onChangeText={setRegistrationNumber}
+          placeholder="e.g. RC-123456"
+          returnKeyType="done"
+          onSubmitEditing={handleSubmit}
+        />
+
+        <TouchableOpacity style={styles.submitButton} onPress={handleSubmit} disabled={submitting}>
+          {submitting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.submitButtonText}>Submit Application</Text>
+          )}
+        </TouchableOpacity>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 

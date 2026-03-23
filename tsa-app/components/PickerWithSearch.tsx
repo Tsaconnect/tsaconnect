@@ -1,5 +1,5 @@
 // PickerWithSearch.tsx (Updated to support searchable prop)
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -35,7 +35,13 @@ const PickerWithSearch = ({
 }: PickerWithSearchProps) => {
   const [modalVisible, setModalVisible] = useState(false);
   const [searchText, setSearchText] = useState('');
-  
+
+  useEffect(() => {
+    if (data.length === 1 && selectedValue !== data[0].value) {
+      onSelect(data[0]);
+    }
+  }, [data]);
+
   const selectedItem = data.find(item => item.value === selectedValue);
   
   const filteredData = searchable
@@ -55,7 +61,7 @@ const PickerWithSearch = ({
     <View>
       <TouchableOpacity
         style={[styles.pickerButton, style]}
-        onPress={() => setModalVisible(true)}
+        onPress={() => data.length > 1 && setModalVisible(true)}
       >
         <Text style={styles.pickerText}>
           {selectedItem ? selectedItem.label : placeholder}
@@ -96,6 +102,7 @@ const PickerWithSearch = ({
             {/* Options List */}
             <FlatList
               data={filteredData}
+              nestedScrollEnabled
               keyExtractor={(item) => item.value}
               renderItem={({ item }) => (
                 <TouchableOpacity
