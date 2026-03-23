@@ -44,14 +44,7 @@ export default function Login() {
       if (response.success) {
         setEmail("");
         setPassword("");
-        const role = await AsyncStorage.getItem("role");
-        if (role === "admin") {
-          return router.replace("/admin/dashboard");
-        } else if (role === "merchant") {
-          return router.replace("/merchants/dashboard");
-        } else {
-          router.replace("/home");
-        }
+        router.replace("/home");
       } else {
         setIsError(true);
         Alert.alert(

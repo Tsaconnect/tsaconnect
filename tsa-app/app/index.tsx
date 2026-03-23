@@ -1,7 +1,7 @@
 import { StyleSheet, Text, View, ActivityIndicator } from "react-native";
 import React, { useEffect, useState } from "react";
 import { router } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+
 import api from "@/components/services/api";
 
 const Dashboard = () => {
@@ -27,14 +27,7 @@ const Dashboard = () => {
         return;
       }
 
-      // Navigate based on role
-      const role = (await AsyncStorage.getItem("role"))?.toLowerCase();
-
-      if (role === "admin" || role === "superadmin") {
-        router.replace("/admin/dashboard");
-      } else {
-        router.replace("/home");
-      }
+      router.replace("/home");
     } catch (error: any) {
       console.error("App init error:", error);
       await api.clearAuth();
