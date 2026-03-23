@@ -47,16 +47,9 @@ const AddCategoryScreen = () => {
     }
   };
 
-  console.log("current user", currentUser);
-
   useEffect(() => {
-    if (!currentUser) {
-      //@ts-ignore
-      router.push("/login");
-    } else {
-      fetchParentCategories();
-    }
-  }, [currentUser]);
+    fetchParentCategories();
+  }, []);
 
   const pickImageAsync = async () => {
     try {

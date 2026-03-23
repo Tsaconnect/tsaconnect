@@ -385,6 +385,13 @@ const Layout = () => {
             drawerItemStyle: { display: "none" },
           }}
         />
+        <Drawer.Screen
+          name="add-category"
+          options={{
+            title: "Add Category",
+            drawerItemStyle: { display: "none" },
+          }}
+        />
       </Drawer>
     </>
   );

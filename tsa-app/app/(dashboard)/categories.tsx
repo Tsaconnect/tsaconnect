@@ -96,6 +96,12 @@ const Categories = () => {
           value={searchQuery}
           onChangeText={(text) => setSearchQuery(text)}
         />
+        <TouchableOpacity
+          style={styles.addButton}
+          onPress={() => router.push("/add-category")}
+        >
+          <Text style={styles.addButtonText}>Add Category</Text>
+        </TouchableOpacity>
       </View>
       {loading ? (
         <LoadingSpinner />
