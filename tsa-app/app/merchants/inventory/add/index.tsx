@@ -103,8 +103,9 @@ const AddProduct = () => {
         setCategories(response.data);
         if (response.data.length === 1) {
           const cat = response.data[0];
-          if (cat._id && cat.title) {
-            setCategoryId(cat._id);
+          const catId = cat._id || cat.id;
+          if (catId && cat.title) {
+            setCategoryId(catId);
             setCategoryName(cat.title);
           }
         }
@@ -424,17 +425,19 @@ const AddProduct = () => {
                   </View>
                 ) : (
                   <View style={styles.categoryChipsContainer}>
-                    {categories.map((item, index) => (
+                    {categories.map((item, index) => {
+                      const itemId = item._id || item.id;
+                      return (
                       <TouchableOpacity
-                        key={item._id || index.toString()}
+                        key={itemId || index.toString()}
                         activeOpacity={0.7}
                         style={[
                           styles.categoryChip,
-                          categoryId === item._id && styles.categoryChipSelected,
+                          categoryId === itemId && styles.categoryChipSelected,
                           errors.category && styles.categoryChipError,
                         ]}
                         onPress={() => {
-                          setCategoryId(item._id);
+                          setCategoryId(itemId);
                           setCategoryName(item.title);
                           setErrors(prev => { const { category, ...rest } = prev; return rest; });
                         }}
@@ -442,15 +445,16 @@ const AddProduct = () => {
                         <CategoryAvatar category={item} />
                         <Text style={[
                           styles.categoryChipText,
-                          categoryId === item._id && styles.categoryChipTextSelected,
+                          categoryId === itemId && styles.categoryChipTextSelected,
                         ]}>
                           {item.title}
                         </Text>
-                        {categoryId === item._id && (
+                        {categoryId === itemId && (
                           <Icon name="check-circle" size={20} color={COLORS.primary} />
                         )}
                       </TouchableOpacity>
-                    ))}
+                    );
+                    })}
                   </View>
                 )}
                 {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}

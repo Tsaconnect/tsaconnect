@@ -248,7 +248,7 @@ const MarketplaceScreen: React.FC = () => {
                   setSelectedSubcategory(subcategoryId);
                   // Navigate to products list for this subcategory
                   router.push({
-                    pathname: '/subcategory/[subcategoryId]',
+                    pathname: '/(dashboard)/(tabs)/(home)/subcategory/[subcategoryId]',
                     params: {
                       subcategoryId,
                       categoryTitle: item.title,
@@ -309,7 +309,7 @@ const MarketplaceScreen: React.FC = () => {
                   setSelectedSubcategory(subcategoryId);
                   // Navigate to services list for this subcategory
                   router.push({
-                    pathname: '/marketplace/services',
+                    pathname: '/(servicegroup)/categoryservice',
                     params: {
                       categoryId: item.id,
                       categoryTitle: item.title,
@@ -398,8 +398,8 @@ const MarketplaceScreen: React.FC = () => {
               onSubmitEditing={() => {
                 if (searchQuery.trim()) {
                   router.push({
-                    pathname: '/marketplace/search',
-                    params: { query: searchQuery }
+                    pathname: '/(dashboard)/(tabs)/(home)/subcategory/[subcategoryId]',
+                    params: { subcategoryId: 'search', subcategoryName: searchQuery, categoryTitle: 'Search Results' }
                   });
                 }
               }}
@@ -552,8 +552,8 @@ const MarketplaceScreen: React.FC = () => {
                 </View>
               ) : (
                 <View>
-                  {productCategories.map((item) => (
-                    <View key={item.id}>
+                  {productCategories.map((item, index) => (
+                    <View key={item.id || item.title || index.toString()}>
                       {renderProductCategory({ item })}
                     </View>
                   ))}
@@ -571,8 +571,8 @@ const MarketplaceScreen: React.FC = () => {
                 </View>
               ) : (
                 <View>
-                  {serviceCategories.map((item) => (
-                    <View key={item.id}>
+                  {serviceCategories.map((item, index) => (
+                    <View key={item.id || item.title || index.toString()}>
                       {renderServiceCategory({ item })}
                     </View>
                   ))}
