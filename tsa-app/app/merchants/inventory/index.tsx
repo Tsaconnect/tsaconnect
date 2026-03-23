@@ -168,7 +168,7 @@ export default function MerchantProductsScreen() {
                     </View>
                     <View style={styles.statItem}>
                         <Feather name="star" size={14} color="#666" />
-                        <Text style={styles.statText}>{item.rating.average.toFixed(1)}</Text>
+                        <Text style={styles.statText}>{(item.rating?.average ?? 0).toFixed(1)}</Text>
                     </View>
                 </View>
                 <View style={styles.itemFooter}>

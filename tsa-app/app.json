@@ -42,14 +42,16 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "30b67bc1-0e2e-4d9d-86aa-46076fa69e15"
+        "projectId": "d5cecf6b-afa9-43a6-9f36-f705f3cfac28"
       }
     },
     "runtimeVersion": "1.0.0",
     "updates": {
-      "enabled": false,
-      "url": "https://u.expo.dev/30b67bc1-0e2e-4d9d-86aa-46076fa69e15"
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/d5cecf6b-afa9-43a6-9f36-f705f3cfac28"
     },
-    "owner": "tsa-connect"
+    "owner": "mcgp"
   }
 }
