@@ -242,7 +242,7 @@ const Cart = () => {
     };
 
     const formatPrice = (price: number) => {
-        return `₦${price.toLocaleString()}`;
+        return `$${price.toLocaleString()}`;
     };
 
     const renderSellerSection = ({ item }: { item: ItemsBySeller }) => (

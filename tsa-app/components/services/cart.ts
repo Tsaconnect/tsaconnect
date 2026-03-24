@@ -780,7 +780,7 @@ class CartService {
      * Format price with currency symbol
      */
     formatPrice(price: number): string {
-        return `₦${price.toLocaleString()}`;
+        return `$${price.toLocaleString()}`;
     }
 }
 

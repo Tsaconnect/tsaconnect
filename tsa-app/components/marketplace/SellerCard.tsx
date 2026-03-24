@@ -61,7 +61,7 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   };
 
   const formatPrice = (price: number) => {
-    return `₦${price.toLocaleString()}`;
+    return `$${price.toLocaleString()}`;
   };
 
   return (

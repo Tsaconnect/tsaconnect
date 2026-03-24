@@ -50,12 +50,12 @@ const SellUSDTScreen = () => {
                     <Text style={styles.label}>You will receive</Text>
                     <View style={styles.receiveContainer}>
                         <Text style={styles.receiveAmount}>
-                            ₦{(Number(amount) * exchangeRate).toLocaleString()}
+                            ${(Number(amount) * exchangeRate).toLocaleString()}
                         </Text>
                         <View style={styles.rateContainer}>
                             <Ionicons name="trending-up" size={14} color="#1D4ED8" />
                             <Text style={styles.rateText}>
-                                Rate: 1 USDT = ₦{exchangeRate.toLocaleString()}
+                                Rate: 1 USDT = ${exchangeRate.toLocaleString()}
                             </Text>
                         </View>
                     </View>

@@ -116,6 +116,13 @@ export async function importWalletFromMnemonic(mnemonic: string): Promise<{ addr
 }
 
 /**
+ * Validate that a string is a valid BIP-39 mnemonic
+ */
+export function isValidMnemonic(mnemonic: string): boolean {
+  return ethers.Mnemonic.isValidMnemonic(mnemonic);
+}
+
+/**
  * Validate that a string is a valid EVM address
  */
 export function isValidAddress(address: string): boolean {
