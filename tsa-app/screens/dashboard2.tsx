@@ -346,10 +346,14 @@ const Dashboard: React.FC = () => {
           if (token) {
             setAuthToken(token);
             api.setToken(token);
+          } else {
+            // No token found — stop loading
+            setIsLoading(false);
           }
         }
       } catch (error) {
         console.error('Error getting auth token:', error);
+        setIsLoading(false);
       }
     };
     getAuthToken();
@@ -454,6 +458,14 @@ const Dashboard: React.FC = () => {
       fetchPortfolioData();
     }
   }, [authToken]);
+
+  // Safety timeout — stop loading after 15s even if API calls hang
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      if (isLoading) setIsLoading(false);
+    }, 15000);
+    return () => clearTimeout(timeout);
+  }, [isLoading]);
 
   // Fetch portfolio data
   const fetchPortfolioData = async () => {

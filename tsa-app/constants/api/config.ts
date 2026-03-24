@@ -1,7 +1,7 @@
 // Centralized API configuration
 // All API URLs should be imported from here
 
-const DEV_API_URL = 'http://10.38.149.33:8080/api';
+const DEV_API_URL = 'https://tsa.mcgpchain.com/api';
 const PROD_API_URL = 'https://tsa.mcgpchain.com/api';
 
 // Toggle this for local development vs production

@@ -103,7 +103,7 @@ type User struct {
 	LastLogin                  *time.Time     `json:"lastLogin,omitempty"`
 	LoginAttempts              int            `gorm:"default:0" json:"loginAttempts"`
 	LockUntil                  *time.Time     `json:"lockUntil,omitempty"`
-	WalletAddress              string         `gorm:"uniqueIndex" json:"walletAddress,omitempty"`
+	WalletAddress              string         `json:"walletAddress,omitempty"`
 	SeedPhraseBackedUp         bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
 	SubmittedForVerificationAt *time.Time     `json:"submittedForVerificationAt,omitempty"`

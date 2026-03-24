@@ -23,7 +23,7 @@ func ConnectDB(cfg *Config) (*gorm.DB, error) {
 }
 
 func AutoMigrate() error {
-	return DB.AutoMigrate(
+	if err := DB.AutoMigrate(
 		&models.User{},
 		&models.Asset{},
 		&models.Product{},
@@ -39,5 +39,16 @@ func AutoMigrate() error {
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
-	)
+	); err != nil {
+		return err
+	}
+
+	// Replace the default unique index on wallet_address with a partial
+	// unique index that only enforces uniqueness for non-empty values.
+	// This allows multiple users to have an empty wallet_address (before
+	// they register a wallet).
+	DB.Exec("DROP INDEX IF EXISTS idx_users_wallet_address")
+	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wallet_address ON users (wallet_address) WHERE wallet_address != ''")
+
+	return nil
 }
