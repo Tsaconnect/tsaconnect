@@ -153,39 +153,46 @@ export interface AssetVisibilityResponse {
 }
 export interface Product {
   _id: string;
+  id?: string;
+  userId?: string;
   name: string;
   description: string;
   price: number;
   stock: number;
-  category?: {
+  category?: string | {
     _id: string;
     title: string;
     icon?: string;
     color?: string;
   };
-  categoryName?: string; // For backward compatibility
+  categoryName?: string;
   location: string;
   phoneNumber: string;
   email: string;
   companyName?: string;
   images: Array<{
-    url: string;
+    id?: string;
+    url?: string;
     publicId?: string;
-    order: number;
+    order?: number;
   }>;
-  attributes: Array<{
+  attributes?: Array<{
     name: string;
     value: string;
   }>;
   status: 'active' | 'inactive' | 'sold_out' | 'pending_review';
   type: 'Product' | 'Service';
-  isFeatured?: boolean; // Featured status
+  isFeatured?: boolean;
   views: number;
   sales: number;
   rating: {
     average: number;
     count: number;
-  };
+  } | null;
+  shippingSameCity?: number;
+  shippingSameState?: number;
+  shippingSameCountry?: number;
+  shippingInternational?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1027,7 +1034,7 @@ class APIService {
         });
       }
 
-      const response = await fetch(`${API_BASE_URL}/products/public/marketplace?${queryParams}`, {
+      const response = await fetch(`${API_BASE_URL}/products?${queryParams}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',

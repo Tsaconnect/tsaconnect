@@ -328,7 +328,7 @@ const CheckoutScreen = () => {
 
             <TouchableOpacity
               style={[styles.successButton, { marginTop: 12 }]}
-              onPress={() => router.replace('/(dashboard)/(tabs)/(home)')}
+              onPress={() => router.replace('/home')}
             >
               <View style={[styles.gradientButton, { backgroundColor: '#FFF', borderWidth: 1, borderColor: '#E8D5C0' }]}>
                 <Text style={[styles.checkoutButtonText, { color: '#8B5A2B' }]}>Continue Shopping</Text>

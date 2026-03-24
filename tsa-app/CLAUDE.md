@@ -43,6 +43,12 @@ app/
 
 Role-based routing: `index.tsx` checks stored role → redirects to `/admin/dashboard`, `/merchants/dashboard`, or `/(dashboard)/(tabs)/(home)`.
 
+#### Navigation Gotchas
+
+- **Route groups `()` are transparent in URLs** — Always navigate with simplified paths: `` router.push(`/product/${id}`) `` NOT `router.push('/(dashboard)/(tabs)/(home)/product/[productId]')`. Use string template URLs, not `{ pathname, params }` objects.
+- **Dynamic routes in `(home)`** — `product/[productId]`, `seller/[sellerId]`, `subcategory/[subcategoryId]` are registered in `app/(dashboard)/(tabs)/(home)/_layout.tsx`
+- **Typed routes generated at** `.expo/types/router.d.ts` — regenerate with `npx expo start` if routes seem missing
+
 ### State Management
 
 - **`AuthContext/AuthContext.tsx`** — Primary context: auth state, user data, token management via AsyncStorage
@@ -55,6 +61,13 @@ No Redux/Zustand — pure Context API + AsyncStorage.
 - **`constants/api/apiClient.js`** — Axios instance, base URL: AWS API Gateway
 - **`components/services/api.ts`** — Main API service (~1500 lines, 40+ endpoints): auth, users, categories, adverts, cart, orders, payments, file uploads, merchant/admin operations
 - Auth: JWT Bearer tokens stored in AsyncStorage, set on `axios.defaults.headers.common['Authorization']`
+- **API base URL**: `https://tsa.mcgpchain.com/api` (both dev and prod in `constants/api/config.ts`)
+
+#### API Gotchas
+
+- **Backend uses UUIDs, not MongoDB ObjectIds** — Product `id` field is a UUID. The `/products/:id` GET endpoint rejects UUIDs ("Invalid product ID"). Workaround: pass product data via navigation params instead of re-fetching.
+- **Product data shape differs from type** — `category` is a UUID string (not an object), `images` may lack `url` field (only have `id`), `rating` can be null, `attributes` is optional. Always null-check these fields.
+- **Currency**: App uses `$` (USD), not `₦` (Naira)
 
 ### Key Conventions
 

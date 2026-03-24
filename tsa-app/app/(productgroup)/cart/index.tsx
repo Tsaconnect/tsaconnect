@@ -212,13 +212,7 @@ const Cart = () => {
 
             if (validationResponse.success && validationResponse.data) {
                 if (validationResponse.data.valid) {
-                    router.push({
-                        pathname: '/checkout',
-                        params: {
-                            totalAmount: summary?.total || 0,
-                            itemCount: cartItems.length
-                        }
-                    });
+                    router.push(`/checkout?totalAmount=${summary?.total || 0}&itemCount=${cartItems.length}`);
                 } else {
                     // Show validation issues
                     const issues = validationResponse.data.issues;

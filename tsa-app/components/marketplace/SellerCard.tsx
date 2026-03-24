@@ -29,7 +29,7 @@ interface SellerCardProps {
     productCount?: number;
   };
   onPress: () => void;
-  onProductPress: (productId: string) => void;
+  onProductPress: (productId: string, productData?: any) => void;
   searchQuery?: string;
 }
 
@@ -118,19 +118,20 @@ export const SellerCard: React.FC<SellerCardProps> = ({
             <TouchableOpacity
               key={product.id || `product-${seller.sellerId}-${index}`}
               style={styles.productCard}
-              onPress={() => onProductPress(product._id)}
+              onPress={() => onProductPress(product._id || product.id, product)}
               activeOpacity={0.7}
             >
               <View style={styles.productImageContainer}>
-                {product.image ? (
+                {product.image || (product.images?.[0]?.url) ? (
                   <Image
-                    source={{ uri: product.image }}
+                    source={{ uri: product.image || product.images[0].url }}
                     style={styles.productImage}
                     resizeMode="cover"
                   />
                 ) : (
                   <View style={styles.productPlaceholder}>
-                    <Ionicons name="image-outline" size={24} color="#CCC" />
+                    <Ionicons name="camera-outline" size={22} color="#D4AF37" />
+                    <Text style={{ fontSize: 8, color: '#C4B89A', marginTop: 2 }}>No photo</Text>
                   </View>
                 )}
               </View>
@@ -314,7 +315,7 @@ const styles = StyleSheet.create({
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#F0F0F0',
+    backgroundColor: '#FAF8F3',
   },
   productInfo: {
     flex: 1,

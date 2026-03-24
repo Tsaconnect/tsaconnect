@@ -14,7 +14,6 @@ import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
-import PagerView from "react-native-pager-view";
 //@ts-ignore
 const ProductDetail = ({ item }) => {
   const [isMore, setIsMore] = useState(false);
@@ -82,7 +81,7 @@ const ProductDetail = ({ item }) => {
     <ScrollView style={styles.container}>
       {item && (
         <>
-          <PagerView style={styles.pagerView} initialPage={0}>
+          <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} style={styles.pagerView}>
             {images.map((image: string, index: number) => (
               <View style={styles.page} key={index}>
                 <Image
@@ -90,12 +89,9 @@ const ProductDetail = ({ item }) => {
                   style={styles.image}
                   accessibilityLabel="Product Image"
                 />
-                <View style={{ marginBottom: 10, flexDirection: "row" }}>
-                  <Text style={{ paddingBottom: 10 }}>➡️ ⬅️</Text>
-                </View>
               </View>
             ))}
-          </PagerView>
+          </ScrollView>
 
           <View style={styles.contentContainer}>
             <View style={styles.titleContainer}>

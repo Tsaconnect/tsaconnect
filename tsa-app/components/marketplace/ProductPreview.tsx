@@ -116,7 +116,7 @@ export const ProductPreview = memo(({ products, searchQuery }: ProductPreviewPro
               // Navigate to full product list
               const sellerId = products[0]?.sellerId;
               if (sellerId) {
-                router.push(`/marketplace/seller/${sellerId}`);
+                router.push(`/seller/${sellerId}`);
               }
             }}
           >
