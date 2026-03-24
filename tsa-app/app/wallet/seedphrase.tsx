@@ -15,13 +15,13 @@ import * as Clipboard from 'expo-clipboard';
 import { router, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
-import { ethers } from 'ethers';
 import {
   getMnemonic,
   generateWallet,
   storePrivateKey,
   storeMnemonic,
   importWalletFromMnemonic,
+  isValidMnemonic,
 } from '../../services/wallet';
 import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/walletApi';
 
@@ -57,7 +57,7 @@ const SeedPhrase = () => {
   useEffect(() => {
     (async () => {
       const mnemonic = await getMnemonic();
-      if (mnemonic && ethers.Mnemonic.isValidMnemonic(mnemonic)) {
+      if (mnemonic && isValidMnemonic(mnemonic)) {
         setStep('warning');
       } else {
         setStep('setup');
@@ -117,7 +117,7 @@ const SeedPhrase = () => {
     setLoading(true);
     try {
       const mnemonic = await getMnemonic();
-      if (mnemonic && ethers.Mnemonic.isValidMnemonic(mnemonic)) {
+      if (mnemonic && isValidMnemonic(mnemonic)) {
         setWords(mnemonic.split(' '));
       } else {
         // Mnemonic missing or corrupted — show setup

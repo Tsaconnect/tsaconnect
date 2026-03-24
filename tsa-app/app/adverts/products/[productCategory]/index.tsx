@@ -472,12 +472,12 @@ const CategoryProductsScreen = () => {
                     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                         {minPrice !== undefined && (
                             <View style={styles.filterChip}>
-                                <Text style={styles.filterChipText}>Min: ₦{minPrice.toLocaleString()}</Text>
+                                <Text style={styles.filterChipText}>Min: ${minPrice.toLocaleString()}</Text>
                             </View>
                         )}
                         {maxPrice !== undefined && (
                             <View style={styles.filterChip}>
-                                <Text style={styles.filterChipText}>Max: ₦{maxPrice.toLocaleString()}</Text>
+                                <Text style={styles.filterChipText}>Max: ${maxPrice.toLocaleString()}</Text>
                             </View>
                         )}
                         {productType !== 'all' && (

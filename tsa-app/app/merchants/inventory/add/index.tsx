@@ -78,6 +78,9 @@ const AddProduct = () => {
   const [productImages, setProductImages] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
+  const [categoryModalVisible, setCategoryModalVisible] = useState(false);
+  const [categorySearch, setCategorySearch] = useState('');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -97,6 +100,7 @@ const AddProduct = () => {
   }, []);
 
   const fetchCategories = async () => {
+    setCategoriesLoading(true);
     try {
       const response = await api.getCategories({ type: 'Product', active: true });
       if (response.success && response.data) {
@@ -112,6 +116,8 @@ const AddProduct = () => {
       }
     } catch (error) {
       showModal('error', 'Failed to load categories');
+    } finally {
+      setCategoriesLoading(false);
     }
   };
 
@@ -418,47 +424,115 @@ const AddProduct = () => {
               {/* Category Picker */}
               <View style={styles.formGroup}>
                 <Text style={styles.label}>Category *</Text>
-                {categories.length === 0 ? (
+                {categoriesLoading ? (
                   <View style={styles.categoryLoadingRow}>
                     <ActivityIndicator size="small" color={COLORS.primary} />
                     <Text style={styles.categoryLoadingText}>Loading categories...</Text>
                   </View>
+                ) : categories.length === 0 ? (
+                  <TouchableOpacity style={styles.categoryLoadingRow} onPress={fetchCategories}>
+                    <Text style={styles.categoryLoadingText}>No categories found. Tap to retry.</Text>
+                  </TouchableOpacity>
                 ) : (
-                  <View style={styles.categoryChipsContainer}>
-                    {categories.map((item, index) => {
-                      const itemId = item._id || item.id;
-                      return (
-                      <TouchableOpacity
-                        key={itemId || index.toString()}
-                        activeOpacity={0.7}
-                        style={[
-                          styles.categoryChip,
-                          categoryId === itemId && styles.categoryChipSelected,
-                          errors.category && styles.categoryChipError,
-                        ]}
-                        onPress={() => {
-                          setCategoryId(itemId);
-                          setCategoryName(item.title);
-                          setErrors(prev => { const { category, ...rest } = prev; return rest; });
-                        }}
-                      >
-                        <CategoryAvatar category={item} />
-                        <Text style={[
-                          styles.categoryChipText,
-                          categoryId === itemId && styles.categoryChipTextSelected,
-                        ]}>
-                          {item.title}
-                        </Text>
-                        {categoryId === itemId && (
-                          <Icon name="check-circle" size={20} color={COLORS.primary} />
-                        )}
-                      </TouchableOpacity>
-                    );
-                    })}
-                  </View>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    style={[
+                      styles.categorySelector,
+                      errors.category && styles.categorySelectorError,
+                      categoryId ? styles.categorySelectorSelected : undefined,
+                    ]}
+                    onPress={() => {
+                      setCategorySearch('');
+                      setCategoryModalVisible(true);
+                    }}
+                  >
+                    {categoryId ? (
+                      <View style={styles.categorySelectorValue}>
+                        <CategoryAvatar category={categories.find(c => (c._id || c.id) === categoryId) || { title: categoryName }} />
+                        <Text style={styles.categorySelectorText}>{categoryName}</Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.categorySelectorPlaceholder}>Select a category</Text>
+                    )}
+                    <Icon name="keyboard-arrow-down" size={24} color={COLORS.textLight} />
+                  </TouchableOpacity>
                 )}
                 {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
               </View>
+
+              {/* Category Selection Modal */}
+              <Modal
+                visible={categoryModalVisible}
+                animationType="slide"
+                transparent
+                onRequestClose={() => setCategoryModalVisible(false)}
+              >
+                <View style={styles.pickerOverlay}>
+                  <Pressable style={styles.pickerOverlayDismiss} onPress={() => setCategoryModalVisible(false)} />
+                  <View style={styles.pickerModal}>
+                    <View style={styles.pickerModalHeader}>
+                      <Text style={styles.pickerModalTitle}>Select Category</Text>
+                      <TouchableOpacity onPress={() => setCategoryModalVisible(false)}>
+                        <Icon name="close" size={24} color={COLORS.textLight} />
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.categorySearchContainer}>
+                      <Icon name="search" size={20} color={COLORS.textLight} />
+                      <TextInput
+                        style={styles.categorySearchInput}
+                        placeholder="Search categories..."
+                        placeholderTextColor={COLORS.textLighter}
+                        value={categorySearch}
+                        onChangeText={setCategorySearch}
+                        autoCapitalize="none"
+                      />
+                      {categorySearch.length > 0 && (
+                        <TouchableOpacity onPress={() => setCategorySearch('')}>
+                          <Icon name="close" size={18} color={COLORS.textLight} />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <ScrollView keyboardShouldPersistTaps="handled">
+                      {categories
+                        .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
+                        .map((item, index) => {
+                          const itemId = item._id || item.id;
+                          const isSelected = categoryId === itemId;
+                          return (
+                            <TouchableOpacity
+                              key={itemId || index.toString()}
+                              style={[styles.categoryListItem, isSelected && styles.categoryListItemSelected]}
+                              onPress={() => {
+                                setCategoryId(itemId);
+                                setCategoryName(item.title);
+                                setErrors(prev => { const { category, ...rest } = prev; return rest; });
+                                setCategoryModalVisible(false);
+                              }}
+                            >
+                              <CategoryAvatar category={item} />
+                              <View style={styles.categoryListItemInfo}>
+                                <Text style={[styles.categoryListItemTitle, isSelected && styles.categoryListItemTitleSelected]}>
+                                  {item.title}
+                                </Text>
+                                {item.description ? (
+                                  <Text style={styles.categoryListItemDesc} numberOfLines={1}>{item.description}</Text>
+                                ) : null}
+                              </View>
+                              {isSelected && <Icon name="check-circle" size={22} color={COLORS.primary} />}
+                            </TouchableOpacity>
+                          );
+                        })
+                      }
+                      {categories.filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase())).length === 0 && (
+                        <View style={styles.pickerEmpty}>
+                          <Icon name="search-off" size={32} color={COLORS.textLighter} />
+                          <Text style={styles.pickerEmptyText}>No categories match "{categorySearch}"</Text>
+                        </View>
+                      )}
+                    </ScrollView>
+                  </View>
+                </View>
+              </Modal>
             </View>
 
             {/* Contact Information */}
@@ -791,6 +865,55 @@ const styles = StyleSheet.create({
   halfWidth: { width: '48%' },
 
   // Category selector
+  categorySelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.gray,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: COLORS.border + '50',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  categorySelectorSelected: {
+    borderColor: COLORS.primary + '40',
+    backgroundColor: COLORS.primary + '08',
+  },
+  categorySelectorError: {
+    borderColor: '#ef4444',
+  },
+  categorySelectorValue: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  categorySelectorText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  categorySelectorPlaceholder: {
+    fontSize: 15,
+    color: COLORS.textLighter,
+  },
+  categorySearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.gray,
+    marginHorizontal: 16,
+    marginVertical: 12,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
+    gap: 8,
+  },
+  categorySearchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: COLORS.text,
+  },
   categoryLoadingRow: {
     flexDirection: 'row',
     alignItems: 'center',

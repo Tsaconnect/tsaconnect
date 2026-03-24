@@ -130,7 +130,7 @@ export const Price: React.FC<PriceProps> = ({ price }) => {
           fontWeight: "600",
         }}
       >
-        ₦{price}
+        ${price}
       </Text>
     </View>
   );
