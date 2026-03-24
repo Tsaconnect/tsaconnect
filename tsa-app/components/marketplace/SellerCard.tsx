@@ -5,27 +5,26 @@ import {
   TouchableOpacity,
   Image,
   StyleSheet,
-  Platform,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-interface Product {
-  id: string;
-  name: string;
-  price: number;
-  image?: string;
-  condition?: string;
-}
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const CARD_PADDING = 16;
+const CARD_MARGIN = 16;
+const GRID_GAP = 10;
+const TILE_WIDTH = (SCREEN_WIDTH - CARD_MARGIN * 2 - CARD_PADDING * 2 - GRID_GAP) / 2;
 
 interface SellerCardProps {
   seller: {
     sellerId: string;
     businessName?: string;
+    name?: string;
     email: string;
     rating?: number;
     reviewCount?: number;
     location?: string;
-    products?: Product[];
+    products?: any[];
     productCount?: number;
   };
   onPress: () => void;
@@ -39,19 +38,14 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   onProductPress,
   searchQuery,
 }) => {
-  console.log('SellerCard seller:', seller);
   const highlightText = (text: string) => {
     if (!searchQuery || !text) return text;
-
-    // Simple text highlighting - you can enhance this based on your needs
     const parts = text.split(new RegExp(`(${searchQuery})`, 'gi'));
     return (
       <Text>
         {parts.map((part, index) =>
           part.toLowerCase() === searchQuery.toLowerCase() ? (
-            <Text key={index} style={styles.highlightedText}>
-              {part}
-            </Text>
+            <Text key={index} style={styles.highlightedText}>{part}</Text>
           ) : (
             <Text key={index}>{part}</Text>
           )
@@ -60,315 +54,283 @@ export const SellerCard: React.FC<SellerCardProps> = ({
     );
   };
 
-  const formatPrice = (price: number) => {
-    return `$${price.toLocaleString()}`;
+  const formatPrice = (price: number) => `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const getProductImage = (product: any): string | null => {
+    if (product.image) return product.image;
+    if (product.images?.length) {
+      const withUrl = product.images.find((img: any) => img.url && img.url.startsWith('http'));
+      if (withUrl) return withUrl.url;
+    }
+    return null;
   };
+
+  const sellerDisplayName = seller.businessName || seller.name || seller.email?.split('@')[0] || 'Seller';
+  const sellerInitial = sellerDisplayName.charAt(0).toUpperCase();
+  const visibleProducts = (seller.products || []).slice(0, 4);
+  const totalCount = seller.productCount || seller.products?.length || 0;
+  const hasMoreProducts = totalCount > 4;
+  const hasRating = seller.reviewCount != null && seller.reviewCount > 0;
 
   return (
     <View style={styles.container}>
-      {/* Seller Header - Taps to view all seller products */}
-      <TouchableOpacity
-        style={styles.sellerHeader}
-        onPress={onPress}
-        activeOpacity={0.7}
-      >
-        <View style={styles.sellerInfo}>
-          <View style={styles.avatarContainer}>
-            <Text style={styles.avatarText}>
-              {seller.businessName?.charAt(0).toUpperCase() ||
-                seller.email?.charAt(0).toUpperCase() ||
-                'S'}
-            </Text>
-          </View>
-          <View style={styles.sellerDetails}>
-            <Text style={styles.sellerName} numberOfLines={1}>
-              {seller.businessName || 'Unknown Seller'}
-            </Text>
-            <View style={styles.ratingContainer}>
-              <Ionicons name="star" size={14} color="#FFC107" />
-              <Text style={styles.rating}>
-                {/* seller.rating?.toFixed(1) || */ '4.0'}
-              </Text>
-              <Text style={styles.reviews}>
-                ({seller.reviewCount || 0} {seller.reviewCount === 1 ? 'review' : 'reviews'})
-              </Text>
-            </View>
-            {seller.location && (
-              <View style={styles.locationContainer}>
-                <Ionicons name="location-outline" size={12} color="#666" />
-                <Text style={styles.location} numberOfLines={1}>
-                  {seller.location}
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-        <View style={styles.productCountBadge}>
-          <Text style={styles.productCountText}>
-            {seller.productCount || 0} {seller.productCount === 1 ? 'Product' : 'Products'}
-          </Text>
-          <Ionicons name="chevron-forward" size={16} color="#D4AF37" />
-        </View>
-      </TouchableOpacity>
-
-      {/* Products List - Each product is tappable with unique key */}
-      {seller.products && seller.products.length > 0 && (
-        <View style={styles.productsContainer}>
-          {seller.products.map((product: any, index) => (
+      {/* ===== Product Grid (Hero) ===== */}
+      <View style={styles.grid}>
+        {visibleProducts.map((product: any, index: number) => {
+          const imageUrl = getProductImage(product);
+          return (
             <TouchableOpacity
-              key={product.id || `product-${seller.sellerId}-${index}`}
-              style={styles.productCard}
+              key={product._id || product.id || `p-${index}`}
+              style={[styles.tile, visibleProducts.length === 1 && styles.tileFull]}
               onPress={() => onProductPress(product._id || product.id, product)}
               activeOpacity={0.7}
             >
-              <View style={styles.productImageContainer}>
-                {product.image || (product.images?.[0]?.url) ? (
-                  <Image
-                    source={{ uri: product.image || product.images[0].url }}
-                    style={styles.productImage}
-                    resizeMode="cover"
-                  />
+              {/* Product Image */}
+              <View style={styles.tileImageWrap}>
+                {imageUrl ? (
+                  <Image source={{ uri: imageUrl }} style={styles.tileImage} resizeMode="cover" />
                 ) : (
-                  <View style={styles.productPlaceholder}>
-                    <Ionicons name="camera-outline" size={22} color="#D4AF37" />
-                    <Text style={{ fontSize: 8, color: '#C4B89A', marginTop: 2 }}>No photo</Text>
+                  <View style={styles.tilePlaceholder}>
+                    <Ionicons name="image-outline" size={36} color="#C4B89A" />
                   </View>
                 )}
+                {/* Cart overlay */}
+                <TouchableOpacity
+                  style={styles.cartOverlay}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    console.log('Add to cart:', product._id || product.id);
+                  }}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                >
+                  <Ionicons name="cart-outline" size={14} color="#D4AF37" />
+                </TouchableOpacity>
               </View>
 
-              <View style={styles.productInfo}>
-                <Text style={styles.productName} numberOfLines={2}>
+              {/* Product Info */}
+              <View style={styles.tileInfo}>
+                <Text style={styles.tileName} numberOfLines={2}>
                   {searchQuery ? highlightText(product.name) : product.name}
                 </Text>
-
                 {product.condition && (
-                  <View style={styles.conditionBadge}>
-                    <Text style={styles.productCondition}>
-                      {product.condition}
-                    </Text>
+                  <View style={styles.conditionPill}>
+                    <Text style={styles.conditionText}>{product.condition}</Text>
                   </View>
                 )}
-
-                <Text style={styles.productPrice}>
-                  {formatPrice(product.price)}
-                </Text>
+                <Text style={styles.tilePrice}>{formatPrice(product.price)}</Text>
               </View>
-
-              <TouchableOpacity
-                style={styles.addToCartButton}
-                onPress={(e) => {
-                  e.stopPropagation();
-                  // Handle add to cart
-                  console.log('Add to cart:', {
-                    productId: product.id,
-                    sellerId: seller.sellerId,
-                    productName: product.name,
-                    price: product.price,
-                  });
-                  // You can trigger a callback here if needed
-                }}
-              >
-                <Ionicons name="cart-outline" size={18} color="#D4AF37" />
-              </TouchableOpacity>
             </TouchableOpacity>
-          ))}
+          );
+        })}
+      </View>
 
-          {/* View All Products Link - Show if more than 3 products */}
-          {seller.productCount && seller.productCount > 3 && (
-            <TouchableOpacity
-              style={styles.viewAllLink}
-              onPress={onPress}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.viewAllText}>
-                View all {seller.productCount} products
-              </Text>
-              <Ionicons name="arrow-forward" size={14} color="#D4AF37" />
-            </TouchableOpacity>
+      {/* View All */}
+      {hasMoreProducts && (
+        <TouchableOpacity style={styles.viewAllRow} onPress={onPress} activeOpacity={0.7}>
+          <Text style={styles.viewAllText}>View all {totalCount} products</Text>
+          <Ionicons name="arrow-forward" size={14} color="#D4AF37" />
+        </TouchableOpacity>
+      )}
+
+      {/* ===== Seller Attribution (Footer) ===== */}
+      <TouchableOpacity style={styles.sellerFooter} onPress={onPress} activeOpacity={0.7}>
+        <View style={styles.sellerAvatar}>
+          <Text style={styles.sellerInitial}>{sellerInitial}</Text>
+        </View>
+        <View style={styles.sellerInfo}>
+          <Text style={styles.sellerLabel} numberOfLines={1}>
+            <Text style={styles.sellerPrefix}>Sold by </Text>
+            {sellerDisplayName}
+          </Text>
+          {hasRating && (
+            <View style={styles.ratingRow}>
+              <Ionicons name="star" size={11} color="#F59E0B" />
+              <Text style={styles.ratingText}>{seller.rating?.toFixed(1)}</Text>
+              <Text style={styles.reviewText}>({seller.reviewCount} {seller.reviewCount === 1 ? 'review' : 'reviews'})</Text>
+            </View>
           )}
         </View>
-      )}
+        <View style={styles.sellerCta}>
+          <Text style={styles.sellerCtaCount}>{totalCount} {totalCount === 1 ? 'Product' : 'Products'}</Text>
+          <Ionicons name="chevron-forward" size={14} color="#D4AF37" />
+        </View>
+      </TouchableOpacity>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 16,
-    marginVertical: 8,
-    borderRadius: 12,
-    elevation: 2,
+    backgroundColor: '#FFF',
+    marginHorizontal: CARD_MARGIN,
+    marginVertical: 10,
+    borderRadius: 14,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 3,
+    overflow: 'hidden',
+  },
+
+  // ── Product Grid ──
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: CARD_PADDING,
+    gap: GRID_GAP,
+  },
+  tile: {
+    width: TILE_WIDTH,
+  },
+  tileFull: {
+    width: '100%',
+  },
+  tileImageWrap: {
+    width: '100%',
+    aspectRatio: 1,
+    maxHeight: 200,
+    borderRadius: 10,
+    backgroundColor: '#F5F3EE',
+    overflow: 'hidden',
+  },
+  tileImage: {
+    width: '100%',
+    height: '100%',
+  },
+  tilePlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F5F3EE',
+  },
+  cartOverlay: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
-    shadowRadius: 4,
-    ...Platform.select({
-      android: {
-        elevation: 3,
-      },
-    }),
+    shadowRadius: 3,
+    elevation: 2,
   },
-  sellerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.05)',
+  tileInfo: {
+    paddingTop: 8,
+    paddingBottom: 4,
   },
-  sellerInfo: {
-    flexDirection: 'row',
-    flex: 1,
-    marginRight: 12,
-  },
-  avatarContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#D4AF37',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  avatarText: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  sellerDetails: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  sellerName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1A1A1A',
-    marginBottom: 4,
-  },
-  ratingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  rating: {
+  tileName: {
     fontSize: 13,
     fontWeight: '600',
     color: '#1A1A1A',
-    marginLeft: 4,
-  },
-  reviews: {
-    fontSize: 12,
-    color: '#666',
-    marginLeft: 4,
-  },
-  locationContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  location: {
-    fontSize: 12,
-    color: '#666',
-    marginLeft: 4,
-    flex: 1,
-  },
-  productCountBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(212,175,55,0.1)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  productCountText: {
-    fontSize: 12,
-    color: '#D4AF37',
-    fontWeight: '600',
-    marginRight: 4,
-  },
-  productsContainer: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 16,
-  },
-  productCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.05)',
-  },
-  productImageContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 8,
-    backgroundColor: '#F8F9FA',
-    overflow: 'hidden',
-    marginRight: 12,
-  },
-  productImage: {
-    width: '100%',
-    height: '100%',
-  },
-  productPlaceholder: {
-    width: '100%',
-    height: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#FAF8F3',
-  },
-  productInfo: {
-    flex: 1,
-    marginRight: 8,
-  },
-  productName: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#1A1A1A',
+    lineHeight: 17,
     marginBottom: 4,
+  },
+  tilePrice: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#D4AF37',
+  },
+  conditionPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#F0F0F0',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginBottom: 4,
+  },
+  conditionText: {
+    fontSize: 10,
+    color: '#666',
   },
   highlightedText: {
     backgroundColor: '#FFEAA7',
     color: '#1A1A1A',
     fontWeight: '600',
   },
-  conditionBadge: {
-    backgroundColor: 'rgba(0,0,0,0.05)',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
-    marginBottom: 4,
-  },
-  productCondition: {
-    fontSize: 11,
-    color: '#666',
-  },
-  productPrice: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#D4AF37',
-  },
-  addToCartButton: {
-    padding: 8,
-    borderRadius: 8,
-    backgroundColor: 'rgba(212,175,55,0.1)',
-    marginLeft: 4,
-  },
-  viewAllLink: {
+
+  // ── View All ──
+  viewAllRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 16,
-    marginTop: 8,
+    paddingVertical: 12,
+    marginHorizontal: CARD_PADDING,
     borderTopWidth: 1,
     borderTopColor: 'rgba(0,0,0,0.05)',
+    gap: 4,
   },
   viewAllText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#D4AF37',
     fontWeight: '600',
-    marginRight: 4,
+  },
+
+  // ── Seller Footer ──
+  sellerFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: CARD_PADDING,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.05)',
+    backgroundColor: '#FAFAFA',
+  },
+  sellerAvatar: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#D4AF37',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sellerInitial: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  sellerInfo: {
+    flex: 1,
+    marginLeft: 8,
+  },
+  sellerLabel: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#555',
+  },
+  sellerPrefix: {
+    fontWeight: '400',
+    color: '#999',
+  },
+  ratingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+    gap: 3,
+  },
+  ratingText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#92400E',
+  },
+  reviewText: {
+    fontSize: 11,
+    color: '#AAA',
+  },
+  sellerCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  sellerCtaCount: {
+    fontSize: 12,
+    color: '#D4AF37',
+    fontWeight: '500',
   },
 });
 
