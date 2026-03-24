@@ -140,8 +140,7 @@ const CategoryProductsScreen = () => {
 
     // Handle product press
     const handleProductPress = (productId: string) => {
-        //@ts-ignore
-        router.push(`/products/${productId}`);
+        router.push(`/product/${productId}`);
     };
 
     // Apply filters

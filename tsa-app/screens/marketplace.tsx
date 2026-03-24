@@ -247,14 +247,7 @@ const MarketplaceScreen: React.FC = () => {
                   const subcategoryId = `${item.id}-${subcategory}`;
                   setSelectedSubcategory(subcategoryId);
                   // Navigate to products list for this subcategory
-                  router.push({
-                    pathname: '/(dashboard)/(tabs)/(home)/subcategory/[subcategoryId]',
-                    params: {
-                      subcategoryId,
-                      categoryTitle: item.title,
-                      subcategoryName: subcategory
-                    }
-                  });
+                  router.push(`/subcategory/${subcategoryId}?categoryTitle=${encodeURIComponent(item.title)}&subcategoryName=${encodeURIComponent(subcategory)}`);
                 }}
                 activeOpacity={0.7}
               >
@@ -397,10 +390,7 @@ const MarketplaceScreen: React.FC = () => {
               onChangeText={setSearchQuery}
               onSubmitEditing={() => {
                 if (searchQuery.trim()) {
-                  router.push({
-                    pathname: '/(dashboard)/(tabs)/(home)/subcategory/[subcategoryId]',
-                    params: { subcategoryId: 'search', subcategoryName: searchQuery, categoryTitle: 'Search Results' }
-                  });
+                  router.push(`/subcategory/search?subcategoryName=${encodeURIComponent(searchQuery)}&categoryTitle=${encodeURIComponent('Search Results')}`);
                 }
               }}
             />

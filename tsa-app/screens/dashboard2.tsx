@@ -668,10 +668,15 @@ const Dashboard: React.FC = () => {
       } else {
         Alert.alert('Select Asset', 'Please select an asset first to perform a swap');
       }
-    } else {
-      // For other actions, navigate directly
-      //@ts-expect-error
-      router.push(`/${action}`);
+    } else if (action === 'product') {
+      router.push('/products');
+    } else if (action === 'services') {
+      router.push('/serviceshome');
+    } else if (action === 'trade') {
+      router.push('/trade');
+    } else if (action === 'more') {
+      // More options - could show a modal or navigate to settings
+      router.push('/(dashboard)/settings');
     }
   };
 

@@ -46,6 +46,18 @@ export default function Layout() {
           name="transfer"
           options={{ title: "Transfer" }}
         />
+        <Stack.Screen
+          name="product/[productId]"
+          options={{ title: "Product Details" }}
+        />
+        <Stack.Screen
+          name="seller/[sellerId]"
+          options={{ title: "Seller" }}
+        />
+        <Stack.Screen
+          name="subcategory/[subcategoryId]"
+          options={{ title: "Products" }}
+        />
       </Stack>
     </GestureHandlerRootView>
   );

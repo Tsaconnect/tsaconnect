@@ -47,11 +47,12 @@ export default function SellerCatalogueScreen() {
     categoryTitle
   });
 
-  const handleProductPress = useCallback((productId: string) => {
-    router.push({
-      pathname: '/product/[productId]',
-      params: { productId }
-    });
+  const handleProductPress = useCallback((productId: string, productData?: any) => {
+    if (productData) {
+      router.push(`/product/${productId}?productData=${encodeURIComponent(JSON.stringify(productData))}`);
+    } else {
+      router.push(`/product/${productId}`);
+    }
   }, [router]);
 
   const handleBackPress = useCallback(() => {
@@ -95,7 +96,7 @@ export default function SellerCatalogueScreen() {
   const renderProduct = useCallback(({ item }: { item: any }) => (
     <TouchableOpacity
       style={styles.productCard}
-      onPress={() => handleProductPress(item._id)}
+      onPress={() => handleProductPress(item._id || item.id, item)}
       activeOpacity={0.9}
     >
       <View style={styles.imageContainer}>

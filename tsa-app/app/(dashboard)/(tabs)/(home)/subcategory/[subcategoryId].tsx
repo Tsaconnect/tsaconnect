@@ -90,23 +90,17 @@ export default function SubcategorySellersScreen() {
 
   const handleSellerPress = useCallback(
     (sellerId: string, sellerEmail: string) => {
-      router.push({
-        pathname: '/seller/[sellerId]',
-        params: {
-          sellerId,
-          subcategoryId,
-          sellerEmail,
-        },
-      });
+      router.push(`/seller/${sellerId}?subcategoryId=${subcategoryId}&sellerEmail=${encodeURIComponent(sellerEmail)}`);
     },
     [router, subcategoryId]
   );
   const handleProductPress = useCallback(
-    (productId: string) => {
-      router.push({
-        pathname: '/product/[productId]',
-        params: { productId },
-      });
+    (productId: string, productData?: any) => {
+      if (productData) {
+        router.push(`/product/${productId}?productData=${encodeURIComponent(JSON.stringify(productData))}`);
+      } else {
+        router.push(`/product/${productId}`);
+      }
     },
     [router]
   );
