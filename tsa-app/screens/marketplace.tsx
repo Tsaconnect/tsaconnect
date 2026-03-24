@@ -1,4 +1,4 @@
-// app/screens/MarketplaceScreen.tsx
+// screens/marketplace.tsx
 import { router } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -12,147 +12,104 @@ import {
   TextInput,
   ActivityIndicator,
   RefreshControl,
+  Dimensions,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import TradeAndEarnScreen from './TradeAndEarnScreen';
 import DepositScreen from './fundfiat';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import api, { Category } from '@/components/services/api';
+import api from '@/components/services/api';
 
-// Gold color palette
-const GOLD_COLORS = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#28A745',
-};
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const GRID_GAP = 10;
+const GRID_PADDING = 20;
+const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
 
-interface CategoryData {
+interface CategoryItem {
   id: string;
   title: string;
+  description?: string;
   icon: string;
-  subcategories: string[];
+  color: string;
+  productCount: number;
+  children: CategoryItem[];
 }
 
-interface ApiCategoryData {
-  productCategories: CategoryData[];
-  serviceCategories: CategoryData[];
-}
+const ICON_MAP: Record<string, string> = {
+  'Agricultural & Food Products': 'agriculture',
+  'Raw Materials & Natural Resources': 'landslide',
+  'Electronics': 'devices',
+  'Electronics & Appliances': 'devices',
+  'Clothing & Fashion': 'checkroom',
+  'Home Goods': 'home',
+  'Automotive & Transportation': 'directions-car',
+  'Tools & Hardware': 'handyman',
+  'Digital & Virtual Products': 'cloud',
+  'Professional & Business Services': 'business-center',
+  'Personal Services': 'person',
+  'Farming & Environmental Services': 'grass',
+  'Home & Repair Services': 'home-repair-service',
+  'Shoes': 'directions-walk',
+  "Men's wears": 'checkroom',
+  "Women's wears": 'checkroom',
+  'Nuts & Seeds': 'eco',
+  'Food & Beverages': 'restaurant',
+};
 
 const MarketplaceScreen: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('products');
-  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
-  const [selectedSubcategory, setSelectedSubcategory] = useState<string | null>(null);
-
-  // State for API data
-  const [productCategories, setProductCategories] = useState<CategoryData[]>([]);
-  const [serviceCategories, setServiceCategories] = useState<CategoryData[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [selectedTab, setSelectedTab] = useState<string>('products');
+  const [categories, setCategories] = useState<CategoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Transform backend categories to frontend format
-  const transformBackendCategories = useCallback((categories: Category[]): CategoryData[] => {
-    // Map backend category type to icon
-    const getIconForCategory = (category: Category): string => {
-      const iconMap: Record<string, string> = {
-        'Agricultural & Food Products': 'agriculture',
-        'Raw Materials & Natural Resources': 'landslide',
-        'Electronics & Appliances': 'factory',
-        'Clothing & Fashion': 'checkroom',
-        'Home Goods': 'home',
-        'Automotive & Transportation': 'directions-car',
-        'Tools & Hardware': 'handyman',
-        'Digital & Virtual Products': 'devices',
-        'Professional & Business Services': 'business-center',
-        'Personal Services': 'person',
-        'Farming & Environmental Services': 'grass',
-        'Home & Repair Services': 'home-repair-service',
-      };
-
-      return iconMap[category.title] || 'category';
-    };
-
-    // Create subcategories from children categories or use default
-    const getSubcategories = (category: Category): string[] => {
-      if (category.children && category.children.length > 0) {
-        return category.children.map(child => child.title);
-      }
-
-      // If no children, return some default subcategories based on category type
-      const defaultSubcategories: Record<string, string[]> = {
-        'Agricultural & Food Products': [
-          'Grains', 'Vegetables', 'Fruits', 'Meat', 'Poultry', 'Seafood'
-        ],
-        'Electronics & Appliances': [
-          'Mobile Phones & Tablets', 'Computers & Accessories', 'TVs & Home Entertainment'
-        ],
-        // Add more defaults as needed
-      };
-
-      return defaultSubcategories[category.title] || ['Browse Products'];
-    };
-
-    return categories.map(category => ({
-      id: category._id,
-      title: category.title,
-      icon: getIconForCategory(category),
-      subcategories: getSubcategories(category),
+  const transformCategories = useCallback((raw: any[]): CategoryItem[] => {
+    return raw.map((cat) => ({
+      id: cat.id || cat._id,
+      title: cat.title,
+      description: cat.description || '',
+      icon: ICON_MAP[cat.title] || 'category',
+      color: cat.color || '#666',
+      productCount: cat.productCount || 0,
+      children: cat.children
+        ? cat.children.map((child: any) => ({
+            id: child.id || child._id,
+            title: child.title,
+            description: child.description || '',
+            icon: ICON_MAP[child.title] || 'label',
+            color: child.color || '#666',
+            productCount: child.productCount || 0,
+            children: [],
+          }))
+        : [],
     }));
   }, []);
 
-  // Fetch categories from backend
   const fetchCategories = useCallback(async (type: 'Product' | 'Service') => {
     try {
       setLoading(true);
       setError(null);
 
-      // Fetch categories from backend
-      const response = await api.getCategories({
-        type,
-        active: true,
-        parent: 'null' // Get only parent categories initially
-      });
+      const response = await api.getCategoryTree(type);
 
-      if (response.success) {
-        const categories = Array.isArray(response.data) ? response.data : response.data?.categories ?? [];
-        const transformedCategories = transformBackendCategories(categories);
-
-        if (type === 'Product') {
-          setProductCategories(transformedCategories);
-        } else {
-          setServiceCategories(transformedCategories);
-        }
+      if (response.success && response.data) {
+        const data = Array.isArray(response.data) ? response.data : [];
+        setCategories(transformCategories(data));
       } else {
         throw new Error(response.message || 'Failed to fetch categories');
       }
     } catch (err: any) {
       console.error('Error fetching categories:', err);
       setError(err.message || 'Failed to load categories');
-
-      // Fallback to dummy data if API fails
-      const fallbackData = type === 'Product' ?
-        require('@/data/dummyCategories').PRODUCT_CATEGORIES :
-        require('@/data/dummyCategories').SERVICE_CATEGORIES;
-
-      if (type === 'Product') {
-        setProductCategories(fallbackData);
-      } else {
-        setServiceCategories(fallbackData);
-      }
+      setCategories([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [transformBackendCategories]);
+  }, [transformCategories]);
 
-  // Load categories based on selected tab
-  // Load user role and refresh it from the server
   const refreshUserRole = useCallback(async () => {
     try {
       const token = await api.getStoredToken();
@@ -174,182 +131,46 @@ const MarketplaceScreen: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => {
-    refreshUserRole();
-  }, [refreshUserRole]);
+  useEffect(() => { refreshUserRole(); }, [refreshUserRole]);
 
   useEffect(() => {
-    if (selectedCategory === 'products') {
-      fetchCategories('Product');
-    } else if (selectedCategory === 'services') {
-      fetchCategories('Service');
-    }
-  }, [selectedCategory, fetchCategories]);
+    if (selectedTab === 'products') fetchCategories('Product');
+    else if (selectedTab === 'services') fetchCategories('Service');
+  }, [selectedTab, fetchCategories]);
 
-  // Handle refresh
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     refreshUserRole();
-    if (selectedCategory === 'products') {
-      fetchCategories('Product');
-    } else if (selectedCategory === 'services') {
-      fetchCategories('Service');
+    if (selectedTab === 'products') fetchCategories('Product');
+    else if (selectedTab === 'services') fetchCategories('Service');
+  }, [selectedTab, fetchCategories, refreshUserRole]);
+
+  const handleCategoryPress = (cat: CategoryItem) => {
+    // Always pass categoryId to use getProductsByCategoryTree which correctly filters
+    // The getProductsByCategory endpoint ignores subcategoryId and returns all products
+    router.push(`/subcategory/${cat.id}?categoryId=${cat.id}&categoryTitle=${encodeURIComponent(cat.title)}&subcategoryName=${encodeURIComponent(cat.title)}`);
+  };
+
+  const handleSearch = () => {
+    if (searchQuery.trim()) {
+      router.push(`/subcategory/search?subcategoryName=${encodeURIComponent(searchQuery)}&categoryTitle=${encodeURIComponent('Search Results')}`);
     }
-  }, [selectedCategory, fetchCategories, refreshUserRole]);
-
-  // Handle category expansion
-  const toggleCategory = (categoryId: string) => {
-    if (expandedCategory === categoryId) {
-      setExpandedCategory(null);
-      setSelectedSubcategory(null);
-    } else {
-      setExpandedCategory(categoryId);
-    }
   };
 
-  // Render product category item
-  const renderProductCategory = ({ item }: { item: CategoryData }) => {
-    const isExpanded = expandedCategory === item.id;
+  // ── Tabs ──
+  const TABS = [
+    { key: 'products', label: 'Products' },
+    { key: 'services', label: 'Services' },
+    { key: 'trade', label: 'Trade & Earn' },
+    { key: 'fundfiat', label: 'Buy USDT' },
+    { key: 'send', label: 'Sell USDT' },
+  ];
 
-    return (
-      <View style={styles.categoryCard}>
-        <TouchableOpacity
-          style={styles.categoryHeader}
-          onPress={() => toggleCategory(item.id)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.categoryIconContainer}>
-            <Icon name={item.icon as any} size={24} color={GOLD_COLORS.dark} />
-          </View>
-          <View style={styles.categoryInfo}>
-            <Text style={styles.categoryTitle}>{item.title}</Text>
-            <Text style={styles.categoryCount}>
-              {item.subcategories.length} subcategories
-            </Text>
-          </View>
-          <Icon
-            name={isExpanded ? 'expand-less' : 'expand-more'}
-            size={24}
-            color={GOLD_COLORS.dark}
-          />
-        </TouchableOpacity>
-
-        {isExpanded && (
-          <View style={styles.subcategoriesContainer}>
-            {item.subcategories.map((subcategory: string, index: number) => (
-              <TouchableOpacity
-                key={`${item.id}-${index}`}
-                style={[
-                  styles.subcategoryItem,
-                  selectedSubcategory === `${item.id}-${subcategory}` && styles.selectedSubcategory
-                ]}
-                onPress={() => {
-                  const subcategoryId = `${item.id}-${subcategory}`;
-                  setSelectedSubcategory(subcategoryId);
-                  // Navigate to products list for this subcategory
-                  router.push(`/subcategory/${subcategoryId}?categoryTitle=${encodeURIComponent(item.title)}&subcategoryName=${encodeURIComponent(subcategory)}`);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.subcategoryText}>{subcategory}</Text>
-                <Icon name="chevron-right" size={20} color="#666" />
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-      </View>
-    );
-  };
-
-  // Render service category item
-  const renderServiceCategory = ({ item }: { item: CategoryData }) => {
-    const isExpanded = expandedCategory === item.id;
-
-    return (
-      <View style={styles.categoryCard}>
-        <TouchableOpacity
-          style={styles.categoryHeader}
-          onPress={() => toggleCategory(item.id)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.categoryIconContainer}>
-            <Icon name={item.icon as any} size={24} color={GOLD_COLORS.dark} />
-          </View>
-          <View style={styles.categoryInfo}>
-            <Text style={styles.categoryTitle}>{item.title}</Text>
-            <Text style={styles.categoryCount}>
-              {item.subcategories.length} services
-            </Text>
-          </View>
-          <Icon
-            name={isExpanded ? 'expand-less' : 'expand-more'}
-            size={24}
-            color={GOLD_COLORS.dark}
-          />
-        </TouchableOpacity>
-
-        {isExpanded && (
-          <View style={styles.subcategoriesContainer}>
-            {item.subcategories.map((subcategory: string, index: number) => (
-              <TouchableOpacity
-                key={`${item.id}-${index}`}
-                style={[
-                  styles.subcategoryItem,
-                  selectedSubcategory === `${item.id}-${subcategory}` && styles.selectedSubcategory
-                ]}
-                onPress={() => {
-                  const subcategoryId = `${item.id}-${subcategory}`;
-                  setSelectedSubcategory(subcategoryId);
-                  // Navigate to services list for this subcategory
-                  router.push({
-                    pathname: '/(servicegroup)/categoryservice',
-                    params: {
-                      categoryId: item.id,
-                      categoryTitle: item.title,
-                      subcategoryName: subcategory
-                    }
-                  });
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.subcategoryText}>{subcategory}</Text>
-                <Icon name="chevron-right" size={20} color="#666" />
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-      </View>
-    );
-  };
-
-  // Loading state
-  if (loading && !refreshing) {
+  // ── Loading ──
+  if (loading && !refreshing && (selectedTab === 'products' || selectedTab === 'services')) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator size="large" color={GOLD_COLORS.primary} />
-        <Text style={styles.loadingText}>Loading categories...</Text>
-      </View>
-    );
-  }
-
-  // Error state
-  if (error && !loading) {
-    return (
-      <View style={[styles.container, styles.centered]}>
-        <Icon name="error-outline" size={64} color={GOLD_COLORS.error} />
-        <Text style={styles.errorText}>{error}</Text>
-        <TouchableOpacity
-          style={styles.retryButton}
-          onPress={() => {
-            if (selectedCategory === 'products') {
-              fetchCategories('Product');
-            } else {
-              fetchCategories('Service');
-            }
-          }}
-        >
-          <Text style={styles.retryButtonText}>Retry</Text>
-        </TouchableOpacity>
+        <ActivityIndicator size="large" color="#D4AF37" />
       </View>
     );
   }
@@ -357,618 +178,250 @@ const MarketplaceScreen: React.FC = () => {
   return (
     <View style={styles.container}>
       <ScrollView
-        style={styles.scrollContainer}
+        style={styles.scroll}
+        showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            colors={[GOLD_COLORS.primary]}
-            tintColor={GOLD_COLORS.primary}
-          />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
         }
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => router.back()}
-            style={styles.backButton}
-          >
-            <Icon name="arrow-back" size={24} color="#000000" />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Marketplace</Text>
-        </View>
-
-        {/* Search Bar */}
-        <View style={styles.searchContainer}>
+        {/* Search */}
+        <View style={styles.searchWrap}>
           <View style={styles.searchBar}>
-            <Icon name="search" size={20} color="#666" />
+            <Icon name="search" size={20} color="#999" />
             <TextInput
               style={styles.searchInput}
               placeholder="Search products or services..."
-              placeholderTextColor="#999"
+              placeholderTextColor="#AAA"
               value={searchQuery}
               onChangeText={setSearchQuery}
-              onSubmitEditing={() => {
-                if (searchQuery.trim()) {
-                  router.push(`/subcategory/search?subcategoryName=${encodeURIComponent(searchQuery)}&categoryTitle=${encodeURIComponent('Search Results')}`);
-                }
-              }}
+              onSubmitEditing={handleSearch}
+              returnKeyType="search"
             />
             {searchQuery.length > 0 && (
               <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Icon name="close" size={20} color="#666" />
+                <Icon name="close" size={18} color="#999" />
               </TouchableOpacity>
             )}
           </View>
-
-          {/* Filter Buttons */}
-          <View style={styles.filterRow}>
-            <TouchableOpacity
-              style={[
-                styles.filterButton,
-                styles.locationButton,
-              ]}
-              onPress={() => Alert.alert('Coming Soon', 'Location filtering will be available soon.')}
-            >
-              <Icon name="location-on" size={16} color={GOLD_COLORS.dark} />
-              <Text style={styles.filterButtonText}>Location</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.filterButton,
-                styles.categoryButton,
-              ]}
-              onPress={() => Alert.alert('Coming Soon', 'All categories view will be available soon.')}
-            >
-              <Icon name="category" size={16} color={GOLD_COLORS.dark} />
-              <Text style={styles.filterButtonText}>All Categories</Text>
-            </TouchableOpacity>
-          </View>
         </View>
 
-        {/* Category Tabs */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              selectedCategory === 'products' && styles.activeTab
-            ]}
-            onPress={() => setSelectedCategory('products')}
-          >
-            <Text style={[
-              styles.tabText,
-              selectedCategory === 'products' && styles.activeTabText
-            ]}>
-              Products
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              selectedCategory === 'services' && styles.activeTab
-            ]}
-            onPress={() => setSelectedCategory('services')}
-          >
-            <Text style={[
-              styles.tabText,
-              selectedCategory === 'services' && styles.activeTabText
-            ]}>
-              Services
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              selectedCategory === 'trade' && styles.activeTab
-            ]}
-            onPress={() => setSelectedCategory('trade')}
-          >
-            <Text style={styles.tabText}>
-              Trade&Earn
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              selectedCategory === 'fundfiat' && styles.activeTab
-            ]}
-            onPress={() => setSelectedCategory('fundfiat')}
-          >
-            <Text style={styles.tabText}>
-              Buy USDT
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              selectedCategory === 'send' && styles.activeTab
-            ]}
-            onPress={() => setSelectedCategory('send')}
-          >
-            <Text style={styles.tabText}>
-              Sell USDT
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Sub-tabs for Products */}
-        {selectedCategory === 'products' && (
-          <View style={styles.subTabContainer}>
+        {/* Tabs */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
+          {TABS.map((tab) => (
             <TouchableOpacity
-              style={[
-                styles.subTab,
-                selectedSubcategory === 'general' && styles.activeSubTab
-              ]}
-              onPress={() => setSelectedSubcategory('general')}
+              key={tab.key}
+              style={[styles.tab, selectedTab === tab.key && styles.tabActive]}
+              onPress={() => setSelectedTab(tab.key)}
             >
-              <Text style={[
-                styles.subTabText,
-                selectedSubcategory === 'general' && styles.activeSubTabText
-              ]}>
-                General Products
+              <Text style={[styles.tabText, selectedTab === tab.key && styles.tabTextActive]}>
+                {tab.label}
               </Text>
             </TouchableOpacity>
+          ))}
+        </ScrollView>
 
-            <TouchableOpacity
-              style={[
-                styles.subTab,
-                selectedSubcategory === 'digital' && styles.activeSubTab
-              ]}
-              onPress={() => setSelectedSubcategory('digital')}
-            >
-              <Text style={[
-                styles.subTabText,
-                selectedSubcategory === 'digital' && styles.activeSubTabText
-              ]}>
-                Digital Products
-              </Text>
-            </TouchableOpacity>
+        {/* Content */}
+        {(selectedTab === 'products' || selectedTab === 'services') && (
+          <View style={styles.content}>
+            {error && (
+              <TouchableOpacity style={styles.errorBanner} onPress={onRefresh}>
+                <Icon name="error-outline" size={16} color="#DC2626" />
+                <Text style={styles.errorText}>{error}</Text>
+                <Text style={styles.errorRetry}>Tap to retry</Text>
+              </TouchableOpacity>
+            )}
+
+            {categories.length === 0 && !loading ? (
+              <View style={styles.emptyState}>
+                <Icon name="category" size={48} color="#CCC" />
+                <Text style={styles.emptyText}>No categories found</Text>
+              </View>
+            ) : (
+              <View style={styles.categoryGrid}>
+                {categories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={styles.categoryTile}
+                    onPress={() => handleCategoryPress(cat)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[styles.categoryIcon, { backgroundColor: `${cat.color}15` }]}>
+                      <Icon name={cat.icon as any} size={26} color={cat.color === '#666666' ? '#D4AF37' : cat.color} />
+                    </View>
+                    <Text style={styles.categoryTitle} numberOfLines={2}>{cat.title}</Text>
+                    {cat.productCount > 0 && (
+                      <Text style={styles.categoryCount}>
+                        {cat.productCount} {cat.productCount === 1 ? 'item' : 'items'}
+                      </Text>
+                    )}
+                    {cat.children && cat.children.length > 0 && (
+                      <Text style={styles.categorySubcount}>
+                        {cat.children.length} subcategories
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {/* Quick Access */}
+            <Text style={styles.sectionTitle}>Quick Access</Text>
+            <View style={styles.quickAccessGrid}>
+              {[
+                { key: 'featured', label: 'Featured', icon: 'star', color: '#D4AF37', bg: 'rgba(212,175,55,0.12)' },
+                { key: 'deals', label: 'Deals', icon: 'local-offer', color: '#16A34A', bg: 'rgba(22,163,74,0.12)' },
+                { key: 'trending', label: 'Trending', icon: 'trending-up', color: '#3B82F6', bg: 'rgba(59,130,246,0.12)' },
+                { key: 'nearby', label: 'Nearby', icon: 'near-me', color: '#8B5CF6', bg: 'rgba(139,92,246,0.12)' },
+              ].map((item) => (
+                <TouchableOpacity
+                  key={item.key}
+                  style={styles.quickAccessTile}
+                  onPress={() => router.push(`/subcategory/${item.key}?subcategoryName=${encodeURIComponent(item.label)}&categoryTitle=${encodeURIComponent(item.label)}`)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.quickAccessIcon, { backgroundColor: item.bg }]}>
+                    <Icon name={item.icon as any} size={28} color={item.color} />
+                  </View>
+                  <Text style={styles.quickAccessLabel}>{item.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Merchant Banner */}
+            {userRole === 'merchant' ? (
+              <TouchableOpacity style={styles.merchantBanner} onPress={() => router.push('/merchants/dashboard')} activeOpacity={0.8}>
+                <Icon name="storefront" size={28} color="#16A34A" />
+                <View style={styles.bannerInfo}>
+                  <Text style={styles.bannerTitle}>Merchant Dashboard</Text>
+                  <Text style={styles.bannerDesc}>Manage products, orders & inventory</Text>
+                </View>
+                <Icon name="chevron-right" size={22} color="#16A34A" />
+              </TouchableOpacity>
+            ) : userRole !== 'admin' && userRole !== 'superadmin' ? (
+              <TouchableOpacity style={[styles.merchantBanner, styles.becomeBanner]} onPress={() => router.push('/merchants/merchant-request')} activeOpacity={0.8}>
+                <Icon name="store" size={28} color="#D4AF37" />
+                <View style={styles.bannerInfo}>
+                  <Text style={[styles.bannerTitle, { color: '#8B6914' }]}>Become a Merchant</Text>
+                  <Text style={styles.bannerDesc}>Sell your products & services</Text>
+                </View>
+                <Icon name="chevron-right" size={22} color="#D4AF37" />
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
 
-        {/* Main Content */}
-        <View style={styles.content}>
-          {selectedCategory === 'products' && (
-            <>
-              {productCategories.length === 0 ? (
-                <View style={styles.emptyState}>
-                  <Icon name="category" size={64} color="#999" />
-                  <Text style={styles.emptyStateText}>No product categories found</Text>
-                </View>
-              ) : (
-                <View>
-                  {productCategories.map((item, index) => (
-                    <View key={item.id || item.title || index.toString()}>
-                      {renderProductCategory({ item })}
-                    </View>
-                  ))}
-                </View>
-              )}
-            </>
-          )}
+        {selectedTab === 'trade' && <TradeAndEarnScreen />}
+        {selectedTab === 'fundfiat' && <DepositScreen />}
+        {selectedTab === 'send' && <TradeAndEarnScreen />}
 
-          {selectedCategory === 'services' && (
-            <>
-              {serviceCategories.length === 0 ? (
-                <View style={styles.emptyState}>
-                  <Icon name="miscellaneous-services" size={64} color="#999" />
-                  <Text style={styles.emptyStateText}>No service categories found</Text>
-                </View>
-              ) : (
-                <View>
-                  {serviceCategories.map((item, index) => (
-                    <View key={item.id || item.title || index.toString()}>
-                      {renderServiceCategory({ item })}
-                    </View>
-                  ))}
-                </View>
-              )}
-            </>
-          )}
-
-          {selectedCategory === 'trade' && (
-            <TradeAndEarnScreen />
-          )}
-
-          {selectedCategory === 'fundfiat' && (
-            <DepositScreen />
-          )}
-
-          {selectedCategory === 'send' && (
-            <TradeAndEarnScreen />
-          )}
-
-          {/* Quick Links */}
-          {(selectedCategory === 'products' || selectedCategory === 'services') && (
-            <View style={styles.quickLinksContainer}>
-              <Text style={styles.quickLinksTitle}>Quick Access</Text>
-
-              <View style={styles.quickLinksGrid}>
-                <TouchableOpacity
-                  style={styles.quickLink}
-                  onPress={() => Alert.alert('Coming Soon', 'Featured listings will be available soon.')}
-                >
-                  <View style={[styles.quickLinkIcon, { backgroundColor: '#FFF3E0' }]}>
-                    <Icon name="star" size={24} color="#F57C00" />
-                  </View>
-                  <Text style={styles.quickLinkText}>Featured</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.quickLink}
-                  onPress={() => Alert.alert('Coming Soon', 'Deals will be available soon.')}
-                >
-                  <View style={[styles.quickLinkIcon, { backgroundColor: '#E8F5E9' }]}>
-                    <Icon name="local-offer" size={24} color="#2E7D32" />
-                  </View>
-                  <Text style={styles.quickLinkText}>Deals</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.quickLink}
-                  onPress={() => Alert.alert('Coming Soon', 'Trending listings will be available soon.')}
-                >
-                  <View style={[styles.quickLinkIcon, { backgroundColor: '#E3F2FD' }]}>
-                    <Icon name="trending-up" size={24} color="#1976D2" />
-                  </View>
-                  <Text style={styles.quickLinkText}>Trending</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.quickLink}
-                  onPress={() => Alert.alert('Coming Soon', 'Nearby listings will be available soon.')}
-                >
-                  <View style={[styles.quickLinkIcon, { backgroundColor: '#F3E5F5' }]}>
-                    <Icon name="near-me" size={24} color="#7B1FA2" />
-                  </View>
-                  <Text style={styles.quickLinkText}>Nearby</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {/* Merchant Banner - role-aware */}
-          {(selectedCategory === 'products' || selectedCategory === 'services') && (
-            userRole === 'merchant' ? (
-              <TouchableOpacity
-                style={[styles.merchantBanner, { backgroundColor: '#E8F5E9', borderColor: '#4CAF50' }]}
-                onPress={() => router.push('/merchants/dashboard')}
-                activeOpacity={0.8}
-              >
-                <View style={styles.bannerContent}>
-                  <Icon name="storefront" size={32} color="#2E7D32" />
-                  <View style={styles.bannerText}>
-                    <Text style={[styles.bannerTitle, { color: '#2E7D32' }]}>Merchant Dashboard</Text>
-                    <Text style={styles.bannerDescription}>
-                      Manage your products, orders & inventory
-                    </Text>
-                  </View>
-                  <Icon name="chevron-right" size={24} color="#2E7D32" />
-                </View>
-              </TouchableOpacity>
-            ) : userRole === 'admin' || userRole === 'superadmin' ? null : (
-              <TouchableOpacity
-                style={styles.merchantBanner}
-                onPress={() => router.push('/merchants/merchant-request')}
-                activeOpacity={0.8}
-              >
-                <View style={styles.bannerContent}>
-                  <Icon name="store" size={32} color="#000000" />
-                  <View style={styles.bannerText}>
-                    <Text style={styles.bannerTitle}>Become a Merchant</Text>
-                    <Text style={styles.bannerDescription}>
-                      Sell your products & services on our platform
-                    </Text>
-                  </View>
-                  <Icon name="chevron-right" size={24} color="#000000" />
-                </View>
-              </TouchableOpacity>
-            )
-          )}
-        </View>
+        <View style={{ height: 40 }} />
       </ScrollView>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD_COLORS.background,
-  },
-  scrollContainer: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 10 : 20,
-    paddingBottom: 20,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  backButton: {
-    padding: 8,
-    marginRight: 12,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  searchContainer: {
-    backgroundColor: '#FFFFFF',
-    padding: 20,
-  },
+  container: { flex: 1, backgroundColor: '#F5F5F7' },
+  scroll: { flex: 1 },
+  centered: { justifyContent: 'center', alignItems: 'center' },
+
+  // Search
+  searchWrap: { backgroundColor: '#FFF', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 16 },
   searchBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginBottom: 16,
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#F5F5F5', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 12 : 8,
   },
-  searchInput: {
-    flex: 1,
-    fontSize: 16,
-    color: '#000000',
-    marginLeft: 12,
-    marginRight: 12,
-  },
-  filterRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  filterButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    flex: 1,
-    justifyContent: 'center',
-  },
-  locationButton: {
-    backgroundColor: '#FFF8E1',
-  },
-  categoryButton: {
-    backgroundColor: '#E8F5E9',
-  },
-  filterButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-    marginLeft: 6,
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 20,
-    paddingTop: 12,
-  },
+  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A', marginLeft: 10 },
+
+  // Tabs
+  tabRow: { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#FFF', gap: 6 },
   tab: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
+    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20,
+    backgroundColor: '#F5F5F5',
   },
-  activeTab: {
-    borderBottomColor: GOLD_COLORS.primary,
+  tabActive: { backgroundColor: '#D4AF37' },
+  tabText: { fontSize: 13, fontWeight: '600', color: '#888' },
+  tabTextActive: { color: '#FFF' },
+
+  // Content
+  content: { padding: GRID_PADDING },
+
+  // Error
+  errorBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 16,
   },
-  tabText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#666666',
+  errorText: { flex: 1, fontSize: 13, color: '#DC2626' },
+  errorRetry: { fontSize: 12, color: '#DC2626', fontWeight: '600' },
+
+  // Empty
+  emptyState: { alignItems: 'center', padding: 40 },
+  emptyText: { marginTop: 12, fontSize: 15, color: '#AAA' },
+
+  // Category Grid
+  categoryGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP,
   },
-  activeTabText: {
-    color: '#000000',
-    fontWeight: '800',
-  },
-  subTabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 16,
-  },
-  subTab: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: GOLD_COLORS.light,
-    marginRight: 12,
-  },
-  activeSubTab: {
-    backgroundColor: GOLD_COLORS.primary,
-  },
-  subTabText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#666666',
-  },
-  activeSubTabText: {
-    color: '#000000',
-  },
-  content: {
-    padding: 20,
-  },
-  categoryCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    marginBottom: 16,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  categoryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 20,
-  },
-  categoryIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: GOLD_COLORS.light,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  categoryInfo: {
-    flex: 1,
-  },
-  categoryTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  categoryCount: {
-    fontSize: 14,
-    color: '#666666',
-  },
-  subcategoriesContainer: {
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
+  categoryTile: {
+    width: TILE_WIDTH,
+    backgroundColor: '#FFF',
+    borderRadius: 14,
     padding: 16,
-  },
-  subcategoryItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    marginBottom: 4,
-  },
-  selectedSubcategory: {
-    backgroundColor: GOLD_COLORS.light,
-  },
-  subcategoryText: {
-    fontSize: 16,
-    color: '#666666',
-  },
-  quickLinksContainer: {
-    marginTop: 24,
-    marginBottom: 24,
-  },
-  quickLinksTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 16,
-  },
-  quickLinksGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  quickLink: {
-    width: '48%',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
     shadowRadius: 4,
     elevation: 2,
   },
-  quickLinkIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    justifyContent: 'center',
-    alignItems: 'center',
+  categoryIcon: {
+    width: 48, height: 48, borderRadius: 14,
+    justifyContent: 'center', alignItems: 'center',
     marginBottom: 12,
   },
-  quickLinkText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#000000',
-    textAlign: 'center',
+  categoryTitle: {
+    fontSize: 14, fontWeight: '700', color: '#1A1A1A',
+    lineHeight: 18, marginBottom: 4,
   },
-  merchantBanner: {
-    backgroundColor: GOLD_COLORS.primary,
-    borderRadius: 16,
-    padding: 24,
-    marginTop: 20,
-  },
-  bannerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  bannerText: {
-    flex: 1,
-    marginLeft: 16,
-  },
-  bannerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  bannerDescription: {
-    fontSize: 14,
-    color: '#000000',
-    opacity: 0.8,
-  },
-  centered: {
-    justifyContent: 'center',
-    alignItems: 'center',
+  categoryCount: { fontSize: 12, color: '#D4AF37', fontWeight: '500' },
+  categorySubcount: { fontSize: 11, color: '#AAA', marginTop: 2 },
+
+  // Quick Access
+  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginTop: 24, marginBottom: 12 },
+  quickAccessGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
+  quickAccessTile: {
+    width: TILE_WIDTH,
+    backgroundColor: '#FFF',
+    borderRadius: 14,
     padding: 20,
-  },
-  loadingText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
-  },
-  errorText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: GOLD_COLORS.error,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  retryButton: {
-    backgroundColor: GOLD_COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  retryButtonText: {
-    color: '#000000',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  emptyState: {
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 40,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+    elevation: 2,
   },
-  emptyStateText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: '#999',
-    textAlign: 'center',
+  quickAccessIcon: {
+    width: 56, height: 56, borderRadius: 28,
+    justifyContent: 'center', alignItems: 'center',
+    marginBottom: 10,
   },
+  quickAccessLabel: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
+
+  // Merchant Banner
+  merchantBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: '#F0FDF4', borderRadius: 14,
+    padding: 18, marginTop: 20,
+    borderWidth: 1, borderColor: '#BBF7D0',
+  },
+  becomeBanner: {
+    backgroundColor: 'rgba(212,175,55,0.08)',
+    borderColor: 'rgba(212,175,55,0.2)',
+  },
+  bannerInfo: { flex: 1 },
+  bannerTitle: { fontSize: 15, fontWeight: '700', color: '#16A34A', marginBottom: 2 },
+  bannerDesc: { fontSize: 12, color: '#888' },
 });
 
 export default MarketplaceScreen;

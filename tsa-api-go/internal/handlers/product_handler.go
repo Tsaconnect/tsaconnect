@@ -108,7 +108,13 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 				continue
 			}
 
+			if result.URL == "" {
+				log.Printf("Cloudinary upload returned empty URL for file %s", fileHeader.Filename)
+				continue
+			}
+
 			uploadedImages = append(uploadedImages, models.ProductImage{
+				ID:       uuid.New(),
 				URL:      result.URL,
 				PublicID: result.PublicID,
 				Order:    i,
@@ -340,11 +346,13 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 		for i, fileHeader := range form.File["images"] {
 			file, err := fileHeader.Open()
 			if err != nil {
+				log.Printf("Error opening file: %v", err)
 				continue
 			}
 			fileData, err := io.ReadAll(file)
 			file.Close()
 			if err != nil {
+				log.Printf("Error reading file: %v", err)
 				continue
 			}
 
@@ -354,7 +362,13 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 				continue
 			}
 
+			if result.URL == "" {
+				log.Printf("Cloudinary upload returned empty URL for file %s", fileHeader.Filename)
+				continue
+			}
+
 			newImages = append(newImages, models.ProductImage{
+				ID:       uuid.New(),
 				URL:      result.URL,
 				PublicID: result.PublicID,
 				Order:    i,

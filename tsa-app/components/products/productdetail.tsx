@@ -75,7 +75,12 @@ const ProductDetail = ({ item }) => {
     return stars;
   };
 
-  const images = item?.images?.split(",") || [];
+  const images: string[] = Array.isArray(item?.images)
+    ? item.images
+        .filter((img: any) => img.url && img.url.startsWith("http"))
+        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
+        .map((img: any) => img.url)
+    : [];
 
   return (
     <ScrollView style={styles.container}>
@@ -144,9 +149,8 @@ const ProductDetail = ({ item }) => {
             {isMore && (
               <>
                 <View style={styles.productInfoContainer}>
-                  {item.attributes
-                    .split(",")
-                    ?.map((attribute: any, index: number) => (
+                  {(Array.isArray(item.attributes) ? item.attributes : [])
+                    .map((attribute: any, index: number) => (
                       <View style={styles.productInfoRow} key={index}>
                         <Text style={styles.productInfoTitle}>
                           {attribute.name}:{" "}
@@ -179,7 +183,7 @@ const ProductDetail = ({ item }) => {
                 </Text>
               </View>
 
-              {item.reviews.split(",").map((review: any, index: number) => (
+              {(Array.isArray(item.reviews) ? item.reviews : []).map((review: any, index: number) => (
                 <View key={index} style={styles.review}>
                   <View style={styles.reviewHeader}>
                     <View style={{ flexDirection: "row" }}>

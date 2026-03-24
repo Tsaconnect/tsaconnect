@@ -65,6 +65,11 @@ func UploadToCloudinary(cfg *config.Config, fileData []byte, folder string) (*Up
 		return nil, fmt.Errorf("failed to upload to Cloudinary: %w", err)
 	}
 
+	if result.SecureURL == "" {
+		return nil, fmt.Errorf("cloudinary upload returned empty URL (cloud: %s, folder: %s, error: %s)",
+			cfg.CloudinaryCloudName, folder, result.Error.Message)
+	}
+
 	return &UploadResult{
 		URL:      result.SecureURL,
 		PublicID: result.PublicID,

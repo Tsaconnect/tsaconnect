@@ -100,9 +100,13 @@ export function useSubcategoryProducts({
             setError(null);
 
             // Determine if we're fetching by subcategory or category tree
+            // Prefer categoryId (parent category) over subcategoryId when both are present
             let response;
 
-            if (subcategoryId) {
+            if (categoryId) {
+                // Fetch products by category tree (includes all subcategories)
+                response = await api.getProductsByCategoryTree(categoryId, true);
+            } else if (subcategoryId) {
                 // Fetch products by specific subcategory
                 response = await api.getProductsByCategory({
                     subcategoryId,
@@ -119,29 +123,17 @@ export function useSubcategoryProducts({
                     sortOrder: sort === 'price_high' ? 'desc' : 'asc',
                     status: 'active',
                 });
-            } else if (categoryId) {
-                // Fetch products by category tree (includes all subcategories)
-                response = await api.getProductsByCategoryTree(categoryId, true);
             }
 
             if (response?.success && response.data) {
-                if (subcategoryId) {
-                    const data = response.data as any;
-                    setProducts(data.products || []);
-                    setCategoryInfo(data.category);
-                    setTotalProducts(data.pagination?.total || data.products?.length || 0);
-                    setHasMore(data.pagination?.page < data.pagination?.pages);
-
-                    // Group products by seller
-                    const groupedSellers = groupProductsBySeller(data.products || []);
-                    setSellers(groupedSellers);
-                } else {
+                if (categoryId) {
                     const data = response.data as any;
                     // Flatten all products from all subcategories
                     const allProducts: Product[] = [];
                     if (data.groupedBySubcategory) {
-                        Object.values(data.groupedBySubcategory).forEach((subcatProducts: any) => {
-                            allProducts.push(...subcatProducts);
+                        Object.values(data.groupedBySubcategory).forEach((group: any) => {
+                            const items = Array.isArray(group) ? group : group?.products || [];
+                            allProducts.push(...items);
                         });
                     }
                     setProducts(allProducts);
@@ -151,6 +143,16 @@ export function useSubcategoryProducts({
 
                     // Group products by seller
                     const groupedSellers = groupProductsBySeller(allProducts);
+                    setSellers(groupedSellers);
+                } else {
+                    const data = response.data as any;
+                    setProducts(data.products || []);
+                    setCategoryInfo(data.category);
+                    setTotalProducts(data.pagination?.total || data.products?.length || 0);
+                    setHasMore(data.pagination?.page < data.pagination?.pages);
+
+                    // Group products by seller
+                    const groupedSellers = groupProductsBySeller(data.products || []);
                     setSellers(groupedSellers);
                 }
             } else {
