@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from 'react';
 import {
   StyleSheet,
   View,
@@ -6,41 +6,43 @@ import {
   TouchableOpacity,
   TextInput,
   Alert,
-} from "react-native";
-import { Avatar } from "react-native-elements";
-import { Picker } from "@react-native-picker/picker";
-import { useRouter } from "expo-router";
-import { COLORS, SIZES } from "../../constants";
-import { countries } from "../../constants/api/statesConstants";
+} from 'react-native';
+import { Avatar } from 'react-native-elements';
+import { useRouter } from 'expo-router';
+import { COLORS, SIZES } from '../../constants';
+import LocationPicker from '../common/LocationPicker';
 
-import PhoneNumber from "../country/phoneNumber";
-import axios from "axios";
-import { baseUrl } from "../../constants/api/apiClient";
-import { useAuth } from "../../AuthContext/AuthContext";
-import * as ImagePicker from "expo-image-picker";
-import { generateFileName } from "../../constants/api/filename";
-import Icon from "@expo/vector-icons/FontAwesome";
+import PhoneNumber from '../country/phoneNumber';
+import axios from 'axios';
+import { baseUrl } from '../../constants/api/apiClient';
+import { useAuth } from '../../AuthContext/AuthContext';
+import * as ImagePicker from 'expo-image-picker';
+import { generateFileName } from '../../constants/api/filename';
+import Icon from '@expo/vector-icons/FontAwesome';
 //@ts-ignore
 const EditProfileScreen = ({ user }) => {
   const { token } = useAuth();
   const [name, setName] = useState(user.name);
   const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber);
-  const [country, setCountry] = useState(user.country);
-  const [countryList, setCountries] = useState(countries);
+  const [location, setLocation] = useState({
+    country: user.country || '',
+    state: user.state || '',
+    city: user.city || '',
+  });
   const [selectedCountry, setSelectedCountry] = useState();
   const [profileImage, setProfileImage] = useState(user.profilePicture);
   const [imageUri, setImageUri] = useState(null);
 
   const router = useRouter();
 
-  const removeAllSpaces = (str: string) => str.replace(/\s+/g, "");
+  const removeAllSpaces = (str: string) => str.replace(/\s+/g, '');
 
   const pickImageAsync = async () => {
     try {
       const { status } =
         await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== "granted") {
-        alert("Permission to access media library denied");
+      if (status !== 'granted') {
+        alert('Permission to access media library denied');
         return;
       }
 
@@ -55,10 +57,10 @@ const EditProfileScreen = ({ user }) => {
         //@ts-ignore
         setImageUri(result.assets[0].uri);
       } else {
-        alert("You did not select any image.");
+        alert('You did not select any image.');
       }
     } catch (error) {
-      console.error("Error picking image:", error);
+      console.error('Error picking image:', error);
     }
   };
 
@@ -66,20 +68,23 @@ const EditProfileScreen = ({ user }) => {
     const formData = new FormData();
     if (imageUri) {
       //@ts-ignore
-      formData.append("profilePicture", {
+      formData.append('profilePicture', {
         uri: imageUri,
-        type: "image/jpeg",
+        type: 'image/jpeg',
         name: `image_${generateFileName()}.jpg`,
       });
     }
 
-    formData.append("name", name);
+    formData.append('name', name);
     formData.append(
-      "phoneNumber",
+      'phoneNumber',
       //@ts-ignore
-      removeAllSpaces(selectedCountry?.callingCode + phoneNumber) || phoneNumber
+      removeAllSpaces(selectedCountry?.callingCode + phoneNumber) ||
+        phoneNumber,
     );
-    formData.append("country", country);
+    formData.append('country', location.country);
+    formData.append('state', location.state);
+    formData.append('city', location.city);
 
     try {
       const { data } = await axios.patch(
@@ -88,16 +93,16 @@ const EditProfileScreen = ({ user }) => {
         {
           headers: {
             Authorization: `${token}`,
-            "Content-Type": "multipart/form-data",
+            'Content-Type': 'multipart/form-data',
           },
-        }
+        },
       );
-      alert("Information Successfully changed");
-      router.push("/profile");
+      alert('Information Successfully changed');
+      router.push('/profile');
     } catch (error: any) {
       Alert.alert(
-        "Error",
-        "Failed to update. " + error?.response?.data?.message || error.message
+        'Error',
+        'Failed to update. ' + error?.response?.data?.message || error.message,
       );
     }
   };
@@ -113,8 +118,8 @@ const EditProfileScreen = ({ user }) => {
               rounded
               title={user.name[0]}
               size="large"
-              overlayContainerStyle={{ backgroundColor: "#9D6B38" }}
-              titleStyle={{ color: "#fff" }}
+              overlayContainerStyle={{ backgroundColor: '#9D6B38' }}
+              titleStyle={{ color: '#fff' }}
             />
           )}
           <TouchableOpacity
@@ -133,18 +138,11 @@ const EditProfileScreen = ({ user }) => {
           onChangeText={setName}
         />
 
-        <View style={styles.pickerContainer}>
-          <Picker
-            style={styles.picker}
-            selectedValue={country}
-            onValueChange={(itemValue) => setCountry(itemValue)}
-          >
-            <Picker.Item label={"Select Country"} value={""} />
-            {countryList.map((item, index) => (
-              <Picker.Item key={index} label={item} value={item} />
-            ))}
-          </Picker>
-        </View>
+        <LocationPicker
+          value={location}
+          onChange={setLocation}
+          required={['country']}
+        />
 
         <PhoneNumber
           inputValue={phoneNumber}
@@ -168,14 +166,14 @@ const EditProfileScreen = ({ user }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: "center",
+    justifyContent: 'center',
     padding: 20,
-    backgroundColor: "#fff",
+    backgroundColor: '#fff',
   },
   input: {
     width: SIZES.width * 0.9,
     height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
+    borderColor: 'gray',
     borderWidth: 1,
     marginTop: 10,
     padding: 10,
@@ -183,56 +181,41 @@ const styles = StyleSheet.create({
     marginHorizontal: SIZES.width * 0.05,
   },
   buttonContainer: {
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   button: {
     backgroundColor: COLORS.primary,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: 'center',
+    justifyContent: 'center',
     height: 45,
     borderRadius: 5,
     width: SIZES.width * 0.9,
   },
   buttonText: {
-    color: "#fff",
+    color: '#fff',
     fontSize: 16,
   },
   profileInfo: {
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: 'center',
+    justifyContent: 'center',
     marginTop: 15,
   },
   uploadContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     marginTop: 10,
   },
   uploadText: {
     marginLeft: 10,
-    color: "#aaa",
-  },
-  pickerContainer: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    borderWidth: 1,
-    marginTop: 10,
-    padding: 0,
-    borderRadius: 10,
-    marginHorizontal: SIZES.width * 0.05,
-    justifyContent: "center",
-  },
-  picker: {
-    width: "100%",
-    height: "100%",
+    color: '#aaa',
   },
   cover: {
-    position: "absolute",
+    position: 'absolute',
     top: SIZES.height * 0.1212,
     marginBottom: 15,
-    backgroundColor: "#FFF",
+    backgroundColor: '#FFF',
   },
 });
 

@@ -16,8 +16,7 @@ import { router } from "expo-router";
 import { LinearProgress } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
 import PhoneNumber from "../country/phoneNumber";
-import { countries } from "../../constants/api/statesConstants";
-import CustomPickerWithSearch from "../country/dropdown";
+import LocationPicker from "../common/LocationPicker";
 import Icon from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { generateWallet, storePrivateKey, storeMnemonic } from "../../services/wallet";
@@ -39,8 +38,6 @@ const Signup = () => {
   const [confirmPassword, setConfirmPassword] = useState("");
   const { loading, setLoading, signup } = useAuth();
   const [selectedCountry, setSelectedCountry] = useState<Country | null>(null);
-  const [countryList] = useState(countries || []);
-
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isError, setIsError] = useState(false);
@@ -171,12 +168,12 @@ const Signup = () => {
           />
 
           {/* Country Picker */}
-          <CustomPickerWithSearch
-            data={countryList}
-            selectedItem={country}
-            setSelectedItem={setCountry}
-            postData={() => {}}
-            backgroundColor="#f9f9f9"
+          <LocationPicker
+            value={{ country, state: "", city: "" }}
+            onChange={({ country: c }) => setCountry(c)}
+            fields={["country"]}
+            required={["country"]}
+            showLabels={false}
           />
 
           {/* Email */}

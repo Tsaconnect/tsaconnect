@@ -24,6 +24,7 @@ import {
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
+import LocationPicker from "@/components/common/LocationPicker";
 
 type CheckoutStep = 'review' | 'signing' | 'success';
 type SigningPhase =
@@ -53,6 +54,12 @@ const CheckoutScreen = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [completedOrders, setCompletedOrders] = useState<string[]>([]);
   const [signingError, setSigningError] = useState<string | null>(null);
+  const [editingAddress, setEditingAddress] = useState(false);
+  const [shippingLocation, setShippingLocation] = useState({
+    country: "",
+    state: "",
+    city: "",
+  });
 
   const loadCart = useCallback(async () => {
     setLoading(true);
@@ -80,6 +87,14 @@ const CheckoutScreen = () => {
     loadCart();
   }, [loadCart]);
 
+  useEffect(() => {
+    setShippingLocation({
+      country: currentUser?.country || "",
+      state: currentUser?.state || "",
+      city: currentUser?.city || "",
+    });
+  }, [currentUser]);
+
   const getProductData = (item: CartItem): { name: string; imageUrl: string | null; productId: string } => {
     if (typeof item.product === 'object') {
       const product = item.product as Product;
@@ -94,15 +109,22 @@ const CheckoutScreen = () => {
   };
 
   const shippingName = currentUser?.name || currentUser?.username || '';
-  const shippingAddress = cartData?.shippingAddress || {
+  const shippingAddress = {
     address: currentUser?.address || '',
-    city: currentUser?.city || '',
-    state: currentUser?.state || '',
-    country: currentUser?.country || '',
+    city: shippingLocation.city,
+    state: shippingLocation.state,
+    country: shippingLocation.country,
   };
 
   // --- Main escrow checkout flow ---
   const handleCreateOrders = async () => {
+    // Validate shipping address
+    if (!shippingLocation.country || !shippingLocation.state) {
+      Alert.alert('Shipping Address Required', 'Please set your shipping country and state before checking out.');
+      setEditingAddress(true);
+      return;
+    }
+
     if (!cartData || cartData.cart.items.length === 0) {
       Alert.alert('Empty Cart', 'Add items to your cart before checking out.');
       return;
@@ -115,9 +137,9 @@ const CheckoutScreen = () => {
 
     try {
       // Step 1: Create orders
-      const buyerCity = shippingAddress.city || '';
-      const buyerState = shippingAddress.state || '';
-      const buyerCountry = shippingAddress.country || '';
+      const buyerCity = shippingLocation.city;
+      const buyerState = shippingLocation.state;
+      const buyerCountry = shippingLocation.country;
 
       const createResult = await createOrders(selectedToken, buyerCity, buyerState, buyerCountry);
       if (!createResult.success || !createResult.data?.orders) {
@@ -435,9 +457,19 @@ const CheckoutScreen = () => {
                 <Ionicons name="location-outline" size={20} color="#8B5A2B" />
                 <Text style={styles.sectionTitle}>Shipping Address</Text>
               </View>
+              <TouchableOpacity onPress={() => setEditingAddress(!editingAddress)}>
+                <Text style={{ color: '#8B5A2B', fontWeight: '600' }}>
+                  {editingAddress ? 'Done' : 'Edit'}
+                </Text>
+              </TouchableOpacity>
             </View>
             <View style={styles.card}>
-              {shippingName ? (
+              {editingAddress ? (
+                <LocationPicker
+                  value={shippingLocation}
+                  onChange={setShippingLocation}
+                />
+              ) : (
                 <>
                   <Text style={styles.cardBoldText}>{shippingName}</Text>
                   {shippingAddress.address ? (
@@ -448,11 +480,14 @@ const CheckoutScreen = () => {
                       .filter(Boolean)
                       .join(', ')}
                   </Text>
+                  {!shippingAddress.country && (
+                    <TouchableOpacity onPress={() => setEditingAddress(true)}>
+                      <Text style={{ color: '#8B5A2B', fontWeight: '600', marginTop: 8 }}>
+                        Add shipping address
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </>
-              ) : (
-                <Text style={styles.cardText}>
-                  No shipping address on file. Please update your profile.
-                </Text>
               )}
             </View>
           </View>

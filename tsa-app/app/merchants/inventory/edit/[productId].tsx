@@ -21,6 +21,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
+import LocationPicker from "../../../../components/common/LocationPicker";
 
 const { width } = Dimensions.get('window');
 
@@ -77,7 +78,7 @@ const EditProduct = () => {
   const [stock, setStock] = useState('0');
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
-  const [location, setLocation] = useState('');
+  const [location, setLocation] = useState({ country: "", state: "", city: "" });
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -133,7 +134,12 @@ const EditProduct = () => {
         setDescription(product.description || '');
         setPrice(product.price?.toString() || '');
         setStock(product.stock?.toString() || '0');
-        setLocation(product.location || '');
+        const parts = (product.location || "").split(", ");
+        setLocation({
+          city: parts.length >= 3 ? parts[0] : "",
+          state: parts.length >= 2 ? parts[parts.length - 2] : "",
+          country: parts.length >= 1 ? parts[parts.length - 1] : "",
+        });
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
         setCompanyName(product.companyName || '');
@@ -260,7 +266,8 @@ const EditProduct = () => {
     if (!stock.trim()) newErrors.stock = 'Stock is required';
     if (isNaN(parseInt(stock)) || parseInt(stock) < 0) newErrors.stock = 'Stock must be non-negative';
     if (!categoryId) newErrors.category = 'Category is required';
-    if (!location.trim()) newErrors.location = 'Location is required';
+    if (!location.country) newErrors.location = 'Country is required';
+    else if (!location.state) newErrors.location = 'State is required';
     if (!phoneNumber.trim()) newErrors.phoneNumber = 'Phone number is required';
     if (!email.trim()) newErrors.email = 'Email is required';
     if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = 'Invalid email';
@@ -299,7 +306,7 @@ const EditProduct = () => {
       formData.append('price', parseFloat(price).toString());
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', location);
+      formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
@@ -585,16 +592,10 @@ const EditProduct = () => {
               </View>
 
               <View style={styles.formGroup}>
-                <Text style={styles.label}>Location *</Text>
-                <TextInput
-                  ref={locationRef}
-                  style={[styles.input, errors.location && styles.inputError]}
-                  placeholder="Enter location"
-                  placeholderTextColor={COLORS.textLighter}
+                <LocationPicker
                   value={location}
-                  onChangeText={setLocation}
-                  returnKeyType="next"
-                  onSubmitEditing={() => phoneRef.current?.focus()}
+                  onChange={setLocation}
+                  required={["country", "state"]}
                 />
                 {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
               </View>
