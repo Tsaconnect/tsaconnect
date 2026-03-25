@@ -23,7 +23,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 
 	// API group with rate limiter
 	api := router.Group("/api")
-	api.Use(middleware.RateLimiter(100, 15*time.Minute))
+	api.Use(middleware.RateLimiter(500, 15*time.Minute))
 
 	auth := middleware.Auth(cfg)
 	adminAuth := middleware.AdminAuth(cfg)

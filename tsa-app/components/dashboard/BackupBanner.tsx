@@ -6,47 +6,89 @@ import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const BackupBanner: React.FC = () => {
-  const [visible, setVisible] = useState(false);
+  const [bannerType, setBannerType] = useState<'none' | 'no_wallet' | 'backup'>(
+    'none',
+  );
 
   useEffect(() => {
     (async () => {
       try {
+        const walletAddress = await AsyncStorage.getItem('walletAddress');
+
+        // No wallet at all — prompt to create one
+        if (!walletAddress) {
+          setBannerType('no_wallet');
+          return;
+        }
+
+        // Wallet exists — check if seed phrase backed up
         const backedUp = await AsyncStorage.getItem('seedPhraseBackedUp');
         if (backedUp === 'true') return;
         const dismissed = await AsyncStorage.getItem('backupBannerDismissed');
         if (dismissed === 'true') return;
         const remindAt = await AsyncStorage.getItem('backupBannerRemindAt');
         if (remindAt && Date.now() < parseInt(remindAt, 10)) return;
-        setVisible(true);
+        setBannerType('backup');
       } catch {}
     })();
   }, []);
 
-  if (!visible) return null;
+  if (bannerType === 'none') return null;
 
   const handleRemindTomorrow = async () => {
-    setVisible(false);
-    await AsyncStorage.setItem('backupBannerRemindAt', (Date.now() + 86400000).toString());
+    setBannerType('none');
+    await AsyncStorage.setItem(
+      'backupBannerRemindAt',
+      (Date.now() + 86400000).toString(),
+    );
   };
 
   const handleNever = async () => {
-    setVisible(false);
+    setBannerType('none');
     await AsyncStorage.setItem('backupBannerDismissed', 'true');
   };
 
+  // No wallet banner
+  if (bannerType === 'no_wallet') {
+    return (
+      <Pressable
+        style={[styles.banner, styles.walletBanner]}
+        onPress={() => router.push('/wallet/home')}
+      >
+        <View style={styles.content}>
+          <Icon name="account-balance-wallet" size={20} color="#1E40AF" />
+          <Text style={[styles.text, styles.walletText]}>
+            Set up your wallet to make purchases and receive cashback
+          </Text>
+        </View>
+        <Icon name="chevron-right" size={20} color="#1E40AF" />
+      </Pressable>
+    );
+  }
+
+  // Backup banner
   return (
     <View style={styles.banner}>
-      <Pressable style={styles.content} onPress={() => router.push('/wallet/seedphrase')}>
+      <Pressable
+        style={styles.content}
+        onPress={() => router.push('/wallet/seedphrase')}
+      >
         <Icon name="shield" size={20} color="#92400E" />
-        <Text style={styles.text}>Back up your seed phrase to protect your funds</Text>
+        <Text style={styles.text}>
+          Back up your seed phrase to protect your funds
+        </Text>
       </Pressable>
       <Pressable
         onPress={() =>
-          Alert.alert('Dismiss Reminder', 'When would you like to be reminded?', [
-            { text: 'Remind Tomorrow', onPress: handleRemindTomorrow },
-            { text: 'Never', style: 'destructive', onPress: handleNever },
-            { text: 'Cancel', style: 'cancel' },
-          ])
+          Alert.alert(
+            'Dismiss Reminder',
+            'When would you like to be reminded?',
+            [
+              { text: 'Remind Tomorrow', onPress: handleRemindTomorrow },
+              { text: 'Never', style: 'destructive', onPress: handleNever },
+              { text: 'Cancel', style: 'cancel' },
+            ],
+          )
         }
         style={styles.close}
         hitSlop={8}
@@ -69,8 +111,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#FDE68A',
   },
+  walletBanner: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+  },
   content: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
   text: { flex: 1, fontSize: 13, color: '#92400E', fontWeight: '500' },
+  walletText: { color: '#1E40AF' },
   close: { marginLeft: 8 },
 });
 

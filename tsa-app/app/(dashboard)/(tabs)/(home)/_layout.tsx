@@ -12,7 +12,7 @@ export default function Layout() {
         />
         <Stack.Screen
           name="checkout/index"
-          options={{ title: "Checkout" }}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="fund"
