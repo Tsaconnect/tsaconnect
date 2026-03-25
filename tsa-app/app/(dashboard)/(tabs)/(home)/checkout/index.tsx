@@ -23,6 +23,7 @@ import {
 } from '@/components/services/cart';
 import {
   createOrders,
+  prepareApprove,
   prepareEscrow,
   submitEscrow,
   formatTokenAmount,
@@ -186,26 +187,30 @@ const CheckoutScreen = () => {
         setCurrentOrderIndex(i);
         const order = newOrders[i];
 
-        setSigningPhase('preparing_escrow');
+        // Step A: Prepare & broadcast approve tx
+        setSigningPhase('approving_token');
+        const approveResult = await prepareApprove(order.id);
+        if (!approveResult.success || !approveResult.data) {
+          throw new Error(approveResult.message || 'Failed to prepare approval');
+        }
+
+        let approveTxHash: string;
+        try {
+          approveTxHash = await signAndBroadcast(approveResult.data.approveTx);
+        } catch (e: any) {
+          throw new Error(`Token approval failed: ${e.message}`);
+        }
+
+        // Step B: Prepare escrow tx (after approve is on-chain, so gas estimation works)
+        setSigningPhase('creating_escrow');
         const escrowResult = await prepareEscrow(order.id);
         if (!escrowResult.success || !escrowResult.data) {
           throw new Error(escrowResult.message || 'Failed to prepare escrow');
         }
 
-        const { approveTx, createOrderTx } = escrowResult.data;
-
-        setSigningPhase('approving_token');
-        let approveTxHash: string;
-        try {
-          approveTxHash = await signAndBroadcast(approveTx);
-        } catch (e: any) {
-          throw new Error(`Token approval failed: ${e.message}`);
-        }
-
-        setSigningPhase('creating_escrow');
         let escrowTxHash: string;
         try {
-          escrowTxHash = await signAndBroadcast(createOrderTx);
+          escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx);
         } catch (e: any) {
           throw new Error(
             `Approved (tx: ${approveTxHash.slice(0, 10)}...) but escrow failed: ${e.message}. Check your orders.`,

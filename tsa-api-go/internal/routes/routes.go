@@ -154,6 +154,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderGroup.GET("", ch.GetUserOrders)
 		orderGroup.GET("/shipping-estimate", ch.GetShippingEstimate)
 		orderGroup.GET("/:id", ch.GetOrderDetail)
+		orderGroup.POST("/:id/prepare-approve", ch.PrepareApprove)
 		orderGroup.POST("/:id/prepare-escrow", ch.PrepareEscrow)
 		orderGroup.POST("/:id/submit-escrow", ch.SubmitEscrow)
 		orderGroup.POST("/:id/deliver", ch.MarkDelivered)

@@ -58,6 +58,7 @@ func GenerateOrderID(dbOrderID uuid.UUID) [32]byte {
 }
 
 // PrepareCreateOrder encodes the createOrder call and builds an UnsignedTx.
+// Must be called AFTER the buyer has broadcast the approve tx, so gas estimation works.
 func (s *EscrowService) PrepareCreateOrder(orderId [32]byte, buyer, seller, token string, productAmount, shippingAmount *big.Int, upline string) ([]byte, error) {
 	sellerAddr := common.HexToAddress(seller)
 	tokenAddr := common.HexToAddress(token)
@@ -146,13 +147,12 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
 	return empty, fmt.Errorf("OrderCreated event not found in receipt")
 }
 
-// buildUnsignedTx creates an UnsignedTx JSON for the escrow contract.
+// buildUnsignedTx creates an UnsignedTx JSON for the escrow contract with real gas estimation.
 func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, error) {
 	if s.client == nil {
 		if s.cfg != nil && s.cfg.Env == "production" {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
-		// Return a minimal tx in non-production (e.g. tests) with valid ABI-encoded data
 		tx := blockchain.UnsignedTx{
 			To:    s.escrowAddress,
 			Value: "0",
