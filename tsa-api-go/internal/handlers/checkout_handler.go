@@ -473,6 +473,11 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		upline = "0x0000000000000000000000000000000000000000"
 	}
 
+	log.Printf("[PrepareEscrow] buyer=%s seller=%s token=%s product=%s shipping=%s platformFee=%s approve=%s escrow=%s upline=%s",
+		user.WalletAddress, seller.WalletAddress, tokenAddr,
+		productAmount.String(), shippingAmount.String(), order.PlatformFee,
+		approveAmount.String(), ch.Config.ProductEscrowAddress, upline)
+
 	createOrderTxBytes, err := ch.EscrowService.PrepareCreateOrder(
 		contractOrderID,
 		user.WalletAddress,
