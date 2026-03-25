@@ -6,79 +6,91 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  Modal,
-  ToastAndroid,
+  Alert,
+  Platform,
+  KeyboardAvoidingView,
+  ActivityIndicator,
 } from "react-native";
-import React, { useState, useEffect, useCallback } from "react";
-import { COLORS, SIZES } from "../../constants/theme";
-import Icon from "@expo/vector-icons/FontAwesome";
+import React, { useState, useEffect } from "react";
+import Icon from "react-native-vector-icons/MaterialIcons";
 import * as ImagePicker from "expo-image-picker";
-import { LinearProgress } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { Picker } from "@react-native-picker/picker";
-import { baseUrl } from "../../constants/api/apiClient";
 import axios from "axios";
-import { ADVERT_TYPE_SERVICE } from "../../constants/constantValues";
+import { baseUrl } from "../../constants/api/apiClient";
+import LocationPicker, { LocationValue } from "../common/LocationPicker";
+
+const GOLD = {
+  primary: '#FFD700',
+  dark: '#B8860B',
+  light: '#FFF8DC',
+  muted: '#F5DEB3',
+  bg: '#FAF9F6',
+};
 
 const AddService = () => {
-  const [productImages, setProductImages] = useState([]);
+  const { token, setLoading, loading } = useAuth();
+  const [productImages, setProductImages] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [productName, setProductName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [email, setEmail] = useState("");
-  const [location, setLocation] = useState("");
+  const [location, setLocation] = useState<LocationValue>({ country: '', state: '', city: '' });
   const [category, setCategory] = useState("");
-  const [companyName, setCompanyName] = useState();
-  const { setLoading, loading, token } = useAuth();
+  const [companyName, setCompanyName] = useState("");
+  const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
+  const maxDescriptionLength = 500;
 
-  const [isModalVisible, setIsModalVisible] = useState(false);
-  const [categories, setCategories] = useState([]);
-  const maxDescriptionLength = 100;
-
-  const delay = useCallback((duration: number) => {
-    return new Promise((resolve) => setTimeout(resolve, duration));
-  }, []);
+  useEffect(() => {
+    const fetchCategories = async () => {
+      try {
+        const response = await axios.get(
+          `${baseUrl}/products/category/all?type=Service&active=true`,
+          { headers: { Authorization: token } }
+        );
+        const data = response.data.data;
+        setCategories(Array.isArray(data) ? data : []);
+      } catch (error) {
+        // Categories will show empty picker
+      }
+    };
+    if (token) fetchCategories();
+  }, [token]);
 
   const pickProductImages = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") {
-      ToastAndroid.show(
-        "Permission to access media library denied!",
-        ToastAndroid.SHORT
-      );
+      Alert.alert("Permission Required", "Please allow access to your photo library.");
       return;
     }
 
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
-      quality: 1,
+      quality: 0.8,
       allowsMultipleSelection: true,
     });
 
     if (!result.canceled) {
-      //@ts-ignore
       setProductImages(result.assets.map((asset) => asset.uri));
-    } else {
-      ToastAndroid.show("You did not select any images!", ToastAndroid.SHORT);
     }
+  };
+
+  const removeImage = (index: number) => {
+    setProductImages(prev => prev.filter((_, i) => i !== index));
   };
 
   const createService = async () => {
     if (
       !productName ||
-      !location ||
+      !location.country ||
+      !location.state ||
       !phoneNumber ||
       !email ||
       !category ||
       !description ||
       productImages.length === 0
     ) {
-      await delay(3000);
-      setIsModalVisible(true);
-      ToastAndroid.show(
-        "Please fill all the fields and upload images!",
-        ToastAndroid.SHORT
-      );
+      Alert.alert("Missing Fields", "Please fill all required fields and upload at least one image.");
       return;
     }
     setLoading(true);
@@ -94,15 +106,15 @@ const AddService = () => {
 
     formData.append("name", productName);
     formData.append("description", description);
-    formData.append("location", location);
-    formData.append("type", ADVERT_TYPE_SERVICE);
+    formData.append("location", [location.city, location.state, location.country].filter(Boolean).join(', '));
+    formData.append("type", "Service");
     formData.append("email", email);
     //@ts-ignore
     formData.append("price", 0);
     formData.append("phoneNumber", phoneNumber);
     formData.append("category", category);
-    //@ts-ignore
     formData.append("companyName", companyName);
+
     try {
       const response = await axios.post(`${baseUrl}/adverts`, formData, {
         headers: {
@@ -112,27 +124,12 @@ const AddService = () => {
       });
       if (response) {
         setLoading(false);
-        setIsModalVisible(true);
-        ToastAndroid.show(
-          "Please fill all the fields and upload images!",
-          ToastAndroid.SHORT
-        );
-        await delay(2000);
-        setIsModalVisible(false);
+        Alert.alert("Success", "Service listed successfully!");
         resetForm();
       }
     } catch (error: any) {
       setLoading(false);
-      setIsModalVisible(true);
-
-      ToastAndroid.show(
-        `Error Creating Service: ${
-          error.response?.data?.message || "An error occurred"
-        }`,
-        ToastAndroid.SHORT
-      );
-      await delay(4000);
-      setIsModalVisible(false);
+      Alert.alert("Error", error.response?.data?.message || "Failed to create service.");
     }
   };
 
@@ -141,137 +138,165 @@ const AddService = () => {
     setCategory("");
     setDescription("");
     setEmail("");
-    setLocation("");
+    setLocation({ country: '', state: '', city: '' });
     setProductImages([]);
     setProductName("");
+    setCompanyName("");
   };
 
-  useEffect(() => {
-    const fetchCategories = async () => {
-      try {
-        const response = await axios.get(`${baseUrl}/category?type=Service`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        }); // Adjust the endpoint based on your API
-        const fetchedCategories = response.data.results;
-        setCategories(fetchedCategories);
-      } catch (error) {}
-    };
-    if (token) fetchCategories();
-  }, [token]);
-
   return (
-    <ScrollView style={styles.cover}>
-      <Modal visible={isModalVisible} style={styles.modal} transparent={true}>
-        <TouchableOpacity
-          onPress={() => {
-            setIsModalVisible(false);
-          }}
-          style={styles.closeButton}
-        >
-          <Text style={styles.closeButtonText}>Close</Text>
-        </TouchableOpacity>
-      </Modal>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <Text style={styles.title}>Add Service</Text>
+        <Text style={styles.subtitle}>Fill in the details to list your service</Text>
 
-      <Text style={styles.label}>Enter service name</Text>
-      <TextInput
-        style={styles.input}
-        value={productName}
-        onChangeText={setProductName}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Location</Text>
-      <TextInput
-        style={styles.input}
-        value={location}
-        onChangeText={setLocation}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid phone number</Text>
-      <TextInput
-        style={styles.input}
-        value={phoneNumber}
-        onChangeText={setPhoneNumber}
-        keyboardType="phone-pad"
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid Email</Text>
-      <TextInput
-        style={styles.input}
-        value={email}
-        onChangeText={setEmail}
-        keyboardType="email-address"
-      />
-      <Text style={styles.label}>Company Name</Text>
-      <TextInput
-        style={styles.input}
-        value={companyName}
-        //@ts-ignore
-        onChangeText={setCompanyName}
-      />
-      <Text style={styles.label}>Type of Service</Text>
-      <Picker
-        style={styles.input}
-        selectedValue={category}
-        onValueChange={(itemValue) => setCategory(itemValue)}
-      >
-        <Picker.Item label={"Select Category"} value={""} />
-        {categories.map((item, index) => (
-          <Picker.Item
-            key={index}
-            //@ts-ignore
-            label={item.title}
-            //@ts-ignore
-            value={item.id}
+        {/* Image Upload */}
+        <Text style={styles.sectionTitle}>Photos</Text>
+        <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
+          <Icon name="add-a-photo" size={32} color={GOLD.dark} />
+          <Text style={styles.imageUploadText}>Tap to upload images</Text>
+          <Text style={styles.imageUploadHint}>Showcase your service with quality photos</Text>
+        </TouchableOpacity>
+
+        {productImages.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
+            {productImages.map((uri, index) => (
+              <View key={index} style={styles.imagePreviewWrapper}>
+                <Image source={{ uri }} style={styles.imagePreview} />
+                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
+                  <Icon name="close" size={16} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+
+        {/* Service Details */}
+        <Text style={styles.sectionTitle}>Service Details</Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Service Name *</Text>
+          <TextInput
+            style={styles.input}
+            value={productName}
+            onChangeText={setProductName}
+            placeholder="e.g. Plumbing & Pipe Repair"
+            placeholderTextColor="#bbb"
           />
-        ))}
-      </Picker>
-
-      <Text style={styles.label}>Upload Quality service images</Text>
-      <View style={styles.multipleImageContainer}>
-        <TouchableOpacity onPress={pickProductImages}>
-          <Icon name="upload" size={25} color="#aaa" />
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.imageContainer}>
-        {productImages &&
-          productImages.map((uri, index) => (
-            <Image key={index} source={{ uri }} style={styles.uploadedImage} />
-          ))}
-      </View>
-      <View style={styles.textAreaContainer}>
-        <TextInput
-          style={styles.textArea}
-          placeholder="Description"
-          placeholderTextColor="grey"
-          numberOfLines={10}
-          multiline={true}
-          maxLength={maxDescriptionLength}
-          value={description}
-          onChangeText={setDescription}
-        />
-        <Text style={styles.charCount}>
-          {description.length}/{maxDescriptionLength}
-        </Text>
-      </View>
-      {loading && (
-        <View style={styles.progressContainer}>
-          <LinearProgress color={COLORS.primary} />
-          <Text style={styles.loadingText}>Submitting...</Text>
         </View>
-      )}
-      <View style={{ alignItems: "center" }}>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Category *</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={category}
+              onValueChange={(val) => setCategory(val)}
+              style={styles.picker}
+            >
+              <Picker.Item label="Select a category" value="" color="#bbb" />
+              {categories.map((item) => (
+                <Picker.Item key={item.id} label={item.title} value={item.id} />
+              ))}
+            </Picker>
+          </View>
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Description *</Text>
+          <TextInput
+            style={styles.textArea}
+            placeholder="Describe your service, expertise, and what clients can expect..."
+            placeholderTextColor="#bbb"
+            numberOfLines={5}
+            multiline
+            maxLength={maxDescriptionLength}
+            value={description}
+            onChangeText={setDescription}
+            textAlignVertical="top"
+          />
+          <Text style={styles.charCount}>
+            {description.length}/{maxDescriptionLength}
+          </Text>
+        </View>
+
+        {/* Contact & Location */}
+        <Text style={styles.sectionTitle}>Contact & Location</Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Company Name</Text>
+          <TextInput
+            style={styles.input}
+            value={companyName}
+            onChangeText={setCompanyName}
+            placeholder="Your business name"
+            placeholderTextColor="#bbb"
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <LocationPicker
+            value={location}
+            onChange={setLocation}
+            required={["country", "state"]}
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Phone Number *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={phoneNumber}
+              onChangeText={setPhoneNumber}
+              keyboardType="phone-pad"
+              placeholder="+234 800 000 0000"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Email *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              placeholder="you@example.com"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+        </View>
+
+        {/* Submit */}
+        {loading && (
+          <View style={{ marginTop: 16 }}>
+            <ActivityIndicator size="small" color={GOLD.dark} />
+            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
+          </View>
+        )}
+
         <TouchableOpacity
-          style={[styles.button, loading && styles.buttonLoading]}
+          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
           onPress={createService}
           disabled={loading}
+          activeOpacity={0.8}
         >
-          <Text style={styles.buttonText}>Continue</Text>
+          <Icon name="publish" size={22} color="#000" />
+          <Text style={styles.submitBtnText}>Publish Service</Text>
         </TouchableOpacity>
-      </View>
-    </ScrollView>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -279,148 +304,143 @@ export default AddService;
 
 const styles = StyleSheet.create({
   container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
+    flex: 1,
+    backgroundColor: GOLD.bg,
+    paddingHorizontal: 20,
   },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
+  title: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#000',
+    marginTop: 20,
   },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 30,
+  subtitle: {
+    fontSize: 14,
+    color: '#999',
+    marginTop: 4,
+    marginBottom: 24,
   },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
+    marginTop: 24,
+    marginBottom: 12,
   },
-  cover: {
-    top: 10,
-    marginBottom: 15,
-    backgroundColor: COLORS.white,
+  inputGroup: {
+    marginBottom: 16,
   },
   label: {
-    marginHorizontal: SIZES.width * 0.05,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#555',
+    marginBottom: 6,
   },
-  priceRangeContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-  priceInput: {
-    flex: 1,
-  },
-  priceSeparator: {
-    marginHorizontal: 10,
-  },
-  multipleImageContainer: {
-    alignItems: "center",
-    backgroundColor: COLORS.gray,
-    width: SIZES.width * 0.9,
-    height: 0.285407725 * SIZES.height,
-    marginHorizontal: SIZES.width * 0.05,
-    justifyContent: "center",
-    marginBottom: 20,
-  },
-  uploadedImage: {
-    width: 100,
-    height: 100,
-    resizeMode: "contain",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  imageContainer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-  },
-  textAreaContainer: {
-    width: SIZES.width * 0.9,
-    borderColor: "gray",
+  input: {
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderRadius: 5,
-    padding: 10,
-    backgroundColor: "#f9f9f9",
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    fontSize: 15,
+    color: '#000',
+  },
+  inputWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
+  },
+  pickerWrapper: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  picker: {
+    marginHorizontal: 4,
   },
   textArea: {
-    height: 150,
-    justifyContent: "flex-start",
-    textAlignVertical: "top",
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 15,
+    color: '#000',
+    minHeight: 120,
   },
   charCount: {
-    textAlign: "right",
-    color: "gray",
+    textAlign: 'right',
+    color: '#bbb',
     fontSize: 12,
+    marginTop: 4,
   },
-  progressContainer: {
-    marginTop: 20,
-    alignItems: "center",
+  imageUploadArea: {
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: GOLD.muted,
+    borderStyle: 'dashed',
+    borderRadius: 16,
+    paddingVertical: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
+  imageUploadText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: GOLD.dark,
+    marginTop: 8,
   },
-  buttonLoading: {
-    backgroundColor: "#d4ba92", // Change to your desired color when loading
+  imageUploadHint: {
+    fontSize: 12,
+    color: '#bbb',
+    marginTop: 4,
   },
-  dropdown: {
-    width: "90%",
-    height: 50,
-    borderColor: "#ccc",
-    borderWidth: 1,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
+  imagePreviewRow: {
+    marginTop: 12,
+    marginBottom: 4,
   },
-  dropdownContainer: {
-    borderColor: "#ccc",
-    borderWidth: 1,
+  imagePreviewWrapper: {
+    marginRight: 10,
+    position: 'relative',
   },
-  icon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+  imagePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#eee',
   },
-  placeholderIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#ccc",
+  imageRemoveBtn: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  modal: {
-    justifyContent: "center",
-    alignContent: "center",
-    alignItems: "center",
-    width: "50%",
-    height: "55%",
+  submitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: GOLD.primary,
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginTop: 24,
+    gap: 8,
   },
-  closeButton: {
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 10,
-    backgroundColor: COLORS.primary,
-    borderRadius: 5,
-  },
-  closeButtonText: {
-    color: "#fff",
-    fontSize: 16,
+  submitBtnText: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
   },
 });

@@ -338,49 +338,78 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 		}
 	}
 
-	// Handle new image uploads
+	// Handle image updates
+	// existingImages is a JSON array of URLs the client wants to keep
+	existingImagesStr := c.PostForm("existingImages")
 	form, _ := c.MultipartForm()
-	if form != nil && form.File["images"] != nil && len(form.File["images"]) > 0 {
-		// Delete old images from Cloudinary
-		for _, img := range product.GetImages() {
-			if img.PublicID != "" {
+	hasNewFiles := form != nil && form.File["images"] != nil && len(form.File["images"]) > 0
+	hasExistingImages := existingImagesStr != ""
+
+	if hasNewFiles || hasExistingImages {
+		oldImages := product.GetImages()
+
+		// Parse the URLs the client wants to keep
+		keepURLs := map[string]bool{}
+		if hasExistingImages {
+			var urls []string
+			if err := json.Unmarshal([]byte(existingImagesStr), &urls); err == nil {
+				for _, u := range urls {
+					keepURLs[u] = true
+				}
+			}
+		}
+
+		// Keep existing images whose URLs are in the keep list, delete the rest
+		var keptImages []models.ProductImage
+		for _, img := range oldImages {
+			if keepURLs[img.URL] {
+				keptImages = append(keptImages, img)
+			} else if img.PublicID != "" {
 				_ = middleware.DeleteFromCloudinary(h.Config, img.PublicID)
 			}
 		}
 
-		var newImages []models.ProductImage
-		for i, fileHeader := range form.File["images"] {
-			file, err := fileHeader.Open()
-			if err != nil {
-				log.Printf("Error opening file: %v", err)
-				continue
-			}
-			fileData, err := io.ReadAll(file)
-			file.Close()
-			if err != nil {
-				log.Printf("Error reading file: %v", err)
-				continue
-			}
+		// Upload new image files
+		if hasNewFiles {
+			for _, fileHeader := range form.File["images"] {
+				file, err := fileHeader.Open()
+				if err != nil {
+					log.Printf("Error opening file: %v", err)
+					continue
+				}
+				fileData, err := io.ReadAll(file)
+				file.Close()
+				if err != nil {
+					log.Printf("Error reading file: %v", err)
+					continue
+				}
 
-			result, err := middleware.UploadToCloudinary(h.Config, fileData, "products")
-			if err != nil {
-				log.Printf("Cloudinary upload error: %v", err)
-				continue
-			}
+				result, err := middleware.UploadToCloudinary(h.Config, fileData, "products")
+				if err != nil {
+					log.Printf("Cloudinary upload error: %v", err)
+					continue
+				}
 
-			if result.URL == "" {
-				log.Printf("Cloudinary upload returned empty URL for file %s", fileHeader.Filename)
-				continue
-			}
+				if result.URL == "" {
+					log.Printf("Cloudinary upload returned empty URL for file %s", fileHeader.Filename)
+					continue
+				}
 
-			newImages = append(newImages, models.ProductImage{
-				ID:       uuid.New(),
-				URL:      result.URL,
-				PublicID: result.PublicID,
-				Order:    i,
-			})
+				keptImages = append(keptImages, models.ProductImage{
+					ID:       uuid.New(),
+					URL:      result.URL,
+					PublicID: result.PublicID,
+					Order:    len(keptImages),
+				})
+			}
 		}
-		imagesJSON, _ := json.Marshal(newImages)
+
+		// Re-number order for all images
+		for i := range keptImages {
+			keptImages[i].Order = i
+		}
+
+		imagesJSON, _ := json.Marshal(keptImages)
 		updates["images"] = imagesJSON
 	}
 

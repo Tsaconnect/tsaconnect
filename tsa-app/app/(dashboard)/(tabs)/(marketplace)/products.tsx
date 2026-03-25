@@ -22,10 +22,7 @@ const Products = () => {
         const fetchedCategories = response.data.results;
         setCategories(fetchedCategories);
       } catch (error) {
-        alert(error?.response.data.message);
-        if(error?.response.data.message==='Please authenticate'){
-          
-        }
+        console.error('Failed to fetch product categories:', error?.response?.data?.message || error);
       }
     };
     if (token) {

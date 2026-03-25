@@ -1,40 +1,30 @@
 import { StyleSheet, View } from "react-native";
-import React, { useEffect, useRef, useState } from "react";
-import { COLORS, SIZES } from "../../../../constants";
-import ListCard from "../../../../components/accessories/ListCard";
+import React, { useEffect, useState } from "react";
+import { COLORS } from "../../../../constants";
 import HeaderSearch from "../../../../components/marketplace/header";
-import { useAuth } from "../../../../AuthContext/AuthContext";
-import axios from "axios";
-import { baseUrl } from "../../../../constants/api/apiClient";
 import ProductListCard from "../../../../components/accessories/ProductListCard";
-import ServicesScreen from "@/screens/service";
+import api from "../../../../components/services/api";
 
 const services = () => {
   const [categories, setCategories] = useState([]);
-  const { token } = useAuth();
   useEffect(() => {
     const fetchCategories = async () => {
       try {
-        const response = await axios.get(`${baseUrl}/category?type=Service`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        });
-        const fetchedCategories = response.data.results;
-        setCategories(fetchedCategories);
+        const response = await api.getCategoryTree('Service');
+        if (response.success) {
+          const raw = response.data || (response as any).results || [];
+          setCategories(Array.isArray(raw) ? raw : []);
+        }
       } catch (error) {
-        alert(error?.response?.data?.message);
+        console.error('Failed to fetch service categories:', error);
       }
     };
-    if (token) {
-      fetchCategories();
-    }
-  }, [token]);
+    fetchCategories();
+  }, []);
   return (
     <View style={{ flex: 1, backgroundColor: COLORS.white }}>
-      {/* <HeaderSearch type="Service"/>
-      <ProductListCard itemList={categories} itemValue="categoryservice" /> */}
-      <ServicesScreen/>
+      <HeaderSearch type="Service"/>
+      <ProductListCard itemList={categories} itemValue="categoryservice" />
     </View>
   );
 };

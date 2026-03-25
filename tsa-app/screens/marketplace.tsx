@@ -95,8 +95,10 @@ const MarketplaceScreen: React.FC = () => {
 
       const response = await api.getCategoryTree(type);
 
-      if (response.success && response.data) {
-        const data = Array.isArray(response.data) ? response.data : [];
+      if (response.success) {
+        // API may return categories under 'data', 'results', or 'categories'
+        const raw = response.data || (response as any).results || (response as any).categories || [];
+        const data = Array.isArray(raw) ? raw : [];
         setCategories(transformCategories(data));
       } else {
         throw new Error(response.message || 'Failed to fetch categories');

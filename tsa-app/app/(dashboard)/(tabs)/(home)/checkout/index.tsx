@@ -47,6 +47,20 @@ type SigningPhase =
 
 const SUPPORTED_TOKENS = ['USDC', 'USDT', 'MCGP'] as const;
 
+/** Parse blockchain/signing errors into user-friendly messages. */
+function friendlyTxError(err: any): string {
+  const msg = err?.message || err?.toString() || '';
+  if (msg.includes('INSUFFICIENT_FUNDS') || msg.includes('insufficient funds'))
+    return 'Not enough S (Sonic) in your wallet to cover gas fees. Please top up your wallet with S and try again.';
+  if (msg.includes('user rejected') || msg.includes('User denied') || msg.includes('ACTION_REJECTED'))
+    return 'Transaction was cancelled.';
+  if (msg.includes('nonce'))
+    return 'Transaction conflict — please wait a moment and try again.';
+  if (msg.includes('UNPREDICTABLE_GAS_LIMIT') || msg.includes('execution reverted'))
+    return 'Transaction would fail on-chain. Please check your token balance and try again.';
+  return msg;
+}
+
 const TOKEN_META: Record<
   string,
   { icon: string; color: string; label: string }
@@ -198,7 +212,7 @@ const CheckoutScreen = () => {
         try {
           approveTxHash = await signAndBroadcast(approveResult.data.approveTx);
         } catch (e: any) {
-          throw new Error(`Token approval failed: ${e.message}`);
+          throw new Error(friendlyTxError(e));
         }
 
         // Step B: Prepare escrow tx (after approve is on-chain, so gas estimation works)
@@ -212,9 +226,7 @@ const CheckoutScreen = () => {
         try {
           escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx);
         } catch (e: any) {
-          throw new Error(
-            `Approved (tx: ${approveTxHash.slice(0, 10)}...) but escrow failed: ${e.message}. Check your orders.`,
-          );
+          throw new Error(friendlyTxError(e));
         }
 
         setSigningPhase('submitting');
