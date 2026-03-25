@@ -10,10 +10,10 @@ import (
 
 // ProductImage represents an image associated with a product.
 type ProductImage struct {
-	ID       uuid.UUID `json:"id,omitempty"`
-	URL      string    `json:"url,omitempty"`
+	ID       uuid.UUID `json:"id"`
+	URL      string    `json:"url"`
 	PublicID string    `json:"publicId,omitempty"`
-	Order    int       `json:"order,omitempty"`
+	Order    int       `json:"order"`
 }
 
 // ProductAttribute represents a key-value attribute on a product.

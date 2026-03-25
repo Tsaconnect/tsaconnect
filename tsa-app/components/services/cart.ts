@@ -292,7 +292,7 @@ class CartService {
         };
 
         if (this.token) {
-            headers['Authorization'] = `${this.token}`; // Your backend uses token without Bearer prefix
+            headers['Authorization'] = this.token.startsWith('Bearer ') ? this.token : `Bearer ${this.token}`;
         }
 
         return headers;

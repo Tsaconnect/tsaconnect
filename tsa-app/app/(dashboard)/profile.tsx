@@ -1,15 +1,15 @@
-import { StyleSheet, Text, View } from 'react-native'
-import React from 'react'
-import ProfileScreen from '../../components/profile/profile'
+import { StyleSheet, Text, View } from 'react-native';
+import React from 'react';
+import ProfileScreen from '../../components/profile/profile';
 
 const Profile = () => {
   return (
     <View style={{ flex: 1 }}>
-      <ProfileScreen/>
+      <ProfileScreen />
     </View>
-  )
-}
+  );
+};
 
-export default Profile
+export default Profile;
 
-const styles = StyleSheet.create({})
+const styles = StyleSheet.create({});

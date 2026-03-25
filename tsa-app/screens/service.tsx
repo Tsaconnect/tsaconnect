@@ -11,7 +11,7 @@ import {
   Modal,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from 'react-native-safe-area-context';
 // Gold color palette
 const GOLD_COLORS = {
   primary: '#FFD700',
@@ -28,13 +28,21 @@ const ServicesScreen: React.FC = () => {
   const [showRegistrationModal, setShowRegistrationModal] = useState(false);
   const [showBuyModal, setShowBuyModal] = useState(false);
   const [showSellModal, setShowSellModal] = useState(false);
-  const [registrationType, setRegistrationType] = useState<'internal' | 'external' | null>(null);
+  const [registrationType, setRegistrationType] = useState<
+    'internal' | 'external' | null
+  >(null);
   const [selectedCountry, setSelectedCountry] = useState<string>('');
   const [selectedCurrency, setSelectedCurrency] = useState<string>('');
   const [serviceType, setServiceType] = useState<'buy' | 'sell' | ''>('');
 
   // Mock data
-  const countries = ['Nigeria', 'United States', 'United Kingdom', 'Ghana', 'South Africa'];
+  const countries = [
+    'Nigeria',
+    'United States',
+    'United Kingdom',
+    'Ghana',
+    'South Africa',
+  ];
   const currencies = ['NGN', 'USD', 'GBP', 'GHS', 'ZAR'];
 
   // TSA CONNECT P2P Merchant Modal
@@ -72,14 +80,17 @@ const ServicesScreen: React.FC = () => {
                 <Icon name="store" size={32} color="#2E7D32" />
               </View>
               <View style={styles.optionContent}>
-                <Text style={styles.optionTitle}>Register as internal seller</Text>
+                <Text style={styles.optionTitle}>
+                  Register as internal seller
+                </Text>
                 <Text style={styles.optionDescription}>
                   USDT payment for Fiat
                 </Text>
                 <View style={styles.optionNote}>
                   <Icon name="info" size={14} color={GOLD_COLORS.dark} />
                   <Text style={styles.noteText}>
-                    Buyer (customer/users) must first upload payment proof of which you (merchant) must verify before releasing USDT
+                    Buyer (customer/users) must first upload payment proof of
+                    which you (merchant) must verify before releasing USDT
                   </Text>
                 </View>
               </View>
@@ -100,14 +111,17 @@ const ServicesScreen: React.FC = () => {
                 <Icon name="shopping-cart" size={32} color="#1976D2" />
               </View>
               <View style={styles.optionContent}>
-                <Text style={styles.optionTitle}>Register as external buyer</Text>
+                <Text style={styles.optionTitle}>
+                  Register as external buyer
+                </Text>
                 <Text style={styles.optionDescription}>
                   Fiat payment for USDT
                 </Text>
                 <View style={styles.optionNote}>
                   <Icon name="info" size={14} color={GOLD_COLORS.dark} />
                   <Text style={styles.noteText}>
-                    You (merchant) must first upload payment proof of which seller (customer/users) must verify before releasing USDT
+                    You (merchant) must first upload payment proof of which
+                    seller (customer/users) must verify before releasing USDT
                   </Text>
                 </View>
               </View>
@@ -151,7 +165,9 @@ const ServicesScreen: React.FC = () => {
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>
-                {registrationType === 'internal' ? 'Internal Seller Registration' : 'External Buyer Registration'}
+                {registrationType === 'internal'
+                  ? 'Internal Seller Registration'
+                  : 'External Buyer Registration'}
               </Text>
               <TouchableOpacity
                 onPress={() => setShowRegistrationModal(false)}
@@ -175,18 +191,25 @@ const ServicesScreen: React.FC = () => {
                       key={country}
                       style={[
                         styles.selectOption,
-                        selectedCountry === country && styles.selectedOption
+                        selectedCountry === country && styles.selectedOption,
                       ]}
                       onPress={() => setSelectedCountry(country)}
                     >
-                      <Text style={[
-                        styles.selectOptionText,
-                        selectedCountry === country && styles.selectedOptionText
-                      ]}>
+                      <Text
+                        style={[
+                          styles.selectOptionText,
+                          selectedCountry === country &&
+                            styles.selectedOptionText,
+                        ]}
+                      >
                         {country}
                       </Text>
                       {selectedCountry === country && (
-                        <Icon name="check-circle" size={20} color={GOLD_COLORS.primary} />
+                        <Icon
+                          name="check-circle"
+                          size={20}
+                          color={GOLD_COLORS.primary}
+                        />
                       )}
                     </TouchableOpacity>
                   ))}
@@ -202,18 +225,25 @@ const ServicesScreen: React.FC = () => {
                       key={currency}
                       style={[
                         styles.selectOption,
-                        selectedCurrency === currency && styles.selectedOption
+                        selectedCurrency === currency && styles.selectedOption,
                       ]}
                       onPress={() => setSelectedCurrency(currency)}
                     >
-                      <Text style={[
-                        styles.selectOptionText,
-                        selectedCurrency === currency && styles.selectedOptionText
-                      ]}>
+                      <Text
+                        style={[
+                          styles.selectOptionText,
+                          selectedCurrency === currency &&
+                            styles.selectedOptionText,
+                        ]}
+                      >
                         {currency}
                       </Text>
                       {selectedCurrency === currency && (
-                        <Icon name="check-circle" size={20} color={GOLD_COLORS.primary} />
+                        <Icon
+                          name="check-circle"
+                          size={20}
+                          color={GOLD_COLORS.primary}
+                        />
                       )}
                     </TouchableOpacity>
                   ))}
@@ -227,19 +257,24 @@ const ServicesScreen: React.FC = () => {
                   <TouchableOpacity
                     style={[
                       styles.serviceOption,
-                      serviceType === 'buy' && styles.selectedServiceOption
+                      serviceType === 'buy' && styles.selectedServiceOption,
                     ]}
                     onPress={() => setServiceType('buy')}
                   >
                     <Icon
                       name="shopping-cart"
                       size={24}
-                      color={serviceType === 'buy' ? GOLD_COLORS.primary : '#666'}
+                      color={
+                        serviceType === 'buy' ? GOLD_COLORS.primary : '#666'
+                      }
                     />
-                    <Text style={[
-                      styles.serviceOptionText,
-                      serviceType === 'buy' && styles.selectedServiceOptionText
-                    ]}>
+                    <Text
+                      style={[
+                        styles.serviceOptionText,
+                        serviceType === 'buy' &&
+                          styles.selectedServiceOptionText,
+                      ]}
+                    >
                       Buy
                     </Text>
                   </TouchableOpacity>
@@ -247,19 +282,24 @@ const ServicesScreen: React.FC = () => {
                   <TouchableOpacity
                     style={[
                       styles.serviceOption,
-                      serviceType === 'sell' && styles.selectedServiceOption
+                      serviceType === 'sell' && styles.selectedServiceOption,
                     ]}
                     onPress={() => setServiceType('sell')}
                   >
                     <Icon
                       name="store"
                       size={24}
-                      color={serviceType === 'sell' ? GOLD_COLORS.primary : '#666'}
+                      color={
+                        serviceType === 'sell' ? GOLD_COLORS.primary : '#666'
+                      }
                     />
-                    <Text style={[
-                      styles.serviceOptionText,
-                      serviceType === 'sell' && styles.selectedServiceOptionText
-                    ]}>
+                    <Text
+                      style={[
+                        styles.serviceOptionText,
+                        serviceType === 'sell' &&
+                          styles.selectedServiceOptionText,
+                      ]}
+                    >
                       Sell
                     </Text>
                   </TouchableOpacity>
@@ -272,10 +312,9 @@ const ServicesScreen: React.FC = () => {
                 <View style={styles.infoContent}>
                   <Text style={styles.infoTitle}>Important Notes:</Text>
                   <Text style={styles.infoText}>
-                    • Funds must match your specified limit range
-                    • Good rates attract more users
-                    • Set rates with low fees included
-                    • Ads remain active until locked funds are exhausted
+                    • Funds must match your specified limit range • Good rates
+                    attract more users • Set rates with low fees included • Ads
+                    remain active until locked funds are exhausted
                   </Text>
                 </View>
               </View>
@@ -293,7 +332,8 @@ const ServicesScreen: React.FC = () => {
               <TouchableOpacity
                 style={[
                   styles.proceedButton,
-                  (!selectedCountry || !selectedCurrency || !serviceType) && styles.disabledButton
+                  (!selectedCountry || !selectedCurrency || !serviceType) &&
+                    styles.disabledButton,
                 ]}
                 onPress={handleProceed}
                 disabled={!selectedCountry || !selectedCurrency || !serviceType}
@@ -325,11 +365,19 @@ const ServicesScreen: React.FC = () => {
             activeOpacity={0.8}
           >
             <View style={styles.serviceCardHeader}>
-              <View style={[styles.serviceIcon, { backgroundColor: '#FFF3E0' }]}>
-                <Icon name="connect-without-contact" size={32} color="#F57C00" />
+              <View
+                style={[styles.serviceIcon, { backgroundColor: '#FFF3E0' }]}
+              >
+                <Icon
+                  name="connect-without-contact"
+                  size={32}
+                  color="#F57C00"
+                />
               </View>
               <View style={styles.serviceCardInfo}>
-                <Text style={styles.serviceCardTitle}>TSA CONNECT P2P MERCHANT</Text>
+                <Text style={styles.serviceCardTitle}>
+                  TSA CONNECT P2P MERCHANT
+                </Text>
                 <Text style={styles.serviceCardDescription}>
                   Peer-to-peer trading platform for merchants
                 </Text>
@@ -339,16 +387,34 @@ const ServicesScreen: React.FC = () => {
 
             <View style={styles.featuresList}>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Register as internal seller/buyer</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Register as internal seller/buyer
+                </Text>
               </View>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Secure payment verification</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Secure payment verification
+                </Text>
               </View>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Competitive rate marketplace</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Competitive rate marketplace
+                </Text>
               </View>
             </View>
           </TouchableOpacity>
@@ -361,7 +427,9 @@ const ServicesScreen: React.FC = () => {
             activeOpacity={0.8}
           >
             <View style={styles.serviceCardHeader}>
-              <View style={[styles.serviceIcon, { backgroundColor: '#E8F5E9' }]}>
+              <View
+                style={[styles.serviceIcon, { backgroundColor: '#E8F5E9' }]}
+              >
                 <Icon name="storefront" size={32} color="#2E7D32" />
               </View>
               <View style={styles.serviceCardInfo}>
@@ -375,16 +443,34 @@ const ServicesScreen: React.FC = () => {
 
             <View style={styles.featuresList}>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Products & Services marketplace</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Products & Services marketplace
+                </Text>
               </View>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Trade & Earn opportunities</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Trade & Earn opportunities
+                </Text>
               </View>
               <View style={styles.featureItem}>
-                <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                <Text style={styles.featureText}>Digital products automation</Text>
+                <Icon
+                  name="check-circle"
+                  size={16}
+                  color={GOLD_COLORS.success}
+                />
+                <Text style={styles.featureText}>
+                  Digital products automation
+                </Text>
               </View>
             </View>
           </TouchableOpacity>
@@ -397,11 +483,15 @@ const ServicesScreen: React.FC = () => {
             activeOpacity={0.8}
           >
             <View style={styles.serviceCardHeader}>
-              <View style={[styles.serviceIcon, { backgroundColor: '#E3F2FD' }]}>
+              <View
+                style={[styles.serviceIcon, { backgroundColor: '#E3F2FD' }]}
+              >
                 <Icon name="business-center" size={32} color="#1976D2" />
               </View>
               <View style={styles.serviceCardInfo}>
-                <Text style={styles.serviceCardTitle}>Professional Services</Text>
+                <Text style={styles.serviceCardTitle}>
+                  Professional Services
+                </Text>
                 <Text style={styles.serviceCardDescription}>
                   Accounting, Legal, Consulting & more
                 </Text>
@@ -418,7 +508,9 @@ const ServicesScreen: React.FC = () => {
             activeOpacity={0.8}
           >
             <View style={styles.serviceCardHeader}>
-              <View style={[styles.serviceIcon, { backgroundColor: '#F1F8E9' }]}>
+              <View
+                style={[styles.serviceIcon, { backgroundColor: '#F1F8E9' }]}
+              >
                 <Icon name="agriculture" size={32} color="#689F38" />
               </View>
               <View style={styles.serviceCardInfo}>

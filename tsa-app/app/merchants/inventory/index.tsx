@@ -107,7 +107,7 @@ export default function MerchantProductsScreen() {
                 // Update local state
                 setProducts(prev =>
                     prev.map(product =>
-                        product._id === productId
+                        (product.id || product._id) === productId
                             ? { ...product, isFeatured: !currentStatus }
                             : product
                     )
@@ -118,8 +118,23 @@ export default function MerchantProductsScreen() {
         }
     };
 
+    const navigateToEditProduct = (product: Product) => {
+        const id = product.id || product._id;
+        router.push({
+            pathname: '/merchants/inventory/edit/[productId]',
+            params: {
+                productId: id,
+                productData: JSON.stringify(product),
+            },
+        });
+    };
+
     const renderProductItem = ({ item }: { item: Product }) => (
-        <View style={styles.itemCard}>
+        <TouchableOpacity
+            style={styles.itemCard}
+            activeOpacity={0.7}
+            onPress={() => navigateToEditProduct(item)}
+        >
             <View style={styles.itemImagePlaceholder}>
                 {item.images && item.images.length > 0 ? (
                     <View style={styles.imageContainer}>
@@ -146,7 +161,7 @@ export default function MerchantProductsScreen() {
                     </View>
                     <TouchableOpacity
                         hitSlop={10}
-                        onPress={() => toggleFeatured(item._id, item.isFeatured)}
+                        onPress={() => toggleFeatured(item.id || item._id, item.isFeatured)}
                     >
                         {item.isFeatured ? (
                             <Feather name="star" size={20} color="#FFD700" />
@@ -180,7 +195,7 @@ export default function MerchantProductsScreen() {
                     </View>
                 </View>
             </View>
-        </View>
+        </TouchableOpacity>
     );
 
     const renderStatsCard = () => {
@@ -278,7 +293,7 @@ export default function MerchantProductsScreen() {
 
             <FlatList
                 data={filteredProducts}
-                keyExtractor={(item) => item._id}
+                keyExtractor={(item) => item.id || item._id}
                 renderItem={renderProductItem}
                 contentContainerStyle={styles.listContent}
                 showsVerticalScrollIndicator={false}

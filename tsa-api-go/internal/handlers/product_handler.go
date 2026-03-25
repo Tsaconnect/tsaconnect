@@ -242,7 +242,7 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 
 // GetProductByID handles GET /api/products/:productId - returns a product and increments views.
 func (h *Handlers) GetProductByID(c *gin.Context) {
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -269,7 +269,7 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -411,7 +411,7 @@ func (h *Handlers) DeleteProduct(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -452,7 +452,7 @@ func (h *Handlers) UpdateStock(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -487,7 +487,7 @@ func (h *Handlers) UpdateStatus(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -530,7 +530,7 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
@@ -570,6 +570,7 @@ func (h *Handlers) UploadImages(c *gin.Context) {
 		}
 
 		img := models.ProductImage{
+			ID:       uuid.New(),
 			URL:      result.URL,
 			PublicID: result.PublicID,
 			Order:    existingCount + i,
@@ -600,7 +601,7 @@ func (h *Handlers) DeleteProductImage(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("productId"))
+	productID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return

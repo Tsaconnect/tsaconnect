@@ -38,7 +38,8 @@ export default function MerchantDashboard() {
       }
 
       if (productsRes.success && productsRes.data) {
-        setProducts(Array.isArray(productsRes.data) ? productsRes.data : []);
+        const data = productsRes.data;
+        setProducts(Array.isArray(data) ? data : data.products || []);
       }
 
       const name = await AsyncStorage.getItem('username');
@@ -78,7 +79,7 @@ export default function MerchantDashboard() {
     <SafeAreaView style={styles.container}>
       <FlatList
         data={products.slice(0, 10)}
-        keyExtractor={(item) => item._id || item.id}
+        keyExtractor={(item) => item.id || item._id}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#9b795f" />
         }
@@ -140,7 +141,14 @@ export default function MerchantDashboard() {
           </>
         }
         renderItem={({ item }) => (
-          <View style={styles.productItem}>
+          <TouchableOpacity
+            style={styles.productItem}
+            activeOpacity={0.7}
+            onPress={() => router.push({
+              pathname: '/merchants/inventory/edit/[productId]',
+              params: { productId: item.id || item._id, productData: JSON.stringify(item) },
+            })}
+          >
             <View style={{ flex: 1 }}>
               <Text style={styles.productName}>{item.name}</Text>
               <Text style={styles.productMeta}>
@@ -150,7 +158,7 @@ export default function MerchantDashboard() {
             <Text style={styles.productPrice}>
               ${item.price != null ? Number(item.price).toFixed(2) : '0.00'}
             </Text>
-          </View>
+          </TouchableOpacity>
         )}
         ListEmptyComponent={null}
       />

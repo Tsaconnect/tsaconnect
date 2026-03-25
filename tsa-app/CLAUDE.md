@@ -65,7 +65,7 @@ No Redux/Zustand — pure Context API + AsyncStorage.
 
 #### API Gotchas
 
-- **Backend uses UUIDs, not MongoDB ObjectIds** — Product `id` field is a UUID. The `/products/:id` GET endpoint rejects UUIDs ("Invalid product ID"). Workaround: pass product data via navigation params instead of re-fetching.
+- **Backend uses PostgreSQL with UUIDs** — Go backend (tsa-api-go) returns `id` (not `_id`) for all entities. Frontend interfaces historically used `_id` but `id` is the correct field from the API. Always prefer `id` over `_id` when accessing entity identifiers.
 - **Product data shape differs from type** — `category` is a UUID string (not an object), `images` may lack `url` field (only have `id`), `rating` can be null, `attributes` is optional. Always null-check these fields.
 - **Currency**: App uses `$` (USD), not `₦` (Naira)
 
