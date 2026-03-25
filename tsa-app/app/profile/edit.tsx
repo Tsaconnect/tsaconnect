@@ -6,7 +6,7 @@ import { useLocalSearchParams } from "expo-router";
 const EditProfile = () => {
   const user = useLocalSearchParams();
   return (
-    <View>
+    <View style={{ flex: 1 }}>
       <EditProfileScreen user={user} />
     </View>
   );
