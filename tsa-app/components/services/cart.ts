@@ -617,7 +617,7 @@ class CartService {
     async validateCart(): Promise<ApiResponse<CartValidationResult>> {
         try {
             const response = await fetch(`${API_BASE_URL}/cart/validate`, {
-                method: 'GET',
+                method: 'POST',
                 headers: this.getHeaders(),
             });
 

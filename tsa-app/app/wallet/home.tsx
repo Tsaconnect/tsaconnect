@@ -7,7 +7,9 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
@@ -173,16 +175,44 @@ const WalletHome = () => {
   if (!walletAddress) {
     return (
       <View style={styles.noWalletContainer}>
-        <Text style={styles.noWalletTitle}>No Wallet Found</Text>
+        <View style={styles.noWalletIconCircle}>
+          <Ionicons name="wallet-outline" size={48} color={COLORS.primary} />
+        </View>
+        <Text style={styles.noWalletTitle}>Set Up Your Wallet</Text>
         <Text style={styles.noWalletSubtitle}>
-          Create a new wallet or import an existing one to get started.
+          A wallet is needed to make purchases, receive cashback, and manage your funds securely.
         </Text>
+
         <TouchableOpacity
-          style={styles.noWalletButton}
+          style={styles.noWalletPrimaryBtn}
           onPress={() => router.push('/wallet/seedphrase')}
+          activeOpacity={0.8}
         >
-          <Text style={styles.noWalletButtonText}>Set Up Wallet</Text>
+          <Ionicons name="add-circle-outline" size={20} color="#FFF" />
+          <Text style={styles.noWalletPrimaryBtnText}>Create New Wallet</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.noWalletOutlineBtn}
+          onPress={() => router.push('/wallet/seedphrase')}
+          activeOpacity={0.8}
+        >
+          <Ionicons name="download-outline" size={20} color={COLORS.primary} />
+          <Text style={styles.noWalletOutlineBtnText}>Import Existing Wallet</Text>
+        </TouchableOpacity>
+
+        <View style={styles.noWalletFeatures}>
+          {[
+            { icon: 'shield-checkmark-outline', text: 'Secured with seed phrase' },
+            { icon: 'swap-horizontal-outline', text: 'Pay with USDC, USDT or MCGP' },
+            { icon: 'gift-outline', text: 'Earn cashback on purchases' },
+          ].map((item) => (
+            <View key={item.text} style={styles.noWalletFeatureRow}>
+              <Ionicons name={item.icon as any} size={16} color={COLORS.primary} />
+              <Text style={styles.noWalletFeatureText}>{item.text}</Text>
+            </View>
+          ))}
+        </View>
       </View>
     );
   }
@@ -497,32 +527,79 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 32,
-    backgroundColor: COLORS.white,
+    paddingHorizontal: 32,
+    backgroundColor: '#F8F9FA',
+  },
+  noWalletIconCircle: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: `${COLORS.primary}15`,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
   },
   noWalletTitle: {
-    ...FONTS.h2,
-    color: COLORS.dark,
-    fontWeight: '600',
+    fontSize: 22,
+    color: '#1A1A1A',
+    fontWeight: '700',
     marginBottom: 8,
   },
   noWalletSubtitle: {
-    ...FONTS.body3,
-    color: COLORS.gray,
+    fontSize: 14,
+    color: '#888',
     textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: 32,
+    lineHeight: 21,
+    marginBottom: 28,
+    paddingHorizontal: 8,
   },
-  noWalletButton: {
+  noWalletPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
     backgroundColor: COLORS.primary,
     paddingVertical: 16,
-    paddingHorizontal: 48,
-    borderRadius: 12,
-    ...SHADOWS.medium,
+    paddingHorizontal: 32,
+    borderRadius: 14,
+    width: '100%',
+    marginBottom: 12,
   },
-  noWalletButtonText: {
-    ...FONTS.h4,
-    color: COLORS.white,
+  noWalletPrimaryBtnText: {
+    fontSize: 16,
+    color: '#FFF',
+    fontWeight: '700',
+  },
+  noWalletOutlineBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    width: '100%',
+    marginBottom: 28,
+  },
+  noWalletOutlineBtnText: {
+    fontSize: 16,
+    color: COLORS.primary,
     fontWeight: '600',
+  },
+  noWalletFeatures: {
+    gap: 12,
+    width: '100%',
+  },
+  noWalletFeatureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 8,
+  },
+  noWalletFeatureText: {
+    fontSize: 13,
+    color: '#666',
   },
 });
