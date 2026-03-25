@@ -86,13 +86,14 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 
 // --- Fee calculation (big.Int) ---
 
-// CalculatePlatformFee returns 10% of productAmount for non-MCGP tokens, 0 for MCGP.
+// CalculatePlatformFee returns 2% merchant fee for non-MCGP tokens, 0 for MCGP.
+// This fee is baked into the listing price — the merchant pays it, not the buyer.
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
 	if strings.ToUpper(token) == "MCGP" {
 		return big.NewInt(0)
 	}
-	// 10% = productAmount * 1000 / 10000
-	fee := new(big.Int).Mul(productAmount, big.NewInt(1000))
+	// 2% = productAmount * 200 / 10000
+	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(models.MerchantFeeBPS)))
 	fee.Div(fee, big.NewInt(10000))
 	return fee
 }

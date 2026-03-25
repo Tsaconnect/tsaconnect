@@ -279,6 +279,7 @@ const CheckoutScreen = () => {
   const summary = cartData?.summary || {
     subtotal: 0,
     shipping: 0,
+    gasFee: 0,
     platformFee: 0,
     discount: 0,
     total: 0,
@@ -286,11 +287,9 @@ const CheckoutScreen = () => {
     totalQuantity: 0,
   };
   const feeConfig = cartData?.feeConfig;
-  const platformFeePercent = feeConfig?.platformFeePercent ?? 10;
   const isMCGP = selectedToken === 'MCGP';
-  const effectiveFeePercent = isMCGP ? 0 : platformFeePercent;
-  const effectivePlatformFee = isMCGP ? 0 : (summary.platformFee ?? summary.subtotal * platformFeePercent / 100);
-  const estimatedTotal = summary.subtotal + summary.shipping + effectivePlatformFee - summary.discount;
+  const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.10);
+  const estimatedTotal = summary.subtotal + summary.shipping + gasFee - summary.discount;
 
   if (items.length === 0 && step === 'review') {
     return (
@@ -522,12 +521,14 @@ const CheckoutScreen = () => {
               ))}
             </View>
             {isMCGP ? (
-              <Text style={styles.tokenHint}>MCGP: No platform fee applied</Text>
-            ) : feeConfig ? (
+              <Text style={styles.tokenHint}>MCGP: No gas fee applied</Text>
+            ) : (
               <Text style={styles.tokenHint}>
-                You'll receive {feeConfig.buyerCashbackPercent}% cashback on confirmation
+                {feeConfig?.buyerCashbackPercent
+                  ? `You'll receive ${feeConfig.buyerCashbackPercent}% cashback on confirmation`
+                  : `$${gasFee.toFixed(2)} gas fee for on-chain escrow`}
               </Text>
-            ) : null}
+            )}
           </View>
 
           {/* Order Items */}
@@ -581,11 +582,11 @@ const CheckoutScreen = () => {
                 <Text style={styles.summaryLabel}>Shipping</Text>
                 <Text style={styles.summaryValue}>${summary.shipping.toFixed(2)}</Text>
               </View>
-              {!isMCGP && (
+              {!isMCGP && gasFee > 0 && (
                 <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Platform Fee ({effectiveFeePercent}%)</Text>
+                  <Text style={styles.summaryLabel}>Gas Fee</Text>
                   <Text style={styles.summaryValue}>
-                    ${effectivePlatformFee.toFixed(2)}
+                    ${gasFee.toFixed(2)}
                   </Text>
                 </View>
               )}

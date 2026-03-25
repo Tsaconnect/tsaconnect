@@ -418,12 +418,12 @@ const Cart = () => {
                         </Text>
                     </View>
 
-                    <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Platform Fee (10%)</Text>
-                        <Text style={styles.summaryValue}>
-                            {(summary?.platformFee ?? summary?.tax) ? formatPrice(summary?.platformFee ?? summary?.tax ?? 0) : 'To be calculated'}
-                        </Text>
-                    </View>
+                    {(summary?.gasFee ?? 0) > 0 && (
+                        <View style={styles.summaryRow}>
+                            <Text style={styles.summaryLabel}>Gas Fee</Text>
+                            <Text style={styles.summaryValue}>{formatPrice(summary.gasFee)}</Text>
+                        </View>
+                    )}
 
                     {summary?.discount ? (
                         <View style={styles.summaryRow}>

@@ -894,13 +894,16 @@ class APIService {
 
   // Get fee configuration (public, no auth required)
   async getFeeConfig(): Promise<ApiResponse<{
-    platformFeeBPS: number;
-    mcgpPlatformFeeBPS: number;
+    merchantFeeBPS: number;
+    mcgpMerchantFeeBPS: number;
     buyerCashbackBPS: number;
     uplineFeeBPS: number;
-    platformFeePercent: number;
+    systemFeeBPS: number;
+    merchantFeePercent: number;
     buyerCashbackPercent: number;
     uplineFeePercent: number;
+    gasFeeUSD: number;
+    buyerPlatformFee: number;
   }>> {
     try {
       const response = await fetch(`${API_BASE_URL}/fees`, {
