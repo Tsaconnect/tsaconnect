@@ -890,6 +890,32 @@ class APIService {
     }
   }
 
+  // ==================== FEE ENDPOINTS ====================
+
+  // Get fee configuration (public, no auth required)
+  async getFeeConfig(): Promise<ApiResponse<{
+    platformFeeBPS: number;
+    mcgpPlatformFeeBPS: number;
+    buyerCashbackBPS: number;
+    uplineFeeBPS: number;
+    platformFeePercent: number;
+    buyerCashbackPercent: number;
+    uplineFeePercent: number;
+  }>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/fees`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return this.handleResponse(response);
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch fee configuration',
+      };
+    }
+  }
+
   // ==================== CATEGORY ENDPOINTS ====================
 
   // Get categories

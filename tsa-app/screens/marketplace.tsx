@@ -19,6 +19,7 @@ import TradeAndEarnScreen from './TradeAndEarnScreen';
 import DepositScreen from './fundfiat';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '@/components/services/api';
+import CartIconBadge from '@/components/common/CartIconBadge';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_GAP = 10;
@@ -184,24 +185,27 @@ const MarketplaceScreen: React.FC = () => {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
         }
       >
-        {/* Search */}
+        {/* Search + Cart */}
         <View style={styles.searchWrap}>
-          <View style={styles.searchBar}>
-            <Icon name="search" size={20} color="#999" />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search products or services..."
-              placeholderTextColor="#AAA"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              onSubmitEditing={handleSearch}
-              returnKeyType="search"
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <Icon name="close" size={18} color="#999" />
-              </TouchableOpacity>
-            )}
+          <View style={styles.searchRow}>
+            <View style={[styles.searchBar, { flex: 1 }]}>
+              <Icon name="search" size={20} color="#999" />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search products or services..."
+                placeholderTextColor="#AAA"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                onSubmitEditing={handleSearch}
+                returnKeyType="search"
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <Icon name="close" size={18} color="#999" />
+                </TouchableOpacity>
+              )}
+            </View>
+            <CartIconBadge color="#D4AF37" size={24} />
           </View>
         </View>
 
@@ -327,6 +331,7 @@ const styles = StyleSheet.create({
 
   // Search
   searchWrap: { backgroundColor: '#FFF', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 16 },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   searchBar: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#F5F5F5', borderRadius: 12,

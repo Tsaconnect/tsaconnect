@@ -739,19 +739,87 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 
 	items := cart.GetItems()
 
-	// Group items by seller
+	// Collect unique product and seller IDs for batch lookup
+	productIDs := make([]uuid.UUID, 0, len(items))
+	sellerIDs := make([]uuid.UUID, 0, len(items))
+	seenProducts := make(map[uuid.UUID]bool)
+	seenSellers := make(map[uuid.UUID]bool)
+	for _, item := range items {
+		if !seenProducts[item.Product] {
+			productIDs = append(productIDs, item.Product)
+			seenProducts[item.Product] = true
+		}
+		if !seenSellers[item.Seller] {
+			sellerIDs = append(sellerIDs, item.Seller)
+			seenSellers[item.Seller] = true
+		}
+	}
+
+	// Batch fetch products
+	productMap := make(map[string]gin.H)
+	if len(productIDs) > 0 {
+		var products []models.Product
+		config.DB.Where("id IN ?", productIDs).Find(&products)
+		for _, p := range products {
+			productMap[p.ID.String()] = gin.H{
+				"_id":    p.ID,
+				"name":   p.Name,
+				"price":  p.Price,
+				"stock":  p.Stock,
+				"images": p.GetImages(),
+			}
+		}
+	}
+
+	// Batch fetch sellers (users)
+	sellerMap := make(map[string]gin.H)
+	if len(sellerIDs) > 0 {
+		var users []models.User
+		config.DB.Where("id IN ?", sellerIDs).Find(&users)
+		for _, u := range users {
+			sellerMap[u.ID.String()] = gin.H{
+				"_id":   u.ID,
+				"name":  u.Name,
+				"email": u.Email,
+			}
+		}
+	}
+
+	// Build enriched items grouped by seller
+	type enrichedItem struct {
+		models.CartItem
+		ProductData gin.H `json:"productData,omitempty"`
+	}
+
 	sellerGroups := make(map[string]gin.H)
 	for _, item := range items {
 		sellerID := item.Seller.String()
 		if _, ok := sellerGroups[sellerID]; !ok {
+			seller := sellerMap[sellerID]
+			if seller == nil {
+				seller = gin.H{"_id": item.Seller, "name": "Seller", "email": ""}
+			}
 			sellerGroups[sellerID] = gin.H{
-				"seller":   item.Seller,
-				"items":    []models.CartItem{},
+				"seller":   seller,
+				"items":    []gin.H{},
 				"subtotal": 0.0,
 			}
 		}
 		entry := sellerGroups[sellerID]
-		entry["items"] = append(entry["items"].([]models.CartItem), item)
+
+		enriched := gin.H{
+			"_id":                item.ID,
+			"product":           productMap[item.Product.String()],
+			"seller":            sellerMap[sellerID],
+			"quantity":          item.Quantity,
+			"price":             item.Price,
+			"selectedAttributes": item.SelectedAttributes,
+			"notes":             item.Notes,
+			"addedAt":           item.AddedAt,
+			"updatedAt":         item.UpdatedAt,
+		}
+
+		entry["items"] = append(entry["items"].([]gin.H), enriched)
 		entry["subtotal"] = entry["subtotal"].(float64) + item.Price*float64(item.Quantity)
 		sellerGroups[sellerID] = entry
 	}
@@ -765,6 +833,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
 		"summary":         cart.GetSummary(),
+		"feeConfig":       models.GetFeeConfig(),
 		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
 		"billingAddress":  cart.BillingAddress,

@@ -34,9 +34,30 @@ type CartSummary struct {
 	TotalQuantity int     `json:"totalQuantity"`
 	Subtotal      float64 `json:"subtotal"`
 	Shipping      float64 `json:"shipping"`
-	Tax           float64 `json:"tax"`
+	PlatformFee   float64 `json:"platformFee"`
 	Discount      float64 `json:"discount"`
 	Total         float64 `json:"total"`
+}
+
+// Fee configuration — matches smart contract ProductEscrow.sol constants.
+const (
+	PlatformFeeBPS     = 1000 // 10% for USDC/USDT
+	MCGPPlatformFeeBPS = 0    // 0% for MCGP
+	BuyerCashbackBPS   = 250  // 2.5%
+	UplineFeeBPS       = 250  // 2.5%
+)
+
+// FeeConfig returns the platform fee schedule for the frontend.
+func GetFeeConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"platformFeeBPS":     PlatformFeeBPS,
+		"mcgpPlatformFeeBPS": MCGPPlatformFeeBPS,
+		"buyerCashbackBPS":   BuyerCashbackBPS,
+		"uplineFeeBPS":       UplineFeeBPS,
+		"platformFeePercent": float64(PlatformFeeBPS) / 100.0,   // 10.0
+		"buyerCashbackPercent": float64(BuyerCashbackBPS) / 100.0, // 2.5
+		"uplineFeePercent":   float64(UplineFeeBPS) / 100.0,     // 2.5
+	}
 }
 
 // Address represents a shipping address.
@@ -202,6 +223,8 @@ func (c *Cart) SetAppliedCoupon(ac *AppliedCoupon) {
 }
 
 // CalculateCartSummary computes the cart summary from deserialized items and coupon.
+// Platform fee matches the smart contract: 10% of subtotal for USDC/USDT, 0% for MCGP.
+// The token parameter controls which fee rate to use; defaults to non-MCGP rate.
 func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShipping float64) CartSummary {
 	summary := CartSummary{
 		TotalItems: len(items),
@@ -213,8 +236,10 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 		summary.Subtotal += item.Price * float64(item.Quantity)
 	}
 
-	// Tax: 10% of subtotal
-	summary.Tax = summary.Subtotal * 0.1
+	// Platform fee: 10% of subtotal (matches ProductEscrow.sol PLATFORM_FEE_BPS = 1000)
+	// This is the default (non-MCGP) rate shown in the cart.
+	// The checkout screen adjusts to 0% when MCGP is selected.
+	summary.PlatformFee = summary.Subtotal * float64(PlatformFeeBPS) / 10000.0
 
 	// Apply discount if coupon is applied
 	if coupon != nil && coupon.Code != "" {
@@ -233,7 +258,7 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 		}
 	}
 
-	summary.Total = summary.Subtotal + summary.Shipping + summary.Tax - summary.Discount
+	summary.Total = summary.Subtotal + summary.Shipping + summary.PlatformFee - summary.Discount
 	if summary.Total < 0 {
 		summary.Total = 0
 	}

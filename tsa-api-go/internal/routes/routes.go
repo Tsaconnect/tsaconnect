@@ -108,6 +108,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		marketGroup.POST("/watchlist", auth, h.AddToWatchlist)
 	}
 
+	// Fee configuration (public)
+	api.GET("/fees", h.GetFeeConfig)
+
 	// Category routes (must be registered before /products/:id to avoid conflicts)
 	categoryGroup := api.Group("/products/category")
 	{
