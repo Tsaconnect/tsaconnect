@@ -176,6 +176,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		cartGroup.GET("", auth, h.GetOrCreateCart)
 		cartGroup.POST("/items", auth, h.AddToCart)
+		cartGroup.PUT("/items/:id", auth, h.UpdateCartItem)
 		cartGroup.DELETE("/items/:id", auth, h.RemoveFromCart)
 		cartGroup.POST("/checkout", auth, h.ConvertToOrder)
 		cartGroup.GET("/summary", auth, h.GetCartSummary)
