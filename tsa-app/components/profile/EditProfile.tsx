@@ -6,36 +6,49 @@ import {
   TouchableOpacity,
   TextInput,
   Alert,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
-import { Avatar } from 'react-native-elements';
 import { useRouter } from 'expo-router';
-import { COLORS, SIZES } from '../../constants';
-import LocationPicker from '../common/LocationPicker';
-
-import PhoneNumber from '../country/phoneNumber';
+import { COLORS } from '../../constants';
+import PhoneInput from 'react-native-international-phone-number';
+import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import { baseUrl } from '../../constants/api/apiClient';
 import { useAuth } from '../../AuthContext/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import { generateFileName } from '../../constants/api/filename';
-import Icon from '@expo/vector-icons/FontAwesome';
+
+const COUNTRY_TO_CCA2: Record<string, string> = {
+  'Nigeria': 'NG',
+  'United States': 'US',
+  'United Kingdom': 'GB',
+  'Ghana': 'GH',
+  'South Africa': 'ZA',
+  'Kenya': 'KE',
+  'Canada': 'CA',
+  'India': 'IN',
+  'Germany': 'DE',
+  'France': 'FR',
+};
+
 //@ts-ignore
 const EditProfileScreen = ({ user }) => {
   const { token } = useAuth();
-  const [name, setName] = useState(user.name);
-  const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber);
-  const [location, setLocation] = useState({
-    country: user.country || '',
-    state: user.state || '',
-    city: user.city || '',
-  });
-  const [selectedCountry, setSelectedCountry] = useState();
-  const [profileImage, setProfileImage] = useState(user.profilePicture);
-  const [imageUri, setImageUri] = useState(null);
-
   const router = useRouter();
+  const defaultCca2 = COUNTRY_TO_CCA2[user.country] || 'NG';
 
-  const removeAllSpaces = (str: string) => str.replace(/\s+/g, '');
+  const [name, setName] = useState(user.name || '');
+  const [username, setUsername] = useState(user.username || '');
+  const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber || '');
+  const [address, setAddress] = useState(user.address || '');
+  const [selectedCountry, setSelectedCountry] = useState<any>(null);
+  const [profileImage, setProfileImage] = useState(user.profilePicture);
+  const [imageUri, setImageUri] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const pickImageAsync = async () => {
     try {
@@ -65,9 +78,16 @@ const EditProfileScreen = ({ user }) => {
   };
 
   const handleUpdate = async () => {
+    if (!name.trim()) {
+      Alert.alert('Error', 'Name is required');
+      return;
+    }
+
+    setSaving(true);
     const formData = new FormData();
+
     if (imageUri) {
-      //@ts-ignore
+      // @ts-ignore
       formData.append('profilePicture', {
         uri: imageUri,
         type: 'image/jpeg',
@@ -75,19 +95,18 @@ const EditProfileScreen = ({ user }) => {
       });
     }
 
-    formData.append('name', name);
+    formData.append('name', name.trim());
+    formData.append('username', username.trim());
+    formData.append('address', address.trim());
     formData.append(
       'phoneNumber',
-      //@ts-ignore
-      removeAllSpaces(selectedCountry?.callingCode + phoneNumber) ||
-        phoneNumber,
+      selectedCountry
+        ? selectedCountry.callingCode.replace(/\s+/g, '') + phoneNumber.replace(/\s+/g, '')
+        : phoneNumber,
     );
-    formData.append('country', location.country);
-    formData.append('state', location.state);
-    formData.append('city', location.city);
 
     try {
-      const { data } = await axios.patch(
+      await axios.patch(
         `${baseUrl}/users/${user.id}`,
         formData,
         {
@@ -97,125 +116,205 @@ const EditProfileScreen = ({ user }) => {
           },
         },
       );
-      alert('Information Successfully changed');
+      Alert.alert('Success', 'Profile updated successfully');
       router.push('/profile');
     } catch (error: any) {
       Alert.alert(
         'Error',
-        'Failed to update. ' + error?.response?.data?.message || error.message,
+        error?.response?.data?.message || error.message || 'Failed to update profile',
       );
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.cover}>
-        <View style={styles.profileInfo}>
-          {profileImage ? (
-            <Avatar rounded source={{ uri: profileImage }} size="large" />
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={styles.container}
+    >
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        {/* Avatar Section */}
+        <View style={styles.avatarContainer}>
+          <TouchableOpacity onPress={pickImageAsync} style={styles.avatarWrapper}>
+            {profileImage ? (
+              <Image source={{ uri: profileImage }} style={styles.avatar} />
+            ) : (
+              <View style={styles.avatarFallback}>
+                <Text style={styles.avatarInitial}>
+                  {user.name?.[0]?.toUpperCase()}
+                </Text>
+              </View>
+            )}
+            <View style={styles.cameraIcon}>
+              <Ionicons name="camera" size={14} color="#666" />
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        {/* Full Name */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Full Name</Text>
+          <TextInput
+            style={styles.input}
+            value={name}
+            onChangeText={setName}
+            placeholder="Your Name"
+          />
+        </View>
+
+        {/* Username */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Username</Text>
+          <TextInput
+            style={styles.input}
+            value={username}
+            onChangeText={setUsername}
+            placeholder="Username"
+          />
+        </View>
+
+        {/* Phone Number */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Phone Number</Text>
+          <PhoneInput
+            value={phoneNumber}
+            onChangePhoneNumber={setPhoneNumber}
+            selectedCountry={selectedCountry}
+            onChangeSelectedCountry={setSelectedCountry}
+            defaultCountry={defaultCca2}
+            placeholder="7034567897"
+            phoneInputStyles={{
+              container: {
+                borderWidth: 1.5,
+                borderColor: '#e0e0e0',
+                borderRadius: 10,
+                backgroundColor: '#fff',
+              },
+              input: {
+                fontSize: 15,
+                color: '#333',
+              },
+            }}
+          />
+        </View>
+
+        {/* Address */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Address</Text>
+          <TextInput
+            style={styles.input}
+            value={address}
+            onChangeText={setAddress}
+            placeholder="Your Address"
+            multiline
+          />
+        </View>
+
+        {/* Save Button */}
+        <TouchableOpacity
+          style={[styles.button, saving && styles.buttonDisabled]}
+          onPress={handleUpdate}
+          disabled={saving}
+        >
+          {saving ? (
+            <ActivityIndicator color="#fff" />
           ) : (
-            <Avatar
-              rounded
-              title={user.name[0]}
-              size="large"
-              overlayContainerStyle={{ backgroundColor: '#9D6B38' }}
-              titleStyle={{ color: '#fff' }}
-            />
+            <Text style={styles.buttonText}>Save Changes</Text>
           )}
-          <TouchableOpacity
-            style={styles.uploadContainer}
-            onPress={pickImageAsync}
-          >
-            <Icon name="upload" size={25} color="#aaa" />
-            <Text style={styles.uploadText}>Change Profile Image</Text>
-          </TouchableOpacity>
-        </View>
-
-        <TextInput
-          placeholder="Your Name"
-          style={styles.input}
-          value={name}
-          onChangeText={setName}
-        />
-
-        <LocationPicker
-          value={location}
-          onChange={setLocation}
-          required={['country']}
-        />
-
-        <PhoneNumber
-          inputValue={phoneNumber}
-          setInputValue={setPhoneNumber}
-          //@ts-ignore
-          selectedCountry={selectedCountry}
-          //@ts-ignore
-          setSelectedCountry={setSelectedCountry}
-        />
-
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity style={styles.button} onPress={handleUpdate}>
-            <Text style={styles.buttonText}>Update</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </View>
+        </TouchableOpacity>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
-    padding: 20,
     backgroundColor: '#fff',
   },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: 'gray',
-    borderWidth: 1,
-    marginTop: 10,
-    padding: 10,
-    borderRadius: 10,
-    marginHorizontal: SIZES.width * 0.05,
+  scrollContent: {
+    padding: 20,
+    paddingBottom: 40,
   },
-  buttonContainer: {
+  avatarContainer: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  avatarWrapper: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    position: 'relative',
+  },
+  avatar: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+  },
+  avatarFallback: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  avatarInitial: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  cameraIcon: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  fieldGroup: {
+    marginBottom: 16,
+  },
+  label: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#666',
+    marginBottom: 6,
+  },
+  input: {
+    borderWidth: 1.5,
+    borderColor: '#e0e0e0',
+    borderRadius: 10,
+    padding: 12,
+    paddingHorizontal: 14,
+    fontSize: 15,
+    color: '#333',
+    backgroundColor: '#fff',
   },
   button: {
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    height: 45,
-    borderRadius: 5,
-    width: SIZES.width * 0.9,
+    height: 50,
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  buttonDisabled: {
+    opacity: 0.7,
   },
   buttonText: {
     color: '#fff',
-    fontSize: 16,
-  },
-  profileInfo: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 15,
-  },
-  uploadContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 10,
-  },
-  uploadText: {
-    marginLeft: 10,
-    color: '#aaa',
-  },
-  cover: {
-    position: 'absolute',
-    top: SIZES.height * 0.1212,
-    marginBottom: 15,
-    backgroundColor: '#FFF',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });
 
