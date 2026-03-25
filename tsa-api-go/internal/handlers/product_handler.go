@@ -87,7 +87,18 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 
 	// Handle image uploads
 	var uploadedImages []models.ProductImage
-	form, _ := c.MultipartForm()
+	form, err := c.MultipartForm()
+	log.Printf("[CreateProduct] MultipartForm parse: form=%v, err=%v", form != nil, err)
+	if form != nil {
+		log.Printf("[CreateProduct] Form files keys: %v", func() []string {
+			keys := make([]string, 0, len(form.File))
+			for k := range form.File {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
+		log.Printf("[CreateProduct] images file count: %d", len(form.File["images"]))
+	}
 	if form != nil && form.File["images"] != nil {
 		for i, fileHeader := range form.File["images"] {
 			file, err := fileHeader.Open()
@@ -142,6 +153,10 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		UpdatedAt:    now,
 	}
 
+	log.Printf("[CreateProduct] uploadedImages count: %d", len(uploadedImages))
+	for i, img := range uploadedImages {
+		log.Printf("[CreateProduct] image[%d]: id=%s url=%s publicId=%s", i, img.ID, img.URL, img.PublicID)
+	}
 	product.SetImages(uploadedImages)
 	product.SetAttributes(parsedAttributes)
 
