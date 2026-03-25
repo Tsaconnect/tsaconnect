@@ -242,8 +242,11 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 
 // GetProductByID handles GET /api/products/:productId - returns a product and increments views.
 func (h *Handlers) GetProductByID(c *gin.Context) {
-	productID, err := uuid.Parse(c.Param("id"))
+	rawID := c.Param("id")
+	log.Printf("[GetProductByID] raw param 'id': %q (len=%d)", rawID, len(rawID))
+	productID, err := uuid.Parse(rawID)
 	if err != nil {
+		log.Printf("[GetProductByID] uuid.Parse failed: %v", err)
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
@@ -269,8 +272,11 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 		return
 	}
 
-	productID, err := uuid.Parse(c.Param("id"))
+	rawID := c.Param("id")
+	log.Printf("[UpdateProduct] raw param 'id': %q (len=%d)", rawID, len(rawID))
+	productID, err := uuid.Parse(rawID)
 	if err != nil {
+		log.Printf("[UpdateProduct] uuid.Parse failed: %v", err)
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
 		return
 	}
@@ -1047,6 +1053,11 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 			},
 		},
 	})
+}
+
+// GetFeeConfig handles GET /api/fees - returns the platform fee schedule.
+func (h *Handlers) GetFeeConfig(c *gin.Context) {
+	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig())
 }
 
 // GetMarketplaceProducts handles GET /api/products/public/marketplace - public marketplace listing with sorting.

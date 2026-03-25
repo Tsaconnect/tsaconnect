@@ -13,7 +13,8 @@ import {
 import { Feather } from '@expo/vector-icons';
 import api, { Product } from '@/components/services/api';
 import { router } from 'expo-router';
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useAuth } from '@/AuthContext/AuthContext';
 interface ProductStats {
     totalProducts: number;
     featuredProducts: number;
@@ -25,6 +26,7 @@ interface ProductStats {
 }
 
 export default function MerchantProductsScreen() {
+    const { token } = useAuth();
     const [searchQuery, setSearchQuery] = useState('');
     const [activeTab, setActiveTab] = useState<'all' | 'featured' | 'non-featured'>('all');
     const [products, setProducts] = useState<Product[]>([]);
@@ -73,8 +75,11 @@ export default function MerchantProductsScreen() {
     };
 
     useEffect(() => {
-        loadData();
-    }, []);
+        if (token) {
+            api.setToken(token.replace('Bearer ', ''));
+            loadData();
+        }
+    }, [token]);
 
     const getFilteredProducts = () => {
         let filtered = products;

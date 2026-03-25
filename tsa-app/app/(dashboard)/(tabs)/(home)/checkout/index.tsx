@@ -257,12 +257,18 @@ const CheckoutScreen = () => {
   const summary = cartData?.summary || {
     subtotal: 0,
     shipping: 0,
-    tax: 0,
+    platformFee: 0,
     discount: 0,
     total: 0,
     totalItems: 0,
     totalQuantity: 0,
   };
+  const feeConfig = cartData?.feeConfig;
+  const platformFeePercent = feeConfig?.platformFeePercent ?? 10;
+  const isMCGP = selectedToken === 'MCGP';
+  const effectiveFeePercent = isMCGP ? 0 : platformFeePercent;
+  const effectivePlatformFee = isMCGP ? 0 : (summary.platformFee ?? summary.subtotal * platformFeePercent / 100);
+  const estimatedTotal = summary.subtotal + summary.shipping + effectivePlatformFee - summary.discount;
 
   if (items.length === 0 && step === 'review') {
     return (
@@ -480,9 +486,13 @@ const CheckoutScreen = () => {
                 </TouchableOpacity>
               ))}
             </View>
-            {selectedToken === 'MCGP' && (
+            {isMCGP ? (
               <Text style={styles.tokenHint}>MCGP: No platform fee applied</Text>
-            )}
+            ) : feeConfig ? (
+              <Text style={styles.tokenHint}>
+                You'll receive {feeConfig.buyerCashbackPercent}% cashback on confirmation
+              </Text>
+            ) : null}
           </View>
 
           {/* Order Items */}
@@ -536,11 +546,11 @@ const CheckoutScreen = () => {
                 <Text style={styles.summaryLabel}>Shipping</Text>
                 <Text style={styles.summaryValue}>${summary.shipping.toFixed(2)}</Text>
               </View>
-              {selectedToken !== 'MCGP' && (
+              {!isMCGP && (
                 <View style={styles.summaryRow}>
-                  <Text style={styles.summaryLabel}>Platform Fee (10%)</Text>
+                  <Text style={styles.summaryLabel}>Platform Fee ({effectiveFeePercent}%)</Text>
                   <Text style={styles.summaryValue}>
-                    ${(summary.subtotal * 0.1).toFixed(2)}
+                    ${effectivePlatformFee.toFixed(2)}
                   </Text>
                 </View>
               )}
@@ -560,13 +570,7 @@ const CheckoutScreen = () => {
                 <View style={styles.totalAmountContainer}>
                   <Text style={styles.currencySymbol}>{selectedToken}</Text>
                   <Text style={styles.totalValue}>
-                    $
-                    {(
-                      summary.subtotal +
-                      summary.shipping +
-                      (selectedToken !== 'MCGP' ? summary.subtotal * 0.1 : 0) -
-                      summary.discount
-                    ).toFixed(2)}
+                    ${estimatedTotal.toFixed(2)}
                   </Text>
                 </View>
               </View>

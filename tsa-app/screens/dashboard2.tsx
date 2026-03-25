@@ -7,10 +7,14 @@ import {
   StyleSheet,
   RefreshControl,
   Pressable,
+  Platform,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
+import { Ionicons } from '@expo/vector-icons';
 import { api, Asset } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useRouter } from 'expo-router';
+import CartIconBadge from '@/components/common/CartIconBadge';
 import { getWalletBalances, getTransactionHistory, Transaction } from '../services/walletApi';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
@@ -77,10 +81,22 @@ const Dashboard: React.FC = () => {
       const balResult = await getWalletBalances();
       let updatedAssets = [...DEFAULT_ASSETS];
       if (balResult.success && balResult.data) {
-        const balArray = balResult.data;
+        // Backend returns { walletAddress, balances: { chainName: { SYMBOL: "amount" } } }
+        const balancesMap = balResult.data.balances || balResult.data;
+        // Flatten nested chain balances into a symbol -> balance lookup
+        const symbolBalances: Record<string, number> = {};
+        if (typeof balancesMap === 'object' && !Array.isArray(balancesMap)) {
+          for (const chain of Object.values(balancesMap)) {
+            if (typeof chain === 'object' && chain !== null) {
+              for (const [symbol, amount] of Object.entries(chain as Record<string, string>)) {
+                const parsed = parseFloat(amount || '0');
+                symbolBalances[symbol] = (symbolBalances[symbol] || 0) + parsed;
+              }
+            }
+          }
+        }
         updatedAssets = DEFAULT_ASSETS.map(a => {
-          const entry = balArray.find(b => b.symbol === a.symbol);
-          const bal = entry ? parseFloat(entry.balance || '0') : 0;
+          const bal = symbolBalances[a.symbol] || 0;
           return { ...a, balance: bal, usdValue: bal * (a.currentPrice || 1) };
         });
       }
@@ -139,6 +155,14 @@ const Dashboard: React.FC = () => {
         <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
       }
     >
+      {/* Header with cart */}
+      <View style={styles.dashHeader}>
+        <Text style={styles.dashHeaderTitle}>TSA Connect</Text>
+        <View style={styles.dashHeaderActions}>
+          <CartIconBadge color="#D4AF37" size={24} />
+        </View>
+      </View>
+
       <BackupBanner />
 
       {/* Error banner */}
@@ -170,6 +194,24 @@ const Dashboard: React.FC = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F5F5F7' },
+  dashHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'ios' ? 56 : 16,
+    paddingBottom: 10,
+    backgroundColor: '#FFF',
+  },
+  dashHeaderTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1A1A1A',
+  },
+  dashHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   skeletonContent: { padding: 16 },
   skeletonCard: {
     backgroundColor: '#E5E5E5',

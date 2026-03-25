@@ -262,15 +262,17 @@ const Cart = () => {
     );
 
     const renderCartItem = (item: CartItem) => {
-        const product = typeof item.product === 'string' ? null : item.product;
+        const rawProduct = item.product;
+        const product = (rawProduct && typeof rawProduct === 'object') ? rawProduct : null;
+        const productId = product?._id || product?.id || (typeof rawProduct === 'string' ? rawProduct : null);
         const isUpdating = updatingItem === item._id;
 
         return (
             <View key={item._id} style={styles.itemCard}>
                 <TouchableOpacity
                     style={styles.itemContent}
-                    onPress={() => product && router.push(`/product/${product._id}`)}
-                    disabled={!product}
+                    onPress={() => productId && router.push(`/product/${productId}`)}
+                    disabled={!productId}
                 >
                     {/* Product Image */}
                     <View style={styles.imageContainer}>
@@ -313,7 +315,7 @@ const Cart = () => {
                             <View style={styles.quantityControls}>
                                 <TouchableOpacity
                                     style={[styles.quantityButton, isUpdating && styles.disabledButton]}
-                                    onPress={() => handleUpdateQuantity(item._id, item.quantity - 1, product?.stock || 0)}
+                                    onPress={() => handleUpdateQuantity(item._id, item.quantity - 1, product?.stock ?? 999)}
                                     disabled={isUpdating || item.quantity <= 1}
                                 >
                                     <Ionicons
@@ -333,14 +335,13 @@ const Cart = () => {
 
                                 <TouchableOpacity
                                     style={[styles.quantityButton, isUpdating && styles.disabledButton]}
-                                    onPress={() => handleUpdateQuantity(item._id, item.quantity + 1, product?.stock || 0)}
-                                    //@ts-ignore
-                                    disabled={isUpdating || (product && item.quantity >= product.stock)}
+                                    onPress={() => handleUpdateQuantity(item._id, item.quantity + 1, product?.stock ?? 999)}
+                                    disabled={isUpdating || (product?.stock != null && item.quantity >= product.stock)}
                                 >
                                     <Ionicons
                                         name="add"
                                         size={16}
-                                        color={(product && item.quantity >= product.stock) ? '#CCC' : '#D4AF37'}
+                                        color={(product?.stock != null && item.quantity >= product.stock) ? '#CCC' : '#D4AF37'}
                                     />
                                 </TouchableOpacity>
                             </View>
@@ -418,9 +419,9 @@ const Cart = () => {
                     </View>
 
                     <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Tax</Text>
+                        <Text style={styles.summaryLabel}>Platform Fee (10%)</Text>
                         <Text style={styles.summaryValue}>
-                            {summary?.tax ? formatPrice(summary.tax) : 'To be calculated'}
+                            {(summary?.platformFee ?? summary?.tax) ? formatPrice(summary?.platformFee ?? summary?.tax ?? 0) : 'To be calculated'}
                         </Text>
                     </View>
 

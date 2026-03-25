@@ -104,7 +104,7 @@ const EditProduct = () => {
 
   useEffect(() => {
     if (token) {
-      api.setToken(token);
+      api.setToken(token.replace('Bearer ', ''));
     }
     loadProduct();
     fetchCategories();
@@ -308,9 +308,7 @@ const EditProduct = () => {
       }
 
       const updateId = actualProductId || productId as string;
-      console.log('[EditProduct] Updating product ID:', updateId, 'Route param:', productId);
       const response = await api.updateProduct(updateId, formData);
-      console.log('[EditProduct] Update response:', JSON.stringify(response));
 
       if (response.success) {
         showModal('success', 'Product updated successfully!');

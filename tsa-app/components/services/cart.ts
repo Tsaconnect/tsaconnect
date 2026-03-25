@@ -69,9 +69,20 @@ export interface CartSummary {
     totalQuantity: number;
     subtotal: number;
     shipping: number;
-    tax: number;
+    platformFee: number;
+    tax?: number; // legacy — use platformFee
     discount: number;
     total: number;
+}
+
+export interface FeeConfig {
+    platformFeeBPS: number;
+    mcgpPlatformFeeBPS: number;
+    buyerCashbackBPS: number;
+    uplineFeeBPS: number;
+    platformFeePercent: number;
+    buyerCashbackPercent: number;
+    uplineFeePercent: number;
 }
 
 export interface ShippingAddress {
@@ -183,6 +194,7 @@ export interface CartSummaryResponse {
     cart: Cart;
     itemsBySeller: ItemsBySeller[];
     summary: CartSummary;
+    feeConfig?: FeeConfig;
     appliedCoupon?: Coupon;
     shippingAddress?: ShippingAddress;
     billingAddress?: BillingAddress;
