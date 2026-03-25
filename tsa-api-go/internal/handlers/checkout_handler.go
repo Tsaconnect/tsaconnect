@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -441,6 +442,16 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
+	// Add gas fee to approve amount — the contract collects product + shipping + platformFee + gasFee
+	// Gas fee is $0.10 = 100000 units for 6-decimal tokens, 0 for MCGP
+	approveAmount := new(big.Int).Set(totalAmount)
+	if strings.ToUpper(order.Token) != "MCGP" {
+		decimals := 6
+		gasFeeStr := fmt.Sprintf("%.0f", models.GasFeeUSD*math.Pow10(decimals))
+		gasFeeWei, _ := new(big.Int).SetString(gasFeeStr, 10)
+		approveAmount.Add(approveAmount, gasFeeWei)
+	}
+
 	// Prepare approve tx
 	client := ch.BlockchainService.ClientForChain("sonic")
 	if client == nil {
@@ -448,7 +459,7 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
-	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, ch.Config.ProductEscrowAddress, totalAmount)
+	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, ch.Config.ProductEscrowAddress, approveAmount)
 	if err != nil {
 		log.Printf("Failed to prepare approve tx: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
