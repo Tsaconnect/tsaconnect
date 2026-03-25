@@ -32,7 +32,8 @@ export interface MultipleUploadResponse {
 }
 //Category
 export interface Category {
-  _id: string;
+  id: string;
+  _id?: string;
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';
@@ -152,15 +153,15 @@ export interface AssetVisibilityResponse {
   data?: any;
 }
 export interface Product {
-  _id: string;
-  id?: string;
+  id: string;
+  _id?: string;
   userId?: string;
   name: string;
   description: string;
   price: number;
   stock: number;
   category?: string | {
-    _id: string;
+    id: string;
     title: string;
     icon?: string;
     color?: string;
@@ -224,14 +225,14 @@ class APIService {
     return headers;
   }
   //Merchant Product methods
-  async getMerchantProducts(): Promise<ApiResponse<Product[]>> {
+  async getMerchantProducts(): Promise<ApiResponse<{ products: Product[]; pagination: any }>> {
     try {
-      const response = await fetch(`${API_BASE_URL}/products`, {
+      const response = await fetch(`${API_BASE_URL}/products/user`, {
         method: 'GET',
         headers: this.getHeaders(),
       });
 
-      return this.handleResponse<Product[]>(response);
+      return this.handleResponse<{ products: Product[]; pagination: any }>(response);
     } catch (error: any) {
       console.error('Get merchant products error:', error);
       return {
@@ -1424,7 +1425,8 @@ class APIService {
 }
 // Category methods
 export interface Category {
-  _id: string;
+  id: string;
+  _id?: string;
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';

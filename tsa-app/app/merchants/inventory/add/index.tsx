@@ -107,7 +107,7 @@ const AddProduct = () => {
         setCategories(response.data);
         if (response.data.length === 1) {
           const cat = response.data[0];
-          const catId = cat._id || cat.id;
+          const catId = cat.id || cat._id;
           if (catId && cat.title) {
             setCategoryId(catId);
             setCategoryName(cat.title);
@@ -448,7 +448,7 @@ const AddProduct = () => {
                   >
                     {categoryId ? (
                       <View style={styles.categorySelectorValue}>
-                        <CategoryAvatar category={categories.find(c => (c._id || c.id) === categoryId) || { title: categoryName }} />
+                        <CategoryAvatar category={categories.find(c => (c.id || c._id) === categoryId) || { title: categoryName }} />
                         <Text style={styles.categorySelectorText}>{categoryName}</Text>
                       </View>
                     ) : (
@@ -496,7 +496,7 @@ const AddProduct = () => {
                       {categories
                         .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
                         .map((item, index) => {
-                          const itemId = item._id || item.id;
+                          const itemId = item.id || item._id;
                           const isSelected = categoryId === itemId;
                           return (
                             <TouchableOpacity

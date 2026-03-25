@@ -27,6 +27,12 @@ export default function MerchantLayout() {
                 }}
             />
             <Stack.Screen
+                name="inventory/edit/[productId]"
+                options={{
+                    title: 'Edit Product',
+                }}
+            />
+            <Stack.Screen
                 name="sell-usdt/index"
                 options={{
                     title: 'P2P: Sell USDT',

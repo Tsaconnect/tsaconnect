@@ -244,16 +244,20 @@ const Cart = () => {
             <View style={styles.sellerHeader}>
                 <View style={styles.sellerAvatar}>
                     <Text style={styles.sellerAvatarText}>
-                        {item.seller.companyName?.charAt(0) || item.seller.name.charAt(0)}
+                        {(item.seller.companyName || item.seller.name || item.seller.email || 'S').charAt(0).toUpperCase()}
                     </Text>
                 </View>
                 <View style={styles.sellerInfo}>
-                    <Text style={styles.sellerName}>{item.seller.companyName || item.seller.name}</Text>
+                    <Text style={styles.sellerName}>{item.seller.companyName || item.seller.name || 'Seller'}</Text>
                     <Text style={styles.sellerSubtotal}>Subtotal: {formatPrice(item.subtotal)}</Text>
                 </View>
             </View>
 
-            {item.items.map((cartItem) => renderCartItem(cartItem))}
+            {item.items.map((cartItem, index) => (
+                <React.Fragment key={cartItem._id || `cart-item-${index}`}>
+                    {renderCartItem(cartItem)}
+                </React.Fragment>
+            ))}
         </View>
     );
 
@@ -473,7 +477,7 @@ const Cart = () => {
             <FlatList
                 data={itemsBySeller}
                 renderItem={renderSellerSection}
-                keyExtractor={(item) => item.seller._id}
+                keyExtractor={(item, index) => item.seller._id || `seller-${index}`}
                 ListHeaderComponent={renderHeader}
                 ListEmptyComponent={renderEmptyCart}
                 ListFooterComponent={renderFooter}
