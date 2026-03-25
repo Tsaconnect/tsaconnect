@@ -152,9 +152,25 @@ export async function getOrderById(id: string): Promise<ApiResponse<Order>> {
   }
 }
 
+export async function prepareApprove(
+  orderId: string
+): Promise<ApiResponse<{ approveTx: UnsignedTx }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/prepare-approve`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Prepare approve error:', error);
+    return { success: false, message: error.message || 'Failed to prepare approval' };
+  }
+}
+
 export async function prepareEscrow(
   orderId: string
-): Promise<ApiResponse<{ approveTx: UnsignedTx; createOrderTx: UnsignedTx; contractOrderId: string }>> {
+): Promise<ApiResponse<{ createOrderTx: UnsignedTx; contractOrderId: string }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders/${orderId}/prepare-escrow`, {

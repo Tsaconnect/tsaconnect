@@ -372,78 +372,70 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	})
 }
 
-// PrepareEscrow handles POST /api/orders/:id/prepare-escrow
-func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
+// getOrderForEscrow is a shared helper for prepare-approve and prepare-escrow.
+func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *models.User, *models.User, string, bool) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
-		return
+		return nil, nil, nil, "", false
 	}
 
 	orderID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
-		return
+		return nil, nil, nil, "", false
 	}
 
 	var order models.Order
 	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
-		return
+		return nil, nil, nil, "", false
 	}
 
 	if order.BuyerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can prepare escrow")
-		return
+		return nil, nil, nil, "", false
 	}
 
 	if !isValidTransition(order.Status, models.OrderStatusEscrowed) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status))
-		return
+		return nil, nil, nil, "", false
 	}
 
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
-		return
+		return nil, nil, nil, "", false
 	}
 
-	// Get seller wallet address
 	var seller models.User
 	if err := config.DB.First(&seller, "id = ?", order.SellerID).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Seller not found")
-		return
+		return nil, nil, nil, "", false
 	}
 	if seller.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Seller has no wallet address")
-		return
+		return nil, nil, nil, "", false
 	}
 
-	// Get token address
 	tokenAddr := ch.BlockchainService.TokenAddress("sonic", order.Token)
 	if tokenAddr == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured", order.Token))
+		return nil, nil, nil, "", false
+	}
+
+	return &order, user, &seller, tokenAddr, true
+}
+
+// PrepareApprove handles POST /api/orders/:id/prepare-approve — returns the ERC20 approve tx.
+func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
+	order, user, _, tokenAddr, ok := ch.getOrderForEscrow(c)
+	if !ok {
 		return
 	}
 
-	totalAmount, ok := new(big.Int).SetString(order.TotalAmount, 10)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Invalid total amount")
-		return
-	}
+	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
 
-	productAmount, ok := new(big.Int).SetString(order.ProductAmount, 10)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Invalid product amount")
-		return
-	}
-	shippingAmount, ok := new(big.Int).SetString(order.ShippingAmount, 10)
-	if !ok {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Invalid shipping amount")
-		return
-	}
-
-	// Add gas fee to approve amount — the contract collects product + shipping + platformFee + gasFee
-	// Gas fee is $0.10 = 100000 units for 6-decimal tokens, 0 for MCGP
+	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee
 	approveAmount := new(big.Int).Set(totalAmount)
 	if strings.ToUpper(order.Token) != "MCGP" {
 		decimals := 6
@@ -452,7 +444,6 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		approveAmount.Add(approveAmount, gasFeeWei)
 	}
 
-	// Prepare approve tx
 	client := ch.BlockchainService.ClientForChain("sonic")
 	if client == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain service unavailable")
@@ -466,17 +457,33 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
-	// Prepare createOrder tx
+	var approveTx map[string]interface{}
+	if err := json.Unmarshal(approveTxBytes, &approveTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode approve transaction")
+		return
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Approve transaction prepared", gin.H{
+		"approveTx": approveTx,
+	})
+}
+
+// PrepareEscrow handles POST /api/orders/:id/prepare-escrow — returns the createOrder tx.
+// Must be called AFTER the approve tx has been broadcast so gas estimation succeeds.
+func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
+	order, user, seller, tokenAddr, ok := ch.getOrderForEscrow(c)
+	if !ok {
+		return
+	}
+
+	productAmount, _ := new(big.Int).SetString(order.ProductAmount, 10)
+	shippingAmount, _ := new(big.Int).SetString(order.ShippingAmount, 10)
+
 	contractOrderID := services.GenerateOrderID(order.ID)
 	upline := order.BuyerUpline
 	if upline == "" {
 		upline = "0x0000000000000000000000000000000000000000"
 	}
-
-	log.Printf("[PrepareEscrow] buyer=%s seller=%s token=%s product=%s shipping=%s platformFee=%s approve=%s escrow=%s upline=%s",
-		user.WalletAddress, seller.WalletAddress, tokenAddr,
-		productAmount.String(), shippingAmount.String(), order.PlatformFee,
-		approveAmount.String(), ch.Config.ProductEscrowAddress, upline)
 
 	createOrderTxBytes, err := ch.EscrowService.PrepareCreateOrder(
 		contractOrderID,
@@ -493,18 +500,13 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 
-	var approveTx, createOrderTx map[string]interface{}
-	if err := json.Unmarshal(approveTxBytes, &approveTx); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode approve transaction")
-		return
-	}
+	var createOrderTx map[string]interface{}
 	if err := json.Unmarshal(createOrderTxBytes, &createOrderTx); err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode escrow transaction")
 		return
 	}
 
-	utils.SuccessResponse(c, http.StatusOK, "Escrow transactions prepared", gin.H{
-		"approveTx":       approveTx,
+	utils.SuccessResponse(c, http.StatusOK, "Escrow transaction prepared", gin.H{
 		"createOrderTx":   createOrderTx,
 		"contractOrderId": fmt.Sprintf("0x%x", contractOrderID),
 	})
