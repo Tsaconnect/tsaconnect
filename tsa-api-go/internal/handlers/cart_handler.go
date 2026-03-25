@@ -199,7 +199,7 @@ func (h *Handlers) AddToCart(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Item added to cart successfully", cart)
 }
 
-// UpdateCartItem handles PUT /api/cart/items/:itemId - updates an item's quantity.
+// UpdateCartItem handles PUT /api/cart/items/:id - updates an item's quantity.
 func (h *Handlers) UpdateCartItem(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -207,7 +207,7 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 		return
 	}
 
-	itemID, err := uuid.Parse(c.Param("itemId"))
+	itemID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid item ID")
 		return
@@ -271,7 +271,7 @@ func (h *Handlers) UpdateCartItem(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Cart updated successfully", cart)
 }
 
-// RemoveFromCart handles DELETE /api/cart/items/:itemId - removes an item from the cart.
+// RemoveFromCart handles DELETE /api/cart/items/:id - removes an item from the cart.
 func (h *Handlers) RemoveFromCart(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -279,7 +279,7 @@ func (h *Handlers) RemoveFromCart(c *gin.Context) {
 		return
 	}
 
-	itemID, err := uuid.Parse(c.Param("itemId"))
+	itemID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid item ID")
 		return

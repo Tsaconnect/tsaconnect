@@ -276,9 +276,9 @@ const Cart = () => {
                 >
                     {/* Product Image */}
                     <View style={styles.imageContainer}>
-                        {product?.images && product.images.length > 0 ? (
+                        {product?.images?.find((img: any) => img.url)?.url ? (
                             <Image
-                                source={{ uri: product.images[0].url }}
+                                source={{ uri: product.images.find((img: any) => img.url)!.url }}
                                 style={styles.itemImage}
                                 resizeMode="cover"
                             />
