@@ -69,20 +69,23 @@ export interface CartSummary {
     totalQuantity: number;
     subtotal: number;
     shipping: number;
+    gasFee: number;
     platformFee: number;
-    tax?: number; // legacy — use platformFee
     discount: number;
     total: number;
 }
 
 export interface FeeConfig {
-    platformFeeBPS: number;
-    mcgpPlatformFeeBPS: number;
+    merchantFeeBPS: number;
+    mcgpMerchantFeeBPS: number;
     buyerCashbackBPS: number;
     uplineFeeBPS: number;
-    platformFeePercent: number;
+    systemFeeBPS: number;
+    merchantFeePercent: number;
     buyerCashbackPercent: number;
     uplineFeePercent: number;
+    gasFeeUSD: number;
+    buyerPlatformFee: number;
 }
 
 export interface ShippingAddress {

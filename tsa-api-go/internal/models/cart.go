@@ -29,34 +29,43 @@ type CartItem struct {
 }
 
 // CartSummary holds aggregated cart totals.
+// Buyer pays 0% platform fee. The 2% merchant fee is baked into listing price.
+// Buyer only pays a flat gas fee ($0.10) per order for on-chain transaction costs.
 type CartSummary struct {
 	TotalItems    int     `json:"totalItems"`
 	TotalQuantity int     `json:"totalQuantity"`
 	Subtotal      float64 `json:"subtotal"`
 	Shipping      float64 `json:"shipping"`
-	PlatformFee   float64 `json:"platformFee"`
+	GasFee        float64 `json:"gasFee"`
+	PlatformFee   float64 `json:"platformFee"` // 0 for buyer — merchant fee is in listing price
 	Discount      float64 `json:"discount"`
 	Total         float64 `json:"total"`
 }
 
 // Fee configuration — matches smart contract ProductEscrow.sol constants.
+// Merchant fee (2%) is baked into the listing price. Buyer pays 0% platform fee.
 const (
-	PlatformFeeBPS     = 1000 // 10% for USDC/USDT
-	MCGPPlatformFeeBPS = 0    // 0% for MCGP
-	BuyerCashbackBPS   = 250  // 2.5%
-	UplineFeeBPS       = 250  // 2.5%
+	MerchantFeeBPS     = 200 // 2% merchant fee per transaction
+	MCGPMerchantFeeBPS = 0   // 0% for MCGP
+	BuyerCashbackBPS   = 50  // 0.5% cashback to buyer
+	UplineFeeBPS       = 50  // 0.5% bonus to upline
+	SystemFeeBPS       = 100 // 1% to system wallet (remainder of 2%)
+	GasFeeUSD          = 0.10 // $0.10 flat gas fee per order, goes to system wallet
 )
 
-// FeeConfig returns the platform fee schedule for the frontend.
+// GetFeeConfig returns the fee schedule for the frontend.
 func GetFeeConfig() map[string]interface{} {
 	return map[string]interface{}{
-		"platformFeeBPS":     PlatformFeeBPS,
-		"mcgpPlatformFeeBPS": MCGPPlatformFeeBPS,
-		"buyerCashbackBPS":   BuyerCashbackBPS,
-		"uplineFeeBPS":       UplineFeeBPS,
-		"platformFeePercent": float64(PlatformFeeBPS) / 100.0,   // 10.0
-		"buyerCashbackPercent": float64(BuyerCashbackBPS) / 100.0, // 2.5
-		"uplineFeePercent":   float64(UplineFeeBPS) / 100.0,     // 2.5
+		"merchantFeeBPS":       MerchantFeeBPS,
+		"mcgpMerchantFeeBPS":   MCGPMerchantFeeBPS,
+		"buyerCashbackBPS":     BuyerCashbackBPS,
+		"uplineFeeBPS":         UplineFeeBPS,
+		"systemFeeBPS":         SystemFeeBPS,
+		"merchantFeePercent":   float64(MerchantFeeBPS) / 100.0,   // 2.0
+		"buyerCashbackPercent": float64(BuyerCashbackBPS) / 100.0, // 0.5
+		"uplineFeePercent":     float64(UplineFeeBPS) / 100.0,     // 0.5
+		"gasFeeUSD":            GasFeeUSD,                          // 0.10
+		"buyerPlatformFee":     0,                                  // buyer pays 0% platform fee
 	}
 }
 
@@ -223,8 +232,8 @@ func (c *Cart) SetAppliedCoupon(ac *AppliedCoupon) {
 }
 
 // CalculateCartSummary computes the cart summary from deserialized items and coupon.
-// Platform fee matches the smart contract: 10% of subtotal for USDC/USDT, 0% for MCGP.
-// The token parameter controls which fee rate to use; defaults to non-MCGP rate.
+// Buyer pays 0% platform fee — the 2% merchant fee is baked into listing prices.
+// Buyer only pays a flat $0.10 gas fee per order for on-chain costs.
 func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShipping float64) CartSummary {
 	summary := CartSummary{
 		TotalItems: len(items),
@@ -236,10 +245,14 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 		summary.Subtotal += item.Price * float64(item.Quantity)
 	}
 
-	// Platform fee: 10% of subtotal (matches ProductEscrow.sol PLATFORM_FEE_BPS = 1000)
-	// This is the default (non-MCGP) rate shown in the cart.
-	// The checkout screen adjusts to 0% when MCGP is selected.
-	summary.PlatformFee = summary.Subtotal * float64(PlatformFeeBPS) / 10000.0
+	// Buyer platform fee is 0% — merchant absorbs the 2% in listing price
+	summary.PlatformFee = 0
+
+	// Gas fee: $0.10 flat per order (for on-chain escrow approval)
+	// 0 if cart is empty, $0.10 if there are items
+	if len(items) > 0 {
+		summary.GasFee = GasFeeUSD
+	}
 
 	// Apply discount if coupon is applied
 	if coupon != nil && coupon.Code != "" {
@@ -258,7 +271,7 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 		}
 	}
 
-	summary.Total = summary.Subtotal + summary.Shipping + summary.PlatformFee - summary.Discount
+	summary.Total = summary.Subtotal + summary.Shipping + summary.GasFee - summary.Discount
 	if summary.Total < 0 {
 		summary.Total = 0
 	}

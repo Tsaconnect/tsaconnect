@@ -29,10 +29,14 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant AUTO_REFUND_GRACE_PERIOD = 3 days;
 
     // Fee basis points (out of 10000)
-    uint256 public constant PLATFORM_FEE_BPS = 1000; // 10%
-    uint256 public constant BUYER_CASHBACK_BPS = 250; // 2.5% of productAmount
-    uint256 public constant UPLINE_FEE_BPS = 250;    // 2.5% of productAmount
-    // System fee = platformFee - buyerCashback - uplineAmount (remainder absorbs rounding)
+    // Merchant fee: 2% baked into listing price, paid by merchant not buyer
+    uint256 public constant PLATFORM_FEE_BPS = 200;  // 2% of productAmount
+    uint256 public constant BUYER_CASHBACK_BPS = 50;  // 0.5% of productAmount
+    uint256 public constant UPLINE_FEE_BPS = 50;      // 0.5% of productAmount
+    // System fee = 1% (platformFee - buyerCashback - uplineAmount, remainder absorbs rounding)
+
+    // Fixed gas fee in token units ($0.10 for 6-decimal tokens like USDC/USDT)
+    uint256 public constant GAS_FEE = 100000; // $0.10 — goes to system wallet
 
     // Auto-refund split when seller delivered but buyer didn't confirm (basis points of total escrowed)
     uint256 public constant AUTO_REFUND_BUYER_BPS = 9000;  // 90%
@@ -125,9 +129,15 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
         require(productAmount > 0, "Product amount must be > 0");
 
         uint256 platformFee = _calculatePlatformFee(productAmount, token);
-        uint256 totalAmount = productAmount + shippingAmount + platformFee;
+        uint256 gasFee = _isMCGP(token) ? 0 : GAS_FEE;
+        uint256 totalAmount = productAmount + shippingAmount + platformFee + gasFee;
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        // Gas fee goes directly to system wallet
+        if (gasFee > 0) {
+            IERC20(token).safeTransfer(owner(), gasFee);
+        }
 
         orders[orderId] = Order({
             buyer: msg.sender,
