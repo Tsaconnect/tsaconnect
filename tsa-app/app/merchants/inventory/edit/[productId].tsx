@@ -292,6 +292,11 @@ const EditProduct = () => {
     try {
       const formData = new FormData();
 
+      // Send existing image URLs to keep
+      if (existingImageUrls.length > 0) {
+        formData.append('existingImages', JSON.stringify(existingImageUrls));
+      }
+
       // Append new images
       newImages.forEach((uri, index) => {
         const filename = uri.split('/').pop() || `image_${index}.jpg`;
