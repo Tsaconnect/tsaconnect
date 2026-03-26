@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -171,6 +172,35 @@ func (h *Handlers) Signup(c *gin.Context) {
 		return
 	}
 
+	// Send email verification OTP
+	go func() {
+		code, err := generateOTP()
+		if err != nil {
+			log.Printf("Signup OTP generation error: %v", err)
+			return
+		}
+		hashedCode, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("Signup OTP hash error: %v", err)
+			return
+		}
+		verification := models.EmailVerification{
+			ID:        uuid.New(),
+			UserID:    user.ID,
+			Email:     user.Email,
+			Code:      string(hashedCode),
+			ExpiresAt: time.Now().Add(15 * time.Minute),
+			CreatedAt: time.Now(),
+		}
+		if err := config.DB.Create(&verification).Error; err != nil {
+			log.Printf("Signup OTP save error: %v", err)
+			return
+		}
+		if err := sendOTPEmail(h.EmailService, user.Email, user.Name, code); err != nil {
+			log.Printf("Signup OTP email error: %v", err)
+		}
+	}()
+
 	// Generate JWT token
 	token, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
 	if err != nil {
@@ -184,11 +214,11 @@ func (h *Handlers) Signup(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
-		"message": "Registration successful. Please proceed to identity verification.",
+		"message": "Registration successful. Please verify your email.",
 		"data": gin.H{
 			"userId":   user.ID.String(),
 			"token":    token,
-			"nextStep": "identity_verification",
+			"nextStep": "email_verification",
 		},
 	})
 }
@@ -537,6 +567,7 @@ func (h *Handlers) Login(c *gin.Context) {
 			"email":              user.Email,
 			"verificationStatus": user.VerificationStatus,
 			"accountStatus":      user.AccountStatus,
+			"emailVerified":      user.EmailVerified,
 		},
 	})
 }

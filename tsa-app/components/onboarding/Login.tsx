@@ -5,40 +5,44 @@ import {
   View,
   TextInput,
   Pressable,
-  Alert,
   ActivityIndicator,
+  ScrollView,
 } from "react-native";
 import { COLORS } from "../../constants/theme";
 import { router } from "expo-router";
-import { LinearProgress } from "react-native-elements";
-import Icon from "@expo/vector-icons/MaterialCommunityIcons";
+import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [isError, setIsError] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [generalError, setGeneralError] = useState("");
 
-  function handlePasswordRecovery() {
-    router.push("/recovery");
-  }
-
-  function Signup() {
-    router.push("/signup");
+  function clearErrors() {
+    setEmailError("");
+    setPasswordError("");
+    setGeneralError("");
   }
 
   async function handleLogin() {
-    if (!email || !password) {
-      Alert.alert("Error", "All credentials must be filled");
-      return;
+    clearErrors();
+
+    let hasError = false;
+    if (!email.trim()) {
+      setEmailError("Email or username is required");
+      hasError = true;
     }
+    if (!password) {
+      setPasswordError("Password is required");
+      hasError = true;
+    }
+    if (hasError) return;
 
     setLoading(true);
-    setIsError(false);
-
     try {
       const response = await api.login(email.trim(), password.trim());
       if (response.success) {
@@ -46,21 +50,14 @@ export default function Login() {
         setPassword("");
         router.replace("/home");
       } else {
-        setIsError(true);
-        Alert.alert(
-          "Login Failed",
-          response.message || "Invalid credentials. Please try again.",
-          [{ text: "OK" }]
+        setGeneralError(
+          response.message || "Invalid credentials. Please try again."
         );
       }
     } catch (error: any) {
-      setIsError(true);
-      console.error("Login error:", error);
-
-      Alert.alert(
-        "Connection Error",
-        api.getErrorMessage(error) || "Unable to connect to server. Please check your internet connection.",
-        [{ text: "OK" }]
+      setGeneralError(
+        api.getErrorMessage(error) ||
+          "Unable to connect to server. Please check your internet connection."
       );
     } finally {
       setLoading(false);
@@ -68,132 +65,164 @@ export default function Login() {
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.loginText}>Login</Text>
-
-      <View style={styles.formContainer}>
-        {/* Email/Username Input */}
-        <TextInput
-          style={[
-            styles.input,
-            isError && styles.inputError
-          ]}
-          value={email}
-          onChangeText={(text) => {
-            setEmail(text);
-            setIsError(false);
-          }}
-          placeholder="Email or Username"
-          keyboardType="email-address"
-          autoCapitalize="none"
-          autoComplete="email"
-          editable={!loading}
-          placeholderTextColor="#999"
-        />
-
-        {/* Password Input */}
-        <View style={[
-          styles.passwordContainer,
-          isError && styles.inputError
-        ]}>
-          <TextInput
-            style={styles.passwordInput}
-            value={password}
-            placeholder="Password"
-            secureTextEntry={!isPasswordVisible}
-            autoCapitalize="none"
-            autoComplete="password"
-            onChangeText={(text) => {
-              setPassword(text);
-              setIsError(false);
-            }}
-            editable={!loading}
-            placeholderTextColor="#999"
-          />
-          <Pressable
-            style={styles.icon}
-            onPress={() => setIsPasswordVisible(!isPasswordVisible)}
-            disabled={loading}
-          >
-            <Icon
-              name={isPasswordVisible ? "eye-off" : "eye"}
-              size={24}
-              color={loading ? "#cccccc" : "gray"}
-            />
-          </Pressable>
-        </View>
-
-        {/* Loading Indicator */}
-        {loading && (
-          <View style={styles.progressContainer}>
-            <LinearProgress color={COLORS.primary} />
-            <Text style={styles.loadingText}>Signing in...</Text>
+    <ScrollView
+      contentContainerStyle={styles.scrollContainer}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.container}>
+        <View style={styles.brandingContainer}>
+          <View style={styles.logoCircle}>
+            <Text style={styles.logoText}>TSA</Text>
           </View>
-        )}
-
-        {/* Forgot Password */}
-        <Pressable
-          onPress={handlePasswordRecovery}
-          disabled={loading}
-          style={styles.forgotPasswordButton}
-        >
-          <Text style={[
-            styles.forgotPassword,
-            loading && styles.disabledText
-          ]}>
-            Forgot Password?
-          </Text>
-        </Pressable>
-
-        {/* Login Button */}
-        <Pressable
-          onPress={handleLogin}
-          style={({ pressed }) => [
-            styles.button,
-            loading && styles.buttonLoading,
-            isError && styles.buttonError,
-            pressed && styles.buttonPressed
-          ]}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Login</Text>
-          )}
-        </Pressable>
-
-        {/* Separator */}
-        <View style={styles.separatorContainer}>
-          <View style={styles.separatorLine} />
-          <Text style={styles.orText}>OR</Text>
-          <View style={styles.separatorLine} />
+          <Text style={styles.welcomeText}>Welcome Back</Text>
+          <Text style={styles.subtitle}>Sign in to your account</Text>
         </View>
 
-        {/* Signup Option */}
-        <View style={styles.signupContainer}>
-          <Text style={styles.question}>New To Tsa?</Text>
+        <View style={styles.formContainer}>
+          <View style={styles.fieldWrapper}>
+            <View
+              style={[
+                styles.inputContainer,
+                emailError ? styles.inputError : null,
+              ]}
+            >
+              <MaterialIcons
+                name="email"
+                size={20}
+                color={emailError ? COLORS.danger : COLORS.gray}
+                style={styles.inputIcon}
+              />
+              <TextInput
+                style={styles.input}
+                value={email}
+                onChangeText={(text) => {
+                  setEmail(text);
+                  if (emailError) setEmailError("");
+                  if (generalError) setGeneralError("");
+                }}
+                placeholder="Email or Username"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+                editable={!loading}
+                placeholderTextColor="#999"
+              />
+            </View>
+            {emailError ? (
+              <Text style={styles.errorText}>{emailError}</Text>
+            ) : null}
+          </View>
+
+          <View style={styles.fieldWrapper}>
+            <View
+              style={[
+                styles.inputContainer,
+                passwordError ? styles.inputError : null,
+              ]}
+            >
+              <MaterialIcons
+                name="lock"
+                size={20}
+                color={passwordError ? COLORS.danger : COLORS.gray}
+                style={styles.inputIcon}
+              />
+              <TextInput
+                style={styles.input}
+                value={password}
+                placeholder="Password"
+                secureTextEntry={!isPasswordVisible}
+                autoCapitalize="none"
+                autoComplete="password"
+                onChangeText={(text) => {
+                  setPassword(text);
+                  if (passwordError) setPasswordError("");
+                  if (generalError) setGeneralError("");
+                }}
+                editable={!loading}
+                placeholderTextColor="#999"
+              />
+              <Pressable
+                style={styles.passwordToggle}
+                onPress={() => setIsPasswordVisible(!isPasswordVisible)}
+                disabled={loading}
+              >
+                <MaterialIcons
+                  name={isPasswordVisible ? "visibility" : "visibility-off"}
+                  size={20}
+                  color={loading ? "#cccccc" : COLORS.gray}
+                />
+              </Pressable>
+            </View>
+            {passwordError ? (
+              <Text style={styles.errorText}>{passwordError}</Text>
+            ) : null}
+          </View>
+
           <Pressable
-            onPress={Signup}
+            onPress={() => router.push("/recovery")}
             disabled={loading}
-            style={({ pressed }) => [
-              pressed && styles.signupPressed
-            ]}
+            style={styles.forgotPasswordButton}
           >
-            <Text style={[
-              styles.signUpText,
-              loading && styles.disabledText
-            ]}>
-              Create Account
+            <Text
+              style={[styles.forgotPassword, loading && styles.disabledText]}
+            >
+              Forgot Password?
             </Text>
           </Pressable>
+
+          {generalError ? (
+            <View style={styles.generalErrorContainer}>
+              <MaterialIcons name="error-outline" size={16} color={COLORS.danger} />
+              <Text style={styles.generalErrorText}>{generalError}</Text>
+            </View>
+          ) : null}
+
+          <Pressable
+            onPress={handleLogin}
+            style={({ pressed }) => [
+              styles.button,
+              loading && styles.buttonLoading,
+              pressed && styles.buttonPressed,
+            ]}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>Login</Text>
+            )}
+          </Pressable>
+
+          <View style={styles.separatorContainer}>
+            <View style={styles.separatorLine} />
+            <Text style={styles.orText}>OR</Text>
+            <View style={styles.separatorLine} />
+          </View>
+
+          <View style={styles.signupContainer}>
+            <Text style={styles.question}>New to TSA Connect?</Text>
+            <Pressable
+              onPress={() => router.push("/signup")}
+              disabled={loading}
+              style={({ pressed }) => [pressed && styles.signupPressed]}
+            >
+              <Text
+                style={[styles.signUpText, loading && styles.disabledText]}
+              >
+                Create Account
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  scrollContainer: {
+    flexGrow: 1,
+  },
   container: {
     flex: 1,
     justifyContent: "center",
@@ -201,86 +230,76 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     alignItems: "center",
   },
+  brandingContainer: {
+    alignItems: "center",
+    marginBottom: 32,
+  },
+  logoCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: COLORS.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  logoText: {
+    color: "#fff",
+    fontSize: 24,
+    fontWeight: "700",
+  },
+  welcomeText: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: COLORS.primary,
+    textAlign: "center",
+  },
+  subtitle: {
+    fontSize: 14,
+    color: COLORS.gray,
+    marginTop: 4,
+  },
   formContainer: {
     width: "100%",
     maxWidth: 400,
-    alignItems: "center",
   },
-  loginText: {
-    fontSize: 28,
-    fontWeight: "bold",
-    marginBottom: 30,
-    color: COLORS.primary,
-    textAlign: "center",
-    width: "100%",
+  fieldWrapper: {
+    marginBottom: 4,
   },
-  input: {
-    width: "100%",
-    height: 56,
-    borderColor: "#ddd",
-    borderWidth: 1,
-    marginBottom: 16,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    fontSize: 16,
-    backgroundColor: "#f9f9f9",
-  },
-  inputError: {
-    borderColor: "#ff4444",
-    borderWidth: 2,
-    backgroundColor: "#fff5f5",
-  },
-  passwordContainer: {
+  inputContainer: {
     flexDirection: "row",
     alignItems: "center",
     width: "100%",
     height: 56,
-    borderColor: "#ddd",
+    borderColor: COLORS.lightGray,
     borderWidth: 1,
-    marginBottom: 16,
+    marginBottom: 2,
     borderRadius: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 15,
     backgroundColor: "#f9f9f9",
   },
-  passwordInput: {
+  inputError: {
+    borderColor: COLORS.danger,
+    borderWidth: 1.5,
+    backgroundColor: "#fff5f5",
+  },
+  inputIcon: {
+    marginRight: 10,
+  },
+  input: {
     flex: 1,
     fontSize: 16,
     height: "100%",
+    color: COLORS.dark,
   },
-  icon: {
+  passwordToggle: {
     padding: 8,
   },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 20,
-    height: 56,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  buttonPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.99 }],
-  },
-  buttonLoading: {
-    backgroundColor: "#d4ba92",
-    opacity: 0.8,
-  },
-  buttonError: {
-    borderColor: "#ff4444",
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "600",
+  errorText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    marginLeft: 15,
+    marginBottom: 8,
   },
   forgotPasswordButton: {
     alignSelf: "flex-end",
@@ -294,6 +313,45 @@ const styles = StyleSheet.create({
   },
   disabledText: {
     color: "#cccccc",
+  },
+  generalErrorContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#fff5f5",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  generalErrorText: {
+    color: COLORS.danger,
+    fontSize: 14,
+    marginLeft: 8,
+    flex: 1,
+  },
+  button: {
+    backgroundColor: COLORS.primary,
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 56,
+    borderRadius: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  buttonPressed: {
+    opacity: 0.9,
+    transform: [{ scale: 0.99 }],
+  },
+  buttonLoading: {
+    opacity: 0.8,
+  },
+  buttonText: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "600",
   },
   separatorContainer: {
     flexDirection: "row",
@@ -330,15 +388,5 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontWeight: "600",
     fontSize: 14,
-  },
-  progressContainer: {
-    width: "100%",
-    marginTop: 10,
-    alignItems: "center",
-  },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 14,
-    color: "#666",
   },
 });

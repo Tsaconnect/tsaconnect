@@ -47,6 +47,8 @@ interface AppContextType {
   tTy: any;
   settTy: React.Dispatch<React.SetStateAction<any>>;
   setCurrentUser: React.Dispatch<React.SetStateAction<any>>;
+  emailVerified: boolean;
+  setEmailVerified: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const defaultContextValue: AppContextType = {
@@ -73,6 +75,8 @@ const defaultContextValue: AppContextType = {
   tTy: null,
   settTy: () => {},
   setCurrentUser: () => {},
+  emailVerified: false,
+  setEmailVerified: () => {},
 };
 
 export const AppContext = createContext<AppContextType>(defaultContextValue);
@@ -92,6 +96,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [items, setItems] = useState<any[]>([]);
   const [currentUser, setCurrentUser] = useState<any>();
   const [tTy, settTy] = useState<any>();
+  const [emailVerified, setEmailVerified] = useState<boolean>(false);
 
   const addItem = async (newItem: any) => {
     try {
@@ -427,7 +432,9 @@ const register = async (formData: FormData) => {
         // Fetch user profile
         try {
           const response = await getCurrentUser();
-          setCurrentUser(response.data?.data ?? response.data);
+          const userData = response.data?.data ?? response.data;
+          setCurrentUser(userData);
+          setEmailVerified(userData?.emailVerified ?? false);
         } catch (err) {
           // Token may be expired — don't force logout, let screens handle it
         }
@@ -467,6 +474,8 @@ const register = async (formData: FormData) => {
         tTy,
         settTy,
         setCurrentUser,
+        emailVerified,
+        setEmailVerified,
       }}
     >
       {children}

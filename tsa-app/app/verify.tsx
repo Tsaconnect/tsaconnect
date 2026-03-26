@@ -1,19 +1,23 @@
-import React, { useEffect } from "react";
-import Verify from "../components/onboarding/Verify";
-import { router, useLocalSearchParams } from "expo-router";
-import { useAuth } from "../AuthContext/AuthContext";
+import React from 'react';
+import { SafeAreaView, StyleSheet } from 'react-native';
+import Verify from '../components/onboarding/Verify';
+import { useLocalSearchParams } from 'expo-router';
 
-const VerifySignup = () => {
-  const payLoad = useLocalSearchParams();
-  const { isAuthenticated } = useAuth();
+const VerifyScreen = () => {
+  const { email } = useLocalSearchParams<{ email?: string }>();
 
-  useEffect(() => {
-    if (isAuthenticated) {
-      //@ts-ignore
-      router.push("/home");
-    }
-  }, []);
-  return <Verify payLoad={payLoad} />;
+  return (
+    <SafeAreaView style={styles.container}>
+      <Verify email={email} showSkip={true} />
+    </SafeAreaView>
+  );
 };
 
-export default VerifySignup;
+export default VerifyScreen;
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+});

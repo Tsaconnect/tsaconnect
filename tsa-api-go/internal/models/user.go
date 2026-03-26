@@ -107,6 +107,7 @@ type User struct {
 	SeedPhraseBackedUp         bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
 	MuteNotifications          bool           `gorm:"default:false" json:"muteNotifications"`
 	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
+	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
 	SubmittedForVerificationAt *time.Time     `json:"submittedForVerificationAt,omitempty"`
 	CreatedAt                  time.Time      `json:"createdAt"`
