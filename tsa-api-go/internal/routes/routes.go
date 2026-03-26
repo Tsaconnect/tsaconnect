@@ -49,8 +49,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		authGroup.POST("/signup", h.Signup)
 		authGroup.POST("/login", h.Login)
-		authGroup.POST("/identity", auth, h.UpdateIdentity)
-		authGroup.POST("/facial", auth, h.UpdateFacial)
 		authGroup.POST("/send-otp", auth, h.SendOTP)
 		authGroup.POST("/verify-otp", auth, h.VerifyOTP)
 		authGroup.POST("/resend-otp", auth, h.ResendOTP)
@@ -74,13 +72,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminGroup.GET("/stats", h.GetAdminStats)
 	}
 
-	// Verification routes
-	verificationGroup := api.Group("/verification")
+	// KYC routes
+	kycGroup := api.Group("/kyc")
 	{
-		verificationGroup.GET("/status", auth, h.GetVerificationStatus)
-		verificationGroup.POST("/submit", auth, h.SubmitForVerification)
-		verificationGroup.POST("/approve/:id", adminAuth, h.ApproveVerification)
-		verificationGroup.POST("/reject/:id", adminAuth, h.RejectVerification)
+		kycGroup.POST("/session", auth, h.CreateKYCSession)
+		kycGroup.POST("/webhook", h.KYCWebhook)
+		kycGroup.GET("/status", auth, h.GetKYCStatus)
+		kycGroup.GET("/admin/verifications", adminAuth, h.GetAllVerifications)
+		kycGroup.POST("/admin/override/:id", adminAuth, h.AdminOverrideKYC)
+		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
 	}
 
 	// Upload routes
