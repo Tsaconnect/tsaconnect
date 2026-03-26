@@ -44,6 +44,12 @@ type Config struct {
 	MailjetAPIKey    string
 	MailjetSecretKey string
 
+	// Smile ID KYC verification
+	SmileIDAPIKey        string
+	SmileIDPartnerID     string
+	SmileIDBaseURL       string
+	SmileIDWebhookSecret string
+
 	// Multi-chain configuration (populated in Load)
 	Chains         map[string]ChainConfig
 	TokenAddresses map[string]string // "chain:symbol" → contract address
@@ -81,6 +87,12 @@ func Load() *Config {
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
+
+	// Smile ID KYC
+	cfg.SmileIDAPIKey = os.Getenv("SMILE_ID_API_KEY")
+	cfg.SmileIDPartnerID = os.Getenv("SMILE_ID_PARTNER_ID")
+	cfg.SmileIDBaseURL = getEnv("SMILE_ID_BASE_URL", "https://api.smileidentity.com")
+	cfg.SmileIDWebhookSecret = os.Getenv("SMILE_ID_WEBHOOK_SECRET")
 
 	cfg.Chains = map[string]ChainConfig{
 		"sonic": {Name: "Sonic Network", RPCURL: cfg.SonicRPCURL, ChainID: cfg.SonicChainID, NativeCurrency: "S"},
