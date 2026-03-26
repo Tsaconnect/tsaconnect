@@ -12,6 +12,7 @@ import { router } from "expo-router";
 import { Avatar } from "react-native-elements";
 import api from "@/components/services/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import NotificationBell from '../../components/NotificationBell';
 
 interface UserProfile {
   _id: string;
@@ -271,6 +272,8 @@ const Layout = () => {
             //@ts-ignore
             ({ navigation, route }) => ({
               headerRight: () => (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <NotificationBell />
                 <Pressable
                   onPress={handleAvatarPress}
                   style={styles.avatarContainer}
@@ -317,6 +320,7 @@ const Layout = () => {
                     />
                   )}
                 </Pressable>
+              </View>
               ),
               headerTitle: "TSA Connect",
               title: "Dashboard",

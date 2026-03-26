@@ -108,6 +108,13 @@ const DashLayout = () => {
           headerShown: false,
         }}
       />
+      <Tabs.Screen
+        name="notifications"
+        options={{
+          title: 'Notifications',
+          href: null,
+        }}
+      />
     </Tabs>
   );
 };
