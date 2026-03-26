@@ -105,6 +105,8 @@ type User struct {
 	LockUntil                  *time.Time     `json:"lockUntil,omitempty"`
 	WalletAddress              string         `json:"walletAddress,omitempty"`
 	SeedPhraseBackedUp         bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
+	MuteNotifications          bool           `gorm:"default:false" json:"muteNotifications"`
+	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
 	SubmittedForVerificationAt *time.Time     `json:"submittedForVerificationAt,omitempty"`
 	CreatedAt                  time.Time      `json:"createdAt"`

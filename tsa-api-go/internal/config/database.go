@@ -39,6 +39,7 @@ func AutoMigrate() error {
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
+		&models.Notification{},
 	); err != nil {
 		return err
 	}
