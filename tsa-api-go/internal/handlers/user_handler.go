@@ -159,19 +159,10 @@ func (h *Handlers) GetVerificationStatus(c *gin.Context) {
 		return
 	}
 
-	docs := dbUser.GetDocuments()
-	fv := dbUser.GetFacialVerification()
-
 	status := gin.H{
-		"overall": dbUser.VerificationStatus,
-		"documents": gin.H{
-			"driversLicense": docs.DriversLicense.Front.Verified,
-			"nin":            docs.NIN.Front.Verified,
-			"passport":       docs.Passport.Photo.Verified,
-			"pvc":            docs.PVC.Card.Verified,
-			"bvn":            docs.BVN.Verified,
-		},
-		"facial":    fv.Verified,
+		"overall":   dbUser.VerificationStatus,
+		"notes":     dbUser.VerificationNotes,
+		"smileJobId": dbUser.SmileJobID,
 		"completed": dbUser.VerificationStatus == models.VerificationStatusVerified,
 	}
 
@@ -205,7 +196,11 @@ func (h *Handlers) GetDocuments(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dbUser.GetDocuments(),
+		"data": gin.H{
+			"verificationStatus": dbUser.VerificationStatus,
+			"verificationNotes":  dbUser.VerificationNotes,
+			"smileJobId":         dbUser.SmileJobID,
+		},
 	})
 }
 
