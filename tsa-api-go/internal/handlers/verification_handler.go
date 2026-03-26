@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -744,6 +745,17 @@ func (h *Handlers) ApproveVerification(c *gin.Context) {
 
 	log.Printf("Verification approved for user %s by admin %s", userID.String(), currentUser.ID.String())
 
+	h.EventBus.Publish(events.Event{
+		Type:    events.VerificationApproved,
+		UserID:  userID,
+		Title:   "Verification Approved",
+		Message: "Your identity verification has been approved",
+		Data: map[string]interface{}{
+			"verificationStatus": models.VerificationStatusVerified,
+			"notes":              notes,
+		},
+	})
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Verification approved successfully",
@@ -825,6 +837,17 @@ func (h *Handlers) RejectVerification(c *gin.Context) {
 	_ = config.DB.Create(&verificationLog).Error
 
 	log.Printf("Verification rejected for user %s by admin %s. Reason: %s", userID.String(), currentUser.ID.String(), req.Reason)
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.VerificationRejected,
+		UserID:  userID,
+		Title:   "Verification Rejected",
+		Message: fmt.Sprintf("Your identity verification has been rejected: %s", req.Reason),
+		Data: map[string]interface{}{
+			"verificationStatus": models.VerificationStatusRejected,
+			"reason":             req.Reason,
+		},
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

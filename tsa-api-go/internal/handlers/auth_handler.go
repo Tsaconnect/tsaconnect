@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -476,6 +477,15 @@ func (h *Handlers) Login(c *gin.Context) {
 		}
 		if lockUntil != nil {
 			updates["lock_until"] = lockUntil
+			h.EventBus.Publish(events.Event{
+				Type:    events.SecurityAccountLocked,
+				UserID:  user.ID,
+				Title:   "Account Locked",
+				Message: "Your account has been temporarily locked due to multiple failed login attempts",
+				Data: map[string]interface{}{
+					"attempts": attempts,
+				},
+			})
 		}
 		config.DB.Model(&user).Updates(updates)
 
@@ -505,6 +515,16 @@ func (h *Handlers) Login(c *gin.Context) {
 		})
 		return
 	}
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.SecurityLoginNewDevice,
+		UserID:  user.ID,
+		Title:   "New Login",
+		Message: "A new login was detected on your account",
+		Data: map[string]interface{}{
+			"ip": c.ClientIP(),
+		},
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

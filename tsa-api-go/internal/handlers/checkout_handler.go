@@ -589,6 +589,18 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderEscrowed,
+		UserID:  user.ID,
+		Title:   "Order Escrowed",
+		Message: fmt.Sprintf("Your payment for order %s has been escrowed", order.ID),
+		Data: map[string]interface{}{
+			"orderId":         order.ID.String(),
+			"status":          models.OrderStatusEscrowed,
+			"escrowExpiresAt": escrowExpires,
+		},
+	})
+
 	utils.SuccessResponse(c, http.StatusOK, "Escrow submitted successfully", gin.H{
 		"orderId":         order.ID,
 		"status":          models.OrderStatusEscrowed,
@@ -644,6 +656,17 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
+
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDelivered,
+		UserID:  order.BuyerID,
+		Title:   "Order Delivered",
+		Message: fmt.Sprintf("Your order %s has been marked as delivered by the seller", order.ID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusDelivered,
+		},
+	})
 
 	utils.SuccessResponse(c, http.StatusOK, "Order marked as delivered", gin.H{
 		"orderId":           order.ID,
@@ -769,6 +792,17 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCompleted,
+		UserID:  order.SellerID,
+		Title:   "Order Completed",
+		Message: fmt.Sprintf("Order %s has been completed — funds have been released", order.ID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusCompleted,
+		},
+	})
+
 	utils.SuccessResponse(c, http.StatusOK, "Order completed", gin.H{
 		"orderId":          order.ID,
 		"status":           models.OrderStatusCompleted,
@@ -831,6 +865,17 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 			return
 		}
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderRefunded,
+			UserID:  user.ID,
+			Title:   "Refund Requested",
+			Message: fmt.Sprintf("Your refund request for order %s is under admin review", order.ID),
+			Data: map[string]interface{}{
+				"orderId": order.ID.String(),
+				"status":  models.OrderStatusRefundRequested,
+			},
+		})
+
 		utils.SuccessResponse(c, http.StatusOK, "Refund requested for admin review", gin.H{
 			"orderId": order.ID,
 			"status":  models.OrderStatusRefundRequested,

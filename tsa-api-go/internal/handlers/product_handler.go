@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -169,6 +171,18 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	if categoryID != nil {
 		updateCategoryProductCount(*categoryID)
 	}
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.ProductListed,
+		UserID:  user.ID,
+		Title:   "Product Listed",
+		Message: fmt.Sprintf("Your product \"%s\" has been listed", product.Name),
+		Data: map[string]interface{}{
+			"productId": product.ID.String(),
+			"name":      product.Name,
+			"price":     product.Price,
+		},
+	})
 
 	utils.SuccessResponse(c, http.StatusCreated, "Product created successfully", product)
 }
