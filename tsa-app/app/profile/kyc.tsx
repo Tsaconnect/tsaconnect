@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import SmileID, { SmileIDDocumentVerificationView } from "@smile_identity/react-native";
 import api from "../../components/services/api";
 import { COLORS, SIZES } from "../../constants/theme";
 
@@ -17,6 +18,10 @@ type KYCState = "not_started" | "loading" | "sdk_active" | "in_progress" | "veri
 export default function KYCScreen() {
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
+  const [sdkConfig, setSdkConfig] = useState<{
+    jobId: string;
+    userId: string;
+  } | null>(null);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -40,6 +45,7 @@ export default function KYCScreen() {
   }, []);
 
   useEffect(() => {
+    SmileID.initialize(false, false).catch(() => {});
     checkStatus();
   }, [checkStatus]);
 
@@ -54,23 +60,26 @@ export default function KYCScreen() {
         return;
       }
 
-      // TODO: Launch Smile ID SDK here using response.data
-      // The exact SDK integration depends on the @smile_identity/react-native API.
-      // Example pattern:
-      //
-      // import { SmileID } from "@smile_identity/react-native";
-      // const result = await SmileID.documentVerification({
-      //   jobId: response.data.jobId,
-      //   partnerId: response.data.partnerId,
-      //   ...response.data.session,
-      // });
-      //
-      // For now, after SDK completes:
-      setState("in_progress");
-      Alert.alert("Verification Started", "We're reviewing your documents. This usually takes a few minutes.");
+      setSdkConfig({
+        jobId: response.data.jobId,
+        userId: response.data.session?.user_id as string ?? response.data.jobId,
+      });
+      setState("sdk_active");
     } catch (error: any) {
       Alert.alert("Error", api.getErrorMessage(error) || "Something went wrong");
       setState("not_started");
+    }
+  };
+
+  const handleSDKResult = (event: any) => {
+    const { result, error } = event.nativeEvent ?? {};
+    if (error) {
+      Alert.alert("Verification Error", "Something went wrong during verification. Please try again.");
+      setState("not_started");
+      setSdkConfig(null);
+    } else {
+      setState("in_progress");
+      setSdkConfig(null);
     }
   };
 
@@ -79,6 +88,25 @@ export default function KYCScreen() {
       <View style={styles.container}>
         <ActivityIndicator size="large" color={COLORS.primary} />
         <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (state === "sdk_active" && sdkConfig) {
+    return (
+      <View style={styles.sdkContainer}>
+        <SmileIDDocumentVerificationView
+          userId={sdkConfig.userId}
+          jobId={sdkConfig.jobId}
+          countryCode="NG"
+          showInstructions={true}
+          showAttribution={true}
+          allowGalleryUpload={false}
+          showConfirmation={true}
+          captureBothSides={true}
+          onResult={handleSDKResult}
+          style={styles.sdkView}
+        />
       </View>
     );
   }
@@ -162,6 +190,15 @@ export default function KYCScreen() {
 }
 
 const styles = StyleSheet.create({
+  sdkContainer: {
+    flex: 1,
+    backgroundColor: "#fff",
+  },
+  sdkView: {
+    flex: 1,
+    width: "100%",
+    height: "100%",
+  },
   container: {
     flex: 1,
     backgroundColor: "#fff",
