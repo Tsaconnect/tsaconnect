@@ -1,17 +1,33 @@
 package routes
 
 import (
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/ws"
+	"gorm.io/gorm"
 )
 
+// wsUpgrader is the WebSocket upgrader with permissive origin check (auth is via JWT token).
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, wsHub *ws.Hub) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -227,5 +243,92 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			serviceGroup.POST("/:id/submit-contact-fee", sch.SubmitContactFee)
 			serviceGroup.GET("/:id/contact", sch.GetServiceContact)
 		}
+	}
+
+	// Notification routes (authenticated)
+	notifGroup := api.Group("/notifications")
+	notifGroup.Use(auth)
+	{
+		notifGroup.GET("", h.GetNotifications)
+		notifGroup.PATCH("/:id/read", h.MarkAsRead)
+		notifGroup.PATCH("/read-all", h.MarkAllAsRead)
+		notifGroup.GET("/unread-count", h.GetUnreadCount)
+		notifGroup.GET("/preferences", h.GetNotificationPreferences)
+		notifGroup.PATCH("/preferences", h.UpdateNotificationPreferences)
+	}
+
+	// WebSocket route for real-time notifications (JWT auth via query param)
+	if wsHub != nil {
+		router.GET("/ws/notifications", func(c *gin.Context) {
+			tokenString := c.Query("token")
+			if tokenString == "" {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Missing token"})
+				return
+			}
+
+			// Parse and validate JWT
+			token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+				}
+				return []byte(cfg.JWTSecret), nil
+			})
+			if err != nil || !token.Valid {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid token"})
+				return
+			}
+
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if !ok {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid token claims"})
+				return
+			}
+
+			userIDStr, ok := claims["userId"].(string)
+			if !ok {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid token claims"})
+				return
+			}
+
+			userID, err := uuid.Parse(userIDStr)
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid user ID"})
+				return
+			}
+
+			// Verify user exists and is active
+			var user models.User
+			result := config.DB.First(&user, "id = ?", userID)
+			if result.Error != nil {
+				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+					c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "User not found"})
+					return
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Database error"})
+				return
+			}
+			if user.AccountStatus != models.AccountStatusActive {
+				c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "Account is not active"})
+				return
+			}
+
+			// Upgrade to WebSocket
+			conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+			if err != nil {
+				log.Printf("[WS] upgrade error for user %s: %v", userID, err)
+				return
+			}
+
+			client := &ws.Client{
+				Hub:    wsHub,
+				UserID: userID,
+				Conn:   conn,
+				Send:   make(chan []byte, 256),
+			}
+
+			wsHub.Register <- client
+			go client.WritePump()
+			go client.ReadPump()
+		})
 	}
 }

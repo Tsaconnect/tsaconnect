@@ -10,17 +10,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
 
 type MerchantRequestHandler struct {
-	DB *gorm.DB
+	DB       *gorm.DB
+	EventBus *events.Bus
 }
 
-func NewMerchantRequestHandler(db *gorm.DB) *MerchantRequestHandler {
-	return &MerchantRequestHandler{DB: db}
+func NewMerchantRequestHandler(db *gorm.DB, bus *events.Bus) *MerchantRequestHandler {
+	return &MerchantRequestHandler{DB: db, EventBus: bus}
 }
 
 type submitMerchantRequestInput struct {

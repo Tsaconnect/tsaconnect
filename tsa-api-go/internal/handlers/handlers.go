@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -10,14 +11,16 @@ type Handlers struct {
 	PriceService      *services.PriceService
 	BlockchainService *services.BlockchainService
 	Config            *config.Config
+	EventBus          *events.Bus
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
-func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config) *Handlers {
+func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus) *Handlers {
 	return &Handlers{
 		PriceService:      ps,
 		BlockchainService: bs,
 		Config:            cfg,
+		EventBus:          bus,
 	}
 }
 
