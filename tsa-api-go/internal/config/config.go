@@ -40,6 +40,10 @@ type Config struct {
 	ProductEscrowAddress  string
 	ServiceContractAddress string
 
+	// Mailjet email service
+	MailjetAPIKey    string
+	MailjetSecretKey string
+
 	// Multi-chain configuration (populated in Load)
 	Chains         map[string]ChainConfig
 	TokenAddresses map[string]string // "chain:symbol" → contract address
@@ -73,6 +77,10 @@ func Load() *Config {
 		ProductEscrowAddress:  getEnv("PRODUCT_ESCROW_ADDRESS", "0xc5E5165cbCB056E4d212727cD4A6642CD5EB886d"),
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xf870DCC5741030990aF1e43D021D986A286C77A6"),
 	}
+
+	// Mailjet email service
+	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
+	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
 
 	cfg.Chains = map[string]ChainConfig{
 		"sonic": {Name: "Sonic Network", RPCURL: cfg.SonicRPCURL, ChainID: cfg.SonicChainID, NativeCurrency: "S"},
