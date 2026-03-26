@@ -27,14 +27,11 @@ func (VerificationLog) TableName() string {
 
 // Verification log action constants.
 const (
-	VerificationActionSubmitted            = "submitted"
-	VerificationActionBVNVerification      = "bvn_verification"
-	VerificationActionDocumentVerification = "document_verification"
-	VerificationActionFacialVerification   = "facial_verification"
-	VerificationActionAdminApproval        = "admin_approval"
-	VerificationActionAdminRejection       = "admin_rejection"
-	VerificationActionInfoRequested        = "info_requested"
-	VerificationActionResubmitted          = "resubmitted"
+	VerificationActionSmileIDInitiated = "smile_id_initiated"
+	VerificationActionSmileIDPassed    = "smile_id_passed"
+	VerificationActionSmileIDFailed    = "smile_id_failed"
+	VerificationActionAdminOverride    = "admin_override_approved"
+	VerificationActionAdminRejection   = "admin_rejection"
 )
 
 // Verification log status constants.
