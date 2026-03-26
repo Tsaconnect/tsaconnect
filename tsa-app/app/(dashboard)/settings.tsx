@@ -98,7 +98,7 @@ const SettingsScreen = () => {
           icon: "verified-user",
           label: "KYC Verification",
           description: "Complete identity verification",
-          onPress: () => router.push("/(dashboard)/kyc"),
+          onPress: () => router.push("/profile/kyc"),
         },
       ],
     },
