@@ -255,6 +255,17 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		log.Printf("ApproveMerchantRequest: reload error: %v", err)
 	}
 
+	h.EventBus.Publish(events.Event{
+		Type:    events.MerchantApproved,
+		UserID:  req.UserID,
+		Title:   "Merchant Request Approved",
+		Message: "Your merchant application has been approved. You can now list products.",
+		Data: map[string]interface{}{
+			"requestId":    req.ID,
+			"businessName": req.BusinessName,
+		},
+	})
+
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 }
 
@@ -305,6 +316,18 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
 		log.Printf("RejectMerchantRequest: reload error: %v", err)
 	}
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.MerchantRejected,
+		UserID:  req.UserID,
+		Title:   "Merchant Request Rejected",
+		Message: "Your merchant application has been rejected: " + input.Note,
+		Data: map[string]interface{}{
+			"requestId":    req.ID,
+			"businessName": req.BusinessName,
+			"reason":       input.Note,
+		},
+	})
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request rejected", req)
 }

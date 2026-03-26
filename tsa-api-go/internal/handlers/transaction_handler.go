@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -276,6 +277,20 @@ func (h *Handlers) CreateTransaction(c *gin.Context) {
 		"updated_at": now,
 	})
 
+	h.EventBus.Publish(events.Event{
+		Type:    events.TransactionPending,
+		UserID:  user.ID,
+		Title:   "Deposit Initiated",
+		Message: fmt.Sprintf("Deposit of %.6f %s is being processed", body.Amount, body.AssetSymbol),
+		Data: map[string]interface{}{
+			"transactionId": tx.ID.String(),
+			"type":          "deposit",
+			"amount":        body.Amount,
+			"asset":         body.AssetSymbol,
+			"usdValue":      usdValue,
+		},
+	})
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"message": "Deposit created successfully",
@@ -390,6 +405,21 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 		"balance":    newBalance,
 		"usd_value":  newUSDValue,
 		"updated_at": now,
+	})
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.TransactionPending,
+		UserID:  user.ID,
+		Title:   "Withdrawal Initiated",
+		Message: fmt.Sprintf("Withdrawal of %.6f %s is being processed", body.Amount, body.AssetSymbol),
+		Data: map[string]interface{}{
+			"transactionId": tx.ID.String(),
+			"type":          "withdrawal",
+			"amount":        body.Amount,
+			"asset":         body.AssetSymbol,
+			"usdValue":      usdValue,
+			"toAddress":     body.WalletAddress,
+		},
 	})
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -532,6 +562,22 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 			"updated_at": now,
 		})
 	}
+
+	h.EventBus.Publish(events.Event{
+		Type:    events.TransactionCompleted,
+		UserID:  user.ID,
+		Title:   "Swap Completed",
+		Message: fmt.Sprintf("Swapped %.6f %s to %.6f %s", body.Amount, body.FromAsset, toAmount, body.ToAsset),
+		Data: map[string]interface{}{
+			"transactionId": tx.ID.String(),
+			"type":          "swap",
+			"fromAsset":     body.FromAsset,
+			"toAsset":       body.ToAsset,
+			"fromAmount":    body.Amount,
+			"toAmount":      toAmount,
+			"exchangeRate":  exchangeRate,
+		},
+	})
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
