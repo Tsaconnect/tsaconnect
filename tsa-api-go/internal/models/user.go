@@ -9,70 +9,6 @@ import (
 	"gorm.io/datatypes"
 )
 
-// VerifiableImage represents an uploaded document image with verification status.
-type VerifiableImage struct {
-	URL      string `json:"url,omitempty"`
-	PublicID string `json:"publicId,omitempty"`
-	Verified bool   `json:"verified"`
-}
-
-// DriversLicense holds driver's license front and back images.
-type DriversLicense struct {
-	Front VerifiableImage `json:"front,omitempty"`
-	Back  VerifiableImage `json:"back,omitempty"`
-}
-
-// NIN holds National Identification Number front and back images.
-type NIN struct {
-	Front VerifiableImage `json:"front,omitempty"`
-	Back  VerifiableImage `json:"back,omitempty"`
-}
-
-// Passport holds the passport photo image.
-type Passport struct {
-	Photo VerifiableImage `json:"photo,omitempty"`
-}
-
-// PVC holds the Permanent Voter's Card image.
-type PVC struct {
-	Card VerifiableImage `json:"card,omitempty"`
-}
-
-// BVN holds Bank Verification Number details.
-type BVN struct {
-	Number     string     `json:"number,omitempty"`
-	Verified   bool       `json:"verified"`
-	VerifiedAt *time.Time `json:"verifiedAt,omitempty"`
-}
-
-// Documents holds all user verification documents.
-type Documents struct {
-	DriversLicense DriversLicense `json:"driversLicense,omitempty"`
-	NIN            NIN            `json:"nin,omitempty"`
-	Passport       Passport       `json:"passport,omitempty"`
-	PVC            PVC            `json:"pvc,omitempty"`
-	BVN            BVN            `json:"bvn,omitempty"`
-}
-
-// FaceImage represents a facial verification image with optional embeddings.
-type FaceImage struct {
-	URL        string    `json:"url,omitempty"`
-	PublicID   string    `json:"publicId,omitempty"`
-	Embeddings []float64 `json:"embeddings,omitempty"`
-}
-
-// FacialVerification holds facial verification data.
-type FacialVerification struct {
-	FaceFront         FaceImage  `json:"faceFront,omitempty"`
-	FaceLeft          FaceImage  `json:"faceLeft,omitempty"`
-	FaceRight         FaceImage  `json:"faceRight,omitempty"`
-	FaceUp            FaceImage  `json:"faceUp,omitempty"`
-	FaceDown          FaceImage  `json:"faceDown,omitempty"`
-	VerificationScore float64    `json:"verificationScore,omitempty"`
-	Verified          bool       `json:"verified"`
-	VerifiedAt        *time.Time `json:"verifiedAt,omitempty"`
-}
-
 // ProfilePhoto represents a user's profile photo.
 type ProfilePhoto struct {
 	URL      string `json:"url,omitempty"`
@@ -95,8 +31,7 @@ type User struct {
 	ProfilePhoto               datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
 	ReferralCode               string         `json:"referralCode,omitempty"`
 	ReferredBy                 *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
-	Documents                  datatypes.JSON `gorm:"type:jsonb" json:"documents,omitempty"`
-	FacialVerification         datatypes.JSON `gorm:"type:jsonb" json:"facialVerification,omitempty"`
+	SmileJobID                 string         `json:"smileJobId,omitempty"`
 	VerificationStatus         string         `gorm:"default:'pending'" json:"verificationStatus"`
 	VerificationNotes          string         `json:"verificationNotes,omitempty"`
 	AccountStatus              string         `gorm:"default:'active'" json:"accountStatus"`
@@ -109,7 +44,6 @@ type User struct {
 	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
 	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
-	SubmittedForVerificationAt *time.Time     `json:"submittedForVerificationAt,omitempty"`
 	CreatedAt                  time.Time      `json:"createdAt"`
 	UpdatedAt                  time.Time      `json:"updatedAt"`
 }
@@ -177,36 +111,6 @@ func HashPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(bytes), nil
-}
-
-// GetDocuments deserializes the Documents JSONB field.
-func (u *User) GetDocuments() Documents {
-	var docs Documents
-	if u.Documents != nil {
-		_ = json.Unmarshal(u.Documents, &docs)
-	}
-	return docs
-}
-
-// SetDocuments serializes the Documents struct into the JSONB field.
-func (u *User) SetDocuments(docs Documents) {
-	data, _ := json.Marshal(docs)
-	u.Documents = data
-}
-
-// GetFacialVerification deserializes the FacialVerification JSONB field.
-func (u *User) GetFacialVerification() FacialVerification {
-	var fv FacialVerification
-	if u.FacialVerification != nil {
-		_ = json.Unmarshal(u.FacialVerification, &fv)
-	}
-	return fv
-}
-
-// SetFacialVerification serializes the FacialVerification struct into the JSONB field.
-func (u *User) SetFacialVerification(fv FacialVerification) {
-	data, _ := json.Marshal(fv)
-	u.FacialVerification = data
 }
 
 // GetProfilePhoto deserializes the ProfilePhoto JSONB field.
