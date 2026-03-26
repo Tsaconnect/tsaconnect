@@ -550,75 +550,34 @@ class APIService {
 
   // ==================== SIGNUP FLOW ENDPOINTS ====================
 
-  // Update identity documents (Screen 2)
-  async updateIdentityDocuments(documents: {
-    driversLicenseFront?: string;
-    driversLicenseBack?: string;
-    ninFront?: string;
-    ninBack?: string;
-    passportPhoto?: string;
-    pvcCard?: string;
-    bvn?: string;
-  }): Promise<ApiResponse<{ nextStep: string; documents: any }>> {
-    try {
-      console.log('Updating identity documents with:', this.getHeaders());
-      const response = await fetch(`${API_BASE_URL}/auth/identity`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(documents),
-      });
-      console.log('Response from identity documents update:', response);
-      return this.handleResponse<{ nextStep: string; documents: any }>(response);
-    } catch (error: any) {
-      console.error('Update identity documents error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to update documents. Please try again.',
-      };
-    }
+  // Create a KYC session via Smile ID
+  async createKYCSession(): Promise<ApiResponse<{
+    jobId: string;
+    partnerId: string;
+    session: Record<string, unknown>;
+  }>> {
+    const headers = this.getHeaders();
+    const response = await fetch(`${API_BASE_URL}/kyc/session`, {
+      method: 'POST',
+      headers,
+    });
+    return response.json();
   }
 
-  // Update facial verification (Screen 3)
-  async updateFacialVerification(facialImages: {
-    faceFront?: string;
-    faceLeft?: string;
-    faceRight?: string;
-    faceUp?: string;
-    faceDown?: string;
-  }): Promise<ApiResponse<{ verificationStatus: string; estimatedTime: string }>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/auth/facial`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(facialImages),
-      });
-      console.log('Response from facial verification update:', response);
-      return this.handleResponse<{ verificationStatus: string; estimatedTime: string }>(response);
-    } catch (error: any) {
-      console.error('Update facial verification error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to update facial verification. Please try again.',
-      };
-    }
-  }
-
-  // Submit for final verification
-  async submitForVerification(): Promise<ApiResponse<{ verificationStatus: string; estimatedTime: string }>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/verification/submit`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<{ verificationStatus: string; estimatedTime: string }>(response);
-    } catch (error: any) {
-      console.error('Submit verification error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to submit verification. Please try again.',
-      };
-    }
+  // Get KYC verification status
+  async getKYCStatus(): Promise<ApiResponse<{
+    verificationStatus: string;
+    verificationNotes: string;
+    smileJobId: string;
+    lastAction: string;
+    lastActionAt: string;
+  }>> {
+    const headers = this.getHeaders();
+    const response = await fetch(`${API_BASE_URL}/kyc/status`, {
+      method: 'GET',
+      headers,
+    });
+    return response.json();
   }
 
   // ==================== USER PROFILE ENDPOINTS ====================
@@ -637,24 +596,6 @@ class APIService {
       return {
         success: false,
         message: error.message || 'Failed to fetch profile.',
-      };
-    }
-  }
-
-  // Get verification status
-  async getVerificationStatus(): Promise<ApiResponse<any>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/verification/status`, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<any>(response);
-    } catch (error: any) {
-      console.error('Get verification status error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to fetch verification status.',
       };
     }
   }
