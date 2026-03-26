@@ -27,9 +27,9 @@ func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg 
 }
 
 // Handler methods are defined in their respective files:
-// - auth_handler.go: Signup, Login, SubmitIdentity, SubmitFacial
+// - auth_handler.go: Signup, Login, SendOTP, VerifyOTP, ResendOTP
 // - user_handler.go: GetProfile, UpdateProfile, GetUsers, GetUserByID, etc.
-// - verification_handler.go: GetVerificationStatus, SubmitVerification, etc.
+// - kyc_handler.go: InitiateKYC, VerifyDocument, GetKYCStatus, etc.
 // - asset_handler.go: GetAssets, GetAssetByID, CreateAsset, etc.
 // - transaction_handler.go: GetTransactions, GetTransactionByID, CreateTransaction, etc.
 // - portfolio_handler.go: GetPortfolio, GetPortfolioSummary, etc.
