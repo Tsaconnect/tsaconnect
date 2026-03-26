@@ -58,7 +58,10 @@ const SignupFlow = () => {
         await AsyncStorage.setItem('userId', userId);
         api.setToken(token);
 
-        router.replace('/home');
+        router.replace({
+          pathname: '/verify',
+          params: { email: signupData.email.trim().toLowerCase() },
+        });
       } else {
         const errorMessage = result.message || 'Please check your information';
         Alert.alert('Signup Failed', errorMessage);

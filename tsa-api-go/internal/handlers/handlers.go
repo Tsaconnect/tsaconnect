@@ -12,15 +12,17 @@ type Handlers struct {
 	BlockchainService *services.BlockchainService
 	Config            *config.Config
 	EventBus          *events.Bus
+	EmailService      *services.EmailService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
-func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus) *Handlers {
+func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus, es *services.EmailService) *Handlers {
 	return &Handlers{
 		PriceService:      ps,
 		BlockchainService: bs,
 		Config:            cfg,
 		EventBus:          bus,
+		EmailService:      es,
 	}
 }
 

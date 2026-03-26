@@ -84,15 +84,17 @@ const ProfileScreen = () => {
         Alert.alert("Error", "Not authenticated");
         return;
       }
-      const result = await api.sendVerificationEmail();
+      const result = await api.sendOtp();
       if (result.success) {
-        router.push("/profile/verify-email");
-        return;
+        router.push({
+          pathname: "/verify",
+          params: { email: user?.email },
+        });
+      } else {
+        Alert.alert("Error", result.message || "Failed to send verification code.");
       }
-
     } catch (error: any) {
-      console.log(error?.response?.data?.message);
-      Alert.alert("An error occurred while sending verification email.");
+      Alert.alert("Error", "An error occurred while sending verification code.");
     }
   };
 
@@ -156,7 +158,7 @@ const ProfileScreen = () => {
               </View>
             </View>
 
-            {!user.isEmailVerified ? (
+            {!user.emailVerified ? (
               <TouchableOpacity
                 style={styles.verificationButton}
                 onPress={handleVerifyEmail}
@@ -164,7 +166,7 @@ const ProfileScreen = () => {
                 <Icon name="mail" size={20} color="#FFFFFF" />
                 <Text style={styles.verificationText}>Verify Email</Text>
               </TouchableOpacity>
-            ) : !user.isKycVerified ? (
+            ) : user.verificationStatus !== 'verified' ? (
               <TouchableOpacity
                 style={styles.verificationButton}
                 onPress={handleKycVerification}

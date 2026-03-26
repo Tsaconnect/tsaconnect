@@ -1,56 +1,97 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { OtpInput } from 'react-native-otp-entry';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { COLORS } from '../../constants/theme';
 import { router } from 'expo-router';
+import api from '../services/api';
 
-const Verify = ({ payLoad }: { payLoad?: any }) => {
+interface VerifyProps {
+  email?: string;
+  onSkip?: () => void;
+  onSuccess?: () => void;
+  showSkip?: boolean;
+}
+
+const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
   const [verificationCode, setVerificationCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+  const [cooldown, setCooldown] = useState(0);
 
-  const email = payLoad?.email || 'your email';
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setTimeout(() => setCooldown(cooldown - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
 
-  const handleVerify = async () => {
+  const handleVerify = useCallback(async () => {
     if (verificationCode.length < 6) {
       setError('Please enter the full 6-digit code');
       return;
     }
 
     setError('');
+    setSuccessMsg('');
     setLoading(true);
     try {
-      // TODO: Call verify account API endpoint when available
-      // await api.verifyAccount({ email: payLoad?.email, code: verificationCode });
-
-      router.replace('/home');
+      const result = await api.verifyOtp(verificationCode);
+      if (result.success) {
+        setSuccessMsg('Email verified successfully!');
+        if (onSuccess) {
+          onSuccess();
+        } else {
+          router.replace('/home');
+        }
+      } else {
+        setError(result.message || 'Invalid code. Please try again.');
+      }
     } catch (err: any) {
-      Alert.alert('Verification Failed', err.message || 'Invalid code. Please try again.');
+      setError(err.message || 'Verification failed. Please try again.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [verificationCode, onSuccess]);
 
-  const handleResend = async () => {
+  const handleResend = useCallback(async () => {
+    if (cooldown > 0) return;
+
     setResending(true);
+    setError('');
+    setSuccessMsg('');
     try {
-      // TODO: Call resend verification code API
-      Alert.alert('Code Sent', 'A new verification code has been sent.');
+      const result = await api.resendOtp();
+      if (result.success) {
+        setSuccessMsg('A new code has been sent to your email.');
+        setCooldown(60);
+        setVerificationCode('');
+      } else {
+        setError(result.message || 'Failed to resend code.');
+      }
     } catch (err: any) {
-      Alert.alert('Error', 'Failed to resend code. Please try again.');
+      setError('Failed to resend code. Please try again.');
     } finally {
       setResending(false);
     }
-  };
+  }, [cooldown]);
+
+  const handleSkip = useCallback(() => {
+    if (onSkip) {
+      onSkip();
+    } else {
+      router.replace('/home');
+    }
+  }, [onSkip]);
+
+  const displayEmail = email || 'your email';
 
   return (
     <View style={styles.container}>
@@ -59,9 +100,9 @@ const Verify = ({ payLoad }: { payLoad?: any }) => {
       </TouchableOpacity>
 
       <View style={styles.content}>
-        <Text style={styles.title}>Verify Your Account</Text>
+        <Text style={styles.title}>Verify Your Email</Text>
         <Text style={styles.subtitle}>
-          Enter the verification code sent to {email}
+          Enter the 6-digit code sent to {displayEmail}
         </Text>
 
         <OtpInput
@@ -83,11 +124,21 @@ const Verify = ({ payLoad }: { payLoad?: any }) => {
             focusedPinCodeContainerStyle: styles.activePinCodeContainer,
           }}
         />
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-        <TouchableOpacity onPress={handleResend} disabled={resending} style={styles.resendButton}>
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {successMsg ? <Text style={styles.successText}>{successMsg}</Text> : null}
+
+        <TouchableOpacity
+          onPress={handleResend}
+          disabled={resending || cooldown > 0}
+          style={styles.resendButton}
+        >
           {resending ? (
             <ActivityIndicator size="small" color={COLORS.primary} />
+          ) : cooldown > 0 ? (
+            <Text style={styles.resendDisabledText}>
+              Resend code in {cooldown}s
+            </Text>
           ) : (
             <Text style={styles.resendText}>Didn't receive a code? Resend</Text>
           )}
@@ -104,6 +155,12 @@ const Verify = ({ payLoad }: { payLoad?: any }) => {
             <Text style={styles.buttonText}>Verify</Text>
           )}
         </TouchableOpacity>
+
+        {showSkip && (
+          <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
+            <Text style={styles.skipText}>Skip for now</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -180,10 +237,20 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
+  resendDisabledText: {
+    color: COLORS.gray,
+    fontSize: 14,
+  },
   errorText: {
     color: COLORS.danger,
-    fontSize: 12,
-    marginLeft: 15,
+    fontSize: 13,
+    marginLeft: 4,
+    marginTop: 8,
+  },
+  successText: {
+    color: COLORS.success,
+    fontSize: 13,
+    marginLeft: 4,
     marginTop: 8,
   },
   button: {
@@ -207,5 +274,14 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: '600',
+  },
+  skipButton: {
+    alignSelf: 'center',
+    marginTop: 16,
+    padding: 8,
+  },
+  skipText: {
+    color: COLORS.gray,
+    fontSize: 14,
   },
 });

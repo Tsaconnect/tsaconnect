@@ -14,7 +14,8 @@ export interface SignupResponse {
   userId: string;
   token: string;
   role: string;
-  nextStep: 'identity_verification' | 'facial_verification' | 'complete';
+  emailVerified?: boolean;
+  nextStep: 'email_verification' | 'identity_verification' | 'facial_verification' | 'complete';
 }
 
 export interface UploadResponse {
@@ -739,21 +740,57 @@ class APIService {
 
     return error.message || 'An unexpected error occurred. Please try again.';
   }
-  // Add to api.ts
-  async sendVerificationEmail(): Promise<ApiResponse<any>> {
+  async sendOtp(): Promise<ApiResponse<any>> {
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/send-verification-email`, {
+      const response = await fetch(`${API_BASE_URL}/auth/send-otp`, {
         method: 'POST',
         headers: this.getHeaders(),
       });
       return this.handleResponse<any>(response);
     } catch (error: any) {
-      console.error('Send verification email error:', error);
+      console.error('Send OTP error:', error);
       return {
         success: false,
-        message: error.message || 'Failed to send verification email.',
+        message: error.message || 'Failed to send verification code.',
       };
     }
+  }
+
+  async verifyOtp(code: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/verify-otp`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ code }),
+      });
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Verify OTP error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to verify code.',
+      };
+    }
+  }
+
+  async resendOtp(): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/resend-otp`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+      });
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Resend OTP error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to resend verification code.',
+      };
+    }
+  }
+
+  async sendVerificationEmail(): Promise<ApiResponse<any>> {
+    return this.sendOtp();
   }
   async createProduct(formData: FormData): Promise<ApiResponse<Product>> {
     try {

@@ -40,6 +40,7 @@ func AutoMigrate() error {
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
 		&models.Notification{},
+		&models.EmailVerification{},
 	); err != nil {
 		return err
 	}

@@ -51,6 +51,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		authGroup.POST("/login", h.Login)
 		authGroup.POST("/identity", auth, h.UpdateIdentity)
 		authGroup.POST("/facial", auth, h.UpdateFacial)
+		authGroup.POST("/send-otp", auth, h.SendOTP)
+		authGroup.POST("/verify-otp", auth, h.VerifyOTP)
+		authGroup.POST("/resend-otp", auth, h.ResendOTP)
 	}
 
 	// User routes
