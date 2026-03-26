@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   StyleSheet,
   View,
@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { Avatar, Icon } from "react-native-elements";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
 
@@ -67,6 +68,14 @@ const ProfileScreen = () => {
       getLoggedInUser();
     }
   }, [token]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (token) {
+        getLoggedInUser();
+      }
+    }, [token])
+  );
 
   const copyToClipboard = () => {
     if (!user?.referralCode) {
