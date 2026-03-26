@@ -1,406 +1,229 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   StyleSheet,
   View,
   Text,
-  TextInput,
   TouchableOpacity,
+  ActivityIndicator,
   Alert,
-  ScrollView,
-  Image,
 } from "react-native";
-import axios from "axios";
-import { useAuth } from "../../AuthContext/AuthContext";
-import { baseUrl } from "../../constants/api/apiClient";
-import { Picker } from "@react-native-picker/picker";
-import * as ImagePicker from "expo-image-picker";
-import CustomDatePicker from "../../components/others/CustomDatePicker";
-import { COLORS } from "../../constants";
+import { router } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import api from "../../components/services/api";
+import { COLORS, SIZES } from "../../constants/theme";
 
-const KycVerificationScreen = () => {
-  const { token } = useAuth();
-  const [form, setForm] = useState({
-    firstName: "",
-    lastName: "",
-    middleName: "",
-    dob: "",
-    resCountry: "Nigeria",
-    resState: "",
-    resCity: "",
-    resAddress: "",
-    resPostalCode: "",
-    selfiePhotoFile: null,
-    idPhotoFile: null,
-    idType: "",
-    idNumber: "",
-    issueDate: "",
-    expiryDate: "",
-  });
+type KYCState = "not_started" | "loading" | "sdk_active" | "in_progress" | "verified" | "rejected";
 
-  const [firstName, setFirstName] = useState();
+export default function KYCScreen() {
+  const [state, setState] = useState<KYCState>("loading");
+  const [notes, setNotes] = useState("");
 
-  const [middleName, setMiddleName] = useState();
-  const [lastName, setLastName] = useState();
-  const [dob, setDob] = useState();
-  const [resCountry, setResCountry] = useState();
-  const [resState, setResState] = useState();
-  const [resCity, setResCity] = useState();
-  const [resAddress, setResAddress] = useState();
-  const [idPhoto, setIdPhoto] = useState();
-  const [posterCode, setPosterCode] = useState();
-  const [selfiePhoto, setSelfiePhote] = useState();
-  const [idtType, setIdType] = useState();
-
-  const [loading, setLoading] = useState(false);
-  const [stepOne, setStepOne] = useState(true);
-  const [stepTwo, setStepTwo] = useState(false);
-  const [stepThree, setStepThree] = useState(false);
-  const [stepFour, setStepFour] = useState(false);
-  const handleImagePicker = async (field) => {
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
-    });
-
-    if (!result.canceled) {
-      setForm({ ...form, [field]: result.uri });
-    }
-  };
-
-  const handleCamera = async (field) => {
-    let result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
-    });
-
-    if (!result.canceled) {
-      setForm({ ...form, [field]: result.uri });
-    }
-  };
-
-  const handleSubmit = async () => {
+  const checkStatus = useCallback(async () => {
     try {
-      setLoading(true);
-      const formData = new FormData();
-      for (const key in form) {
-        if (key === "selfiePhotoFile" || key === "idPhotoFile") {
-          if (form[key]) {
-            formData.append(key, {
-              uri: form[key],
-              type: "image/jpeg",
-              name: `${key}.jpg`,
-            });
-          }
+      const response = await api.getKYCStatus();
+      if (response.success && response.data) {
+        const { verificationStatus } = response.data;
+        if (verificationStatus === "verified") {
+          setState("verified");
+        } else if (verificationStatus === "rejected") {
+          setState("rejected");
+          setNotes(response.data.verificationNotes || "Verification failed. Please try again.");
+        } else if (verificationStatus === "in_review") {
+          setState("in_progress");
         } else {
-          formData.append(key, form[key]);
+          setState("not_started");
         }
       }
-      await axios.post(`${baseUrl}/kyc`, formData, {
-        headers: {
-          Authorization: `${token}`,
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      Alert.alert("Success", "KYC verification submitted successfully!");
     } catch (error) {
-      Alert.alert(
-        "Error",
-        error?.response?.data?.message || "Failed to submit KYC verification."
-      );
-    } finally {
-      setLoading(false);
+      setState("not_started");
+    }
+  }, []);
+
+  useEffect(() => {
+    checkStatus();
+  }, [checkStatus]);
+
+  const startVerification = async () => {
+    try {
+      setState("loading");
+      const response = await api.createKYCSession();
+
+      if (!response.success || !response.data) {
+        Alert.alert("Error", response.message || "Failed to start verification");
+        setState("not_started");
+        return;
+      }
+
+      // TODO: Launch Smile ID SDK here using response.data
+      // The exact SDK integration depends on the @smile_identity/react-native API.
+      // Example pattern:
+      //
+      // import { SmileID } from "@smile_identity/react-native";
+      // const result = await SmileID.documentVerification({
+      //   jobId: response.data.jobId,
+      //   partnerId: response.data.partnerId,
+      //   ...response.data.session,
+      // });
+      //
+      // For now, after SDK completes:
+      setState("in_progress");
+      Alert.alert("Verification Started", "We're reviewing your documents. This usually takes a few minutes.");
+    } catch (error: any) {
+      Alert.alert("Error", api.getErrorMessage(error) || "Something went wrong");
+      setState("not_started");
     }
   };
 
-  const idTypesNigeria = [
-    { label: "National ID", value: "National ID" },
-    { label: "Driver's License", value: "Driver's License" },
-    { label: "Voter's Card", value: "Voter's Card" },
-    { label: "Passport", value: "Passport" },
-  ];
+  if (state === "loading") {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
 
-  const idTypesOther = [
-    { label: "Passport", value: "Passport" },
-    { label: "ID Card", value: "ID Card" },
-  ];
+  if (state === "verified") {
+    return (
+      <View style={styles.container}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="checkmark-circle" size={80} color={COLORS.primary} />
+        </View>
+        <Text style={styles.title}>Identity Verified</Text>
+        <Text style={styles.subtitle}>Your identity has been successfully verified.</Text>
+        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
+          <Text style={styles.buttonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
-  const idTypes = form.resCountry === "Nigeria" ? idTypesNigeria : idTypesOther;
+  if (state === "in_progress") {
+    return (
+      <View style={styles.container}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="time-outline" size={80} color={COLORS.secondary} />
+        </View>
+        <Text style={styles.title}>Verification In Progress</Text>
+        <Text style={styles.subtitle}>
+          We're reviewing your documents. This usually takes a few minutes. We'll notify you when it's done.
+        </Text>
+        <TouchableOpacity style={styles.secondaryButton} onPress={checkStatus}>
+          <Text style={styles.secondaryButtonText}>Refresh Status</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
+          <Text style={styles.buttonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
+  if (state === "rejected") {
+    return (
+      <View style={styles.container}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="close-circle" size={80} color="#EF4444" />
+        </View>
+        <Text style={styles.title}>Verification Failed</Text>
+        <Text style={styles.subtitle}>{notes}</Text>
+        <TouchableOpacity style={styles.button} onPress={startVerification}>
+          <Text style={styles.buttonText}>Try Again</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
+          <Text style={styles.secondaryButtonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // not_started
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>KYC Verification</Text>
-      {stepOne && (
-        <View>
-          <TextInput
-            style={styles.input}
-            placeholder="First Name"
-            value={form.firstName}
-            onChangeText={(value) => setForm({ ...form, firstName: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Middle Name"
-            value={form.middleName}
-            onChangeText={(value) => setForm({ ...form, middleName: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Last Name"
-            value={form.lastName}
-            onChangeText={(value) => setForm({ ...form, lastName: value })}
-          />
-
-          <CustomDatePicker
-            date={form.dob}
-            placeholder="Date of Birth"
-            onDateChange={(date) => setForm({ ...form, dob: date })}
-          />
-          <TouchableOpacity
-            onPress={() => {
-              setStepOne(false);
-              setStepTwo(true);
-            }}
-            style={styles.nextButton}
-          >
-            <Text style={{ padding: 10, fontWeight: "600" }}>Next</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-      {stepTwo && (
-        <View>
-          <TextInput
-            style={styles.input}
-            placeholder="Residential Country"
-            value={form.resCountry}
-            onChangeText={(value) => setForm({ ...form, resCountry: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="State"
-            value={form.resState}
-            onChangeText={(value) => setForm({ ...form, resState: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="City"
-            value={form.resCity}
-            onChangeText={(value) => setForm({ ...form, resCity: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Address"
-            value={form.resAddress}
-            onChangeText={(value) => setForm({ ...form, resAddress: value })}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Postal Code"
-            value={form.resPostalCode}
-            onChangeText={(value) => setForm({ ...form, resPostalCode: value })}
-          />
-          <TouchableOpacity
-            onPress={() => {
-              setStepOne(false);
-              setStepTwo(false);
-              setStepThree(true);
-            }}
-            style={styles.nextButton}
-          >
-            <Text style={{ padding: 10, fontWeight: "600" }}>Next</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-      {stepThree && (
-        <View>
-          <Picker
-            selectedValue={form.idType}
-            style={styles.input}
-            onValueChange={(itemValue) =>
-              setForm({ ...form, idType: itemValue })
-            }
-          >
-            <Picker.Item label="Select ID Type" value="" />
-            {idTypes.map((type) => (
-              <Picker.Item
-                key={type.value}
-                label={type.label}
-                value={type.value}
-              />
-            ))}
-          </Picker>
-
-          <TextInput
-            style={styles.input}
-            placeholder="ID Number"
-            value={form.idNumber}
-            onChangeText={(value) => setForm({ ...form, idNumber: value })}
-          />
-
-          <CustomDatePicker
-            date={form.issueDate}
-            placeholder="Issue Date"
-            onDateChange={(date) => setForm({ ...form, issueDate: date })}
-          />
-
-          <CustomDatePicker
-            date={form.expiryDate}
-            placeholder="Expiry Date"
-            onDateChange={(date) => setForm({ ...form, expiryDate: date })}
-          />
-          <TouchableOpacity
-            onPress={() => {
-              setStepOne(false);
-              setStepTwo(false);
-              setStepThree(false);
-              setStepFour(true);
-            }}
-            style={styles.nextButton}
-          >
-            <Text style={{ padding: 10, fontWeight: "600" }}>Next</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-      {stepFour && (
-        <>
-          <View style={styles.imagePickerContainer}>
-            <Text style={styles.label}>Selfie Photo</Text>
-            <View style={styles.imagePickerButtons}>
-              <TouchableOpacity
-                style={styles.button}
-                onPress={() => handleImagePicker("selfiePhotoFile")}
-              >
-                <Text style={styles.buttonText}>Upload</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.button}
-                onPress={() => handleCamera("selfiePhotoFile")}
-              >
-                <Text style={styles.buttonText}>Snap</Text>
-              </TouchableOpacity>
-            </View>
-            {form.selfiePhotoFile && (
-              <Image
-                source={{ uri: form.selfiePhotoFile }}
-                style={styles.imagePreview}
-              />
-            )}
-          </View>
-
-          <View style={styles.imagePickerContainer}>
-            <Text style={styles.label}>ID Photo</Text>
-            <View style={styles.imagePickerButtons}>
-              <TouchableOpacity
-                style={styles.button}
-                onPress={() => handleImagePicker("idPhotoFile")}
-              >
-                <Text style={styles.buttonText}>Upload</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.button}
-                onPress={() => handleCamera("idPhotoFile")}
-              >
-                <Text style={styles.buttonText}>Snap</Text>
-              </TouchableOpacity>
-            </View>
-            {form.idPhotoFile && (
-              <Image
-                source={{ uri: form.idPhotoFile }}
-                style={styles.imagePreview}
-              />
-            )}
-          </View>
-
-          <TouchableOpacity
-            style={styles.submitButton}
-            onPress={handleSubmit}
-            disabled={loading}
-          >
-            <Text style={styles.submitButtonText}>
-              {loading ? "Submitting..." : "Submit"}
-            </Text>
-          </TouchableOpacity>
-        </>
-      )}
-    </ScrollView>
+    <View style={styles.container}>
+      <View style={styles.iconContainer}>
+        <Ionicons name="shield-checkmark-outline" size={80} color={COLORS.primary} />
+      </View>
+      <Text style={styles.title}>Verify Your Identity</Text>
+      <Text style={styles.subtitle}>
+        Complete identity verification to unlock all features including buying, selling, and sending funds.
+      </Text>
+      <Text style={styles.infoText}>
+        You'll need:{"\n"}
+        {"\u2022"} A valid government-issued ID{"\n"}
+        {"\u2022"} A well-lit environment for a selfie
+      </Text>
+      <TouchableOpacity style={styles.button} onPress={startVerification}>
+        <Text style={styles.buttonText}>Start Verification</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
+        <Text style={styles.secondaryButtonText}>Do This Later</Text>
+      </TouchableOpacity>
+    </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
   container: {
-    flexGrow: 1,
-    padding: 20,
+    flex: 1,
     backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: SIZES.large,
+  },
+  iconContainer: {
+    marginBottom: 24,
   },
   title: {
-    fontSize: 24,
-    fontWeight: "bold",
-    marginBottom: 20,
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#111",
+    marginBottom: 12,
     textAlign: "center",
   },
-  input: {
-    width: "100%",
-    padding: 10,
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 5,
-    marginBottom: 15,
+  subtitle: {
+    fontSize: 15,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 20,
+    lineHeight: 22,
   },
-  datePicker: {
-    width: "100%",
-    marginBottom: 15,
+  infoText: {
+    fontSize: 14,
+    color: "#444",
+    marginBottom: 32,
+    lineHeight: 22,
   },
-  imagePickerContainer: {
-    marginBottom: 15,
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: "bold",
-    marginBottom: 5,
-  },
-  imagePickerButtons: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+  loadingText: {
+    marginTop: 12,
+    fontSize: 15,
+    color: "#666",
   },
   button: {
-    backgroundColor: "#9D6B38",
-    padding: 10,
-    borderRadius: 5,
-    width: "48%",
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 10,
+    width: "100%",
     alignItems: "center",
+    marginBottom: 12,
   },
   buttonText: {
     color: "#fff",
     fontSize: 16,
+    fontWeight: "600",
   },
-  imagePreview: {
-    width: "100%",
-    height: 200,
-    marginTop: 10,
-  },
-  submitButton: {
-    backgroundColor: "#9D6B38",
-    padding: 15,
-    borderRadius: 5,
-    alignItems: "center",
-  },
-  submitButtonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  nextButton: {
-    backgroundColor: COLORS.lightButton,
+  secondaryButton: {
+    paddingVertical: 14,
+    paddingHorizontal: 32,
     borderRadius: 10,
+    width: "100%",
     alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    marginBottom: 12,
+  },
+  secondaryButtonText: {
+    color: COLORS.primary,
+    fontSize: 16,
+    fontWeight: "600",
   },
 });
-
-export default KycVerificationScreen;
