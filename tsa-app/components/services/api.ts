@@ -152,6 +152,25 @@ export interface AssetVisibilityResponse {
   message: string;
   data?: any;
 }
+
+export interface Notification {
+  id: string;
+  userId: string;
+  type: string;
+  title: string;
+  message: string;
+  data: Record<string, any>;
+  channel: string;
+  isRead: boolean;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface NotificationPreferences {
+  muteNotifications: boolean;
+  muteEmail: boolean;
+}
+
 export interface Product {
   id: string;
   _id?: string;
@@ -1450,6 +1469,56 @@ class APIService {
         message: error.message || 'Failed to update categories',
       };
     }
+  }
+
+  // ── Notification Methods ──────────────────────────────────────────
+
+  async getNotifications(page: number = 1, filter?: 'read' | 'unread'): Promise<ApiResponse> {
+    const params = new URLSearchParams({ page: String(page), limit: '20' });
+    if (filter) params.append('filter', filter);
+    const response = await fetch(`${API_BASE_URL}/notifications?${params}`, {
+      headers: this.getHeaders(),
+    });
+    return response.json();
+  }
+
+  async markAsRead(id: string): Promise<ApiResponse> {
+    const response = await fetch(`${API_BASE_URL}/notifications/${id}/read`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+    });
+    return response.json();
+  }
+
+  async markAllAsRead(): Promise<ApiResponse> {
+    const response = await fetch(`${API_BASE_URL}/notifications/read-all`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+    });
+    return response.json();
+  }
+
+  async getUnreadCount(): Promise<ApiResponse> {
+    const response = await fetch(`${API_BASE_URL}/notifications/unread-count`, {
+      headers: this.getHeaders(),
+    });
+    return response.json();
+  }
+
+  async getNotificationPreferences(): Promise<ApiResponse> {
+    const response = await fetch(`${API_BASE_URL}/notifications/preferences`, {
+      headers: this.getHeaders(),
+    });
+    return response.json();
+  }
+
+  async updateNotificationPreferences(prefs: Partial<NotificationPreferences>): Promise<ApiResponse> {
+    const response = await fetch(`${API_BASE_URL}/notifications/preferences`, {
+      method: 'PATCH',
+      headers: this.getHeaders('application/json'),
+      body: JSON.stringify(prefs),
+    });
+    return response.json();
   }
 }
 // Category methods
