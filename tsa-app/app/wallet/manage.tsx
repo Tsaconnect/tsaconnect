@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
@@ -31,6 +32,17 @@ const WalletManage = () => {
   const [mode, setMode] = useState<Mode>(initialMode === 'import' ? 'import' : 'menu');
   const [mnemonicInput, setMnemonicInput] = useState('');
   const [error, setError] = useState('');
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [seedBackedUp, setSeedBackedUp] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const address = await AsyncStorage.getItem('walletAddress');
+      const backedUp = await AsyncStorage.getItem('seedPhraseBackedUp');
+      setWalletAddress(address);
+      setSeedBackedUp(backedUp === 'true');
+    })();
+  }, []);
 
   React.useEffect(() => {
     navigation.setOptions({
@@ -160,17 +172,84 @@ const WalletManage = () => {
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={styles.subtitle}>
-            Import an existing wallet, generate a new one, or view your seed phrase.
+    <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
+      <View style={styles.header}>
+        <Text style={styles.subtitle}>
+          Manage your wallets, back up your seed phrase, or add a new wallet.
+        </Text>
+      </View>
+
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+      {/* Current Wallet(s) Section */}
+      {walletAddress ? (
+        <View style={styles.walletsSection}>
+          <Text style={styles.walletsSectionTitle}>Your Wallets</Text>
+          <View style={styles.walletCard}>
+            <View style={styles.walletCardHeader}>
+              <View style={styles.walletIconCircle}>
+                <Ionicons name="wallet" size={22} color={COLORS.primary} />
+              </View>
+              <View style={styles.walletCardInfo}>
+                <Text style={styles.walletCardLabel}>Primary Wallet</Text>
+                <Text style={styles.walletCardAddress} numberOfLines={1} ellipsizeMode="middle">
+                  {walletAddress}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.walletCardActions}>
+              {seedBackedUp ? (
+                <View style={styles.backedUpBadge}>
+                  <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
+                  <Text style={styles.backedUpText}>Backed Up</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.backupButton}
+                  onPress={() => router.push('/wallet/seedphrase')}
+                >
+                  <Ionicons name="shield-checkmark-outline" size={16} color={COLORS.white} />
+                  <Text style={styles.backupButtonText}>Back Up</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.viewSeedButton}
+                onPress={() => router.push('/wallet/seedphrase')}
+              >
+                <Ionicons name="eye-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.viewSeedButtonText}>View Seed Phrase</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      ) : (
+        <View style={styles.noWalletBanner}>
+          <Ionicons name="information-circle-outline" size={20} color="#1E40AF" />
+          <Text style={styles.noWalletBannerText}>
+            No wallet found. Create or import one below.
           </Text>
         </View>
+      )}
 
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
+      {/* Wallet Actions */}
+      <View style={styles.walletsSection}>
+        <Text style={styles.walletsSectionTitle}>Add Wallet</Text>
         <View style={styles.buttonContainer}>
+          <TouchableOpacity
+            style={[styles.primaryButton, loading && styles.disabledButton]}
+            onPress={handleGenerateNewWallet}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color={COLORS.white} />
+            ) : (
+              <>
+                <Ionicons name="add-circle-outline" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
+                <Text style={styles.primaryButtonText}>Generate New Wallet</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={styles.secondaryButton}
             onPress={() => {
@@ -180,39 +259,20 @@ const WalletManage = () => {
             }}
             disabled={loading}
           >
+            <Ionicons name="download-outline" size={20} color={COLORS.primary} style={{ marginRight: 8 }} />
             <Text style={styles.secondaryButtonText}>Import Existing Wallet</Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.primaryButton, loading && styles.disabledButton]}
-            onPress={handleGenerateNewWallet}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color={COLORS.white} />
-            ) : (
-              <Text style={styles.primaryButtonText}>Generate New Wallet</Text>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.secondaryButton}
-            onPress={() => router.push('/wallet/seedphrase')}
-            disabled={loading}
-          >
-            <Text style={styles.secondaryButtonText}>View Seed Phrase</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>Warning</Text>
-          <Text style={styles.infoText}>
-            Generating a new wallet or importing one will replace your current wallet. Make sure
-            you have backed up your current seed phrase before proceeding.
-          </Text>
         </View>
       </View>
-    </View>
+
+      <View style={styles.infoBox}>
+        <Text style={styles.infoTitle}>Warning</Text>
+        <Text style={styles.infoText}>
+          Generating a new wallet or importing one will replace your current wallet. Make sure
+          you have backed up your current seed phrase before proceeding.
+        </Text>
+      </View>
+    </ScrollView>
   );
 };
 
@@ -221,33 +281,144 @@ export default WalletManage;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.white,
+    backgroundColor: '#F5F5F7',
   },
   scrollContent: {
     flexGrow: 1,
     padding: SIZES.padding3,
   },
-  content: {
-    flex: 1,
-    padding: SIZES.padding3,
-  },
   header: {
-    marginBottom: 32,
+    marginBottom: 24,
   },
   subtitle: {
     ...FONTS.body3,
     color: COLORS.gray,
     lineHeight: 22,
   },
+  walletsSection: {
+    marginBottom: 24,
+  },
+  walletsSectionTitle: {
+    ...FONTS.body3,
+    fontWeight: '700',
+    color: COLORS.dark,
+    marginBottom: 12,
+  },
+  walletCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 14,
+    padding: 16,
+    ...SHADOWS.light,
+  },
+  walletCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  walletIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: `${COLORS.primary}15`,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  walletCardInfo: {
+    flex: 1,
+  },
+  walletCardLabel: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: COLORS.dark,
+    marginBottom: 2,
+  },
+  walletCardAddress: {
+    ...FONTS.body5,
+    color: COLORS.gray,
+  },
+  walletCardActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  backupButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    gap: 6,
+    flex: 1,
+    justifyContent: 'center',
+  },
+  backupButtonText: {
+    ...FONTS.body4,
+    color: COLORS.white,
+    fontWeight: '600',
+  },
+  backedUpBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#D1FAE5',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    gap: 6,
+    flex: 1,
+    justifyContent: 'center',
+  },
+  backedUpText: {
+    ...FONTS.body4,
+    color: COLORS.success,
+    fontWeight: '600',
+  },
+  viewSeedButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.white,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    gap: 6,
+    flex: 1,
+    justifyContent: 'center',
+  },
+  viewSeedButtonText: {
+    ...FONTS.body4,
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  noWalletBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    gap: 10,
+    marginBottom: 24,
+  },
+  noWalletBannerText: {
+    ...FONTS.body4,
+    color: '#1E40AF',
+    fontWeight: '500',
+    flex: 1,
+  },
   buttonContainer: {
-    gap: 16,
-    marginBottom: 32,
+    gap: 12,
+    marginBottom: 24,
   },
   primaryButton: {
     backgroundColor: COLORS.primary,
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
     ...SHADOWS.medium,
   },
   primaryButtonText: {
@@ -260,6 +431,8 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
     borderWidth: 2,
     borderColor: COLORS.primary,
   },
