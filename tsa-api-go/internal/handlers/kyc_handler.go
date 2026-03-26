@@ -19,8 +19,8 @@ import (
 
 // CreateKYCSession generates a Smile ID verification session for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
-	user, err := getUserFromContext(c)
-	if err != nil {
+	user := getUserFromContext(c)
+	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
@@ -190,8 +190,8 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 
 // GetKYCStatus returns the current KYC verification status for the authenticated user.
 func (h *Handlers) GetKYCStatus(c *gin.Context) {
-	user, err := getUserFromContext(c)
-	if err != nil {
+	user := getUserFromContext(c)
+	if user == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
@@ -213,8 +213,8 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 
 // AdminOverrideKYC allows an admin to approve a user whose Smile ID verification failed.
 func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
-	adminUser, err := getUserFromContext(c)
-	if err != nil {
+	adminUser := getUserFromContext(c)
+	if adminUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
@@ -261,8 +261,8 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 
 // AdminRejectKYC allows an admin to reject a user's verification.
 func (h *Handlers) AdminRejectKYC(c *gin.Context) {
-	adminUser, err := getUserFromContext(c)
-	if err != nil {
+	adminUser := getUserFromContext(c)
+	if adminUser == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
 		return
 	}
