@@ -45,7 +45,7 @@ export default function KYCScreen() {
   }, []);
 
   useEffect(() => {
-    SmileID.initialize(false, false).catch(() => {});
+    SmileID?.initialize?.(false, false)?.catch?.(() => {});
     checkStatus();
   }, [checkStatus]);
 
