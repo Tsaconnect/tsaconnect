@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -24,14 +25,16 @@ type CheckoutHandler struct {
 	Config            *config.Config
 	BlockchainService *services.BlockchainService
 	EscrowService     *services.EscrowService
+	EventBus          *events.Bus
 }
 
 // NewCheckoutHandler creates a new CheckoutHandler.
-func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *services.EscrowService) *CheckoutHandler {
+func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *services.EscrowService, bus *events.Bus) *CheckoutHandler {
 	return &CheckoutHandler{
 		Config:            cfg,
 		BlockchainService: bs,
 		EscrowService:     es,
+		EventBus:          bus,
 	}
 }
 

@@ -12,10 +12,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/routes"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"github.com/ojimcy/tsa-api-go/internal/ws"
 )
 
 func main() {
@@ -65,11 +67,19 @@ func main() {
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
 
+	// Initialize event bus and WebSocket hub
+	eventBus := events.NewBus()
+	wsHub := ws.NewHub()
+
+	// Initialize email and notification services
+	emailService := services.NewEmailService(cfg.MailjetAPIKey, cfg.MailjetSecretKey)
+	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService)
+
 	// Initialize handlers with dependency injection
-	h := handlers.NewHandlers(priceService, blockchainService, cfg)
-	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService)
+	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus)
+	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
-	mrh := handlers.NewMerchantRequestHandler(config.DB)
+	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
@@ -99,7 +109,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, wsHub)
 
 	// Configure HTTP server
 	port := cfg.Port
@@ -126,6 +136,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+
+	// Stop event bus
+	eventBus.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
