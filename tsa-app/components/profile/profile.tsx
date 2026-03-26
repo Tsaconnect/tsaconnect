@@ -166,21 +166,28 @@ const ProfileScreen = () => {
                 <Icon name="mail" size={20} color="#FFFFFF" />
                 <Text style={styles.verificationText}>Verify Email</Text>
               </TouchableOpacity>
-            ) : user.verificationStatus !== 'verified' ? (
+            ) : user.verificationStatus === 'verified' ? (
+              <View style={styles.verifiedContainer}>
+                <Icon name="verified" size={20} color="green" />
+                <Text style={styles.verifiedText}>Verified</Text>
+              </View>
+            ) : user.verificationStatus === 'in_review' ? (
+              <View style={styles.inReviewContainer}>
+                <Icon name="hourglass-empty" size={20} color="#9D6B38" />
+                <Text style={styles.inReviewText}>Verification In Progress</Text>
+              </View>
+            ) : (
               <TouchableOpacity
                 style={styles.verificationButton}
                 onPress={handleKycVerification}
               >
                 <Icon name="account-box" size={20} color="#FFFFFF" />
                 <Text style={styles.verificationText}>
-                  Complete KYC Verification
+                  {user.verificationStatus === 'rejected'
+                    ? 'Verification Failed - Try Again'
+                    : 'Verify Identity'}
                 </Text>
               </TouchableOpacity>
-            ) : (
-              <View style={styles.verifiedContainer}>
-                <Icon name="verified" size={20} color="green" />
-                <Text style={styles.verifiedText}>Verified</Text>
-              </View>
             )}
           </View>
           <View style={styles.linksContainer}>
@@ -355,6 +362,20 @@ const styles = StyleSheet.create({
   },
   verifiedText: {
     color: "green",
+    marginLeft: 10,
+    fontSize: 16,
+  },
+  inReviewContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 15,
+    borderRadius: 10,
+    marginVertical: 10,
+    backgroundColor: "#fff8e1",
+  },
+  inReviewText: {
+    color: "#9D6B38",
     marginLeft: 10,
     fontSize: 16,
   },
