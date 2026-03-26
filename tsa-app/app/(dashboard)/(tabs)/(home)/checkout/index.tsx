@@ -32,6 +32,7 @@ import {
 import { signAndBroadcast } from '@/services/transaction';
 import LocationPicker from '@/components/common/LocationPicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEmailVerification } from '../../../../../hooks/useEmailVerification';
 
 type CheckoutStep = 'review' | 'signing' | 'success';
 type SigningPhase =
@@ -72,6 +73,7 @@ const TOKEN_META: Record<
 
 const CheckoutScreen = () => {
   const { currentUser, token } = useAuth();
+  const { requireVerified } = useEmailVerification();
   const [cartData, setCartData] = useState<CartSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -153,6 +155,7 @@ const CheckoutScreen = () => {
 
   // --- Escrow checkout flow ---
   const handleCreateOrders = async () => {
+    if (!requireVerified()) return;
     // Re-check wallet in case user came back without completing setup
     const addr = await AsyncStorage.getItem('walletAddress');
     if (!addr) {
