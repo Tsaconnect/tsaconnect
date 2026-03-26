@@ -5,6 +5,7 @@ import { Stack } from "expo-router";
 import * as Updates from "expo-updates";
 import { AppProvider } from "../AuthContext/AuthContext";
 import { TokenProvider } from "../hooks/useTokens";
+import { NotificationProvider } from '../contexts/NotificationContext';
 
 const RootLayout = () => {
   useEffect(() => {
@@ -34,15 +35,17 @@ const RootLayout = () => {
   return (
     <AppProvider>
       <TokenProvider>
-        <StatusBar barStyle="dark-content" backgroundColor="#fff" />
-        <Stack screenOptions={{ headerShown: false }}>
-          <Stack.Screen
-            name="index"
-            options={{
-              headerShown: false,
-            }}
-          />
-        </Stack>
+        <NotificationProvider>
+          <StatusBar barStyle="dark-content" backgroundColor="#fff" />
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen
+              name="index"
+              options={{
+                headerShown: false,
+              }}
+            />
+          </Stack>
+        </NotificationProvider>
       </TokenProvider>
     </AppProvider>
   );
