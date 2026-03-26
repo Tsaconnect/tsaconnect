@@ -35,18 +35,7 @@ func generateOTP() (string, error) {
 
 // sendOTPEmail sends the OTP code via the email service.
 func sendOTPEmail(emailService *services.EmailService, toEmail, toName, code string) error {
-	message := fmt.Sprintf(
-		"Your verification code is: <strong style=\"font-size: 24px; letter-spacing: 4px;\">%s</strong><br><br>This code expires in 15 minutes. If you didn't request this, please ignore this email.",
-		code,
-	)
-	return emailService.Send(
-		toEmail,
-		toName,
-		"Your TSA Connect verification code",
-		"Email Verification",
-		message,
-		"", "",
-	)
+	return emailService.SendOTP(toEmail, toName, code)
 }
 
 // SendOTP handles POST /api/auth/send-otp (auth required).
