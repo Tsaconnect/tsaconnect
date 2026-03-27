@@ -9,19 +9,16 @@ import {
 } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import SmileID, { SmileIDDocumentVerificationView } from "@smile_identity/react-native";
+import { WebView } from "react-native-webview";
 import api from "../../components/services/api";
 import { COLORS, SIZES } from "../../constants/theme";
 
-type KYCState = "not_started" | "loading" | "sdk_active" | "in_progress" | "verified" | "rejected";
+type KYCState = "not_started" | "loading" | "webview_active" | "in_progress" | "verified" | "rejected";
 
 export default function KYCScreen() {
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
-  const [sdkConfig, setSdkConfig] = useState<{
-    jobId: string;
-    userId: string;
-  } | null>(null);
+  const [inquiryUrl, setInquiryUrl] = useState<string | null>(null);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -45,7 +42,6 @@ export default function KYCScreen() {
   }, []);
 
   useEffect(() => {
-    SmileID?.initialize?.(false, false)?.catch?.(() => {});
     checkStatus();
   }, [checkStatus]);
 
@@ -60,26 +56,19 @@ export default function KYCScreen() {
         return;
       }
 
-      setSdkConfig({
-        jobId: response.data.jobId,
-        userId: response.data.session?.user_id as string ?? response.data.jobId,
-      });
-      setState("sdk_active");
+      setInquiryUrl(response.data.inquiryUrl);
+      setState("webview_active");
     } catch (error: any) {
       Alert.alert("Error", api.getErrorMessage(error) || "Something went wrong");
       setState("not_started");
     }
   };
 
-  const handleSDKResult = (event: any) => {
-    const { result, error } = event.nativeEvent ?? {};
-    if (error) {
-      Alert.alert("Verification Error", "Something went wrong during verification. Please try again.");
-      setState("not_started");
-      setSdkConfig(null);
-    } else {
+  const handleWebViewNavigationChange = (navState: { url: string }) => {
+    // Persona redirects to a completion page when the inquiry is done
+    if (navState.url.includes("/done") || navState.url.includes("completed")) {
+      setInquiryUrl(null);
       setState("in_progress");
-      setSdkConfig(null);
     }
   };
 
@@ -92,20 +81,30 @@ export default function KYCScreen() {
     );
   }
 
-  if (state === "sdk_active" && sdkConfig) {
+  if (state === "webview_active" && inquiryUrl) {
     return (
-      <View style={styles.sdkContainer}>
-        <SmileIDDocumentVerificationView
-          userId={sdkConfig.userId}
-          jobId={sdkConfig.jobId}
-          countryCode="NG"
-          showInstructions={true}
-          showAttribution={true}
-          allowGalleryUpload={false}
-          showConfirmation={true}
-          captureBothSides={true}
-          onResult={handleSDKResult}
-          style={styles.sdkView}
+      <View style={styles.webviewContainer}>
+        <View style={styles.webviewHeader}>
+          <TouchableOpacity
+            onPress={() => {
+              setInquiryUrl(null);
+              setState("in_progress");
+            }}
+            style={styles.closeButton}
+          >
+            <Ionicons name="close" size={24} color="#111" />
+          </TouchableOpacity>
+          <Text style={styles.webviewTitle}>Identity Verification</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <WebView
+          source={{ uri: inquiryUrl }}
+          onNavigationStateChange={handleWebViewNavigationChange}
+          javaScriptEnabled
+          domStorageEnabled
+          mediaPlaybackRequiresUserAction={false}
+          allowsInlineMediaPlayback
+          style={styles.webview}
         />
       </View>
     );
@@ -190,14 +189,30 @@ export default function KYCScreen() {
 }
 
 const styles = StyleSheet.create({
-  sdkContainer: {
+  webviewContainer: {
     flex: 1,
     backgroundColor: "#fff",
   },
-  sdkView: {
+  webviewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingTop: 50,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+  closeButton: {
+    padding: 4,
+  },
+  webviewTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#111",
+  },
+  webview: {
     flex: 1,
-    width: "100%",
-    height: "100%",
   },
   container: {
     flex: 1,
