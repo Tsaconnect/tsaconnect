@@ -17,7 +17,7 @@ import (
 	"gorm.io/datatypes"
 )
 
-// CreateKYCSession generates a Smile ID verification session for the authenticated user.
+// CreateKYCSession creates a Persona inquiry for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -30,18 +30,17 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	partnerID := h.Config.SmileIDPartnerID
-	apiKey := h.Config.SmileIDAPIKey
-	baseURL := h.Config.SmileIDBaseURL
-
-	jobID := fmt.Sprintf("kyc-%s-%d", user.ID.String(), time.Now().Unix())
+	apiKey := h.Config.PersonaAPIKey
+	templateID := h.Config.PersonaTemplateID
+	baseURL := h.Config.PersonaBaseURL
 
 	payload := map[string]interface{}{
-		"partner_id":         partnerID,
-		"job_id":             jobID,
-		"user_id":            user.ID.String(),
-		"job_type":           6,
-		"use_enrolled_image": false,
+		"data": map[string]interface{}{
+			"attributes": map[string]interface{}{
+				"inquiry-template-id": templateID,
+				"reference-id":        user.ID.String(),
+			},
+		},
 	}
 
 	body, err := json.Marshal(payload)
@@ -50,43 +49,56 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/v2/auth_smile", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", baseURL+"/inquiries", bytes.NewReader(body))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Persona-Version", "2023-01-05")
+	req.Header.Set("Key-Inflection", "kebab")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Smile ID"})
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Persona"})
 		return
 	}
 	defer resp.Body.Close()
 
-	var smileResp map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&smileResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Smile ID"})
+	var personaResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&personaResp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Persona"})
 		return
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Smile ID returned an error", "details": smileResp})
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Persona returned an error", "details": personaResp})
 		return
+	}
+
+	// Extract inquiry ID and URL from Persona response
+	data, _ := personaResp["data"].(map[string]interface{})
+	inquiryID, _ := data["id"].(string)
+	attrs, _ := data["attributes"].(map[string]interface{})
+
+	// Build the hosted inquiry URL
+	inquiryURL := fmt.Sprintf("https://withpersona.com/verify?inquiry-id=%s", inquiryID)
+	if env, ok := attrs["environment"].(string); ok && env == "sandbox" {
+		inquiryURL += "&sandbox=true"
 	}
 
 	config.DB.Model(&user).Updates(map[string]interface{}{
-		"smile_job_id":        jobID,
+		"persona_inquiry_id":  inquiryID,
 		"verification_status": models.VerificationStatusInReview,
 	})
 
-	metadata, _ := json.Marshal(map[string]string{"job_id": jobID})
+	metadata, _ := json.Marshal(map[string]string{"inquiry_id": inquiryID})
 	config.DB.Create(&models.VerificationLog{
 		UserID:   user.ID,
-		Action:   models.VerificationActionSmileIDInitiated,
+		Action:   models.VerificationActionPersonaInitiated,
 		Status:   models.VerificationLogStatusInReview,
-		Notes:    "Smile ID verification session created",
+		Notes:    "Persona verification inquiry created",
 		Metadata: datatypes.JSON(metadata),
 	})
 
@@ -94,14 +106,13 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		"success": true,
 		"message": "KYC session created",
 		"data": gin.H{
-			"jobId":     jobID,
-			"partnerId": partnerID,
-			"session":   smileResp,
+			"inquiryId":  inquiryID,
+			"inquiryUrl": inquiryURL,
 		},
 	})
 }
 
-// KYCWebhook receives verification results from Smile ID.
+// KYCWebhook receives verification results from Persona.
 func (h *Handlers) KYCWebhook(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -109,13 +120,21 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		return
 	}
 
-	secret := h.Config.SmileIDWebhookSecret
+	secret := h.Config.PersonaWebhookSecret
 	if secret != "" {
-		sig := c.GetHeader("X-Smileid-Signature")
+		sig := c.GetHeader("Persona-Signature")
+		// Persona signature format: "t=<timestamp>,v1=<signature>"
+		parts := parsePersonaSignature(sig)
+		if parts.timestamp == "" || parts.signature == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature format"})
+			return
+		}
+		// Compute HMAC-SHA256 over "timestamp.body"
 		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(parts.timestamp + "."))
 		mac.Write(bodyBytes)
 		expected := hex.EncodeToString(mac.Sum(nil))
-		if sig != expected {
+		if !hmac.Equal([]byte(parts.signature), []byte(expected)) {
 			c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
 			return
 		}
@@ -127,25 +146,41 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		return
 	}
 
-	jobID, _ := payload["job_id"].(string)
-	resultCode, _ := payload["result_code"].(string)
-	resultText, _ := payload["result_text"].(string)
+	// Extract event name and inquiry data from Persona webhook payload
+	data, _ := payload["data"].(map[string]interface{})
+	attrs, _ := data["attributes"].(map[string]interface{})
+	eventName, _ := attrs["name"].(string)
 
-	if jobID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing job_id"})
+	// Get the inquiry from the included array
+	included, _ := payload["included"].([]interface{})
+	var inquiryID string
+	var referenceID string
+	for _, item := range included {
+		obj, _ := item.(map[string]interface{})
+		if objType, _ := obj["type"].(string); objType == "inquiry" {
+			inquiryID, _ = obj["id"].(string)
+			objAttrs, _ := obj["attributes"].(map[string]interface{})
+			referenceID, _ = objAttrs["reference-id"].(string)
+			break
+		}
+	}
+
+	if inquiryID == "" || referenceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing inquiry data"})
 		return
 	}
 
 	var user models.User
-	if err := config.DB.Where("smile_job_id = ?", jobID).First(&user).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "User not found for job"})
+	if err := config.DB.Where("persona_inquiry_id = ? OR id = ?", inquiryID, referenceID).First(&user).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "User not found for inquiry"})
 		return
 	}
 
+	// Check for duplicate processing
 	var existingLog models.VerificationLog
-	alreadyProcessed := config.DB.Where("user_id = ? AND metadata->>'job_id' = ? AND action IN ?",
-		user.ID, jobID,
-		[]string{models.VerificationActionSmileIDPassed, models.VerificationActionSmileIDFailed},
+	alreadyProcessed := config.DB.Where("user_id = ? AND metadata->>'inquiry_id' = ? AND action IN ?",
+		user.ID, inquiryID,
+		[]string{models.VerificationActionPersonaPassed, models.VerificationActionPersonaFailed},
 	).First(&existingLog).Error == nil
 
 	if alreadyProcessed {
@@ -155,37 +190,64 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 
 	metadata, _ := json.Marshal(payload)
 
-	passed := resultCode == "0810" || resultCode == "0811"
+	// inquiry.completed = passed, inquiry.failed/inquiry.expired = failed
+	passed := eventName == "inquiry.completed"
 
 	if passed {
 		now := time.Now()
 		config.DB.Model(&user).Updates(map[string]interface{}{
 			"verification_status": models.VerificationStatusVerified,
-			"verification_notes":  resultText,
+			"verification_notes":  "Persona verification completed",
 			"updated_at":          now,
 		})
 		config.DB.Create(&models.VerificationLog{
 			UserID:   user.ID,
-			Action:   models.VerificationActionSmileIDPassed,
+			Action:   models.VerificationActionPersonaPassed,
 			Status:   models.VerificationLogStatusVerified,
-			Notes:    resultText,
+			Notes:    "Persona verification completed",
 			Metadata: datatypes.JSON(metadata),
 		})
 	} else {
 		config.DB.Model(&user).Updates(map[string]interface{}{
 			"verification_status": models.VerificationStatusRejected,
-			"verification_notes":  resultText,
+			"verification_notes":  fmt.Sprintf("Persona verification event: %s", eventName),
 		})
 		config.DB.Create(&models.VerificationLog{
 			UserID:   user.ID,
-			Action:   models.VerificationActionSmileIDFailed,
+			Action:   models.VerificationActionPersonaFailed,
 			Status:   models.VerificationLogStatusRejected,
-			Notes:    resultText,
+			Notes:    fmt.Sprintf("Persona verification event: %s", eventName),
 			Metadata: datatypes.JSON(metadata),
 		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Webhook processed"})
+}
+
+// personaSignatureParts holds parsed Persona webhook signature components.
+type personaSignatureParts struct {
+	timestamp string
+	signature string
+}
+
+// parsePersonaSignature parses the "t=<ts>,v1=<sig>" format from Persona-Signature header.
+func parsePersonaSignature(header string) personaSignatureParts {
+	var parts personaSignatureParts
+	for _, segment := range bytes.Split([]byte(header), []byte(",")) {
+		kv := bytes.SplitN(segment, []byte("="), 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := string(bytes.TrimSpace(kv[0]))
+		val := string(bytes.TrimSpace(kv[1]))
+		switch key {
+		case "t":
+			parts.timestamp = val
+		case "v1":
+			parts.signature = val
+		}
+	}
+	return parts
 }
 
 // GetKYCStatus returns the current KYC verification status for the authenticated user.
@@ -204,14 +266,14 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 		"data": gin.H{
 			"verificationStatus": user.VerificationStatus,
 			"verificationNotes":  user.VerificationNotes,
-			"smileJobId":         user.SmileJobID,
+			"personaInquiryId":   user.PersonaInquiryID,
 			"lastAction":         latestLog.Action,
 			"lastActionAt":       latestLog.CreatedAt,
 		},
 	})
 }
 
-// AdminOverrideKYC allows an admin to approve a user whose Smile ID verification failed.
+// AdminOverrideKYC allows an admin to approve a user whose verification failed.
 func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	adminUser := getUserFromContext(c)
 	if adminUser == nil {
@@ -334,7 +396,7 @@ func (h *Handlers) GetAllVerifications(c *gin.Context) {
 	query.Count(&total)
 
 	var users []models.User
-	query.Select("id, name, email, phone_number, verification_status, verification_notes, smile_job_id, created_at, updated_at, profile_photo").
+	query.Select("id, name, email, phone_number, verification_status, verification_notes, persona_inquiry_id, created_at, updated_at, profile_photo").
 		Order("updated_at DESC").
 		Offset(offset).
 		Limit(limit).
