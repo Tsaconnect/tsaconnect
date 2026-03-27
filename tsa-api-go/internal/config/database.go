@@ -45,6 +45,12 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// Rename smile_job_id → persona_inquiry_id (Persona KYC migration)
+	DB.Exec("ALTER TABLE users RENAME COLUMN smile_job_id TO persona_inquiry_id")
+
+	// Reset any in_review users from old provider to pending
+	DB.Exec("UPDATE users SET verification_status = 'pending', persona_inquiry_id = '' WHERE verification_status = 'in_review'")
+
 	// Replace the default unique index on wallet_address with a partial
 	// unique index that only enforces uniqueness for non-empty values.
 	// This allows multiple users to have an empty wallet_address (before
