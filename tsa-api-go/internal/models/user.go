@@ -31,7 +31,7 @@ type User struct {
 	ProfilePhoto               datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
 	ReferralCode               string         `json:"referralCode,omitempty"`
 	ReferredBy                 *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
-	SmileJobID                 string         `json:"smileJobId,omitempty"`
+	PersonaInquiryID               string         `json:"personaInquiryId,omitempty"`
 	VerificationStatus         string         `gorm:"default:'pending'" json:"verificationStatus"`
 	VerificationNotes          string         `json:"verificationNotes,omitempty"`
 	AccountStatus              string         `gorm:"default:'active'" json:"accountStatus"`
