@@ -162,7 +162,7 @@ func (h *Handlers) GetVerificationStatus(c *gin.Context) {
 	status := gin.H{
 		"overall":   dbUser.VerificationStatus,
 		"notes":     dbUser.VerificationNotes,
-		"smileJobId": dbUser.SmileJobID,
+		"personaInquiryId": dbUser.PersonaInquiryID,
 		"completed": dbUser.VerificationStatus == models.VerificationStatusVerified,
 	}
 
@@ -199,7 +199,7 @@ func (h *Handlers) GetDocuments(c *gin.Context) {
 		"data": gin.H{
 			"verificationStatus": dbUser.VerificationStatus,
 			"verificationNotes":  dbUser.VerificationNotes,
-			"smileJobId":         dbUser.SmileJobID,
+			"personaInquiryId":   dbUser.PersonaInquiryID,
 		},
 	})
 }
