@@ -44,11 +44,11 @@ type Config struct {
 	MailjetAPIKey    string
 	MailjetSecretKey string
 
-	// Smile ID KYC verification
-	SmileIDAPIKey        string
-	SmileIDPartnerID     string
-	SmileIDBaseURL       string
-	SmileIDWebhookSecret string
+	// Persona KYC verification
+	PersonaAPIKey        string
+	PersonaTemplateID    string
+	PersonaBaseURL       string
+	PersonaWebhookSecret string
 
 	// Multi-chain configuration (populated in Load)
 	Chains         map[string]ChainConfig
@@ -88,11 +88,11 @@ func Load() *Config {
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
 
-	// Smile ID KYC
-	cfg.SmileIDAPIKey = os.Getenv("SMILE_ID_API_KEY")
-	cfg.SmileIDPartnerID = os.Getenv("SMILE_ID_PARTNER_ID")
-	cfg.SmileIDBaseURL = getEnv("SMILE_ID_BASE_URL", "https://api.smileidentity.com")
-	cfg.SmileIDWebhookSecret = os.Getenv("SMILE_ID_WEBHOOK_SECRET")
+	// Persona KYC
+	cfg.PersonaAPIKey = os.Getenv("PERSONA_API_KEY")
+	cfg.PersonaTemplateID = os.Getenv("PERSONA_TEMPLATE_ID")
+	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
+	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
 
 	cfg.Chains = map[string]ChainConfig{
 		"sonic": {Name: "Sonic Network", RPCURL: cfg.SonicRPCURL, ChainID: cfg.SonicChainID, NativeCurrency: "S"},
