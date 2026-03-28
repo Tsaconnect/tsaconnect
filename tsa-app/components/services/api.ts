@@ -560,7 +560,7 @@ class APIService {
       method: 'POST',
       headers,
     });
-    return response.json();
+    return this.handleResponse<{ inquiryId: string; inquiryUrl: string }>(response);
   }
 
   // Get KYC verification status
@@ -576,7 +576,13 @@ class APIService {
       method: 'GET',
       headers,
     });
-    return response.json();
+    return this.handleResponse<{
+      verificationStatus: string;
+      verificationNotes: string;
+      personaInquiryId: string;
+      lastAction: string;
+      lastActionAt: string;
+    }>(response);
   }
 
   // ==================== USER PROFILE ENDPOINTS ====================

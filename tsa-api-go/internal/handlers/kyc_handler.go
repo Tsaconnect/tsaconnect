@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -73,6 +74,7 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		log.Printf("[KYC] Persona API error: status=%d response=%v", resp.StatusCode, personaResp)
 		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Persona returned an error", "details": personaResp})
 		return
 	}
