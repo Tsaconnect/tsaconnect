@@ -85,7 +85,7 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	attrs, _ := data["attributes"].(map[string]interface{})
 
 	// Build the hosted inquiry URL
-	inquiryURL := fmt.Sprintf("https://withpersona.com/verify?inquiry-id=%s", inquiryID)
+	inquiryURL := fmt.Sprintf("https://inquiry.withpersona.com/verify?inquiry-id=%s", inquiryID)
 	if env, ok := attrs["environment"].(string); ok && env == "sandbox" {
 		inquiryURL += "&sandbox=true"
 	}
