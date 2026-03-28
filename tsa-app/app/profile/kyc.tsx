@@ -6,9 +6,11 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Linking,
 } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { Camera } from "expo-camera";
 import { WebView } from "react-native-webview";
 import api from "../../components/services/api";
 import { COLORS, SIZES } from "../../constants/theme";
@@ -45,8 +47,26 @@ export default function KYCScreen() {
     checkStatus();
   }, [checkStatus]);
 
+  const requestCameraPermission = async (): Promise<boolean> => {
+    const { status } = await Camera.requestCameraPermissionsAsync();
+    if (status === "granted") return true;
+
+    Alert.alert(
+      "Camera Permission Required",
+      "Camera access is needed for identity verification. Please enable it in your device settings.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Open Settings", onPress: () => Linking.openSettings() },
+      ]
+    );
+    return false;
+  };
+
   const startVerification = async () => {
     try {
+      const hasPermission = await requestCameraPermission();
+      if (!hasPermission) return;
+
       setState("loading");
       const response = await api.createKYCSession();
 
@@ -104,8 +124,9 @@ export default function KYCScreen() {
           domStorageEnabled
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback
-          mediaCapturePermissionGrantType="grantIfSameHostElsePrompt"
+          mediaCapturePermissionGrantType="grant"
           allowsBackForwardNavigationGestures={false}
+          onPermissionRequest={(event: any) => event.grant()}
           style={styles.webview}
         />
       </View>
