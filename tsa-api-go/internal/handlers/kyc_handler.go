@@ -91,8 +91,7 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	}
 
 	config.DB.Model(&user).Updates(map[string]interface{}{
-		"persona_inquiry_id":  inquiryID,
-		"verification_status": models.VerificationStatusInReview,
+		"persona_inquiry_id": inquiryID,
 	})
 
 	metadata, _ := json.Marshal(map[string]string{"inquiry_id": inquiryID})
@@ -191,6 +190,22 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 	}
 
 	metadata, _ := json.Marshal(payload)
+
+	// inquiry.started = user began the flow, set to in_review
+	if eventName == "inquiry.started" || eventName == "inquiry.transitioned" {
+		config.DB.Model(&user).Updates(map[string]interface{}{
+			"verification_status": models.VerificationStatusInReview,
+		})
+		config.DB.Create(&models.VerificationLog{
+			UserID:   user.ID,
+			Action:   models.VerificationActionPersonaInitiated,
+			Status:   models.VerificationLogStatusInReview,
+			Notes:    fmt.Sprintf("Persona event: %s", eventName),
+			Metadata: datatypes.JSON(metadata),
+		})
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Webhook processed"})
+		return
+	}
 
 	// inquiry.completed = passed, inquiry.failed/inquiry.expired = failed
 	passed := eventName == "inquiry.completed"
