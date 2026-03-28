@@ -181,10 +181,10 @@ const ProfileScreen = () => {
                 <Text style={styles.verifiedText}>Verified</Text>
               </View>
             ) : user.verificationStatus === 'in_review' ? (
-              <View style={styles.inReviewContainer}>
+              <TouchableOpacity style={styles.inReviewContainer} onPress={handleKycVerification}>
                 <Icon name="hourglass-empty" size={20} color="#9D6B38" />
                 <Text style={styles.inReviewText}>Verification In Progress</Text>
-              </View>
+              </TouchableOpacity>
             ) : (
               <TouchableOpacity
                 style={styles.verificationButton}

@@ -72,11 +72,24 @@ export default function KYCScreen() {
     }
   };
 
+  const Header = () => (
+    <View style={styles.header}>
+      <TouchableOpacity onPress={() => router.back()} style={styles.headerBackButton}>
+        <Ionicons name="arrow-back" size={24} color="#111" />
+      </TouchableOpacity>
+      <Text style={styles.headerTitle}>KYC Verification</Text>
+      <View style={{ width: 24 }} />
+    </View>
+  );
+
   if (state === "loading") {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading...</Text>
+      <View style={styles.screenContainer}>
+        <Header />
+        <View style={styles.container}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
       </View>
     );
   }
@@ -84,19 +97,6 @@ export default function KYCScreen() {
   if (state === "webview_active" && inquiryUrl) {
     return (
       <View style={styles.webviewContainer}>
-        <View style={styles.webviewHeader}>
-          <TouchableOpacity
-            onPress={() => {
-              setInquiryUrl(null);
-              setState("in_progress");
-            }}
-            style={styles.closeButton}
-          >
-            <Ionicons name="close" size={24} color="#111" />
-          </TouchableOpacity>
-          <Text style={styles.webviewTitle}>Identity Verification</Text>
-          <View style={{ width: 24 }} />
-        </View>
         <WebView
           source={{ uri: inquiryUrl }}
           onNavigationStateChange={handleWebViewNavigationChange}
@@ -104,6 +104,8 @@ export default function KYCScreen() {
           domStorageEnabled
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback
+          mediaCapturePermissionGrantType="grantIfSameHostElsePrompt"
+          allowsBackForwardNavigationGestures={false}
           style={styles.webview}
         />
       </View>
@@ -112,88 +114,103 @@ export default function KYCScreen() {
 
   if (state === "verified") {
     return (
-      <View style={styles.container}>
-        <View style={styles.iconContainer}>
-          <Ionicons name="checkmark-circle" size={80} color={COLORS.primary} />
+      <View style={styles.screenContainer}>
+        <Header />
+        <View style={styles.container}>
+          <View style={styles.iconContainer}>
+            <Ionicons name="checkmark-circle" size={80} color={COLORS.primary} />
+          </View>
+          <Text style={styles.title}>Identity Verified</Text>
+          <Text style={styles.subtitle}>Your identity has been successfully verified.</Text>
+          <TouchableOpacity style={styles.button} onPress={() => router.back()}>
+            <Text style={styles.buttonText}>Go Back</Text>
+          </TouchableOpacity>
         </View>
-        <Text style={styles.title}>Identity Verified</Text>
-        <Text style={styles.subtitle}>Your identity has been successfully verified.</Text>
-        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
-          <Text style={styles.buttonText}>Go Back</Text>
-        </TouchableOpacity>
       </View>
     );
   }
 
   if (state === "in_progress") {
     return (
-      <View style={styles.container}>
-        <View style={styles.iconContainer}>
-          <Ionicons name="time-outline" size={80} color={COLORS.secondary} />
+      <View style={styles.screenContainer}>
+        <Header />
+        <View style={styles.container}>
+          <View style={styles.iconContainer}>
+            <Ionicons name="time-outline" size={80} color={COLORS.secondary} />
+          </View>
+          <Text style={styles.title}>Verification In Progress</Text>
+          <Text style={styles.subtitle}>
+            Your verification is being reviewed. If you didn't finish submitting, you can start again.
+          </Text>
+          <TouchableOpacity style={styles.button} onPress={startVerification}>
+            <Text style={styles.buttonText}>Continue Verification</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={checkStatus}>
+            <Text style={styles.secondaryButtonText}>Refresh Status</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
+            <Text style={styles.secondaryButtonText}>Go Back</Text>
+          </TouchableOpacity>
         </View>
-        <Text style={styles.title}>Verification In Progress</Text>
-        <Text style={styles.subtitle}>
-          We're reviewing your documents. This usually takes a few minutes. We'll notify you when it's done.
-        </Text>
-        <TouchableOpacity style={styles.secondaryButton} onPress={checkStatus}>
-          <Text style={styles.secondaryButtonText}>Refresh Status</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
-          <Text style={styles.buttonText}>Go Back</Text>
-        </TouchableOpacity>
       </View>
     );
   }
 
   if (state === "rejected") {
     return (
-      <View style={styles.container}>
-        <View style={styles.iconContainer}>
-          <Ionicons name="close-circle" size={80} color="#EF4444" />
+      <View style={styles.screenContainer}>
+        <Header />
+        <View style={styles.container}>
+          <View style={styles.iconContainer}>
+            <Ionicons name="close-circle" size={80} color="#EF4444" />
+          </View>
+          <Text style={styles.title}>Verification Failed</Text>
+          <Text style={styles.subtitle}>{notes}</Text>
+          <TouchableOpacity style={styles.button} onPress={startVerification}>
+            <Text style={styles.buttonText}>Try Again</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
+            <Text style={styles.secondaryButtonText}>Go Back</Text>
+          </TouchableOpacity>
         </View>
-        <Text style={styles.title}>Verification Failed</Text>
-        <Text style={styles.subtitle}>{notes}</Text>
-        <TouchableOpacity style={styles.button} onPress={startVerification}>
-          <Text style={styles.buttonText}>Try Again</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
-          <Text style={styles.secondaryButtonText}>Go Back</Text>
-        </TouchableOpacity>
       </View>
     );
   }
 
   // not_started
   return (
-    <View style={styles.container}>
-      <View style={styles.iconContainer}>
-        <Ionicons name="shield-checkmark-outline" size={80} color={COLORS.primary} />
+    <View style={styles.screenContainer}>
+      <Header />
+      <View style={styles.container}>
+        <View style={styles.iconContainer}>
+          <Ionicons name="shield-checkmark-outline" size={80} color={COLORS.primary} />
+        </View>
+        <Text style={styles.title}>Verify Your Identity</Text>
+        <Text style={styles.subtitle}>
+          Complete identity verification to unlock all features including buying, selling, and sending funds.
+        </Text>
+        <Text style={styles.infoText}>
+          You'll need:{"\n"}
+          {"\u2022"} A valid government-issued ID{"\n"}
+          {"\u2022"} A well-lit environment for a selfie
+        </Text>
+        <TouchableOpacity style={styles.button} onPress={startVerification}>
+          <Text style={styles.buttonText}>Start Verification</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
+          <Text style={styles.secondaryButtonText}>Do This Later</Text>
+        </TouchableOpacity>
       </View>
-      <Text style={styles.title}>Verify Your Identity</Text>
-      <Text style={styles.subtitle}>
-        Complete identity verification to unlock all features including buying, selling, and sending funds.
-      </Text>
-      <Text style={styles.infoText}>
-        You'll need:{"\n"}
-        {"\u2022"} A valid government-issued ID{"\n"}
-        {"\u2022"} A well-lit environment for a selfie
-      </Text>
-      <TouchableOpacity style={styles.button} onPress={startVerification}>
-        <Text style={styles.buttonText}>Start Verification</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
-        <Text style={styles.secondaryButtonText}>Do This Later</Text>
-      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  webviewContainer: {
+  screenContainer: {
     flex: 1,
     backgroundColor: "#fff",
   },
-  webviewHeader: {
+  header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -203,13 +220,17 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#eee",
   },
-  closeButton: {
+  headerBackButton: {
     padding: 4,
   },
-  webviewTitle: {
+  headerTitle: {
     fontSize: 16,
     fontWeight: "600",
     color: "#111",
+  },
+  webviewContainer: {
+    flex: 1,
+    backgroundColor: "#fff",
   },
   webview: {
     flex: 1,
