@@ -6,6 +6,7 @@ const WalletLayout = () => {
   return (
     <Stack screenOptions={defaultScreenOptions}>
       <Stack.Screen name="home" options={{ headerShown: false }} />
+      <Stack.Screen name="token" options={{ title: 'Token Details' }} />
       <Stack.Screen name="manage" options={{ title: 'Manage Wallet' }} />
       <Stack.Screen name="send" options={{ title: 'Send' }} />
       <Stack.Screen name="receive" options={{ title: 'Receive' }} />

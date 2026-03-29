@@ -195,6 +195,26 @@ export interface SupportedTokenResponse {
 }
 
 /**
+ * Fetch price history for a token symbol over the given number of days.
+ */
+export async function getTokenPriceHistory(
+  symbol: string,
+  days: number = 7
+): Promise<ApiResponse<{ timestamp: number; price: number }[]>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(
+      `${API_BASE_URL}/market/history/${symbol}?days=${days}`,
+      { method: 'GET', headers }
+    );
+    return await response.json();
+  } catch (error: any) {
+    console.error('Get token price history error:', error);
+    return { success: false, message: error.message || 'Failed to fetch price history' };
+  }
+}
+
+/**
  * Confirm that the user has backed up their seed phrase
  */
 export async function confirmSeedPhraseBackup(): Promise<ApiResponse> {

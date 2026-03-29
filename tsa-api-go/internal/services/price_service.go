@@ -63,6 +63,8 @@ type PriceService struct {
 func NewPriceService() *PriceService {
 	return &PriceService{
 		coinIDs: map[string]string{
+			"S":     "sonic-3",
+			"tBNB":  "binancecoin",
 			"MCGP":  "maticgold-pro",
 			"USDT":  "tether",
 			"USDC":  "usd-coin",
