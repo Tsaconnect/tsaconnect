@@ -19,7 +19,7 @@ import PhoneNumber from "../country/phoneNumber";
 import LocationPicker from "../common/LocationPicker";
 import Icon from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { generateWallet, storePrivateKey, storeMnemonic } from "../../services/wallet";
+import { generateWallet, addWallet } from "../../services/wallet";
 import { registerWalletAddress } from "../../services/walletApi";
 
 interface Country {
@@ -83,10 +83,7 @@ const Signup = () => {
             await AsyncStorage.setItem('authToken', result.data.token);
           }
           const wallet = await generateWallet();
-          await storePrivateKey(wallet.privateKey);
-          await storeMnemonic(wallet.mnemonic);
-          await AsyncStorage.setItem('walletAddress', wallet.address);
-          await AsyncStorage.setItem('seedPhraseBackedUp', 'false');
+          await addWallet(wallet, 'Wallet 1');
           await registerWalletAddress(wallet.address);
         } catch (walletErr) {
           console.warn('Auto wallet generation failed, user can set up later:', walletErr);

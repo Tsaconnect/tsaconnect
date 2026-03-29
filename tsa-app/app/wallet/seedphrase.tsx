@@ -13,14 +13,15 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { router, useNavigation } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
   getMnemonic,
   generateWallet,
-  storePrivateKey,
-  storeMnemonic,
+  addWallet,
   importWalletFromMnemonic,
+  getWalletList,
+  markWalletBackedUp,
+  getActiveWallet,
   isValidMnemonic,
 } from '../../services/wallet';
 import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/walletApi';
@@ -70,10 +71,8 @@ const SeedPhrase = () => {
     setError('');
     try {
       const wallet = await generateWallet();
-      await storePrivateKey(wallet.privateKey);
-      await storeMnemonic(wallet.mnemonic);
-      await AsyncStorage.setItem('walletAddress', wallet.address);
-      await AsyncStorage.setItem('seedPhraseBackedUp', 'false');
+      const list = await getWalletList();
+      await addWallet(wallet, `Wallet ${list.length + 1}`);
       try {
         await registerWalletAddress(wallet.address);
       } catch (_) {}
@@ -99,11 +98,12 @@ const SeedPhrase = () => {
     setLoading(true);
     setError('');
     try {
-      const { address } = await importWalletFromMnemonic(mnemonicInput);
-      await AsyncStorage.setItem('walletAddress', address);
-      await AsyncStorage.setItem('seedPhraseBackedUp', 'true');
+      const walletInfo = await importWalletFromMnemonic(mnemonicInput);
+      const list = await getWalletList();
+      await addWallet(walletInfo, `Wallet ${list.length + 1}`);
+      await markWalletBackedUp(walletInfo.address);
       try {
-        await registerWalletAddress(address);
+        await registerWalletAddress(walletInfo.address);
       } catch (_) {}
       router.replace('/tokenization');
     } catch (err: any) {
@@ -198,7 +198,8 @@ const SeedPhrase = () => {
     // All correct
     setLoading(true);
     try {
-      await AsyncStorage.setItem('seedPhraseBackedUp', 'true');
+      const activeAddr = await getActiveWallet();
+      if (activeAddr) await markWalletBackedUp(activeAddr);
       await confirmSeedPhraseBackup();
       setStep('success');
     } catch (err: any) {

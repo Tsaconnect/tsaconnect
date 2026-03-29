@@ -8,6 +8,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   Platform,
+  Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -16,9 +17,17 @@ import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
   getWalletBalances,
   getTransactionHistory,
+  registerWalletAddress,
   WalletBalance,
   Transaction,
 } from '../../services/walletApi';
+import {
+  getWalletList,
+  getActiveWallet,
+  setActiveWallet as setActiveWalletService,
+  migrateFromSingleWallet,
+  WalletMeta,
+} from '../../services/wallet';
 import { useTokens } from '../../hooks/useTokens';
 
 const WalletHome = () => {
@@ -38,15 +47,27 @@ const WalletHome = () => {
   const [seedBackedUp, setSeedBackedUp] = useState(true);
   const [walletAddress, setWalletAddress] = useState('');
   const [error, setError] = useState('');
+  const [walletList, setWalletList] = useState<WalletMeta[]>([]);
+  const [activeLabel, setActiveLabel] = useState('');
+  const [selectorVisible, setSelectorVisible] = useState(false);
 
   const fetchData = useCallback(async () => {
     setError('');
     try {
+      await migrateFromSingleWallet();
+      const list = await getWalletList();
+      setWalletList(list);
+      const activeAddr = await getActiveWallet();
+      if (activeAddr) {
+        const activeMeta = list.find(w => w.address === activeAddr);
+        setActiveLabel(activeMeta?.label || 'Wallet');
+      }
+
       const address = await AsyncStorage.getItem('walletAddress');
       if (address) setWalletAddress(address);
 
-      const backedUp = await AsyncStorage.getItem('seedPhraseBackedUp');
-      setSeedBackedUp(backedUp === 'true');
+      const backedUp = list.find(w => w.address === address)?.backedUp;
+      setSeedBackedUp(backedUp ?? false);
 
       const [balanceResult, txResult] = await Promise.all([
         getWalletBalances(),
@@ -89,6 +110,19 @@ const WalletHome = () => {
     await fetchData();
     setRefreshing(false);
   }, [fetchData]);
+
+  const handleSwitchWallet = async (address: string) => {
+    setSelectorVisible(false);
+    if (address === walletAddress) return;
+    setLoading(true);
+    try {
+      await setActiveWalletService(address);
+      await registerWalletAddress(address);
+      await fetchData();
+    } catch (err: any) {
+      console.error('Switch wallet error:', err);
+    }
+  };
 
   const totalUsdValue = balances.reduce(
     (sum, b) => sum + parseFloat(b.usdValue || '0'),
@@ -239,6 +273,13 @@ const WalletHome = () => {
 
       {/* Total balance */}
       <View style={styles.balanceCard}>
+        <TouchableOpacity
+          style={styles.walletSelector}
+          onPress={() => setSelectorVisible(true)}
+        >
+          <Text style={styles.walletSelectorLabel}>{activeLabel}</Text>
+          <Ionicons name="chevron-down" size={16} color="rgba(255,255,255,0.8)" />
+        </TouchableOpacity>
         <Text style={styles.balanceLabel}>Total Balance</Text>
         <Text style={styles.balanceAmount}>${totalUsdValue.toFixed(2)}</Text>
         <Text style={styles.addressText} numberOfLines={1} ellipsizeMode="middle">
@@ -300,6 +341,45 @@ const WalletHome = () => {
       </View>
 
       <View style={{ height: 40 }} />
+
+      {/* Wallet selector modal */}
+      <Modal visible={selectorVisible} transparent animationType="slide">
+        <TouchableOpacity
+          style={styles.selectorOverlay}
+          activeOpacity={1}
+          onPress={() => setSelectorVisible(false)}
+        >
+          <View style={styles.selectorSheet}>
+            <Text style={styles.selectorTitle}>Select Wallet</Text>
+            {walletList.map((w) => (
+              <TouchableOpacity
+                key={w.address}
+                style={styles.selectorItem}
+                onPress={() => handleSwitchWallet(w.address)}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.selectorItemLabel}>{w.label}</Text>
+                  <Text style={styles.selectorItemAddress} numberOfLines={1} ellipsizeMode="middle">
+                    {w.address}
+                  </Text>
+                </View>
+                {w.address === walletAddress && (
+                  <Ionicons name="checkmark-circle" size={22} color={COLORS.primary} />
+                )}
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              style={styles.selectorManageLink}
+              onPress={() => {
+                setSelectorVisible(false);
+                router.push('/wallet/manage');
+              }}
+            >
+              <Text style={styles.selectorManageLinkText}>Manage Wallets</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </ScrollView>
   );
 };
@@ -601,5 +681,60 @@ const styles = StyleSheet.create({
   noWalletFeatureText: {
     fontSize: 13,
     color: '#666',
+  },
+  walletSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 8,
+  },
+  walletSelectorLabel: {
+    ...FONTS.body4,
+    color: 'rgba(255,255,255,0.9)',
+    fontWeight: '600',
+  },
+  selectorOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  selectorSheet: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    maxHeight: '60%',
+  },
+  selectorTitle: {
+    ...FONTS.h4,
+    fontWeight: '600',
+    color: COLORS.dark,
+    marginBottom: 16,
+  },
+  selectorItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  selectorItemLabel: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: COLORS.dark,
+  },
+  selectorItemAddress: {
+    ...FONTS.body5,
+    color: COLORS.gray,
+    marginTop: 2,
+  },
+  selectorManageLink: {
+    alignItems: 'center',
+    paddingVertical: 16,
+  },
+  selectorManageLinkText: {
+    ...FONTS.body3,
+    color: COLORS.primary,
+    fontWeight: '600',
   },
 });
