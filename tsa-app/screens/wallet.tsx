@@ -12,7 +12,14 @@ import {
   Image,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { getWalletBalances } from '../services/walletApi';
+import { getWalletBalances, registerWalletAddress } from '../services/walletApi';
+import {
+  getWalletList,
+  getActiveWallet,
+  setActiveWallet,
+  migrateFromSingleWallet,
+  WalletMeta,
+} from '../services/wallet';
 import { useTokens } from '../hooks/useTokens';
 import { CHAINS, type ChainKey } from '../constants/chains';
 
@@ -23,6 +30,7 @@ interface WalletAsset {
   name: string;
   balance: number;
   usdValue: number;
+  usdPrice: number;
   iconColor: string;
   iconUrl?: string;
   details?: {
@@ -44,10 +52,16 @@ const QUICK_ACTIONS = [
 const WalletBalanceCard: React.FC<{
   totalUsdValue: number;
   isValuesHidden: boolean;
+  activeLabel: string;
   onToggleVisibility: () => void;
   onQuickAction: (action: string) => void;
-}> = ({ totalUsdValue, isValuesHidden, onToggleVisibility, onQuickAction }) => (
+  onWalletPress: () => void;
+}> = ({ totalUsdValue, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => (
   <View style={styles.balanceCard}>
+    <Pressable style={styles.walletSelector} onPress={onWalletPress}>
+      <Text style={styles.walletSelectorLabel}>{activeLabel}</Text>
+      <Icon name="keyboard-arrow-down" size={18} color="rgba(255,255,255,0.8)" />
+    </Pressable>
     <View style={styles.balanceHeader}>
       <Text style={styles.balanceLabel}>Wallet Balance</Text>
       <Pressable onPress={onToggleVisibility} hitSlop={8}>
@@ -84,10 +98,11 @@ const WalletBalanceCard: React.FC<{
 const AssetRow: React.FC<{
   asset: WalletAsset;
   isValuesHidden: boolean;
-}> = ({ asset, isValuesHidden }) => {
+  onPress?: () => void;
+}> = ({ asset, isValuesHidden, onPress }) => {
   const isNative = asset.details?.type === 'Native Token';
   return (
-    <View style={styles.assetRow}>
+    <Pressable style={({ pressed }) => [styles.assetRow, pressed && { opacity: 0.7 }]} onPress={onPress}>
       <View style={[styles.assetAvatar, { backgroundColor: asset.iconColor + '20' }]}>
         {asset.iconUrl ? (
           <Image source={{ uri: asset.iconUrl }} style={styles.assetAvatarImage} />
@@ -117,7 +132,7 @@ const AssetRow: React.FC<{
           {isValuesHidden ? '••••' : `$${asset.usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
         </Text>
       </View>
-    </View>
+    </Pressable>
   );
 };
 
@@ -216,6 +231,10 @@ const WalletScreen: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showFundModal, setShowFundModal] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
+  const [walletList, setWalletList] = useState<WalletMeta[]>([]);
+  const [activeLabel, setActiveLabel] = useState('Wallet');
+  const [activeAddress, setActiveAddress] = useState('');
+  const [showWalletSelector, setShowWalletSelector] = useState(false);
 
   const buildAssetList = useCallback((): WalletAsset[] => {
     const list: WalletAsset[] = [];
@@ -229,6 +248,7 @@ const WalletScreen: React.FC = () => {
         name: `${chain.name} Native`,
         balance: 0,
         usdValue: 0,
+        usdPrice: 0,
         iconColor: chain.iconColor,
         iconUrl: chain.iconUrl,
         details: { type: 'Native Token', chain: chain.name, chainKey: chainKey as ChainKey },
@@ -245,6 +265,7 @@ const WalletScreen: React.FC = () => {
           name: token.name,
           balance: 0,
           usdValue: 0,
+          usdPrice: 0,
           iconColor: token.iconColor,
           iconUrl: token.iconUrl,
           details: {
@@ -260,6 +281,18 @@ const WalletScreen: React.FC = () => {
 
   const fetchBalances = useCallback(async (refreshing = false) => {
     if (refreshing) setIsRefreshing(true); else setIsLoading(true);
+
+    // Load wallet list for switcher
+    await migrateFromSingleWallet();
+    const list = await getWalletList();
+    setWalletList(list);
+    const addr = await getActiveWallet();
+    if (addr) {
+      setActiveAddress(addr);
+      const meta = list.find(w => w.address === addr);
+      setActiveLabel(meta?.label || 'Wallet');
+    }
+
     const assetList = buildAssetList();
     try {
       const result = await getWalletBalances();
@@ -273,16 +306,21 @@ const WalletScreen: React.FC = () => {
           if (!chainKey) return asset;
 
           let balance = 0;
+          let usdValue = 0;
+          let usdPrice = 0;
           if (nestedBalances && nestedBalances[chainKey]) {
-            // Nested format: { sonic: { S: "0", MCGP: "0" }, bsc: { tBNB: "0.0001" } }
-            const raw = nestedBalances[chainKey][asset.symbol];
-            balance = raw ? parseFloat(raw) : 0;
-          } else if (Array.isArray(data)) {
-            // Flat format: WalletBalance[]
-            const entry = data.find((b: any) => b.symbol === asset.symbol);
-            balance = entry ? parseFloat(entry.balance || '0') : 0;
+            const entry = nestedBalances[chainKey][asset.symbol];
+            if (entry && typeof entry === 'object') {
+              // New format: { balance: "30", usdPrice: 0.52, usdValue: 15.6 }
+              balance = parseFloat(entry.balance || '0');
+              usdValue = entry.usdValue || 0;
+              usdPrice = entry.usdPrice || 0;
+            } else if (entry) {
+              // Legacy format: plain string "30"
+              balance = parseFloat(entry);
+            }
           }
-          return { ...asset, balance, usdValue: balance * 1.0 };
+          return { ...asset, balance, usdValue, usdPrice };
         });
         setAssets(updated);
       } else {
@@ -301,12 +339,39 @@ const WalletScreen: React.FC = () => {
 
   const onRefresh = useCallback(() => fetchBalances(true), [fetchBalances]);
 
+  const handleSwitchWallet = useCallback(async (address: string) => {
+    setShowWalletSelector(false);
+    if (address === activeAddress) return;
+    setIsLoading(true);
+    try {
+      await setActiveWallet(address);
+      await registerWalletAddress(address);
+      await fetchBalances();
+    } catch (err) {
+      console.error('Switch wallet error:', err);
+    }
+  }, [activeAddress, fetchBalances]);
+
   const totalUsdValue = assets.reduce((s, a) => s + a.usdValue, 0);
 
   const handleQuickAction = (action: string) => {
     if (action === 'fund') setShowFundModal(true);
     else if (action === 'send') setShowSendModal(true);
     else router.push(`/${action}` as any);
+  };
+
+  const handleAssetPress = (asset: WalletAsset) => {
+    router.push({
+      pathname: '/wallet/token',
+      params: {
+        symbol: asset.symbol,
+        chainKey: asset.details?.chainKey || '',
+        name: asset.name,
+        iconColor: asset.iconColor,
+        iconUrl: asset.iconUrl || '',
+        type: asset.details?.type || '',
+      },
+    } as any);
   };
 
   // Group assets: those with balance first, then zero-balance
@@ -335,8 +400,10 @@ const WalletScreen: React.FC = () => {
       <WalletBalanceCard
         totalUsdValue={totalUsdValue}
         isValuesHidden={isValuesHidden}
+        activeLabel={activeLabel}
         onToggleVisibility={() => setIsValuesHidden(v => !v)}
         onQuickAction={handleQuickAction}
+        onWalletPress={() => setShowWalletSelector(true)}
       />
 
       {/* Assets */}
@@ -349,7 +416,7 @@ const WalletScreen: React.FC = () => {
         {assetsWithBalance.length > 0 && (
           <>
             {assetsWithBalance.map(asset => (
-              <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} />
+              <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
             ))}
             {assetsWithoutBalance.length > 0 && (
               <View style={styles.divider} />
@@ -366,6 +433,42 @@ const WalletScreen: React.FC = () => {
 
       <FundModal visible={showFundModal} onClose={() => setShowFundModal(false)} />
       <SendModal visible={showSendModal} onClose={() => setShowSendModal(false)} />
+
+      {/* Wallet Selector */}
+      <Modal visible={showWalletSelector} transparent animationType="slide" onRequestClose={() => setShowWalletSelector(false)}>
+        <Pressable style={styles.modalOverlay} onPress={() => setShowWalletSelector(false)}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Wallet</Text>
+              <Pressable onPress={() => setShowWalletSelector(false)}><Icon name="close" size={24} color="#888" /></Pressable>
+            </View>
+            {walletList.map((w) => (
+              <Pressable
+                key={w.address}
+                style={styles.modalOption}
+                onPress={() => handleSwitchWallet(w.address)}
+              >
+                <View style={[styles.modalOptionIcon, { backgroundColor: w.address === activeAddress ? '#D4AF3720' : '#F5F5F5' }]}>
+                  <Icon name="account-balance-wallet" size={24} color={w.address === activeAddress ? '#D4AF37' : '#888'} />
+                </View>
+                <View style={styles.modalOptionInfo}>
+                  <Text style={styles.modalOptionTitle}>{w.label}</Text>
+                  <Text style={styles.modalOptionDesc} numberOfLines={1}>{w.address.slice(0, 8)}...{w.address.slice(-6)}</Text>
+                </View>
+                {w.address === activeAddress && (
+                  <Icon name="check-circle" size={22} color="#D4AF37" />
+                )}
+              </Pressable>
+            ))}
+            <Pressable
+              style={styles.modalCancel}
+              onPress={() => { setShowWalletSelector(false); router.push('/wallet/manage'); }}
+            >
+              <Text style={[styles.modalCancelText, { color: '#D4AF37', fontWeight: '600' }]}>Manage Wallets</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 };
@@ -479,6 +582,19 @@ const styles = StyleSheet.create({
   modalOptionDesc: { fontSize: 12, color: '#888', marginTop: 2 },
   modalCancel: { alignItems: 'center', paddingVertical: 14, marginTop: 4 },
   modalCancelText: { fontSize: 15, color: '#888', fontWeight: '500' },
+
+  // Wallet Selector
+  walletSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 8,
+  },
+  walletSelectorLabel: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.9)',
+    fontWeight: '600',
+  },
 });
 
 export default WalletScreen;

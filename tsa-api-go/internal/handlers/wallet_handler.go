@@ -211,15 +211,50 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	var supportedTokens []models.SupportedToken
 	config.DB.Where("is_active = ?", true).Find(&supportedTokens)
 
-	result := make(map[string]map[string]string)
+	type tokenBalance struct {
+		Balance  string  `json:"balance"`
+		UsdPrice float64 `json:"usdPrice"`
+		UsdValue float64 `json:"usdValue"`
+	}
+	result := make(map[string]map[string]tokenBalance)
+
+	// Collect all token symbols to fetch prices
+	symbolSet := make(map[string]bool)
+	for _, cq := range chains {
+		symbolSet[cq.cfg.NativeCurrency] = true
+	}
+	for _, tok := range supportedTokens {
+		symbolSet[tok.Symbol] = true
+	}
+	var priceSymbols []string
+	for s := range symbolSet {
+		priceSymbols = append(priceSymbols, s)
+	}
+
+	// Fetch USD prices from CoinGecko
+	prices := make(map[string]float64)
+	if h.PriceService != nil && len(priceSymbols) > 0 {
+		if priceData, err := h.PriceService.GetPrices(priceSymbols); err == nil {
+			for sym, pd := range priceData {
+				prices[sym] = pd.USD
+			}
+		}
+	}
 
 	for _, cq := range chains {
 		client := h.BlockchainService.ClientForChain(cq.name)
-		chainBalances := make(map[string]string)
+		chainBalances := make(map[string]tokenBalance)
 
 		if client != nil {
 			if nativeBal, err := client.GetBalance(user.WalletAddress); err == nil {
-				chainBalances[cq.cfg.NativeCurrency] = formatTokenBalance(nativeBal, 18)
+				balStr := formatTokenBalance(nativeBal, 18)
+				balFloat, _ := strconv.ParseFloat(balStr, 64)
+				price := prices[cq.cfg.NativeCurrency]
+				chainBalances[cq.cfg.NativeCurrency] = tokenBalance{
+					Balance:  balStr,
+					UsdPrice: price,
+					UsdValue: balFloat * price,
+				}
 			}
 		}
 
@@ -231,12 +266,19 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 					tokenAddr := h.BlockchainService.TokenAddress(cq.name, tok.Symbol)
 					if tokenAddr != "" && client != nil {
 						if bal, err := client.GetTokenBalance(tokenAddr, user.WalletAddress); err == nil {
-							chainBalances[tok.Symbol] = formatTokenBalance(bal, tok.Decimals)
+							balStr := formatTokenBalance(bal, tok.Decimals)
+							balFloat, _ := strconv.ParseFloat(balStr, 64)
+							price := prices[tok.Symbol]
+							chainBalances[tok.Symbol] = tokenBalance{
+								Balance:  balStr,
+								UsdPrice: price,
+								UsdValue: balFloat * price,
+							}
 						} else {
-							chainBalances[tok.Symbol] = "0"
+							chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 						}
 					} else {
-						chainBalances[tok.Symbol] = "0"
+						chainBalances[tok.Symbol] = tokenBalance{Balance: "0"}
 					}
 				}
 			}
