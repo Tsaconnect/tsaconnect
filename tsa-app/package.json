@@ -9,7 +9,10 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "test": "jest --watchAll",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "build:android": "EXPO_TOKEN=4frfAtt1qmlHLYB2LcIACmmXsSSO0VYHFnllVbcr eas build --platform android --profile preview",
+    "build:ios": "EXPO_TOKEN=4frfAtt1qmlHLYB2LcIACmmXsSSO0VYHFnllVbcr eas build --platform ios --profile preview",
+    "update": "EXPO_TOKEN=4frfAtt1qmlHLYB2LcIACmmXsSSO0VYHFnllVbcr eas update"
   },
   "jest": {
     "preset": "jest-expo"
