@@ -1,6 +1,6 @@
 // app/screens/TradeAndEarnScreen.tsx
 import { router } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -10,10 +10,12 @@ import {
   Platform,
   Share,
   Alert,
-  Clipboard,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from "react-native-safe-area-context";
+import * as Clipboard from 'expo-clipboard';
+import api from '../components/services/api';
+
 // Gold color palette
 const GOLD_COLORS = {
   primary: '#FFD700',
@@ -26,23 +28,53 @@ const GOLD_COLORS = {
 };
 
 const TradeAndEarnScreen: React.FC = () => {
-  const [referralLink, setReferralLink] = useState('https://tsaconnect.com/ref/abc123xyz');
-  const [tpBalance, setTpBalance] = useState(100);
-  const [showReferralModal, setShowReferralModal] = useState(false);
+  const [referralCode, setReferralCode] = useState('');
+  const [tpBalance, setTpBalance] = useState(0);
+  const [totalReferrals, setTotalReferrals] = useState(0);
 
-  const copyReferralLink = () => {
-    Clipboard.setString(referralLink);
-    Alert.alert('Copied!', 'Referral link copied to clipboard');
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [profileRes, tpRes, referralsRes] = await Promise.all([
+          api.getProfile(),
+          api.getTPBalance(),
+          api.getReferrals(),
+        ]);
+
+        if (profileRes.success && profileRes.data) {
+          setReferralCode(profileRes.data.referralCode || profileRes.data.username || '');
+        }
+        if (tpRes.success && tpRes.data) {
+          setTpBalance(tpRes.data.tpBalance || 0);
+        }
+        if (referralsRes.success && referralsRes.data) {
+          setTotalReferrals(referralsRes.data.totalReferrals || 0);
+        }
+      } catch (error) {
+        console.error('Error fetching trade & earn data:', error);
+      }
+    };
+    fetchData();
+  }, []);
+
+  const copyReferralCode = () => {
+    if (!referralCode) {
+      Alert.alert('Error', 'No referral code available');
+      return;
+    }
+    Clipboard.setStringAsync(referralCode);
+    Alert.alert('Copied!', 'Referral code copied to clipboard');
   };
 
-  const shareReferralLink = async () => {
+  const shareReferralCode = async () => {
+    if (!referralCode) return;
     try {
       await Share.share({
-        message: `Join TSA Connect and earn with me! Use my referral link: ${referralLink}`,
+        message: `Join TSA Connect using my referral code: ${referralCode}`,
         title: 'TSA Connect Referral',
       });
     } catch (error) {
-      Alert.alert('Error', 'Failed to share referral link');
+      Alert.alert('Error', 'Failed to share referral code');
     }
   };
 
@@ -151,26 +183,26 @@ const TradeAndEarnScreen: React.FC = () => {
 
               {/* Referral Link Section */}
               <View style={styles.referralSection}>
-                <Text style={styles.referralLabel}>Referral Link:</Text>
+                <Text style={styles.referralLabel}>Your Referral Code:</Text>
                 <View style={styles.referralLinkContainer}>
                   <Text style={styles.referralLink} numberOfLines={1}>
-                    {referralLink}
+                    {referralCode || 'N/A'}
                   </Text>
                   <TouchableOpacity
                     style={styles.copyButton}
-                    onPress={copyReferralLink}
+                    onPress={copyReferralCode}
                   >
                     <Icon name="content-copy" size={20} color={GOLD_COLORS.dark} />
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.shareButton}
-                    onPress={shareReferralLink}
+                    onPress={shareReferralCode}
                   >
                     <Icon name="share" size={20} color={GOLD_COLORS.dark} />
                   </TouchableOpacity>
                 </View>
                 <Text style={styles.referralNote}>
-                  Copy referral link and onboard others to earn too
+                  Share your referral code to earn TP when they trade
                 </Text>
               </View>
             </View>
@@ -275,13 +307,13 @@ const TradeAndEarnScreen: React.FC = () => {
                 </View>
               </View>
 
-              <View style={styles.statCard}>
-                <Text style={styles.statValue}>0</Text>
+              <TouchableOpacity style={styles.statCard} onPress={() => router.push('/referrals')}>
+                <Text style={styles.statValue}>{totalReferrals}</Text>
                 <Text style={styles.statLabel}>Total Referrals</Text>
                 <View style={[styles.statIcon, { backgroundColor: '#E8F5E9' }]}>
                   <Icon name="people" size={20} color="#2E7D32" />
                 </View>
-              </View>
+              </TouchableOpacity>
 
               <View style={styles.statCard}>
                 <Text style={styles.statValue}>$0.00</Text>
