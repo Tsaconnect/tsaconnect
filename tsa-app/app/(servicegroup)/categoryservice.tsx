@@ -22,7 +22,7 @@ const Services = () => {
   useEffect(() => {
     const fetchedServices = async () => {
       try {
-        const response = await axios.get(`${baseUrl}/adverts?type=Service`, {
+        const response = await axios.get(`${baseUrl}/products?type=Service`, {
           headers: {
             Authorization: `${token}`,
           },

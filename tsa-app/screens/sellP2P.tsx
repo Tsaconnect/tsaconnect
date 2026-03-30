@@ -112,7 +112,7 @@ const P2PSellScreen: React.FC = () => {
       // For now, omitting images or we can add a default one if required.
       // Assuming backend handles no-image for P2P or we should upload one.
 
-      const response = await axios.post(`${baseUrl}/adverts`, formData, {
+      const response = await axios.post(`${baseUrl}/products`, formData, {
         headers: {
           Authorization: token,
           "Content-Type": "multipart/form-data",

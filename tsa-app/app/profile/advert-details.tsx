@@ -18,7 +18,7 @@ const AdvertDetailScreen = () => {
 
   const fetchAdvert = async () => {
     try {
-      const response = await axios.get(`${baseUrl}/adverts/${id}`, {
+      const response = await axios.get(`${baseUrl}/products/${id}`, {
         headers: {
           "Content-Type": "application/json",
           Authorization: `${token}`,

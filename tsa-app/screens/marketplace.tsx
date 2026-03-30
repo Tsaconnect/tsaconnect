@@ -150,7 +150,8 @@ const MarketplaceScreen: React.FC = () => {
   const handleCategoryPress = (cat: CategoryItem) => {
     // Always pass categoryId to use getProductsByCategoryTree which correctly filters
     // The getProductsByCategory endpoint ignores subcategoryId and returns all products
-    router.push(`/subcategory/${cat.id}?categoryId=${cat.id}&categoryTitle=${encodeURIComponent(cat.title)}&subcategoryName=${encodeURIComponent(cat.title)}`);
+    const type = selectedTab === 'services' ? 'Service' : 'Product';
+    router.push(`/subcategory/${cat.id}?categoryId=${cat.id}&categoryTitle=${encodeURIComponent(cat.title)}&subcategoryName=${encodeURIComponent(cat.title)}&categoryType=${type}&userRole=${userRole || ''}`);
   };
 
   const handleSearch = () => {

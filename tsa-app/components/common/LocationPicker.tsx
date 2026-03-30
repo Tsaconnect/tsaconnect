@@ -64,6 +64,16 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<TextInput>(null);
 
+  // Focus search input after modal animation completes to prevent Android crash
+  useEffect(() => {
+    if (modalVisible) {
+      const timer = setTimeout(() => {
+        searchInputRef.current?.focus();
+      }, 400);
+      return () => clearTimeout(timer);
+    }
+  }, [modalVisible]);
+
   const filteredData = data.filter((item) =>
     item.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -158,7 +168,6 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
                 placeholder="Search..."
                 value={searchQuery}
                 onChangeText={setSearchQuery}
-                autoFocus
               />
             </View>
 
