@@ -131,13 +131,16 @@ const TradeAndEarnScreen: React.FC = () => {
 
           {/* Stats Row */}
           <View style={styles.statsRow}>
-            <View style={styles.statItem}>
+            <TouchableOpacity
+              style={styles.statItem}
+              onPress={() => router.push('/marketplace')}
+            >
               <View style={[styles.statDot, { backgroundColor: '#FFF3E0' }]}>
                 <Icon name="payments" size={16} color="#F57C00" />
               </View>
               <Text style={styles.statValue}>$0.00</Text>
               <Text style={styles.statLabel}>Cashback</Text>
-            </View>
+            </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.statItem}
@@ -227,13 +230,101 @@ const TradeAndEarnScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          {/* TP Info Note */}
-          <View style={styles.tpNote}>
-            <Icon name="info-outline" size={16} color={COLORS.dark} />
-            <Text style={styles.tpNoteText}>
-              TPs are earned automatically from every transaction you and your
-              referral network make. Accumulate as much as possible!
-            </Text>
+          {/* Earning Details */}
+          <Text style={styles.sectionTitle}>Earning Details</Text>
+
+          <View style={styles.detailsCard}>
+            <View style={styles.detailSection}>
+              <View style={styles.detailHeader}>
+                <Icon name="payments" size={18} color="#F57C00" />
+                <Text style={styles.detailTitle}>Cashback</Text>
+              </View>
+              <Text style={styles.detailText}>
+                Earn 1% cashback on all product/service purchases. Payments must be in USDT or USDC.
+              </Text>
+            </View>
+
+            <View style={styles.detailDivider} />
+
+            <View style={styles.detailSection}>
+              <View style={styles.detailHeader}>
+                <Icon name="people" size={18} color="#2E7D32" />
+                <Text style={styles.detailTitle}>Referral Earnings</Text>
+              </View>
+              <Text style={styles.detailText}>
+                Earn TP from up to 10 generations of your referral network. Every time someone in your network trades, you earn automatically.
+              </Text>
+            </View>
+
+            <View style={styles.detailDivider} />
+
+            <View style={styles.detailSection}>
+              <View style={styles.detailHeader}>
+                <Icon name="swap-horiz" size={18} color="#1976D2" />
+                <Text style={styles.detailTitle}>P2P Commission</Text>
+              </View>
+              <Text style={styles.detailText}>
+                Earn 0.5% commission from P2P fiat deposit/withdrawal trades. Available for internal sellers and external buyers.
+              </Text>
+            </View>
+          </View>
+
+          {/* TP Conversion Rates */}
+          <Text style={styles.sectionTitle}>TP Conversion Rates</Text>
+
+          <View style={styles.conversionCard}>
+            <View style={styles.conversionRow}>
+              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>0.01 TP = $0.1 trades</Text>
+            </View>
+            <View style={styles.conversionRow}>
+              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>0.1 TP = $1 trades</Text>
+            </View>
+            <View style={styles.conversionRow}>
+              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>1 TP = $10 trades</Text>
+            </View>
+            <View style={styles.conversionNote}>
+              <Icon name="info-outline" size={14} color={COLORS.dark} />
+              <Text style={styles.conversionNoteText}>
+                Minimum purchase to gain TP is $0.1. TPs will be converted to cash in future.
+              </Text>
+            </View>
+          </View>
+
+          {/* How It Works */}
+          <Text style={styles.sectionTitle}>How It Works</Text>
+
+          <View style={styles.stepsCard}>
+            <View style={styles.stepRow}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepTitle}>Start Trading</Text>
+                <Text style={styles.stepDesc}>Buy or sell products/services in the marketplace</Text>
+              </View>
+            </View>
+            <View style={styles.stepRow}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>2</Text></View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepTitle}>Earn Rewards</Text>
+                <Text style={styles.stepDesc}>Automatically earn cashback, TPs, and commissions</Text>
+              </View>
+            </View>
+            <View style={styles.stepRow}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>3</Text></View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepTitle}>Invite & Earn More</Text>
+                <Text style={styles.stepDesc}>Share your referral code to earn from your network</Text>
+              </View>
+            </View>
+            <View style={styles.stepRow}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>4</Text></View>
+              <View style={styles.stepInfo}>
+                <Text style={styles.stepTitle}>Join P2P</Text>
+                <Text style={styles.stepDesc}>Become a merchant for additional commission</Text>
+              </View>
+            </View>
           </View>
 
           {/* CTA */}
@@ -432,21 +523,124 @@ const styles = StyleSheet.create({
     marginLeft: 74,
   },
 
-  // TP Note
-  tpNote: {
+  // Earning Details
+  detailsCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  detailSection: {
+    paddingVertical: 4,
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  detailTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  detailText: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+    lineHeight: 19,
+  },
+  detailDivider: {
+    height: 1,
+    backgroundColor: COLORS.border,
+    marginVertical: 14,
+  },
+
+  // Conversion Rates
+  conversionCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  conversionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  conversionText: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+  },
+  conversionNote: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     backgroundColor: COLORS.light,
-    padding: 14,
-    borderRadius: 12,
-    marginBottom: 24,
+    padding: 12,
+    borderRadius: 10,
+    marginTop: 6,
     gap: 8,
   },
-  tpNoteText: {
-    fontSize: 13,
+  conversionNoteText: {
+    fontSize: 12,
     color: COLORS.dark,
     flex: 1,
-    lineHeight: 18,
+    lineHeight: 17,
+  },
+
+  // How It Works
+  stepsCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  stepNum: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
+  },
+  stepNumText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  stepInfo: {
+    flex: 1,
+  },
+  stepTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  stepDesc: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
   },
 
   // CTAs
