@@ -60,6 +60,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		userGroup.GET("/profile", h.GetProfile)
 		userGroup.PUT("/profile", h.UpdateProfile)
+		userGroup.GET("/referral-stats", h.GetReferralStats)
+		userGroup.GET("/referrals", h.GetReferralsWithTP)
+		userGroup.GET("/tp-balance", h.GetTPBalance)
+		userGroup.GET("/tp-earnings", h.GetTPEarnings)
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)

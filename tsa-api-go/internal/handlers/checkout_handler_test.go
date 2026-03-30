@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
@@ -175,7 +176,7 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	// Create a blockchain service with no real clients (avoids RPC connections)
 	bs := services.NewBlockchainService(cfg)
 	es := services.NewEscrowService(nil, cfg)
-	return NewCheckoutHandler(cfg, bs, es)
+	return NewCheckoutHandler(cfg, bs, es, events.NewBus())
 }
 
 func createTestProduct(t *testing.T, db *gorm.DB, sellerID uuid.UUID, price float64) *models.Product {
