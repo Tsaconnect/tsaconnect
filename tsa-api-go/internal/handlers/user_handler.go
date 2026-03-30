@@ -417,7 +417,7 @@ func (h *Handlers) GetReferralStats(c *gin.Context) {
 	var referrals []referralUser
 	if err := config.DB.Model(&models.User{}).
 		Select("name, email, created_at, verification_status").
-		Where("referred_by = ?", user.ID).
+		Where("referred_by = ? AND deleted_at IS NULL", user.ID).
 		Order("created_at DESC").
 		Find(&referrals).Error; err != nil {
 		log.Printf("GetReferralStats error: %v", err)
