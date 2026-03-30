@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -578,6 +579,13 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 			"exchangeRate":  exchangeRate,
 		},
 	})
+
+	// Distribute TP earnings from swap fee
+	go func(userID, txID uuid.UUID, fee float64) {
+		if err := DistributeTPEarnings(config.DB, userID, "swap", txID, fee); err != nil {
+			log.Printf("TP distribution failed for swap %s: %v", txID, err)
+		}
+	}(user.ID, tx.ID, feeUSD)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,

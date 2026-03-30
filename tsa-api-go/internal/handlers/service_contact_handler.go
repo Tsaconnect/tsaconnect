@@ -315,6 +315,13 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		return
 	}
 
+	// Distribute TP earnings from service contact fee ($0.10)
+	go func(userID, paymentID uuid.UUID) {
+		if err := DistributeTPEarnings(config.DB, userID, "service_contact", paymentID, 0.10); err != nil {
+			log.Printf("TP distribution failed for service contact %s: %v", paymentID, err)
+		}
+	}(user.ID, payment.ID)
+
 	utils.SuccessResponse(c, http.StatusOK, "Contact fee paid successfully", gin.H{
 		"payment": payment,
 		"contact": gin.H{

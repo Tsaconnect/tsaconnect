@@ -112,6 +112,20 @@ func tokenDecimals(token string) int {
 	}
 }
 
+// weiToUSDFloat converts a wei string amount back to a USD float value.
+func weiToUSDFloat(weiStr string, token string) float64 {
+	wei, ok := new(big.Int).SetString(weiStr, 10)
+	if !ok || wei.Sign() == 0 {
+		return 0
+	}
+	decimals := tokenDecimals(token)
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	fWei := new(big.Float).SetInt(wei)
+	fDiv := new(big.Float).SetInt(divisor)
+	result, _ := new(big.Float).Quo(fWei, fDiv).Float64()
+	return result
+}
+
 // toWei converts a decimal string amount (e.g. "10.5") to a big.Int in the smallest unit.
 // Uses string-based parsing to avoid float64 precision loss.
 func toWei(amountStr string, decimals int) (*big.Int, error) {
@@ -368,6 +382,17 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	if err := tx.Commit().Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
 		return
+	}
+
+	// Distribute TP earnings for each order
+	for _, order := range orders {
+		platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
+		systemFeeUSD := platformFeeFloat + models.GasFeeUSD
+		go func(buyerID, orderID uuid.UUID, fee float64) {
+			if err := DistributeTPEarnings(config.DB, buyerID, "checkout", orderID, fee); err != nil {
+				log.Printf("TP distribution failed for checkout order %s: %v", orderID, err)
+			}
+		}(order.BuyerID, order.ID, systemFeeUSD)
 	}
 
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
