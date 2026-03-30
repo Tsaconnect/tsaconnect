@@ -7,55 +7,66 @@ import {
   TouchableOpacity,
   ScrollView,
   StyleSheet,
-  Platform,
   Share,
   Alert,
+  RefreshControl,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import api from '../components/services/api';
 
-// Gold color palette
-const GOLD_COLORS = {
+const COLORS = {
   primary: '#FFD700',
   dark: '#B8860B',
   light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
+  background: '#F5F5F5',
+  white: '#FFFFFF',
+  text: '#1A1A1A',
+  textSecondary: '#666666',
+  textMuted: '#999999',
   success: '#28A745',
+  border: '#F0F0F0',
 };
 
 const TradeAndEarnScreen: React.FC = () => {
   const [referralCode, setReferralCode] = useState('');
   const [tpBalance, setTpBalance] = useState(0);
   const [totalReferrals, setTotalReferrals] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const fetchData = async () => {
+    try {
+      const [profileRes, tpRes, referralsRes] = await Promise.all([
+        api.getProfile(),
+        api.getTPBalance(),
+        api.getReferrals(),
+      ]);
+
+      if (profileRes.success && profileRes.data) {
+        setReferralCode(profileRes.data.referralCode || profileRes.data.username || '');
+      }
+      if (tpRes.success && tpRes.data) {
+        setTpBalance(tpRes.data.tpBalance || 0);
+      }
+      if (referralsRes.success && referralsRes.data) {
+        setTotalReferrals(referralsRes.data.totalReferrals || 0);
+      }
+    } catch (error) {
+      console.error('Error fetching trade & earn data:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [profileRes, tpRes, referralsRes] = await Promise.all([
-          api.getProfile(),
-          api.getTPBalance(),
-          api.getReferrals(),
-        ]);
-
-        if (profileRes.success && profileRes.data) {
-          setReferralCode(profileRes.data.referralCode || profileRes.data.username || '');
-        }
-        if (tpRes.success && tpRes.data) {
-          setTpBalance(tpRes.data.tpBalance || 0);
-        }
-        if (referralsRes.success && referralsRes.data) {
-          setTotalReferrals(referralsRes.data.totalReferrals || 0);
-        }
-      } catch (error) {
-        console.error('Error fetching trade & earn data:', error);
-      }
-    };
     fetchData();
   }, []);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchData();
+  };
 
   const copyReferralCode = () => {
     if (!referralCode) {
@@ -78,348 +89,171 @@ const TradeAndEarnScreen: React.FC = () => {
     }
   };
 
-  const handleStartTrading = () => {
-    //@ts-expect-error
-    router.push('/marketplace');
-  };
-
-  const handleJoinP2P = () => {
-    //@ts-expect-error
-    router.push('/services');
-  };
-
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView style={styles.scrollContainer}>
-        {/* Main Content */}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
         <View style={styles.content}>
-          {/* Hero Banner */}
-          <View style={styles.heroBanner}>
-            <Text style={styles.heroTitle}>Earn While You Trade!</Text>
-            <Text style={styles.heroSubtitle}>
-              Multiple ways to earn rewards from every transaction
-            </Text>
+          {/* Hero Card — TP Balance + Referral Code */}
+          <View style={styles.heroCard}>
+            <View style={styles.heroTop}>
+              <View>
+                <Text style={styles.heroLabel}>Trade Points</Text>
+                <Text style={styles.heroBalance}>{tpBalance.toFixed(2)}</Text>
+                <Text style={styles.heroUnit}>TP</Text>
+              </View>
+              <View style={styles.heroIconWrap}>
+                <Icon name="stars" size={36} color={COLORS.dark} />
+              </View>
+            </View>
+
+            <View style={styles.heroDivider} />
+
+            <View style={styles.referralRow}>
+              <View style={styles.referralInfo}>
+                <Text style={styles.referralLabel}>Your Referral Code</Text>
+                <Text style={styles.referralCode}>{referralCode || 'N/A'}</Text>
+              </View>
+              <View style={styles.referralActions}>
+                <TouchableOpacity style={styles.referralBtn} onPress={copyReferralCode}>
+                  <Icon name="content-copy" size={18} color={COLORS.dark} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.referralBtn} onPress={shareReferralCode}>
+                  <Icon name="share" size={18} color={COLORS.dark} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          {/* Stats Row */}
+          <View style={styles.statsRow}>
+            <View style={styles.statItem}>
+              <View style={[styles.statDot, { backgroundColor: '#FFF3E0' }]}>
+                <Icon name="payments" size={16} color="#F57C00" />
+              </View>
+              <Text style={styles.statValue}>$0.00</Text>
+              <Text style={styles.statLabel}>Cashback</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.statItem}
+              onPress={() => router.push('/referrals')}
+            >
+              <View style={[styles.statDot, { backgroundColor: '#E8F5E9' }]}>
+                <Icon name="people" size={16} color="#2E7D32" />
+              </View>
+              <Text style={styles.statValue}>{totalReferrals}</Text>
+              <Text style={styles.statLabel}>Referrals</Text>
+            </TouchableOpacity>
+
+            <View style={styles.statItem}>
+              <View style={[styles.statDot, { backgroundColor: '#E3F2FD' }]}>
+                <Icon name="swap-horiz" size={16} color="#1976D2" />
+              </View>
+              <Text style={styles.statValue}>$0.00</Text>
+              <Text style={styles.statLabel}>P2P</Text>
+            </View>
+
+            <View style={styles.statItem}>
+              <View style={[styles.statDot, { backgroundColor: '#F3E5F5' }]}>
+                <Icon name="stars" size={16} color="#7B1FA2" />
+              </View>
+              <Text style={styles.statValue}>{tpBalance.toFixed(2)}</Text>
+              <Text style={styles.statLabel}>TP</Text>
+            </View>
           </View>
 
           {/* Earning Methods */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Earning Methods</Text>
+          <Text style={styles.sectionTitle}>Ways to Earn</Text>
 
-            {/* Method 1: Cashback */}
-            <View style={styles.methodCard}>
-              <View style={styles.methodHeader}>
-                <View style={[styles.methodIcon, { backgroundColor: '#FFF3E0' }]}>
-                  <Icon name="payments" size={32} color="#F57C00" />
-                </View>
-                <View style={styles.methodInfo}>
-                  <Text style={styles.methodTitle}>1% Cashback</Text>
-                  <Text style={styles.methodRate}>Instant Cashback</Text>
-                </View>
-              </View>
-
-              <View style={styles.methodDetails}>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Earn 1% cashback on all product/service purchases
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Earn 1% OTF when you or downlines swap to MCGP
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Payments must be in USDT or USDC
-                  </Text>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={styles.actionButton}
-                onPress={handleStartTrading}
-                activeOpacity={0.8}
-              >
-                <Icon name="shopping-cart" size={20} color="#000000" />
-                <Text style={styles.actionButtonText}>Start Trading to Earn Now!</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Method 2: Referral Program */}
-            <View style={styles.methodCard}>
-              <View style={styles.methodHeader}>
-                <View style={[styles.methodIcon, { backgroundColor: '#E8F5E9' }]}>
-                  <Icon name="people" size={32} color="#2E7D32" />
-                </View>
-                <View style={styles.methodInfo}>
-                  <Text style={styles.methodTitle}>Referral Program</Text>
-                  <Text style={styles.methodRate}>Earn from referrals</Text>
-                </View>
-              </View>
-
-              <View style={styles.methodDetails}>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Earn from direct referral purchases
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Copy and share your referral link
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Multiple levels of earning potential
-                  </Text>
-                </View>
-              </View>
-
-              {/* Referral Link Section */}
-              <View style={styles.referralSection}>
-                <Text style={styles.referralLabel}>Your Referral Code:</Text>
-                <View style={styles.referralLinkContainer}>
-                  <Text style={styles.referralLink} numberOfLines={1}>
-                    {referralCode || 'N/A'}
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.copyButton}
-                    onPress={copyReferralCode}
-                  >
-                    <Icon name="content-copy" size={20} color={GOLD_COLORS.dark} />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.shareButton}
-                    onPress={shareReferralCode}
-                  >
-                    <Icon name="share" size={20} color={GOLD_COLORS.dark} />
-                  </TouchableOpacity>
-                </View>
-                <Text style={styles.referralNote}>
-                  Share your referral code to earn TP when they trade
-                </Text>
-              </View>
-            </View>
-
-            {/* Method 3: P2P Trading Commission */}
-            <View style={styles.methodCard}>
-              <View style={styles.methodHeader}>
-                <View style={[styles.methodIcon, { backgroundColor: '#E3F2FD' }]}>
-                  <Icon name="swap-horiz" size={32} color="#1976D2" />
-                </View>
-                <View style={styles.methodInfo}>
-                  <Text style={styles.methodTitle}>P2P Commission</Text>
-                  <Text style={styles.methodRate}>0.5% Commission</Text>
-                </View>
-              </View>
-
-              <View style={styles.methodDetails}>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Earn 0.5% from P2P fiat deposit/withdrawal trades
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Available for internal sellers & external buyers
-                  </Text>
-                </View>
-                <View style={styles.detailItem}>
-                  <Icon name="check-circle" size={16} color={GOLD_COLORS.success} />
-                  <Text style={styles.detailText}>
-                    Commission from every successful USDT trade
-                  </Text>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={styles.actionButton}
-                onPress={handleJoinP2P}
-                activeOpacity={0.8}
-              >
-                <Icon name="store" size={20} color="#000000" />
-                <Text style={styles.actionButtonText}>
-                  Join TSA Connect P2P Trading Merchant Service
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {/* Trade Points Section */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Trade Points (TP)</Text>
-
-            <View style={styles.tpCard}>
-              <View style={styles.tpHeader}>
-                <View style={styles.tpIconContainer}>
-                  <Icon name="stars" size={32} color={GOLD_COLORS.primary} />
-                </View>
-                <View style={styles.tpBalanceContainer}>
-                  <Text style={styles.tpBalanceLabel}>TP Balance</Text>
-                  <Text style={styles.tpBalanceValue}>{tpBalance} TPs</Text>
-                </View>
-              </View>
-
-              <View style={styles.tpConversion}>
-                <Text style={styles.tpConversionTitle}>TP Conversion Rates:</Text>
-                <View style={styles.conversionRow}>
-                  <Icon name="currency-exchange" size={16} color={GOLD_COLORS.dark} />
-                  <Text style={styles.conversionText}>0.01 TP = $0.1 trades</Text>
-                </View>
-                <View style={styles.conversionRow}>
-                  <Icon name="currency-exchange" size={16} color={GOLD_COLORS.dark} />
-                  <Text style={styles.conversionText}>0.1 TP = $1 trades</Text>
-                </View>
-                <View style={styles.conversionRow}>
-                  <Icon name="currency-exchange" size={16} color={GOLD_COLORS.dark} />
-                  <Text style={styles.conversionText}>1 TP = $10 trades</Text>
-                </View>
-              </View>
-
-              <View style={styles.tpNote}>
-                <Icon name="info" size={16} color={GOLD_COLORS.dark} />
-                <Text style={styles.tpNoteText}>
-                  Minimum purchase to gain TP is $0.1 buy/sell activities.
-                  TPs will be converted to cash in future. Accumulate as much as possible through active trading.
-                </Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Statistics Dashboard */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Your Earnings Dashboard</Text>
-
-            <View style={styles.statsGrid}>
-              <View style={styles.statCard}>
-                <Text style={styles.statValue}>$0.00</Text>
-                <Text style={styles.statLabel}>Total Cashback</Text>
-                <View style={[styles.statIcon, { backgroundColor: '#FFF3E0' }]}>
-                  <Icon name="payments" size={20} color="#F57C00" />
-                </View>
-              </View>
-
-              <TouchableOpacity style={styles.statCard} onPress={() => router.push('/referrals')}>
-                <Text style={styles.statValue}>{totalReferrals}</Text>
-                <Text style={styles.statLabel}>Total Referrals</Text>
-                <View style={[styles.statIcon, { backgroundColor: '#E8F5E9' }]}>
-                  <Icon name="people" size={20} color="#2E7D32" />
-                </View>
-              </TouchableOpacity>
-
-              <View style={styles.statCard}>
-                <Text style={styles.statValue}>$0.00</Text>
-                <Text style={styles.statLabel}>P2P Commission</Text>
-                <View style={[styles.statIcon, { backgroundColor: '#E3F2FD' }]}>
-                  <Icon name="swap-horiz" size={20} color="#1976D2" />
-                </View>
-              </View>
-
-              <View style={styles.statCard}>
-                <Text style={styles.statValue}>{tpBalance}</Text>
-                <Text style={styles.statLabel}>Trade Points</Text>
-                <View style={[styles.statIcon, { backgroundColor: '#F3E5F5' }]}>
-                  <Icon name="stars" size={20} color="#7B1FA2" />
-                </View>
-              </View>
-            </View>
-          </View>
-
-          {/* How It Works */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>How It Works</Text>
-
-            <View style={styles.stepsContainer}>
-              <View style={styles.step}>
-                <View style={styles.stepNumber}>
-                  <Text style={styles.stepNumberText}>1</Text>
-                </View>
-                <View style={styles.stepContent}>
-                  <Text style={styles.stepTitle}>Start Trading</Text>
-                  <Text style={styles.stepDescription}>
-                    Buy or sell products/services in the marketplace
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.stepDivider}>
-                <Icon name="arrow-downward" size={20} color={GOLD_COLORS.dark} />
-              </View>
-
-              <View style={styles.step}>
-                <View style={styles.stepNumber}>
-                  <Text style={styles.stepNumberText}>2</Text>
-                </View>
-                <View style={styles.stepContent}>
-                  <Text style={styles.stepTitle}>Earn Rewards</Text>
-                  <Text style={styles.stepDescription}>
-                    Automatically earn cashback, TPs, and commissions
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.stepDivider}>
-                <Icon name="arrow-downward" size={20} color={GOLD_COLORS.dark} />
-              </View>
-
-              <View style={styles.step}>
-                <View style={styles.stepNumber}>
-                  <Text style={styles.stepNumberText}>3</Text>
-                </View>
-                <View style={styles.stepContent}>
-                  <Text style={styles.stepTitle}>Invite & Earn More</Text>
-                  <Text style={styles.stepDescription}>
-                    Share referral link to earn from your network
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.stepDivider}>
-                <Icon name="arrow-downward" size={20} color={GOLD_COLORS.dark} />
-              </View>
-
-              <View style={styles.step}>
-                <View style={styles.stepNumber}>
-                  <Text style={styles.stepNumberText}>4</Text>
-                </View>
-                <View style={styles.stepContent}>
-                  <Text style={styles.stepTitle}>Join P2P</Text>
-                  <Text style={styles.stepDescription}>
-                    Become a merchant for additional commission
-                  </Text>
-                </View>
-              </View>
-            </View>
-          </View>
-
-          {/* Quick Actions */}
-          <View style={styles.quickActions}>
+          <View style={styles.methodsCard}>
             <TouchableOpacity
-              style={styles.primaryAction}
-              onPress={handleStartTrading}
-              activeOpacity={0.8}
+              style={styles.methodRow}
+              activeOpacity={0.7}
+              onPress={() => router.push('/marketplace')}
             >
-              <Icon name="shopping-cart" size={24} color="#000000" />
-              <Text style={styles.primaryActionText}>Start Trading Now</Text>
+              <View style={[styles.methodIcon, { backgroundColor: '#FFF3E0' }]}>
+                <Icon name="payments" size={22} color="#F57C00" />
+              </View>
+              <View style={styles.methodInfo}>
+                <Text style={styles.methodTitle}>Cashback</Text>
+                <Text style={styles.methodDesc}>
+                  Earn on every product & service purchase
+                </Text>
+              </View>
+              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
             </TouchableOpacity>
 
+            <View style={styles.methodDivider} />
+
             <TouchableOpacity
-              style={styles.secondaryAction}
-              onPress={handleJoinP2P}
-              activeOpacity={0.8}
+              style={styles.methodRow}
+              activeOpacity={0.7}
+              onPress={() => router.push('/referrals')}
             >
-              <Icon name="store" size={24} color="#000000" />
-              <Text style={styles.secondaryActionText}>Join P2P Merchant</Text>
+              <View style={[styles.methodIcon, { backgroundColor: '#E8F5E9' }]}>
+                <Icon name="people" size={22} color="#2E7D32" />
+              </View>
+              <View style={styles.methodInfo}>
+                <Text style={styles.methodTitle}>Referral Program</Text>
+                <Text style={styles.methodDesc}>
+                  Earn TP when your referrals trade
+                </Text>
+              </View>
+              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
+            </TouchableOpacity>
+
+            <View style={styles.methodDivider} />
+
+            <TouchableOpacity
+              style={styles.methodRow}
+              activeOpacity={0.7}
+              onPress={() => router.push('/services')}
+            >
+              <View style={[styles.methodIcon, { backgroundColor: '#E3F2FD' }]}>
+                <Icon name="swap-horiz" size={22} color="#1976D2" />
+              </View>
+              <View style={styles.methodInfo}>
+                <Text style={styles.methodTitle}>P2P Commission</Text>
+                <Text style={styles.methodDesc}>
+                  0.5% from P2P fiat trades as a merchant
+                </Text>
+              </View>
+              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
             </TouchableOpacity>
           </View>
+
+          {/* TP Info Note */}
+          <View style={styles.tpNote}>
+            <Icon name="info-outline" size={16} color={COLORS.dark} />
+            <Text style={styles.tpNoteText}>
+              TPs are earned automatically from every transaction you and your
+              referral network make. Accumulate as much as possible!
+            </Text>
+          </View>
+
+          {/* CTA */}
+          <TouchableOpacity
+            style={styles.ctaButton}
+            onPress={() => router.push('/marketplace')}
+            activeOpacity={0.8}
+          >
+            <Icon name="shopping-cart" size={22} color="#000" />
+            <Text style={styles.ctaText}>Start Trading Now</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.ctaSecondary}
+            onPress={() => router.push('/services')}
+            activeOpacity={0.8}
+          >
+            <Icon name="store" size={22} color={COLORS.dark} />
+            <Text style={styles.ctaSecondaryText}>Become a P2P Merchant</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -429,378 +263,229 @@ const TradeAndEarnScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: GOLD_COLORS.background,
-  },
-  scrollContainer: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 10 : 20,
-    paddingBottom: 20,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  backButton: {
-    padding: 8,
-    marginRight: 12,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: '#000000',
-    flex: 1,
-  },
-  helpButton: {
-    padding: 8,
+    backgroundColor: COLORS.background,
   },
   content: {
-    padding: 20,
+    padding: 16,
   },
-  heroBanner: {
-    backgroundColor: GOLD_COLORS.primary,
+
+  // Hero Card
+  heroCard: {
+    backgroundColor: COLORS.primary,
     borderRadius: 20,
     padding: 24,
-    marginBottom: 24,
-    alignItems: 'center',
-  },
-  heroTitle: {
-    fontSize: 28,
-    fontWeight: '900',
-    color: '#000000',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  heroSubtitle: {
-    fontSize: 16,
-    color: '#000000',
-    opacity: 0.8,
-    textAlign: 'center',
-  },
-  section: {
-    marginBottom: 32,
-  },
-  sectionTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#000000',
     marginBottom: 16,
   },
-  methodCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  methodHeader: {
+  heroTop: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
   },
-  methodIcon: {
+  heroLabel: {
+    fontSize: 14,
+    color: COLORS.text,
+    opacity: 0.7,
+    marginBottom: 4,
+  },
+  heroBalance: {
+    fontSize: 40,
+    fontWeight: '900',
+    color: COLORS.text,
+    lineHeight: 44,
+  },
+  heroUnit: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.dark,
+    marginTop: 2,
+  },
+  heroIconWrap: {
     width: 56,
     height: 56,
     borderRadius: 28,
+    backgroundColor: 'rgba(255,255,255,0.4)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
+  },
+  heroDivider: {
+    height: 1,
+    backgroundColor: 'rgba(0,0,0,0.1)',
+    marginVertical: 16,
+  },
+  referralRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  referralInfo: {
+    flex: 1,
+  },
+  referralLabel: {
+    fontSize: 12,
+    color: COLORS.text,
+    opacity: 0.6,
+    marginBottom: 2,
+  },
+  referralCode: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  referralActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  referralBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  // Stats Row
+  statsRow: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  statItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  statDot: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  statValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  statLabel: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+
+  // Section
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+    marginBottom: 12,
+  },
+
+  // Methods
+  methodsCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  methodRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+  },
+  methodIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 14,
   },
   methodInfo: {
     flex: 1,
   },
   methodTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  methodRate: {
-    fontSize: 16,
-    color: GOLD_COLORS.dark,
-    fontWeight: '600',
-  },
-  methodDetails: {
-    marginBottom: 20,
-  },
-  detailItem: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  detailText: {
-    fontSize: 14,
-    color: '#666666',
-    marginLeft: 8,
-    flex: 1,
-    lineHeight: 20,
-  },
-  actionButton: {
-    backgroundColor: GOLD_COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 12,
-    paddingVertical: 16,
-    shadowColor: GOLD_COLORS.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  actionButtonText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#000000',
-    marginLeft: 8,
-    textAlign: 'center',
-    flex: 1,
-  },
-  referralSection: {
-    marginTop: 16,
-  },
-  referralLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 8,
-  },
-  referralLinkContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-  },
-  referralLink: {
-    flex: 1,
-    fontSize: 14,
-    color: '#666666',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  copyButton: {
-    padding: 8,
-    marginLeft: 8,
-  },
-  shareButton: {
-    padding: 8,
-    marginLeft: 4,
-  },
-  referralNote: {
-    fontSize: 12,
-    color: GOLD_COLORS.dark,
-    fontStyle: 'italic',
-  },
-  tpCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  tpHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  tpIconContainer: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: GOLD_COLORS.light,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  tpBalanceContainer: {
-    flex: 1,
-  },
-  tpBalanceLabel: {
-    fontSize: 14,
-    color: '#666666',
-    marginBottom: 4,
-  },
-  tpBalanceValue: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: GOLD_COLORS.primary,
-  },
-  tpConversion: {
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-  },
-  tpConversionTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
-    color: '#000000',
-    marginBottom: 12,
+    color: COLORS.text,
+    marginBottom: 2,
   },
-  conversionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
+  methodDesc: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
   },
-  conversionText: {
-    fontSize: 14,
-    color: '#666666',
-    marginLeft: 8,
+  methodDivider: {
+    height: 1,
+    backgroundColor: COLORS.border,
+    marginLeft: 74,
   },
+
+  // TP Note
   tpNote: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    backgroundColor: '#FFF8E1',
-    padding: 16,
+    backgroundColor: COLORS.light,
+    padding: 14,
     borderRadius: 12,
+    marginBottom: 24,
+    gap: 8,
   },
   tpNoteText: {
-    fontSize: 14,
-    color: GOLD_COLORS.dark,
-    marginLeft: 8,
+    fontSize: 13,
+    color: COLORS.dark,
     flex: 1,
-    lineHeight: 20,
+    lineHeight: 18,
   },
-  statsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  statCard: {
-    width: '48%',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  statValue: {
-    fontSize: 24,
-    fontWeight: '900',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  statLabel: {
-    fontSize: 14,
-    color: '#666666',
-    marginBottom: 12,
-  },
-  statIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'absolute',
-    top: 16,
-    right: 16,
-  },
-  stepsContainer: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  step: {
+
+  // CTAs
+  ctaButton: {
+    backgroundColor: COLORS.primary,
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
-  },
-  stepNumber: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: GOLD_COLORS.primary,
     justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginBottom: 10,
+    gap: 8,
+    shadowColor: COLORS.dark,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  stepNumberText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  stepContent: {
-    flex: 1,
-  },
-  stepTitle: {
+  ctaText: {
     fontSize: 16,
+    fontWeight: '800',
+    color: '#000',
+  },
+  ctaSecondary: {
+    backgroundColor: COLORS.white,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginBottom: 24,
+    gap: 8,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+  },
+  ctaSecondaryText: {
+    fontSize: 15,
     fontWeight: '700',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  stepDescription: {
-    fontSize: 14,
-    color: '#666666',
-  },
-  stepDivider: {
-    alignItems: 'center',
-    marginVertical: 8,
-  },
-  quickActions: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 24,
-  },
-  primaryAction: {
-    flex: 1,
-    backgroundColor: GOLD_COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 16,
-    paddingVertical: 18,
-    shadowColor: GOLD_COLORS.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  primaryActionText: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-    marginLeft: 8,
-  },
-  secondaryAction: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 16,
-    paddingVertical: 18,
-    borderWidth: 2,
-    borderColor: GOLD_COLORS.primary,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  secondaryActionText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#000000',
-    marginLeft: 8,
+    color: COLORS.dark,
   },
 });
 
