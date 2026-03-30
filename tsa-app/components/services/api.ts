@@ -605,6 +605,60 @@ class APIService {
     }
   }
 
+  // Get referrals with TP contribution data
+  async getReferrals(): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/referrals`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get referrals error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch referrals.',
+      };
+    }
+  }
+
+  // Get TP balance
+  async getTPBalance(): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/tp-balance`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get TP balance error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch TP balance.',
+      };
+    }
+  }
+
+  // Get TP earnings history (paginated)
+  async getTPEarnings(page: number = 1, limit: number = 20): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/tp-earnings?page=${page}&limit=${limit}`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get TP earnings error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch TP earnings.',
+      };
+    }
+  }
+
   // ==================== UTILITY FUNCTIONS ====================
 
   // Check if user is authenticated

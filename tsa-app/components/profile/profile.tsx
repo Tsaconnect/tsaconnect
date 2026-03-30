@@ -240,6 +240,14 @@ const ProfileScreen = () => {
 
             <TouchableOpacity
               style={styles.profileLink}
+              onPress={() => router.push("/referrals")}
+            >
+              <Icon name="people" size={20} color="#9D6B38" />
+              <Text style={styles.linkText}>My Referrals</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.profileLink}
               onPress={() => router.push("/(dashboard)/settings")}
             >
               <Icon name="settings" size={20} color="#9D6B38" />
