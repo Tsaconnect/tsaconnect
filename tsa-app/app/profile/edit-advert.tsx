@@ -124,8 +124,8 @@ const UpdateAdvert = () => {
     //@ts-ignore
     formData.append("companyName", companyName);
     try {
-      const response = await axios.patch(
-        `${baseUrl}/adverts/${item.id}`,
+      const response = await axios.put(
+        `${baseUrl}/products/${item.id}`,
         formData,
         {
           headers: {

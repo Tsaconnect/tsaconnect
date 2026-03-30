@@ -3,45 +3,29 @@ import {
   View,
   Text,
   TextInput,
-  Pressable,
   ScrollView,
   StyleSheet,
   Image,
   Modal,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
   ActivityIndicator,
   TouchableOpacity,
+  Pressable,
 } from 'react-native';
 import { router } from 'expo-router';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import * as ImagePicker from 'expo-image-picker';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 import LocationPicker from "../../../../components/common/LocationPicker";
 
-const { width } = Dimensions.get('window');
-
-const COLORS = {
-  primary: '#8B4513',
-  primaryLight: '#A0522D',
-  primaryDark: '#654321',
-  secondary: '#D2691E',
-  accent: '#DEB887',
-  background: '#F5F5DC',
-  surface: '#FFF8DC',
-  text: '#333333',
-  textLight: '#666666',
-  textLighter: '#999999',
-  border: '#D2B48C',
-  success: '#228B22',
-  error: '#DC143C',
-  warning: '#FF8C00',
-  white: '#FFFFFF',
-  gray: '#E8E8E8',
-  darkGray: '#A9A9A9',
+const GOLD = {
+  primary: '#FFD700',
+  dark: '#B8860B',
+  light: '#FFF8DC',
+  muted: '#F5DEB3',
+  bg: '#FAF9F6',
 };
 
 const CategoryAvatar = ({ category }: { category: any }) => {
@@ -51,7 +35,7 @@ const CategoryAvatar = ({ category }: { category: any }) => {
     );
   }
   const initial = (category.title || '?')[0].toUpperCase();
-  const bgColor = category.color || COLORS.primary;
+  const bgColor = category.color || GOLD.dark;
   return (
     <View style={[styles.categoryItemAvatar, { backgroundColor: bgColor }]}>
       <Text style={styles.categoryItemAvatarText}>{initial}</Text>
@@ -93,7 +77,6 @@ const AddProduct = () => {
   const phoneRef = useRef<TextInput>(null);
   const emailRef = useRef<TextInput>(null);
   const companyRef = useRef<TextInput>(null);
-  const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
     fetchCategories();
@@ -294,414 +277,342 @@ const AddProduct = () => {
     setIsModalVisible(true);
   };
 
-  const renderAttributeItem = ({ item, index }: { item: { name: string; value: string }; index: number }) => (
-    <View style={styles.attributeItem}>
-      <View style={styles.attributeInputs}>
-        <TextInput
-          style={[styles.attributeInput, errors[`attr_name_${index}`] && styles.inputError]}
-          placeholder="e.g. Size"
-          placeholderTextColor={COLORS.textLighter}
-          value={item.name}
-          onChangeText={(value) => handleAttributeChange(index, 'name', value)}
-        />
-        <TextInput
-          style={[styles.attributeInput, errors[`attr_value_${index}`] && styles.inputError]}
-          placeholder="e.g. Large"
-          placeholderTextColor={COLORS.textLighter}
-          value={item.value}
-          onChangeText={(value) => handleAttributeChange(index, 'value', value)}
-        />
-      </View>
-      <Pressable
-        style={styles.removeAttributeButton}
-        onPress={() => handleRemoveAttribute(index)}
-      >
-        <Icon name="delete" size={24} color={COLORS.error} />
-      </Pressable>
-    </View>
-  );
-
   return (
     <KeyboardAvoidingView
+      style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.container}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
-      <LinearGradient
-        colors={[COLORS.background, COLORS.surface]}
-        style={styles.gradientBackground}
-      >
-        <ScrollView
-          ref={scrollRef}
-          style={styles.scrollView}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
-        >
-          {/* Header */}
-          <View style={styles.header}>
-            <Pressable style={styles.backButton} onPress={() => router.back()}>
-              <Icon name="arrow-back" size={28} color={COLORS.primary} />
-            </Pressable>
-            <Text style={styles.headerTitle}>Add New Product</Text>
-            <Pressable style={styles.resetButton} onPress={resetForm} disabled={loading}>
-              <Icon name="refresh" size={24} color={COLORS.primary} />
-            </Pressable>
-          </View>
+      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <Text style={styles.title}>Add Product</Text>
+        <Text style={styles.subtitle}>Fill in the details to list your product</Text>
 
-          <View style={styles.formContainer}>
-            {/* Basic Information */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="info" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Basic Information</Text>
+        {/* Image Upload */}
+        <Text style={styles.sectionTitle}>
+          Photos <Text style={styles.imageCountInline}>({productImages.length}/10)</Text>
+        </Text>
+        {errors.images && <Text style={styles.errorText}>{errors.images}</Text>}
+
+        <View style={styles.imageUploadRow}>
+          <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
+            <Icon name="photo-library" size={28} color={GOLD.dark} />
+            <Text style={styles.imageUploadText}>Gallery</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.imageUploadArea} onPress={takePhoto} activeOpacity={0.7}>
+            <Icon name="camera-alt" size={28} color={GOLD.dark} />
+            <Text style={styles.imageUploadText}>Camera</Text>
+          </TouchableOpacity>
+        </View>
+
+        {productImages.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
+            {productImages.map((uri, index) => (
+              <View key={index} style={styles.imagePreviewWrapper}>
+                <Image source={{ uri }} style={styles.imagePreview} />
+                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
+                  <Icon name="close" size={16} color="#fff" />
+                </TouchableOpacity>
               </View>
+            ))}
+          </ScrollView>
+        )}
 
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Product Name *</Text>
-                <TextInput
-                  style={[styles.input, errors.productName && styles.inputError]}
-                  placeholder="Enter product name"
-                  placeholderTextColor={COLORS.textLighter}
-                  value={productName}
-                  onChangeText={setProductName}
-                  returnKeyType="next"
-                  onSubmitEditing={() => descriptionRef.current?.focus()}
-                />
-                {errors.productName && <Text style={styles.errorText}>{errors.productName}</Text>}
-              </View>
+        {/* Product Details */}
+        <Text style={styles.sectionTitle}>Product Details</Text>
 
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Description *</Text>
-                <View style={[styles.textAreaContainer, errors.description && styles.inputError]}>
-                  <TextInput
-                    ref={descriptionRef}
-                    style={styles.textArea}
-                    placeholder="Describe your product..."
-                    placeholderTextColor={COLORS.textLighter}
-                    multiline
-                    numberOfLines={4}
-                    value={description}
-                    onChangeText={setDescription}
-                    maxLength={maxDescriptionLength}
-                  />
-                  <Text style={styles.charCount}>
-                    {description.length}/{maxDescriptionLength}
-                  </Text>
-                </View>
-                {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
-              </View>
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Product Name *</Text>
+          <TextInput
+            style={[styles.input, errors.productName && styles.inputError]}
+            value={productName}
+            onChangeText={setProductName}
+            placeholder="e.g. Organic Honey Jar"
+            placeholderTextColor="#bbb"
+            returnKeyType="next"
+            onSubmitEditing={() => descriptionRef.current?.focus()}
+          />
+          {errors.productName && <Text style={styles.errorText}>{errors.productName}</Text>}
+        </View>
 
-              <View style={styles.row}>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Price ($) *</Text>
-                  <TextInput
-                    ref={priceRef}
-                    style={[styles.input, errors.price && styles.inputError]}
-                    placeholder="0.00"
-                    placeholderTextColor={COLORS.textLighter}
-                    keyboardType="decimal-pad"
-                    value={price}
-                    onChangeText={setPrice}
-                  />
-                  {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
-                </View>
-
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Stock *</Text>
-                  <TextInput
-                    ref={stockRef}
-                    style={[styles.input, errors.stock && styles.inputError]}
-                    placeholder="0"
-                    placeholderTextColor={COLORS.textLighter}
-                    keyboardType="number-pad"
-                    value={stock}
-                    onChangeText={setStock}
-                  />
-                  {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
-                </View>
-              </View>
-
-              {/* Category Picker */}
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Category *</Text>
-                {categoriesLoading ? (
-                  <View style={styles.categoryLoadingRow}>
-                    <ActivityIndicator size="small" color={COLORS.primary} />
-                    <Text style={styles.categoryLoadingText}>Loading categories...</Text>
-                  </View>
-                ) : categories.length === 0 ? (
-                  <TouchableOpacity style={styles.categoryLoadingRow} onPress={fetchCategories}>
-                    <Text style={styles.categoryLoadingText}>No categories found. Tap to retry.</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    style={[
-                      styles.categorySelector,
-                      errors.category && styles.categorySelectorError,
-                      categoryId ? styles.categorySelectorSelected : undefined,
-                    ]}
-                    onPress={() => {
-                      setCategorySearch('');
-                      setCategoryModalVisible(true);
-                    }}
-                  >
-                    {categoryId ? (
-                      <View style={styles.categorySelectorValue}>
-                        <CategoryAvatar category={categories.find(c => (c.id || c._id) === categoryId) || { title: categoryName }} />
-                        <Text style={styles.categorySelectorText}>{categoryName}</Text>
-                      </View>
-                    ) : (
-                      <Text style={styles.categorySelectorPlaceholder}>Select a category</Text>
-                    )}
-                    <Icon name="keyboard-arrow-down" size={24} color={COLORS.textLight} />
-                  </TouchableOpacity>
-                )}
-                {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
-              </View>
-
-              {/* Category Selection Modal */}
-              <Modal
-                visible={categoryModalVisible}
-                animationType="slide"
-                transparent
-                onRequestClose={() => setCategoryModalVisible(false)}
-              >
-                <View style={styles.pickerOverlay}>
-                  <Pressable style={styles.pickerOverlayDismiss} onPress={() => setCategoryModalVisible(false)} />
-                  <View style={styles.pickerModal}>
-                    <View style={styles.pickerModalHeader}>
-                      <Text style={styles.pickerModalTitle}>Select Category</Text>
-                      <TouchableOpacity onPress={() => setCategoryModalVisible(false)}>
-                        <Icon name="close" size={24} color={COLORS.textLight} />
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.categorySearchContainer}>
-                      <Icon name="search" size={20} color={COLORS.textLight} />
-                      <TextInput
-                        style={styles.categorySearchInput}
-                        placeholder="Search categories..."
-                        placeholderTextColor={COLORS.textLighter}
-                        value={categorySearch}
-                        onChangeText={setCategorySearch}
-                        autoCapitalize="none"
-                      />
-                      {categorySearch.length > 0 && (
-                        <TouchableOpacity onPress={() => setCategorySearch('')}>
-                          <Icon name="close" size={18} color={COLORS.textLight} />
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                    <ScrollView keyboardShouldPersistTaps="handled">
-                      {categories
-                        .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
-                        .map((item, index) => {
-                          const itemId = item.id || item._id;
-                          const isSelected = categoryId === itemId;
-                          return (
-                            <TouchableOpacity
-                              key={itemId || index.toString()}
-                              style={[styles.categoryListItem, isSelected && styles.categoryListItemSelected]}
-                              onPress={() => {
-                                setCategoryId(itemId);
-                                setCategoryName(item.title);
-                                setErrors(prev => { const { category, ...rest } = prev; return rest; });
-                                setCategoryModalVisible(false);
-                              }}
-                            >
-                              <CategoryAvatar category={item} />
-                              <View style={styles.categoryListItemInfo}>
-                                <Text style={[styles.categoryListItemTitle, isSelected && styles.categoryListItemTitleSelected]}>
-                                  {item.title}
-                                </Text>
-                                {item.description ? (
-                                  <Text style={styles.categoryListItemDesc} numberOfLines={1}>{item.description}</Text>
-                                ) : null}
-                              </View>
-                              {isSelected && <Icon name="check-circle" size={22} color={COLORS.primary} />}
-                            </TouchableOpacity>
-                          );
-                        })
-                      }
-                      {categories.filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase())).length === 0 && (
-                        <View style={styles.pickerEmpty}>
-                          <Icon name="search-off" size={32} color={COLORS.textLighter} />
-                          <Text style={styles.pickerEmptyText}>No categories match "{categorySearch}"</Text>
-                        </View>
-                      )}
-                    </ScrollView>
-                  </View>
-                </View>
-              </Modal>
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Category *</Text>
+          {categoriesLoading ? (
+            <View style={styles.categoryLoadingRow}>
+              <ActivityIndicator size="small" color={GOLD.dark} />
+              <Text style={styles.categoryLoadingText}>Loading categories...</Text>
             </View>
-
-            {/* Contact Information */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="contact-phone" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Contact Information</Text>
-              </View>
-
-              <View style={styles.formGroup}>
-                <LocationPicker
-                  value={location}
-                  onChange={setLocation}
-                  required={["country", "state"]}
-                />
-                {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Phone Number *</Text>
-                <TextInput
-                  ref={phoneRef}
-                  style={[styles.input, errors.phoneNumber && styles.inputError]}
-                  placeholder="Enter phone number"
-                  placeholderTextColor={COLORS.textLighter}
-                  keyboardType="phone-pad"
-                  value={phoneNumber}
-                  onChangeText={setPhoneNumber}
-                  returnKeyType="next"
-                  onSubmitEditing={() => emailRef.current?.focus()}
-                />
-                {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Email *</Text>
-                <TextInput
-                  ref={emailRef}
-                  style={[styles.input, errors.email && styles.inputError]}
-                  placeholder="Enter email address"
-                  placeholderTextColor={COLORS.textLighter}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  value={email}
-                  onChangeText={setEmail}
-                  returnKeyType="next"
-                  onSubmitEditing={() => companyRef.current?.focus()}
-                />
-                {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Company Name (Optional)</Text>
-                <TextInput
-                  ref={companyRef}
-                  style={styles.input}
-                  placeholder="Enter company name"
-                  placeholderTextColor={COLORS.textLighter}
-                  value={companyName}
-                  onChangeText={setCompanyName}
-                  returnKeyType="done"
-                />
-              </View>
-            </View>
-
-            {/* Images */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="photo-library" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Product Images *</Text>
-                <Text style={styles.imageCount}>({productImages.length}/10)</Text>
-              </View>
-
-              {errors.images && <Text style={styles.errorText}>{errors.images}</Text>}
-
-              {/* Image thumbnails */}
-              {productImages.length > 0 && (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.imagesScroll}
-                  contentContainerStyle={styles.imagesList}
-                >
-                  {productImages.map((uri, index) => (
-                    <View key={index} style={styles.imageItem}>
-                      <Image source={{ uri }} style={styles.productImage} />
-                      <Pressable style={styles.removeImageButton} onPress={() => removeImage(index)}>
-                        <Icon name="close" size={16} color={COLORS.white} />
-                      </Pressable>
-                    </View>
-                  ))}
-                </ScrollView>
-              )}
-
-              {/* Upload buttons - compact row */}
-              {productImages.length < 10 && (
-                <View style={styles.imageUploadRow}>
-                  <Pressable style={styles.uploadBtn} onPress={pickProductImages}>
-                    <Icon name="photo-library" size={22} color={COLORS.white} />
-                    <Text style={styles.uploadBtnText}>Gallery</Text>
-                  </Pressable>
-                  <Pressable style={[styles.uploadBtn, { backgroundColor: COLORS.secondary }]} onPress={takePhoto}>
-                    <Icon name="camera-alt" size={22} color={COLORS.white} />
-                    <Text style={styles.uploadBtnText}>Camera</Text>
-                  </Pressable>
-                </View>
-              )}
-            </View>
-
-            {/* Attributes */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="tune" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Attributes (Optional)</Text>
-                <Pressable style={styles.addAttributeHeaderButton} onPress={handleAddAttribute}>
-                  <Icon name="add" size={24} color={COLORS.primary} />
-                </Pressable>
-              </View>
-
-              {attributes.length > 0 ? (
-                <>
-                  {attributes.map((item, index) => (
-                    <View key={index}>
-                      {renderAttributeItem({ item, index })}
-                    </View>
-                  ))}
-                  <Pressable style={styles.addAttributeButton} onPress={handleAddAttribute}>
-                    <Icon name="add-circle" size={20} color={COLORS.primary} />
-                    <Text style={styles.addAttributeButtonText}>Add Another</Text>
-                  </Pressable>
-                </>
-              ) : (
-                <Text style={styles.noAttributesHint}>
-                  Add attributes like size, color, material, etc.
-                </Text>
-              )}
-            </View>
-
-            {/* Submit */}
-            <Pressable
-              style={[styles.submitButton, loading && styles.submitButtonDisabled]}
-              onPress={createProduct}
-              disabled={loading}
+          ) : categories.length === 0 ? (
+            <TouchableOpacity style={styles.categoryLoadingRow} onPress={fetchCategories}>
+              <Text style={styles.categoryLoadingText}>No categories found. Tap to retry.</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              activeOpacity={0.7}
+              style={[
+                styles.categorySelector,
+                errors.category && styles.inputError,
+                categoryId ? styles.categorySelectorSelected : undefined,
+              ]}
+              onPress={() => {
+                setCategorySearch('');
+                setCategoryModalVisible(true);
+              }}
             >
-              <LinearGradient
-                colors={[COLORS.primary, COLORS.primaryDark]}
-                style={styles.submitButtonGradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-              >
-                {loading ? (
-                  <ActivityIndicator color={COLORS.white} size="small" />
-                ) : (
-                  <>
-                    <Icon name="add-shopping-cart" size={24} color={COLORS.white} />
-                    <Text style={styles.submitButtonText}>Create Product</Text>
-                  </>
-                )}
-              </LinearGradient>
-            </Pressable>
+              {categoryId ? (
+                <View style={styles.categorySelectorValue}>
+                  <CategoryAvatar category={categories.find(c => (c.id || c._id) === categoryId) || { title: categoryName }} />
+                  <Text style={styles.categorySelectorText}>{categoryName}</Text>
+                </View>
+              ) : (
+                <Text style={styles.categorySelectorPlaceholder}>Select a category</Text>
+              )}
+              <Icon name="keyboard-arrow-down" size={24} color="#bbb" />
+            </TouchableOpacity>
+          )}
+          {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
+        </View>
 
-            <View style={styles.helpContainer}>
-              <Icon name="help" size={16} color={COLORS.textLight} />
-              <Text style={styles.helpText}>Fields marked with * are required</Text>
-            </View>
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Description *</Text>
+          <TextInput
+            ref={descriptionRef}
+            style={[styles.textArea, errors.description && styles.inputError]}
+            placeholder="Describe your product, quality, and what buyers can expect..."
+            placeholderTextColor="#bbb"
+            numberOfLines={5}
+            multiline
+            maxLength={maxDescriptionLength}
+            value={description}
+            onChangeText={setDescription}
+            textAlignVertical="top"
+          />
+          <Text style={styles.charCount}>
+            {description.length}/{maxDescriptionLength}
+          </Text>
+          {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
+        </View>
+
+        <View style={styles.rowFields}>
+          <View style={styles.halfField}>
+            <Text style={styles.label}>Price ($) *</Text>
+            <TextInput
+              ref={priceRef}
+              style={[styles.input, errors.price && styles.inputError]}
+              placeholder="0.00"
+              placeholderTextColor="#bbb"
+              keyboardType="decimal-pad"
+              value={price}
+              onChangeText={setPrice}
+            />
+            {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
           </View>
-        </ScrollView>
-      </LinearGradient>
+          <View style={styles.halfField}>
+            <Text style={styles.label}>Stock *</Text>
+            <TextInput
+              ref={stockRef}
+              style={[styles.input, errors.stock && styles.inputError]}
+              placeholder="0"
+              placeholderTextColor="#bbb"
+              keyboardType="number-pad"
+              value={stock}
+              onChangeText={setStock}
+            />
+            {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
+          </View>
+        </View>
+
+        {/* Contact & Location */}
+        <Text style={styles.sectionTitle}>Contact & Location</Text>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Company Name</Text>
+          <TextInput
+            ref={companyRef}
+            style={styles.input}
+            value={companyName}
+            onChangeText={setCompanyName}
+            placeholder="Your business name"
+            placeholderTextColor="#bbb"
+          />
+        </View>
+
+        <View style={styles.inputGroup}>
+          <LocationPicker
+            value={location}
+            onChange={setLocation}
+            required={["country", "state"]}
+          />
+          {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Phone Number *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              ref={phoneRef}
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={phoneNumber}
+              onChangeText={setPhoneNumber}
+              keyboardType="phone-pad"
+              placeholder="+234 800 000 0000"
+              placeholderTextColor="#bbb"
+              returnKeyType="next"
+              onSubmitEditing={() => emailRef.current?.focus()}
+            />
+          </View>
+          {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Email *</Text>
+          <View style={styles.inputWithIcon}>
+            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
+            <TextInput
+              ref={emailRef}
+              style={{ flex: 1, fontSize: 15, color: '#000' }}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              placeholder="you@example.com"
+              placeholderTextColor="#bbb"
+            />
+          </View>
+          {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
+        </View>
+
+        {/* Attributes */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Attributes</Text>
+          <TouchableOpacity style={styles.addAttrBtn} onPress={handleAddAttribute}>
+            <Icon name="add" size={20} color={GOLD.dark} />
+            <Text style={styles.addAttrBtnText}>Add</Text>
+          </TouchableOpacity>
+        </View>
+
+        {attributes.length > 0 ? (
+          attributes.map((item, index) => (
+            <View key={index} style={styles.attributeRow}>
+              <TextInput
+                style={[styles.attributeInput, errors[`attr_name_${index}`] && styles.inputError]}
+                placeholder="e.g. Size"
+                placeholderTextColor="#bbb"
+                value={item.name}
+                onChangeText={(value) => handleAttributeChange(index, 'name', value)}
+              />
+              <TextInput
+                style={[styles.attributeInput, errors[`attr_value_${index}`] && styles.inputError]}
+                placeholder="e.g. Large"
+                placeholderTextColor="#bbb"
+                value={item.value}
+                onChangeText={(value) => handleAttributeChange(index, 'value', value)}
+              />
+              <TouchableOpacity onPress={() => handleRemoveAttribute(index)} style={{ padding: 6 }}>
+                <Icon name="delete-outline" size={22} color="#DC143C" />
+              </TouchableOpacity>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.hintText}>Add attributes like size, color, material, etc.</Text>
+        )}
+
+        {/* Submit */}
+        {loading && (
+          <View style={{ marginTop: 16 }}>
+            <ActivityIndicator size="small" color={GOLD.dark} />
+            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
+          onPress={createProduct}
+          disabled={loading}
+          activeOpacity={0.8}
+        >
+          <Icon name="add-shopping-cart" size={22} color="#000" />
+          <Text style={styles.submitBtnText}>Publish Product</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.hintText}>Fields marked with * are required</Text>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+
+      {/* Category Selection Modal */}
+      <Modal
+        visible={categoryModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setCategoryModalVisible(false)}
+      >
+        <View style={styles.pickerOverlay}>
+          <Pressable style={styles.pickerOverlayDismiss} onPress={() => setCategoryModalVisible(false)} />
+          <View style={styles.pickerModal}>
+            <View style={styles.pickerModalHeader}>
+              <Text style={styles.pickerModalTitle}>Select Category</Text>
+              <TouchableOpacity onPress={() => setCategoryModalVisible(false)}>
+                <Icon name="close" size={24} color="#999" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.categorySearchContainer}>
+              <Icon name="search" size={20} color="#999" />
+              <TextInput
+                style={styles.categorySearchInput}
+                placeholder="Search categories..."
+                placeholderTextColor="#bbb"
+                value={categorySearch}
+                onChangeText={setCategorySearch}
+                autoCapitalize="none"
+              />
+              {categorySearch.length > 0 && (
+                <TouchableOpacity onPress={() => setCategorySearch('')}>
+                  <Icon name="close" size={18} color="#999" />
+                </TouchableOpacity>
+              )}
+            </View>
+            <ScrollView keyboardShouldPersistTaps="handled">
+              {categories
+                .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
+                .map((item, index) => {
+                  const itemId = item.id || item._id;
+                  const isSelected = categoryId === itemId;
+                  return (
+                    <TouchableOpacity
+                      key={itemId || index.toString()}
+                      style={[styles.categoryListItem, isSelected && styles.categoryListItemSelected]}
+                      onPress={() => {
+                        setCategoryId(itemId);
+                        setCategoryName(item.title);
+                        setErrors(prev => { const { category, ...rest } = prev; return rest; });
+                        setCategoryModalVisible(false);
+                      }}
+                    >
+                      <CategoryAvatar category={item} />
+                      <View style={styles.categoryListItemInfo}>
+                        <Text style={[styles.categoryListItemTitle, isSelected && styles.categoryListItemTitleSelected]}>
+                          {item.title}
+                        </Text>
+                        {item.description ? (
+                          <Text style={styles.categoryListItemDesc} numberOfLines={1}>{item.description}</Text>
+                        ) : null}
+                      </View>
+                      {isSelected && <Icon name="check-circle" size={22} color={GOLD.dark} />}
+                    </TouchableOpacity>
+                  );
+                })
+              }
+              {categories.filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase())).length === 0 && (
+                <View style={styles.pickerEmpty}>
+                  <Icon name="search-off" size={32} color="#bbb" />
+                  <Text style={styles.pickerEmptyText}>No categories match "{categorySearch}"</Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* Success/Error Modal */}
       <Modal
@@ -714,25 +625,25 @@ const AddProduct = () => {
           <View style={styles.modalContainer}>
             <View style={[
               styles.modalIconContainer,
-              modalType === 'success' && styles.modalIconSuccess,
-              modalType === 'error' && styles.modalIconError,
-              modalType === 'info' && styles.modalIconInfo,
+              modalType === 'success' && { backgroundColor: '#228B22' },
+              modalType === 'error' && { backgroundColor: '#DC143C' },
+              modalType === 'info' && { backgroundColor: '#FF8C00' },
             ]}>
               <Icon
                 name={modalType === 'success' ? 'check-circle' : modalType === 'error' ? 'error' : 'info'}
                 size={48}
-                color={COLORS.white}
+                color="#fff"
               />
             </View>
             <Text style={styles.modalTitle}>
               {modalType === 'success' ? 'Success!' : modalType === 'error' ? 'Error!' : 'Information'}
             </Text>
             <Text style={styles.modalMessage}>{modalMessage}</Text>
-            <Pressable style={styles.modalButton} onPress={() => setIsModalVisible(false)}>
+            <TouchableOpacity style={styles.modalButton} onPress={() => setIsModalVisible(false)} activeOpacity={0.8}>
               <Text style={styles.modalButtonText}>
                 {modalType === 'success' ? 'Continue' : 'Try Again'}
               </Text>
-            </Pressable>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -740,143 +651,172 @@ const AddProduct = () => {
   );
 };
 
+export default AddProduct;
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.background },
-  gradientBackground: { flex: 1 },
-  scrollView: { flex: 1 },
-  scrollContent: { paddingBottom: 40 },
-  header: {
+  container: {
+    flex: 1,
+    backgroundColor: GOLD.bg,
+    paddingHorizontal: 20,
+  },
+  title: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#000',
+    marginTop: 20,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: '#999',
+    marginTop: 4,
+    marginBottom: 24,
+  },
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
+    marginTop: 24,
+    marginBottom: 12,
+  },
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 60 : 20,
-    paddingBottom: 16,
-    backgroundColor: COLORS.white,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    elevation: 3,
+    marginTop: 24,
+    marginBottom: 12,
   },
-  backButton: {
-    padding: 8,
-    borderRadius: 20,
-    backgroundColor: COLORS.accent + '20',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: COLORS.primary,
-    flex: 1,
-    textAlign: 'center',
-  },
-  resetButton: {
-    padding: 8,
-    borderRadius: 20,
-    backgroundColor: COLORS.accent + '20',
-  },
-  formContainer: { paddingHorizontal: 16, paddingTop: 16 },
-  card: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: COLORS.border + '30',
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border + '30',
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.primary,
-    marginLeft: 10,
-    flex: 1,
-  },
-  imageCount: {
+  imageCountInline: {
     fontSize: 14,
     fontWeight: '500',
-    color: COLORS.textLight,
+    color: '#999',
   },
-  formGroup: { marginBottom: 14 },
+  inputGroup: {
+    marginBottom: 16,
+  },
   label: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    color: COLORS.primaryDark,
+    color: '#555',
     marginBottom: 6,
   },
   input: {
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: COLORS.text,
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: COLORS.border + '50',
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    fontSize: 15,
+    color: '#000',
   },
   inputError: {
-    borderColor: COLORS.error,
-    backgroundColor: COLORS.error + '10',
+    borderColor: '#DC143C',
+    backgroundColor: '#DC143C08',
   },
   errorText: {
     fontSize: 12,
-    color: COLORS.error,
+    color: '#DC143C',
     marginTop: 4,
     marginLeft: 4,
   },
-  textAreaContainer: {
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
+  inputWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: COLORS.border + '50',
-    minHeight: 100,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
   },
   textArea: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
+    borderRadius: 12,
     padding: 14,
     fontSize: 15,
-    color: COLORS.text,
-    textAlignVertical: 'top',
-    minHeight: 80,
+    color: '#000',
+    minHeight: 120,
   },
   charCount: {
     textAlign: 'right',
+    color: '#bbb',
     fontSize: 12,
-    color: COLORS.textLight,
-    paddingHorizontal: 14,
-    paddingBottom: 8,
+    marginTop: 4,
   },
-  row: { flexDirection: 'row', justifyContent: 'space-between' },
-  halfWidth: { width: '48%' },
+  rowFields: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  halfField: {
+    flex: 1,
+    marginBottom: 16,
+  },
+
+  // Image upload
+  imageUploadRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  imageUploadArea: {
+    flex: 1,
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: GOLD.muted,
+    borderStyle: 'dashed',
+    borderRadius: 16,
+    paddingVertical: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageUploadText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: GOLD.dark,
+    marginTop: 6,
+  },
+  imagePreviewRow: {
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  imagePreviewWrapper: {
+    marginRight: 10,
+    position: 'relative',
+  },
+  imagePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+    backgroundColor: '#eee',
+  },
+  imageRemoveBtn: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   // Category selector
   categorySelector: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: COLORS.gray,
+    backgroundColor: '#fff',
     borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: COLORS.border + '50',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
     paddingHorizontal: 14,
-    paddingVertical: 14,
+    paddingVertical: 13,
   },
   categorySelectorSelected: {
-    borderColor: COLORS.primary + '40',
-    backgroundColor: COLORS.primary + '08',
-  },
-  categorySelectorError: {
-    borderColor: '#ef4444',
+    borderColor: GOLD.dark + '60',
+    backgroundColor: GOLD.light,
   },
   categorySelectorValue: {
     flexDirection: 'row',
@@ -887,27 +827,11 @@ const styles = StyleSheet.create({
   categorySelectorText: {
     fontSize: 15,
     fontWeight: '600',
-    color: COLORS.text,
+    color: '#000',
   },
   categorySelectorPlaceholder: {
     fontSize: 15,
-    color: COLORS.textLighter,
-  },
-  categorySearchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.gray,
-    marginHorizontal: 16,
-    marginVertical: 12,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
-    gap: 8,
-  },
-  categorySearchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: COLORS.text,
+    color: '#bbb',
   },
   categoryLoadingRow: {
     flexDirection: 'row',
@@ -916,43 +840,67 @@ const styles = StyleSheet.create({
   },
   categoryLoadingText: {
     fontSize: 14,
-    color: COLORS.textLight,
+    color: '#999',
     marginLeft: 8,
   },
-  categoryChipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  categoryChip: {
+
+  // Attributes
+  addAttrBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.gray,
+    gap: 4,
+    backgroundColor: GOLD.light,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  addAttrBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: GOLD.dark,
+  },
+  attributeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  attributeInput: {
+    flex: 1,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#E8E8E8',
     borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: COLORS.border + '50',
     paddingHorizontal: 14,
     paddingVertical: 10,
-    gap: 8,
-  },
-  categoryChipSelected: {
-    borderColor: COLORS.primary,
-    backgroundColor: COLORS.primary + '10',
-  },
-  categoryChipError: {
-    borderColor: '#ef4444',
-  },
-  categoryChipText: {
     fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.text,
+    color: '#000',
   },
-  categoryChipTextSelected: {
-    color: COLORS.primary,
-    fontWeight: '600',
+  hintText: {
+    fontSize: 13,
+    color: '#bbb',
+    textAlign: 'center',
+    paddingVertical: 8,
   },
 
-  // Category picker modal
+  // Submit
+  submitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: GOLD.primary,
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginTop: 24,
+    gap: 8,
+  },
+  submitBtnText: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#000',
+  },
+
+  // Category modal
   pickerOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -962,7 +910,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   pickerModal: {
-    backgroundColor: COLORS.white,
+    backgroundColor: '#fff',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     maxHeight: '60%',
@@ -974,21 +922,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.gray,
+    borderBottomColor: '#E8E8E8',
   },
   pickerModalTitle: {
     fontSize: 18,
     fontWeight: '700',
-    color: COLORS.primaryDark,
+    color: '#000',
   },
-  pickerEmpty: {
-    padding: 40,
+  categorySearchContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#F5F5F5',
+    marginHorizontal: 16,
+    marginVertical: 12,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
+    gap: 8,
   },
-  pickerEmptyText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: COLORS.textLight,
+  categorySearchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: '#000',
   },
   categoryListItem: {
     flexDirection: 'row',
@@ -997,13 +952,13 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   categoryListItemSelected: {
-    backgroundColor: COLORS.accent + '20',
+    backgroundColor: GOLD.light,
   },
   categoryItemImage: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: COLORS.gray,
+    backgroundColor: '#eee',
   },
   categoryItemAvatar: {
     width: 40,
@@ -1015,7 +970,7 @@ const styles = StyleSheet.create({
   categoryItemAvatarText: {
     fontSize: 18,
     fontWeight: '700',
-    color: COLORS.white,
+    color: '#fff',
   },
   categoryListItemInfo: {
     flex: 1,
@@ -1024,156 +979,25 @@ const styles = StyleSheet.create({
   categoryListItemTitle: {
     fontSize: 15,
     fontWeight: '500',
-    color: COLORS.text,
+    color: '#333',
   },
   categoryListItemTitleSelected: {
-    color: COLORS.primary,
+    color: GOLD.dark,
     fontWeight: '600',
   },
   categoryListItemDesc: {
     fontSize: 12,
-    color: COLORS.textLighter,
+    color: '#bbb',
     marginTop: 2,
   },
-  categoryListSeparator: {
-    height: 1,
-    backgroundColor: COLORS.gray,
-    marginHorizontal: 16,
-  },
-
-  // Image upload - compact
-  imageUploadRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 8,
-  },
-  uploadBtn: {
-    flex: 1,
-    flexDirection: 'row',
+  pickerEmpty: {
+    padding: 40,
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    borderRadius: 12,
-    gap: 8,
   },
-  uploadBtnText: {
+  pickerEmptyText: {
+    marginTop: 12,
     fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  imagesScroll: {
-    marginBottom: 8,
-  },
-  imagesList: {
-    paddingVertical: 4,
-    gap: 10,
-  },
-  imageItem: {
-    position: 'relative',
-  },
-  productImage: {
-    width: 90,
-    height: 90,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  removeImageButton: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    backgroundColor: COLORS.error,
-    borderRadius: 10,
-    width: 22,
-    height: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  // Attributes
-  attributeItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  attributeInputs: {
-    flex: 1,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  attributeInput: {
-    flex: 1,
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: COLORS.text,
-    borderWidth: 1,
-    borderColor: COLORS.border + '50',
-  },
-  removeAttributeButton: {
-    padding: 8,
-    marginLeft: 4,
-  },
-  addAttributeHeaderButton: {
-    padding: 4,
-    borderRadius: 12,
-    backgroundColor: COLORS.accent + '20',
-  },
-  noAttributesHint: {
-    fontSize: 13,
-    color: COLORS.textLighter,
-    textAlign: 'center',
-    paddingVertical: 8,
-  },
-  addAttributeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.accent + '20',
-    borderRadius: 10,
-    paddingVertical: 10,
-    marginTop: 4,
-    gap: 6,
-  },
-  addAttributeButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-
-  // Submit
-  submitButton: {
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginTop: 8,
-    marginBottom: 16,
-    elevation: 4,
-  },
-  submitButtonDisabled: { opacity: 0.7 },
-  submitButtonGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    gap: 10,
-  },
-  submitButtonText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  helpContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  helpText: {
-    fontSize: 13,
-    color: COLORS.textLight,
+    color: '#999',
   },
 
   // Result modal
@@ -1185,7 +1009,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   modalContainer: {
-    backgroundColor: COLORS.white,
+    backgroundColor: '#fff',
     borderRadius: 20,
     padding: 28,
     width: '100%',
@@ -1200,24 +1024,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
-  modalIconSuccess: { backgroundColor: COLORS.success },
-  modalIconError: { backgroundColor: COLORS.error },
-  modalIconInfo: { backgroundColor: COLORS.warning },
   modalTitle: {
     fontSize: 22,
     fontWeight: '700',
-    color: COLORS.primary,
+    color: '#000',
     marginBottom: 8,
   },
   modalMessage: {
     fontSize: 15,
-    color: COLORS.text,
+    color: '#333',
     textAlign: 'center',
     marginBottom: 20,
     lineHeight: 22,
   },
   modalButton: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: GOLD.primary,
     borderRadius: 12,
     paddingHorizontal: 28,
     paddingVertical: 12,
@@ -1226,9 +1047,7 @@ const styles = StyleSheet.create({
   modalButtonText: {
     fontSize: 15,
     fontWeight: '600',
-    color: COLORS.white,
+    color: '#000',
     textAlign: 'center',
   },
 });
-
-export default AddProduct;

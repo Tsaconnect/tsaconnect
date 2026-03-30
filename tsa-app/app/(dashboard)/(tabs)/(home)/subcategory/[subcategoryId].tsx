@@ -37,13 +37,18 @@ type SortOption = typeof SORT_OPTIONS[number];
 
 export default function SubcategorySellersScreen() {
 
-  const { subcategoryId, categoryId, categoryTitle, subcategoryName } =
+  const { subcategoryId, categoryId, categoryTitle, subcategoryName, categoryType, userRole } =
     useLocalSearchParams<{
       subcategoryId: string;
       categoryId?: string;
       categoryTitle?: string;
       subcategoryName?: string;
+      categoryType?: string;
+      userRole?: string;
     }>();
+
+  const isService = categoryType === 'Service';
+  const isMerchant = userRole === 'merchant' || userRole === 'admin' || userRole === 'super_admin';
 
   const router = useRouter();
 
@@ -132,12 +137,12 @@ export default function SubcategorySellersScreen() {
           </Text>
 
           <Text style={styles.categoryDescription}>
-            {categoryInfo?.description || 'Browse products in this category'}
+            {categoryInfo?.description || (isService ? 'Browse services in this category' : 'Browse products in this category')}
           </Text>
 
           {totalProducts > 0 && (
             <Text style={styles.productCount}>
-              {totalProducts} products available
+              {totalProducts} {isService ? 'services' : 'products'} available
             </Text>
           )}
         </View>
@@ -187,7 +192,7 @@ export default function SubcategorySellersScreen() {
       {!loading && (
         <View style={styles.resultsInfo}>
           <Text style={styles.resultsText}>
-            Showing {showingProducts} of {totalProducts} products
+            Showing {showingProducts} of {totalProducts} {isService ? 'services' : 'products'}
             {searchQuery ? ` for "${searchQuery}"` : ''}
           </Text>
         </View>
@@ -220,16 +225,25 @@ export default function SubcategorySellersScreen() {
 
     return (
       <EmptyState
-        title="No Products Available"
-        message="There are no products in this category yet."
+        title={isService ? "No Services Available" : "No Products Available"}
+        message={isService ? "There are no services in this category yet." : "There are no products in this category yet."}
         icon="storefront-outline"
         action={
-          <Pressable
-            style={styles.becomeSellerButton}
-            onPress={() => router.push('/merchants/inventory/add')}
-          >
-            <Text style={styles.becomeSellerText}>Become a Seller</Text>
-          </Pressable>
+          isMerchant ? (
+            <Pressable
+              style={styles.becomeSellerButton}
+              onPress={() => router.push(isService ? '/serviceaction?index=1' : '/merchants/inventory/add')}
+            >
+              <Text style={styles.becomeSellerText}>{isService ? "List a Service" : "List a Product"}</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              style={styles.becomeSellerButton}
+              onPress={() => router.push('/merchants/merchant-request')}
+            >
+              <Text style={styles.becomeSellerText}>Become a Merchant</Text>
+            </Pressable>
+          )
         }
       />
     );
@@ -285,7 +299,7 @@ export default function SubcategorySellersScreen() {
       <Stack.Screen
         options={{
           ...baseHeaderOptions,
-          title: subcategoryName || categoryTitle || 'Products',
+          title: subcategoryName || categoryTitle || (isService ? 'Services' : 'Products'),
           headerLeft: () => (
             <Pressable onPress={handleBackPress}>
               <Ionicons name="arrow-back" size={22} color="#D4AF37" />

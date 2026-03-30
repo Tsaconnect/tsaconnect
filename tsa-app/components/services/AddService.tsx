@@ -29,7 +29,8 @@ const GOLD = {
 };
 
 const AddService = () => {
-  const { token, setLoading, loading } = useAuth();
+  const { token } = useAuth();
+  const [loading, setLoading] = useState(false);
   const [productImages, setProductImages] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [productName, setProductName] = useState("");
@@ -116,9 +117,9 @@ const AddService = () => {
     formData.append("companyName", companyName);
 
     try {
-      const response = await axios.post(`${baseUrl}/adverts`, formData, {
+      const response = await axios.post(`${baseUrl}/products`, formData, {
         headers: {
-          Authorization: token,
+          Authorization: token?.startsWith('Bearer ') ? token : `Bearer ${token}`,
           "Content-Type": "multipart/form-data",
         },
       });
@@ -129,7 +130,8 @@ const AddService = () => {
       }
     } catch (error: any) {
       setLoading(false);
-      Alert.alert("Error", error.response?.data?.message || "Failed to create service.");
+      const message = error?.response?.data?.message || "Failed to create service.";
+      Alert.alert("Error", message);
     }
   };
 
