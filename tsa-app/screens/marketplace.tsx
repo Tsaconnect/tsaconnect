@@ -16,7 +16,6 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import TradeAndEarnScreen from './TradeAndEarnScreen';
-import DepositScreen from './fundfiat';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '@/components/services/api';
 import CartIconBadge from '@/components/common/CartIconBadge';
@@ -317,8 +316,19 @@ const MarketplaceScreen: React.FC = () => {
         )}
 
         {selectedTab === 'trade' && <TradeAndEarnScreen />}
-        {selectedTab === 'fundfiat' && <DepositScreen />}
-        {selectedTab === 'send' && <TradeAndEarnScreen />}
+        {(selectedTab === 'fundfiat' || selectedTab === 'send') && (
+          <View style={styles.comingSoonWrap}>
+            <View style={styles.comingSoonIcon}>
+              <Icon name="construction" size={48} color="#D4AF37" />
+            </View>
+            <Text style={styles.comingSoonTitle}>Coming Soon</Text>
+            <Text style={styles.comingSoonDesc}>
+              {selectedTab === 'fundfiat'
+                ? 'P2P Buy USDT will be available soon. Stay tuned!'
+                : 'P2P Sell USDT will be available soon. Stay tuned!'}
+            </Text>
+          </View>
+        )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -429,6 +439,17 @@ const styles = StyleSheet.create({
   bannerInfo: { flex: 1 },
   bannerTitle: { fontSize: 15, fontWeight: '700', color: '#16A34A', marginBottom: 2 },
   bannerDesc: { fontSize: 12, color: '#888' },
+
+  // Coming Soon
+  comingSoonWrap: { alignItems: 'center', paddingVertical: 60, paddingHorizontal: 32 },
+  comingSoonIcon: {
+    width: 80, height: 80, borderRadius: 40,
+    backgroundColor: 'rgba(212,175,55,0.1)',
+    justifyContent: 'center', alignItems: 'center',
+    marginBottom: 20,
+  },
+  comingSoonTitle: { fontSize: 22, fontWeight: '800', color: '#1A1A1A', marginBottom: 8 },
+  comingSoonDesc: { fontSize: 14, color: '#888', textAlign: 'center', lineHeight: 20 },
 });
 
 export default MarketplaceScreen;
