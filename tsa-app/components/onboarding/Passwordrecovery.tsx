@@ -12,6 +12,7 @@ import {
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { COLORS } from '../../constants/theme';
 import { router } from 'expo-router';
+import api from '../services/api';
 
 export default function PasswordRecovery() {
   const [emailOrPhone, setEmailOrPhone] = useState('');
@@ -20,7 +21,7 @@ export default function PasswordRecovery() {
 
   const handleSendCode = async () => {
     if (!emailOrPhone.trim()) {
-      setError('Please enter your email or phone number');
+      setError('Please enter your email address');
       return;
     }
 
@@ -28,8 +29,11 @@ export default function PasswordRecovery() {
     setLoading(true);
 
     try {
-      // TODO: Call password recovery API endpoint when available
-      // await api.requestPasswordReset(emailOrPhone.trim());
+      const result = await api.forgotPassword(emailOrPhone.trim());
+      if (!result.success) {
+        setError(result.message || 'Failed to send recovery code. Please try again.');
+        return;
+      }
 
       // Navigate to OTP screen with email context
       router.push({
@@ -55,14 +59,14 @@ export default function PasswordRecovery() {
 
         <Text style={styles.title}>Recover Password</Text>
         <Text style={styles.subtitle}>
-          Enter the email or phone number associated with your account and we'll send you a verification code.
+          Enter the email associated with your account and we'll send you a verification code.
         </Text>
 
         <View style={[styles.inputContainer, error ? styles.inputError : null]}>
           <MaterialIcons name="email" size={20} color={error ? COLORS.danger : COLORS.gray} style={styles.inputIcon} />
           <TextInput
             style={styles.input}
-            placeholder="Email or Phone Number"
+            placeholder="Email Address"
             placeholderTextColor="#999"
             value={emailOrPhone}
             onChangeText={(text) => {

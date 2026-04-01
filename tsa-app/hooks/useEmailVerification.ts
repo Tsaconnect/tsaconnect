@@ -1,6 +1,7 @@
 import { Alert } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '../AuthContext/AuthContext';
+import api from '../components/services/api';
 
 /**
  * Returns a gate function that checks email verification.
@@ -20,7 +21,14 @@ export function useEmailVerification() {
         { text: 'Later', style: 'cancel' },
         {
           text: 'Verify Now',
-          onPress: () => router.push('/verify'),
+          onPress: async () => {
+            try {
+              await api.sendOtp();
+            } catch (_) {
+              // OTP send failure is non-blocking; the verify screen has a resend button
+            }
+            router.push('/verify');
+          },
         },
       ]
     );

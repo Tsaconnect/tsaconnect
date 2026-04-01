@@ -130,6 +130,7 @@ const OrderList = () => {
         data={STATUS_FILTERS}
         keyExtractor={(item) => item.key}
         contentContainerStyle={styles.filterContainer}
+        style={styles.filterList}
         renderItem={({ item: filter }) => (
           <TouchableOpacity
             style={[
@@ -195,6 +196,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  filterList: {
+    flexGrow: 0,
   },
   filterContainer: {
     paddingHorizontal: 16,

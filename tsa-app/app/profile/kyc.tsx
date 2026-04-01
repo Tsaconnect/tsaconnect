@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   StyleSheet,
   View,
@@ -12,6 +12,7 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { Camera } from "expo-camera";
 import { WebView } from "react-native-webview";
+import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
 import { COLORS, SIZES } from "../../constants/theme";
 
@@ -43,9 +44,11 @@ export default function KYCScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    checkStatus();
-  }, [checkStatus]);
+  useFocusEffect(
+    useCallback(() => {
+      checkStatus();
+    }, [checkStatus])
+  );
 
   const requestCameraPermission = async (): Promise<boolean> => {
     const { status } = await Camera.requestCameraPermissionsAsync();

@@ -167,7 +167,7 @@ const ProfileScreen = () => {
               </View>
             </View>
 
-            {!user.emailVerified ? (
+            {!user.emailVerified && (
               <TouchableOpacity
                 style={styles.verificationButton}
                 onPress={handleVerifyEmail}
@@ -175,7 +175,9 @@ const ProfileScreen = () => {
                 <Icon name="mail" size={20} color="#FFFFFF" />
                 <Text style={styles.verificationText}>Verify Email</Text>
               </TouchableOpacity>
-            ) : user.verificationStatus === 'verified' ? (
+            )}
+
+            {user.verificationStatus === 'verified' ? (
               <View style={styles.verifiedContainer}>
                 <Icon name="verified" size={20} color="green" />
                 <Text style={styles.verifiedText}>Verified</Text>
