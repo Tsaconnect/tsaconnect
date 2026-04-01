@@ -11,6 +11,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { COLORS } from '../../constants/theme';
 import { router } from 'expo-router';
 import api from '../services/api';
+import { useAuth } from '../../AuthContext/AuthContext';
 
 interface VerifyProps {
   email?: string;
@@ -20,6 +21,7 @@ interface VerifyProps {
 }
 
 const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
+  const { setEmailVerified } = useAuth();
   const [verificationCode, setVerificationCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
@@ -45,6 +47,7 @@ const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
     try {
       const result = await api.verifyOtp(verificationCode);
       if (result.success) {
+        setEmailVerified(true);
         setSuccessMsg('Email verified successfully!');
         if (onSuccess) {
           onSuccess();

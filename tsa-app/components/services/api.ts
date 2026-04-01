@@ -792,6 +792,41 @@ class APIService {
   async sendVerificationEmail(): Promise<ApiResponse<any>> {
     return this.sendOtp();
   }
+
+  async forgotPassword(email: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Forgot password error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to send reset code.',
+      };
+    }
+  }
+
+  async resetPassword(email: string, code: string, newPassword: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code, newPassword }),
+      });
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Reset password error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to reset password.',
+      };
+    }
+  }
+
   async createProduct(formData: FormData): Promise<ApiResponse<Product>> {
     try {
       const response = await fetch(`${API_BASE_URL}/products`, {

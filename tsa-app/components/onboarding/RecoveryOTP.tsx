@@ -13,6 +13,7 @@ import { OtpInput } from 'react-native-otp-entry';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { COLORS } from '../../constants/theme';
 import { router, useLocalSearchParams } from 'expo-router';
+import api from '../services/api';
 
 const RecoveryOTP = () => {
   const { emailOrPhone } = useLocalSearchParams<{ emailOrPhone?: string }>();
@@ -53,14 +54,16 @@ const RecoveryOTP = () => {
 
     setLoading(true);
     try {
-      // TODO: Call password reset API endpoint when available
-      // await api.resetPassword({ emailOrPhone, otp, newPassword });
-
-      Alert.alert(
-        'Password Reset',
-        'Your password has been updated successfully.',
-        [{ text: 'Login', onPress: () => router.replace('/login') }]
-      );
+      const result = await api.resetPassword(emailOrPhone || '', otp, newPassword);
+      if (result.success) {
+        Alert.alert(
+          'Password Reset',
+          'Your password has been updated successfully.',
+          [{ text: 'Login', onPress: () => router.replace('/login') }]
+        );
+      } else {
+        Alert.alert('Error', result.message || 'Failed to reset password. Please try again.');
+      }
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to reset password. Please try again.');
     } finally {
@@ -71,9 +74,12 @@ const RecoveryOTP = () => {
   const handleResendCode = async () => {
     setResending(true);
     try {
-      // TODO: Call resend OTP API endpoint when available
-      // await api.requestPasswordReset(emailOrPhone);
-      Alert.alert('Code Sent', 'A new verification code has been sent.');
+      const result = await api.forgotPassword(emailOrPhone || '');
+      if (result.success) {
+        Alert.alert('Code Sent', 'A new verification code has been sent.');
+      } else {
+        Alert.alert('Error', result.message || 'Failed to resend code.');
+      }
     } catch (err: any) {
       Alert.alert('Error', 'Failed to resend code. Please try again.');
     } finally {

@@ -128,6 +128,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         await AsyncStorage.setItem("authToken", jwtToken);
         setToken(jwtToken);
         setCurrentUser(response.data.user);
+        setEmailVerified(response.data.user?.emailVerified ?? false);
         setUsername(username);
         setAuthenticated(true);
         apiClient.interceptors.request.use((config: any) => {

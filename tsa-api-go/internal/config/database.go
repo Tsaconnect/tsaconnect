@@ -41,6 +41,7 @@ func AutoMigrate() error {
 		&models.MerchantRequest{},
 		&models.Notification{},
 		&models.EmailVerification{},
+		&models.PasswordReset{},
 		&models.TPEarning{},
 	); err != nil {
 		return err
