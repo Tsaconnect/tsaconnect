@@ -45,7 +45,8 @@
         {
           "cameraPermission": "We need camera access to verify your identity"
         }
-      ]
+      ],
+      "expo-updates"
     ],
     "experiments": {
       "typedRoutes": true

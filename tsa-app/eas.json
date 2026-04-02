@@ -1,48 +1,23 @@
- {
-  "build": {
-    "preview": {
-      "channel": "preview",
-      "android": {
-        "buildType": "apk",
-        "gradleCommand": ":app:assembleRelease"
-      }
-    },
-    "preview2": {
-      "android": {
-        "gradleCommand": ":app:assembleRelease"
-      }
-    },
-    "preview3": {
-      "developmentClient": true
-    },
-    "preview4": {
-      "distribution": "internal"
-    },
-    "production": {}
-  }
-} 
-
-/* {
+{
   "cli": {
     "version": ">= 10.0.0"
   },
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "channel": "development"
     },
     "preview": {
+      "distribution": "internal",
+      "channel": "preview",
       "android": {
-        "gradleCommand": ":app:assembleRelease -Dorg.gradle.jvmargs=\"-Xmx6g -XX:MaxMetaspaceSize=2g\"",
-        "autoIncrement": true
-      },
-      "ios": {
-        "autoIncrement": true
+        "gradleCommand": ":app:assembleRelease"
       }
     },
     "production": {
+      "channel": "production",
       "android": {
-        "gradleCommand": ":app:assembleRelease -Dorg.gradle.jvmargs=\"-Xmx6g -XX:MaxMetaspaceSize=2g\"",
         "buildType": "app-bundle"
       }
     }
@@ -50,4 +25,4 @@
   "submit": {
     "production": {}
   }
-} */
+}
