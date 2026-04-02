@@ -165,8 +165,17 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 	})
 }
 
+// resolveNetwork reads the "network" query param and returns "mainnet" or "testnet".
+func resolveNetwork(c *gin.Context) string {
+	n := c.DefaultQuery("network", "mainnet")
+	if n == "testnet" {
+		return "testnet"
+	}
+	return "mainnet"
+}
+
 // GetWalletBalances handles GET /api/wallet/balances.
-// Returns token balances for the user's registered wallet address across configured chains.
+// Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional).
 func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -175,6 +184,13 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+
+	network := resolveNetwork(c)
+	netCfg, ok := h.Config.Networks[network]
+	if !ok {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid network")
 		return
 	}
 
@@ -192,7 +208,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid chainId")
 			return
 		}
-		for name, cfg := range h.Config.Chains {
+		for name, cfg := range netCfg.Chains {
 			if cfg.ChainID == cid {
 				chains = append(chains, chainQuery{name, cfg})
 				break
@@ -203,7 +219,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 			return
 		}
 	} else {
-		for name, cfg := range h.Config.Chains {
+		for name, cfg := range netCfg.Chains {
 			chains = append(chains, chainQuery{name, cfg})
 		}
 	}
@@ -242,7 +258,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	}
 
 	for _, cq := range chains {
-		client := h.BlockchainService.ClientForChain(cq.name)
+		client := h.BlockchainService.ClientForNetwork(network, cq.name)
 		chainBalances := make(map[string]tokenBalance)
 
 		if client != nil {
@@ -263,7 +279,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 			json.Unmarshal(tok.Chains, &tokenChains)
 			for _, tc := range tokenChains {
 				if tc == cq.name {
-					tokenAddr := h.BlockchainService.TokenAddress(cq.name, tok.Symbol)
+					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
 					if tokenAddr != "" && client != nil {
 						if bal, err := client.GetTokenBalance(tokenAddr, user.WalletAddress); err == nil {
 							balStr := formatTokenBalance(bal, tok.Decimals)
@@ -289,6 +305,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
 		"walletAddress": user.WalletAddress,
+		"network":       network,
 		"balances":      result,
 	})
 }
@@ -328,6 +345,12 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		return
 	}
 
+	// Resolve which network this chainId belongs to
+	network, _, _ := h.BlockchainService.NetworkForChainID(req.ChainID)
+	if network == "" {
+		network = "mainnet"
+	}
+
 	decimals := 18
 	if tokenUpper == "USDT" || tokenUpper == "USDC" {
 		decimals = 6
@@ -341,10 +364,10 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 	var txBytes []byte
 	var err error
 
-	if tokenUpper == "S" || tokenUpper == "TBNB" {
+	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
 		txBytes, err = client.PrepareNativeTransfer(user.WalletAddress, req.ToAddress, amountWei)
 	} else {
-		tokenAddr := h.BlockchainService.TokenAddress(chainName, tokenUpper)
+		tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, chainName, tokenUpper)
 		if tokenAddr == "" {
 			utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
 			return

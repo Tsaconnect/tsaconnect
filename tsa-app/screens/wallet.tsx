@@ -22,6 +22,7 @@ import {
 } from '../services/wallet';
 import { useTokens } from '../hooks/useTokens';
 import { CHAINS, type ChainKey } from '../constants/chains';
+import { useNetwork } from '../hooks/useNetwork';
 
 // ── Types ──
 interface WalletAsset {
@@ -225,6 +226,7 @@ const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visibl
 // ── Main Screen ──
 const WalletScreen: React.FC = () => {
   const { tokenList } = useTokens();
+  const { network, switchNetwork } = useNetwork();
   const [assets, setAssets] = useState<WalletAsset[]>([]);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -312,12 +314,14 @@ const WalletScreen: React.FC = () => {
             const entry = nestedBalances[chainKey][asset.symbol];
             if (entry && typeof entry === 'object') {
               // New format: { balance: "30", usdPrice: 0.52, usdValue: 15.6 }
-              balance = parseFloat(entry.balance || '0');
-              usdValue = entry.usdValue || 0;
-              usdPrice = entry.usdPrice || 0;
+              const parsedBal = parseFloat(entry.balance || '0');
+              balance = Number.isFinite(parsedBal) ? parsedBal : 0;
+              usdValue = Number.isFinite(entry.usdValue) ? entry.usdValue : 0;
+              usdPrice = Number.isFinite(entry.usdPrice) ? entry.usdPrice : 0;
             } else if (entry) {
               // Legacy format: plain string "30"
-              balance = parseFloat(entry);
+              const parsedBal = parseFloat(entry);
+              balance = Number.isFinite(parsedBal) ? parsedBal : 0;
             }
           }
           return { ...asset, balance, usdValue, usdPrice };
@@ -333,7 +337,7 @@ const WalletScreen: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [buildAssetList]);
+  }, [buildAssetList, network]);
 
   useEffect(() => { fetchBalances(); }, [fetchBalances]);
 
@@ -352,7 +356,7 @@ const WalletScreen: React.FC = () => {
     }
   }, [activeAddress, fetchBalances]);
 
-  const totalUsdValue = assets.reduce((s, a) => s + a.usdValue, 0);
+  const totalUsdValue = assets.reduce((s, a) => s + (Number.isFinite(a.usdValue) ? a.usdValue : 0), 0);
 
   const handleQuickAction = (action: string) => {
     if (action === 'fund') setShowFundModal(true);
@@ -376,7 +380,7 @@ const WalletScreen: React.FC = () => {
 
   // Group assets: those with balance first, then zero-balance
   const assetsWithBalance = assets.filter(a => a.balance > 0);
-  const assetsWithoutBalance = assets.filter(a => a.balance === 0);
+  const assetsWithoutBalance = assets.filter(a => !(a.balance > 0));
 
   // Skeleton loading
   if (isLoading && !isRefreshing) {
@@ -397,6 +401,18 @@ const WalletScreen: React.FC = () => {
         <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
       }
     >
+      {__DEV__ && (
+        <Pressable
+          style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}
+          onPress={() => switchNetwork(network === 'mainnet' ? 'testnet' : 'mainnet')}
+        >
+          <View style={[styles.networkDot, { backgroundColor: network === 'mainnet' ? '#4CAF50' : '#FF9800' }]} />
+          <Text style={styles.networkBadgeText}>
+            {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+          </Text>
+        </Pressable>
+      )}
+
       <WalletBalanceCard
         totalUsdValue={totalUsdValue}
         isValuesHidden={isValuesHidden}
@@ -476,6 +492,31 @@ const WalletScreen: React.FC = () => {
 // ── Styles ──
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F5F5F7' },
+  networkBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: '#E8F5E9',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  networkBadgeTestnet: {
+    backgroundColor: '#FFF3E0',
+  },
+  networkDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  networkBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#333',
+  },
   skeletonContent: { padding: 16 },
   skeletonCard: {
     backgroundColor: '#E5E5E5',

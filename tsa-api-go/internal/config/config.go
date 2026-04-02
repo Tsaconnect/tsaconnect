@@ -10,7 +10,13 @@ type ChainConfig struct {
 	Name           string
 	RPCURL         string
 	ChainID        int64
-	NativeCurrency string // "S", "tBNB", etc.
+	NativeCurrency string // "S", "BNB", "tBNB", etc.
+}
+
+// NetworkConfig holds chains and token addresses for a single network environment.
+type NetworkConfig struct {
+	Chains         map[string]ChainConfig
+	TokenAddresses map[string]string // "chain:symbol" → contract address
 }
 
 type Config struct {
@@ -37,7 +43,7 @@ type Config struct {
 	BSCChainID int64
 
 	// Smart contract addresses
-	ProductEscrowAddress  string
+	ProductEscrowAddress   string
 	ServiceContractAddress string
 
 	// Mailjet email service
@@ -50,9 +56,12 @@ type Config struct {
 	PersonaBaseURL       string
 	PersonaWebhookSecret string
 
-	// Multi-chain configuration (populated in Load)
+	// Network configurations: "mainnet" and "testnet"
+	Networks map[string]NetworkConfig
+
+	// Legacy flat fields — kept for backward compat, point to mainnet
 	Chains         map[string]ChainConfig
-	TokenAddresses map[string]string // "chain:symbol" → contract address
+	TokenAddresses map[string]string
 }
 
 func Load() *Config {
@@ -67,7 +76,7 @@ func Load() *Config {
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),
 
-		// Sonic blockchain
+		// Sonic blockchain (env vars override testnet defaults)
 		SonicRPCURL:         getEnv("SONIC_RPC_URL", "https://rpc.testnet.soniclabs.com"),
 		SonicChainID:        getEnvInt64("SONIC_CHAIN_ID", 14601),
 		MCGPTokenAddress:    getEnv("MCGP_TOKEN_ADDRESS", "0x517600323e5E2938207fA2e2e915B9D80e5B2b21"),
@@ -80,7 +89,7 @@ func Load() *Config {
 		BSCChainID: getEnvInt64("BSC_CHAIN_ID", 97),
 
 		// Smart contract addresses
-		ProductEscrowAddress:  getEnv("PRODUCT_ESCROW_ADDRESS", "0xc5E5165cbCB056E4d212727cD4A6642CD5EB886d"),
+		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0xc5E5165cbCB056E4d212727cD4A6642CD5EB886d"),
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xf870DCC5741030990aF1e43D021D986A286C77A6"),
 	}
 
@@ -94,29 +103,60 @@ func Load() *Config {
 	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
 	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
 
-	cfg.Chains = map[string]ChainConfig{
-		"sonic": {Name: "Sonic Network", RPCURL: cfg.SonicRPCURL, ChainID: cfg.SonicChainID, NativeCurrency: "S"},
-		"bsc":   {Name: "BNB Smart Chain", RPCURL: cfg.BSCRPCURL, ChainID: cfg.BSCChainID, NativeCurrency: "tBNB"},
+	// ── Mainnet configuration ──
+	// Token addresses sourced from https://docs.soniclabs.com/sonic/build-on-sonic/contract-addresses
+	mainnetChains := map[string]ChainConfig{
+		"sonic": {Name: "Sonic Network", RPCURL: getEnv("SONIC_MAINNET_RPC_URL", "https://rpc.soniclabs.com"), ChainID: getEnvInt64("SONIC_MAINNET_CHAIN_ID", 146), NativeCurrency: "S"},
+		"bsc":   {Name: "BNB Smart Chain", RPCURL: getEnv("BSC_MAINNET_RPC_URL", "https://bsc-dataseed.binance.org"), ChainID: getEnvInt64("BSC_MAINNET_CHAIN_ID", 56), NativeCurrency: "BNB"},
+	}
+	mainnetTokens := map[string]string{}
+	if cfg.MCGPTokenAddress != "" {
+		mainnetTokens["sonic:MCGP"] = cfg.MCGPTokenAddress
+	}
+	// Mainnet stablecoin addresses (official Sonic contract addresses as defaults)
+	if addr := getEnv("MAINNET_USDT_ADDRESS", "0x6047828dc181963ba44974801ff68e538da5eaf9"); addr != "" {
+		mainnetTokens["sonic:USDT"] = addr
+	}
+	if addr := getEnv("MAINNET_USDC_ADDRESS", "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"); addr != "" {
+		mainnetTokens["sonic:USDC"] = addr
+	}
+	if addr := getEnv("BSC_MAINNET_USDT_ADDRESS", "0x55d398326f99059fF775485246999027B3197955"); addr != "" {
+		mainnetTokens["bsc:USDT"] = addr
+	}
+	if addr := getEnv("BSC_MAINNET_USDC_ADDRESS", "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"); addr != "" {
+		mainnetTokens["bsc:USDC"] = addr
 	}
 
-	cfg.TokenAddresses = map[string]string{}
-	if cfg.MCGPTokenAddress != "" {
-		cfg.TokenAddresses["sonic:MCGP"] = cfg.MCGPTokenAddress
+	// ── Testnet configuration ──
+	testnetChains := map[string]ChainConfig{
+		"sonic": {Name: "Sonic Testnet", RPCURL: getEnv("SONIC_TESTNET_RPC_URL", "https://rpc.testnet.soniclabs.com"), ChainID: getEnvInt64("SONIC_TESTNET_CHAIN_ID", 14601), NativeCurrency: "S"},
+		"bsc":   {Name: "BSC Testnet", RPCURL: getEnv("BSC_TESTNET_RPC_URL", "https://data-seed-prebsc-1-s1.binance.org:8545"), ChainID: getEnvInt64("BSC_TESTNET_CHAIN_ID", 97), NativeCurrency: "tBNB"},
 	}
-	if cfg.USDTTokenAddress != "" {
-		cfg.TokenAddresses["sonic:USDT"] = cfg.USDTTokenAddress
+	testnetTokens := map[string]string{}
+	if addr := getEnv("TESTNET_MCGP_ADDRESS", ""); addr != "" {
+		testnetTokens["sonic:MCGP"] = addr
 	}
-	if cfg.USDCTokenAddress != "" {
-		cfg.TokenAddresses["sonic:USDC"] = cfg.USDCTokenAddress
+	if addr := getEnv("TESTNET_USDT_ADDRESS", ""); addr != "" {
+		testnetTokens["sonic:USDT"] = addr
 	}
-	bscUSDT := getEnv("BSC_USDT_ADDRESS", "")
-	if bscUSDT != "" {
-		cfg.TokenAddresses["bsc:USDT"] = bscUSDT
+	if addr := getEnv("TESTNET_USDC_ADDRESS", "0x0BA304580ee7c9a980CF72e55f5Ed2E9fd30Bc51"); addr != "" {
+		testnetTokens["sonic:USDC"] = addr
 	}
-	bscUSDC := getEnv("BSC_USDC_ADDRESS", "")
-	if bscUSDC != "" {
-		cfg.TokenAddresses["bsc:USDC"] = bscUSDC
+	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "")); addr != "" {
+		testnetTokens["bsc:USDT"] = addr
 	}
+	if addr := getEnv("BSC_TESTNET_USDC_ADDRESS", getEnv("BSC_USDC_ADDRESS", "")); addr != "" {
+		testnetTokens["bsc:USDC"] = addr
+	}
+
+	cfg.Networks = map[string]NetworkConfig{
+		"mainnet": {Chains: mainnetChains, TokenAddresses: mainnetTokens},
+		"testnet": {Chains: testnetChains, TokenAddresses: testnetTokens},
+	}
+
+	// Legacy flat fields point to mainnet for backward compat
+	cfg.Chains = mainnetChains
+	cfg.TokenAddresses = mainnetTokens
 
 	return cfg
 }
