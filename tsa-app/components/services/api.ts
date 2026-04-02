@@ -221,7 +221,6 @@ export interface Product {
 
 class APIService {
   private token: string | null = null;
-
   // Set token for authenticated requests
   setToken(token: string) {
     this.token = token;
@@ -703,8 +702,6 @@ class APIService {
 
   // Get stored token
   async getStoredToken(): Promise<string | null> {
-    this.getHeaders();
-    console.log('Getting stored token with headers:', this.getHeaders());
     try {
       return await AsyncStorage.getItem('authToken');
     } catch (error) {

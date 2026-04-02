@@ -9,8 +9,10 @@ import { NotificationProvider } from '../contexts/NotificationContext';
 
 const RootLayout = () => {
   useEffect(() => {
-    async function checkForUpdates() {
-      if (__DEV__) return;
+    if (__DEV__) return;
+
+    // Defer update check so it doesn't block app startup
+    const timer = setTimeout(async () => {
       try {
         const update = await Updates.checkForUpdateAsync();
         if (update.isAvailable) {
@@ -25,11 +27,11 @@ const RootLayout = () => {
           );
         }
       } catch (e) {
-        console.log("Update check failed:", e);
+        // Update check is non-critical, silently ignore
       }
-    }
+    }, 5000);
 
-    checkForUpdates();
+    return () => clearTimeout(timer);
   }, []);
 
   return (

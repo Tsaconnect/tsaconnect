@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { COLORS } from '../../constants/theme';
 import { router } from 'expo-router';
@@ -36,10 +37,7 @@ export default function PasswordRecovery() {
       }
 
       // Navigate to OTP screen with email context
-      router.push({
-        pathname: '/passwordOTP',
-        params: { emailOrPhone: emailOrPhone.trim() },
-      });
+      router.push(`/passwordOTP?emailOrPhone=${encodeURIComponent(emailOrPhone.trim())}`);
     } catch (err: any) {
       setError(err.message || 'Failed to send recovery code. Please try again.');
     } finally {
@@ -48,15 +46,15 @@ export default function PasswordRecovery() {
   };
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <MaterialIcons name="arrow-back" size={24} color={COLORS.primary} />
+      </TouchableOpacity>
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.content}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <MaterialIcons name="arrow-back" size={24} color={COLORS.primary} />
-        </TouchableOpacity>
-
         <Text style={styles.title}>Recover Password</Text>
         <Text style={styles.subtitle}>
           Enter the email associated with your account and we'll send you a verification code.
@@ -107,13 +105,17 @@ export default function PasswordRecovery() {
         </View>
       </View>
     </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  safeArea: {
     flex: 1,
     backgroundColor: '#fff',
+  },
+  container: {
+    flex: 1,
   },
   content: {
     flex: 1,
@@ -121,11 +123,9 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   backButton: {
-    position: 'absolute',
-    top: 60,
-    left: 20,
-    padding: 8,
-    zIndex: 1,
+    padding: 12,
+    paddingLeft: 16,
+    alignSelf: 'flex-start',
   },
   title: {
     fontSize: 28,

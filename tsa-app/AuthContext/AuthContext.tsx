@@ -49,6 +49,7 @@ interface AppContextType {
   setCurrentUser: React.Dispatch<React.SetStateAction<any>>;
   emailVerified: boolean;
   setEmailVerified: React.Dispatch<React.SetStateAction<boolean>>;
+  isHydrated: boolean;
 }
 
 const defaultContextValue: AppContextType = {
@@ -77,6 +78,7 @@ const defaultContextValue: AppContextType = {
   setCurrentUser: () => {},
   emailVerified: false,
   setEmailVerified: () => {},
+  isHydrated: false,
 };
 
 export const AppContext = createContext<AppContextType>(defaultContextValue);
@@ -97,6 +99,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<any>();
   const [tTy, settTy] = useState<any>();
   const [emailVerified, setEmailVerified] = useState<boolean>(false);
+  const [isHydrated, setIsHydrated] = useState<boolean>(false);
 
   const addItem = async (newItem: any) => {
     try {
@@ -437,11 +440,17 @@ const register = async (formData: FormData) => {
           setCurrentUser(userData);
           setEmailVerified(userData?.emailVerified ?? false);
         } catch (err) {
-          // Token may be expired — don't force logout, let screens handle it
+          // Token may be expired — clear auth so index.tsx redirects to login
+          setAuthenticated(false);
+          setToken("");
+          await AsyncStorage.removeItem("token");
+          await AsyncStorage.removeItem("authToken");
         }
       }
     } catch (err) {
       console.error("Error hydrating auth:", err);
+    } finally {
+      setIsHydrated(true);
     }
   }
 
@@ -477,6 +486,7 @@ const register = async (formData: FormData) => {
         setCurrentUser,
         emailVerified,
         setEmailVerified,
+        isHydrated,
       }}
     >
       {children}
