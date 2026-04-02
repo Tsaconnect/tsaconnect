@@ -87,16 +87,13 @@ const Layout = () => {
     }
   };
 
-  // Handle avatar press - refresh profile and navigate
-  const handleAvatarPress = async () => {
-    try {
-      // Refresh profile data before navigating
-      await refreshProfile();
-      router.push("/profile");
-    } catch (error) {
-      console.error('Error navigating to profile:', error);
-      router.push("/profile");
+  // Handle avatar press - navigate immediately, profile screen fetches its own data
+  const handleAvatarPress = () => {
+    if (!isAuthenticated) {
+      router.push("/login");
+      return;
     }
+    router.push("/profile");
   };
 
   // Get user initials for avatar fallback
@@ -106,6 +103,18 @@ const Layout = () => {
     if (names.length === 1) return name.charAt(0).toUpperCase();
     return (names[0].charAt(0) + names[names.length - 1].charAt(0)).toUpperCase();
   };
+
+  // Guard: redirect unauthenticated users to login
+  useEffect(() => {
+    if (!loading && !isAuthenticated) {
+      router.replace("/login");
+    }
+  }, [loading, isAuthenticated]);
+
+  // Don't render dashboard UI until auth is confirmed
+  if (loading || !isAuthenticated) {
+    return null;
+  }
 
   const isMerchant = userRole === "merchant";
 
