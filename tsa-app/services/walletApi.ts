@@ -52,7 +52,8 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
     'Content-Type': 'application/json',
   };
   if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+    // Token may already include "Bearer " prefix from AuthContext
+    headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
   }
   return headers;
 }
