@@ -39,65 +39,98 @@ type TransactionVerification struct {
 
 // BlockchainService provides blockchain interaction methods via EVM RPC clients.
 type BlockchainService struct {
-	clients map[string]*blockchain.EVMClient // keyed by chain name: "sonic", "bsc"
+	clients map[string]*blockchain.EVMClient // keyed by "network:chain" e.g. "mainnet:sonic"
 	cfg     *config.Config
 }
 
-// NewBlockchainService creates a BlockchainService connected to all configured chains.
+// NewBlockchainService creates a BlockchainService connected to all configured chains
+// across both mainnet and testnet networks.
 func NewBlockchainService(cfg *config.Config) *BlockchainService {
 	bs := &BlockchainService{
 		clients: make(map[string]*blockchain.EVMClient),
 		cfg:     cfg,
 	}
 
-	for name, chain := range cfg.Chains {
-		client, err := blockchain.NewEVMClient(chain.RPCURL, chain.ChainID)
-		if err != nil {
-			log.Printf("Warning: failed to connect to %s (chain ID %d): %v", name, chain.ChainID, err)
-			continue
+	for network, netCfg := range cfg.Networks {
+		for name, chain := range netCfg.Chains {
+			key := network + ":" + name
+			client, err := blockchain.NewEVMClient(chain.RPCURL, chain.ChainID)
+			if err != nil {
+				log.Printf("Warning: failed to connect to %s/%s (chain ID %d): %v", network, name, chain.ChainID, err)
+				continue
+			}
+			bs.clients[key] = client
+			log.Printf("%s/%s blockchain client connected (chain ID: %d, RPC: %s)", network, name, chain.ChainID, chain.RPCURL)
 		}
-		bs.clients[name] = client
-		log.Printf("%s blockchain client connected (chain ID: %d, RPC: %s)", name, chain.ChainID, chain.RPCURL)
 	}
 
 	return bs
 }
 
-// ClientForChain returns the EVMClient for the given chain name.
-func (bs *BlockchainService) ClientForChain(chain string) *blockchain.EVMClient {
+// ClientForNetwork returns the EVMClient for a specific network and chain.
+func (bs *BlockchainService) ClientForNetwork(network, chain string) *blockchain.EVMClient {
 	if bs.clients == nil {
 		return nil
 	}
-	return bs.clients[chain]
+	return bs.clients[network+":"+chain]
 }
 
-// ClientForChainID returns the EVMClient matching the given numeric chain ID.
+// ClientForChain returns the EVMClient for the given chain name on mainnet (backward compat).
+func (bs *BlockchainService) ClientForChain(chain string) *blockchain.EVMClient {
+	return bs.ClientForNetwork("mainnet", chain)
+}
+
+// ClientForChainID returns the EVMClient matching the given numeric chain ID,
+// searching across all networks.
 func (bs *BlockchainService) ClientForChainID(chainID int64) (*blockchain.EVMClient, string) {
 	if bs.cfg == nil {
 		return nil, ""
 	}
-	for name, chain := range bs.cfg.Chains {
-		if chain.ChainID == chainID {
-			if bs.clients == nil {
-				return nil, name
+	for network, netCfg := range bs.cfg.Networks {
+		for name, chain := range netCfg.Chains {
+			if chain.ChainID == chainID {
+				key := network + ":" + name
+				return bs.clients[key], name
 			}
-			return bs.clients[name], name
 		}
 	}
 	return nil, ""
 }
 
-// Client returns the Sonic client for backward compatibility.
+// Client returns the mainnet Sonic client for backward compatibility.
 func (bs *BlockchainService) Client() *blockchain.EVMClient {
 	return bs.ClientForChain("sonic")
 }
 
-// TokenAddress returns the contract address for a token on a chain.
-func (bs *BlockchainService) TokenAddress(chain, symbol string) string {
+// TokenAddressForNetwork returns the contract address for a token on a specific network/chain.
+func (bs *BlockchainService) TokenAddressForNetwork(network, chain, symbol string) string {
 	if bs.cfg == nil {
 		return ""
 	}
-	return bs.cfg.TokenAddresses[chain+":"+symbol]
+	if net, ok := bs.cfg.Networks[network]; ok {
+		return net.TokenAddresses[chain+":"+symbol]
+	}
+	return ""
+}
+
+// TokenAddress returns the contract address for a token on mainnet (backward compat).
+func (bs *BlockchainService) TokenAddress(chain, symbol string) string {
+	return bs.TokenAddressForNetwork("mainnet", chain, symbol)
+}
+
+// NetworkForChainID returns the network name ("mainnet"/"testnet") and chain key for a chain ID.
+func (bs *BlockchainService) NetworkForChainID(chainID int64) (network, chainKey string, ok bool) {
+	if bs.cfg == nil {
+		return "", "", false
+	}
+	for net, netCfg := range bs.cfg.Networks {
+		for name, chain := range netCfg.Chains {
+			if chain.ChainID == chainID {
+				return net, name, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // GetTransactionReceipt fetches a transaction receipt from the specified chain.

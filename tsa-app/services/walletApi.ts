@@ -2,6 +2,7 @@
 // API calls to the Go backend for wallet operations
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
+import { getNetwork } from '../hooks/useNetwork';
 
 export interface WalletBalance {
   symbol: string;
@@ -81,7 +82,9 @@ export async function registerWalletAddress(address: string): Promise<ApiRespons
 export async function getWalletBalances(chainId?: number): Promise<ApiResponse<WalletBalance[]>> {
   try {
     const headers = await getAuthHeaders();
-    const params = chainId ? `?chainId=${chainId}` : '';
+    const qp = new URLSearchParams({ network: getNetwork() });
+    if (chainId) qp.append('chainId', String(chainId));
+    const params = `?${qp.toString()}`;
     const response = await fetch(`${API_BASE_URL}/wallet/balances${params}`, {
       method: 'GET',
       headers,
