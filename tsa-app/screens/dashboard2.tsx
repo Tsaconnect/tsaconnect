@@ -22,27 +22,29 @@ import { AssetList } from '@/components/dashboard/AssetList';
 import { RecentActivity } from '@/components/dashboard/RecentActivity';
 import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
+import { useNetwork } from '../hooks/useNetwork';
 
-// Default assets — updated with real balances at runtime
+// The three transactable assets shown on the dashboard
 const DEFAULT_ASSETS: Asset[] = [
   {
     _id: 'mcgp-001', id: 'mcgp-001', symbol: 'MCGP', name: 'Mason Capital Gold Point',
     balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Stablecoin', chain: 'Polygon' }, currentPrice: 1.0, priceChange24h: 0,
+    details: { type: 'Gold-Backed Token', chain: 'Sonic' }, currentPrice: 0, priceChange24h: 0,
   },
   {
     _id: 'usdc-001', id: 'usdc-001', symbol: 'USDC', name: 'USD Coin',
     balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Stablecoin', chain: 'Polygon' }, currentPrice: 1.0, priceChange24h: 0.01,
+    details: { type: 'Stablecoin', chain: 'Sonic' }, currentPrice: 1.0, priceChange24h: 0,
   },
   {
     _id: 'usdt-001', id: 'usdt-001', symbol: 'USDT', name: 'Tether USD',
     balance: 0, usdValue: 0, isSelected: false, isHidden: false,
-    details: { type: 'Stablecoin', chain: 'Polygon' }, currentPrice: 1.0, priceChange24h: -0.02,
+    details: { type: 'Stablecoin', chain: 'Sonic' }, currentPrice: 1.0, priceChange24h: 0,
   },
 ];
 
 const Dashboard: React.FC = () => {
+  const { network } = useNetwork();
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
@@ -77,34 +79,44 @@ const Dashboard: React.FC = () => {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
-      // Fetch balances
+      // Fetch balances from active network
       const balResult = await getWalletBalances();
       let updatedAssets = [...DEFAULT_ASSETS];
       if (balResult.success && balResult.data) {
-        // Backend returns { walletAddress, balances: { chainName: { SYMBOL: "amount" } } }
-        const balancesMap = balResult.data.balances || balResult.data;
-        // Flatten nested chain balances into a symbol -> balance lookup
-        const symbolBalances: Record<string, number> = {};
-        if (typeof balancesMap === 'object' && !Array.isArray(balancesMap)) {
-          for (const chain of Object.values(balancesMap)) {
-            if (typeof chain === 'object' && chain !== null) {
-              for (const [symbol, amount] of Object.entries(chain as Record<string, string>)) {
-                const parsed = parseFloat(amount || '0');
-                symbolBalances[symbol] = (symbolBalances[symbol] || 0) + parsed;
+        const data = balResult.data as any;
+        const nestedBalances = data.balances || null;
+        // Flatten all chains into symbol -> { balance, usdValue, usdPrice }
+        const symbolData: Record<string, { balance: number; usdValue: number; usdPrice: number }> = {};
+        if (nestedBalances && typeof nestedBalances === 'object') {
+          for (const chainTokens of Object.values(nestedBalances)) {
+            if (typeof chainTokens === 'object' && chainTokens !== null) {
+              for (const [symbol, entry] of Object.entries(chainTokens as Record<string, any>)) {
+                if (entry && typeof entry === 'object') {
+                  const bal = Number.isFinite(parseFloat(entry.balance)) ? parseFloat(entry.balance) : 0;
+                  const usd = Number.isFinite(entry.usdValue) ? entry.usdValue : 0;
+                  const price = Number.isFinite(entry.usdPrice) ? entry.usdPrice : 0;
+                  const prev = symbolData[symbol];
+                  symbolData[symbol] = {
+                    balance: (prev?.balance || 0) + bal,
+                    usdValue: (prev?.usdValue || 0) + usd,
+                    usdPrice: price || prev?.usdPrice || 0,
+                  };
+                }
               }
             }
           }
         }
         updatedAssets = DEFAULT_ASSETS.map(a => {
-          const bal = symbolBalances[a.symbol] || 0;
-          return { ...a, balance: bal, usdValue: bal * (a.currentPrice || 1) };
+          const d = symbolData[a.symbol];
+          if (!d) return a;
+          return { ...a, balance: d.balance, usdValue: d.usdValue, currentPrice: d.usdPrice };
         });
       }
       // Select first asset with balance, or first
       const selected = updatedAssets.find(a => a.balance > 0) || updatedAssets[0];
       if (selected) selected.isSelected = true;
       setAssets(updatedAssets);
-      setTotalUsdValue(updatedAssets.reduce((s, a) => s + a.usdValue, 0));
+      setTotalUsdValue(updatedAssets.reduce((s, a) => s + (Number.isFinite(a.usdValue) ? a.usdValue : 0), 0));
 
       // Try portfolio API for dailyChange
       try {
@@ -129,7 +141,7 @@ const Dashboard: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [authToken]);
+  }, [authToken, network]);
 
   useEffect(() => { if (authToken) fetchData(); }, [authToken, fetchData]);
 
