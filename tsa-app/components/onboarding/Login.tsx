@@ -12,6 +12,7 @@ import { COLORS } from "../../constants/theme";
 import { router, Link } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
+import { useAuth } from "../../AuthContext/AuthContext";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -21,6 +22,7 @@ export default function Login() {
   const [emailError, setEmailError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [generalError, setGeneralError] = useState("");
+  const { setAuthenticated, setEmailVerified, setCurrentUser, setToken: setAuthToken } = useAuth();
 
   function clearErrors() {
     setEmailError("");
@@ -45,7 +47,12 @@ export default function Login() {
     setLoading(true);
     try {
       const response = await api.login(email.trim(), password.trim());
-      if (response.success) {
+      if (response.success && response.data) {
+        // Sync AuthContext with login data
+        setAuthenticated(true);
+        setAuthToken(response.data.token);
+        setEmailVerified(response.data.emailVerified ?? false);
+        setCurrentUser(response.data);
         setEmail("");
         setPassword("");
         router.replace("/home");

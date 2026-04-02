@@ -17,7 +17,6 @@ import { Ionicons } from '@expo/vector-icons';
 import api, { Product } from '@/components/services/api';
 import { cartService } from '@/components/services/cart';
 import { useAuth } from '@/AuthContext/AuthContext';
-import { useEmailVerification } from '../../../../../hooks/useEmailVerification';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -34,7 +33,6 @@ export default function ProductDetailsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { token } = useAuth();
-  const { requireVerified } = useEmailVerification();
   const [quantity, setQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [cartCount, setCartCount] = useState(0);
@@ -116,7 +114,6 @@ export default function ProductDetailsScreen() {
   }, [product]);
 
   const handleAddToCart = async () => {
-    if (!requireVerified()) return;
     if (!token) {
       Alert.alert('Login Required', 'Please login to add items to your cart', [
         { text: 'Cancel', style: 'cancel' },

@@ -17,11 +17,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import api, { CartItem, CartSummary, ItemsBySeller } from "@/components/services/cart";
-import { useEmailVerification } from '../../../hooks/useEmailVerification';
 
 const Cart = () => {
     const router = useRouter();
-    const { requireVerified } = useEmailVerification();
     const [cartItems, setCartItems] = useState<CartItem[]>([]);
     const [summary, setSummary] = useState<CartSummary | null>(null);
     const [itemsBySeller, setItemsBySeller] = useState<ItemsBySeller[]>([]);
@@ -202,7 +200,6 @@ const Cart = () => {
     };
 
     const handleCheckout = async () => {
-        if (!requireVerified()) return;
         if (cartItems.length === 0) {
             Alert.alert('Empty Cart', 'Your cart is empty. Add some items before checkout.');
             return;

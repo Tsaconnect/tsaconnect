@@ -22,13 +22,13 @@ import {
   submitTransaction,
   WalletBalance,
 } from '../../services/walletApi';
-import { useEmailVerification } from '../../hooks/useEmailVerification';
+import { useKycVerification } from '../../hooks/useKycVerification';
 
 type ScreenState = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
 const SendToken = () => {
   const { tokens, tokenList, getChainsForToken } = useTokens();
-  const { requireVerified } = useEmailVerification();
+  const { requireKycVerified } = useKycVerification();
   const [selectedToken, setSelectedToken] = useState('MCGP');
   const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
   const [toAddress, setToAddress] = useState('');
@@ -132,7 +132,7 @@ const SendToken = () => {
   };
 
   const handleSend = async () => {
-    if (!requireVerified()) return;
+    if (!requireKycVerified()) return;
     setScreenState('sending');
     setError('');
 
