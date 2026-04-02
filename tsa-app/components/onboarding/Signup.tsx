@@ -64,7 +64,7 @@ const Signup = () => {
 
     const payLoad = {
       name,
-      referralCode,
+      referralCode: referralCode?.trim().toLowerCase() || undefined,
       email: email.trim(),
       password,
       country,

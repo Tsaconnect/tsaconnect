@@ -119,11 +119,17 @@ func (h *Handlers) Signup(c *gin.Context) {
 	// Handle referral code
 	var referredBy *uuid.UUID
 	if req.ReferralCode != "" {
+		referralCode := strings.ToLower(strings.TrimSpace(req.ReferralCode))
 		var referrer models.User
-		err := config.DB.Where("referral_code = ? AND account_status = ?", req.ReferralCode, models.AccountStatusActive).First(&referrer).Error
-		if err == nil {
-			referredBy = &referrer.ID
+		err := config.DB.Where("referral_code = ? AND account_status = ?", referralCode, models.AccountStatusActive).First(&referrer).Error
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid referral code. Please check and try again.",
+			})
+			return
 		}
+		referredBy = &referrer.ID
 	}
 
 	// Hash password
