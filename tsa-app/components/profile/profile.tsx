@@ -20,14 +20,19 @@ const ProfileScreen = () => {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
 
-  // Get token on component mount
+  // Get token on component mount — redirect if not authenticated
   useEffect(() => {
     const getToken = async () => {
       try {
         const storedToken = await api.getStoredToken();
+        if (!storedToken) {
+          router.replace("/login");
+          return;
+        }
         setToken(storedToken);
       } catch (error) {
         console.error("Error getting token:", error);
+        router.replace("/login");
       }
     };
     getToken();
