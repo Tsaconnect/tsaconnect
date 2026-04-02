@@ -100,10 +100,16 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     setConnected(false);
   }, []);
 
+  // Defer notification setup — don't block app startup
   useEffect(() => {
-    connect();
-    refreshUnreadCount();
-    return () => disconnect();
+    const timer = setTimeout(() => {
+      connect();
+      refreshUnreadCount();
+    }, 3000);
+    return () => {
+      clearTimeout(timer);
+      disconnect();
+    };
   }, [connect, disconnect, refreshUnreadCount]);
 
   return (

@@ -27,16 +27,16 @@ const TokenContext = createContext<TokenContextValue | null>(null);
 
 export function TokenProvider({ children }: { children: ReactNode }) {
   const [tokens, setTokens] = useState<Record<string, TokenConfig>>(DEFAULT_TOKENS);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   const loadTokens = useCallback(async () => {
+    setLoading(true);
     try {
       // Try cache first for instant UI
       const cached = await AsyncStorage.getItem(CACHE_KEY);
       if (cached) {
         const parsed = JSON.parse(cached) as Record<string, TokenConfig>;
         if (Object.keys(parsed).length > 0) {
-          // Merge iconUrl from defaults in case cache is missing them
           for (const sym of Object.keys(parsed)) {
             if (!parsed[sym].iconUrl && DEFAULT_TOKENS[sym]?.iconUrl) {
               parsed[sym].iconUrl = DEFAULT_TOKENS[sym].iconUrl;
@@ -51,7 +51,6 @@ export function TokenProvider({ children }: { children: ReactNode }) {
       if (result.success && result.data && result.data.length > 0) {
         const fetched: Record<string, TokenConfig> = {};
         for (const t of result.data) {
-          // Only include chains we actually support in CHAINS
           const validChains = t.chains.filter(c => c in CHAINS) as ChainKey[];
           if (validChains.length > 0) {
             fetched[t.symbol] = {
@@ -70,15 +69,33 @@ export function TokenProvider({ children }: { children: ReactNode }) {
         }
       }
     } catch (err) {
-      console.error('Load tokens error:', err);
       // Fallback stays as DEFAULT_TOKENS or cached
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Defer network fetch — load cache sync, fetch from backend after 2s
   useEffect(() => {
-    loadTokens();
+    // Load cache immediately (fast, no network)
+    AsyncStorage.getItem(CACHE_KEY).then((cached) => {
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as Record<string, TokenConfig>;
+          if (Object.keys(parsed).length > 0) {
+            for (const sym of Object.keys(parsed)) {
+              if (!parsed[sym].iconUrl && DEFAULT_TOKENS[sym]?.iconUrl) {
+                parsed[sym].iconUrl = DEFAULT_TOKENS[sym].iconUrl;
+              }
+            }
+            setTokens(parsed);
+          }
+        } catch {}
+      }
+    });
+    // Defer the network call so it doesn't compete with startup
+    const timer = setTimeout(() => loadTokens(), 3000);
+    return () => clearTimeout(timer);
   }, [loadTokens]);
 
   const value: TokenContextValue = {

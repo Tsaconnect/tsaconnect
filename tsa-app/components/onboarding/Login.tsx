@@ -9,7 +9,7 @@ import {
   ScrollView,
 } from "react-native";
 import { COLORS } from "../../constants/theme";
-import { router } from "expo-router";
+import { router, Link } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
 
@@ -158,17 +158,15 @@ export default function Login() {
             ) : null}
           </View>
 
-          <Pressable
-            onPress={() => router.push("/recovery")}
-            disabled={loading}
-            style={styles.forgotPasswordButton}
-          >
-            <Text
-              style={[styles.forgotPassword, loading && styles.disabledText]}
-            >
-              Forgot Password?
-            </Text>
-          </Pressable>
+          <Link href="/recovery" asChild disabled={loading}>
+            <Pressable style={styles.forgotPasswordButton} disabled={loading}>
+              <Text
+                style={[styles.forgotPassword, loading && styles.disabledText]}
+              >
+                Forgot Password?
+              </Text>
+            </Pressable>
+          </Link>
 
           {generalError ? (
             <View style={styles.generalErrorContainer}>
