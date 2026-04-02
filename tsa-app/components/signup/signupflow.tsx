@@ -42,7 +42,7 @@ const SignupFlow = () => {
         confirmPassword: signupData.confirmPassword,
         phoneNumber: signupData.phoneNumber.trim(),
         address: signupData.address.trim(),
-        referralCode: signupData.referralCode?.trim() || undefined,
+        referralCode: signupData.referralCode?.trim().toLowerCase() || undefined,
       };
 
       //@ts-ignore
