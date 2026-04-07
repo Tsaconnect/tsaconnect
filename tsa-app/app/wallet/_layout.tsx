@@ -10,6 +10,7 @@ const WalletLayout = () => {
       <Stack.Screen name="manage" options={{ title: 'Manage Wallet' }} />
       <Stack.Screen name="send" options={{ title: 'Send' }} />
       <Stack.Screen name="receive" options={{ title: 'Receive' }} />
+      <Stack.Screen name="instant-pay" options={{ title: 'Instant Pay' }} />
       <Stack.Screen name="seedphrase" options={{ title: 'Seed Phrase' }} />
     </Stack>
   );

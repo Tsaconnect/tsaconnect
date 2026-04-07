@@ -632,3 +632,43 @@ func (h *Handlers) ConfirmSeedPhraseBackup(c *gin.Context) {
 		"seedPhraseBackedUp": true,
 	})
 }
+
+// ResolveUsername handles GET /api/wallet/resolve/:username
+// Looks up a user by username and returns their public wallet address.
+func (h *Handlers) ResolveUsername(c *gin.Context) {
+	caller := getUserFromContext(c)
+	if caller == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	username := strings.TrimSpace(c.Param("username"))
+	if username == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Username is required")
+		return
+	}
+
+	// Prevent sending to self
+	if strings.EqualFold(username, caller.Username) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot send to yourself")
+		return
+	}
+
+	var target models.User
+	if err := config.DB.Where("LOWER(username) = LOWER(?)", username).First(&target).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "User not found")
+		return
+	}
+
+	if target.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "This user has not set up a wallet yet")
+		return
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "User resolved", gin.H{
+		"username":           target.Username,
+		"name":               target.Name,
+		"walletAddress":      target.WalletAddress,
+		"verificationStatus": target.VerificationStatus,
+	})
+}

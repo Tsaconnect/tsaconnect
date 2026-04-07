@@ -234,3 +234,27 @@ export async function confirmSeedPhraseBackup(): Promise<ApiResponse> {
     return { success: false, message: error.message || 'Failed to confirm backup' };
   }
 }
+
+export interface ResolvedUser {
+  username: string;
+  name: string;
+  walletAddress: string;
+  verificationStatus: string;
+}
+
+/**
+ * Resolve a username to a wallet address for Instant Pay
+ */
+export async function resolveUsername(username: string): Promise<ApiResponse<ResolvedUser>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/wallet/resolve/${encodeURIComponent(username)}`, {
+      method: 'GET',
+      headers,
+    });
+    return await response.json();
+  } catch (error: any) {
+    console.error('Resolve username error:', error);
+    return { success: false, message: error.message || 'Failed to resolve username' };
+  }
+}
