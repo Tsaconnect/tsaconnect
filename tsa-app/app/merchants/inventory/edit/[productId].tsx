@@ -470,6 +470,7 @@ const EditProduct = () => {
                     onChangeText={setPrice}
                   />
                   {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
+                  <Text style={styles.feeHint}>2% platform fee applies per sale</Text>
                 </View>
                 <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>Stock *</Text>
@@ -890,6 +891,7 @@ const styles = StyleSheet.create({
   },
   inputError: { borderColor: COLORS.error, backgroundColor: COLORS.error + '10' },
   errorText: { fontSize: 12, color: COLORS.error, marginTop: 4, marginLeft: 4 },
+  feeHint: { fontSize: 11, color: '#888', marginTop: 4, marginLeft: 4 },
   textAreaContainer: {
     backgroundColor: COLORS.gray,
     borderRadius: 12,

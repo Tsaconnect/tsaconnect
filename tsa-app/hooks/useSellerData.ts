@@ -95,7 +95,7 @@ export function useSellerData({
                         },
                         products: sellerProducts,
                         productCount: sellerProducts.length,
-                        isVerified: true,
+                        isVerified: firstProduct.sellerVerified ?? false,
                         joinedDate: firstProduct.createdAt || new Date().toISOString(),
                         totalSales,
                         description: categoryTitle

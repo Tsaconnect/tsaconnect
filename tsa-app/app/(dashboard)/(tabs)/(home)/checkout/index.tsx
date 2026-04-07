@@ -695,6 +695,17 @@ const CheckoutScreen = () => {
             </View>
           )}
 
+          {feeConfig?.merchantFeePercent != null && feeConfig.merchantFeePercent > 0 && (
+            <View style={s.summaryRow}>
+              <Text style={[s.summaryLabel, { color: '#888' }]}>
+                Platform Fee ({feeConfig.merchantFeePercent}%)
+              </Text>
+              <Text style={[s.summaryValue, { color: '#888' }]}>
+                Charged to seller
+              </Text>
+            </View>
+          )}
+
           <View style={s.summaryDivider} />
 
           <View style={s.totalRow}>
