@@ -222,6 +222,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.POST("/submit-tx", h.SubmitTransaction)
 		walletGroup.GET("/transactions", h.GetTransactionHistory)
 		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
+		walletGroup.GET("/resolve/:username", h.ResolveUsername)
 	}
 
 	// Merchant request routes (authenticated user)
