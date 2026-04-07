@@ -287,7 +287,6 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 20,
     width: "94%",
-    height: 217,
     backgroundColor: "#F5FCFF",
   },
   editIcon: {

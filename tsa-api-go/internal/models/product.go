@@ -70,6 +70,7 @@ type Product struct {
 	ShippingSameState     float64        `gorm:"default:0" json:"shippingSameState"`
 	ShippingSameCountry   float64        `gorm:"default:0" json:"shippingSameCountry"`
 	ShippingInternational float64        `gorm:"default:0" json:"shippingInternational"`
+	SellerVerified        bool           `gorm:"-" json:"sellerVerified"`
 	CreatedAt             time.Time      `json:"createdAt"`
 	UpdatedAt             time.Time      `json:"updatedAt"`
 }

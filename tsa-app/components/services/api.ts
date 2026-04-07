@@ -214,6 +214,7 @@ export interface Product {
   shippingSameState?: number;
   shippingSameCountry?: number;
   shippingInternational?: number;
+  sellerVerified?: boolean;
   createdAt: string;
   updatedAt: string;
 }

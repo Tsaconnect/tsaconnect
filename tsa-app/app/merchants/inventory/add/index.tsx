@@ -405,6 +405,7 @@ const AddProduct = () => {
               onChangeText={setPrice}
             />
             {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
+            <Text style={styles.feeHint}>2% platform fee applies per sale</Text>
           </View>
           <View style={styles.halfField}>
             <Text style={styles.label}>Stock *</Text>
@@ -716,6 +717,12 @@ const styles = StyleSheet.create({
   errorText: {
     fontSize: 12,
     color: '#DC143C',
+    marginTop: 4,
+    marginLeft: 4,
+  },
+  feeHint: {
+    fontSize: 11,
+    color: '#888',
     marginTop: 4,
     marginLeft: 4,
   },

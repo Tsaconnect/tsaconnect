@@ -20,6 +20,43 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
+// populateSellerVerified sets SellerVerified on each product by batch-querying
+// the users table for their verification status.
+func populateSellerVerified(products []models.Product) {
+	if len(products) == 0 {
+		return
+	}
+	// Collect unique user IDs
+	userIDSet := make(map[uuid.UUID]struct{})
+	for i := range products {
+		userIDSet[products[i].UserID] = struct{}{}
+	}
+	userIDs := make([]uuid.UUID, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
+
+	// Query verification status for all sellers in one batch
+	type userStatus struct {
+		ID                 uuid.UUID
+		VerificationStatus string
+	}
+	var statuses []userStatus
+	config.DB.Model(&models.User{}).
+		Select("id, verification_status").
+		Where("id IN ?", userIDs).
+		Find(&statuses)
+
+	verified := make(map[uuid.UUID]bool, len(statuses))
+	for _, s := range statuses {
+		verified[s.ID] = s.VerificationStatus == models.VerificationStatusVerified
+	}
+
+	for i := range products {
+		products[i].SellerVerified = verified[products[i].UserID]
+	}
+}
+
 // CreateProduct handles POST /api/products/ - creates a new product with optional image uploads.
 func (h *Handlers) CreateProduct(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -254,6 +291,8 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 		return
 	}
 
+	populateSellerVerified(products)
+
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
 	utils.SuccessResponse(c, http.StatusOK, "Products fetched successfully", gin.H{
@@ -289,6 +328,11 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 	// Increment views
 	config.DB.Model(&product).Update("views", product.Views+1)
 	product.Views++
+
+	// Populate seller verification status
+	single := []models.Product{product}
+	populateSellerVerified(single)
+	product = single[0]
 
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", product)
 }
@@ -933,6 +977,8 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 		return
 	}
 
+	populateSellerVerified(products)
+
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
 	// Get category details if categoryId is provided
@@ -1205,6 +1251,8 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 		return
 	}
 
+	populateSellerVerified(products)
+
 	// Get featured products (same filters but featured only, limit 5)
 	featuredQuery := config.DB.Model(&models.Product{}).Where("status = ? AND is_featured = ?", "active", true)
 	if category != "" {
@@ -1218,6 +1266,8 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 
 	var featuredProducts []models.Product
 	featuredQuery.Limit(5).Find(&featuredProducts)
+
+	populateSellerVerified(featuredProducts)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
