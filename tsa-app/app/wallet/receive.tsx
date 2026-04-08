@@ -8,7 +8,7 @@ import {
   Alert,
 } from 'react-native';
 import { router } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
@@ -20,7 +20,7 @@ const ReceiveToken = () => {
 
   useEffect(() => {
     const loadAddress = async () => {
-      const address = await AsyncStorage.getItem('walletAddress');
+      const address = await getActiveWallet();
       if (address) setWalletAddress(address);
     };
     loadAddress();

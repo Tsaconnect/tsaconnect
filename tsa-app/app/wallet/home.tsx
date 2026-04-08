@@ -63,7 +63,7 @@ const WalletHome = () => {
         setActiveLabel(activeMeta?.label || 'Wallet');
       }
 
-      const address = await AsyncStorage.getItem('walletAddress');
+      const address = activeAddr || await getActiveWallet();
       if (address) setWalletAddress(address);
 
       const backedUp = list.find(w => w.address === address)?.backedUp;

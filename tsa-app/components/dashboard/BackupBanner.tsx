@@ -4,6 +4,7 @@ import { View, Text, Pressable, Alert, StyleSheet } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getActiveWallet } from '@/services/wallet';
 
 export const BackupBanner: React.FC = () => {
   const [bannerType, setBannerType] = useState<'none' | 'no_wallet' | 'backup'>(
@@ -13,7 +14,7 @@ export const BackupBanner: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const walletAddress = await AsyncStorage.getItem('walletAddress');
+        const walletAddress = await getActiveWallet();
 
         // No wallet at all — prompt to create one
         if (!walletAddress) {
