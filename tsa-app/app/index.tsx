@@ -73,7 +73,7 @@ const EntryScreen = () => {
         </View>
       ) : networkStatus === "slow" ? (
         <View style={styles.statusContainer}>
-          <MaterialIcons name="signal-wifi-statusbar-connected-no-internet-4" size={20} color="#f59e0b" />
+          <MaterialIcons name="wifi" size={20} color="#f59e0b" />
           <Text style={styles.statusTextWarn}>Slow connection, please wait...</Text>
         </View>
       ) : (
