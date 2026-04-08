@@ -31,7 +31,7 @@ import {
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
 import LocationPicker from '@/components/common/LocationPicker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '../../../../../hooks/useKycVerification';
 
 type CheckoutStep = 'review' | 'signing' | 'success';
@@ -117,9 +117,9 @@ const CheckoutScreen = () => {
 
   useEffect(() => {
     loadCart();
-    // Check if wallet exists — use same check as wallet home screen
+    // Check if wallet exists
     (async () => {
-      const addr = await AsyncStorage.getItem('walletAddress');
+      const addr = await getActiveWallet();
       setHasWallet(!!addr);
     })();
   }, [loadCart]);
@@ -157,7 +157,7 @@ const CheckoutScreen = () => {
   const handleCreateOrders = async () => {
     if (!requireKycVerified()) return;
     // Re-check wallet in case user came back without completing setup
-    const addr = await AsyncStorage.getItem('walletAddress');
+    const addr = await getActiveWallet();
     if (!addr) {
       Alert.alert(
         'Wallet Required',
