@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import {
@@ -40,7 +41,7 @@ const FundScreen: React.FC = () => {
 
   useEffect(() => {
     const loadAddress = async () => {
-      const address = await AsyncStorage.getItem('walletAddress');
+      const address = await getActiveWallet();
       if (address) setWalletAddress(address);
     };
     loadAddress();
