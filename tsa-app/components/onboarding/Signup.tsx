@@ -30,6 +30,7 @@ interface Country {
 
 const Signup = () => {
   const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
   const [referralCode, setReferralCode] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -47,8 +48,15 @@ const Signup = () => {
   }
 
   async function handleSignup() {
-    if (!name || !email || !country || !phoneNumber || !password || !confirmPassword) {
+    if (!name || !username || !email || !country || !phoneNumber || !password || !confirmPassword) {
       Alert.alert("Error", "All fields are required");
+      setIsError(true);
+      return;
+    }
+
+    const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
+    if (!usernameRegex.test(username)) {
+      Alert.alert("Error", "Username must be 3-20 characters, letters, numbers, or underscores only");
       setIsError(true);
       return;
     }
@@ -64,6 +72,7 @@ const Signup = () => {
 
     const payLoad = {
       name,
+      username: username.trim().toLowerCase(),
       referralCode: referralCode?.trim().toLowerCase() || undefined,
       email: email.trim(),
       password,
@@ -154,6 +163,22 @@ const Signup = () => {
             autoCapitalize="words"
             editable={!loading}
             placeholderTextColor="#999"
+          />
+
+          {/* Username */}
+          <TextInput
+            style={[styles.input, isError && !username && styles.inputError]}
+            value={username}
+            placeholder="Username"
+            onChangeText={(text) => {
+              setUsername(text.replace(/[^a-zA-Z0-9_]/g, ''));
+              setIsError(false);
+            }}
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!loading}
+            placeholderTextColor="#999"
+            maxLength={20}
           />
 
           {/* Phone Number */}

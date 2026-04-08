@@ -61,6 +61,8 @@ func (h *Handlers) Signup(c *gin.Context) {
 	}
 	if req.Username == "" {
 		validationErrors = append(validationErrors, gin.H{"field": "username", "message": "Username is required"})
+	} else if !regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`).MatchString(req.Username) {
+		validationErrors = append(validationErrors, gin.H{"field": "username", "message": "Username must be 3-20 characters, letters, numbers, or underscores only"})
 	}
 	if req.Email == "" || !isValidEmail(req.Email) {
 		validationErrors = append(validationErrors, gin.H{"field": "email", "message": "Please enter a valid email"})

@@ -168,6 +168,9 @@ const ProfileScreen = () => {
               )}
               <View style={styles.textInfo}>
                 <Text style={styles.fullName}>{user.name}</Text>
+                {user?.username ? (
+                  <Text style={styles.username}>@{user.username}</Text>
+                ) : null}
                 <Text style={styles.phoneNumber}>{user?.phoneNumber}</Text>
               </View>
             </View>
@@ -305,6 +308,11 @@ const styles = StyleSheet.create({
   fullName: {
     fontSize: 18,
     fontWeight: "bold",
+  },
+  username: {
+    fontSize: 14,
+    color: "#9D6B38",
+    fontWeight: "500",
   },
   phoneNumber: {
     fontSize: 14,
