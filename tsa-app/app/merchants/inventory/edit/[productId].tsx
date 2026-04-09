@@ -82,6 +82,10 @@ const EditProduct = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
+  const [shippingSameCity, setShippingSameCity] = useState('');
+  const [shippingSameState, setShippingSameState] = useState('');
+  const [shippingSameCountry, setShippingSameCountry] = useState('');
+  const [shippingInternational, setShippingInternational] = useState('');
   const [newImages, setNewImages] = useState<string[]>([]);
   const [existingImageUrls, setExistingImageUrls] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
@@ -143,6 +147,10 @@ const EditProduct = () => {
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
         setCompanyName(product.companyName || '');
+        setShippingSameCity(product.shippingSameCity?.toString() || '');
+        setShippingSameState(product.shippingSameState?.toString() || '');
+        setShippingSameCountry(product.shippingSameCountry?.toString() || '');
+        setShippingInternational(product.shippingInternational?.toString() || '');
 
         // Category
         const catId = typeof product.category === 'string' ? product.category :
@@ -315,6 +323,10 @@ const EditProduct = () => {
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
+      if (shippingSameCity) formData.append('shippingSameCity', shippingSameCity);
+      if (shippingSameState) formData.append('shippingSameState', shippingSameState);
+      if (shippingSameCountry) formData.append('shippingSameCountry', shippingSameCountry);
+      if (shippingInternational) formData.append('shippingInternational', shippingInternational);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
@@ -484,6 +496,29 @@ const EditProduct = () => {
                     onChangeText={setStock}
                   />
                   {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
+                </View>
+              </View>
+
+              {/* Shipping Rates */}
+              <Text style={[styles.label, { marginTop: 8, marginBottom: 4, fontWeight: '700' }]}>Shipping Rates ($)</Text>
+              <View style={styles.row}>
+                <View style={[styles.formGroup, styles.halfWidth]}>
+                  <Text style={styles.label}>Same City</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCity} onChangeText={setShippingSameCity} />
+                </View>
+                <View style={[styles.formGroup, styles.halfWidth]}>
+                  <Text style={styles.label}>Same State</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameState} onChangeText={setShippingSameState} />
+                </View>
+              </View>
+              <View style={styles.row}>
+                <View style={[styles.formGroup, styles.halfWidth]}>
+                  <Text style={styles.label}>Same Country</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCountry} onChangeText={setShippingSameCountry} />
+                </View>
+                <View style={[styles.formGroup, styles.halfWidth]}>
+                  <Text style={styles.label}>International</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingInternational} onChangeText={setShippingInternational} />
                 </View>
               </View>
 
