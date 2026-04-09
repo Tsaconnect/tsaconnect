@@ -307,15 +307,6 @@ const WalletHome = () => {
           </View>
           <Text style={styles.actionLabel}>Receive</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => router.push('/wallet/instant-pay')}
-        >
-          <View style={[styles.actionIconContainer, { backgroundColor: '#FFF8E1' }]}>
-            <Ionicons name="flash" size={18} color="#D4AF37" />
-          </View>
-          <Text style={styles.actionLabel}>Instant Pay</Text>
-        </TouchableOpacity>
       </View>
 
       {/* Error */}

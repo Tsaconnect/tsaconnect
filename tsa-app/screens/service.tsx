@@ -82,7 +82,7 @@ const QUICK_ACTIONS = [
   { key: 'deposit', label: 'Deposit', icon: 'account-balance-wallet', color: '#16A34A', bg: 'rgba(22,163,74,0.12)', route: '/sellp2p' },
   { key: 'order', label: 'Order Service', icon: 'receipt-long', color: '#3B82F6', bg: 'rgba(59,130,246,0.12)', route: '/service' },
   { key: 'merchant', label: 'Become Merchant', icon: 'store', color: GOLD, bg: 'rgba(212,175,55,0.12)', route: '/merchants/merchant-request' },
-  { key: 'wallet', label: 'Wallet', icon: 'account-balance', color: '#8B5CF6', bg: 'rgba(139,92,246,0.12)', route: '/wallet' },
+  { key: 'wallet', label: 'Wallet', icon: 'account-balance', color: '#8B5CF6', bg: 'rgba(139,92,246,0.12)', route: '/tokenization' },
 ];
 
 const ServicesScreen: React.FC = () => {
