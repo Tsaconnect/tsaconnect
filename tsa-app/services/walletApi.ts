@@ -258,3 +258,56 @@ export async function resolveUsername(username: string): Promise<ApiResponse<Res
     return { success: false, message: error.message || 'Failed to resolve username' };
   }
 }
+
+export interface SwapPrice {
+  direction: string;
+  mcgpAmount: string;
+  usdcAmount: string;
+}
+
+export interface PreparedSwap {
+  direction: string;
+  mcgpAmount: string;
+  usdcAmount: string;
+  approveTx: PreparedTransaction;
+  swapTx: PreparedTransaction;
+}
+
+/**
+ * Get current swap price from OTC contract
+ */
+export async function getSwapPrice(
+  direction: 'buy' | 'sell',
+  mcgpAmount: string
+): Promise<ApiResponse<SwapPrice>> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/swap/price?direction=${direction}&mcgpAmount=${mcgpAmount}`,
+      { method: 'GET', headers: { 'Content-Type': 'application/json' } }
+    );
+    return await response.json();
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to get swap price' };
+  }
+}
+
+/**
+ * Prepare a swap transaction (approve + swap tx)
+ */
+export async function prepareSwap(
+  direction: 'buy' | 'sell',
+  mcgpAmount: string,
+  slippageBps?: number
+): Promise<ApiResponse<PreparedSwap>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/swap/prepare`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ direction, mcgpAmount, slippageBps: slippageBps || 50 }),
+    });
+    return await response.json();
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to prepare swap' };
+  }
+}
