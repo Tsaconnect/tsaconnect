@@ -45,6 +45,7 @@ type Config struct {
 	// Smart contract addresses
 	ProductEscrowAddress   string
 	ServiceContractAddress string
+	OTCMarketplaceAddress  string
 
 	// Mailjet email service
 	MailjetAPIKey    string
@@ -92,6 +93,7 @@ func Load() *Config {
 		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0xc5E5165cbCB056E4d212727cD4A6642CD5EB886d"),
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xf870DCC5741030990aF1e43D021D986A286C77A6"),
 	}
+	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
