@@ -176,7 +176,8 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	// Create a blockchain service with no real clients (avoids RPC connections)
 	bs := services.NewBlockchainService(cfg)
 	es := services.NewEscrowService(nil, cfg)
-	return NewCheckoutHandler(cfg, bs, es, events.NewBus())
+	otc := services.NewOTCService(nil, cfg)
+	return NewCheckoutHandler(cfg, bs, es, events.NewBus(), otc)
 }
 
 func createTestProduct(t *testing.T, db *gorm.DB, sellerID uuid.UUID, price float64) *models.Product {

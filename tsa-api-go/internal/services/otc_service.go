@@ -68,6 +68,12 @@ func (s *OTCService) GetBuyPricePerToken() (*big.Int, error) {
 	return s.GetBuyPrice(one)
 }
 
+// GetSellPricePerToken returns the sell price for exactly 1 MCGP (1e18 wei).
+func (s *OTCService) GetSellPricePerToken() (*big.Int, error) {
+	one := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	return s.GetSellPrice(one)
+}
+
 // PrepareBuy encodes the buy call and builds an UnsignedTx for the given buyer.
 func (s *OTCService) PrepareBuy(buyer string, mcgpAmount, maxUsdcAmount *big.Int) ([]byte, error) {
 	data, err := parsedOTCABI.Pack("buy", mcgpAmount, maxUsdcAmount)
