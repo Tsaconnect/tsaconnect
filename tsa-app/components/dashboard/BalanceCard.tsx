@@ -12,10 +12,10 @@ interface BalanceCardProps {
 }
 
 const QUICK_ACTIONS = [
-  { key: 'buy', label: 'Buy', icon: 'shopping-bag', route: '/products' },
-  { key: 'services', label: 'Services', icon: 'miscellaneous-services', route: '/serviceshome' },
-  { key: 'trade', label: 'Trade', icon: 'trending-up', route: '/trade' },
-  { key: 'wallet', label: 'Wallet', icon: 'account-balance-wallet', route: '/(dashboard)/(tabs)/tokenization' },
+  { key: 'buy', label: 'Buy', icon: 'shopping-bag', route: '/(dashboard)/(tabs)/(marketplace)' },
+  { key: 'services', label: 'Services', icon: 'miscellaneous-services', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
+  { key: 'trade', label: 'Trade', icon: 'trending-up', route: '/easyswap' },
+  { key: 'wallet', label: 'Wallet', icon: 'account-balance-wallet', route: '/tokenization' },
 ] as const;
 
 export const BalanceCard: React.FC<BalanceCardProps> = ({
