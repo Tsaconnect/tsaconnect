@@ -62,6 +62,18 @@ const PinSetupScreen = () => {
   };
 
   const handleBiometricChoice = async (enable: boolean) => {
+    if (enable) {
+      // Verify biometric works before enabling
+      const LocalAuth = await import('expo-local-authentication');
+      const result = await LocalAuth.authenticateAsync({
+        promptMessage: 'Verify your fingerprint or face',
+        disableDeviceFallback: true,
+      });
+      if (!result.success) {
+        Alert.alert('Verification Failed', 'Could not verify biometric. Please try again.');
+        return;
+      }
+    }
     await setBiometricEnabled(enable);
     setStep('done');
     setTimeout(() => {

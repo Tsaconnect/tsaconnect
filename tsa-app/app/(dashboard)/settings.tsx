@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,10 +9,12 @@ import {
 } from "react-native";
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import api from "@/components/services/api";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
+  authenticateWithBiometric, verifyPin,
 } from "@/services/localAuth";
 
 interface SettingsItem {
@@ -35,23 +37,47 @@ const SettingsScreen = () => {
   const [bioType, setBioType] = useState('Biometric');
   const [pinSet, setPinSet] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      setLockOn(await isLockEnabled());
-      setPinSet(await hasPin());
-      const ba = await isBiometricAvailable();
-      setBioAvailable(ba);
-      setBioEnabled(await isBiometricEnabled());
-      setBioType(await getBiometricType());
-    })();
-  }, []);
+  // Refresh security state every time settings screen is focused
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        setLockOn(await isLockEnabled());
+        setPinSet(await hasPin());
+        const ba = await isBiometricAvailable();
+        setBioAvailable(ba);
+        setBioEnabled(await isBiometricEnabled());
+        setBioType(await getBiometricType());
+      })();
+    }, [])
+  );
+
+  // Require biometric or PIN before changing security settings
+  const requireAuth = async (): Promise<boolean> => {
+    if (bioAvailable && bioEnabled) {
+      const success = await authenticateWithBiometric();
+      if (success) return true;
+    }
+    // On Android, Alert.prompt doesn't exist — use biometric with device fallback
+    if (pinSet) {
+      // Use system biometric prompt which includes device PIN/pattern fallback
+      const result = await import('expo-local-authentication').then(m =>
+        m.authenticateAsync({
+          promptMessage: 'Verify your identity',
+          fallbackLabel: 'Use device passcode',
+          disableDeviceFallback: false,
+        })
+      );
+      return result.success;
+    }
+    return true;
+  };
 
   const handleToggleLock = async () => {
     if (!lockOn) {
-      // Enable — go to PIN setup
       router.push("/pin-setup");
     } else {
-      // Disable
+      const authed = await requireAuth();
+      if (!authed) return;
       Alert.alert("Disable App Lock", "Remove PIN and biometric lock?", [
         { text: "Cancel", style: "cancel" },
         {
@@ -71,6 +97,22 @@ const SettingsScreen = () => {
   };
 
   const handleToggleBiometric = async () => {
+    // Verify with biometric before toggling
+    if (bioEnabled) {
+      // Disabling — verify with biometric first
+      const success = await authenticateWithBiometric();
+      if (!success) {
+        Alert.alert('Verification Failed', `${bioType} verification required to disable.`);
+        return;
+      }
+    } else {
+      // Enabling — verify biometric works
+      const success = await authenticateWithBiometric();
+      if (!success) {
+        Alert.alert('Verification Failed', `Could not verify ${bioType}. Please try again.`);
+        return;
+      }
+    }
     const newVal = !bioEnabled;
     await setBiometricEnabled(newVal);
     setBioEnabled(newVal);
