@@ -12,7 +12,7 @@ const TRADE_ITEMS = [
     icon: 'shopping-bag',
     color: '#D4AF37',
     bg: 'rgba(212,175,55,0.1)',
-    route: '/products',
+    route: '/(dashboard)/(tabs)/(marketplace)',
   },
   {
     key: 'services',
@@ -21,7 +21,7 @@ const TRADE_ITEMS = [
     icon: 'miscellaneous-services',
     color: '#3B82F6',
     bg: 'rgba(59,130,246,0.1)',
-    route: '/serviceshome',
+    route: '/(dashboard)/(tabs)/(services)/serviceshome',
   },
   {
     key: 'trade',
@@ -30,7 +30,7 @@ const TRADE_ITEMS = [
     icon: 'trending-up',
     color: '#16A34A',
     bg: 'rgba(22,163,74,0.1)',
-    route: '/trade',
+    route: '/easyswap',
   },
 ] as const;
 
