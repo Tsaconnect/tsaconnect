@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   StyleSheet,
   Text,
@@ -7,12 +7,19 @@ import {
   Pressable,
   ActivityIndicator,
   ScrollView,
+  TouchableOpacity,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { COLORS } from "../../constants/theme";
 import { router, Link } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  isLockEnabled, isBiometricEnabled, isBiometricAvailable,
+  authenticateWithBiometric, getBiometricType,
+} from "../../services/localAuth";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -22,7 +29,44 @@ export default function Login() {
   const [emailError, setEmailError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [generalError, setGeneralError] = useState("");
+  const [showBiometric, setShowBiometric] = useState(false);
+  const [bioType, setBioType] = useState("Fingerprint");
   const { setAuthenticated, setEmailVerified, setCurrentUser, setToken: setAuthToken } = useAuth();
+
+  // Check if user has a stored session + biometric enabled
+  useEffect(() => {
+    (async () => {
+      const hasToken = await AsyncStorage.getItem("authToken");
+      if (!hasToken) return;
+      const lockOn = await isLockEnabled();
+      const bioOn = await isBiometricEnabled();
+      const bioAvail = await isBiometricAvailable();
+      if (lockOn && bioOn && bioAvail) {
+        setShowBiometric(true);
+        setBioType(await getBiometricType());
+      }
+    })();
+  }, []);
+
+  const handleBiometricLogin = async () => {
+    const success = await authenticateWithBiometric();
+    if (success) {
+      // Token exists in storage — hydrate auth
+      const storedToken = await AsyncStorage.getItem("authToken");
+      if (storedToken) {
+        setAuthenticated(true);
+        setAuthToken(storedToken);
+        try {
+          const response = await api.getProfile();
+          if (response.success && response.data) {
+            setCurrentUser(response.data);
+            setEmailVerified(response.data.emailVerified ?? false);
+          }
+        } catch {}
+        router.replace("/home");
+      }
+    }
+  };
 
   function clearErrors() {
     setEmailError("");
@@ -198,6 +242,21 @@ export default function Login() {
             )}
           </Pressable>
 
+          {showBiometric && (
+            <TouchableOpacity
+              style={styles.biometricButton}
+              onPress={handleBiometricLogin}
+              disabled={loading}
+            >
+              <Ionicons
+                name={bioType === "Face ID" ? "scan" : "finger-print"}
+                size={24}
+                color={COLORS.primary}
+              />
+              <Text style={styles.biometricText}>Login with {bioType}</Text>
+            </TouchableOpacity>
+          )}
+
           <View style={styles.separatorContainer}>
             <View style={styles.separatorLine} />
             <Text style={styles.orText}>OR</Text>
@@ -357,6 +416,24 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 18,
     fontWeight: "600",
+  },
+  biometricButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "100%",
+    height: 56,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    marginTop: 12,
+    gap: 10,
+    backgroundColor: "#FFF",
+  },
+  biometricText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.primary,
   },
   separatorContainer: {
     flexDirection: "row",
