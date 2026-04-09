@@ -46,8 +46,14 @@ func (h *SwapHandler) GetSwapPrice(c *gin.Context) {
 	mcgpAmountStr := c.Query("mcgpAmount")
 	usdcAmountStr := c.Query("usdcAmount")
 
-	// Get price per 1 MCGP for rate calculation
-	pricePerMCGP, err := h.otcService.GetBuyPricePerToken()
+	// Get price per 1 MCGP for the active direction
+	var pricePerMCGP *big.Int
+	var err error
+	if direction == "buy" {
+		pricePerMCGP, err = h.otcService.GetBuyPricePerToken()
+	} else {
+		pricePerMCGP, err = h.otcService.GetSellPricePerToken()
+	}
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to fetch price: "+err.Error())
 		return
