@@ -10,16 +10,18 @@ import (
 type Handlers struct {
 	PriceService      *services.PriceService
 	BlockchainService *services.BlockchainService
+	OTCService        *services.OTCService
 	Config            *config.Config
 	EventBus          *events.Bus
 	EmailService      *services.EmailService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
-func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus, es *services.EmailService) *Handlers {
+func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus, es *services.EmailService, otc *services.OTCService) *Handlers {
 	return &Handlers{
 		PriceService:      ps,
 		BlockchainService: bs,
+		OTCService:        otc,
 		Config:            cfg,
 		EventBus:          bus,
 		EmailService:      es,

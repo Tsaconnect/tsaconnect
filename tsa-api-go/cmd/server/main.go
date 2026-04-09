@@ -79,7 +79,7 @@ func main() {
 	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService)
 
 	// Initialize handlers with dependency injection
-	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService)
+	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
