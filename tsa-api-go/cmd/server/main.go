@@ -67,6 +67,9 @@ func main() {
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
 
+	// Initialize OTC service
+	otcService := services.NewOTCService(sonicClient, cfg)
+
 	// Initialize event bus and WebSocket hub
 	eventBus := events.NewBus()
 	wsHub := ws.NewHub()
@@ -77,9 +80,10 @@ func main() {
 
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService)
-	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus)
+	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
+	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
@@ -109,7 +113,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, wsHub)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, wsHub)
 
 	// Configure HTTP server
 	port := cfg.Port
