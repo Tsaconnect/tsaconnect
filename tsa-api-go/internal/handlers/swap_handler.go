@@ -117,11 +117,8 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		slippageBps = 50
 	}
 
-	// Resolve network from SonicChainID config
-	network, _, found := h.blockchainService.NetworkForChainID(h.cfg.SonicChainID)
-	if !found || network == "" {
-		network = "mainnet"
-	}
+	// OTC contract is on Sonic mainnet
+	network := "mainnet"
 
 	otcAddress := h.cfg.OTCMarketplaceAddress
 	sonicClient := h.blockchainService.ClientForChain("sonic")
