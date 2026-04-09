@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, wsHub *ws.Hub) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, wsHub *ws.Hub) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -223,6 +223,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.GET("/transactions", h.GetTransactionHistory)
 		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
 		walletGroup.GET("/resolve/:username", h.ResolveUsername)
+	}
+
+	// Swap / OTC marketplace routes
+	if swh != nil {
+		swapGroup := api.Group("/swap")
+		{
+			swapGroup.GET("/price", swh.GetSwapPrice)
+			swapGroup.POST("/prepare", auth, swh.PrepareSwap)
+		}
 	}
 
 	// Merchant request routes (authenticated user)

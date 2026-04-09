@@ -26,15 +26,17 @@ type CheckoutHandler struct {
 	BlockchainService *services.BlockchainService
 	EscrowService     *services.EscrowService
 	EventBus          *events.Bus
+	otcService        *services.OTCService
 }
 
 // NewCheckoutHandler creates a new CheckoutHandler.
-func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *services.EscrowService, bus *events.Bus) *CheckoutHandler {
+func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *services.EscrowService, bus *events.Bus, otc *services.OTCService) *CheckoutHandler {
 	return &CheckoutHandler{
 		Config:            cfg,
 		BlockchainService: bs,
 		EscrowService:     es,
 		EventBus:          bus,
+		otcService:        otc,
 	}
 }
 
@@ -315,17 +317,40 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			productTotal := product.Price * float64(item.Quantity)
 			shippingTotal := shippingRate * float64(item.Quantity)
 
-			productAmountWei, err := toWei(floatToDecimalStr(productTotal, decimals), decimals)
-			if err != nil {
-				tx.Rollback()
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert product amount")
-				return
-			}
-			shippingAmountWei, err := toWei(floatToDecimalStr(shippingTotal, decimals), decimals)
-			if err != nil {
-				tx.Rollback()
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert shipping amount")
-				return
+			var productAmountWei, shippingAmountWei *big.Int
+
+			if token == "MCGP" {
+				// Convert USD prices to MCGP amounts using OTC contract rate
+				pricePerMCGP, rateErr := ch.otcService.GetBuyPricePerToken()
+				if rateErr != nil || pricePerMCGP.Sign() == 0 {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to get MCGP exchange rate")
+					return
+				}
+
+				// Convert product USD to MCGP: (usd * 1e6 * 1e18) / pricePerMCGP
+				usdProductWei, _ := toWei(floatToDecimalStr(productTotal, 6), 6)
+				productAmountWei = new(big.Int).Mul(usdProductWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+				productAmountWei.Div(productAmountWei, pricePerMCGP)
+
+				usdShipWei, _ := toWei(floatToDecimalStr(shippingTotal, 6), 6)
+				shippingAmountWei = new(big.Int).Mul(usdShipWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+				shippingAmountWei.Div(shippingAmountWei, pricePerMCGP)
+			} else {
+				// USDC/USDT: 1:1 with USD
+				var err error
+				productAmountWei, err = toWei(floatToDecimalStr(productTotal, decimals), decimals)
+				if err != nil {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert product amount")
+					return
+				}
+				shippingAmountWei, err = toWei(floatToDecimalStr(shippingTotal, decimals), decimals)
+				if err != nil {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert shipping amount")
+					return
+				}
 			}
 			platformFeeWei := CalculatePlatformFee(productAmountWei, token)
 			totalAmountWei := new(big.Int).Add(productAmountWei, shippingAmountWei)
