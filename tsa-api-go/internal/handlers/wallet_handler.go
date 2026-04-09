@@ -257,6 +257,14 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		}
 	}
 
+	// Override MCGP price with OTC contract buy price
+	if h.OTCService != nil {
+		if priceWei, err := h.OTCService.GetBuyPricePerToken(); err == nil && priceWei.Sign() > 0 {
+			// priceWei is USDC (6 decimals) per 1 MCGP — convert to float USD
+			prices["MCGP"] = float64(priceWei.Int64()) / 1e6
+		}
+	}
+
 	for _, cq := range chains {
 		client := h.BlockchainService.ClientForNetwork(network, cq.name)
 		chainBalances := make(map[string]tokenBalance)
