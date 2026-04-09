@@ -401,17 +401,15 @@ const WalletScreen: React.FC = () => {
         <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
       }
     >
-      {__DEV__ && (
-        <Pressable
-          style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}
-          onPress={() => switchNetwork(network === 'mainnet' ? 'testnet' : 'mainnet')}
-        >
-          <View style={[styles.networkDot, { backgroundColor: network === 'mainnet' ? '#4CAF50' : '#FF9800' }]} />
-          <Text style={styles.networkBadgeText}>
-            {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
-          </Text>
-        </Pressable>
-      )}
+      <Pressable
+        style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}
+        onPress={() => switchNetwork(network === 'mainnet' ? 'testnet' : 'mainnet')}
+      >
+        <View style={[styles.networkDot, { backgroundColor: network === 'mainnet' ? '#4CAF50' : '#FF9800' }]} />
+        <Text style={styles.networkBadgeText}>
+          {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+        </Text>
+      </Pressable>
 
       <WalletBalanceCard
         totalUsdValue={totalUsdValue}

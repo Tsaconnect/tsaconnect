@@ -38,7 +38,16 @@ export async function getWalletList(): Promise<WalletMeta[]> {
 }
 
 export async function getActiveWallet(): Promise<string | null> {
-  return AsyncStorage.getItem(ACTIVE_WALLET_KEY);
+  const active = await AsyncStorage.getItem(ACTIVE_WALLET_KEY);
+  if (active) return active;
+
+  // Fallback: legacy key from before multi-wallet migration
+  const legacy = await AsyncStorage.getItem('walletAddress');
+  if (legacy) {
+    // Sync to new key so future reads are fast
+    await AsyncStorage.setItem(ACTIVE_WALLET_KEY, legacy);
+  }
+  return legacy;
 }
 
 export async function setActiveWallet(address: string): Promise<void> {
