@@ -46,7 +46,7 @@ const QUICK_ACTIONS = [
   { key: 'fund', label: 'Fund', icon: 'account-balance' },
   { key: 'swap', label: 'Swap', icon: 'swap-horiz' },
   { key: 'send', label: 'Send', icon: 'send' },
-  { key: 'transfer', label: 'Transfer', icon: 'sync-alt' },
+  { key: 'instant-pay', label: 'Instant Pay', icon: 'flash-on' },
 ] as const;
 
 // ── Balance Card ──
@@ -361,6 +361,7 @@ const WalletScreen: React.FC = () => {
   const handleQuickAction = (action: string) => {
     if (action === 'fund') setShowFundModal(true);
     else if (action === 'send') setShowSendModal(true);
+    else if (action === 'instant-pay') router.push('/wallet/instant-pay' as any);
     else router.push(`/${action}` as any);
   };
 
