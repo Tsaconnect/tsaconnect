@@ -27,8 +27,15 @@ func NewSwapHandler(cfg *config.Config, otcService *services.OTCService, blockch
 	}
 }
 
-// GetSwapPrice handles GET /api/swap/price?direction=buy|sell&mcgpAmount=<wei>
-// Public endpoint — no auth required.
+// GetSwapPrice handles GET /api/swap/price
+//
+// Query params:
+//   - direction: "buy" or "sell" (required)
+//   - mcgpAmount: MCGP amount in wei (optional, used for sell or buy-by-mcgp)
+//   - usdcAmount: USDC amount in wei (optional, used for buy-by-usdc)
+//
+// For buy: pass either mcgpAmount (get USDC cost) or usdcAmount (get MCGP you'll receive)
+// For sell: pass mcgpAmount (get USDC you'll receive)
 func (h *SwapHandler) GetSwapPrice(c *gin.Context) {
 	direction := c.Query("direction")
 	if direction != "buy" && direction != "sell" {
@@ -37,46 +44,70 @@ func (h *SwapHandler) GetSwapPrice(c *gin.Context) {
 	}
 
 	mcgpAmountStr := c.Query("mcgpAmount")
-	var mcgpAmount *big.Int
-	if mcgpAmountStr == "" {
-		// Default to 1e18 (1 token in wei)
-		mcgpAmount = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-		mcgpAmountStr = mcgpAmount.String()
+	usdcAmountStr := c.Query("usdcAmount")
+
+	// Get price per 1 MCGP for rate calculation
+	pricePerMCGP, err := h.otcService.GetBuyPricePerToken()
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "failed to fetch price: "+err.Error())
+		return
+	}
+
+	var mcgpAmount, usdcAmount *big.Int
+
+	if direction == "buy" && usdcAmountStr != "" {
+		// Buy mode: user specified USDC amount → calculate MCGP they'll receive
+		usdcAmount, _ = new(big.Int).SetString(usdcAmountStr, 10)
+		if usdcAmount == nil || usdcAmount.Sign() <= 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "usdcAmount must be a positive integer (wei)")
+			return
+		}
+		// mcgpAmount = (usdcAmount * 1e18) / pricePerMCGP
+		mcgpAmount = new(big.Int).Mul(usdcAmount, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+		mcgpAmount.Div(mcgpAmount, pricePerMCGP)
+
+		// Verify with contract
+		verifiedUsdc, verr := h.otcService.GetBuyPrice(mcgpAmount)
+		if verr == nil && verifiedUsdc != nil {
+			usdcAmount = verifiedUsdc
+		}
 	} else {
-		var ok bool
-		mcgpAmount, ok = new(big.Int).SetString(mcgpAmountStr, 10)
-		if !ok || mcgpAmount.Sign() <= 0 {
-			utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei)")
+		// mcgpAmount provided (or default 1 token)
+		if mcgpAmountStr == "" {
+			mcgpAmount = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		} else {
+			mcgpAmount, _ = new(big.Int).SetString(mcgpAmountStr, 10)
+			if mcgpAmount == nil || mcgpAmount.Sign() <= 0 {
+				utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei)")
+				return
+			}
+		}
+
+		switch direction {
+		case "buy":
+			usdcAmount, err = h.otcService.GetBuyPrice(mcgpAmount)
+		case "sell":
+			usdcAmount, err = h.otcService.GetSellPrice(mcgpAmount)
+		}
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadGateway, "failed to fetch price: "+err.Error())
 			return
 		}
 	}
 
-	var usdcAmount *big.Int
-	var err error
-
-	switch direction {
-	case "buy":
-		usdcAmount, err = h.otcService.GetBuyPrice(mcgpAmount)
-	case "sell":
-		usdcAmount, err = h.otcService.GetSellPrice(mcgpAmount)
-	}
-
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadGateway, "failed to fetch price from contract: "+err.Error())
-		return
-	}
-
 	utils.SuccessResponse(c, http.StatusOK, "price fetched successfully", gin.H{
-		"direction":   direction,
-		"mcgpAmount":  mcgpAmountStr,
-		"usdcAmount":  usdcAmount.String(),
+		"direction":     direction,
+		"mcgpAmount":    mcgpAmount.String(),
+		"usdcAmount":    usdcAmount.String(),
+		"pricePerMCGP":  pricePerMCGP.String(),
 	})
 }
 
 // prepareSwapRequest is the request body for POST /api/swap/prepare.
 type prepareSwapRequest struct {
 	Direction   string `json:"direction"`
-	McgpAmount  string `json:"mcgpAmount"`
+	McgpAmount  string `json:"mcgpAmount"`  // Required for sell; optional for buy
+	UsdcAmount  string `json:"usdcAmount"`  // Optional for buy (alternative to mcgpAmount)
 	SlippageBps int    `json:"slippageBps"`
 }
 
@@ -105,42 +136,59 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		return
 	}
 
-	mcgpAmount, ok := new(big.Int).SetString(req.McgpAmount, 10)
-	if !ok || mcgpAmount.Sign() <= 0 {
-		utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei)")
-		return
-	}
-
-	// Default slippage: 50 bps = 0.5%
 	slippageBps := req.SlippageBps
 	if slippageBps <= 0 {
 		slippageBps = 50
 	}
 
+	// Resolve MCGP amount
+	var mcgpAmount *big.Int
+	var ok bool
+
+	if req.Direction == "buy" && req.UsdcAmount != "" && req.McgpAmount == "" {
+		// Buy by USDC amount: calculate MCGP
+		usdcInput, uok := new(big.Int).SetString(req.UsdcAmount, 10)
+		if !uok || usdcInput.Sign() <= 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "usdcAmount must be a positive integer (wei)")
+			return
+		}
+		pricePerMCGP, err := h.otcService.GetBuyPricePerToken()
+		if err != nil || pricePerMCGP.Sign() == 0 {
+			utils.ErrorResponse(c, http.StatusBadGateway, "failed to get MCGP price")
+			return
+		}
+		mcgpAmount = new(big.Int).Mul(usdcInput, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+		mcgpAmount.Div(mcgpAmount, pricePerMCGP)
+	} else {
+		mcgpAmount, ok = new(big.Int).SetString(req.McgpAmount, 10)
+		if !ok || mcgpAmount.Sign() <= 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "mcgpAmount must be a positive integer (wei)")
+			return
+		}
+	}
+
 	// OTC contract is on Sonic mainnet
 	network := "mainnet"
-
 	otcAddress := h.cfg.OTCMarketplaceAddress
 	sonicClient := h.blockchainService.ClientForChain("sonic")
 
 	var approveTxBytes, swapTxBytes []byte
+	var usdcAmount *big.Int
 
 	switch req.Direction {
 	case "buy":
-		// Get USDC cost from contract
-		usdcAmount, err := h.otcService.GetBuyPrice(mcgpAmount)
+		var err error
+		usdcAmount, err = h.otcService.GetBuyPrice(mcgpAmount)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadGateway, "failed to calculate buy price: "+err.Error())
 			return
 		}
 
-		// Apply slippage upward (buyer pays at most usdcAmount * (1 + slippageBps/10000))
 		maxUsdcAmount := applySlippageUp(usdcAmount, slippageBps)
 
-		// Prepare approve USDC tx
 		usdcAddr := h.blockchainService.TokenAddressForNetwork(network, "sonic", "USDC")
 		if usdcAddr == "" {
-			utils.ErrorResponse(c, http.StatusInternalServerError, "USDC token address not configured for network: "+network)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "USDC token address not configured")
 			return
 		}
 
@@ -152,7 +200,6 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 			}
 		}
 
-		// Prepare buy tx
 		swapTxBytes, err = h.otcService.PrepareBuy(userWallet, mcgpAmount, maxUsdcAmount)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadGateway, "failed to prepare buy tx: "+err.Error())
@@ -160,20 +207,18 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		}
 
 	case "sell":
-		// Get USDC proceeds from contract
-		usdcAmount, err := h.otcService.GetSellPrice(mcgpAmount)
+		var err error
+		usdcAmount, err = h.otcService.GetSellPrice(mcgpAmount)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadGateway, "failed to calculate sell price: "+err.Error())
 			return
 		}
 
-		// Apply slippage downward (seller accepts at least usdcAmount * (1 - slippageBps/10000))
 		minUsdcAmount := applySlippageDown(usdcAmount, slippageBps)
 
-		// Prepare approve MCGP tx
 		mcgpAddr := h.blockchainService.TokenAddressForNetwork(network, "sonic", "MCGP")
 		if mcgpAddr == "" {
-			utils.ErrorResponse(c, http.StatusInternalServerError, "MCGP token address not configured for network: "+network)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "MCGP token address not configured")
 			return
 		}
 
@@ -185,7 +230,6 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 			}
 		}
 
-		// Prepare sell tx
 		swapTxBytes, err = h.otcService.PrepareSell(userWallet, mcgpAmount, minUsdcAmount)
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusBadGateway, "failed to prepare sell tx: "+err.Error())
@@ -193,7 +237,6 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		}
 	}
 
-	// Unmarshal tx bytes into raw JSON objects for the response
 	var approveTx, swapTx json.RawMessage
 	if approveTxBytes != nil {
 		approveTx = json.RawMessage(approveTxBytes)
@@ -202,23 +245,25 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		swapTx = json.RawMessage(swapTxBytes)
 	}
 
+	usdcStr := "0"
+	if usdcAmount != nil {
+		usdcStr = usdcAmount.String()
+	}
+
 	utils.SuccessResponse(c, http.StatusOK, "swap transactions prepared", gin.H{
 		"direction":  req.Direction,
-		"mcgpAmount": req.McgpAmount,
+		"mcgpAmount": mcgpAmount.String(),
+		"usdcAmount": usdcStr,
 		"approveTx":  approveTx,
 		"swapTx":     swapTx,
 	})
 }
 
-// applySlippageUp increases amount by slippageBps basis points (for buy maxUsdcAmount).
-// result = amount * (10000 + slippageBps) / 10000
 func applySlippageUp(amount *big.Int, slippageBps int) *big.Int {
 	numerator := new(big.Int).Mul(amount, big.NewInt(int64(10000+slippageBps)))
 	return new(big.Int).Div(numerator, big.NewInt(10000))
 }
 
-// applySlippageDown decreases amount by slippageBps basis points (for sell minUsdcAmount).
-// result = amount * (10000 - slippageBps) / 10000
 func applySlippageDown(amount *big.Int, slippageBps int) *big.Int {
 	numerator := new(big.Int).Mul(amount, big.NewInt(int64(10000-slippageBps)))
 	return new(big.Int).Div(numerator, big.NewInt(10000))

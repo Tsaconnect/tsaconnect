@@ -263,6 +263,7 @@ export interface SwapPrice {
   direction: string;
   mcgpAmount: string;
   usdcAmount: string;
+  pricePerMCGP: string;
 }
 
 export interface PreparedSwap {
@@ -274,15 +275,20 @@ export interface PreparedSwap {
 }
 
 /**
- * Get current swap price from OTC contract
+ * Get current swap price from OTC contract.
+ * For buy: pass usdcAmount to get mcgpAmount, or mcgpAmount to get usdcAmount.
+ * For sell: pass mcgpAmount to get usdcAmount.
  */
 export async function getSwapPrice(
   direction: 'buy' | 'sell',
-  mcgpAmount: string
+  params: { mcgpAmount?: string; usdcAmount?: string }
 ): Promise<ApiResponse<SwapPrice>> {
   try {
+    const qp = new URLSearchParams({ direction });
+    if (params.mcgpAmount) qp.append('mcgpAmount', params.mcgpAmount);
+    if (params.usdcAmount) qp.append('usdcAmount', params.usdcAmount);
     const response = await fetch(
-      `${API_BASE_URL}/swap/price?direction=${direction}&mcgpAmount=${mcgpAmount}`,
+      `${API_BASE_URL}/swap/price?${qp.toString()}`,
       { method: 'GET', headers: { 'Content-Type': 'application/json' } }
     );
     return await response.json();
@@ -292,19 +298,25 @@ export async function getSwapPrice(
 }
 
 /**
- * Prepare a swap transaction (approve + swap tx)
+ * Prepare a swap transaction (approve + swap tx).
+ * For buy: pass usdcAmount (how much USDC to spend) or mcgpAmount.
+ * For sell: pass mcgpAmount.
  */
 export async function prepareSwap(
   direction: 'buy' | 'sell',
-  mcgpAmount: string,
-  slippageBps?: number
+  params: { mcgpAmount?: string; usdcAmount?: string; slippageBps?: number }
 ): Promise<ApiResponse<PreparedSwap>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/swap/prepare`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ direction, mcgpAmount, slippageBps: slippageBps || 50 }),
+      body: JSON.stringify({
+        direction,
+        mcgpAmount: params.mcgpAmount,
+        usdcAmount: params.usdcAmount,
+        slippageBps: params.slippageBps || 50,
+      }),
     });
     return await response.json();
   } catch (error: any) {
