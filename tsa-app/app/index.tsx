@@ -5,6 +5,7 @@ import * as Network from "expo-network";
 import { useAuth } from "@/AuthContext/AuthContext";
 import { COLORS } from "@/constants/theme";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import { isLockEnabled } from "@/services/localAuth";
 
 const EntryScreen = () => {
   const { isAuthenticated, isHydrated } = useAuth();
@@ -13,11 +14,18 @@ const EntryScreen = () => {
   useEffect(() => {
     if (!isHydrated) return;
 
-    if (isAuthenticated) {
-      router.replace("/home");
-    } else {
-      router.replace("/login");
-    }
+    (async () => {
+      if (isAuthenticated) {
+        const lockOn = await isLockEnabled();
+        if (lockOn) {
+          router.replace("/lock");
+        } else {
+          router.replace("/home");
+        }
+      } else {
+        router.replace("/login");
+      }
+    })();
   }, [isHydrated, isAuthenticated]);
 
   // Monitor network state while loading

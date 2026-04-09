@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -10,6 +10,10 @@ import {
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import api from "@/components/services/api";
+import {
+  isLockEnabled, setLockEnabled, hasPin, removePin,
+  isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
+} from "@/services/localAuth";
 
 interface SettingsItem {
   icon: string;
@@ -25,6 +29,53 @@ interface SettingsSection {
 }
 
 const SettingsScreen = () => {
+  const [lockOn, setLockOn] = useState(false);
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioEnabled, setBioEnabled] = useState(false);
+  const [bioType, setBioType] = useState('Biometric');
+  const [pinSet, setPinSet] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setLockOn(await isLockEnabled());
+      setPinSet(await hasPin());
+      const ba = await isBiometricAvailable();
+      setBioAvailable(ba);
+      setBioEnabled(await isBiometricEnabled());
+      setBioType(await getBiometricType());
+    })();
+  }, []);
+
+  const handleToggleLock = async () => {
+    if (!lockOn) {
+      // Enable — go to PIN setup
+      router.push("/pin-setup");
+    } else {
+      // Disable
+      Alert.alert("Disable App Lock", "Remove PIN and biometric lock?", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Disable",
+          style: "destructive",
+          onPress: async () => {
+            await setLockEnabled(false);
+            await removePin();
+            await setBiometricEnabled(false);
+            setLockOn(false);
+            setPinSet(false);
+            setBioEnabled(false);
+          },
+        },
+      ]);
+    }
+  };
+
+  const handleToggleBiometric = async () => {
+    const newVal = !bioEnabled;
+    await setBiometricEnabled(newVal);
+    setBioEnabled(newVal);
+  };
+
   const handleLogout = () => {
     Alert.alert("Logout", "Are you sure you want to logout?", [
       { text: "Cancel", style: "cancel" },
@@ -83,6 +134,37 @@ const SettingsScreen = () => {
               params: { mode: "import" },
             }),
         },
+      ],
+    },
+    {
+      title: "Security",
+      items: [
+        {
+          icon: lockOn ? "lock" : "lock-open",
+          label: lockOn ? "App Lock Enabled" : "Enable App Lock",
+          description: lockOn ? "PIN and biometric lock is active" : "Set up PIN or fingerprint to secure the app",
+          onPress: handleToggleLock,
+        },
+        ...(lockOn && bioAvailable
+          ? [
+              {
+                icon: "fingerprint",
+                label: `${bioType} Unlock`,
+                description: bioEnabled ? `${bioType} is enabled` : `Enable ${bioType} for quick unlock`,
+                onPress: handleToggleBiometric,
+              },
+            ]
+          : []),
+        ...(lockOn && pinSet
+          ? [
+              {
+                icon: "dialpad",
+                label: "Change PIN",
+                description: "Update your 4-digit PIN",
+                onPress: () => router.push("/pin-setup"),
+              },
+            ]
+          : []),
       ],
     },
     {
