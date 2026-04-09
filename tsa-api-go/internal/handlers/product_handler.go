@@ -172,24 +172,34 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		}
 	}
 
+	// Parse shipping rates
+	shippingSameCity, _ := strconv.ParseFloat(c.PostForm("shippingSameCity"), 64)
+	shippingSameState, _ := strconv.ParseFloat(c.PostForm("shippingSameState"), 64)
+	shippingSameCountry, _ := strconv.ParseFloat(c.PostForm("shippingSameCountry"), 64)
+	shippingInternational, _ := strconv.ParseFloat(c.PostForm("shippingInternational"), 64)
+
 	now := time.Now()
 	product := models.Product{
-		ID:           uuid.New(),
-		UserID:       user.ID,
-		Name:         name,
-		Description:  description,
-		Price:        price,
-		Stock:        stock,
-		CategoryID:   categoryID,
-		CategoryName: categoryName,
-		Location:     location,
-		PhoneNumber:  phoneNumber,
-		Email:        strings.ToLower(strings.TrimSpace(email)),
-		CompanyName:  companyName,
-		Status:       models.ProductStatusActive,
-		Type:         productType,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                    uuid.New(),
+		UserID:                user.ID,
+		Name:                  name,
+		Description:           description,
+		Price:                 price,
+		Stock:                 stock,
+		CategoryID:            categoryID,
+		CategoryName:          categoryName,
+		Location:              location,
+		PhoneNumber:           phoneNumber,
+		Email:                 strings.ToLower(strings.TrimSpace(email)),
+		CompanyName:           companyName,
+		ShippingSameCity:      shippingSameCity,
+		ShippingSameState:     shippingSameState,
+		ShippingSameCountry:   shippingSameCountry,
+		ShippingInternational: shippingInternational,
+		Status:                models.ProductStatusActive,
+		Type:                  productType,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 
 	log.Printf("[CreateProduct] uploadedImages count: %d", len(uploadedImages))
@@ -392,6 +402,20 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	}
 	if t := c.PostForm("type"); t != "" {
 		updates["type"] = t
+	}
+
+	// Shipping rates
+	if v := c.PostForm("shippingSameCity"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_city"] = f }
+	}
+	if v := c.PostForm("shippingSameState"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_state"] = f }
+	}
+	if v := c.PostForm("shippingSameCountry"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_country"] = f }
+	}
+	if v := c.PostForm("shippingInternational"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_international"] = f }
 	}
 
 	// Parse attributes
