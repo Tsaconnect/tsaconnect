@@ -1,6 +1,11 @@
 // services/localAuth.ts
 // Local authentication: biometric (fingerprint/face) + PIN fallback
-import * as LocalAuthentication from 'expo-local-authentication';
+let LocalAuthentication: typeof import('expo-local-authentication') | null = null;
+try {
+  LocalAuthentication = require('expo-local-authentication');
+} catch {
+  // Native module not available in this build — biometric features disabled
+}
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -12,6 +17,7 @@ const LOCK_ENABLED_KEY = 'tsa-lock-enabled';
 // ── Biometric support ──
 
 export async function isBiometricAvailable(): Promise<boolean> {
+  if (!LocalAuthentication) return false;
   const compatible = await LocalAuthentication.hasHardwareAsync();
   if (!compatible) return false;
   const enrolled = await LocalAuthentication.isEnrolledAsync();
@@ -19,6 +25,7 @@ export async function isBiometricAvailable(): Promise<boolean> {
 }
 
 export async function getBiometricType(): Promise<string> {
+  if (!LocalAuthentication) return 'Biometric';
   const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
   if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) return 'Face ID';
   if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) return 'Fingerprint';
@@ -27,6 +34,7 @@ export async function getBiometricType(): Promise<string> {
 }
 
 export async function authenticateWithBiometric(): Promise<boolean> {
+  if (!LocalAuthentication) return false;
   const result = await LocalAuthentication.authenticateAsync({
     promptMessage: 'Unlock TSA Connect',
     fallbackLabel: 'Use PIN',
