@@ -1,662 +1,439 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  TextInput,
-  ScrollView,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
+  View, Text, TouchableOpacity, StyleSheet, TextInput, ScrollView,
+  ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, Modal, FlatList,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
-import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import { CHAINS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { isValidAddress, signTransaction } from '../../services/wallet';
 import {
-  getWalletBalances,
-  prepareSendTransaction,
-  submitTransaction,
-  WalletBalance,
+  getWalletBalances, prepareSendTransaction, submitTransaction, WalletBalance,
 } from '../../services/walletApi';
 import { useKycVerification } from '../../hooks/useKycVerification';
 
-type ScreenState = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
+type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
+const GOLD = '#D4AF37';
+
+const TOKEN_COLORS: Record<string, string> = {
+  MCGP: '#D4AF37', USDC: '#2775CA', USDT: '#26A17B', S: '#5B21B6', BNB: '#F0B90B',
+};
+
+const TokenBadge = ({ symbol, size = 36 }: { symbol: string; size?: number }) => (
+  <View style={[st.badge, { width: size, height: size, borderRadius: size / 2, backgroundColor: TOKEN_COLORS[symbol] || '#888' }]}>
+    <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#FFF' }}>{symbol[0]}</Text>
+  </View>
+);
 
 const SendToken = () => {
   const { tokens, tokenList, getChainsForToken } = useTokens();
   const { requireKycVerified } = useKycVerification();
-  const [selectedToken, setSelectedToken] = useState('MCGP');
+  const [selectedToken, setSelectedToken] = useState('USDT');
   const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
+  const [inputMode, setInputMode] = useState<'token' | 'usd'>('token');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [gasEstimate, setGasEstimate] = useState('0.001');
-  const [screenState, setScreenState] = useState<ScreenState>('form');
+  const [screen, setScreen] = useState<Screen>('form');
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
-  const [showNetworkPicker, setShowNetworkPicker] = useState(false);
+
+  useEffect(() => { loadBalances(); }, []);
 
   useEffect(() => {
-    loadBalances();
-  }, []);
-
-  // When token changes, auto-select chain if only one available
-  useEffect(() => {
-    const tokenChains = tokens[selectedToken]?.chains ?? [];
-    if (!tokenChains.includes(selectedChain)) {
-      setSelectedChain(tokenChains[0]);
-    }
+    const chains = tokens[selectedToken]?.chains ?? [];
+    if (!chains.includes(selectedChain)) setSelectedChain(chains[0]);
   }, [selectedToken]);
 
   const loadBalances = async () => {
     try {
       const result = await getWalletBalances();
       if (result.success && result.data) {
-        setBalances(result.data);
+        const d = result.data as any;
+        if (Array.isArray(d)) { setBalances(d); }
+        else if (d.balances) {
+          const flat: WalletBalance[] = [];
+          for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
+            for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
+              if (info && typeof info === 'object') {
+                flat.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
+              }
+            }
+          }
+          setBalances(flat);
+        }
       }
     } catch (err) {
       console.error('Load balances error:', err);
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
-  const getSelectedBalance = (): string => {
-    const token = balances.find((b) => b.symbol === selectedToken);
-    return token?.balance || '0';
+  const getBalance = (): string => balances.find(b => b.symbol === selectedToken)?.balance || '0';
+  const getUsdPrice = (): number => {
+    const b = balances.find(b => b.symbol === selectedToken);
+    if (!b) return selectedToken === 'USDC' || selectedToken === 'USDT' ? 1 : 0;
+    const bal = parseFloat(b.balance || '0');
+    const usd = parseFloat(b.usdValue || '0');
+    return bal > 0 ? usd / bal : (selectedToken === 'USDC' || selectedToken === 'USDT' ? 1 : 0);
   };
+
+  const tokenAmount = inputMode === 'token' ? amount : (
+    amount && getUsdPrice() > 0 ? (parseFloat(amount) / getUsdPrice()).toFixed(6) : '0'
+  );
+  const usdAmount = inputMode === 'usd' ? amount : (
+    amount && getUsdPrice() > 0 ? (parseFloat(amount) * getUsdPrice()).toFixed(2) : '0'
+  );
+
+  const activeChain = CHAINS[selectedChain];
 
   const handlePaste = async () => {
     try {
       const text = await Clipboard.getStringAsync();
       if (text) setToAddress(text.trim());
-    } catch (err) {
-      console.warn('Paste error:', err);
-    }
+    } catch {}
   };
 
-  const handleMax = () => {
-    setAmount(getSelectedBalance());
-  };
-
-  const availableChains = getChainsForToken(selectedToken);
-  const activeChain = CHAINS[selectedChain];
-
-  const validateForm = (): string | null => {
-    if (!toAddress.trim()) return 'Please enter a recipient address.';
+  const validate = (): string | null => {
+    if (!toAddress.trim()) return 'Enter a recipient address.';
     if (!isValidAddress(toAddress.trim())) return 'Invalid wallet address.';
-    if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) {
-      return 'Please enter a valid amount.';
-    }
-    if (Number(amount) > Number(getSelectedBalance())) {
-      return 'Insufficient balance.';
-    }
+    if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) return 'Enter a valid amount.';
+    const sendAmount = parseFloat(tokenAmount);
+    if (sendAmount > parseFloat(getBalance())) return 'Insufficient balance.';
     return null;
   };
 
   const handleReview = async () => {
-    const validationError = validateForm();
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
+    const e = validate(); if (e) { setError(e); return; }
     setError('');
-
     try {
       setLoading(true);
-      const prepResult = await prepareSendTransaction(
-        selectedToken,
-        toAddress.trim(),
-        amount,
-        activeChain.chainId
-      );
-      if (prepResult.success && prepResult.data) {
-        const gasPrice = BigInt(prepResult.data.gasPrice || '0');
-        const gasLimit = BigInt(prepResult.data.gasLimit || '21000');
-        const gasCostWei = gasPrice * gasLimit;
-        const gasCostEth = Number(gasCostWei) / 1e18;
-        setGasEstimate(gasCostEth.toFixed(6));
+      const r = await prepareSendTransaction(selectedToken, toAddress.trim(), tokenAmount, activeChain.chainId);
+      if (r.success && r.data) {
+        const gp = BigInt(r.data.gasPrice || '0'), gl = BigInt(r.data.gasLimit || '21000');
+        setGasEstimate((Number(gp * gl) / 1e18).toFixed(6));
       }
-      setScreenState('confirm');
-    } catch (err) {
-      setError('Failed to estimate gas. Please try again.');
-    } finally {
-      setLoading(false);
-    }
+      setScreen('confirm');
+    } catch { setError('Failed to estimate gas.'); }
+    finally { setLoading(false); }
   };
 
   const handleSend = async () => {
     if (!requireKycVerified()) return;
-    setScreenState('sending');
-    setError('');
-
+    setScreen('sending'); setError('');
     try {
-      const prepResult = await prepareSendTransaction(
-        selectedToken,
-        toAddress.trim(),
-        amount,
-        activeChain.chainId
-      );
-
-      if (!prepResult.success || !prepResult.data) {
-        throw new Error(prepResult.message || 'Failed to prepare transaction');
-      }
-
-      const unsignedTx = prepResult.data;
-
-      const signedTx = await signTransaction({
-        to: unsignedTx.to,
-        data: unsignedTx.data,
-        value: unsignedTx.value,
-        gasLimit: unsignedTx.gasLimit,
-        gasPrice: unsignedTx.gasPrice,
-        nonce: unsignedTx.nonce,
-        chainId: unsignedTx.chainId,
+      const r = await prepareSendTransaction(selectedToken, toAddress.trim(), tokenAmount, activeChain.chainId);
+      if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
+      const signed = await signTransaction({
+        to: r.data.to, data: r.data.data, value: r.data.value,
+        gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
+        nonce: r.data.nonce, chainId: r.data.chainId,
       });
-
-      const submitResult = await submitTransaction(
-        signedTx,
-        'send',
-        selectedToken,
-        toAddress.trim(),
-        amount,
-        activeChain.chainId
-      );
-
-      if (submitResult.success && submitResult.data) {
-        setTxHash(submitResult.data.txHash);
-        setScreenState('success');
-      } else {
-        throw new Error(submitResult.message || 'Transaction submission failed');
-      }
-    } catch (err: any) {
-      console.error('Send transaction error:', err);
-      setError(err.message || 'Transaction failed. Please try again.');
-      setScreenState('failure');
-    }
+      const res = await submitTransaction(signed, 'send', selectedToken, toAddress.trim(), tokenAmount, activeChain.chainId);
+      if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); }
+      else throw new Error(res.message || 'Failed');
+    } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
   };
 
-  // Result screen (success or failure)
-  if (screenState === 'success' || screenState === 'failure') {
-    const isSuccess = screenState === 'success';
+  // ── Result ──
+  if (screen === 'success' || screen === 'failure') {
+    const ok = screen === 'success';
     return (
-      <View style={styles.container}>
-        <View style={styles.resultContainer}>
-          <View
-            style={[
-              styles.resultIcon,
-              { backgroundColor: isSuccess ? '#D1FAE5' : '#FEE2E2' },
-            ]}
-          >
-            <Text
-              style={[
-                styles.resultIconText,
-                { color: isSuccess ? COLORS.success : COLORS.danger },
-              ]}
-            >
-              {isSuccess ? '!' : 'X'}
-            </Text>
+      <View style={st.container}>
+        <View style={st.center}>
+          <View style={[st.resIcon, { backgroundColor: ok ? '#D1FAE5' : '#FEE2E2' }]}>
+            <Ionicons name={ok ? 'checkmark-circle' : 'close-circle'} size={48} color={ok ? '#16A34A' : '#DC2626'} />
           </View>
-          <Text style={styles.resultTitle}>
-            {isSuccess ? 'Transaction Sent' : 'Transaction Failed'}
+          <Text style={st.bigTitle}>{ok ? 'Sent!' : 'Failed'}</Text>
+          <Text style={st.resMsg}>
+            {ok ? `${tokenAmount} ${selectedToken} sent` : error}
           </Text>
-          <Text style={styles.resultMessage}>
-            {isSuccess
-              ? `${amount} ${selectedToken} sent on ${activeChain.name}.`
-              : error || 'Something went wrong.'}
-          </Text>
-          {txHash ? (
-            <Text style={styles.txHashText} numberOfLines={1} ellipsizeMode="middle">
-              Tx: {txHash}
-            </Text>
-          ) : null}
-          <TouchableOpacity
-            style={styles.primaryButton}
-            onPress={() => router.replace('/tokenization')}
-          >
-            <Text style={styles.primaryButtonText}>Back to Wallet</Text>
+          {ok && <Text style={st.resUsd}>≈ ${usdAmount}</Text>}
+          {txHash ? <Text style={st.txH} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text> : null}
+          <TouchableOpacity style={st.btn} onPress={() => router.replace('/tokenization')}>
+            <Text style={st.btnT}>Back to Wallet</Text>
           </TouchableOpacity>
         </View>
       </View>
     );
   }
 
-  // Sending screen
-  if (screenState === 'sending') {
-    return (
-      <View style={styles.container}>
-        <View style={styles.resultContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={[styles.resultTitle, { marginTop: 16 }]}>Sending...</Text>
-          <Text style={styles.resultMessage}>
-            Please wait while your transaction is being processed.
-          </Text>
+  // ── Sending ──
+  if (screen === 'sending') return (
+    <View style={st.container}>
+      <View style={st.center}>
+        <View style={st.signingIcon}><ActivityIndicator size="large" color={GOLD} /></View>
+        <Text style={st.bigTitle}>Sending</Text>
+        <Text style={st.signingMsg}>{tokenAmount} {selectedToken} → {toAddress.slice(0, 8)}...</Text>
+      </View>
+    </View>
+  );
+
+  // ── Confirm ──
+  if (screen === 'confirm') return (
+    <View style={st.container}>
+      <ScrollView contentContainerStyle={st.scroll}>
+        <Pressable onPress={() => setScreen('form')} style={st.backRow}>
+          <Ionicons name="chevron-back" size={22} color={GOLD} />
+          <Text style={st.backT}>Back</Text>
+        </Pressable>
+        <Text style={st.bigTitle}>Confirm Send</Text>
+
+        <View style={st.card}>
+          <View style={st.detRow}>
+            <Text style={st.detL}>Amount</Text>
+            <View style={{ alignItems: 'flex-end' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <TokenBadge symbol={selectedToken} size={24} />
+                <Text style={st.detVBold}>{tokenAmount} {selectedToken}</Text>
+              </View>
+              <Text style={st.detUsd}>≈ ${usdAmount}</Text>
+            </View>
+          </View>
+          <View style={st.divider} />
+          <View style={st.detRow}>
+            <Text style={st.detL}>To</Text>
+            <Text style={[st.detV, { maxWidth: 180 }]} numberOfLines={1} ellipsizeMode="middle">{toAddress}</Text>
+          </View>
+          <View style={st.detRow}>
+            <Text style={st.detL}>Network</Text>
+            <Text style={st.detV}>{activeChain.name}</Text>
+          </View>
+          <View style={st.detRow}>
+            <Text style={st.detL}>Gas Fee</Text>
+            <Text style={st.detV}>{gasEstimate} {activeChain.nativeCurrency.symbol}</Text>
+          </View>
         </View>
-      </View>
-    );
-  }
 
-  // Confirmation screen
-  if (screenState === 'confirm') {
-    return (
-      <View style={styles.container}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.header}>
-            <Text style={styles.title}>Confirm Transaction</Text>
-          </View>
+        <TouchableOpacity style={st.btn} onPress={handleSend}>
+          <Ionicons name="send" size={18} color="#FFF" style={{ marginRight: 8 }} />
+          <Text style={st.btnT}>Confirm & Send</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={st.btn2} onPress={() => setScreen('form')}>
+          <Text style={st.btn2T}>Cancel</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </View>
+  );
 
-          <View style={styles.confirmCard}>
-            <View style={styles.confirmRow}>
-              <Text style={styles.confirmLabel}>Token</Text>
-              <Text style={styles.confirmValue}>{selectedToken}</Text>
-            </View>
-            <View style={styles.confirmRow}>
-              <Text style={styles.confirmLabel}>Network</Text>
-              <Text style={styles.confirmValue}>{activeChain.name}</Text>
-            </View>
-            <View style={styles.confirmRow}>
-              <Text style={styles.confirmLabel}>Amount</Text>
-              <Text style={styles.confirmValue}>{amount}</Text>
-            </View>
-            <View style={styles.confirmRow}>
-              <Text style={styles.confirmLabel}>To</Text>
-              <Text
-                style={[styles.confirmValue, { fontSize: 12 }]}
-                numberOfLines={1}
-                ellipsizeMode="middle"
-              >
-                {toAddress}
-              </Text>
-            </View>
-            <View style={[styles.confirmRow, { borderBottomWidth: 0 }]}>
-              <Text style={styles.confirmLabel}>Est. Gas Fee</Text>
-              <Text style={styles.confirmValue}>
-                {gasEstimate} {activeChain.nativeCurrency.symbol}
-              </Text>
-            </View>
-          </View>
+  // ── Form ──
+  const price = getUsdPrice();
 
-          <TouchableOpacity style={styles.primaryButton} onPress={handleSend}>
-            <Text style={styles.primaryButtonText}>Confirm & Send</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-    );
-  }
-
-  // Main form
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Send</Text>
-        </View>
+    <KeyboardAvoidingView style={st.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <ScrollView contentContainerStyle={st.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <Text style={st.bigTitle}>Send</Text>
+        <Text style={st.sub}>Transfer tokens to any wallet</Text>
 
-        {/* Token selector */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Token</Text>
-          <TouchableOpacity
-            style={styles.tokenSelector}
-            onPress={() => {
-              setShowTokenPicker(!showTokenPicker);
-              setShowNetworkPicker(false);
-            }}
-          >
-            <Text style={styles.tokenSelectorText}>{selectedToken}</Text>
-            <Text style={styles.tokenSelectorArrow}>
-              {showTokenPicker ? 'v' : '>'}
-            </Text>
-          </TouchableOpacity>
-          {showTokenPicker && (
-            <View style={styles.tokenPickerDropdown}>
-              {tokenList.map(({ symbol: token }) => (
-                <TouchableOpacity
-                  key={token}
-                  style={[
-                    styles.tokenPickerItem,
-                    token === selectedToken && styles.tokenPickerItemActive,
-                  ]}
-                  onPress={() => {
-                    setSelectedToken(token);
-                    setShowTokenPicker(false);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.tokenPickerItemText,
-                      token === selectedToken && styles.tokenPickerItemTextActive,
-                    ]}
-                  >
-                    {token}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-          <Text style={styles.balanceHint}>
-            Balance: {getSelectedBalance()} {selectedToken}
-          </Text>
-        </View>
+        {/* Amount card */}
+        <View style={st.card}>
+          <View style={st.amountHeader}>
+            <Text style={st.cardLabel}>AMOUNT</Text>
+            <TouchableOpacity onPress={() => {
+              setInputMode('token');
+              setAmount(getBalance());
+            }}>
+              <Text style={st.balText}>Balance: {getBalance()} {selectedToken}</Text>
+            </TouchableOpacity>
+          </View>
 
-        {/* Network selector */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Network</Text>
-          <TouchableOpacity
-            style={styles.tokenSelector}
-            onPress={() => {
-              if (availableChains.length > 1) {
-                setShowNetworkPicker(!showNetworkPicker);
-                setShowTokenPicker(false);
-              }
-            }}
-          >
-            <Text style={styles.tokenSelectorText}>
-              {activeChain.name} ({activeChain.shortName})
-            </Text>
-            {availableChains.length > 1 && (
-              <Text style={styles.tokenSelectorArrow}>
-                {showNetworkPicker ? 'v' : '>'}
-              </Text>
-            )}
-          </TouchableOpacity>
-          {showNetworkPicker && (
-            <View style={styles.tokenPickerDropdown}>
-              {availableChains.map((chain) => {
-                const isActive = chain.key === selectedChain;
-                return (
-                  <TouchableOpacity
-                    key={chain.key}
-                    style={[
-                      styles.tokenPickerItem,
-                      isActive && styles.tokenPickerItemActive,
-                    ]}
-                    onPress={() => {
-                      setSelectedChain(chain.key);
-                      setShowNetworkPicker(false);
-                    }}
-                  >
-                    <Text
-                      style={[
-                        styles.tokenPickerItemText,
-                        isActive && styles.tokenPickerItemTextActive,
-                      ]}
-                    >
-                      {chain.name} ({chain.shortName})
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-          {availableChains.length === 1 && (
-            <Text style={styles.balanceHint}>
-              {selectedToken} is only available on {activeChain.name}
-            </Text>
-          )}
-        </View>
-
-        {/* Recipient address */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Recipient Address</Text>
-          <View style={styles.inputRow}>
+          {/* Token selector + Amount input */}
+          <View style={st.amountRow}>
+            <TouchableOpacity style={st.tokenChip} onPress={() => setShowTokenPicker(true)}>
+              <TokenBadge symbol={selectedToken} size={28} />
+              <Text style={st.tokenChipText}>{selectedToken}</Text>
+              <Ionicons name="chevron-down" size={16} color="#888" />
+            </TouchableOpacity>
             <TextInput
-              style={[styles.input, { flex: 1 }]}
-              placeholder="0x..."
-              placeholderTextColor={COLORS.gray}
-              value={toAddress}
-              onChangeText={(text) => {
-                setToAddress(text);
-                setError('');
+              style={st.amountInput}
+              placeholder="0.00"
+              placeholderTextColor="#CCC"
+              value={amount}
+              onChangeText={t => { setAmount(t); setError(''); }}
+              keyboardType="decimal-pad"
+            />
+          </View>
+
+          {/* USD equivalent + toggle */}
+          <View style={st.usdRow}>
+            <Text style={st.usdText}>
+              {inputMode === 'token'
+                ? `≈ $${amount && price > 0 ? (parseFloat(amount) * price).toFixed(2) : '0.00'}`
+                : `≈ ${amount && price > 0 ? (parseFloat(amount) / price).toFixed(6) : '0'} ${selectedToken}`}
+            </Text>
+            <TouchableOpacity
+              style={st.toggleBtn}
+              onPress={() => {
+                if (inputMode === 'token' && price > 0 && amount) {
+                  setAmount((parseFloat(amount) * price).toFixed(2));
+                } else if (inputMode === 'usd' && price > 0 && amount) {
+                  setAmount((parseFloat(amount) / price).toFixed(6));
+                }
+                setInputMode(m => m === 'token' ? 'usd' : 'token');
               }}
+            >
+              <Ionicons name="swap-vertical" size={16} color={GOLD} />
+              <Text style={st.toggleText}>{inputMode === 'token' ? 'USD' : selectedToken}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Recipient */}
+        <View style={st.card}>
+          <Text style={st.cardLabel}>RECIPIENT</Text>
+          <View style={st.addressRow}>
+            <TextInput
+              style={st.addressInput}
+              placeholder="0x... wallet address"
+              placeholderTextColor="#CCC"
+              value={toAddress}
+              onChangeText={t => { setToAddress(t); setError(''); }}
               autoCapitalize="none"
               autoCorrect={false}
             />
-            <TouchableOpacity style={styles.pasteButton} onPress={handlePaste}>
-              <Text style={styles.pasteText}>Paste</Text>
+            <TouchableOpacity style={st.pasteBtn} onPress={handlePaste}>
+              <Ionicons name="clipboard-outline" size={18} color={GOLD} />
             </TouchableOpacity>
           </View>
+          {toAddress && !isValidAddress(toAddress) && (
+            <Text style={st.addrHint}>Invalid address format</Text>
+          )}
         </View>
 
-        {/* Amount */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Amount</Text>
-          <View style={styles.inputRow}>
-            <TextInput
-              style={[styles.input, { flex: 1 }]}
-              placeholder="0.00"
-              placeholderTextColor={COLORS.gray}
-              value={amount}
-              onChangeText={(text) => {
-                setAmount(text);
-                setError('');
-              }}
-              keyboardType="decimal-pad"
-            />
-            <TouchableOpacity style={styles.maxButton} onPress={handleMax}>
-              <Text style={styles.maxText}>MAX</Text>
-            </TouchableOpacity>
+        {/* Network info */}
+        <View style={st.networkRow}>
+          <Ionicons name="globe-outline" size={16} color="#888" />
+          <Text style={st.networkText}>{activeChain.name}</Text>
+        </View>
+
+        {error ? (
+          <View style={st.errorBar}>
+            <Ionicons name="alert-circle" size={16} color="#DC2626" />
+            <Text style={st.errorText}>{error}</Text>
           </View>
-        </View>
-
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        ) : null}
 
         <TouchableOpacity
-          style={[styles.primaryButton, loading && styles.disabledButton]}
+          style={[st.btn, loading && { opacity: 0.4 }]}
           onPress={handleReview}
           disabled={loading}
         >
-          {loading ? (
-            <ActivityIndicator color={COLORS.white} />
-          ) : (
-            <Text style={styles.primaryButtonText}>Review</Text>
+          {loading ? <ActivityIndicator color="#FFF" /> : (
+            <>
+              <Ionicons name="send" size={18} color="#FFF" style={{ marginRight: 8 }} />
+              <Text style={st.btnT}>Review</Text>
+            </>
           )}
         </TouchableOpacity>
       </ScrollView>
+
+      {/* Token Picker */}
+      <Modal visible={showTokenPicker} transparent animationType="slide">
+        <Pressable style={st.modalOverlay} onPress={() => setShowTokenPicker(false)}>
+          <View style={st.modalContent}>
+            <Text style={st.modalTitle}>Select Token</Text>
+            <FlatList
+              data={tokenList}
+              keyExtractor={t => t.symbol}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[st.modalItem, item.symbol === selectedToken && st.modalItemActive]}
+                  onPress={() => { setSelectedToken(item.symbol); setShowTokenPicker(false); setInputMode('token'); setAmount(''); }}
+                >
+                  <TokenBadge symbol={item.symbol} size={36} />
+                  <View style={{ flex: 1, marginLeft: 12 }}>
+                    <Text style={st.modalItemSym}>{item.symbol}</Text>
+                    <Text style={st.modalItemName}>{item.name}</Text>
+                  </View>
+                  <Text style={st.modalItemBal}>{balances.find(b => b.symbol === item.symbol)?.balance || '0'}</Text>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        </Pressable>
+      </Modal>
     </KeyboardAvoidingView>
   );
 };
 
 export default SendToken;
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
+const st = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#FAFAFA' },
+  scroll: { flexGrow: 1, padding: 20, paddingBottom: 40 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+
+  bigTitle: { fontSize: 26, fontWeight: '700', color: '#1A1A1A' },
+  sub: { fontSize: 13, color: '#888', marginTop: 4, marginBottom: 20 },
+
+  card: {
+    backgroundColor: '#FFF', borderRadius: 16, padding: 16, marginBottom: 12,
+    borderWidth: 1, borderColor: '#F0F0F0',
+    elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.04, shadowRadius: 8,
   },
-  scrollContent: {
-    flexGrow: 1,
-    padding: SIZES.padding3,
-  },
-  header: {
-    marginBottom: 24,
-  },
-  title: {
-    ...FONTS.h1,
-    color: COLORS.dark,
-  },
-  fieldGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    ...FONTS.body3,
-    fontWeight: '600',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  tokenSelector: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 12,
-    padding: 16,
-  },
-  tokenSelectorText: {
-    ...FONTS.body3,
-    fontWeight: '600',
-    color: COLORS.dark,
-  },
-  tokenSelectorArrow: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-  },
-  tokenPickerDropdown: {
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 12,
-    marginTop: 4,
-    overflow: 'hidden',
-  },
-  tokenPickerItem: {
-    padding: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.lightGray,
-  },
-  tokenPickerItemActive: {
-    backgroundColor: COLORS.lightGray,
-  },
-  tokenPickerItemText: {
-    ...FONTS.body3,
-    color: COLORS.dark,
-  },
-  tokenPickerItemTextActive: {
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  balanceHint: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    marginTop: 6,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 12,
-    padding: 16,
-    ...FONTS.body3,
-    color: COLORS.dark,
-  },
-  pasteButton: {
-    backgroundColor: COLORS.lightGray,
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-  },
-  pasteText: {
-    ...FONTS.body4,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  maxButton: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-  },
-  maxText: {
-    ...FONTS.body4,
-    color: COLORS.white,
-    fontWeight: '700',
-  },
-  primaryButton: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 16,
-    ...SHADOWS.medium,
-  },
-  primaryButtonText: {
-    ...FONTS.h4,
-    color: COLORS.white,
-    fontWeight: '600',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  errorText: {
-    ...FONTS.body4,
-    color: COLORS.danger,
-    marginBottom: 8,
-  },
-  // Confirm screen
-  confirmCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    marginBottom: 24,
-    overflow: 'hidden',
-  },
-  confirmRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.lightGray,
-  },
-  confirmLabel: {
-    ...FONTS.body4,
-    color: COLORS.gray,
-  },
-  confirmValue: {
-    ...FONTS.body3,
-    fontWeight: '600',
-    color: COLORS.dark,
-    maxWidth: '60%',
-    textAlign: 'right',
-  },
-  // Result screen
-  resultContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: SIZES.padding3,
-  },
-  resultIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  resultIconText: {
-    fontSize: 32,
-    fontWeight: '700',
-  },
-  resultTitle: {
-    ...FONTS.h2,
-    color: COLORS.dark,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  resultMessage: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  txHashText: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    marginBottom: 24,
-    maxWidth: '80%',
-  },
+  cardLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 12 },
+  amountHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  balText: { fontSize: 12, color: GOLD, fontWeight: '500' },
+
+  amountRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  tokenChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#F5F5F5', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 24 },
+  tokenChipText: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
+  amountInput: { flex: 1, fontSize: 28, fontWeight: '700', color: '#1A1A1A', textAlign: 'right', padding: 0 },
+
+  usdRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 },
+  usdText: { fontSize: 14, color: '#888' },
+  toggleBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#FFF8E1', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16 },
+  toggleText: { fontSize: 12, fontWeight: '600', color: GOLD },
+
+  addressRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  addressInput: { flex: 1, fontSize: 15, color: '#1A1A1A', backgroundColor: '#F9F9F9', height: 48, paddingHorizontal: 12, borderRadius: 12 },
+  pasteBtn: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center' },
+  addrHint: { fontSize: 12, color: '#DC2626', marginTop: 6 },
+
+  networkRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12, marginLeft: 4 },
+  networkText: { fontSize: 13, color: '#888' },
+
+  errorBar: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 8 },
+  errorText: { fontSize: 12, color: '#DC2626', flex: 1 },
+
+  btn: { flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginTop: 16, elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
+  btnT: { fontSize: 16, fontWeight: '700', color: '#FFF' },
+  btn2: { paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 10 },
+  btn2T: { fontSize: 15, color: '#888', fontWeight: '600' },
+
+  badge: { justifyContent: 'center', alignItems: 'center' },
+  backRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 4 },
+  backT: { fontSize: 15, color: GOLD, fontWeight: '600' },
+
+  // Confirm
+  detRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
+  detL: { fontSize: 13, color: '#888' },
+  detV: { fontSize: 13, fontWeight: '600', color: '#1A1A1A' },
+  detVBold: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
+  detUsd: { fontSize: 12, color: '#888', marginTop: 2 },
+  divider: { height: 1, backgroundColor: '#F0F0F0', marginVertical: 4 },
+
+  // Signing
+  signingIcon: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+  signingMsg: { fontSize: 15, color: GOLD, fontWeight: '600' },
+
+  // Result
+  resIcon: { width: 80, height: 80, borderRadius: 40, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+  resMsg: { fontSize: 15, color: '#666', textAlign: 'center', marginBottom: 4, paddingHorizontal: 24 },
+  resUsd: { fontSize: 14, color: '#888', marginBottom: 20 },
+  txH: { fontSize: 12, color: '#AAA', marginBottom: 24, maxWidth: '80%' },
+
+  // Token modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '60%' },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 16, textAlign: 'center' },
+  modalItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 8, borderRadius: 12 },
+  modalItemActive: { backgroundColor: '#FFF8E1' },
+  modalItemSym: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
+  modalItemName: { fontSize: 13, color: '#888' },
+  modalItemBal: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
 });
