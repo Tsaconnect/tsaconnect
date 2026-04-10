@@ -49,7 +49,21 @@ const InstantPay = () => {
     (async () => {
       try {
         const r = await getWalletBalances();
-        if (r.success && Array.isArray(r.data)) setBalances(r.data);
+        if (r.success && r.data) {
+          const d = r.data as any;
+          if (Array.isArray(d)) { setBalances(d); }
+          else if (d.balances) {
+            const flat: WalletBalance[] = [];
+            for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
+              for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
+                if (info && typeof info === 'object') {
+                  flat.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
+                }
+              }
+            }
+            setBalances(flat);
+          }
+        }
       } catch {} finally { setLoading(false); }
     })();
   }, []);
