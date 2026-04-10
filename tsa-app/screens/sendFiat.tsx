@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from "react-native-safe-area-context"
+import AuthorizationModal from '../components/common/AuthorizationModal';
 // Types and interfaces
 interface BankDetails {
   id: string;
@@ -171,7 +172,7 @@ const WithdrawalScreen: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [showSellModal, setShowSellModal] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [showOTPModal, setShowOTPModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [showBankModal, setShowBankModal] = useState(false);
 
   // User data
@@ -190,7 +191,6 @@ const WithdrawalScreen: React.FC = () => {
   // Transaction data
   const [usdAmount, setUsdAmount] = useState<string>('');
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [otp, setOtp] = useState<string>('');
   const [transaction, setTransaction] = useState<Transaction | null>(null);
 
   // Available merchants
@@ -343,7 +343,7 @@ const WithdrawalScreen: React.FC = () => {
     setShowConfirmModal(false);
 
     if (confirmed) {
-      setShowOTPModal(true);
+      setShowAuthModal(true);
     } else {
       Alert.alert(
         'Payment Not Received',
@@ -356,19 +356,14 @@ const WithdrawalScreen: React.FC = () => {
     }
   };
 
-  // Handle OTP submission
-  const handleOTPSubmit = () => {
-    if (otp.length !== 6) {
-      Alert.alert('Error', 'Please enter a valid 6-digit OTP');
-      return;
-    }
-
+  // Handle authorization success — runs after biometric/PIN/OTP auth is verified
+  const handleAuthorized = async () => {
+    setShowAuthModal(false);
     setIsLoading(true);
 
     // Simulate API call
     setTimeout(() => {
       setIsLoading(false);
-      setShowOTPModal(false);
 
       // Update transaction status
       if (transaction) {
@@ -672,69 +667,15 @@ const WithdrawalScreen: React.FC = () => {
     </Modal>
   );
 
-  // OTP Modal
-  const OTPModal = () => (
-    <Modal
-      animationType="slide"
-      transparent={true}
-      visible={showOTPModal}
-      onRequestClose={() => setShowOTPModal(false)}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Enter OTP</Text>
-            <TouchableOpacity
-              onPress={() => setShowOTPModal(false)}
-              style={styles.modalCloseButton}
-            >
-              <Icon name="close" size={24} color="#666" />
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.modalBody}>
-            <View style={styles.otpIcon}>
-              <Icon name="lock" size={60} color={GOLD_COLORS.primary} />
-            </View>
-
-            <Text style={styles.otpTitle}>Enter OTP to release USDT</Text>
-
-            <Text style={styles.otpText}>
-              A 6-digit OTP has been sent to your registered email and phone number
-            </Text>
-
-            <TextInput
-              style={styles.otpInput}
-              value={otp}
-              onChangeText={setOtp}
-              placeholder="Enter 6-digit OTP"
-              placeholderTextColor="#999"
-              keyboardType="number-pad"
-              maxLength={6}
-              autoFocus={true}
-            />
-
-            <TouchableOpacity style={styles.resendButton}>
-              <Text style={styles.resendText}>Resend OTP (60s)</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.modalFooter}>
-            <TouchableOpacity
-              style={[styles.submitButton, otp.length !== 6 && styles.submitButtonDisabled]}
-              onPress={handleOTPSubmit}
-              disabled={otp.length !== 6 || isLoading}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color="#000" />
-              ) : (
-                <Text style={styles.submitButtonText}>Release USDT</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </View>
-      </View>
-    </Modal>
+  // Authorization Modal (replaces OTP Modal)
+  const renderAuthModal = () => (
+    <AuthorizationModal
+      visible={showAuthModal}
+      title="Authorize Payment"
+      description={`Send $${usdAmount || '0'} to ${selectedMerchant?.name ?? 'merchant'}`}
+      onAuthorized={handleAuthorized}
+      onCancel={() => setShowAuthModal(false)}
+    />
   );
 
   // Render step 1: Setup and amount
@@ -1156,7 +1097,7 @@ const WithdrawalScreen: React.FC = () => {
         <SellTermsModal />
         <BankDetailsModal />
         <ConfirmPaymentModal />
-        <OTPModal />
+        {renderAuthModal()}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
