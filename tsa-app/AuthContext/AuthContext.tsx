@@ -424,6 +424,10 @@ const register = async (formData: FormData) => {
 
   async function logOutFull() {
     try {
+      // Ensure we have a valid access token before revoking
+      if (!token) {
+        await api.refreshSession();
+      }
       await api.revokeSession();
     } catch {}
     const { clearRefreshToken } = await import('../services/localAuth');

@@ -127,8 +127,7 @@ const SettingsScreen = () => {
         text: "Logout",
         style: "destructive",
         onPress: async () => {
-          await api.clearAuth();
-          router.replace("/login");
+          await logOut();
         },
       },
     ]);

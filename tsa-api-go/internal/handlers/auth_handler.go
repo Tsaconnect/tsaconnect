@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"net/http"
@@ -220,13 +223,30 @@ func (h *Handlers) Signup(c *gin.Context) {
 		return
 	}
 
+	rawRefresh, hashedRefresh, err := generateRefreshToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate refresh token"})
+		return
+	}
+	rt := models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: hashedRefresh,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+	}
+	if err := config.DB.Create(&rt).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
+		return
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"message": "Registration successful. Please verify your email.",
 		"data": gin.H{
-			"userId":   user.ID.String(),
-			"token":    token,
-			"nextStep": "email_verification",
+			"userId":       user.ID.String(),
+			"token":        token,
+			"accessToken":  token,
+			"refreshToken": rawRefresh,
+			"nextStep":     "email_verification",
 		},
 	})
 }
@@ -350,6 +370,21 @@ func (h *Handlers) Login(c *gin.Context) {
 		},
 	})
 
+	rawRefresh, hashedRefresh, err := generateRefreshToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate refresh token"})
+		return
+	}
+	rt := models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: hashedRefresh,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+	}
+	if err := config.DB.Create(&rt).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Login successful",
@@ -357,6 +392,8 @@ func (h *Handlers) Login(c *gin.Context) {
 			"userId":             user.ID.String(),
 			"role":               user.Role,
 			"token":              token,
+			"accessToken":        token,
+			"refreshToken":       rawRefresh,
 			"name":               user.Name,
 			"email":              user.Email,
 			"verificationStatus": user.VerificationStatus,
@@ -371,7 +408,7 @@ func generateToken(userID uuid.UUID, email, secret string) (string, error) {
 	claims := jwt.MapClaims{
 		"userId": userID.String(),
 		"email":  email,
-		"exp":    time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"exp":    time.Now().Add(1 * time.Hour).Unix(),
 		"iat":    time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -414,6 +451,22 @@ func validatePassword(password string) []string {
 func isValidEmail(email string) bool {
 	re := regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 	return re.MatchString(email)
+}
+
+func generateRefreshToken() (raw string, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", err
+	}
+	raw = hex.EncodeToString(b)
+	h := sha256.Sum256([]byte(raw))
+	hash = hex.EncodeToString(h[:])
+	return raw, hash, nil
+}
+
+func hashToken(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
 }
 
 // getUserFromContext is defined in common.go
