@@ -13,6 +13,7 @@ import {
   resolveUsername, WalletBalance, ResolvedUser,
 } from '../../services/walletApi';
 import { useKycVerification } from '../../hooks/useKycVerification';
+import AuthorizationModal from '../../components/common/AuthorizationModal';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 const GOLD = '#D4AF37';
@@ -44,6 +45,7 @@ const InstantPay = () => {
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -114,18 +116,23 @@ const InstantPay = () => {
     finally { setLoading(false); }
   };
 
-  const handleSend = async () => {
+  const handleSendRequest = () => {
     if (!requireKycVerified() || !resolvedUser) return;
+    setShowAuthModal(true);
+  };
+
+  const handleSend = async () => {
+    setShowAuthModal(false);
     setScreen('sending'); setError('');
     try {
-      const r = await prepareSendTransaction(selectedToken, resolvedUser.walletAddress, amount, activeChain.chainId);
+      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
       const signed = await signTransaction({
         to: r.data.to, data: r.data.data, value: r.data.value,
         gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
         nonce: r.data.nonce, chainId: r.data.chainId,
       });
-      const res = await submitTransaction(signed, 'instant_pay', selectedToken, resolvedUser.walletAddress, amount, activeChain.chainId);
+      const res = await submitTransaction(signed, 'instant_pay', selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
       if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); }
       else throw new Error(res.message || 'Failed');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
@@ -216,7 +223,7 @@ const InstantPay = () => {
           </View>
         </View>
 
-        <TouchableOpacity style={st.btn} onPress={handleSend}>
+        <TouchableOpacity style={st.btn} onPress={handleSendRequest}>
           <Ionicons name="flash" size={18} color="#FFF" style={{ marginRight: 8 }} />
           <Text style={st.btnT}>Confirm & Pay</Text>
         </TouchableOpacity>
@@ -224,6 +231,14 @@ const InstantPay = () => {
           <Text style={st.btn2T}>Cancel</Text>
         </TouchableOpacity>
       </ScrollView>
+
+      <AuthorizationModal
+        visible={showAuthModal}
+        title="Authorize Transfer"
+        description={`Send ${amount} ${selectedToken} to @${resolvedUser?.username}`}
+        onAuthorized={handleSend}
+        onCancel={() => setShowAuthModal(false)}
+      />
     </View>
   );
 
