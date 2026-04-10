@@ -11,6 +11,7 @@ import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "@/components/services/api";
+import { useAuth } from "../../AuthContext/AuthContext";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
@@ -31,6 +32,7 @@ interface SettingsSection {
 }
 
 const SettingsScreen = () => {
+  const { logOut, logOutFull, currentUser } = useAuth();
   const [lockOn, setLockOn] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioEnabled, setBioEnabled] = useState(false);
@@ -130,6 +132,23 @@ const SettingsScreen = () => {
         },
       },
     ]);
+  };
+
+  const handleFullLogout = () => {
+    Alert.alert(
+      "Sign Out of This Device",
+      "This will remove biometric login. You'll need your password to sign in again.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Sign Out",
+          style: "destructive",
+          onPress: async () => {
+            await logOutFull();
+          },
+        },
+      ]
+    );
   };
 
   const handleDeleteAccount = () => {
@@ -253,6 +272,13 @@ const SettingsScreen = () => {
           description: "Sign out of your account",
           onPress: handleLogout,
           danger: false,
+        },
+        {
+          icon: "no-encryption",
+          label: "Sign Out of This Device",
+          description: "Removes biometric login — requires password on next sign in",
+          onPress: handleFullLogout,
+          danger: true,
         },
         {
           icon: "delete-forever",
