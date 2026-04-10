@@ -16,6 +16,8 @@ export interface SignupResponse {
   role: string;
   emailVerified?: boolean;
   nextStep: 'email_verification' | 'identity_verification' | 'facial_verification' | 'complete';
+  accessToken?: string;
+  refreshToken?: string;
 }
 
 export interface UploadResponse {
@@ -442,6 +444,10 @@ class APIService {
         // Store token in AsyncStorage for persistence
         await AsyncStorage.setItem('authToken', result.data.token);
         await AsyncStorage.setItem('userId', result.data.userId);
+        if (result.data.refreshToken) {
+          const { storeRefreshToken } = await import('../../services/localAuth');
+          await storeRefreshToken(result.data.refreshToken);
+        }
       }
 
       return result;
@@ -464,11 +470,16 @@ class APIService {
       });
 
       const result = await this.handleResponse<SignupResponse>(response);
-      if (result.success && result.data?.token) {
-        this.setToken(result.data.token);
-        await AsyncStorage.setItem('authToken', result.data.token);
+      if (result.success && result.data) {
+        const accessToken = result.data.accessToken || result.data.token;
+        this.setToken(accessToken);
+        await AsyncStorage.setItem('authToken', accessToken);
         await AsyncStorage.setItem('userId', result.data.userId);
         await AsyncStorage.setItem('role', result.data.role);
+        if (result.data.refreshToken) {
+          const { storeRefreshToken } = await import('../../services/localAuth');
+          await storeRefreshToken(result.data.refreshToken);
+        }
       }
 
       return result;
@@ -675,6 +686,47 @@ class APIService {
     } catch (error) {
       console.error('Check auth error:', error);
       return false;
+    }
+  }
+
+  async refreshSession(): Promise<ApiResponse<{ accessToken: string; refreshToken: string }>> {
+    try {
+      const { getRefreshToken, storeRefreshToken } = await import('../../services/localAuth');
+      const refreshToken = await getRefreshToken();
+      if (!refreshToken) {
+        return { success: false, message: 'No refresh token available' };
+      }
+      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      });
+      const result = await this.handleResponse<{ accessToken: string; refreshToken: string }>(response);
+      if (result.success && result.data) {
+        this.setToken(result.data.accessToken);
+        await AsyncStorage.setItem('authToken', result.data.accessToken);
+        await storeRefreshToken(result.data.refreshToken);
+      }
+      return result;
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Failed to refresh session' };
+    }
+  }
+
+  async revokeSession(): Promise<ApiResponse<any>> {
+    try {
+      const { getRefreshToken, clearRefreshToken } = await import('../../services/localAuth');
+      const refreshToken = await getRefreshToken();
+      const response = await fetch(`${API_BASE_URL}/auth/revoke`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ refreshToken: refreshToken || '' }),
+      });
+      const result = await this.handleResponse<any>(response);
+      await clearRefreshToken();
+      return result;
+    } catch (error: any) {
+      return { success: false, message: error.message || 'Failed to revoke session' };
     }
   }
 
