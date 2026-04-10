@@ -26,8 +26,11 @@ export async function isBiometricAvailable(): Promise<boolean> {
 
 export async function getBiometricType(): Promise<string> {
   if (!LocalAuthentication) return 'Biometric';
+  const { Platform } = require('react-native');
   const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
-  if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) return 'Face ID';
+  if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+    return Platform.OS === 'ios' ? 'Face ID' : 'Biometric';
+  }
   if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) return 'Fingerprint';
   if (types.includes(LocalAuthentication.AuthenticationType.IRIS)) return 'Iris';
   return 'Biometric';
