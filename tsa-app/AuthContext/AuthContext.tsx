@@ -13,6 +13,7 @@ import {
   register,
 } from "../constants/api/AuthenticationService";
 import { apiClient } from "../constants/api/apiClient";
+import api from "../components/services/api";
 import { router } from "expo-router";
 import * as FileSystem from 'expo-file-system';
 
@@ -26,6 +27,7 @@ interface AppContextType {
     password: string
   ) => Promise<{ success: boolean; error: boolean; message: string }>;
   logOut: () => Promise<void>;
+  logOutFull: () => Promise<void>;
   username: string;
   token: string;
   loading: boolean;
@@ -59,6 +61,7 @@ const defaultContextValue: AppContextType = {
   setAuthenticated: () => {},
   login: async () => ({ success: false, error: true, message: "" }),
   logOut: async () => {},
+  logOutFull: async () => {},
   username: "",
   token: "",
   loading: false,
@@ -407,15 +410,25 @@ const register = async (formData: FormData) => {
     setToken("");
     setAuthenticated(false);
     setUsername("");
+    setCurrentUser(null);
     apiClient.interceptors.request.use((config:any) => {
       config.headers.Authorization = "";
       return config;
     });
+    api.clearToken();
     await AsyncStorage.removeItem("token");
     await AsyncStorage.removeItem("authToken");
-    setCurrentUser(null);
     //@ts-ignore
     router.push("/login");
+  }
+
+  async function logOutFull() {
+    try {
+      await api.revokeSession();
+    } catch {}
+    const { clearRefreshToken } = await import('../services/localAuth');
+    await clearRefreshToken();
+    await logOut();
   }
 
   async function hydrateAuth() {
@@ -439,12 +452,36 @@ const register = async (formData: FormData) => {
           const userData = response.data?.data ?? response.data;
           setCurrentUser(userData);
           setEmailVerified(userData?.emailVerified ?? false);
-        } catch (err) {
-          // Token may be expired — clear auth so index.tsx redirects to login
-          setAuthenticated(false);
-          setToken("");
-          await AsyncStorage.removeItem("token");
-          await AsyncStorage.removeItem("authToken");
+        } catch (err: any) {
+          // Access token expired — try silent refresh
+          const refreshResult = await api.refreshSession();
+          if (refreshResult.success && refreshResult.data) {
+            const newToken = refreshResult.data.accessToken;
+            setToken(newToken);
+            setAuthenticated(true);
+            await AsyncStorage.setItem("authToken", newToken);
+            await AsyncStorage.setItem("token", newToken);
+            apiClient.interceptors.request.use((config: any) => {
+              config.headers.Authorization = "Bearer " + newToken;
+              return config;
+            });
+            try {
+              const response = await getCurrentUser();
+              const userData = response.data?.data ?? response.data;
+              setCurrentUser(userData);
+              setEmailVerified(userData?.emailVerified ?? false);
+            } catch {
+              setAuthenticated(false);
+              setToken("");
+              await AsyncStorage.removeItem("token");
+              await AsyncStorage.removeItem("authToken");
+            }
+          } else {
+            setAuthenticated(false);
+            setToken("");
+            await AsyncStorage.removeItem("token");
+            await AsyncStorage.removeItem("authToken");
+          }
         }
       }
     } catch (err) {
@@ -467,6 +504,7 @@ const register = async (formData: FormData) => {
         setAuthenticated,
         login,
         logOut,
+        logOutFull,
         username,
         token,
         loading,
