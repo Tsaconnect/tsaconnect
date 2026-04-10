@@ -47,10 +47,13 @@ export default function Login() {
       const bioAvail = await isBiometricAvailable();
       const pinOk = await hasPin();
 
-      if (bioOn && bioAvail) {
+      // Show biometric if enabled OR if hardware is available (auto-offer)
+      if (bioAvail) {
         setShowBiometric(true);
         setBioType(await getBiometricType());
-      } else if (pinOk) {
+      }
+      // Always show PIN option if PIN is set
+      if (pinOk) {
         setShowPinLogin(true);
       }
     })();
@@ -290,7 +293,7 @@ export default function Login() {
             </TouchableOpacity>
           )}
 
-          {showPinLogin && !showBiometric && (
+          {showPinLogin && (
             <PinLoginButton onSubmit={handlePinLogin} loading={loading} />
           )}
 
