@@ -204,7 +204,7 @@ const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visibl
         </Pressable>
         <Pressable
           style={styles.modalOption}
-          onPress={() => { onClose(); router.push('/send'); }}
+          onPress={() => { onClose(); router.push('/wallet/send'); }}
         >
           <View style={[styles.modalOptionIcon, { backgroundColor: '#F3E5F5' }]}>
             <Icon name="account-balance-wallet" size={24} color="#7B1FA2" />
