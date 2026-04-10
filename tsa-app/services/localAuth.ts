@@ -115,3 +115,34 @@ export async function getLockState(): Promise<LockState> {
     biometricType: bioType,
   };
 }
+
+// ── Refresh token (SecureStore – survives soft logout) ──
+
+const REFRESH_TOKEN_KEY = 'tsa-refresh-token';
+
+export async function storeRefreshToken(token: string): Promise<void> {
+  await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, token);
+}
+
+export async function getRefreshToken(): Promise<string | null> {
+  return SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+}
+
+export async function clearRefreshToken(): Promise<void> {
+  await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+}
+
+export async function hasRefreshToken(): Promise<boolean> {
+  const token = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+  return !!token;
+}
+
+// ── Sensitive operation authorization ──
+
+export async function authorizeWithBiometric(): Promise<boolean> {
+  const state = await getLockState();
+  if (state.hasBiometric) {
+    return authenticateWithBiometric();
+  }
+  return false;
+}
