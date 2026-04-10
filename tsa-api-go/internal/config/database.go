@@ -43,6 +43,7 @@ func AutoMigrate() error {
 		&models.EmailVerification{},
 		&models.PasswordReset{},
 		&models.TPEarning{},
+		&models.RefreshToken{},
 	); err != nil {
 		return err
 	}

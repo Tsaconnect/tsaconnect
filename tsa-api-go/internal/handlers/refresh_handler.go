@@ -8,6 +8,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type refreshRequest struct {
@@ -39,8 +40,6 @@ func (h *Handlers) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	config.DB.Model(&stored).Update("revoked", true)
-
 	accessToken, err := generateToken(user.ID, user.Email, h.Config.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate token"})
@@ -57,8 +56,15 @@ func (h *Handlers) RefreshToken(c *gin.Context) {
 		TokenHash: hashedRefresh,
 		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
 	}
-	if err := config.DB.Create(&rt).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to store refresh token"})
+
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&stored).Update("revoked", true).Error; err != nil {
+			return err
+		}
+		return tx.Create(&rt).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to rotate refresh token"})
 		return
 	}
 

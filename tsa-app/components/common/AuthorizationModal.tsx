@@ -61,6 +61,7 @@ export default function AuthorizationModal({
       setOtpValue('');
       setOtpSent(false);
       setPinAttempts(0);
+      setOtpCountdown(0);
       setLoading(false);
       return;
     }
