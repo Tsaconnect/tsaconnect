@@ -17,7 +17,7 @@ import api from "../services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
 import {
   isLockEnabled, isBiometricEnabled, isBiometricAvailable,
-  authenticateWithBiometric, getBiometricType,
+  authenticateWithBiometric, getBiometricType, hasPin, verifyPin,
 } from "../../services/localAuth";
 
 export default function Login() {
@@ -29,29 +29,35 @@ export default function Login() {
   const [passwordError, setPasswordError] = useState("");
   const [generalError, setGeneralError] = useState("");
   const [showBiometric, setShowBiometric] = useState(false);
+  const [showPinLogin, setShowPinLogin] = useState(false);
   const [bioType, setBioType] = useState("Fingerprint");
   const { setAuthenticated, setEmailVerified, setCurrentUser, setToken: setAuthToken } = useAuth();
 
-  // Check if user has a stored session + biometric enabled
+  // Check if user can use biometric or PIN login via stored refresh token
   useEffect(() => {
     (async () => {
       const { hasRefreshToken } = await import('../../services/localAuth');
       const hasToken = await hasRefreshToken();
       if (!hasToken) return;
+
       const lockOn = await isLockEnabled();
+      if (!lockOn) return;
+
       const bioOn = await isBiometricEnabled();
       const bioAvail = await isBiometricAvailable();
-      if (lockOn && bioOn && bioAvail) {
+      const pinOk = await hasPin();
+
+      if (bioOn && bioAvail) {
         setShowBiometric(true);
         setBioType(await getBiometricType());
+      } else if (pinOk) {
+        setShowPinLogin(true);
       }
     })();
   }, []);
 
-  const handleBiometricLogin = async () => {
-    const success = await authenticateWithBiometric();
-    if (!success) return;
-
+  // Restore session after biometric/PIN verification using refresh token
+  const restoreSession = async () => {
     setLoading(true);
     try {
       const refreshResult = await api.refreshSession();
@@ -66,17 +72,33 @@ export default function Login() {
           }
         } catch {}
         router.replace("/home");
-      } else {
-        const { clearRefreshToken } = await import('../../services/localAuth');
-        await clearRefreshToken();
-        setShowBiometric(false);
-        setGeneralError("Session expired. Please sign in with your password.");
+        return;
       }
+
+      // Refresh failed — clear and show error
+      const { clearRefreshToken } = await import('../../services/localAuth');
+      await clearRefreshToken();
+      setShowBiometric(false);
+      setShowPinLogin(false);
+      setGeneralError("Session expired. Please sign in with your password.");
     } catch (error) {
       setGeneralError("Failed to authenticate. Please try again.");
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleBiometricLogin = async () => {
+    const success = await authenticateWithBiometric();
+    if (!success) return;
+    await restoreSession();
+  };
+
+  const handlePinLogin = async (pinValue: string): Promise<boolean> => {
+    const valid = await verifyPin(pinValue);
+    if (!valid) return false;
+    await restoreSession();
+    return true;
   };
 
   function clearErrors() {
@@ -268,6 +290,10 @@ export default function Login() {
             </TouchableOpacity>
           )}
 
+          {showPinLogin && !showBiometric && (
+            <PinLoginButton onSubmit={handlePinLogin} loading={loading} />
+          )}
+
           <View style={styles.separatorContainer}>
             <View style={styles.separatorLine} />
             <Text style={styles.orText}>OR</Text>
@@ -293,6 +319,112 @@ export default function Login() {
     </ScrollView>
   );
 }
+
+// Inline PIN entry for login screen (shown when PIN is set but biometric is not enabled)
+function PinLoginButton({ onSubmit, loading }: { onSubmit: (pin: string) => Promise<boolean>; loading: boolean }) {
+  const [showInput, setShowInput] = useState(false);
+  const [pin, setPinVal] = useState("");
+  const [error, setError] = useState("");
+
+  if (!showInput) {
+    return (
+      <TouchableOpacity
+        style={pinStyles.button}
+        onPress={() => setShowInput(true)}
+        disabled={loading}
+      >
+        <Ionicons name="keypad" size={24} color={COLORS.primary} />
+        <Text style={pinStyles.buttonText}>Login with PIN</Text>
+      </TouchableOpacity>
+    );
+  }
+
+  return (
+    <View style={pinStyles.container}>
+      <Text style={pinStyles.label}>Enter your 4-digit PIN</Text>
+      <TextInput
+        style={pinStyles.input}
+        value={pin}
+        onChangeText={(text) => {
+          const digits = text.replace(/[^0-9]/g, "").slice(0, 4);
+          setPinVal(digits);
+          setError("");
+          if (digits.length === 4) {
+            onSubmit(digits).then((ok) => {
+              if (!ok) {
+                setError("Incorrect PIN");
+                setPinVal("");
+              }
+            });
+          }
+        }}
+        keyboardType="number-pad"
+        maxLength={4}
+        secureTextEntry
+        autoFocus
+        placeholder="••••"
+        placeholderTextColor="#ccc"
+      />
+      {error ? <Text style={pinStyles.error}>{error}</Text> : null}
+      <TouchableOpacity onPress={() => { setShowInput(false); setPinVal(""); setError(""); }}>
+        <Text style={pinStyles.cancel}>Cancel</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const pinStyles = StyleSheet.create({
+  button: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "100%",
+    height: 56,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    marginTop: 12,
+    gap: 10,
+    backgroundColor: "#FFF",
+  },
+  buttonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.primary,
+  },
+  container: {
+    alignItems: "center",
+    marginTop: 16,
+    width: "100%",
+  },
+  label: {
+    fontSize: 14,
+    color: COLORS.gray,
+    marginBottom: 12,
+  },
+  input: {
+    fontSize: 28,
+    fontWeight: "700",
+    textAlign: "center",
+    letterSpacing: 12,
+    width: 180,
+    borderBottomWidth: 2,
+    borderBottomColor: COLORS.primary,
+    paddingVertical: 8,
+    color: COLORS.dark || "#1a1a1a",
+  },
+  error: {
+    fontSize: 13,
+    color: COLORS.danger || "#DC3545",
+    marginTop: 8,
+  },
+  cancel: {
+    fontSize: 14,
+    color: COLORS.primary,
+    fontWeight: "500",
+    marginTop: 12,
+  },
+});
 
 const styles = StyleSheet.create({
   scrollContainer: {

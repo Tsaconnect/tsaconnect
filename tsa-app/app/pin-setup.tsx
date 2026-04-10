@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { setPin, setBiometricEnabled, isBiometricAvailable, getBiometricType } from '@/services/localAuth';
+import { setPin as savePin, setBiometricEnabled, isBiometricAvailable, getBiometricType } from '@/services/localAuth';
 
 const GOLD = '#D4AF37';
 type Step = 'create' | 'confirm' | 'biometric' | 'done';
@@ -46,7 +46,7 @@ const PinSetupScreen = () => {
   };
 
   const handlePinSet = async (pinValue: string) => {
-    await setPin(pinValue);
+    await savePin(pinValue);
 
     // Check if biometric is available
     const bioAvailable = await isBiometricAvailable();
