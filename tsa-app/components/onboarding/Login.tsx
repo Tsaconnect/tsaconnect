@@ -15,7 +15,6 @@ import { router, Link } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   isLockEnabled, isBiometricEnabled, isBiometricAvailable,
   authenticateWithBiometric, getBiometricType,
@@ -36,7 +35,8 @@ export default function Login() {
   // Check if user has a stored session + biometric enabled
   useEffect(() => {
     (async () => {
-      const hasToken = await AsyncStorage.getItem("authToken");
+      const { hasRefreshToken } = await import('../../services/localAuth');
+      const hasToken = await hasRefreshToken();
       if (!hasToken) return;
       const lockOn = await isLockEnabled();
       const bioOn = await isBiometricEnabled();
@@ -50,12 +50,14 @@ export default function Login() {
 
   const handleBiometricLogin = async () => {
     const success = await authenticateWithBiometric();
-    if (success) {
-      // Token exists in storage — hydrate auth
-      const storedToken = await AsyncStorage.getItem("authToken");
-      if (storedToken) {
+    if (!success) return;
+
+    setLoading(true);
+    try {
+      const refreshResult = await api.refreshSession();
+      if (refreshResult.success && refreshResult.data) {
         setAuthenticated(true);
-        setAuthToken(storedToken);
+        setAuthToken(refreshResult.data.accessToken);
         try {
           const response = await api.getProfile();
           if (response.success && response.data) {
@@ -64,7 +66,16 @@ export default function Login() {
           }
         } catch {}
         router.replace("/home");
+      } else {
+        const { clearRefreshToken } = await import('../../services/localAuth');
+        await clearRefreshToken();
+        setShowBiometric(false);
+        setGeneralError("Session expired. Please sign in with your password.");
       }
+    } catch (error) {
+      setGeneralError("Failed to authenticate. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
