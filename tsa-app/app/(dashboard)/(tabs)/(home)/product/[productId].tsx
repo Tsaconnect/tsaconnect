@@ -426,50 +426,50 @@ export default function ProductDetailsScreen() {
         )}
 
         {/* ===== Shipping Info ===== */}
-        {((product.shippingSameCity ?? 0) > 0 ||
-          (product.shippingSameState ?? 0) > 0 ||
-          (product.shippingSameCountry ?? 0) > 0 ||
-          (product.shippingInternational ?? 0) > 0) && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Shipping</Text>
-            {(product.shippingSameCity ?? 0) > 0 && (
-              <View style={styles.shippingRow}>
-                <Ionicons name="bicycle-outline" size={16} color="#888" />
-                <Text style={styles.shippingLabel}>Same City</Text>
-                <Text style={styles.shippingPrice}>
-                  ${product.shippingSameCity}
-                </Text>
-              </View>
-            )}
-            {(product.shippingSameState ?? 0) > 0 && (
-              <View style={styles.shippingRow}>
-                <Ionicons name="car-outline" size={16} color="#888" />
-                <Text style={styles.shippingLabel}>Same State</Text>
-                <Text style={styles.shippingPrice}>
-                  ${product.shippingSameState}
-                </Text>
-              </View>
-            )}
-            {(product.shippingSameCountry ?? 0) > 0 && (
-              <View style={styles.shippingRow}>
-                <Ionicons name="bus-outline" size={16} color="#888" />
-                <Text style={styles.shippingLabel}>Nationwide</Text>
-                <Text style={styles.shippingPrice}>
-                  ${product.shippingSameCountry}
-                </Text>
-              </View>
-            )}
-            {(product.shippingInternational ?? 0) > 0 && (
-              <View style={styles.shippingRow}>
-                <Ionicons name="airplane-outline" size={16} color="#888" />
-                <Text style={styles.shippingLabel}>International</Text>
-                <Text style={styles.shippingPrice}>
-                  ${product.shippingInternational}
-                </Text>
-              </View>
-            )}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Shipping</Text>
+          <View style={styles.shippingRow}>
+            <Ionicons name="home-outline" size={16} color="#888" />
+            <Text style={styles.shippingLabel}>Same Residential Area</Text>
+            <Text style={[styles.shippingPrice, { color: '#2ecc71' }]}>Free</Text>
           </View>
-        )}
+          {(product.shippingSameCity ?? 0) > 0 && (
+            <View style={styles.shippingRow}>
+              <Ionicons name="bicycle-outline" size={16} color="#888" />
+              <Text style={styles.shippingLabel}>Same City</Text>
+              <Text style={styles.shippingPrice}>
+                ${product.shippingSameCity}
+              </Text>
+            </View>
+          )}
+          {(product.shippingSameState ?? 0) > 0 && (
+            <View style={styles.shippingRow}>
+              <Ionicons name="car-outline" size={16} color="#888" />
+              <Text style={styles.shippingLabel}>Same State</Text>
+              <Text style={styles.shippingPrice}>
+                ${product.shippingSameState}
+              </Text>
+            </View>
+          )}
+          {(product.shippingSameCountry ?? 0) > 0 && (
+            <View style={styles.shippingRow}>
+              <Ionicons name="bus-outline" size={16} color="#888" />
+              <Text style={styles.shippingLabel}>Nationwide</Text>
+              <Text style={styles.shippingPrice}>
+                ${product.shippingSameCountry}
+              </Text>
+            </View>
+          )}
+          {(product.shippingInternational ?? 0) > 0 && (
+            <View style={styles.shippingRow}>
+              <Ionicons name="airplane-outline" size={16} color="#888" />
+              <Text style={styles.shippingLabel}>International</Text>
+              <Text style={styles.shippingPrice}>
+                ${product.shippingInternational}
+              </Text>
+            </View>
+          )}
+        </View>
 
         {/* ===== Quantity Selector ===== */}
         {isInStock && (

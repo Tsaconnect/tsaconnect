@@ -290,8 +290,45 @@ const CheckoutScreen = () => {
   const feeConfig = cartData?.feeConfig;
   const isMCGP = selectedToken === 'MCGP';
   const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.1);
+
+  // --- Calculate shipping based on buyer location vs merchant product location ---
+  const calculateItemShipping = (item: CartItem): number => {
+    if (typeof item.product !== 'object') return 0;
+    const product = item.product as Product;
+    const productLocation = product.location || '';
+    const parts = productLocation.split(',').map((s: string) => s.trim().toLowerCase());
+    // location format: "City, State, Country"
+    const merchantCity = parts[0] || '';
+    const merchantState = parts[1] || '';
+    const merchantCountry = parts[2] || '';
+
+    const buyerCity = shippingLocation.city.trim().toLowerCase();
+    const buyerState = shippingLocation.state.trim().toLowerCase();
+    const buyerCountry = shippingLocation.country.trim().toLowerCase();
+
+    // Same city
+    if (buyerCountry === merchantCountry && buyerState === merchantState && buyerCity === merchantCity) {
+      return product.shippingSameCity ?? 0;
+    }
+    // Same state
+    if (buyerCountry === merchantCountry && buyerState === merchantState) {
+      return product.shippingSameState ?? 0;
+    }
+    // Same country
+    if (buyerCountry === merchantCountry) {
+      return product.shippingSameCountry ?? 0;
+    }
+    // International
+    return product.shippingInternational ?? 0;
+  };
+
+  const calculatedShipping = items.reduce(
+    (total, item) => total + calculateItemShipping(item) * item.quantity,
+    0
+  );
+  const shippingTotal = calculatedShipping > 0 ? calculatedShipping : summary.shipping;
   const estimatedTotal =
-    summary.subtotal + summary.shipping + gasFee - summary.discount;
+    summary.subtotal + shippingTotal + gasFee - summary.discount;
 
   // ===== HEADER =====
   const Header = ({
@@ -675,8 +712,8 @@ const CheckoutScreen = () => {
           <View style={s.summaryRow}>
             <Text style={s.summaryLabel}>Shipping</Text>
             <Text style={s.summaryValue}>
-              {summary.shipping > 0
-                ? `$${summary.shipping.toFixed(2)}`
+              {shippingTotal > 0
+                ? `$${shippingTotal.toFixed(2)}`
                 : 'Free'}
             </Text>
           </View>

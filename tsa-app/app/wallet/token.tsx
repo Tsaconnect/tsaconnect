@@ -295,7 +295,7 @@ const TokenDetailScreen: React.FC = () => {
       <View style={styles.actionsCard}>
         <Pressable
           style={[styles.actionBtn, { backgroundColor: displayColor }]}
-          onPress={() => router.push({ pathname: '/send', params: { token: symbol, chainKey } } as any)}
+          onPress={() => router.push({ pathname: '/wallet/send', params: { token: symbol, chainKey } } as any)}
         >
           <Icon name="send" size={20} color="#FFF" />
           <Text style={styles.actionBtnText}>Send</Text>

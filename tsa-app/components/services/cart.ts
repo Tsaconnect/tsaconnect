@@ -34,6 +34,10 @@ export interface Product {
     status?: 'active' | 'inactive' | 'draft';
     views?: number;
     location?: string;
+    shippingSameCity?: number;
+    shippingSameState?: number;
+    shippingSameCountry?: number;
+    shippingInternational?: number;
     phoneNumber?: string;
     companyName?: string;
     email?: string;

@@ -434,6 +434,14 @@ const AddProduct = () => {
         <Text style={styles.sectionTitle}>Shipping Rates ($)</Text>
         <View style={styles.rowFields}>
           <View style={styles.halfField}>
+            <Text style={styles.label}>Same Residential Area</Text>
+            <TextInput
+              style={[styles.input, { backgroundColor: '#f0f0f0', color: '#888' }]}
+              value="Free"
+              editable={false}
+            />
+          </View>
+          <View style={styles.halfField}>
             <Text style={styles.label}>Same City</Text>
             <TextInput
               style={styles.input}
@@ -444,6 +452,8 @@ const AddProduct = () => {
               onChangeText={setShippingSameCity}
             />
           </View>
+        </View>
+        <View style={styles.rowFields}>
           <View style={styles.halfField}>
             <Text style={styles.label}>Same State</Text>
             <TextInput
@@ -455,8 +465,6 @@ const AddProduct = () => {
               onChangeText={setShippingSameState}
             />
           </View>
-        </View>
-        <View style={styles.rowFields}>
           <View style={styles.halfField}>
             <Text style={styles.label}>Same Country</Text>
             <TextInput
@@ -468,6 +476,8 @@ const AddProduct = () => {
               onChangeText={setShippingSameCountry}
             />
           </View>
+        </View>
+        <View style={styles.rowFields}>
           <View style={styles.halfField}>
             <Text style={styles.label}>International</Text>
             <TextInput

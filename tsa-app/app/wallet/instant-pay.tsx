@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { signTransaction } from '../../services/wallet';
@@ -47,28 +48,41 @@ const InstantPay = () => {
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await getWalletBalances();
-        if (r.success && r.data) {
-          const d = r.data as any;
-          if (Array.isArray(d)) { setBalances(d); }
-          else if (d.balances) {
-            const flat: WalletBalance[] = [];
-            for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
-              for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
-                if (info && typeof info === 'object') {
-                  flat.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
-                }
+  const loadBalances = useCallback(async () => {
+    try {
+      setLoading(true);
+      // Query the active chain for accurate balances
+      const chainId = CHAINS[selectedChain]?.chainId;
+      const r = await getWalletBalances(chainId);
+      if (r.success && r.data) {
+        const d = r.data as any;
+        let fetched: WalletBalance[] = [];
+        if (Array.isArray(d)) { fetched = d; }
+        else if (d.balances) {
+          for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
+            for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
+              if (info && typeof info === 'object') {
+                fetched.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
               }
             }
-            setBalances(flat);
           }
         }
-      } catch {} finally { setLoading(false); }
-    })();
-  }, []);
+        // Merge with tokenList so all tokens appear
+        const balanceMap = new Map(fetched.map(b => [b.symbol, b]));
+        const merged: WalletBalance[] = tokenList.map(t =>
+          balanceMap.get(t.symbol) ?? { symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals }
+        );
+        for (const b of fetched) {
+          if (!merged.some(m => m.symbol === b.symbol)) merged.push(b);
+        }
+        setBalances(merged);
+      }
+    } catch (err) {
+      console.error('InstantPay: load balances error:', err);
+    } finally { setLoading(false); }
+  }, [selectedChain, tokenList]);
+
+  useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
 
   useEffect(() => {
     const chains = tokens[selectedToken]?.chains ?? [];
@@ -132,7 +146,7 @@ const InstantPay = () => {
         gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
         nonce: r.data.nonce, chainId: r.data.chainId,
       });
-      const res = await submitTransaction(signed, 'instant_pay', selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
+      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
       if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); }
       else throw new Error(res.message || 'Failed');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
