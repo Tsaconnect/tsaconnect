@@ -8,7 +8,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { COLORS } from '@/constants';
+import { CHAINS } from '@/constants/chains';
 import { signTransaction } from '@/services/wallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances,
@@ -131,28 +133,43 @@ const SwapScreen = () => {
   const toToken = TOKENS[toSymbol];
   const direction = fromSymbol === 'MCGP' ? 'sell' as const : 'buy' as const;
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await getWalletBalances();
-        if (r.success && r.data) {
-          const d = r.data as any;
-          if (Array.isArray(d)) { setBalances(d); }
-          else if (d.balances) {
-            const flat: WalletBalance[] = [];
-            for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
-              for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
-                if (info && typeof info === 'object') {
-                  flat.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
-                }
+  const loadBalances = useCallback(async () => {
+    try {
+      setLoadingBal(true);
+      // Query Sonic chain specifically since swaps happen on Sonic
+      const sonicChainId = CHAINS.sonic.chainId;
+      const r = await getWalletBalances(sonicChainId);
+      if (r.success && r.data) {
+        const d = r.data as any;
+        let fetched: WalletBalance[] = [];
+        if (Array.isArray(d)) { fetched = d; }
+        else if (d.balances) {
+          for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
+            for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
+              if (info && typeof info === 'object') {
+                fetched.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
               }
             }
-            setBalances(flat);
           }
         }
-      } catch {} finally { setLoadingBal(false); }
-    })();
+        // Merge with known swap tokens so all always appear
+        const balanceMap = new Map(fetched.map(b => [b.symbol, b]));
+        const merged: WalletBalance[] = Object.values(TOKENS).map(t =>
+          balanceMap.get(t.symbol) ?? { symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals }
+        );
+        // Also include any other tokens from the API
+        for (const b of fetched) {
+          if (!merged.some(m => m.symbol === b.symbol)) merged.push(b);
+        }
+        setBalances(merged);
+      }
+    } catch (err) {
+      console.error('Swap: load balances error:', err);
+    } finally { setLoadingBal(false); }
   }, []);
+
+  // Refresh balances every time the screen gains focus
+  useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
 
   const bal = (sym: string) => balances.find(b => b.symbol === sym)?.balance || '0';
 
@@ -251,7 +268,7 @@ const SwapScreen = () => {
       });
       const res = await submitTransaction(signedS, 'swap', 'MCGP', swapTx.to, amount, swapTx.chainId);
 
-      if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); }
+      if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); loadBalances(); }
       else throw new Error(res.message || 'Swap failed');
     } catch (e: any) { setError(e.message || 'Swap failed.'); setScreen('failure'); }
   };

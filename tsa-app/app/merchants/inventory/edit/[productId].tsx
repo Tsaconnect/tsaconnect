@@ -503,19 +503,25 @@ const EditProduct = () => {
               <Text style={[styles.label, { marginTop: 8, marginBottom: 4, fontWeight: '700' }]}>Shipping Rates ($)</Text>
               <View style={styles.row}>
                 <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same City</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCity} onChangeText={setShippingSameCity} />
+                  <Text style={styles.label}>Same Residential Area</Text>
+                  <TextInput style={[styles.input, { backgroundColor: '#f0f0f0', color: '#888' }]} value="Free" editable={false} />
                 </View>
                 <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same State</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameState} onChangeText={setShippingSameState} />
+                  <Text style={styles.label}>Same City</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCity} onChangeText={setShippingSameCity} />
                 </View>
               </View>
               <View style={styles.row}>
                 <View style={[styles.formGroup, styles.halfWidth]}>
+                  <Text style={styles.label}>Same State</Text>
+                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameState} onChangeText={setShippingSameState} />
+                </View>
+                <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>Same Country</Text>
                   <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCountry} onChangeText={setShippingSameCountry} />
                 </View>
+              </View>
+              <View style={styles.row}>
                 <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>International</Text>
                   <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingInternational} onChangeText={setShippingInternational} />

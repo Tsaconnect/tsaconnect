@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, TextInput, ScrollView,
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, Modal, FlatList,
@@ -43,35 +43,45 @@ const SendToken = () => {
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
 
-  useEffect(() => { loadBalances(); }, []);
-
   useEffect(() => {
     const chains = tokens[selectedToken]?.chains ?? [];
     if (!chains.includes(selectedChain)) setSelectedChain(chains[0]);
   }, [selectedToken]);
 
-  const loadBalances = async () => {
+  const loadBalances = useCallback(async () => {
     try {
-      const result = await getWalletBalances();
+      setLoading(true);
+      const chainId = CHAINS[selectedChain]?.chainId;
+      const result = await getWalletBalances(chainId);
       if (result.success && result.data) {
         const d = result.data as any;
-        if (Array.isArray(d)) { setBalances(d); }
+        let fetched: WalletBalance[] = [];
+        if (Array.isArray(d)) { fetched = d; }
         else if (d.balances) {
-          const flat: WalletBalance[] = [];
           for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
             for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
               if (info && typeof info === 'object') {
-                flat.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
+                fetched.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
               }
             }
           }
-          setBalances(flat);
         }
+        // Merge with tokenList so all tokens appear
+        const balanceMap = new Map(fetched.map(b => [b.symbol, b]));
+        const merged: WalletBalance[] = tokenList.map(t =>
+          balanceMap.get(t.symbol) ?? { symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals }
+        );
+        for (const b of fetched) {
+          if (!merged.some(m => m.symbol === b.symbol)) merged.push(b);
+        }
+        setBalances(merged);
       }
     } catch (err) {
-      console.error('Load balances error:', err);
+      console.error('Send: load balances error:', err);
     } finally { setLoading(false); }
-  };
+  }, [selectedChain, tokenList]);
+
+  useEffect(() => { loadBalances(); }, [loadBalances]);
 
   const getBalance = (): string => balances.find(b => b.symbol === selectedToken)?.balance || '0';
   const getUsdPrice = (): number => {

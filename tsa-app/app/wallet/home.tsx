@@ -75,7 +75,16 @@ const WalletHome = () => {
       ]);
 
       if (balanceResult.success && Array.isArray(balanceResult.data)) {
-        setBalances(balanceResult.data);
+        // Merge API balances with full token list so all supported tokens appear
+        const balanceMap = new Map(balanceResult.data.map(b => [b.symbol, b]));
+        const merged = tokenList.map(t => balanceMap.get(t.symbol) ?? {
+          symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
+        });
+        // Include any API tokens not in tokenList (e.g. custom tokens in wallet)
+        for (const b of balanceResult.data) {
+          if (!tokenList.some(t => t.symbol === b.symbol)) merged.push(b);
+        }
+        setBalances(merged);
       } else {
         // Show default empty balances
         setBalances(
@@ -91,11 +100,11 @@ const WalletHome = () => {
     } catch (err: any) {
       console.error('Fetch wallet data error:', err);
       setError('Failed to load wallet data');
-      setBalances([
-        { symbol: 'MCGP', name: 'MCG Protocol', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 18 },
-        { symbol: 'USDT', name: 'Tether USD', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
-        { symbol: 'USDC', name: 'USD Coin', balance: '0', usdValue: '0.00', contractAddress: '', decimals: 6 },
-      ]);
+      setBalances(
+        tokenList.map(t => ({
+          symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
+        }))
+      );
     } finally {
       setLoading(false);
     }

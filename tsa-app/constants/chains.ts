@@ -88,6 +88,21 @@ export function setActiveNetwork(network: NetworkType) {
 // Default tokens — used as fallback when backend is unreachable.
 // The canonical token list is fetched from the backend at runtime.
 export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
+  MCGP: {
+    symbol: 'MCGP',
+    name: 'MCG Protocol',
+    decimals: 18,
+    iconColor: '#FFD700',
+    chains: ['sonic'],
+  },
+  S: {
+    symbol: 'S',
+    name: 'Sonic',
+    decimals: 18,
+    iconColor: '#5B6EF5',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/38108/small/200x200_Sonic_Logo.png',
+    chains: ['sonic'],
+  },
   USDT: {
     symbol: 'USDT',
     name: 'Tether',
@@ -103,13 +118,6 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     iconColor: '#2775CA',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/usdc.png',
     chains: ['sonic', 'bsc'],
-  },
-  MCGP: {
-    symbol: 'MCGP',
-    name: 'MCG Protocol',
-    decimals: 18,
-    iconColor: '#FFD700',
-    chains: ['sonic'],
   },
 };
 
