@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { type NetworkType, setActiveNetwork } from '../constants/chains';
+import { clearProviderCache } from '../services/wallet';
 
 const NETWORK_KEY = 'tsa-network';
 
@@ -25,6 +26,7 @@ export function useNetwork() {
   const switchNetwork = useCallback(async (net: NetworkType) => {
     currentNetwork = net;
     setActiveNetwork(net);
+    clearProviderCache();
     setNetwork(net);
     await AsyncStorage.setItem(NETWORK_KEY, net);
   }, []);

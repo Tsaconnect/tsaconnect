@@ -13,10 +13,9 @@ import { COLORS } from '@/constants';
 import { CHAINS } from '@/constants/chains';
 import { signTransaction } from '@/services/wallet';
 import {
-  getSwapPrice, prepareSwap, submitTransaction, getWalletBalances,
+  getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
   type WalletBalance,
 } from '@/services/walletApi';
-import { useKycVerification } from '@/hooks/useKycVerification';
 
 // ── Token config (extend this list as new tokens are added) ──
 interface TokenInfo {
@@ -113,7 +112,7 @@ const TokenPicker = ({
 
 // ── Main Screen ──
 const SwapScreen = () => {
-  const { requireKycVerified } = useKycVerification();
+
   const [fromSymbol, setFromSymbol] = useState('USDC');
   const [toSymbol, setToSymbol] = useState('MCGP');
   const [amount, setAmount] = useState('');
@@ -140,18 +139,9 @@ const SwapScreen = () => {
       const sonicChainId = CHAINS.sonic.chainId;
       const r = await getWalletBalances(sonicChainId);
       if (r.success && r.data) {
-        const d = r.data as any;
-        let fetched: WalletBalance[] = [];
-        if (Array.isArray(d)) { fetched = d; }
-        else if (d.balances) {
-          for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
-            for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
-              if (info && typeof info === 'object') {
-                fetched.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
-              }
-            }
-          }
-        }
+        const fetched: WalletBalance[] = normalizeWalletBalances(r.data, 'sonic').map(
+          ({ chainKey, chainName, ...balance }) => balance
+        );
         // Merge with known swap tokens so all always appear
         const balanceMap = new Map(fetched.map(b => [b.symbol, b]));
         const merged: WalletBalance[] = Object.values(TOKENS).map(t =>
@@ -239,7 +229,7 @@ const SwapScreen = () => {
   };
 
   const handleSwap = async () => {
-    if (!requireKycVerified()) return;
+
     setScreen('signing'); setError('');
     try {
       const params = direction === 'buy'
@@ -254,6 +244,7 @@ const SwapScreen = () => {
 
       setStatus('Approving tokens...');
       const signedA = await signTransaction({
+        type: 0,
         to: approveTx.to, data: approveTx.data, value: approveTx.value,
         gasLimit: approveTx.gasLimit, gasPrice: approveTx.gasPrice,
         nonce: approveTx.nonce, chainId: approveTx.chainId,
@@ -262,6 +253,7 @@ const SwapScreen = () => {
 
       setStatus('Executing swap...');
       const signedS = await signTransaction({
+        type: 0,
         to: swapTx.to, data: swapTx.data, value: swapTx.value,
         gasLimit: swapTx.gasLimit, gasPrice: swapTx.gasPrice,
         nonce: swapTx.nonce, chainId: swapTx.chainId,

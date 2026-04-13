@@ -213,7 +213,7 @@ const CheckoutScreen = () => {
 
         let approveTxHash: string;
         try {
-          approveTxHash = await signAndBroadcast(approveResult.data.approveTx);
+          approveTxHash = await signAndBroadcast(approveResult.data.approveTx, 'sonic');
         } catch (e: any) {
           throw new Error(friendlyTxError(e));
         }
@@ -227,7 +227,7 @@ const CheckoutScreen = () => {
 
         let escrowTxHash: string;
         try {
-          escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx);
+          escrowTxHash = await signAndBroadcast(escrowResult.data.createOrderTx, 'sonic');
         } catch (e: any) {
           throw new Error(friendlyTxError(e));
         }

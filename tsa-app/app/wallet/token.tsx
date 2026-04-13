@@ -13,9 +13,10 @@ import {
   Image,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { CHAINS, type ChainKey, type ChainConfig } from '../../constants/chains';
+import { CHAINS, CHAIN_KEYS, type ChainKey, type ChainConfig } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
-import { getWalletBalances } from '../../services/walletApi';
+import ChainSelector from '../../components/wallet/ChainSelector';
+import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { getTokenPriceHistory } from '../../services/walletApi';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -119,7 +120,12 @@ const TokenDetailScreen: React.FC = () => {
   }>();
 
   const { symbol, chainKey, name, iconColor, iconUrl, type } = params;
-  const chain: ChainConfig | undefined = chainKey ? (CHAINS as Record<string, ChainConfig>)[chainKey] : undefined;
+
+  const { tokens: allTokens } = useTokens();
+  const tokenConfig = allTokens[symbol];
+  const availableChains = tokenConfig?.chains ?? (chainKey ? [chainKey as ChainKey] : []);
+  const [activeChainKey, setActiveChainKey] = useState<ChainKey>((chainKey as ChainKey) || 'sonic');
+  const activeChainConfig = (CHAINS as Record<string, ChainConfig>)[activeChainKey];
 
   const [balance, setBalance] = useState(0);
   const [usdPrice, setUsdPrice] = useState(0);
@@ -133,20 +139,21 @@ const TokenDetailScreen: React.FC = () => {
   const fetchBalance = useCallback(async () => {
     setLoadingBalance(true);
     try {
-      const result = await getWalletBalances(chain?.chainId);
+      const result = await getWalletBalances(CHAINS[activeChainKey]?.chainId);
       if (result.success && result.data) {
-        const data = result.data as any;
-        const balances = data.balances || {};
-        const chainData = balances[chainKey];
-        if (chainData && chainData[symbol]) {
-          const entry = chainData[symbol];
-          if (typeof entry === 'object') {
-            setBalance(parseFloat(entry.balance || '0'));
-            setUsdPrice(entry.usdPrice || 0);
-            setUsdValue(entry.usdValue || 0);
-          } else {
-            setBalance(parseFloat(entry));
-          }
+        const found = normalizeWalletBalances(result.data, activeChainKey).find(
+          (entry) => entry.symbol === symbol && entry.chainKey === activeChainKey
+        );
+        if (found) {
+          const parsedBalance = parseFloat(found.balance || '0');
+          const parsedUsdValue = parseFloat(found.usdValue || '0');
+          setBalance(parsedBalance);
+          setUsdValue(parsedUsdValue);
+          setUsdPrice(found.usdPrice || (parsedBalance > 0 ? parsedUsdValue / parsedBalance : 0));
+        } else {
+          setBalance(0);
+          setUsdValue(0);
+          setUsdPrice(0);
         }
       }
     } catch (err) {
@@ -154,7 +161,7 @@ const TokenDetailScreen: React.FC = () => {
     } finally {
       setLoadingBalance(false);
     }
-  }, [chain?.chainId, chainKey, symbol]);
+  }, [activeChainKey, symbol]);
 
   const fetchPriceHistory = useCallback(async (days: number) => {
     setLoadingChart(true);
@@ -187,7 +194,7 @@ const TokenDetailScreen: React.FC = () => {
 
   const isNative = type === 'Native Token';
   const changeColor = priceChange >= 0 ? '#22C55E' : '#EF4444';
-  const displayColor = iconColor || chain?.iconColor || '#888';
+  const displayColor = iconColor || activeChainConfig?.iconColor || '#888';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
@@ -248,6 +255,17 @@ const TokenDetailScreen: React.FC = () => {
         </View>
       </View>
 
+      {/* Chain Selector */}
+      {availableChains.length > 1 && (
+        <View style={{ paddingHorizontal: 16, marginBottom: 12 }}>
+          <ChainSelector
+            availableChains={availableChains}
+            selectedChain={activeChainKey}
+            onSelect={(chain) => setActiveChainKey(chain)}
+          />
+        </View>
+      )}
+
       {/* Chart */}
       <View style={styles.chartCard}>
         <Text style={styles.sectionTitle}>Price Chart</Text>
@@ -283,11 +301,11 @@ const TokenDetailScreen: React.FC = () => {
       <View style={styles.infoCard}>
         <Text style={styles.sectionTitle}>Details</Text>
         <InfoRow label="Type" value={type || 'Token'} />
-        <InfoRow label="Network" value={chain?.name || chainKey} />
+        <InfoRow label="Network" value={activeChainConfig?.name || activeChainKey} />
         <InfoRow label="Symbol" value={symbol} />
         {isNative && <InfoRow label="Decimals" value="18" />}
-        {chain?.explorerUrl && (
-          <InfoRow label="Explorer" value={chain.shortName || chain.name} />
+        {activeChainConfig?.explorerUrl && (
+          <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} />
         )}
       </View>
 
@@ -295,7 +313,7 @@ const TokenDetailScreen: React.FC = () => {
       <View style={styles.actionsCard}>
         <Pressable
           style={[styles.actionBtn, { backgroundColor: displayColor }]}
-          onPress={() => router.push({ pathname: '/wallet/send', params: { token: symbol, chainKey } } as any)}
+          onPress={() => router.push({ pathname: '/wallet/send', params: { token: symbol, chainKey: activeChainKey } } as any)}
         >
           <Icon name="send" size={20} color="#FFF" />
           <Text style={styles.actionBtnText}>Send</Text>

@@ -202,9 +202,50 @@ export async function signTransaction(unsignedTx: ethers.TransactionLike): Promi
     throw new Error('No private key found. Please set up your wallet first.');
   }
 
-  const wallet = new ethers.Wallet(privateKey);
-  const signedTx = await wallet.signTransaction(unsignedTx);
-  return signedTx;
+  // Build a Transaction object and sign with SigningKey for proper EIP-155
+  const tx = ethers.Transaction.from({
+    type: 0, // legacy
+    to: unsignedTx.to,
+    value: unsignedTx.value || '0x0',
+    data: unsignedTx.data || '0x',
+    nonce: Number(unsignedTx.nonce || 0),
+    gasLimit: unsignedTx.gasLimit,
+    gasPrice: unsignedTx.gasPrice,
+    chainId: Number(unsignedTx.chainId || 146),
+  });
+
+  const signingKey = new ethers.SigningKey(privateKey);
+  tx.signature = signingKey.sign(tx.unsignedHash);
+
+  return tx.serialized;
+}
+
+/**
+ * Read ERC20 token metadata from a contract address.
+ * Returns null if the contract doesn't implement standard ERC20 metadata.
+ */
+export async function readTokenContract(
+  contractAddress: string,
+  chainKey: ChainKey
+): Promise<{ name: string; symbol: string; decimals: number } | null> {
+  try {
+    const provider = getProvider(chainKey);
+    const abi = [
+      'function name() view returns (string)',
+      'function symbol() view returns (string)',
+      'function decimals() view returns (uint8)',
+    ];
+    const contract = new ethers.Contract(contractAddress, abi, provider);
+    const [name, symbol, decimals] = await Promise.all([
+      contract.name(),
+      contract.symbol(),
+      contract.decimals(),
+    ]);
+    return { name, symbol, decimals: Number(decimals) };
+  } catch (err) {
+    console.error('readTokenContract error:', err);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +269,14 @@ export function isValidAddress(address: string): boolean {
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
+
+/**
+ * Clear the provider cache. Call this when switching networks (mainnet/testnet)
+ * so providers reconnect with the correct RPC URLs.
+ */
+export function clearProviderCache() {
+  providerCache.clear();
+}
 
 /**
  * Get a JSON-RPC provider for a given chain.

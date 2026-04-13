@@ -12,7 +12,7 @@ import {
   Image,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { getWalletBalances, registerWalletAddress } from '../services/walletApi';
+import { getWalletBalances, normalizeWalletBalances, registerWalletAddress } from '../services/walletApi';
 import {
   getWalletList,
   getActiveWallet,
@@ -299,31 +299,21 @@ const WalletScreen: React.FC = () => {
     try {
       const result = await getWalletBalances();
       if (result.success && result.data) {
-        const data = result.data as any;
-        // API may return flat WalletBalance[] or nested { balances: { chainKey: { symbol: amount } } }
-        const nestedBalances = data.balances || null;
+        const normalizedBalances = normalizeWalletBalances(result.data);
+        const balanceMap = new Map(
+          normalizedBalances.map((entry) => [`${entry.symbol}-${entry.chainKey}`, entry] as const)
+        );
 
         const updated = assetList.map(asset => {
           const chainKey = asset.details?.chainKey;
           if (!chainKey) return asset;
 
-          let balance = 0;
-          let usdValue = 0;
-          let usdPrice = 0;
-          if (nestedBalances && nestedBalances[chainKey]) {
-            const entry = nestedBalances[chainKey][asset.symbol];
-            if (entry && typeof entry === 'object') {
-              // New format: { balance: "30", usdPrice: 0.52, usdValue: 15.6 }
-              const parsedBal = parseFloat(entry.balance || '0');
-              balance = Number.isFinite(parsedBal) ? parsedBal : 0;
-              usdValue = Number.isFinite(entry.usdValue) ? entry.usdValue : 0;
-              usdPrice = Number.isFinite(entry.usdPrice) ? entry.usdPrice : 0;
-            } else if (entry) {
-              // Legacy format: plain string "30"
-              const parsedBal = parseFloat(entry);
-              balance = Number.isFinite(parsedBal) ? parsedBal : 0;
-            }
-          }
+          const entry = balanceMap.get(`${asset.symbol}-${chainKey}`);
+          const parsedBal = parseFloat(entry?.balance || '0');
+          const parsedUsdValue = parseFloat(entry?.usdValue || '0');
+          const balance = Number.isFinite(parsedBal) ? parsedBal : 0;
+          const usdValue = Number.isFinite(parsedUsdValue) ? parsedUsdValue : 0;
+          const usdPrice = entry?.usdPrice || (balance > 0 ? usdValue / balance : 0);
           return { ...asset, balance, usdValue, usdPrice };
         });
         setAssets(updated);

@@ -29,6 +29,7 @@ import {
   WalletMeta,
 } from '../../services/wallet';
 import { registerWalletAddress } from '../../services/walletApi';
+import { useNetwork } from '../../hooks/useNetwork';
 
 type Mode = 'menu' | 'import';
 
@@ -45,6 +46,24 @@ const WalletManage = () => {
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [renameAddress, setRenameAddress] = useState('');
   const [renameValue, setRenameValue] = useState('');
+  const { network, switchNetwork } = useNetwork();
+
+  const handleNetworkToggle = () => {
+    const target = network === 'mainnet' ? 'testnet' : 'mainnet';
+    Alert.alert(
+      `Switch to ${target === 'testnet' ? 'Testnet' : 'Mainnet'}?`,
+      target === 'testnet'
+        ? 'Testnet uses test tokens with no real value. Your mainnet balances are not affected.'
+        : 'Switch back to Mainnet to see your real balances.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: `Switch to ${target === 'testnet' ? 'Testnet' : 'Mainnet'}`,
+          onPress: () => switchNetwork(target),
+        },
+      ]
+    );
+  };
 
   const loadWallets = useCallback(async () => {
     await migrateFromSingleWallet();
@@ -346,6 +365,26 @@ const WalletManage = () => {
         </View>
       </View>
 
+      {/* Network Toggle */}
+      <View style={styles.sectionCard}>
+        <TouchableOpacity style={styles.networkRow} onPress={handleNetworkToggle}>
+          <View style={styles.networkLeft}>
+            <Ionicons name="globe-outline" size={20} color="#D4AF37" />
+            <View>
+              <Text style={styles.networkLabel}>Network</Text>
+              <Text style={styles.networkValue}>
+                {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+              </Text>
+            </View>
+          </View>
+          <View style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}>
+            <Text style={[styles.networkBadgeText, network === 'testnet' && styles.networkBadgeTextTestnet]}>
+              {network === 'mainnet' ? 'Live' : 'Test'}
+            </Text>
+          </View>
+        </TouchableOpacity>
+      </View>
+
       {/* Rename Modal */}
       <Modal visible={renameModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -458,4 +497,50 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary, paddingVertical: 10, paddingHorizontal: 20, borderRadius: 8,
   },
   modalSaveText: { ...FONTS.body3, color: COLORS.white, fontWeight: '600' },
+  sectionCard: {
+    backgroundColor: '#FFF',
+    borderRadius: 16,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#F0F0F0',
+    overflow: 'hidden',
+  },
+  networkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  networkLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  networkLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1A1A1A',
+  },
+  networkValue: {
+    fontSize: 12,
+    color: '#888',
+    marginTop: 2,
+  },
+  networkBadge: {
+    backgroundColor: '#D1FAE5',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  networkBadgeTestnet: {
+    backgroundColor: '#FEF3C7',
+  },
+  networkBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#16A34A',
+  },
+  networkBadgeTextTestnet: {
+    color: '#D97706',
+  },
 });

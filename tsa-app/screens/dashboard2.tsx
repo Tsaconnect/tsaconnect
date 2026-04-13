@@ -15,7 +15,12 @@ import { api, Asset } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import CartIconBadge from '@/components/common/CartIconBadge';
-import { getWalletBalances, getTransactionHistory, Transaction } from '../services/walletApi';
+import {
+  getWalletBalances,
+  getTransactionHistory,
+  normalizeWalletBalances,
+  type Transaction,
+} from '../services/walletApi';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
 import { AssetList } from '@/components/dashboard/AssetList';
@@ -83,28 +88,18 @@ const Dashboard: React.FC = () => {
       const balResult = await getWalletBalances();
       let updatedAssets = [...DEFAULT_ASSETS];
       if (balResult.success && balResult.data) {
-        const data = balResult.data as any;
-        const nestedBalances = data.balances || null;
         // Flatten all chains into symbol -> { balance, usdValue, usdPrice }
         const symbolData: Record<string, { balance: number; usdValue: number; usdPrice: number }> = {};
-        if (nestedBalances && typeof nestedBalances === 'object') {
-          for (const chainTokens of Object.values(nestedBalances)) {
-            if (typeof chainTokens === 'object' && chainTokens !== null) {
-              for (const [symbol, entry] of Object.entries(chainTokens as Record<string, any>)) {
-                if (entry && typeof entry === 'object') {
-                  const bal = Number.isFinite(parseFloat(entry.balance)) ? parseFloat(entry.balance) : 0;
-                  const usd = Number.isFinite(entry.usdValue) ? entry.usdValue : 0;
-                  const price = Number.isFinite(entry.usdPrice) ? entry.usdPrice : 0;
-                  const prev = symbolData[symbol];
-                  symbolData[symbol] = {
-                    balance: (prev?.balance || 0) + bal,
-                    usdValue: (prev?.usdValue || 0) + usd,
-                    usdPrice: price || prev?.usdPrice || 0,
-                  };
-                }
-              }
-            }
-          }
+        for (const entry of normalizeWalletBalances(balResult.data)) {
+          const bal = Number.isFinite(parseFloat(entry.balance)) ? parseFloat(entry.balance) : 0;
+          const usd = Number.isFinite(parseFloat(entry.usdValue)) ? parseFloat(entry.usdValue) : 0;
+          const price = Number.isFinite(entry.usdPrice || NaN) ? Number(entry.usdPrice) : 0;
+          const prev = symbolData[entry.symbol];
+          symbolData[entry.symbol] = {
+            balance: (prev?.balance || 0) + bal,
+            usdValue: (prev?.usdValue || 0) + usd,
+            usdPrice: price || prev?.usdPrice || 0,
+          };
         }
         updatedAssets = DEFAULT_ASSETS.map(a => {
           const d = symbolData[a.symbol];

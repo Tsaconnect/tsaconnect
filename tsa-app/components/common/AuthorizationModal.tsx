@@ -1,18 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  Modal, View, Text, TouchableOpacity, TextInput,
-  ActivityIndicator, StyleSheet,
+  ActivityIndicator,
+  Modal,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  isBiometricAvailable, isBiometricEnabled, getBiometricType,
-  authenticateWithBiometric, hasPin, verifyPin,
+  authenticateWithBiometric,
+  getBiometricType,
+  hasPin,
+  isBiometricAvailable,
+  verifyPin,
 } from '../../services/localAuth';
-import api from '../services/api';
 
 const COLORS = {
   primary: '#D4AF37',
-  gold: '#FFD700',
   dark: '#1a1a1a',
   gray: '#666',
   lightGray: '#e0e0e0',
@@ -29,7 +35,7 @@ interface AuthorizationModalProps {
   onCancel: () => void;
 }
 
-type AuthMethod = 'choose' | 'biometric' | 'pin' | 'otp';
+type AuthMethod = 'choose' | 'pin';
 
 export default function AuthorizationModal({
   visible,
@@ -49,96 +55,70 @@ export default function AuthorizationModal({
   const [pinValue, setPinValue] = useState('');
   const [pinAttempts, setPinAttempts] = useState(0);
 
-  const [otpValue, setOtpValue] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCountdown, setOtpCountdown] = useState(0);
-
   useEffect(() => {
     if (!visible) {
       setMethod('choose');
       setError('');
       setPinValue('');
-      setOtpValue('');
-      setOtpSent(false);
       setPinAttempts(0);
-      setOtpCountdown(0);
       setLoading(false);
       return;
     }
+
     (async () => {
-      const [bioOk, bioOn, pinOk, type] = await Promise.all([
+      const [bioOk, pinOk, type] = await Promise.all([
         isBiometricAvailable(),
-        isBiometricEnabled(),
         hasPin(),
         getBiometricType(),
       ]);
-      setBioAvailable(bioOk && bioOn);
+
+      setBioAvailable(bioOk);
       setPinAvailable(pinOk);
       setBioType(type);
     })();
   }, [visible]);
-
-  useEffect(() => {
-    if (otpCountdown <= 0) return;
-    const timer = setTimeout(() => setOtpCountdown(otpCountdown - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [otpCountdown]);
 
   const handleBiometric = async () => {
     setError('');
     const success = await authenticateWithBiometric();
     if (success) {
       onAuthorized();
-    } else {
-      setError('Biometric verification failed. Try another method.');
+      return;
     }
+    setError('Biometric verification failed. Try another method.');
   };
 
   const handlePinSubmit = async (pin: string) => {
     setError('');
     setLoading(true);
+
     const valid = await verifyPin(pin);
+
     setLoading(false);
+
     if (valid) {
       onAuthorized();
-    } else {
-      const attempts = pinAttempts + 1;
-      setPinAttempts(attempts);
-      setPinValue('');
-      if (attempts >= 3) {
-        setError('Too many PIN attempts. Use OTP instead.');
-        setMethod('otp');
-        setPinAttempts(0);
-      } else {
-        setError(`Incorrect PIN. ${3 - attempts} attempts remaining.`);
+      return;
+    }
+
+    const attempts = pinAttempts + 1;
+    setPinAttempts(attempts);
+    setPinValue('');
+
+    if (attempts >= 3) {
+      setPinAttempts(0);
+      setError(
+        bioAvailable
+          ? 'Too many incorrect PIN attempts. Use biometrics or cancel.'
+          : 'Too many incorrect PIN attempts. Close this prompt and try again.'
+      );
+      if (bioAvailable) {
+        setMethod('choose');
       }
+      return;
     }
-  };
 
-  const handleSendOtp = async () => {
-    setError('');
-    setLoading(true);
-    const result = await api.sendOtp();
-    setLoading(false);
-    if (result.success) {
-      setOtpSent(true);
-      setOtpCountdown(60);
-    } else {
-      setError(result.message || 'Failed to send OTP');
-    }
-  };
-
-  const handleVerifyOtp = async () => {
-    setError('');
-    setLoading(true);
-    const result = await api.verifyOtp(otpValue);
-    setLoading(false);
-    if (result.success) {
-      onAuthorized();
-    } else {
-      setOtpValue('');
-      setError(result.message || 'Invalid OTP. Please try again.');
-    }
+    setError(`Incorrect PIN. ${3 - attempts} attempts remaining.`);
   };
 
   const renderChoose = () => (
@@ -153,19 +133,23 @@ export default function AuthorizationModal({
           <Text style={styles.methodText}>Use {bioType}</Text>
         </TouchableOpacity>
       )}
+
       {pinAvailable && (
         <TouchableOpacity style={styles.methodButton} onPress={() => setMethod('pin')}>
           <Ionicons name="keypad" size={28} color={COLORS.primary} />
           <Text style={styles.methodText}>Use PIN</Text>
         </TouchableOpacity>
       )}
-      <TouchableOpacity
-        style={styles.methodButton}
-        onPress={() => { setMethod('otp'); handleSendOtp(); }}
-      >
-        <Ionicons name="mail" size={28} color={COLORS.primary} />
-        <Text style={styles.methodText}>Use Email OTP</Text>
-      </TouchableOpacity>
+
+      {!bioAvailable && !pinAvailable && (
+        <View style={styles.emptyState}>
+          <Ionicons name="shield-checkmark-outline" size={28} color={COLORS.primary} />
+          <Text style={styles.emptyTitle}>Authorization unavailable</Text>
+          <Text style={styles.emptyText}>
+            Set up app PIN or biometrics in Settings before sending funds.
+          </Text>
+        </View>
+      )}
     </View>
   );
 
@@ -177,64 +161,18 @@ export default function AuthorizationModal({
         value={pinValue}
         onChangeText={(text) => {
           setPinValue(text);
-          if (text.length === 4) handlePinSubmit(text);
+          if (text.length === 4) {
+            handlePinSubmit(text);
+          }
         }}
         keyboardType="number-pad"
         maxLength={4}
         secureTextEntry
         autoFocus
-        placeholder="••••"
+        placeholder="...."
         placeholderTextColor="#ccc"
       />
-      {loading && <ActivityIndicator color={COLORS.primary} style={{ marginTop: 12 }} />}
-      <TouchableOpacity onPress={() => setMethod('choose')} style={styles.backButton}>
-        <Text style={styles.backText}>Try another method</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const renderOtp = () => (
-    <View style={styles.inputContainer}>
-      {!otpSent ? (
-        <>
-          <Text style={styles.inputLabel}>Sending verification code to your email...</Text>
-          <ActivityIndicator color={COLORS.primary} />
-        </>
-      ) : (
-        <>
-          <Text style={styles.inputLabel}>Enter the 6-digit code sent to your email</Text>
-          <TextInput
-            style={styles.otpInput}
-            value={otpValue}
-            onChangeText={setOtpValue}
-            keyboardType="number-pad"
-            maxLength={6}
-            autoFocus
-            placeholder="000000"
-            placeholderTextColor="#ccc"
-          />
-          <TouchableOpacity
-            style={[styles.submitBtn, otpValue.length !== 6 && styles.submitBtnDisabled]}
-            onPress={handleVerifyOtp}
-            disabled={otpValue.length !== 6 || loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.submitBtnText}>Verify</Text>
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={handleSendOtp}
-            disabled={otpCountdown > 0 || loading}
-            style={styles.resendBtn}
-          >
-            <Text style={[styles.resendText, otpCountdown > 0 && { color: '#ccc' }]}>
-              {otpCountdown > 0 ? `Resend in ${otpCountdown}s` : 'Resend Code'}
-            </Text>
-          </TouchableOpacity>
-        </>
-      )}
+      {loading && <ActivityIndicator color={COLORS.primary} style={styles.loader} />}
       <TouchableOpacity onPress={() => setMethod('choose')} style={styles.backButton}>
         <Text style={styles.backText}>Try another method</Text>
       </TouchableOpacity>
@@ -247,7 +185,10 @@ export default function AuthorizationModal({
         <View style={styles.modal}>
           <View style={styles.header}>
             <Text style={styles.title}>{title}</Text>
-            <TouchableOpacity onPress={onCancel} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <TouchableOpacity
+              onPress={onCancel}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
               <Ionicons name="close" size={24} color={COLORS.gray} />
             </TouchableOpacity>
           </View>
@@ -263,7 +204,6 @@ export default function AuthorizationModal({
 
           {method === 'choose' && renderChoose()}
           {method === 'pin' && renderPin()}
-          {method === 'otp' && renderOtp()}
         </View>
       </View>
     </Modal>
@@ -332,6 +272,25 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.dark,
   },
+  emptyState: {
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: COLORS.lightGray,
+    borderRadius: 14,
+    padding: 20,
+    gap: 8,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.dark,
+  },
+  emptyText: {
+    fontSize: 14,
+    color: COLORS.gray,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
   inputContainer: {
     alignItems: 'center',
     marginTop: 8,
@@ -353,40 +312,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     color: COLORS.dark,
   },
-  otpInput: {
-    fontSize: 24,
-    fontWeight: '600',
-    textAlign: 'center',
-    letterSpacing: 8,
-    width: 240,
-    borderBottomWidth: 2,
-    borderBottomColor: COLORS.primary,
-    paddingVertical: 8,
-    color: COLORS.dark,
-  },
-  submitBtn: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    paddingHorizontal: 48,
-    borderRadius: 12,
-    marginTop: 20,
-    alignItems: 'center',
-  },
-  submitBtnDisabled: {
-    opacity: 0.5,
-  },
-  submitBtnText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  resendBtn: {
-    marginTop: 16,
-  },
-  resendText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.primary,
+  loader: {
+    marginTop: 12,
   },
   backButton: {
     marginTop: 20,
