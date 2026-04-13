@@ -12,11 +12,13 @@ import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
-import { getSupportedNetworkNames } from '../../constants/chains';
+import { CHAINS, CHAIN_KEYS, type ChainKey, getSupportedNetworkNames } from '../../constants/chains';
+import ChainSelector from '../../components/wallet/ChainSelector';
 
 const ReceiveToken = () => {
   const [walletAddress, setWalletAddress] = useState('');
   const [copied, setCopied] = useState(false);
+  const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
 
   useEffect(() => {
     const loadAddress = async () => {
@@ -51,6 +53,16 @@ const ReceiveToken = () => {
           Share your address or QR code to receive tokens on supported networks ({getSupportedNetworkNames()}).
         </Text>
       </View>
+
+      <Text style={styles.sectionLabel}>NETWORK</Text>
+      <ChainSelector
+        availableChains={CHAIN_KEYS}
+        selectedChain={selectedChain}
+        onSelect={setSelectedChain}
+      />
+      <Text style={styles.chainInfo}>
+        Send tokens on {CHAINS[selectedChain]?.name || 'Unknown'} to this address
+      </Text>
 
       <View style={styles.qrContainer}>
         {walletAddress ? (
@@ -193,5 +205,19 @@ const styles = StyleSheet.create({
     ...FONTS.body4,
     color: '#92400E',
     lineHeight: 20,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#AAA',
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  chainInfo: {
+    fontSize: 13,
+    color: '#888',
+    textAlign: 'center',
+    marginTop: 12,
+    marginBottom: 8,
   },
 });

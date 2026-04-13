@@ -2,15 +2,22 @@
 // API calls to the Go backend for wallet operations
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
+import { CHAINS, CHAIN_KEYS, type ChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
 
 export interface WalletBalance {
   symbol: string;
   name: string;
   balance: string;
+  usdPrice?: number;
   usdValue: string;
   contractAddress: string;
   decimals: number;
+}
+
+export interface WalletBalanceWithChain extends WalletBalance {
+  chainKey: ChainKey;
+  chainName: string;
 }
 
 export interface Transaction {
@@ -41,6 +48,182 @@ interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
   data?: T;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function withHexPrefix(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return '0x';
+  }
+  return value.startsWith('0x') ? value : `0x${value}`;
+}
+
+function resolveChainKey(rawKey: string, fallback?: ChainKey): ChainKey | undefined {
+  if ((CHAIN_KEYS as string[]).includes(rawKey)) {
+    return rawKey as ChainKey;
+  }
+
+  const normalized = rawKey.trim().toLowerCase();
+  const match = CHAIN_KEYS.find((chainKey) => {
+    const chain = CHAINS[chainKey];
+    return (
+      chainKey === normalized ||
+      chain.name.toLowerCase() === normalized ||
+      chain.shortName.toLowerCase() === normalized
+    );
+  });
+
+  return match || fallback;
+}
+
+function inferDecimals(symbol: string, value: Record<string, any>): number {
+  if (typeof value.decimals === 'number') {
+    return value.decimals;
+  }
+  if (typeof value.decimals === 'string' && value.decimals.trim() !== '') {
+    const parsed = Number(value.decimals);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return symbol === 'USDT' || symbol === 'USDC' ? 6 : 18;
+}
+
+function normalizeWalletBalanceEntry(
+  symbol: string,
+  rawValue: unknown,
+  chainKey: ChainKey
+): WalletBalanceWithChain | null {
+  if (rawValue === null || rawValue === undefined) {
+    return null;
+  }
+
+  const chain = CHAINS[chainKey];
+
+  if (!isRecord(rawValue)) {
+    return {
+      symbol,
+      name: symbol,
+      balance: String(rawValue),
+      usdPrice: 0,
+      usdValue: '0',
+      contractAddress: '',
+      decimals: inferDecimals(symbol, {}),
+      chainKey,
+      chainName: chain.shortName,
+    };
+  }
+
+  return {
+    symbol,
+    name: typeof rawValue.name === 'string' && rawValue.name.trim() ? rawValue.name : symbol,
+    balance: String(rawValue.balance ?? '0'),
+    usdPrice: Number.isFinite(Number(rawValue.usdPrice)) ? Number(rawValue.usdPrice) : 0,
+    usdValue: String(rawValue.usdValue ?? '0'),
+    contractAddress: typeof rawValue.contractAddress === 'string' ? rawValue.contractAddress : '',
+    decimals: inferDecimals(symbol, rawValue),
+    chainKey,
+    chainName: chain.shortName,
+  };
+}
+
+function normalizePreparedTransactionData(payload: unknown): PreparedTransaction | null {
+  const data = isRecord(payload) ? payload : null;
+  const tx = isRecord(data?.transaction) ? data.transaction : data;
+  if (!tx || typeof tx.to !== 'string') {
+    return null;
+  }
+
+  const nonce = Number(tx.nonce ?? 0);
+  const chainId = Number(tx.chainId ?? 0);
+
+  return {
+    to: tx.to,
+    data: withHexPrefix(tx.data),
+    value: String(tx.value ?? '0'),
+    gasLimit: String(tx.gasLimit ?? '0'),
+    gasPrice: String(tx.gasPrice ?? '0'),
+    nonce: Number.isFinite(nonce) ? nonce : 0,
+    chainId: Number.isFinite(chainId) ? chainId : 0,
+  };
+}
+
+function extractTransactionHash(payload: unknown): string | undefined {
+  const data = isRecord(payload) ? payload : null;
+  if (!data) {
+    return undefined;
+  }
+  if (typeof data.txHash === 'string' && data.txHash.trim()) {
+    return data.txHash;
+  }
+  if (isRecord(data.transaction) && typeof data.transaction.txHash === 'string' && data.transaction.txHash.trim()) {
+    return data.transaction.txHash;
+  }
+  return undefined;
+}
+
+export function normalizeWalletBalances(
+  payload: unknown,
+  fallbackChainKey?: ChainKey
+): WalletBalanceWithChain[] {
+  const normalized: WalletBalanceWithChain[] = [];
+  const pushEntry = (symbol: string, rawValue: unknown, chainKey: ChainKey | undefined) => {
+    if (!chainKey) return;
+    const entry = normalizeWalletBalanceEntry(symbol, rawValue, chainKey);
+    if (entry) normalized.push(entry);
+  };
+
+  if (Array.isArray(payload)) {
+    for (const rawEntry of payload) {
+      if (!isRecord(rawEntry) || typeof rawEntry.symbol !== 'string') continue;
+      const chainKey = resolveChainKey(
+        typeof rawEntry.chainKey === 'string' ? rawEntry.chainKey : '',
+        fallbackChainKey
+      );
+      pushEntry(rawEntry.symbol, rawEntry, chainKey);
+    }
+    return normalized;
+  }
+
+  if (!isRecord(payload)) {
+    return normalized;
+  }
+
+  const wrappedBalances = isRecord(payload.balances) ? payload.balances : null;
+  if (wrappedBalances) {
+    for (const [rawChainKey, rawBalances] of Object.entries(wrappedBalances)) {
+      if (!isRecord(rawBalances)) continue;
+      const chainKey = resolveChainKey(rawChainKey, fallbackChainKey);
+      for (const [symbol, rawValue] of Object.entries(rawBalances)) {
+        pushEntry(symbol, rawValue, chainKey);
+      }
+    }
+    return normalized;
+  }
+
+  const looksLikeChainMap = Object.entries(payload).some(([rawChainKey, rawBalances]) => {
+    return !!resolveChainKey(rawChainKey) && isRecord(rawBalances);
+  });
+
+  if (looksLikeChainMap) {
+    for (const [rawChainKey, rawBalances] of Object.entries(payload)) {
+      if (!isRecord(rawBalances)) continue;
+      const chainKey = resolveChainKey(rawChainKey, fallbackChainKey);
+      for (const [symbol, rawValue] of Object.entries(rawBalances)) {
+        pushEntry(symbol, rawValue, chainKey);
+      }
+    }
+    return normalized;
+  }
+
+  for (const [symbol, rawValue] of Object.entries(payload)) {
+    pushEntry(symbol, rawValue, fallbackChainKey);
+  }
+
+  return normalized;
 }
 
 /**
@@ -113,7 +296,12 @@ export async function prepareSendTransaction(
       headers,
       body: JSON.stringify({ tokenSymbol, toAddress, amount, chainId }),
     });
-    return await response.json();
+    const result = await response.json();
+    const normalizedTx = normalizePreparedTransactionData(result?.data);
+    if (result?.success && normalizedTx) {
+      return { ...result, data: normalizedTx };
+    }
+    return result;
   } catch (error: any) {
     console.error('Prepare transaction error:', error);
     return { success: false, message: error.message || 'Failed to prepare transaction' };
@@ -138,7 +326,12 @@ export async function submitTransaction(
       headers,
       body: JSON.stringify({ signedTx, txType, tokenSymbol, toAddress, amount, chainId }),
     });
-    return await response.json();
+    const result = await response.json();
+    const txHash = extractTransactionHash(result?.data);
+    if (result?.success && txHash) {
+      return { ...result, data: { txHash } };
+    }
+    return result;
   } catch (error: any) {
     console.error('Submit transaction error:', error);
     return { success: false, message: error.message || 'Failed to submit transaction' };

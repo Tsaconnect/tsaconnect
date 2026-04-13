@@ -6,15 +6,21 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import { CHAINS, type ChainKey } from '../../constants/chains';
+import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { signTransaction } from '../../services/wallet';
 import {
-  getWalletBalances, prepareSendTransaction, submitTransaction,
-  resolveUsername, WalletBalance, ResolvedUser,
+  getWalletBalances,
+  normalizeWalletBalances,
+  prepareSendTransaction,
+  submitTransaction,
+  resolveUsername,
+  type WalletBalanceWithChain,
+  type ResolvedUser,
 } from '../../services/walletApi';
-import { useKycVerification } from '../../hooks/useKycVerification';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
+
+type BalanceEntry = WalletBalanceWithChain;
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 const GOLD = '#D4AF37';
@@ -30,14 +36,14 @@ const TokenBadge = ({ symbol, size = 36 }: { symbol: string; size?: number }) =>
 );
 
 const InstantPay = () => {
-  const { tokens, tokenList, getChainsForToken } = useTokens();
-  const { requireKycVerified } = useKycVerification();
+  const { tokens, tokenList } = useTokens();
+
 
   const [username, setUsername] = useState('');
   const [amount, setAmount] = useState('');
   const [selectedToken, setSelectedToken] = useState('USDT');
   const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
-  const [balances, setBalances] = useState<WalletBalance[]>([]);
+  const [balances, setBalances] = useState<BalanceEntry[]>([]);
   const [resolvedUser, setResolvedUser] = useState<ResolvedUser | null>(null);
   const [resolving, setResolving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -48,48 +54,73 @@ const InstantPay = () => {
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
+  const getSupportedChainsForToken = useCallback((symbol: string): ChainKey[] => {
+    const registryChains = tokens[symbol]?.chains ?? [];
+    if (registryChains.length > 0) {
+      return registryChains;
+    }
+
+    const inferredChains = Array.from(
+      new Set(
+        balances
+          .filter((entry) => entry.symbol === symbol)
+          .map((entry) => entry.chainKey)
+      )
+    );
+    return inferredChains;
+  }, [balances, tokens]);
+
   const loadBalances = useCallback(async () => {
     try {
       setLoading(true);
-      // Query the active chain for accurate balances
-      const chainId = CHAINS[selectedChain]?.chainId;
-      const r = await getWalletBalances(chainId);
-      if (r.success && r.data) {
-        const d = r.data as any;
-        let fetched: WalletBalance[] = [];
-        if (Array.isArray(d)) { fetched = d; }
-        else if (d.balances) {
-          for (const [, cb] of Object.entries(d.balances as Record<string, any>)) {
-            for (const [sym, info] of Object.entries(cb as Record<string, any>)) {
-              if (info && typeof info === 'object') {
-                fetched.push({ symbol: sym, name: sym, balance: info.balance || '0', usdValue: String(info.usdValue || 0), contractAddress: '', decimals: sym === 'MCGP' ? 18 : 6 });
-              }
-            }
+      const chainResults = await Promise.all(
+        CHAIN_KEYS.map(async (chainKey) => {
+          const result = await getWalletBalances(CHAINS[chainKey].chainId);
+          return { chainKey, result };
+        })
+      );
+
+      const allBalances: BalanceEntry[] = [];
+      const seen = new Set<string>();
+
+      for (const { chainKey, result } of chainResults) {
+        if (!result.success || !result.data) continue;
+        for (const entry of normalizeWalletBalances(result.data, chainKey)) {
+          allBalances.push(entry);
+          seen.add(`${entry.symbol}-${entry.chainKey}`);
+        }
+      }
+
+      for (const t of tokenList) {
+        for (const chain of t.chains) {
+          const key = `${t.symbol}-${chain}`;
+          if (!seen.has(key)) {
+            allBalances.push({
+              symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00',
+              contractAddress: '', decimals: t.decimals,
+              chainKey: chain as ChainKey, chainName: CHAINS[chain as ChainKey]?.shortName || chain,
+            });
           }
         }
-        // Merge with tokenList so all tokens appear
-        const balanceMap = new Map(fetched.map(b => [b.symbol, b]));
-        const merged: WalletBalance[] = tokenList.map(t =>
-          balanceMap.get(t.symbol) ?? { symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals }
-        );
-        for (const b of fetched) {
-          if (!merged.some(m => m.symbol === b.symbol)) merged.push(b);
-        }
-        setBalances(merged);
       }
+
+      setBalances(allBalances);
     } catch (err) {
       console.error('InstantPay: load balances error:', err);
     } finally { setLoading(false); }
-  }, [selectedChain, tokenList]);
+  }, [tokenList]);
 
   useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
 
   useEffect(() => {
-    const chains = tokens[selectedToken]?.chains ?? [];
-    if (!chains.includes(selectedChain)) setSelectedChain(chains[0]);
-  }, [selectedToken]);
+    const chains = getSupportedChainsForToken(selectedToken);
+    if (chains.length === 0) return;
+    if (!chains.includes(selectedChain)) {
+      setSelectedChain(chains[0]);
+    }
+  }, [getSupportedChainsForToken, selectedChain, selectedToken]);
 
-  const bal = balances.find(b => b.symbol === selectedToken)?.balance || '0';
+  const bal = balances.find(b => b.symbol === selectedToken && b.chainKey === selectedChain)?.balance || '0';
   const activeChain = CHAINS[selectedChain];
 
   // Debounced username lookup
@@ -120,18 +151,18 @@ const InstantPay = () => {
     setError('');
     try {
       setLoading(true);
-      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
-      if (r.success && r.data) {
-        const gp = BigInt(r.data.gasPrice || '0'), gl = BigInt(r.data.gasLimit || '21000');
-        setGasEstimate((Number(gp * gl) / 1e18).toFixed(6));
-      }
+      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
+      if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare transaction.');
+      const gp = BigInt(r.data.gasPrice || '0');
+      const gl = BigInt(r.data.gasLimit || '21000');
+      setGasEstimate((Number(gp * gl) / 1e18).toFixed(6));
       setScreen('confirm');
-    } catch { setError('Failed to estimate gas.'); }
+    } catch (err: any) { setError(err.message || 'Failed to estimate gas.'); }
     finally { setLoading(false); }
   };
 
   const handleSendRequest = () => {
-    if (!requireKycVerified() || !resolvedUser) return;
+    if (!resolvedUser) return;
     setShowAuthModal(true);
   };
 
@@ -139,15 +170,16 @@ const InstantPay = () => {
     setShowAuthModal(false);
     setScreen('sending'); setError('');
     try {
-      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
+      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
       const signed = await signTransaction({
+        type: 0,
         to: r.data.to, data: r.data.data, value: r.data.value,
         gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
         nonce: r.data.nonce, chainId: r.data.chainId,
       });
-      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain.chainId);
-      if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); }
+      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
+      if (res.success && res.data?.txHash) { setTxHash(res.data.txHash); setScreen('success'); }
       else throw new Error(res.message || 'Failed');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
   };
@@ -229,11 +261,11 @@ const InstantPay = () => {
           <View style={st.divider} />
           <View style={st.detRow}>
             <Text style={st.detL}>Network</Text>
-            <Text style={st.detV}>{activeChain.name}</Text>
+            <Text style={st.detV}>{activeChain?.name || selectedChain}</Text>
           </View>
           <View style={st.detRow}>
             <Text style={st.detL}>Gas Fee</Text>
-            <Text style={st.detV}>{gasEstimate} {activeChain.nativeCurrency.symbol}</Text>
+            <Text style={st.detV}>{gasEstimate} {activeChain?.nativeCurrency?.symbol || 'S'}</Text>
           </View>
         </View>
 
@@ -350,29 +382,42 @@ const InstantPay = () => {
         </TouchableOpacity>
       </ScrollView>
 
-      {/* Token Picker */}
+      {/* Token + Chain Picker */}
       <Modal visible={showTokenPicker} transparent animationType="slide">
         <Pressable style={st.modalOverlay} onPress={() => setShowTokenPicker(false)}>
           <View style={st.modalContent}>
             <Text style={st.modalTitle}>Select Token</Text>
             <FlatList
-              data={tokenList}
-              keyExtractor={t => t.symbol}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[st.modalItem, item.symbol === selectedToken && st.modalItemActive]}
-                  onPress={() => { setSelectedToken(item.symbol); setShowTokenPicker(false); }}
-                >
-                  <TokenBadge symbol={item.symbol} size={36} />
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text style={st.modalItemSym}>{item.symbol}</Text>
-                    <Text style={st.modalItemName}>{item.name}</Text>
-                  </View>
-                  <Text style={st.modalItemBal}>
-                    {balances.find(b => b.symbol === item.symbol)?.balance || '0'}
-                  </Text>
-                </TouchableOpacity>
-              )}
+              data={[...(balances as BalanceEntry[])].sort((a, b) => parseFloat(b.balance) - parseFloat(a.balance))}
+              keyExtractor={item => `${item.symbol}-${item.chainKey}`}
+              renderItem={({ item }) => {
+                const active = item.symbol === selectedToken && item.chainKey === selectedChain;
+                const balVal = parseFloat(item.balance);
+                return (
+                  <TouchableOpacity
+                    style={[st.modalItem, active && st.modalItemActive]}
+                    onPress={() => {
+                      setSelectedToken(item.symbol);
+                      setSelectedChain(item.chainKey);
+                      setShowTokenPicker(false);
+                    }}
+                  >
+                    <TokenBadge symbol={item.symbol} size={36} />
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <Text style={st.modalItemSym}>{item.symbol}</Text>
+                      <Text style={st.modalItemName}>{item.name} · {item.chainName}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={st.modalItemBal}>
+                        {balVal > 0 ? balVal.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '0'}
+                      </Text>
+                      {parseFloat(item.usdValue) > 0 && (
+                        <Text style={{ fontSize: 11, color: '#AAA' }}>${parseFloat(item.usdValue).toFixed(2)}</Text>
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                );
+              }}
             />
           </View>
         </Pressable>
@@ -426,7 +471,7 @@ const st = StyleSheet.create({
   errorText: { fontSize: 12, color: '#DC2626', flex: 1 },
 
   // Buttons
-  btn: { flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginTop: 16, elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
+  btn: { flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16, paddingHorizontal: 32, borderRadius: 14, alignItems: 'center', justifyContent: 'center', alignSelf: 'stretch', marginTop: 16, marginHorizontal: 20, elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
   btnT: { fontSize: 16, fontWeight: '700', color: '#FFF' },
   btn2: { paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 10 },
   btn2T: { fontSize: 15, color: '#888', fontWeight: '600' },

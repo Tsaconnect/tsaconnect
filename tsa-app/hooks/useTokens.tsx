@@ -9,6 +9,31 @@ import {
   type ChainConfig,
 } from '../constants/chains';
 import { fetchSupportedTokens } from '../services/walletApi';
+import { getNetwork, useNetwork } from './useNetwork';
+
+const CUSTOM_TOKENS_KEY_PREFIX = 'tsa-custom-tokens-';
+
+export interface CustomToken extends TokenConfig {
+  contractAddress: string;
+  chainKey: ChainKey;
+  custom: true;
+  importedAt: string;
+}
+
+function getCustomTokensKey(network: string): string {
+  return `${CUSTOM_TOKENS_KEY_PREFIX}${network}`;
+}
+
+async function loadCustomTokens(network: string): Promise<CustomToken[]> {
+  try {
+    const raw = await AsyncStorage.getItem(getCustomTokensKey(network));
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+async function saveCustomTokens(network: string, tokens: CustomToken[]): Promise<void> {
+  await AsyncStorage.setItem(getCustomTokensKey(network), JSON.stringify(tokens));
+}
 
 const CACHE_KEY = 'tsa-supported-tokens';
 
@@ -17,10 +42,13 @@ export type ChainWithKey = ChainConfig & { key: ChainKey };
 interface TokenContextValue {
   tokens: Record<string, TokenConfig>;
   tokenList: TokenConfig[];
+  customTokens: CustomToken[];
   loading: boolean;
   refresh: () => Promise<void>;
   getTokensForChain: (chainKey: ChainKey) => TokenConfig[];
   getChainsForToken: (symbol: string) => ChainWithKey[];
+  importToken: (token: CustomToken) => Promise<void>;
+  removeToken: (symbol: string, chainKey: ChainKey) => Promise<void>;
 }
 
 const TokenContext = createContext<TokenContextValue | null>(null);
@@ -28,6 +56,32 @@ const TokenContext = createContext<TokenContextValue | null>(null);
 export function TokenProvider({ children }: { children: ReactNode }) {
   const [tokens, setTokens] = useState<Record<string, TokenConfig>>(DEFAULT_TOKENS);
   const [loading, setLoading] = useState(false);
+  const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
+  const { network } = useNetwork();
+
+  // Load custom tokens on mount and when network changes
+  useEffect(() => {
+    loadCustomTokens(network).then(setCustomTokens);
+  }, [network]);
+
+  const importToken = useCallback(async (token: CustomToken) => {
+    const network = getNetwork();
+    const existing = await loadCustomTokens(network);
+    if (existing.some(t => t.symbol === token.symbol && t.chainKey === token.chainKey)) {
+      throw new Error(`${token.symbol} on ${token.chainKey} is already imported`);
+    }
+    const updated = [...existing, token];
+    await saveCustomTokens(network, updated);
+    setCustomTokens(updated);
+  }, []);
+
+  const removeToken = useCallback(async (symbol: string, chainKey: ChainKey) => {
+    const network = getNetwork();
+    const existing = await loadCustomTokens(network);
+    const updated = existing.filter(t => !(t.symbol === symbol && t.chainKey === chainKey));
+    await saveCustomTokens(network, updated);
+    setCustomTokens(updated);
+  }, []);
 
   const loadTokens = useCallback(async () => {
     setLoading(true);
@@ -42,7 +96,7 @@ export function TokenProvider({ children }: { children: ReactNode }) {
               parsed[sym].iconUrl = DEFAULT_TOKENS[sym].iconUrl;
             }
           }
-          setTokens(parsed);
+          setTokens({ ...DEFAULT_TOKENS, ...parsed });
         }
       }
 
@@ -64,8 +118,10 @@ export function TokenProvider({ children }: { children: ReactNode }) {
           }
         }
         if (Object.keys(fetched).length > 0) {
-          setTokens(fetched);
-          await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(fetched));
+          // Merge with DEFAULT_TOKENS so native tokens (S, BNB) are never lost
+          const merged = { ...DEFAULT_TOKENS, ...fetched };
+          setTokens(merged);
+          await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(merged));
         }
       }
     } catch (err) {
@@ -88,7 +144,7 @@ export function TokenProvider({ children }: { children: ReactNode }) {
                 parsed[sym].iconUrl = DEFAULT_TOKENS[sym].iconUrl;
               }
             }
-            setTokens(parsed);
+            setTokens({ ...DEFAULT_TOKENS, ...parsed });
           }
         } catch {}
       }
@@ -98,17 +154,27 @@ export function TokenProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [loadTokens]);
 
+  const allTokens: Record<string, TokenConfig> = { ...tokens };
+  for (const ct of customTokens) {
+    if (!allTokens[ct.symbol]) {
+      allTokens[ct.symbol] = ct;
+    }
+  }
+
   const value: TokenContextValue = {
-    tokens,
-    tokenList: Object.values(tokens),
+    tokens: allTokens,
+    tokenList: [...Object.values(tokens), ...customTokens.filter(ct => !tokens[ct.symbol])],
+    customTokens,
     loading,
     refresh: loadTokens,
-    getTokensForChain: (chainKey) => getTokensForChain(tokens, chainKey),
+    getTokensForChain: (chainKey) => getTokensForChain(allTokens, chainKey),
     getChainsForToken: (symbol) => {
-      const token = tokens[symbol];
+      const token = allTokens[symbol];
       if (!token) return [];
       return token.chains.map(key => ({ ...CHAINS[key], key }));
     },
+    importToken,
+    removeToken,
   };
 
   return (

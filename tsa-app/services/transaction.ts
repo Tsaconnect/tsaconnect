@@ -1,42 +1,41 @@
-// services/transaction.ts
-// Shared sign-and-broadcast helper for escrow transactions
 import { signTransaction, getProvider } from './wallet';
+import { type ChainKey } from '../constants/chains';
 import type { UnsignedTx } from './orderApi';
 
-const TX_TIMEOUT_MS = 90_000; // 90 seconds
+const TX_TIMEOUT_MS = 90_000;
 
 /**
- * Sign an unsigned transaction locally, broadcast it, and wait for confirmation.
- * Returns the confirmed transaction hash.
- * Throws if signing, broadcast, or confirmation fails (including timeout and dropped txs).
+ * Sign a transaction locally and broadcast it on-chain.
+ * @param chainKey - Which chain to broadcast on (e.g. 'sonic', 'bsc')
  */
-export async function signAndBroadcast(unsignedTx: UnsignedTx): Promise<string> {
-  const dataHex = unsignedTx.data.startsWith('0x') ? unsignedTx.data : '0x' + unsignedTx.data;
-
-  const signedTx = await signTransaction({
+export async function signAndBroadcast(
+  unsignedTx: UnsignedTx,
+  chainKey: ChainKey = 'sonic'
+): Promise<string> {
+  const txReq: Record<string, any> = {
+    type: 0, // legacy transaction format
     to: unsignedTx.to,
-    value: unsignedTx.value,
-    data: dataHex,
-    nonce: unsignedTx.nonce,
-    gasPrice: unsignedTx.gasPrice,
+    value: unsignedTx.value || '0x0',
     gasLimit: unsignedTx.gasLimit,
-    chainId: parseInt(unsignedTx.chainId),
-  });
+    gasPrice: unsignedTx.gasPrice,
+    nonce: unsignedTx.nonce,
+    chainId: unsignedTx.chainId,
+  };
+  if (unsignedTx.data && unsignedTx.data !== '0x') {
+    txReq.data = unsignedTx.data.startsWith('0x') ? unsignedTx.data : `0x${unsignedTx.data}`;
+  }
 
-  const provider = getProvider('sonic');
-  const txResponse = await provider.broadcastTransaction(signedTx);
+  const signed = await signTransaction(txReq);
+  const provider = getProvider(chainKey);
+  const txResponse = await provider.broadcastTransaction(signed);
 
-  // Race between tx confirmation and a timeout
   const receipt = await Promise.race([
     txResponse.wait(),
-    new Promise<null>((_, reject) =>
-      setTimeout(() => reject(new Error('Transaction timed out. Check your order list for status.')), TX_TIMEOUT_MS)
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Transaction confirmation timed out')), TX_TIMEOUT_MS)
     ),
   ]);
 
-  if (!receipt) {
-    throw new Error('Transaction was dropped or replaced. Check your order list for status.');
-  }
-
+  if (!receipt) throw new Error('No receipt returned');
   return receipt.hash;
 }

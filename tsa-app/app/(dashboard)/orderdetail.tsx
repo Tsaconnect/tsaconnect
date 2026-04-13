@@ -72,7 +72,7 @@ const OrderDetailScreen = () => {
                 throw new Error(prepResult.message || 'Failed to prepare confirm');
               }
 
-              const txHash = await signAndBroadcast(prepResult.data.confirmTx);
+              const txHash = await signAndBroadcast(prepResult.data.confirmTx, 'sonic');
 
               const submitResult = await submitConfirm(order.id, txHash);
               if (!submitResult.success) {
@@ -114,7 +114,7 @@ const OrderDetailScreen = () => {
 
               // If escrowed, we get a refundTx to sign and broadcast
               if (order.status === 'escrowed' && result.data?.refundTx) {
-                const txHash = await signAndBroadcast(result.data.refundTx);
+                const txHash = await signAndBroadcast(result.data.refundTx, 'sonic');
                 Alert.alert(
                   'Refund Requested',
                   `On-chain refund request submitted.\nTx: ${txHash.slice(0, 16)}...`,

@@ -7,6 +7,7 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
+  Alert,
   Platform,
   Modal,
 } from 'react-native';
@@ -17,9 +18,10 @@ import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
   getWalletBalances,
   getTransactionHistory,
+  normalizeWalletBalances,
   registerWalletAddress,
-  WalletBalance,
-  Transaction,
+  type Transaction,
+  type WalletBalanceWithChain,
 } from '../../services/walletApi';
 import {
   getWalletList,
@@ -29,9 +31,13 @@ import {
   WalletMeta,
 } from '../../services/wallet';
 import { useTokens } from '../../hooks/useTokens';
+import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
+import ChainSelector from '../../components/wallet/ChainSelector';
+import ImportTokenModal from '../../components/wallet/ImportTokenModal';
+import { useNetwork } from '../../hooks/useNetwork';
 
 const WalletHome = () => {
-  const { tokens, tokenList } = useTokens();
+  const { tokens, tokenList, removeToken } = useTokens();
 
   const TOKEN_COLORS: Record<string, string> = Object.fromEntries(
     tokenList.map(t => [t.symbol, t.iconColor])
@@ -40,7 +46,7 @@ const WalletHome = () => {
     tokenList.map(t => [t.symbol, t.symbol[0]])
   );
 
-  const [balances, setBalances] = useState<WalletBalance[]>([]);
+  const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -50,6 +56,9 @@ const WalletHome = () => {
   const [walletList, setWalletList] = useState<WalletMeta[]>([]);
   const [activeLabel, setActiveLabel] = useState('');
   const [selectorVisible, setSelectorVisible] = useState(false);
+  const [chainFilter, setChainFilter] = useState<ChainKey | 'all'>('all');
+  const [importModalVisible, setImportModalVisible] = useState(false);
+  const { network } = useNetwork();
 
   const fetchData = useCallback(async () => {
     setError('');
@@ -69,30 +78,48 @@ const WalletHome = () => {
       const backedUp = list.find(w => w.address === address)?.backedUp;
       setSeedBackedUp(backedUp ?? false);
 
-      const [balanceResult, txResult] = await Promise.all([
-        getWalletBalances(),
+      // Fetch balances from all chains in parallel
+      const [chainResults, txResult] = await Promise.all([
+        Promise.all(
+          CHAIN_KEYS.map(async (chainKey) => {
+            const result = await getWalletBalances(CHAINS[chainKey].chainId);
+            return { chainKey, result };
+          })
+        ),
         getTransactionHistory(1, 5),
       ]);
 
-      if (balanceResult.success && Array.isArray(balanceResult.data)) {
-        // Merge API balances with full token list so all supported tokens appear
-        const balanceMap = new Map(balanceResult.data.map(b => [b.symbol, b]));
-        const merged = tokenList.map(t => balanceMap.get(t.symbol) ?? {
-          symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
-        });
-        // Include any API tokens not in tokenList (e.g. custom tokens in wallet)
-        for (const b of balanceResult.data) {
-          if (!tokenList.some(t => t.symbol === b.symbol)) merged.push(b);
+      const allBalances: WalletBalanceWithChain[] = [];
+      const seenTokenChains = new Set<string>();
+
+      for (const { chainKey, result } of chainResults) {
+        if (!result.success || !result.data) continue;
+        for (const entry of normalizeWalletBalances(result.data, chainKey)) {
+          allBalances.push(entry);
+          seenTokenChains.add(`${entry.symbol}-${entry.chainKey}`);
         }
-        setBalances(merged);
-      } else {
-        // Show default empty balances
-        setBalances(
-          tokenList.map(t => ({
-            symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
-          }))
-        );
       }
+
+      // Merge with tokenList — add 0-balance entries for missing tokens
+      for (const t of tokenList) {
+        for (const chain of t.chains) {
+          const key = `${t.symbol}-${chain}`;
+          if (!seenTokenChains.has(key)) {
+            allBalances.push({
+              symbol: t.symbol,
+              name: t.name,
+              balance: '0',
+              usdValue: '0.00',
+              contractAddress: '',
+              decimals: t.decimals,
+              chainKey: chain as ChainKey,
+              chainName: CHAINS[chain as ChainKey]?.shortName || chain,
+            });
+          }
+        }
+      }
+
+      setBalances(allBalances);
 
       if (txResult.success && txResult.data) {
         setTransactions(txResult.data.transactions || []);
@@ -101,14 +128,18 @@ const WalletHome = () => {
       console.error('Fetch wallet data error:', err);
       setError('Failed to load wallet data');
       setBalances(
-        tokenList.map(t => ({
-          symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00', contractAddress: '', decimals: t.decimals,
-        }))
+        tokenList.flatMap(t =>
+          t.chains.map(chain => ({
+            symbol: t.symbol, name: t.name, balance: '0', usdValue: '0.00',
+            contractAddress: '', decimals: t.decimals, chainKey: chain as ChainKey,
+            chainName: CHAINS[chain as ChainKey]?.shortName || chain,
+          }))
+        )
       );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tokenList]);
 
   useEffect(() => {
     fetchData();
@@ -138,34 +169,64 @@ const WalletHome = () => {
     0
   );
 
-  const renderTokenCard = (token: WalletBalance) => (
-    <View key={token.symbol} style={styles.tokenCard}>
-      <View style={styles.tokenRow}>
-        <View
-          style={[
-            styles.tokenIcon,
-            { backgroundColor: TOKEN_COLORS[token.symbol] || COLORS.primary },
-          ]}
-        >
-          <Text style={styles.tokenIconText}>
-            {TOKEN_ICONS[token.symbol] || token.symbol[0]}
-          </Text>
+  const renderTokenCard = (token: WalletBalanceWithChain) => {
+    const chain = CHAINS[token.chainKey];
+    return (
+      <TouchableOpacity
+        key={`${token.symbol}-${token.chainKey}`}
+        style={styles.tokenCard}
+        onPress={() =>
+          router.push(
+            `/wallet/token?symbol=${token.symbol}&chainKey=${token.chainKey}&name=${encodeURIComponent(token.name)}&iconColor=${encodeURIComponent(TOKEN_COLORS[token.symbol] || COLORS.primary)}`
+          )
+        }
+        activeOpacity={0.7}
+        onLongPress={() => {
+          if ((token as any).custom) {
+            Alert.alert(
+              'Remove Token',
+              `Remove ${token.symbol} from your wallet?`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Remove',
+                  style: 'destructive',
+                  onPress: async () => { await removeToken(token.symbol, token.chainKey); fetchData(); },
+                },
+              ]
+            );
+          }
+        }}
+      >
+        <View style={styles.tokenRow}>
+          <View
+            style={[
+              styles.tokenIcon,
+              { backgroundColor: TOKEN_COLORS[token.symbol] || COLORS.primary },
+            ]}
+          >
+            <Text style={styles.tokenIconText}>
+              {TOKEN_ICONS[token.symbol] || token.symbol[0]}
+            </Text>
+          </View>
+          <View style={styles.tokenInfo}>
+            <Text style={styles.tokenSymbol}>{token.symbol}</Text>
+            <Text style={styles.tokenName}>
+              {token.name}{chain ? ` \u00B7 ${chain.shortName}` : ''}
+            </Text>
+          </View>
+          <View style={styles.tokenBalanceContainer}>
+            <Text style={styles.tokenBalance}>
+              {parseFloat(token.balance).toLocaleString(undefined, {
+                maximumFractionDigits: 6,
+              })}
+            </Text>
+            <Text style={styles.tokenUsd}>${parseFloat(token.usdValue).toFixed(2)}</Text>
+          </View>
         </View>
-        <View style={styles.tokenInfo}>
-          <Text style={styles.tokenSymbol}>{token.symbol}</Text>
-          <Text style={styles.tokenName}>{token.name}</Text>
-        </View>
-        <View style={styles.tokenBalanceContainer}>
-          <Text style={styles.tokenBalance}>
-            {parseFloat(token.balance).toLocaleString(undefined, {
-              maximumFractionDigits: 6,
-            })}
-          </Text>
-          <Text style={styles.tokenUsd}>${parseFloat(token.usdValue).toFixed(2)}</Text>
-        </View>
-      </View>
-    </View>
-  );
+      </TouchableOpacity>
+    );
+  };
 
   const renderTransaction = (tx: Transaction) => {
     const isSend =
@@ -267,6 +328,13 @@ const WalletHome = () => {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
       }
     >
+      {network === 'testnet' && (
+        <View style={styles.testnetBanner}>
+          <Ionicons name="warning" size={14} color="#D97706" />
+          <Text style={styles.testnetText}>Testnet Mode — Balances are not real</Text>
+        </View>
+      )}
+
       {/* Seed phrase backup warning */}
       {!seedBackedUp && (
         <TouchableOpacity
@@ -331,7 +399,27 @@ const WalletHome = () => {
       {/* Token balances */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Assets</Text>
-        {balances.map(renderTokenCard)}
+        <ChainSelector
+          availableChains={CHAIN_KEYS}
+          selectedChain={chainFilter === 'all' ? CHAIN_KEYS[0] : chainFilter}
+          onSelect={(chain) => setChainFilter(chain)}
+          showAll
+          onSelectAll={() => setChainFilter('all')}
+          allSelected={chainFilter === 'all'}
+          size="compact"
+        />
+        <View style={{ marginTop: 12 }}>
+          {(balances as WalletBalanceWithChain[])
+            .filter((b) => chainFilter === 'all' || b.chainKey === chainFilter)
+            .map(renderTokenCard)}
+        </View>
+        <TouchableOpacity
+          style={styles.importBtn}
+          onPress={() => setImportModalVisible(true)}
+        >
+          <Ionicons name="add-circle-outline" size={18} color="#D4AF37" />
+          <Text style={styles.importBtnText}>Import Token</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Recent transactions */}
@@ -350,6 +438,11 @@ const WalletHome = () => {
       </View>
 
       <View style={{ height: 40 }} />
+
+      <ImportTokenModal
+        visible={importModalVisible}
+        onClose={() => { setImportModalVisible(false); fetchData(); }}
+      />
 
       {/* Wallet selector modal */}
       <Modal visible={selectorVisible} transparent animationType="slide">
@@ -745,5 +838,33 @@ const styles = StyleSheet.create({
     ...FONTS.body3,
     color: COLORS.primary,
     fontWeight: '600',
+  },
+  importBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 14,
+    marginTop: 4,
+  },
+  importBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#D4AF37',
+  },
+  testnetBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#FEF3C7',
+    paddingVertical: 8,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  testnetText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#D97706',
   },
 });
