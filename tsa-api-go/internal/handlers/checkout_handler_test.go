@@ -44,22 +44,27 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			state TEXT,
 			city TEXT,
 			address TEXT,
-			profile_photo TEXT,
-			referral_code TEXT,
-			referred_by TEXT,
-			documents TEXT,
-			facial_verification TEXT,
-			verification_status TEXT DEFAULT 'pending',
-			verification_notes TEXT,
-			account_status TEXT DEFAULT 'active',
+				profile_photo TEXT,
+				referral_code TEXT,
+				referred_by TEXT,
+				persona_inquiry_id TEXT,
+				documents TEXT,
+				facial_verification TEXT,
+				verification_status TEXT DEFAULT 'pending',
+				verification_notes TEXT,
+				account_status TEXT DEFAULT 'active',
 			last_login DATETIME,
 			login_attempts INTEGER DEFAULT 0,
-			lock_until DATETIME,
-			wallet_address TEXT,
-			seed_phrase_backed_up INTEGER DEFAULT 0,
-			deleted_at DATETIME,
-			submitted_for_verification_at DATETIME,
-			created_at DATETIME,
+				lock_until DATETIME,
+				wallet_address TEXT,
+				seed_phrase_backed_up INTEGER DEFAULT 0,
+				mute_notifications INTEGER DEFAULT 0,
+				mute_email INTEGER DEFAULT 0,
+				tp_balance REAL DEFAULT 0,
+				email_verified INTEGER DEFAULT 0,
+				deleted_at DATETIME,
+				submitted_for_verification_at DATETIME,
+				created_at DATETIME,
 			updated_at DATETIME
 		)`,
 	}
@@ -163,11 +168,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	t.Helper()
 	cfg := &config.Config{
-		ProductEscrowAddress:  "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
+		ProductEscrowAddress:   "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
 		ServiceContractAddress: "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f",
-		USDCTokenAddress:      "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
-		MCGPTokenAddress:      "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
-		Chains:                map[string]config.ChainConfig{},
+		USDCTokenAddress:       "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
+		MCGPTokenAddress:       "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
+		Chains:                 map[string]config.ChainConfig{},
 		TokenAddresses: map[string]string{
 			"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
 			"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
@@ -447,6 +452,78 @@ func TestCreateOrderFromCart_MultiSeller(t *testing.T) {
 	orders := data["orders"].([]interface{})
 	if len(orders) != 2 {
 		t.Errorf("expected 2 orders (one per seller), got %d", len(orders))
+	}
+}
+
+func TestGetCartSummary_IncludesMerchantShippingMetadata(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	product.Location = "Ikeja, Lagos, Nigeria"
+	if err := db.Save(product).Error; err != nil {
+		t.Fatalf("failed to update product location: %v", err)
+	}
+
+	items := []models.CartItem{
+		{
+			ID:       uuid.New(),
+			Product:  product.ID,
+			Seller:   seller.ID,
+			Quantity: 1,
+			Price:    10.0,
+			AddedAt:  time.Now(),
+		},
+	}
+	createTestCart(t, db, buyer.ID, items)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Request, _ = http.NewRequest("GET", "/summary", nil)
+
+	h.GetCartSummary(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	data := resp["data"].(map[string]interface{})
+	itemsBySeller := data["itemsBySeller"].([]interface{})
+	if len(itemsBySeller) != 1 {
+		t.Fatalf("expected 1 seller group, got %d", len(itemsBySeller))
+	}
+
+	group := itemsBySeller[0].(map[string]interface{})
+	enrichedItems := group["items"].([]interface{})
+	if len(enrichedItems) != 1 {
+		t.Fatalf("expected 1 enriched item, got %d", len(enrichedItems))
+	}
+
+	enriched := enrichedItems[0].(map[string]interface{})
+	productData := enriched["product"].(map[string]interface{})
+	sellerData := enriched["seller"].(map[string]interface{})
+
+	if productData["location"] != "Ikeja, Lagos, Nigeria" {
+		t.Errorf("expected product location to be included, got %v", productData["location"])
+	}
+	if productData["shippingSameState"] != 5.0 {
+		t.Errorf("expected shippingSameState 5.0, got %v", productData["shippingSameState"])
+	}
+	if productData["shippingInternational"] != 25.0 {
+		t.Errorf("expected shippingInternational 25.0, got %v", productData["shippingInternational"])
+	}
+	if sellerData["city"] != "Ikeja" {
+		t.Errorf("expected seller city Ikeja, got %v", sellerData["city"])
+	}
+	if sellerData["country"] != "Nigeria" {
+		t.Errorf("expected seller country Nigeria, got %v", sellerData["country"])
 	}
 }
 

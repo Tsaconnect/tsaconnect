@@ -54,6 +54,29 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Safely parse a fetch response as JSON. If the server returns non-JSON
+ * (e.g. an HTML error page or plain "error: ..." text), surface a clean
+ * error message instead of throwing a cryptic "JSON Parse error".
+ */
+async function safeJson<T = any>(response: Response): Promise<ApiResponse<T>> {
+  const text = await response.text();
+  if (!text) {
+    return { success: false, message: `Empty response (HTTP ${response.status})` };
+  }
+  try {
+    return JSON.parse(text) as ApiResponse<T>;
+  } catch {
+    const preview = text.length > 200 ? text.slice(0, 200) + '...' : text;
+    return {
+      success: false,
+      message: response.ok
+        ? `Unexpected server response: ${preview}`
+        : `Server error (HTTP ${response.status}): ${preview}`,
+    };
+  }
+}
+
 function withHexPrefix(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') {
     return '0x';
@@ -273,7 +296,7 @@ export async function getWalletBalances(chainId?: number): Promise<ApiResponse<W
       method: 'GET',
       headers,
     });
-    return await response.json();
+    return await safeJson(response);
   } catch (error: any) {
     console.error('Get wallet balances error:', error);
     return { success: false, message: error.message || 'Failed to fetch balances' };
@@ -296,7 +319,7 @@ export async function prepareSendTransaction(
       headers,
       body: JSON.stringify({ tokenSymbol, toAddress, amount, chainId }),
     });
-    const result = await response.json();
+    const result = await safeJson<any>(response);
     const normalizedTx = normalizePreparedTransactionData(result?.data);
     if (result?.success && normalizedTx) {
       return { ...result, data: normalizedTx };
@@ -326,7 +349,7 @@ export async function submitTransaction(
       headers,
       body: JSON.stringify({ signedTx, txType, tokenSymbol, toAddress, amount, chainId }),
     });
-    const result = await response.json();
+    const result = await safeJson<any>(response);
     const txHash = extractTransactionHash(result?.data);
     if (result?.success && txHash) {
       return { ...result, data: { txHash } };
@@ -484,7 +507,7 @@ export async function getSwapPrice(
       `${API_BASE_URL}/swap/price?${qp.toString()}`,
       { method: 'GET', headers: { 'Content-Type': 'application/json' } }
     );
-    return await response.json();
+    return await safeJson(response);
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to get swap price' };
   }
@@ -511,7 +534,7 @@ export async function prepareSwap(
         slippageBps: params.slippageBps || 50,
       }),
     });
-    return await response.json();
+    return await safeJson<PreparedSwap>(response);
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to prepare swap' };
   }

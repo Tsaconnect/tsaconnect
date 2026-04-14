@@ -51,6 +51,9 @@ export interface Seller {
     name: string;
     email: string;
     companyName?: string;
+    city?: string;
+    state?: string;
+    country?: string;
 }
 
 export interface CartItem {

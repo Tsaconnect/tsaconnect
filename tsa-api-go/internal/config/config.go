@@ -90,7 +90,7 @@ func Load() *Config {
 		BSCChainID: getEnvInt64("BSC_CHAIN_ID", 97),
 
 		// Smart contract addresses
-		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0xc5E5165cbCB056E4d212727cD4A6642CD5EB886d"),
+		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"),
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xf870DCC5741030990aF1e43D021D986A286C77A6"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")

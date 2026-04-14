@@ -762,11 +762,16 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		config.DB.Where("id IN ?", productIDs).Find(&products)
 		for _, p := range products {
 			productMap[p.ID.String()] = gin.H{
-				"_id":    p.ID,
-				"name":   p.Name,
-				"price":  p.Price,
-				"stock":  p.Stock,
-				"images": p.GetImages(),
+				"_id":                   p.ID,
+				"name":                  p.Name,
+				"price":                 p.Price,
+				"stock":                 p.Stock,
+				"images":                p.GetImages(),
+				"location":              p.Location,
+				"shippingSameCity":      p.ShippingSameCity,
+				"shippingSameState":     p.ShippingSameState,
+				"shippingSameCountry":   p.ShippingSameCountry,
+				"shippingInternational": p.ShippingInternational,
 			}
 		}
 	}
@@ -778,9 +783,12 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		config.DB.Where("id IN ?", sellerIDs).Find(&users)
 		for _, u := range users {
 			sellerMap[u.ID.String()] = gin.H{
-				"_id":   u.ID,
-				"name":  u.Name,
-				"email": u.Email,
+				"_id":     u.ID,
+				"name":    u.Name,
+				"email":   u.Email,
+				"city":    u.City,
+				"state":   u.State,
+				"country": u.Country,
 			}
 		}
 	}
@@ -809,14 +817,14 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 
 		enriched := gin.H{
 			"_id":                item.ID,
-			"product":           productMap[item.Product.String()],
-			"seller":            sellerMap[sellerID],
-			"quantity":          item.Quantity,
-			"price":             item.Price,
+			"product":            productMap[item.Product.String()],
+			"seller":             sellerMap[sellerID],
+			"quantity":           item.Quantity,
+			"price":              item.Price,
 			"selectedAttributes": item.SelectedAttributes,
-			"notes":             item.Notes,
-			"addedAt":           item.AddedAt,
-			"updatedAt":         item.UpdatedAt,
+			"notes":              item.Notes,
+			"addedAt":            item.AddedAt,
+			"updatedAt":          item.UpdatedAt,
 		}
 
 		entry["items"] = append(entry["items"].([]gin.H), enriched)
