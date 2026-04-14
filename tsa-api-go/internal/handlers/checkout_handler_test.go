@@ -318,6 +318,13 @@ func TestDetectShippingZone_CaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestDetectShippingZone_StateSuffixNormalization(t *testing.T) {
+	zone := DetectShippingZone("Ankpa", "Kogi State", "Nigeria", "Lokoja", "Kogi", "Nigeria")
+	if zone != ShippingZoneSameState {
+		t.Errorf("expected %s, got %s", ShippingZoneSameState, zone)
+	}
+}
+
 // ---------- Fee calculation tests ----------
 
 func TestCalculatePlatformFee_USDC(t *testing.T) {
@@ -452,6 +459,71 @@ func TestCreateOrderFromCart_MultiSeller(t *testing.T) {
 	orders := data["orders"].([]interface{})
 	if len(orders) != 2 {
 		t.Errorf("expected 2 orders (one per seller), got %d", len(orders))
+	}
+}
+
+func TestCreateOrderFromCart_UsesProductLocationForShipping(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Ankpa", "Kogi State", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Abuja", "FCT", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	product.Location = "Lokoja, Kogi, Nigeria"
+	product.ShippingSameState = 5.0
+	product.ShippingSameCountry = 0
+	if err := db.Save(product).Error; err != nil {
+		t.Fatalf("failed to update product location: %v", err)
+	}
+
+	items := []models.CartItem{
+		{
+			ID:       uuid.New(),
+			Product:  product.ID,
+			Seller:   seller.ID,
+			Quantity: 1,
+			Price:    10.0,
+			AddedAt:  time.Now(),
+		},
+	}
+	createTestCart(t, db, buyer.ID, items)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"token":        "USDC",
+		"buyerCity":    "Ankpa",
+		"buyerState":   "Kogi State",
+		"buyerCountry": "Nigeria",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.CreateOrderFromCart(c)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	data := resp["data"].(map[string]interface{})
+	orders := data["orders"].([]interface{})
+	if len(orders) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(orders))
+	}
+
+	order := orders[0].(map[string]interface{})
+	if order["shippingZone"] != ShippingZoneSameState {
+		t.Errorf("expected shipping zone %s, got %v", ShippingZoneSameState, order["shippingZone"])
+	}
+	if order["shippingAmount"] != "5000000" {
+		t.Errorf("expected shipping amount 5000000, got %v", order["shippingAmount"])
 	}
 }
 
@@ -865,6 +937,46 @@ func TestGetShippingEstimate(t *testing.T) {
 
 	if data["zone"] != "same_state" {
 		t.Errorf("expected zone same_state, got %v", data["zone"])
+	}
+	if data["shippingCost"].(float64) != 5.0 {
+		t.Errorf("expected shipping cost 5.0, got %v", data["shippingCost"])
+	}
+}
+
+func TestGetShippingEstimate_UsesProductLocation(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	seller := createTestUserWithLocation(t, db, "Abuja", "FCT", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	product.Location = "Lokoja, Kogi, Nigeria"
+	product.ShippingSameState = 5.0
+	product.ShippingSameCountry = 0
+	if err := db.Save(product).Error; err != nil {
+		t.Fatalf("failed to update product location: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(
+		"GET",
+		fmt.Sprintf("/?productId=%s&buyerCity=Ankpa&buyerState=Kogi%%20State&buyerCountry=Nigeria", product.ID),
+		nil,
+	)
+
+	ch.GetShippingEstimate(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+
+	if data["zone"] != ShippingZoneSameState {
+		t.Errorf("expected zone %s, got %v", ShippingZoneSameState, data["zone"])
 	}
 	if data["shippingCost"].(float64) != 5.0 {
 		t.Errorf("expected shipping cost 5.0, got %v", data["shippingCost"])

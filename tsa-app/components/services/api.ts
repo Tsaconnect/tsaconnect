@@ -461,12 +461,13 @@ class APIService {
   }
 
   // Login (if needed)
-  async login(email: string, password: string): Promise<ApiResponse<SignupResponse>> {
+  async login(emailOrUsername: string, password: string): Promise<ApiResponse<SignupResponse>> {
     try {
+      // Backend accepts a single `identifier` field (email OR username) + password
       const response = await fetch(`${API_BASE_URL}/auth/login`, {
         method: 'POST',
         headers: this.getHeaders(),
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier: emailOrUsername.trim(), password }),
       });
 
       const result = await this.handleResponse<SignupResponse>(response);
