@@ -373,16 +373,16 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
-				origin := resolveShippingOrigin(&product, &seller)
-				zone := DetectShippingZone(
-					buyerCity,
-					buyerState,
-					buyerCountry,
-					origin.City,
-					origin.State,
-					origin.Country,
-				)
-				shippingRate := GetShippingRate(&product, zone)
+			origin := resolveShippingOrigin(&product, &seller)
+			zone := DetectShippingZone(
+				buyerCity,
+				buyerState,
+				buyerCountry,
+				origin.City,
+				origin.State,
+				origin.Country,
+			)
+			shippingRate := GetShippingRate(&product, zone)
 
 			// Convert to wei using string-based math (no float64 precision loss)
 			productTotal := product.Price * float64(item.Quantity)
@@ -768,8 +768,8 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 
 	now := time.Now()
 	updates := map[string]interface{}{
-		"status":             models.OrderStatusDelivered,
-		"delivery_proof_url": req.DeliveryProofURL,
+		"status":              models.OrderStatusDelivered,
+		"delivery_proof_url":  req.DeliveryProofURL,
 		"seller_delivered_at": now,
 	}
 
@@ -903,8 +903,8 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 
 	now := time.Now()
 	updates := map[string]interface{}{
-		"status":            models.OrderStatusCompleted,
-		"release_tx_hash":   req.TxHash,
+		"status":             models.OrderStatusCompleted,
+		"release_tx_hash":    req.TxHash,
 		"buyer_confirmed_at": now,
 	}
 
