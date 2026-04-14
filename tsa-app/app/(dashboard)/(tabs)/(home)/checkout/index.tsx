@@ -27,6 +27,7 @@ import {
   prepareEscrow,
   submitEscrow,
   formatTokenAmount,
+  getShippingEstimate,
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
@@ -92,6 +93,8 @@ const CheckoutScreen = () => {
     state: '',
     city: '',
   });
+  const [shippingEstimateTotal, setShippingEstimateTotal] = useState<number | null>(null);
+  const [shippingEstimateLoading, setShippingEstimateLoading] = useState(false);
 
   const loadCart = useCallback(async () => {
     setLoading(true);
@@ -145,50 +148,16 @@ const CheckoutScreen = () => {
     };
   };
 
-  const getSellerLocation = (item: CartItem) => {
-    const seller = item.seller;
-    if (seller.city || seller.state || seller.country) {
-      return {
-        city: seller.city?.trim().toLowerCase() || '',
-        state: seller.state?.trim().toLowerCase() || '',
-        country: seller.country?.trim().toLowerCase() || '',
-      };
+  const getProductId = (item: CartItem) => {
+    if (typeof item.product === 'object') {
+      return (item.product as Product)._id;
     }
 
-    if (typeof item.product !== 'object') {
-      return null;
-    }
-
-    const product = item.product as Product;
-    const parts = (product.location || '')
-      .split(',')
-      .map((part: string) => part.trim().toLowerCase())
-      .filter(Boolean);
-
-    return {
-      city: parts[0] || '',
-      state: parts[1] || '',
-      country: parts[2] || '',
-    };
-  };
-
-  const hasMerchantShippingData = (item: CartItem) => {
-    if (typeof item.product !== 'object') {
-      return false;
-    }
-
-    const product = item.product as Product;
-    return (
-      'shippingSameCity' in product &&
-      'shippingSameState' in product &&
-      'shippingSameCountry' in product &&
-      'shippingInternational' in product
-    );
+    return typeof item.product === 'string' ? item.product : '';
   };
 
   const shippingName = currentUser?.name || currentUser?.username || '';
   const shippingAddress = {
-    address: currentUser?.address || '',
     city: shippingLocation.city,
     state: shippingLocation.state,
     country: shippingLocation.country,
@@ -214,6 +183,13 @@ const CheckoutScreen = () => {
         'Please set your shipping address before checking out.',
       );
       setEditingAddress(true);
+      return;
+    }
+    if (shippingEstimateLoading) {
+      Alert.alert(
+        'Updating Shipping',
+        'Please wait for shipping fees to finish updating.',
+      );
       return;
     }
     if (!cartData || items.length === 0) {
@@ -317,7 +293,7 @@ const CheckoutScreen = () => {
   };
 
   // --- Derived data ---
-  const items = cartData?.itemsBySeller.flatMap((group) => group.items) || cartData?.cart.items || [];
+  const items = cartData?.itemsBySeller?.flatMap((group) => group.items) || cartData?.cart.items || [];
   const summary = cartData?.summary || {
     subtotal: 0,
     shipping: 0,
@@ -332,58 +308,98 @@ const CheckoutScreen = () => {
   const isMCGP = selectedToken === 'MCGP';
   const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.1);
 
-  // --- Calculate shipping based on buyer location vs merchant product location ---
-  const calculateItemShipping = (item: CartItem): number | null => {
-    if (typeof item.product !== 'object' || !hasMerchantShippingData(item)) {
-      return null;
-    }
+  useEffect(() => {
+    let cancelled = false;
 
-    const product = item.product as Product;
-    const sellerLocation = getSellerLocation(item);
-    if (!sellerLocation?.country) {
-      return null;
-    }
+    const loadShippingEstimate = async () => {
+      const checkoutItems =
+        cartData?.itemsBySeller?.flatMap((group) => group.items) ||
+        cartData?.cart.items ||
+        [];
 
-    const buyerCity = shippingLocation.city.trim().toLowerCase();
-    const buyerState = shippingLocation.state.trim().toLowerCase();
-    const buyerCountry = shippingLocation.country.trim().toLowerCase();
-    const { city: merchantCity, state: merchantState, country: merchantCountry } = sellerLocation;
-
-    // Same city
-    if (buyerCountry === merchantCountry && buyerState === merchantState && buyerCity === merchantCity) {
-      return product.shippingSameCity ?? 0;
-    }
-    // Same state
-    if (buyerCountry === merchantCountry && buyerState === merchantState) {
-      return product.shippingSameState ?? 0;
-    }
-    // Same country
-    if (buyerCountry === merchantCountry) {
-      return product.shippingSameCountry ?? 0;
-    }
-    // International
-    return product.shippingInternational ?? 0;
-  };
-
-  const shippingComputation = items.reduce(
-    (acc, item) => {
-      const itemShipping = calculateItemShipping(item);
-      if (itemShipping == null) {
-        return { ...acc, hasMerchantShippingForAllItems: false };
+      if (checkoutItems.length === 0) {
+        setShippingEstimateTotal(0);
+        setShippingEstimateLoading(false);
+        return;
       }
 
-      return {
-        hasMerchantShippingForAllItems: acc.hasMerchantShippingForAllItems,
-        total: acc.total + itemShipping * item.quantity,
-      };
-    },
-    { hasMerchantShippingForAllItems: items.length > 0, total: 0 }
-  );
-  const shippingTotal = shippingComputation.hasMerchantShippingForAllItems
-    ? shippingComputation.total
-    : summary.shipping;
+      if (!shippingLocation.country || !shippingLocation.state) {
+        setShippingEstimateTotal(null);
+        setShippingEstimateLoading(false);
+        return;
+      }
+
+      setShippingEstimateLoading(true);
+
+      try {
+        const estimates = await Promise.all(
+          checkoutItems.map(async (item) => {
+            const productId = getProductId(item);
+            if (!productId) {
+              return null;
+            }
+
+            const result = await getShippingEstimate(
+              productId,
+              shippingLocation.city,
+              shippingLocation.state,
+              shippingLocation.country,
+            );
+
+            if (!result.success || result.data?.shippingCost == null) {
+              return null;
+            }
+
+            return result.data.shippingCost * item.quantity;
+          }),
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        const resolvedEstimates = estimates.filter(
+          (value): value is number => value != null,
+        );
+
+        if (resolvedEstimates.length !== estimates.length) {
+          setShippingEstimateTotal(null);
+          return;
+        }
+
+        setShippingEstimateTotal(
+          resolvedEstimates.reduce((total, value) => total + value, 0),
+        );
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to load shipping estimates:', err);
+          setShippingEstimateTotal(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setShippingEstimateLoading(false);
+        }
+      }
+    };
+
+    loadShippingEstimate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cartData,
+    shippingLocation.city,
+    shippingLocation.state,
+    shippingLocation.country,
+  ]);
+
+  const shippingTotal = shippingEstimateTotal ?? summary.shipping;
   const estimatedTotal =
     summary.subtotal + shippingTotal + gasFee - summary.discount;
+  const totalDisplay = shippingEstimateLoading
+    ? 'Updating...'
+    : `$${estimatedTotal.toFixed(2)}`;
 
   // ===== HEADER =====
   const Header = ({
@@ -628,9 +644,6 @@ const CheckoutScreen = () => {
           ) : shippingAddress.country ? (
             <View style={s.addressContent}>
               <Text style={s.addressName}>{shippingName}</Text>
-              {shippingAddress.address ? (
-                <Text style={s.addressLine}>{shippingAddress.address}</Text>
-              ) : null}
               <Text style={s.addressLine}>
                 {[
                   shippingAddress.city,
@@ -767,7 +780,9 @@ const CheckoutScreen = () => {
           <View style={s.summaryRow}>
             <Text style={s.summaryLabel}>Shipping</Text>
             <Text style={s.summaryValue}>
-              {shippingTotal > 0
+              {shippingEstimateLoading
+                ? 'Calculating...'
+                : shippingTotal > 0
                 ? `$${shippingTotal.toFixed(2)}`
                 : 'Free'}
             </Text>
@@ -803,7 +818,7 @@ const CheckoutScreen = () => {
           <View style={s.totalRow}>
             <Text style={s.totalLabel}>Total</Text>
             <View style={{ alignItems: 'flex-end' }}>
-              <Text style={s.totalValue}>${estimatedTotal.toFixed(2)}</Text>
+              <Text style={s.totalValue}>{totalDisplay}</Text>
               <Text style={s.totalToken}>Paid in {selectedToken}</Text>
             </View>
           </View>
@@ -815,12 +830,13 @@ const CheckoutScreen = () => {
         <View style={s.footerRow}>
           <View>
             <Text style={s.footerLabel}>Total</Text>
-            <Text style={s.footerTotal}>${estimatedTotal.toFixed(2)}</Text>
+            <Text style={s.footerTotal}>{totalDisplay}</Text>
           </View>
           <TouchableOpacity
-            style={s.payBtn}
+            style={[s.payBtn, shippingEstimateLoading && { opacity: 0.6 }]}
             activeOpacity={0.8}
             onPress={handleCreateOrders}
+            disabled={shippingEstimateLoading}
           >
             <Ionicons name="shield-checkmark" size={18} color="#FFF" />
             <Text style={s.payBtnText}>Pay with {selectedToken}</Text>

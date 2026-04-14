@@ -49,14 +49,77 @@ const (
 	ShippingZoneInternational = "international"
 )
 
+type shippingOrigin struct {
+	City    string
+	State   string
+	Country string
+}
+
+func normalizeLocationComponent(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func normalizeStateComponent(value string) string {
+	normalized := normalizeLocationComponent(value)
+	for _, suffix := range []string{" state", " province", " region"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return strings.TrimSpace(strings.TrimSuffix(normalized, suffix))
+		}
+	}
+	if normalized == "federal capital territory" {
+		return "fct"
+	}
+	return normalized
+}
+
+func parseProductLocation(location string) shippingOrigin {
+	parts := strings.Split(location, ",")
+	trimmed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			trimmed = append(trimmed, part)
+		}
+	}
+
+	origin := shippingOrigin{}
+	if len(trimmed) > 0 {
+		origin.City = trimmed[0]
+	}
+	if len(trimmed) > 1 {
+		origin.State = trimmed[1]
+	}
+	if len(trimmed) > 2 {
+		origin.Country = trimmed[2]
+	}
+
+	return origin
+}
+
+func resolveShippingOrigin(product *models.Product, seller *models.User) shippingOrigin {
+	origin := parseProductLocation(product.Location)
+	if seller != nil {
+		if origin.City == "" {
+			origin.City = seller.City
+		}
+		if origin.State == "" {
+			origin.State = seller.State
+		}
+		if origin.Country == "" {
+			origin.Country = seller.Country
+		}
+	}
+	return origin
+}
+
 // DetectShippingZone compares buyer and seller locations.
 func DetectShippingZone(buyerCity, buyerState, buyerCountry, sellerCity, sellerState, sellerCountry string) string {
-	bc := strings.ToLower(strings.TrimSpace(buyerCountry))
-	sc := strings.ToLower(strings.TrimSpace(sellerCountry))
-	bs := strings.ToLower(strings.TrimSpace(buyerState))
-	ss := strings.ToLower(strings.TrimSpace(sellerState))
-	bci := strings.ToLower(strings.TrimSpace(buyerCity))
-	sci := strings.ToLower(strings.TrimSpace(sellerCity))
+	bc := normalizeLocationComponent(buyerCountry)
+	sc := normalizeLocationComponent(sellerCountry)
+	bs := normalizeStateComponent(buyerState)
+	ss := normalizeStateComponent(sellerState)
+	bci := normalizeLocationComponent(buyerCity)
+	sci := normalizeLocationComponent(sellerCity)
 
 	if bc == "" || sc == "" {
 		return ShippingZoneSameCountry
@@ -310,8 +373,16 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
-			zone := DetectShippingZone(buyerCity, buyerState, buyerCountry, seller.City, seller.State, seller.Country)
-			shippingRate := GetShippingRate(&product, zone)
+				origin := resolveShippingOrigin(&product, &seller)
+				zone := DetectShippingZone(
+					buyerCity,
+					buyerState,
+					buyerCountry,
+					origin.City,
+					origin.State,
+					origin.Country,
+				)
+				shippingRate := GetShippingRate(&product, zone)
 
 			// Convert to wei using string-based math (no float64 precision loss)
 			productTotal := product.Price * float64(item.Quantity)
@@ -1111,7 +1182,15 @@ func (ch *CheckoutHandler) GetShippingEstimate(c *gin.Context) {
 		return
 	}
 
-	zone := DetectShippingZone(buyerCity, buyerState, buyerCountry, seller.City, seller.State, seller.Country)
+	origin := resolveShippingOrigin(&product, &seller)
+	zone := DetectShippingZone(
+		buyerCity,
+		buyerState,
+		buyerCountry,
+		origin.City,
+		origin.State,
+		origin.Country,
+	)
 	shippingCost := GetShippingRate(&product, zone)
 
 	utils.SuccessResponse(c, http.StatusOK, "Shipping estimate", gin.H{
