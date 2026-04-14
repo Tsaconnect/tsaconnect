@@ -38,9 +38,9 @@ func init() {
 
 // EscrowService prepares unsigned transactions for the ProductEscrow contract.
 type EscrowService struct {
-	client          *blockchain.EVMClient
-	escrowAddress   string
-	cfg             *config.Config
+	client        *blockchain.EVMClient
+	escrowAddress string
+	cfg           *config.Config
 }
 
 // NewEscrowService creates a new EscrowService.
@@ -127,11 +127,13 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
 
 	escrowAddr := common.HexToAddress(s.escrowAddress)
 	orderCreatedSig := parsedEscrowABI.Events["OrderCreated"].ID
+	foundEscrowLog := false
 
 	for _, log := range receipt.Logs {
 		if log.Address != escrowAddr {
 			continue
 		}
+		foundEscrowLog = true
 		if len(log.Topics) < 1 || log.Topics[0] != orderCreatedSig {
 			continue
 		}
@@ -142,6 +144,10 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
 		var orderId [32]byte
 		copy(orderId[:], log.Topics[1].Bytes())
 		return orderId, nil
+	}
+
+	if !foundEscrowLog {
+		return empty, fmt.Errorf("no logs found for configured escrow contract %s in receipt", s.escrowAddress)
 	}
 
 	return empty, fmt.Errorf("OrderCreated event not found in receipt")

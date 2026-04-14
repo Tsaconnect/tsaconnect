@@ -145,6 +145,47 @@ const CheckoutScreen = () => {
     };
   };
 
+  const getSellerLocation = (item: CartItem) => {
+    const seller = item.seller;
+    if (seller.city || seller.state || seller.country) {
+      return {
+        city: seller.city?.trim().toLowerCase() || '',
+        state: seller.state?.trim().toLowerCase() || '',
+        country: seller.country?.trim().toLowerCase() || '',
+      };
+    }
+
+    if (typeof item.product !== 'object') {
+      return null;
+    }
+
+    const product = item.product as Product;
+    const parts = (product.location || '')
+      .split(',')
+      .map((part: string) => part.trim().toLowerCase())
+      .filter(Boolean);
+
+    return {
+      city: parts[0] || '',
+      state: parts[1] || '',
+      country: parts[2] || '',
+    };
+  };
+
+  const hasMerchantShippingData = (item: CartItem) => {
+    if (typeof item.product !== 'object') {
+      return false;
+    }
+
+    const product = item.product as Product;
+    return (
+      'shippingSameCity' in product &&
+      'shippingSameState' in product &&
+      'shippingSameCountry' in product &&
+      'shippingInternational' in product
+    );
+  };
+
   const shippingName = currentUser?.name || currentUser?.username || '';
   const shippingAddress = {
     address: currentUser?.address || '',
@@ -175,7 +216,7 @@ const CheckoutScreen = () => {
       setEditingAddress(true);
       return;
     }
-    if (!cartData || cartData.cart.items.length === 0) {
+    if (!cartData || items.length === 0) {
       Alert.alert('Empty Cart', 'Add items to your cart before checking out.');
       return;
     }
@@ -276,7 +317,7 @@ const CheckoutScreen = () => {
   };
 
   // --- Derived data ---
-  const items = cartData?.cart.items || [];
+  const items = cartData?.itemsBySeller.flatMap((group) => group.items) || cartData?.cart.items || [];
   const summary = cartData?.summary || {
     subtotal: 0,
     shipping: 0,
@@ -292,19 +333,21 @@ const CheckoutScreen = () => {
   const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.1);
 
   // --- Calculate shipping based on buyer location vs merchant product location ---
-  const calculateItemShipping = (item: CartItem): number => {
-    if (typeof item.product !== 'object') return 0;
+  const calculateItemShipping = (item: CartItem): number | null => {
+    if (typeof item.product !== 'object' || !hasMerchantShippingData(item)) {
+      return null;
+    }
+
     const product = item.product as Product;
-    const productLocation = product.location || '';
-    const parts = productLocation.split(',').map((s: string) => s.trim().toLowerCase());
-    // location format: "City, State, Country"
-    const merchantCity = parts[0] || '';
-    const merchantState = parts[1] || '';
-    const merchantCountry = parts[2] || '';
+    const sellerLocation = getSellerLocation(item);
+    if (!sellerLocation?.country) {
+      return null;
+    }
 
     const buyerCity = shippingLocation.city.trim().toLowerCase();
     const buyerState = shippingLocation.state.trim().toLowerCase();
     const buyerCountry = shippingLocation.country.trim().toLowerCase();
+    const { city: merchantCity, state: merchantState, country: merchantCountry } = sellerLocation;
 
     // Same city
     if (buyerCountry === merchantCountry && buyerState === merchantState && buyerCity === merchantCity) {
@@ -322,11 +365,23 @@ const CheckoutScreen = () => {
     return product.shippingInternational ?? 0;
   };
 
-  const calculatedShipping = items.reduce(
-    (total, item) => total + calculateItemShipping(item) * item.quantity,
-    0
+  const shippingComputation = items.reduce(
+    (acc, item) => {
+      const itemShipping = calculateItemShipping(item);
+      if (itemShipping == null) {
+        return { ...acc, hasMerchantShippingForAllItems: false };
+      }
+
+      return {
+        hasMerchantShippingForAllItems: acc.hasMerchantShippingForAllItems,
+        total: acc.total + itemShipping * item.quantity,
+      };
+    },
+    { hasMerchantShippingForAllItems: items.length > 0, total: 0 }
   );
-  const shippingTotal = calculatedShipping > 0 ? calculatedShipping : summary.shipping;
+  const shippingTotal = shippingComputation.hasMerchantShippingForAllItems
+    ? shippingComputation.total
+    : summary.shipping;
   const estimatedTotal =
     summary.subtotal + shippingTotal + gasFee - summary.discount;
 
