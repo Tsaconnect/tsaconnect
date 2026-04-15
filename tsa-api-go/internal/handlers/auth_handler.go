@@ -252,9 +252,12 @@ func (h *Handlers) Signup(c *gin.Context) {
 }
 
 // loginRequest defines the expected JSON body for login.
+// Accepts either `identifier` (email or username), or legacy `email`, or `username`.
 type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Identifier string `json:"identifier"`
+	Email      string `json:"email"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
 }
 
 // Login handles POST /api/auth/login.
@@ -268,10 +271,19 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
+	// Resolve the login identifier from any of the accepted fields
+	identifier := strings.TrimSpace(req.Identifier)
+	if identifier == "" {
+		identifier = strings.TrimSpace(req.Email)
+	}
+	if identifier == "" {
+		identifier = strings.TrimSpace(req.Username)
+	}
+
 	// Validate
 	var validationErrors []gin.H
-	if req.Email == "" || !isValidEmail(req.Email) {
-		validationErrors = append(validationErrors, gin.H{"field": "email", "message": "Please enter a valid email"})
+	if identifier == "" {
+		validationErrors = append(validationErrors, gin.H{"field": "identifier", "message": "Email or username is required"})
 	}
 	if req.Password == "" {
 		validationErrors = append(validationErrors, gin.H{"field": "password", "message": "Password is required"})
@@ -284,8 +296,22 @@ func (h *Handlers) Login(c *gin.Context) {
 		return
 	}
 
+	// Look up by email if the identifier looks like an email, otherwise by username.
+	// Falls through to the opposite lookup so both formats work even if misclassified.
 	var user models.User
-	err := config.DB.Where("email = ?", strings.ToLower(req.Email)).First(&user).Error
+	var err error
+	lowered := strings.ToLower(identifier)
+	if isValidEmail(identifier) {
+		err = config.DB.Where("email = ?", lowered).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
+		}
+	} else {
+		err = config.DB.Where("LOWER(username) = ?", lowered).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			err = config.DB.Where("email = ?", lowered).First(&user).Error
+		}
+	}
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusUnauthorized, gin.H{

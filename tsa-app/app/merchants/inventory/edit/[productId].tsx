@@ -22,6 +22,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
 import LocationPicker from "../../../../components/common/LocationPicker";
+import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
 
 const { width } = Dimensions.get('window');
 
@@ -82,10 +83,26 @@ const EditProduct = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
+  const [baseShippingFee, setBaseShippingFee] = useState('');
   const [shippingSameCity, setShippingSameCity] = useState('');
   const [shippingSameState, setShippingSameState] = useState('');
   const [shippingSameCountry, setShippingSameCountry] = useState('');
   const [shippingInternational, setShippingInternational] = useState('');
+
+  const applyBaseShippingFee = (baseStr: string) => {
+    setBaseShippingFee(baseStr);
+    const base = parseFloat(baseStr);
+    if (isNaN(base) || base < 0) return;
+    const rates = calculateZoneRates(base);
+    setShippingSameCity(rates.sameCity.toFixed(2));
+    setShippingSameState(rates.sameState.toFixed(2));
+    setShippingSameCountry(rates.sameCountry.toFixed(2));
+    setShippingInternational(rates.international.toFixed(2));
+  };
+
+  const applyPackagePreset = (baseFee: number) => {
+    applyBaseShippingFee(String(baseFee));
+  };
   const [newImages, setNewImages] = useState<string[]>([]);
   const [existingImageUrls, setExistingImageUrls] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
@@ -501,6 +518,36 @@ const EditProduct = () => {
 
               {/* Shipping Rates */}
               <Text style={[styles.label, { marginTop: 8, marginBottom: 4, fontWeight: '700' }]}>Shipping Rates ($)</Text>
+
+              <Text style={[styles.label, { marginTop: 4, marginBottom: 6 }]}>Package size (quick-select)</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                {PACKAGE_SIZE_PRESETS.map((preset) => (
+                  <TouchableOpacity
+                    key={preset.key}
+                    style={{ flex: 1, minWidth: 90, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12, borderWidth: 1, borderColor: '#E0E0E0', backgroundColor: '#FAFAFA', alignItems: 'center' }}
+                    onPress={() => applyPackagePreset(preset.baseFee)}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#1A1A1A', textAlign: 'center' }}>{preset.label}</Text>
+                    <Text style={{ fontSize: 11, color: COLORS.primary, marginTop: 2, fontWeight: '600' }}>${preset.baseFee}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <View style={styles.formGroup}>
+                <Text style={styles.label}>Base shipping fee ($)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. 2.00"
+                  placeholderTextColor={COLORS.textLighter}
+                  keyboardType="decimal-pad"
+                  value={baseShippingFee}
+                  onChangeText={applyBaseShippingFee}
+                />
+                <Text style={{ fontSize: 11, color: '#888', marginTop: 4, fontStyle: 'italic' }}>
+                  Auto-fills zone rates below. Edit any zone to override.
+                </Text>
+              </View>
+
               <View style={styles.row}>
                 <View style={[styles.formGroup, styles.halfWidth]}>
                   <Text style={styles.label}>Same Residential Area</Text>
