@@ -19,6 +19,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 import LocationPicker from "../../../../components/common/LocationPicker";
+import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
 
 const GOLD = {
   primary: '#FFD700',
@@ -60,10 +61,26 @@ const AddProduct = () => {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
+  const [baseShippingFee, setBaseShippingFee] = useState('');
   const [shippingSameCity, setShippingSameCity] = useState('');
   const [shippingSameState, setShippingSameState] = useState('');
   const [shippingSameCountry, setShippingSameCountry] = useState('');
   const [shippingInternational, setShippingInternational] = useState('');
+
+  const applyBaseShippingFee = (baseStr: string) => {
+    setBaseShippingFee(baseStr);
+    const base = parseFloat(baseStr);
+    if (isNaN(base) || base < 0) return;
+    const rates = calculateZoneRates(base);
+    setShippingSameCity(rates.sameCity.toFixed(2));
+    setShippingSameState(rates.sameState.toFixed(2));
+    setShippingSameCountry(rates.sameCountry.toFixed(2));
+    setShippingInternational(rates.international.toFixed(2));
+  };
+
+  const applyPackagePreset = (baseFee: number) => {
+    applyBaseShippingFee(String(baseFee));
+  };
   const [productImages, setProductImages] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
@@ -432,6 +449,34 @@ const AddProduct = () => {
 
         {/* Shipping Rates */}
         <Text style={styles.sectionTitle}>Shipping Rates ($)</Text>
+
+        <Text style={[styles.label, { marginBottom: 6 }]}>Package size (optional quick-select)</Text>
+        <View style={styles.presetRow}>
+          {PACKAGE_SIZE_PRESETS.map((preset) => (
+            <Pressable
+              key={preset.key}
+              style={styles.presetChip}
+              onPress={() => applyPackagePreset(preset.baseFee)}
+            >
+              <Text style={styles.presetLabel}>{preset.label}</Text>
+              <Text style={styles.presetDesc}>${preset.baseFee}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <View style={styles.inputGroup}>
+          <Text style={styles.label}>Base shipping fee ($)</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g. 2.00"
+            placeholderTextColor="#bbb"
+            keyboardType="decimal-pad"
+            value={baseShippingFee}
+            onChangeText={applyBaseShippingFee}
+          />
+          <Text style={styles.helperText}>Auto-fills the zone rates below. Edit any zone to override.</Text>
+        </View>
+
         <View style={styles.rowFields}>
           <View style={styles.halfField}>
             <Text style={styles.label}>Same Residential Area</Text>
@@ -828,6 +873,43 @@ const styles = StyleSheet.create({
   halfField: {
     flex: 1,
     marginBottom: 16,
+  },
+
+  // Shipping presets
+  presetRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14,
+    flexWrap: 'wrap',
+  },
+  presetChip: {
+    flex: 1,
+    minWidth: 90,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    backgroundColor: '#FAFAFA',
+    alignItems: 'center',
+  },
+  presetLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1A1A1A',
+    textAlign: 'center',
+  },
+  presetDesc: {
+    fontSize: 11,
+    color: GOLD.dark,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  helperText: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 4,
+    fontStyle: 'italic',
   },
 
   // Image upload
