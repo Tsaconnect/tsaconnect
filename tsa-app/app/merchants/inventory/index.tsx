@@ -123,22 +123,16 @@ export default function MerchantProductsScreen() {
         }
     };
 
-    const navigateToEditProduct = (product: Product) => {
+    const navigateToProductDetail = (product: Product) => {
         const id = product.id || product._id;
-        router.push({
-            pathname: '/merchants/inventory/edit/[productId]',
-            params: {
-                productId: id,
-                productData: JSON.stringify(product),
-            },
-        });
+        router.push(`/merchants/inventory/${id}` as any);
     };
 
     const renderProductItem = ({ item }: { item: Product }) => (
         <TouchableOpacity
             style={styles.itemCard}
             activeOpacity={0.7}
-            onPress={() => navigateToEditProduct(item)}
+            onPress={() => navigateToProductDetail(item)}
         >
             <View style={styles.itemImagePlaceholder}>
                 {item.images && item.images.length > 0 ? (

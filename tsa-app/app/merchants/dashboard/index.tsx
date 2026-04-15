@@ -118,7 +118,14 @@ export default function MerchantDashboard() {
                 onPress={() => router.push('/merchants/inventory')}
               >
                 <Ionicons name="list-outline" size={24} color="#fff" />
-                <Text style={styles.actionButtonText}>View Inventory</Text>
+                <Text style={styles.actionButtonText}>Inventory</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionButton, { backgroundColor: '#8B5CF6' }]}
+                onPress={() => router.push('/merchants/orders' as any)}
+              >
+                <Ionicons name="receipt-outline" size={24} color="#fff" />
+                <Text style={styles.actionButtonText}>Orders</Text>
               </TouchableOpacity>
             </View>
 
@@ -144,10 +151,7 @@ export default function MerchantDashboard() {
           <TouchableOpacity
             style={styles.productItem}
             activeOpacity={0.7}
-            onPress={() => router.push({
-              pathname: '/merchants/inventory/edit/[productId]',
-              params: { productId: item.id || item._id, productData: JSON.stringify(item) },
-            })}
+            onPress={() => router.push(`/merchants/inventory/${item.id || item._id}` as any)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.productName}>{item.name}</Text>

@@ -437,21 +437,24 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			}
 
 			order := models.Order{
-				ID:             uuid.New(),
-				BuyerID:        user.ID,
-				SellerID:       group.sellerID,
-				ProductID:      item.Product,
-				Quantity:       item.Quantity,
-				Token:          token,
-				ProductAmount:  productAmountWei.String(),
-				ShippingAmount: shippingAmountWei.String(),
-				PlatformFee:    platformFeeWei.String(),
-				TotalAmount:    totalAmountWei.String(),
-				ShippingZone:   zone,
-				BuyerUpline:    buyerUpline,
-				Status:         models.OrderStatusPendingPayment,
-				CreatedAt:      time.Now(),
-				UpdatedAt:      time.Now(),
+				ID:              uuid.New(),
+				BuyerID:         user.ID,
+				SellerID:        group.sellerID,
+				ProductID:       item.Product,
+				Quantity:        item.Quantity,
+				Token:           token,
+				ProductAmount:   productAmountWei.String(),
+				ShippingAmount:  shippingAmountWei.String(),
+				PlatformFee:     platformFeeWei.String(),
+				TotalAmount:     totalAmountWei.String(),
+				ShippingZone:    zone,
+				ShippingCity:    buyerCity,
+				ShippingState:   buyerState,
+				ShippingCountry: buyerCountry,
+				BuyerUpline:     buyerUpline,
+				Status:          models.OrderStatusPendingPayment,
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
 			}
 
 			if err := tx.Create(&order).Error; err != nil {
@@ -730,6 +733,84 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 	})
 }
 
+// shipRequest optional tracking info when marking order as shipped.
+type shipRequest struct {
+	TrackingNumber string `json:"trackingNumber"`
+	Notes          string `json:"notes"`
+}
+
+// MarkShipped handles POST /api/orders/:id/ship
+// Seller marks an escrowed order as shipped. Optional tracking number and notes.
+func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var req shipRequest
+	// Body is optional — ignore bind errors so seller can ship without tracking info
+	_ = c.ShouldBindJSON(&req)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can mark as shipped")
+		return
+	}
+
+	if !isValidTransition(order.Status, models.OrderStatusShipped) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as shipped: order is in %s status", order.Status))
+		return
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status":             models.OrderStatusShipped,
+		"seller_shipped_at":  now,
+	}
+	if strings.TrimSpace(req.TrackingNumber) != "" {
+		updates["tracking_number"] = strings.TrimSpace(req.TrackingNumber)
+	}
+	if strings.TrimSpace(req.Notes) != "" {
+		updates["notes"] = strings.TrimSpace(req.Notes)
+	}
+
+	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderShipped,
+		UserID:  order.BuyerID,
+		Title:   "Order Shipped",
+		Message: fmt.Sprintf("Your order %s has been shipped by the seller", order.ID),
+		Data: map[string]interface{}{
+			"orderId":        order.ID.String(),
+			"status":         models.OrderStatusShipped,
+			"trackingNumber": req.TrackingNumber,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Order marked as shipped", gin.H{
+		"orderId":         order.ID,
+		"status":          models.OrderStatusShipped,
+		"sellerShippedAt": now,
+		"trackingNumber":  req.TrackingNumber,
+	})
+}
+
 // MarkDelivered handles POST /api/orders/:id/deliver
 func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -793,6 +874,144 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		"orderId":           order.ID,
 		"status":            models.OrderStatusDelivered,
 		"sellerDeliveredAt": now,
+	})
+}
+
+// refundDecisionRequest optional note when approving or rejecting a refund.
+type refundDecisionRequest struct {
+	Notes string `json:"notes"`
+}
+
+// ApproveRefund handles POST /api/orders/:id/approve-refund
+// Merchant consents to refund. Order stays in refund_requested; admin executes on-chain.
+// Sets merchant_approved_refund=true so admin dashboard knows.
+func (ch *CheckoutHandler) ApproveRefund(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var req refundDecisionRequest
+	_ = c.ShouldBindJSON(&req)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can approve a refund")
+		return
+	}
+
+	if order.Status != models.OrderStatusRefundRequested {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot approve refund: order is in %s status, must be %s", order.Status, models.OrderStatusRefundRequested))
+		return
+	}
+
+	updates := map[string]interface{}{
+		"merchant_approved_refund": true,
+	}
+	if strings.TrimSpace(req.Notes) != "" {
+		updates["notes"] = strings.TrimSpace(req.Notes)
+	}
+	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderRefundApproved,
+		UserID:  order.BuyerID,
+		Title:   "Refund Approved by Seller",
+		Message: fmt.Sprintf("The seller has approved your refund request for order %s. An admin will finalize the refund shortly.", order.ID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  order.Status,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Refund approved by seller", gin.H{
+		"orderId":                order.ID,
+		"status":                 order.Status,
+		"merchantApprovedRefund": true,
+	})
+}
+
+// RejectRefund handles POST /api/orders/:id/reject-refund
+// Merchant disputes the refund request. Status returns to 'delivered' and the buyer
+// can re-request or admin can manually resolve.
+func (ch *CheckoutHandler) RejectRefund(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var req refundDecisionRequest
+	_ = c.ShouldBindJSON(&req)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can reject a refund")
+		return
+	}
+
+	if order.Status != models.OrderStatusRefundRequested {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot reject refund: order is in %s status, must be %s", order.Status, models.OrderStatusRefundRequested))
+		return
+	}
+
+	if !isValidTransition(order.Status, models.OrderStatusDelivered) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot transition back to delivered")
+		return
+	}
+
+	updates := map[string]interface{}{
+		"status":                   models.OrderStatusDelivered,
+		"merchant_approved_refund": false,
+	}
+	if strings.TrimSpace(req.Notes) != "" {
+		updates["notes"] = strings.TrimSpace(req.Notes)
+	}
+	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderRefundRejected,
+		UserID:  order.BuyerID,
+		Title:   "Refund Rejected",
+		Message: fmt.Sprintf("The seller has rejected your refund request for order %s. Contact support if you disagree.", order.ID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusDelivered,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Refund rejected by seller", gin.H{
+		"orderId": order.ID,
+		"status":  models.OrderStatusDelivered,
 	})
 }
 
@@ -1105,13 +1324,15 @@ func (ch *CheckoutHandler) GetUserOrders(c *gin.Context) {
 		return
 	}
 
+	enriched := enrichOrdersWithPreview(orders)
+
 	totalPages := int(total) / limit
 	if int(total)%limit != 0 {
 		totalPages++
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Orders retrieved", gin.H{
-		"orders": orders,
+		"orders": enriched,
 		"pagination": gin.H{
 			"page":       page,
 			"limit":      limit,
@@ -1119,6 +1340,114 @@ func (ch *CheckoutHandler) GetUserOrders(c *gin.Context) {
 			"totalPages": totalPages,
 		},
 	})
+}
+
+// orderPreview is an enriched order with summaries of related entities.
+// Kept as a flat struct to preserve all model fields in JSON output.
+type orderPreview struct {
+	models.Order
+	Buyer   *userPreview    `json:"buyer,omitempty"`
+	Seller  *userPreview    `json:"seller,omitempty"`
+	Product *productPreview `json:"product,omitempty"`
+}
+
+type userPreview struct {
+	ID       string `json:"id"`
+	Name     string `json:"name,omitempty"`
+	Username string `json:"username,omitempty"`
+	Email    string `json:"email,omitempty"`
+}
+
+type productPreview struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Price    float64 `json:"price"`
+	ImageURL string  `json:"imageUrl,omitempty"`
+}
+
+// enrichOrdersWithPreview loads related buyer/seller/product summaries in a single
+// query each to avoid N+1 issues. Returns orders with nested previews or unchanged
+// if the related entity can't be found.
+func enrichOrdersWithPreview(orders []models.Order) []orderPreview {
+	if len(orders) == 0 {
+		return []orderPreview{}
+	}
+
+	buyerIDs := make(map[uuid.UUID]struct{})
+	sellerIDs := make(map[uuid.UUID]struct{})
+	productIDs := make(map[uuid.UUID]struct{})
+	for _, o := range orders {
+		buyerIDs[o.BuyerID] = struct{}{}
+		sellerIDs[o.SellerID] = struct{}{}
+		productIDs[o.ProductID] = struct{}{}
+	}
+
+	toSlice := func(m map[uuid.UUID]struct{}) []uuid.UUID {
+		out := make([]uuid.UUID, 0, len(m))
+		for id := range m {
+			out = append(out, id)
+		}
+		return out
+	}
+
+	var users []models.User
+	allUserIDs := append(toSlice(buyerIDs), toSlice(sellerIDs)...)
+	if len(allUserIDs) > 0 {
+		_ = config.DB.Where("id IN ?", allUserIDs).Find(&users).Error
+	}
+	userByID := make(map[uuid.UUID]*userPreview, len(users))
+	for i := range users {
+		u := &users[i]
+		userByID[u.ID] = &userPreview{
+			ID:       u.ID.String(),
+			Name:     strings.TrimSpace(u.Name),
+			Username: u.Username,
+			Email:    u.Email,
+		}
+	}
+
+	var products []models.Product
+	if len(productIDs) > 0 {
+		_ = config.DB.Where("id IN ?", toSlice(productIDs)).Find(&products).Error
+	}
+	productByID := make(map[uuid.UUID]*productPreview, len(products))
+	for i := range products {
+		p := &products[i]
+		productByID[p.ID] = &productPreview{
+			ID:       p.ID.String(),
+			Name:     p.Name,
+			Price:    p.Price,
+			ImageURL: firstProductImageURL(p),
+		}
+	}
+
+	out := make([]orderPreview, len(orders))
+	for i, o := range orders {
+		out[i] = orderPreview{
+			Order:   o,
+			Buyer:   userByID[o.BuyerID],
+			Seller:  userByID[o.SellerID],
+			Product: productByID[o.ProductID],
+		}
+	}
+	return out
+}
+
+// firstProductImageURL extracts the first non-empty image URL from a product's images JSON.
+func firstProductImageURL(p *models.Product) string {
+	if len(p.Images) == 0 {
+		return ""
+	}
+	var imgs []map[string]interface{}
+	if err := json.Unmarshal(p.Images, &imgs); err != nil {
+		return ""
+	}
+	for _, img := range imgs {
+		if u, ok := img["url"].(string); ok && u != "" {
+			return u
+		}
+	}
+	return ""
 }
 
 // GetOrderDetail handles GET /api/orders/:id
@@ -1148,7 +1477,8 @@ func (ch *CheckoutHandler) GetOrderDetail(c *gin.Context) {
 		return
 	}
 
-	utils.SuccessResponse(c, http.StatusOK, "Order retrieved", order)
+	enriched := enrichOrdersWithPreview([]models.Order{order})
+	utils.SuccessResponse(c, http.StatusOK, "Order retrieved", enriched[0])
 }
 
 // GetShippingEstimate handles GET /api/orders/shipping-estimate

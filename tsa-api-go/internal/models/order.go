@@ -18,14 +18,20 @@ type Order struct {
 	PlatformFee      string     `gorm:"not null;default:'0'" json:"platformFee"`
 	TotalAmount      string     `gorm:"not null" json:"totalAmount"`
 	ShippingZone     string     `json:"shippingZone"`
+	ShippingCity     string     `json:"shippingCity,omitempty"`
+	ShippingState    string     `json:"shippingState,omitempty"`
+	ShippingCountry  string     `json:"shippingCountry,omitempty"`
 	ContractOrderID  string     `json:"contractOrderId,omitempty"`
 	EscrowTxHash     string     `json:"escrowTxHash,omitempty"`
 	ApproveTxHash    string     `json:"approveTxHash,omitempty"`
 	ReleaseTxHash    string     `json:"releaseTxHash,omitempty"`
 	BuyerUpline      string     `json:"buyerUpline,omitempty"`
 	DeliveryProofURL string     `json:"deliveryProofUrl,omitempty"`
+	TrackingNumber   string     `json:"trackingNumber,omitempty"`
+	MerchantApprovedRefund bool `gorm:"default:false" json:"merchantApprovedRefund"`
 	Status           string     `gorm:"not null;default:'pending_payment';index" json:"status"`
 	BuyerConfirmedAt *time.Time `json:"buyerConfirmedAt,omitempty"`
+	SellerShippedAt  *time.Time `json:"sellerShippedAt,omitempty"`
 	SellerDeliveredAt *time.Time `json:"sellerDeliveredAt,omitempty"`
 	EscrowExpiresAt  *time.Time `json:"escrowExpiresAt,omitempty"`
 	Notes            string     `json:"notes,omitempty"`
@@ -40,6 +46,7 @@ func (Order) TableName() string {
 const (
 	OrderStatusPendingPayment  = "pending_payment"
 	OrderStatusEscrowed        = "escrowed"
+	OrderStatusShipped         = "shipped"
 	OrderStatusDelivered       = "delivered"
 	OrderStatusCompleted       = "completed"
 	OrderStatusRefundRequested = "refund_requested"
@@ -53,11 +60,14 @@ func ValidNextStatuses(current string) []string {
 	case OrderStatusPendingPayment:
 		return []string{OrderStatusEscrowed, OrderStatusCancelled}
 	case OrderStatusEscrowed:
-		return []string{OrderStatusDelivered, OrderStatusRefunded, OrderStatusCancelled}
+		return []string{OrderStatusShipped, OrderStatusDelivered, OrderStatusRefunded, OrderStatusCancelled}
+	case OrderStatusShipped:
+		return []string{OrderStatusDelivered, OrderStatusRefundRequested, OrderStatusRefunded}
 	case OrderStatusDelivered:
 		return []string{OrderStatusCompleted, OrderStatusRefundRequested}
 	case OrderStatusRefundRequested:
-		return []string{OrderStatusRefunded, OrderStatusCompleted}
+		// Admin can refund; merchant rejection returns to delivered; admin can also mark completed.
+		return []string{OrderStatusRefunded, OrderStatusDelivered, OrderStatusCompleted}
 	case OrderStatusCompleted:
 		return []string{}
 	case OrderStatusRefunded:
