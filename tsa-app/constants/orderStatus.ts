@@ -4,6 +4,7 @@
 export const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   pending_payment: { bg: '#FFF3CD', text: '#856404' },
   escrowed: { bg: '#D1ECF1', text: '#0C5460' },
+  shipped: { bg: '#DBEAFE', text: '#1E3A8A' },
   delivered: { bg: '#D4EDDA', text: '#155724' },
   completed: { bg: '#D1FAE5', text: '#065F46' },
   refund_requested: { bg: '#F8D7DA', text: '#721C24' },

@@ -1,5 +1,4 @@
 import { Stack } from 'expo-router';
-import { COLORS } from '../../constants';
 
 export default function MerchantLayout() {
     return (
@@ -27,9 +26,27 @@ export default function MerchantLayout() {
                 }}
             />
             <Stack.Screen
+                name="inventory/[productId]"
+                options={{
+                    title: 'Product Details',
+                }}
+            />
+            <Stack.Screen
                 name="inventory/edit/[productId]"
                 options={{
                     title: 'Edit Product',
+                }}
+            />
+            <Stack.Screen
+                name="orders/index"
+                options={{
+                    title: 'Orders',
+                }}
+            />
+            <Stack.Screen
+                name="orders/[orderId]"
+                options={{
+                    title: 'Order Details',
                 }}
             />
             <Stack.Screen

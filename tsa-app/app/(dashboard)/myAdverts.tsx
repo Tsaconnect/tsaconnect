@@ -16,6 +16,12 @@ import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { ADVERT_TYPE_PRODUCT } from "../../constants/constantValues";
 
+// Normalize the auth header to always include the "Bearer " prefix.
+function authHeaderFor(token: string | null | undefined): string {
+  if (!token) return "";
+  return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+}
+
 const MyAdvertsScreen = () => {
   const { token, setCurrentUser } = useAuth();
   const [adverts, setAdverts] = useState([]);
@@ -31,23 +37,49 @@ const MyAdvertsScreen = () => {
 
   const fetchAdverts = async () => {
     try {
-      const response = await axios.get(
-        `${baseUrl}/products/user`,
-        {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: token,
-          },
-        }
-      );
-      setAdverts(response.data.data?.products || []);
+      const response = await axios.get(`${baseUrl}/products/user`, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeaderFor(token),
+        },
+      });
+      const body = response.data;
+
+      // If the API explicitly reports failure with HTTP 200, surface it
+      if (body && body.success === false) {
+        Alert.alert("Couldn't load products", body.message || "Server reported an error.");
+        setAdverts([]);
+        return;
+      }
+
+      // Response shape can be { data: { products: [] } }, { data: [] }, { products: [] }, or [] directly
+      let list: any[] | null = null;
+      if (body?.data?.products && Array.isArray(body.data.products)) list = body.data.products;
+      else if (body?.products && Array.isArray(body.products)) list = body.products;
+      else if (Array.isArray(body?.data)) list = body.data;
+      else if (Array.isArray(body)) list = body;
+
+      if (list === null) {
+        console.warn("Unexpected /products/user response shape:", body);
+        Alert.alert(
+          "Couldn't load products",
+          "We received an unexpected response from the server. Please try again."
+        );
+        setAdverts([]);
+        return;
+      }
+      setAdverts(list);
     } catch (error: any) {
       if (error?.response?.status === 401) {
-        // Token invalid or expired — show empty state silently
+        Alert.alert(
+          "Session expired",
+          "Please log in again to see your products.",
+          [{ text: "OK", onPress: () => router.replace("/login") }]
+        );
         setAdverts([]);
       } else {
-        console.error("Error fetching adverts:", error);
-        Alert.alert("Error", "Failed to fetch adverts. Please try again later.");
+        console.error("Error fetching products:", error);
+        Alert.alert("Error", "Failed to fetch products. Please try again later.");
       }
     } finally {
       setLoading(false);
@@ -56,8 +88,8 @@ const MyAdvertsScreen = () => {
 
   const handleDelete = (id: any) => {
     Alert.alert(
-      "Delete Advert",
-      "Are you sure you want to delete this advert?",
+      "Delete Product",
+      "Are you sure you want to delete this product?",
       [
         {
           text: "Cancel",
@@ -70,7 +102,7 @@ const MyAdvertsScreen = () => {
               await axios.delete(`${baseUrl}/products/${id}`, {
                 headers: {
                   "Content-Type": "application/json",
-                  Authorization: `${token}`,
+                  Authorization: authHeaderFor(token),
                 },
               });
               fetchAdverts();
@@ -171,9 +203,9 @@ const MyAdvertsScreen = () => {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Icon name="inventory" size={72} color="#D4B896" />
-            <Text style={styles.emptyTitle}>No adverts yet</Text>
+            <Text style={styles.emptyTitle}>No products yet</Text>
             <Text style={styles.emptySubtitle}>
-              Products and services you post will appear here
+              Products and services you list will appear here
             </Text>
             <TouchableOpacity
               style={styles.emptyButton}
@@ -186,7 +218,7 @@ const MyAdvertsScreen = () => {
               activeOpacity={0.8}
             >
               <Icon name="add" size={20} color="#000" />
-              <Text style={styles.emptyButtonText}>Post your first advert</Text>
+              <Text style={styles.emptyButtonText}>List your first product</Text>
             </TouchableOpacity>
           </View>
         }

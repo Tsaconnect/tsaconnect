@@ -355,7 +355,7 @@ const Layout = () => {
         <Drawer.Screen
           name="myAdverts"
           options={{
-            title: "My Adverts",
+            title: "My Products",
             drawerActiveTintColor: COLORS.primary,
           }}
         />

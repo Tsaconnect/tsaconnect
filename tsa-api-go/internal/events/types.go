@@ -11,11 +11,15 @@ const (
 	TransactionReceived  = "transaction.received"
 
 	// Order events
-	OrderPlaced    = "order.placed"
-	OrderEscrowed  = "order.escrowed"
-	OrderDelivered = "order.delivered"
-	OrderCompleted = "order.completed"
-	OrderRefunded  = "order.refunded"
+	OrderPlaced           = "order.placed"
+	OrderEscrowed         = "order.escrowed"
+	OrderShipped          = "order.shipped"
+	OrderDelivered        = "order.delivered"
+	OrderCompleted        = "order.completed"
+	OrderRefundRequested  = "order.refund_requested"
+	OrderRefundApproved   = "order.refund_approved"
+	OrderRefundRejected   = "order.refund_rejected"
+	OrderRefunded         = "order.refunded"
 
 	// Security events
 	SecurityLoginNewDevice  = "security.login_new_device"

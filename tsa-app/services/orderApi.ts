@@ -33,13 +33,23 @@ export interface Order {
   releaseTxHash?: string;
   buyerUpline?: string;
   deliveryProofUrl?: string;
+  trackingNumber?: string;
+  merchantApprovedRefund?: boolean;
+  shippingCity?: string;
+  shippingState?: string;
+  shippingCountry?: string;
   status: string;
   buyerConfirmedAt?: string;
+  sellerShippedAt?: string;
   sellerDeliveredAt?: string;
   escrowExpiresAt?: string;
   notes?: string;
   createdAt: string;
   updatedAt: string;
+  // Enriched (returned by backend with related entities)
+  buyer?: { id: string; name?: string; username?: string; email?: string };
+  seller?: { id: string; name?: string; username?: string; email?: string };
+  product?: { id: string; name: string; price: number; imageUrl?: string };
 }
 
 export interface ApiResponse<T = any> {
@@ -234,6 +244,91 @@ export async function submitConfirm(
   } catch (error: any) {
     console.error('Submit confirm error:', error);
     return { success: false, message: error.message || 'Failed to submit confirm' };
+  }
+}
+
+/**
+ * Seller marks an escrowed order as shipped. Optional tracking number + notes.
+ */
+export async function markOrderShipped(
+  orderId: string,
+  params?: { trackingNumber?: string; notes?: string }
+): Promise<ApiResponse<Order>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/ship`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(params || {}),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Mark shipped error:', error);
+    return { success: false, message: error.message || 'Failed to mark as shipped' };
+  }
+}
+
+/**
+ * Seller marks an order as delivered. Requires a delivery proof URL.
+ */
+export async function markOrderDelivered(
+  orderId: string,
+  deliveryProofUrl: string
+): Promise<ApiResponse<Order>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/deliver`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ deliveryProofUrl }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Mark delivered error:', error);
+    return { success: false, message: error.message || 'Failed to mark as delivered' };
+  }
+}
+
+/**
+ * Seller approves a refund request. Order remains in refund_requested
+ * but is flagged for admin to finalize on-chain.
+ */
+export async function approveRefund(
+  orderId: string,
+  notes?: string
+): Promise<ApiResponse<Order>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/approve-refund`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(notes ? { notes } : {}),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Approve refund error:', error);
+    return { success: false, message: error.message || 'Failed to approve refund' };
+  }
+}
+
+/**
+ * Seller rejects a refund request. Order returns to delivered status.
+ */
+export async function rejectRefund(
+  orderId: string,
+  notes?: string
+): Promise<ApiResponse<Order>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/reject-refund`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(notes ? { notes } : {}),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Reject refund error:', error);
+    return { success: false, message: error.message || 'Failed to reject refund' };
   }
 }
 
