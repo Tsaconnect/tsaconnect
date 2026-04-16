@@ -242,21 +242,26 @@ const SwapScreen = () => {
 
       const { approveTx, swapTx } = prep.data;
 
-      setStatus('Approving tokens...');
-      const signedA = await signTransaction({
-        type: 0,
-        to: approveTx.to, data: approveTx.data, value: approveTx.value,
-        gasLimit: approveTx.gasLimit, gasPrice: approveTx.gasPrice,
-        nonce: approveTx.nonce, chainId: approveTx.chainId,
-      });
-      await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId);
+      if (approveTx) {
+        setStatus('Approving tokens...');
+        const signedA = await signTransaction({
+          type: 0,
+          to: approveTx.to, data: approveTx.data, value: approveTx.value,
+          gasLimit: approveTx.gasLimit, gasPrice: approveTx.gasPrice,
+          nonce: approveTx.nonce, chainId: approveTx.chainId,
+        });
+        await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId);
+      }
 
       setStatus('Executing swap...');
+      const swapNonce = approveTx && swapTx.nonce <= approveTx.nonce
+        ? approveTx.nonce + 1
+        : swapTx.nonce;
       const signedS = await signTransaction({
         type: 0,
         to: swapTx.to, data: swapTx.data, value: swapTx.value,
         gasLimit: swapTx.gasLimit, gasPrice: swapTx.gasPrice,
-        nonce: swapTx.nonce, chainId: swapTx.chainId,
+        nonce: swapNonce, chainId: swapTx.chainId,
       });
       const res = await submitTransaction(signedS, 'swap', 'MCGP', swapTx.to, amount, swapTx.chainId);
 

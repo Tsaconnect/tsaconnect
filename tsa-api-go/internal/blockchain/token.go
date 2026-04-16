@@ -80,6 +80,45 @@ func (c *EVMClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.In
 	return balance, nil
 }
 
+// GetTokenAllowance returns the approved allowance that owner has granted to spender.
+func (c *EVMClient) GetTokenAllowance(tokenAddress, owner, spender string) (*big.Int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tokenAddr := common.HexToAddress(tokenAddress)
+	ownerAddr := common.HexToAddress(owner)
+	spenderAddr := common.HexToAddress(spender)
+
+	data, err := parsedERC20ABI.Pack("allowance", ownerAddr, spenderAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack allowance call: %w", err)
+	}
+
+	result, err := c.Client.CallContract(ctx, ethereum.CallMsg{
+		To:   &tokenAddr,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call allowance on %s: %w", tokenAddress, err)
+	}
+
+	if len(result) == 0 {
+		return big.NewInt(0), nil
+	}
+
+	outputs, err := parsedERC20ABI.Unpack("allowance", result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack allowance result: %w", err)
+	}
+
+	allowance, ok := outputs[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("unexpected allowance return type")
+	}
+
+	return allowance, nil
+}
+
 // PrepareNativeTransfer builds an unsigned native token transfer transaction and returns it as JSON bytes.
 func (c *EVMClient) PrepareNativeTransfer(from, to string, amountWei *big.Int) ([]byte, error) {
 	fromAddr := common.HexToAddress(from)

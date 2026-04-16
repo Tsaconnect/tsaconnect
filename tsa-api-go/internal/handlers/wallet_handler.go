@@ -419,6 +419,7 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	validTxTypes := map[string]bool{
 		models.TxTypeSend: true, models.TxTypeReceive: true,
 		models.TxTypeApprove: true, models.TxTypeEscrow: true,
+		models.TxTypeSwap: true,
 	}
 	if !validTxTypes[req.TxType] {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid transaction type")

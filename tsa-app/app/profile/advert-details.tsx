@@ -2,33 +2,63 @@ import React, { useState, useEffect } from "react";
 import { StyleSheet, View, Text, ActivityIndicator, Alert } from "react-native";
 import { Image } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { useLocalSearchParams, useRoute } from "expo-router";
+import { useLocalSearchParams } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 
+// Normalize auth header to always include Bearer prefix
+function authHeaderFor(token: string | null | undefined): string {
+  if (!token) return "";
+  return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+}
+
+// Extract first usable image URL from a product's images field.
+// Backend shape is [{id, url, publicId}, ...] but accept plain strings or JSON.
+function firstImageUrl(images: any): string | undefined {
+  if (!images) return undefined;
+  let arr: any = images;
+  if (typeof images === "string") {
+    try { arr = JSON.parse(images); } catch { return undefined; }
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return undefined;
+  const first = arr[0];
+  if (typeof first === "string") return first;
+  if (first && typeof first === "object" && typeof first.url === "string") return first.url;
+  return undefined;
+}
+
 const AdvertDetailScreen = () => {
   const { token } = useAuth();
-  const [advert, setAdvert] = useState(null);
+  const [advert, setAdvert] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
-  const { id } = useLocalSearchParams();
+  const { id } = useLocalSearchParams<{ id: string }>();
 
   useEffect(() => {
-    fetchAdvert();
-  }, []);
+    if (id) fetchAdvert();
+    else setLoading(false);
+  }, [id]);
 
   const fetchAdvert = async () => {
     try {
       const response = await axios.get(`${baseUrl}/products/${id}`, {
         headers: {
           "Content-Type": "application/json",
-          Authorization: `${token}`,
+          Authorization: authHeaderFor(token),
         },
       });
-      setAdvert(response.data);
-    } catch (error) {
+      // Response shape may be { data: product } or the raw product object.
+      const body = response.data;
+      const product = body?.data?.id
+        ? body.data
+        : body?.id
+          ? body
+          : body?.data?.product ?? null;
+      setAdvert(product);
+    } catch (error: any) {
+      console.error("Fetch product details error:", error);
       Alert.alert(
         "Error",
-        "Failed to fetch advert details. Please try again later."
+        "Failed to fetch product details. Please try again later."
       );
     } finally {
       setLoading(false);
@@ -46,31 +76,47 @@ const AdvertDetailScreen = () => {
   if (!advert) {
     return (
       <View style={styles.container}>
-        <Text>No advert details available.</Text>
+        <Text>No product details available.</Text>
       </View>
     );
   }
 
+  const imgUrl = firstImageUrl(advert.images);
+  const createdDate = advert.createdAt ? (() => {
+    const d = new Date(advert.createdAt);
+    return isNaN(d.getTime()) ? "" : d.toLocaleDateString();
+  })() : "";
+
   return (
     <View style={styles.container}>
-      <Image source={{ uri: advert.images[0] }} style={styles.image} />
+      {imgUrl ? (
+        <Image source={{ uri: imgUrl }} style={styles.image} />
+      ) : (
+        <View style={[styles.image, { backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center' }]}>
+          <Text style={{ color: '#999' }}>No image</Text>
+        </View>
+      )}
       <View style={styles.infoContainer}>
-        <Text style={styles.title}>{advert.name}</Text>
-        <Text style={styles.amount}>{advert.price} USD</Text>
-        <Text style={styles.status}>Status: {advert.status}</Text>
-        <Text style={styles.description}>{advert.description}</Text>
-        <Text style={styles.details}>Location: {advert.location}</Text>
-        <Text style={styles.details}>
-          Contact: {advert.phoneNumber} / {advert.email}
-        </Text>
-        <Text style={styles.details}>Stock: {advert.stock}</Text>
-        <Text style={styles.details}>
-          Negotiable: {advert.negotiable ? "Yes" : "No"}
-        </Text>
-        <Text style={styles.details}>Company: {advert.companyName}</Text>
-        <Text style={styles.details}>
-          Created At: {new Date(advert.createdAt).toLocaleDateString()}
-        </Text>
+        <Text style={styles.title}>{advert.name ?? 'Untitled'}</Text>
+        {advert.price != null && (
+          <Text style={styles.amount}>${Number(advert.price).toFixed(2)} USD</Text>
+        )}
+        {advert.status && <Text style={styles.status}>Status: {advert.status}</Text>}
+        {advert.description && <Text style={styles.description}>{advert.description}</Text>}
+        {advert.location && <Text style={styles.details}>Location: {advert.location}</Text>}
+        {(advert.phoneNumber || advert.email) && (
+          <Text style={styles.details}>
+            Contact: {[advert.phoneNumber, advert.email].filter(Boolean).join(' / ')}
+          </Text>
+        )}
+        {advert.stock != null && <Text style={styles.details}>Stock: {advert.stock}</Text>}
+        {advert.negotiable != null && (
+          <Text style={styles.details}>
+            Negotiable: {advert.negotiable ? "Yes" : "No"}
+          </Text>
+        )}
+        {advert.companyName && <Text style={styles.details}>Company: {advert.companyName}</Text>}
+        {createdDate && <Text style={styles.details}>Created At: {createdDate}</Text>}
       </View>
     </View>
   );

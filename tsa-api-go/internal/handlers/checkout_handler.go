@@ -791,11 +791,16 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 		return
 	}
 
+	shortOrderID := order.ID.String()[:8]
+	shipMsg := fmt.Sprintf("Your order #%s has been shipped by the seller.", shortOrderID)
+	if tn := strings.TrimSpace(req.TrackingNumber); tn != "" {
+		shipMsg = fmt.Sprintf("Your order #%s has been shipped. Tracking: %s", shortOrderID, tn)
+	}
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderShipped,
 		UserID:  order.BuyerID,
 		Title:   "Order Shipped",
-		Message: fmt.Sprintf("Your order %s has been shipped by the seller", order.ID),
+		Message: shipMsg,
 		Data: map[string]interface{}{
 			"orderId":        order.ID.String(),
 			"status":         models.OrderStatusShipped,
@@ -1135,8 +1140,8 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderCompleted,
 		UserID:  order.SellerID,
-		Title:   "Order Completed",
-		Message: fmt.Sprintf("Order %s has been completed — funds have been released", order.ID),
+		Title:   "Order Confirmed by Buyer",
+		Message: fmt.Sprintf("The buyer confirmed receipt for order #%s. Funds have been released to your wallet.", order.ID.String()[:8]),
 		Data: map[string]interface{}{
 			"orderId": order.ID.String(),
 			"status":  models.OrderStatusCompleted,
