@@ -292,8 +292,35 @@ const OrderDetailScreen = () => {
                 <View style={styles.actionContainer}>
                   <View style={styles.waitingBanner}>
                     <Ionicons name="time-outline" size={20} color="#0C5460" />
-                    <Text style={styles.waitingText}>Waiting for seller to deliver</Text>
+                    <Text style={styles.waitingText}>Waiting for seller to ship</Text>
                   </View>
+                  <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
+                    <Text style={styles.refundButtonText}>Request Refund</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {order.status === 'shipped' && (
+                <View style={styles.actionContainer}>
+                  <View style={styles.waitingBanner}>
+                    <Ionicons name="cube-outline" size={20} color="#1E3A8A" />
+                    <Text style={[styles.waitingText, { color: '#1E3A8A' }]}>
+                      {order.trackingNumber
+                        ? `Shipped! Tracking: ${order.trackingNumber}`
+                        : 'Your order has been shipped!'}
+                    </Text>
+                  </View>
+                  <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmReceipt}>
+                    <LinearGradient
+                      colors={['#2E7D32', '#1B5E20']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={styles.actionGradient}
+                    >
+                      <Ionicons name="checkmark-circle-outline" size={20} color="#FFF" />
+                      <Text style={styles.confirmButtonText}>Mark as Received</Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
                   <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
                     <Text style={styles.refundButtonText}>Request Refund</Text>
                   </TouchableOpacity>

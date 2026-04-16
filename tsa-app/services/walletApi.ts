@@ -188,6 +188,33 @@ function extractTransactionHash(payload: unknown): string | undefined {
   return undefined;
 }
 
+function normalizePreparedSwapData(payload: unknown): PreparedSwap | null {
+  const data = isRecord(payload) ? payload : null;
+  if (!data) {
+    return null;
+  }
+
+  const swapTx = normalizePreparedTransactionData(data.swapTx);
+  if (!swapTx) {
+    return null;
+  }
+
+  const approveTx = data.approveTx == null
+    ? null
+    : normalizePreparedTransactionData(data.approveTx);
+  if (data.approveTx != null && !approveTx) {
+    return null;
+  }
+
+  return {
+    direction: typeof data.direction === 'string' ? data.direction : '',
+    mcgpAmount: String(data.mcgpAmount ?? '0'),
+    usdcAmount: String(data.usdcAmount ?? '0'),
+    approveTx,
+    swapTx,
+  };
+}
+
 export function normalizeWalletBalances(
   payload: unknown,
   fallbackChainKey?: ChainKey
@@ -486,7 +513,7 @@ export interface PreparedSwap {
   direction: string;
   mcgpAmount: string;
   usdcAmount: string;
-  approveTx: PreparedTransaction;
+  approveTx?: PreparedTransaction | null;
   swapTx: PreparedTransaction;
 }
 
@@ -534,7 +561,12 @@ export async function prepareSwap(
         slippageBps: params.slippageBps || 50,
       }),
     });
-    return await safeJson<PreparedSwap>(response);
+    const result = await safeJson<PreparedSwap>(response);
+    const normalizedSwap = normalizePreparedSwapData(result?.data);
+    if (result?.success && normalizedSwap) {
+      return { ...result, data: normalizedSwap };
+    }
+    return result;
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to prepare swap' };
   }

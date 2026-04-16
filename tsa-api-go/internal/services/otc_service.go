@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ const otcMarketplaceABI = `[
 ]`
 
 var parsedOTCABI abi.ABI
+
+const defaultOTCSwapGasLimit uint64 = 250000
 
 func init() {
 	var err error
@@ -80,7 +83,17 @@ func (s *OTCService) PrepareBuy(buyer string, mcgpAmount, maxUsdcAmount *big.Int
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack buy: %w", err)
 	}
-	return s.buildUnsignedTx(buyer, data)
+	return s.buildUnsignedTx(buyer, data, false)
+}
+
+// PrepareBuyWithEstimateFallback encodes the buy call and falls back to a fixed gas limit
+// when estimation fails because allowance is expected to be satisfied by a prior tx.
+func (s *OTCService) PrepareBuyWithEstimateFallback(buyer string, mcgpAmount, maxUsdcAmount *big.Int) ([]byte, error) {
+	data, err := parsedOTCABI.Pack("buy", mcgpAmount, maxUsdcAmount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack buy: %w", err)
+	}
+	return s.buildUnsignedTx(buyer, data, true)
 }
 
 // PrepareSell encodes the sell call and builds an UnsignedTx for the given seller.
@@ -89,7 +102,17 @@ func (s *OTCService) PrepareSell(seller string, mcgpAmount, minUsdcAmount *big.I
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack sell: %w", err)
 	}
-	return s.buildUnsignedTx(seller, data)
+	return s.buildUnsignedTx(seller, data, false)
+}
+
+// PrepareSellWithEstimateFallback encodes the sell call and falls back to a fixed gas limit
+// when estimation fails because allowance is expected to be satisfied by a prior tx.
+func (s *OTCService) PrepareSellWithEstimateFallback(seller string, mcgpAmount, minUsdcAmount *big.Int) ([]byte, error) {
+	data, err := parsedOTCABI.Pack("sell", mcgpAmount, minUsdcAmount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack sell: %w", err)
+	}
+	return s.buildUnsignedTx(seller, data, true)
 }
 
 // callView is a helper that calls a read-only (view) function on the OtcMarketplace contract
@@ -133,8 +156,8 @@ func (s *OTCService) callView(method string, args ...interface{}) (*big.Int, err
 	return value, nil
 }
 
-// buildUnsignedTx creates an UnsignedTx JSON for the OtcMarketplace contract with real gas estimation.
-func (s *OTCService) buildUnsignedTx(from string, callData []byte) ([]byte, error) {
+// buildUnsignedTx creates an UnsignedTx JSON for the OtcMarketplace contract.
+func (s *OTCService) buildUnsignedTx(from string, callData []byte, allowEstimateFallback bool) ([]byte, error) {
 	if s.client == nil {
 		if s.cfg != nil && s.cfg.Env == "production" {
 			return nil, fmt.Errorf("blockchain client not available")
@@ -166,7 +189,11 @@ func (s *OTCService) buildUnsignedTx(from string, callData []byte) ([]byte, erro
 		Data: callData,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
+		if !allowEstimateFallback {
+			return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
+		}
+		gasLimit = defaultOTCSwapGasLimit
+		log.Printf("OTC gas estimation failed for %s, using fallback gas limit %d: %v", s.otcAddress, gasLimit, err)
 	}
 
 	tx := blockchain.UnsignedTx{

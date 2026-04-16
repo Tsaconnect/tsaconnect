@@ -11,7 +11,7 @@ import {
 } from "react-native";
 import { Card, Icon } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { Link, router } from "expo-router";
+import { router } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { ADVERT_TYPE_PRODUCT } from "../../constants/constantValues";
@@ -23,8 +23,8 @@ function authHeaderFor(token: string | null | undefined): string {
 }
 
 const MyAdvertsScreen = () => {
-  const { token, setCurrentUser } = useAuth();
-  const [adverts, setAdverts] = useState([]);
+  const { token } = useAuth();
+  const [adverts, setAdverts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -121,13 +121,20 @@ const MyAdvertsScreen = () => {
     );
   };
 
+  // Normalize a product's images field to the first usable image URL string.
+  // Backend stores images as [{id, url, publicId}, ...] but historical data
+  // may use plain string URLs or serialized JSON — handle all shapes safely.
   const getFirstImage = (images: any): string | undefined => {
     if (!images) return undefined;
-    if (Array.isArray(images)) return images[0];
-    try {
-      const parsed = typeof images === 'string' ? JSON.parse(images) : images;
-      return Array.isArray(parsed) ? parsed[0] : undefined;
-    } catch { return undefined; }
+    let arr: any = images;
+    if (typeof images === 'string') {
+      try { arr = JSON.parse(images); } catch { return undefined; }
+    }
+    if (!Array.isArray(arr) || arr.length === 0) return undefined;
+    const first = arr[0];
+    if (typeof first === 'string') return first;
+    if (first && typeof first === 'object' && typeof first.url === 'string') return first.url;
+    return undefined;
   };
 
   const renderItem = ({ item }: { item: any }) => (
@@ -144,26 +151,36 @@ const MyAdvertsScreen = () => {
         </View>
       )}
       <View style={styles.infoContainer}>
-        <Text style={styles.title}>{item.name}</Text>
-        {item.type === ADVERT_TYPE_PRODUCT && (
-          <Text style={styles.amount}>{item.price}</Text>
+        <Text style={styles.title}>{item?.name ?? 'Untitled'}</Text>
+        {item?.type === ADVERT_TYPE_PRODUCT && item?.price != null && (
+          <Text style={styles.amount}>${Number(item.price).toFixed(2)}</Text>
         )}
-        <Text style={[styles.status, item.status === 'Rejected' && styles.statusRejected]}>
-          {item.status}
-        </Text>
-        {item.status === 'Rejected' && (
+        {item?.status && (
+          <Text style={[styles.status, item.status === 'Rejected' && styles.statusRejected]}>
+            {item.status}
+          </Text>
+        )}
+        {item?.status === 'Rejected' && (
           <Text style={styles.rejectionReason}>
             Reason: {item.rejectionReason || "Please contact admin for details"}
           </Text>
         )}
-        <Text style={styles.status}>{item.type}</Text>
-        <Text style={styles.date}>
-          {new Date(item.createdAt).toLocaleDateString()}
-        </Text>
+        {item?.type && <Text style={styles.status}>{item.type}</Text>}
+        {item?.createdAt && (
+          <Text style={styles.date}>
+            {(() => {
+              const d = new Date(item.createdAt);
+              return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
+            })()}
+          </Text>
+        )}
         <View style={styles.actions}>
           <TouchableOpacity
             onPress={() =>
-              router.push({ pathname: `/profile/edit-advert`, params: item })
+              router.push({
+                pathname: `/profile/edit-advert`,
+                params: { id: item?.id ?? item?._id },
+              })
             }
           >
             <Icon name="edit" size={20} color="#9D6B38" />
@@ -198,7 +215,7 @@ const MyAdvertsScreen = () => {
     <View style={styles.container}>
       <FlatList
         data={adverts}
-        keyExtractor={(item) => item.id.toString()}
+        keyExtractor={(item, index) => String(item?.id ?? item?._id ?? index)}
         renderItem={renderItem}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
