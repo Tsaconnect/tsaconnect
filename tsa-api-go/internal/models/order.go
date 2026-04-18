@@ -34,6 +34,7 @@ type Order struct {
 	SellerShippedAt  *time.Time `json:"sellerShippedAt,omitempty"`
 	SellerDeliveredAt *time.Time `json:"sellerDeliveredAt,omitempty"`
 	EscrowExpiresAt  *time.Time `json:"escrowExpiresAt,omitempty"`
+	TPDistributedAt  *time.Time `json:"tpDistributedAt,omitempty"`
 	Notes            string     `json:"notes,omitempty"`
 	CreatedAt        time.Time  `json:"createdAt"`
 	UpdatedAt        time.Time  `json:"updatedAt"`

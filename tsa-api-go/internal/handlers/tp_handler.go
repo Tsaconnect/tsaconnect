@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,6 +31,9 @@ var GenerationPercentages = []float64{
 // DistributeTPEarnings distributes TP to the source user and up to 10 generations of upline.
 // systemFeeUSD is the total system fee in USD from the transaction.
 func DistributeTPEarnings(db *gorm.DB, sourceUserID uuid.UUID, sourceType string, sourceID uuid.UUID, systemFeeUSD float64) error {
+	if systemFeeUSD <= 0 {
+		return nil
+	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		currentUserID := sourceUserID
 
@@ -38,8 +41,7 @@ func DistributeTPEarnings(db *gorm.DB, sourceUserID uuid.UUID, sourceType string
 			if gen > 0 {
 				var prevUser models.User
 				if err := tx.Select("referred_by").First(&prevUser, "id = ?", currentUserID).Error; err != nil {
-					log.Printf("DistributeTPEarnings: failed to load user %s at gen %d: %v", currentUserID, gen, err)
-					break
+					return fmt.Errorf("load user %s at gen %d: %w", currentUserID, gen, err)
 				}
 				if prevUser.ReferredBy == nil {
 					break
@@ -47,7 +49,7 @@ func DistributeTPEarnings(db *gorm.DB, sourceUserID uuid.UUID, sourceType string
 
 				var referrer models.User
 				if err := tx.Select("id, account_status").First(&referrer, "id = ?", *prevUser.ReferredBy).Error; err != nil {
-					break
+					return fmt.Errorf("load referrer %s at gen %d: %w", *prevUser.ReferredBy, gen, err)
 				}
 				if referrer.AccountStatus != models.AccountStatusActive {
 					break
@@ -57,7 +59,7 @@ func DistributeTPEarnings(db *gorm.DB, sourceUserID uuid.UUID, sourceType string
 			}
 
 			pct := GenerationPercentages[gen]
-			tpEarned := systemFeeUSD * pct / 100
+			tpEarned := systemFeeUSD * pct
 
 			earning := models.TPEarning{
 				ID:           uuid.New(),

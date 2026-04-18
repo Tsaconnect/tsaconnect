@@ -483,20 +483,19 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		return
 	}
 
-	// Distribute TP earnings for each order
-	for _, order := range orders {
-		platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
-		systemFeeUSD := platformFeeFloat + models.GasFeeUSD
-		go func(buyerID, orderID uuid.UUID, fee float64) {
-			if err := DistributeTPEarnings(config.DB, buyerID, "checkout", orderID, fee); err != nil {
-				log.Printf("TP distribution failed for checkout order %s: %v", orderID, err)
-			}
-		}(order.BuyerID, order.ID, systemFeeUSD)
-	}
-
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
 		"orders": orders,
 	})
+}
+
+// orderSystemFeeUSD computes the USD-denominated system fee for TP distribution.
+// For MCGP orders, the buyer pays no platform fee or gas fee, so TP distributes 0.
+func orderSystemFeeUSD(order *models.Order) float64 {
+	platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
+	if strings.ToUpper(order.Token) == "MCGP" {
+		return platformFeeFloat
+	}
+	return platformFeeFloat + models.GasFeeUSD
 }
 
 // getOrderForEscrow is a shared helper for prepare-approve and prepare-escrow.
@@ -1135,6 +1134,17 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
+	}
+
+	if order.TPDistributedAt == nil {
+		systemFeeUSD := orderSystemFeeUSD(&order)
+		if err := DistributeTPEarnings(config.DB, order.BuyerID, "checkout", order.ID, systemFeeUSD); err != nil {
+			log.Printf("TP distribution failed for order %s: %v", order.ID, err)
+		} else {
+			if err := config.DB.Model(&order).Update("tp_distributed_at", now).Error; err != nil {
+				log.Printf("Failed to mark TP distributed for order %s: %v", order.ID, err)
+			}
+		}
 	}
 
 	ch.EventBus.Publish(events.Event{
