@@ -580,12 +580,9 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 		},
 	})
 
-	// Distribute TP earnings from swap fee
-	go func(userID, txID uuid.UUID, fee float64) {
-		if err := DistributeTPEarnings(config.DB, userID, "swap", txID, fee); err != nil {
-			log.Printf("TP distribution failed for swap %s: %v", txID, err)
-		}
-	}(user.ID, tx.ID, feeUSD)
+	if err := DistributeTPEarnings(config.DB, user.ID, "swap", tx.ID, feeUSD); err != nil {
+		log.Printf("TP distribution failed for swap %s: %v", tx.ID, err)
+	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,

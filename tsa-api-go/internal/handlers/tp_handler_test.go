@@ -125,7 +125,7 @@ func TestDistributeTPEarnings_ThreeUserChain(t *testing.T) {
 	if earnings[0].UserID != userC.ID || earnings[0].Generation != 0 {
 		t.Errorf("gen 0: expected userC, got user %s gen %d", earnings[0].UserID, earnings[0].Generation)
 	}
-	expectedTP0 := systemFee * 0.354 / 100
+	expectedTP0 := systemFee * 0.354
 	if diff := earnings[0].TPEarned - expectedTP0; diff > 0.0001 || diff < -0.0001 {
 		t.Errorf("gen 0 TP: expected %f, got %f", expectedTP0, earnings[0].TPEarned)
 	}
@@ -133,7 +133,7 @@ func TestDistributeTPEarnings_ThreeUserChain(t *testing.T) {
 	if earnings[1].UserID != userB.ID || earnings[1].Generation != 1 {
 		t.Errorf("gen 1: expected userB, got user %s gen %d", earnings[1].UserID, earnings[1].Generation)
 	}
-	expectedTP1 := systemFee * 0.177 / 100
+	expectedTP1 := systemFee * 0.177
 	if diff := earnings[1].TPEarned - expectedTP1; diff > 0.0001 || diff < -0.0001 {
 		t.Errorf("gen 1 TP: expected %f, got %f", expectedTP1, earnings[1].TPEarned)
 	}
@@ -141,7 +141,7 @@ func TestDistributeTPEarnings_ThreeUserChain(t *testing.T) {
 	if earnings[2].UserID != userA.ID || earnings[2].Generation != 2 {
 		t.Errorf("gen 2: expected userA, got user %s gen %d", earnings[2].UserID, earnings[2].Generation)
 	}
-	expectedTP2 := systemFee * 0.142 / 100
+	expectedTP2 := systemFee * 0.142
 	if diff := earnings[2].TPEarned - expectedTP2; diff > 0.0001 || diff < -0.0001 {
 		t.Errorf("gen 2 TP: expected %f, got %f", expectedTP2, earnings[2].TPEarned)
 	}
