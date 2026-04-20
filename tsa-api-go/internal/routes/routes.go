@@ -96,6 +96,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	uploadGroup.Use(auth)
 	{
 		uploadGroup.POST("", h.UploadFile)
+		uploadGroup.POST("/base64", h.UploadBase64)
 	}
 
 	// Asset routes
