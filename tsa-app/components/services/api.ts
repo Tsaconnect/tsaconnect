@@ -29,10 +29,6 @@ export interface UploadResponse {
   height?: number;
 }
 
-export interface MultipleUploadResponse {
-  uploaded: Array<UploadResponse & { index: number }>;
-  failed?: Array<{ index: number; error: string }>;
-}
 //Category
 export interface Category {
   id: string;
@@ -522,40 +518,6 @@ class APIService {
       return {
         success: false,
         message: error.message || 'Failed to upload image. Please try again.',
-      };
-    }
-  }
-
-  // Upload multiple images (for facial verification)
-  async uploadImages(
-    imageUris: string[],
-    type: 'document' | 'facial' = 'document'
-  ): Promise<ApiResponse<MultipleUploadResponse>> {
-    try {
-      // Convert all images to base64
-      const uploadPromises = imageUris.map(async (uri) => {
-        const response = await fetch(uri);
-        const blob = await response.blob();
-        return this.blobToBase64(blob);
-      });
-
-      const base64Images = await Promise.all(uploadPromises);
-
-      const uploadResponse = await fetch(`${API_BASE_URL}/upload/facial`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({
-          images: base64Images,
-          type,
-        }),
-      });
-
-      return this.handleResponse<MultipleUploadResponse>(uploadResponse);
-    } catch (error: any) {
-      console.error('Upload images error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to upload images. Please try again.',
       };
     }
   }

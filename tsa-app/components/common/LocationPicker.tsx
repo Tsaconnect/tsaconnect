@@ -8,6 +8,8 @@ import {
   Modal,
   StyleSheet,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { COLORS, SIZES } from "../../constants/theme";
@@ -151,6 +153,10 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
         transparent
         onRequestClose={() => setModalVisible(false)}
       >
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
@@ -214,6 +220,7 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
             />
           </View>
         </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
