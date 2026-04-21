@@ -8,6 +8,7 @@ export const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   delivered: { bg: '#D4EDDA', text: '#155724' },
   completed: { bg: '#D1FAE5', text: '#065F46' },
   refund_requested: { bg: '#F8D7DA', text: '#721C24' },
+  cancel_requested: { bg: '#FEF3C7', text: '#92400E' },
   refunded: { bg: '#E2E3E5', text: '#383D41' },
   cancelled: { bg: '#F5F5F5', text: '#6C757D' },
 };

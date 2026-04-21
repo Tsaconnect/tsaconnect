@@ -579,6 +579,34 @@ class APIService {
     }
   }
 
+  // Update user profile
+  async updateProfile(payload: {
+    name?: string;
+    username?: string;
+    phoneNumber?: string;
+    address?: string;
+    state?: string;
+    city?: string;
+    country?: string;
+    profilePicture?: { url: string; publicId?: string };
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/profile`, {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(payload),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Update profile error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to update profile.',
+      };
+    }
+  }
+
   // Get referrals with TP contribution data
   async getReferrals(): Promise<ApiResponse<any>> {
     try {

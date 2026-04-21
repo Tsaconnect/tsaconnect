@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -483,6 +485,33 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		return
 	}
 
+	for i := range orders {
+		order := &orders[i]
+		shortID := order.ID.String()[:8]
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderPlaced,
+			UserID:  order.BuyerID,
+			Title:   "Order Placed",
+			Message: fmt.Sprintf("Your order #%s has been placed. Complete payment to proceed.", shortID),
+			Data: map[string]interface{}{
+				"orderId": order.ID.String(),
+				"status":  order.Status,
+				"role":    "buyer",
+			},
+		})
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderPlaced,
+			UserID:  order.SellerID,
+			Title:   "New Order Received",
+			Message: fmt.Sprintf("You have received a new order #%s. Awaiting buyer payment.", shortID),
+			Data: map[string]interface{}{
+				"orderId": order.ID.String(),
+				"status":  order.Status,
+				"role":    "seller",
+			},
+		})
+	}
+
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
 		"orders": orders,
 	})
@@ -723,6 +752,18 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 			"escrowExpiresAt": escrowExpires,
 		},
 	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderEscrowed,
+		UserID:  order.SellerID,
+		Title:   "Payment Received — Ship Order",
+		Message: fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8]),
+		Data: map[string]interface{}{
+			"orderId":         order.ID.String(),
+			"status":          models.OrderStatusEscrowed,
+			"escrowExpiresAt": escrowExpires,
+			"role":            "seller",
+		},
+	})
 
 	utils.SuccessResponse(c, http.StatusOK, "Escrow submitted successfully", gin.H{
 		"orderId":         order.ID,
@@ -765,6 +806,11 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 
 	if order.SellerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can mark as shipped")
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
 	}
 
@@ -846,6 +892,11 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		return
 	}
 
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
 	if !isValidTransition(order.Status, models.OrderStatusDelivered) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
 		return
@@ -863,6 +914,10 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		return
 	}
 
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		log.Printf("MarkDelivered reload error: %v", err)
+	}
+
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderDelivered,
 		UserID:  order.BuyerID,
@@ -874,11 +929,7 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		},
 	})
 
-	utils.SuccessResponse(c, http.StatusOK, "Order marked as delivered", gin.H{
-		"orderId":           order.ID,
-		"status":            models.OrderStatusDelivered,
-		"sellerDeliveredAt": now,
-	})
+	utils.SuccessResponse(c, http.StatusOK, "Order marked as delivered", order)
 }
 
 // refundDecisionRequest optional note when approving or rejecting a refund.
@@ -913,6 +964,11 @@ func (ch *CheckoutHandler) ApproveRefund(c *gin.Context) {
 
 	if order.SellerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can approve a refund")
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
 	}
 
@@ -980,6 +1036,11 @@ func (ch *CheckoutHandler) RejectRefund(c *gin.Context) {
 		return
 	}
 
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
 	if order.Status != models.OrderStatusRefundRequested {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot reject refund: order is in %s status, must be %s", order.Status, models.OrderStatusRefundRequested))
 		return
@@ -1044,6 +1105,11 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 		return
 	}
 
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
 	if !isValidTransition(order.Status, models.OrderStatusCompleted) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot confirm receipt: order is in %s status", order.Status))
 		return
@@ -1100,6 +1166,11 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 
 	if order.BuyerID != user.ID {
 		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can confirm receipt")
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
 	}
 
@@ -1190,6 +1261,11 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 		return
 	}
 
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -1241,7 +1317,10 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 	}
 }
 
-// CancelOrder handles POST /api/orders/:id/cancel
+// CancelOrder handles POST /api/orders/:id/cancel.
+// - Buyer may cancel directly while the order is in pending_payment (no on-chain escrow yet).
+// - Seller may cancel in pending_payment or escrowed (escrowed cancels require an on-chain tx).
+// - Once shipped/delivered, neither party may cancel; they must go through refund_requested.
 func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -1261,8 +1340,15 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	if order.SellerID != user.ID {
-		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can cancel an order")
+	isBuyer := order.BuyerID == user.ID
+	isSeller := order.SellerID == user.ID
+	if !isBuyer && !isSeller {
+		utils.ErrorResponse(c, http.StatusForbidden, "You are not a party to this order")
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
 	}
 
@@ -1271,6 +1357,76 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
+	// Buyer-initiated cancel is only allowed before payment escrow.
+	if isBuyer && !isSeller && order.Status != models.OrderStatusPendingPayment {
+		utils.ErrorResponse(c, http.StatusForbidden, "Buyers can only cancel before payment. Please request a refund instead.")
+		return
+	}
+
+	// Pending-payment cancels: mark cancelled AND restore the reserved stock
+	// in a single transaction so cancelling an unpaid order doesn't burn inventory.
+	if order.Status == models.OrderStatusPendingPayment {
+		tx := config.DB.Begin()
+		if tx.Error != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+			return
+		}
+		if err := tx.Model(&order).Updates(map[string]interface{}{
+			"status":     models.OrderStatusCancelled,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+			tx.Rollback()
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
+			return
+		}
+		if err := tx.Model(&models.Product{}).
+			Where("id = ?", order.ProductID).
+			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+			tx.Rollback()
+			log.Printf("CancelOrder stock restore error for order %s: %v", order.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+			return
+		}
+		if err := tx.Commit().Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+			return
+		}
+
+		role := "seller"
+		if isBuyer {
+			role = "buyer"
+		}
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderRefunded,
+			UserID:  order.BuyerID,
+			Title:   "Order Cancelled",
+			Message: fmt.Sprintf("Order #%s was cancelled (by %s).", order.ID.String()[:8], role),
+			Data: map[string]interface{}{
+				"orderId":      order.ID.String(),
+				"status":       models.OrderStatusCancelled,
+				"cancelledBy":  role,
+			},
+		})
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderRefunded,
+			UserID:  order.SellerID,
+			Title:   "Order Cancelled",
+			Message: fmt.Sprintf("Order #%s was cancelled (by %s).", order.ID.String()[:8], role),
+			Data: map[string]interface{}{
+				"orderId":      order.ID.String(),
+				"status":       models.OrderStatusCancelled,
+				"cancelledBy":  role,
+			},
+		})
+
+		utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+			"orderId": order.ID,
+			"status":  models.OrderStatusCancelled,
+		})
+		return
+	}
+
+	// Escrowed cancel requires on-chain tx, seller only.
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -1545,7 +1701,12 @@ func (ch *CheckoutHandler) GetShippingEstimate(c *gin.Context) {
 	})
 }
 
-// AdminResolveDispute handles POST /api/admin/orders/:id/resolve
+// AdminResolveDispute handles POST /api/admin/orders/:id/resolve.
+// Accepts orders that are refund_requested, cancel_requested, or disputed.
+// This call does NOT change any state — it only returns an unsigned resolve tx.
+// The admin must sign & broadcast, then POST the resulting tx hash to
+// /api/admin/orders/:id/submit-resolve so the backend can verify the on-chain
+// confirmation and only THEN clear the dispute fields.
 func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -1571,8 +1732,18 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 		return
 	}
 
-	if order.Status != models.OrderStatusRefundRequested {
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot resolve dispute: order is in %s status, must be %s", order.Status, models.OrderStatusRefundRequested))
+	allowedStatus := order.Status == models.OrderStatusRefundRequested ||
+		order.Status == models.OrderStatusCancelRequested
+	isDisputed := order.DisputedAt != nil
+	if !allowedStatus && !isDisputed {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot resolve: order must be refund_requested, cancel_requested, or disputed (current: %s)", order.Status))
+		return
+	}
+
+	// Orders that predate on-chain escrow have nothing for the escrow contract
+	// to resolve. Pending_payment disputes (if any sneak in) would fail here.
+	if order.ContractOrderID == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Order has no on-chain escrow to resolve")
 		return
 	}
 
@@ -1597,6 +1768,645 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Resolve transaction prepared", gin.H{
 		"resolveTx":   resolveTx,
 		"refundBuyer": req.RefundBuyer,
+	})
+}
+
+// adminSubmitResolveBody is the request for SubmitAdminResolve.
+type adminSubmitResolveBody struct {
+	TxHash      string `json:"txHash" binding:"required"`
+	RefundBuyer bool   `json:"refundBuyer"`
+}
+
+// SubmitAdminResolve handles POST /api/admin/orders/:id/submit-resolve.
+// Admin sends the broadcast tx hash for the resolve tx prepared by AdminResolveDispute.
+// Only after on-chain confirmation do we flip the status, clear dispute flags,
+// and notify the parties. If the admin abandons signing, nothing here runs and
+// the order stays frozen under dispute — which is the correct behavior.
+func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body adminSubmitResolveBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "txHash is required")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	allowedStatus := order.Status == models.OrderStatusRefundRequested ||
+		order.Status == models.OrderStatusCancelRequested
+	isDisputed := order.DisputedAt != nil
+	if !allowedStatus && !isDisputed {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit resolve: order is in %s status", order.Status))
+		return
+	}
+
+	receipt := ch.BlockchainService.GetTransactionReceipt(body.TxHash, "sonic")
+	switch receipt.Status {
+	case "confirmed":
+		// OK
+	case "error":
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify resolve transaction — try again later")
+		return
+	case "pending":
+		utils.ErrorResponse(c, http.StatusConflict, "Resolve transaction is still pending — please wait and retry")
+		return
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "Resolve transaction failed on-chain")
+		return
+	}
+
+	var finalStatus string
+	if body.RefundBuyer {
+		finalStatus = models.OrderStatusRefunded
+	} else {
+		finalStatus = models.OrderStatusCompleted
+	}
+
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return
+	}
+	orderUpdates := map[string]interface{}{
+		"status":          finalStatus,
+		"release_tx_hash": body.TxHash,
+	}
+	if isDisputed {
+		orderUpdates["disputed_at"] = nil
+		orderUpdates["dispute_reason"] = ""
+		orderUpdates["dispute_raised_by"] = ""
+	}
+	if err := tx.Model(&order).Updates(orderUpdates).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+	// Restore stock if the buyer was refunded (item never reached them or is being returned).
+	if body.RefundBuyer {
+		if err := tx.Model(&models.Product{}).
+			Where("id = ?", order.ProductID).
+			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+			tx.Rollback()
+			log.Printf("SubmitAdminResolve stock restore error for order %s: %v", order.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+			return
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	outcome := "released to seller"
+	if body.RefundBuyer {
+		outcome = "refunded to buyer"
+	}
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputeResolved,
+		UserID:  order.BuyerID,
+		Title:   "Dispute Resolved",
+		Message: fmt.Sprintf("Admin resolved order #%s — funds %s.", shortID, outcome),
+		Data: map[string]interface{}{
+			"orderId":     order.ID.String(),
+			"status":      finalStatus,
+			"refundBuyer": body.RefundBuyer,
+			"txHash":      body.TxHash,
+		},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputeResolved,
+		UserID:  order.SellerID,
+		Title:   "Dispute Resolved",
+		Message: fmt.Sprintf("Admin resolved order #%s — funds %s.", shortID, outcome),
+		Data: map[string]interface{}{
+			"orderId":     order.ID.String(),
+			"status":      finalStatus,
+			"refundBuyer": body.RefundBuyer,
+			"txHash":      body.TxHash,
+		},
+	})
+
+	// Ensure admin action is attributed (currently unused but useful for audit logs).
+	_ = user
+
+	utils.SuccessResponse(c, http.StatusOK, "Dispute resolved", gin.H{
+		"orderId":     order.ID,
+		"status":      finalStatus,
+		"refundBuyer": body.RefundBuyer,
+	})
+}
+
+// --- Cancel-request workflow ---
+
+type requestCancelBody struct {
+	Reason string `json:"reason"`
+}
+
+type rejectCancelBody struct {
+	Notes string `json:"notes"`
+}
+
+type raiseDisputeBody struct {
+	Reason string `json:"reason" binding:"required"`
+}
+
+type submitCancelBody struct {
+	TxHash string `json:"txHash" binding:"required"`
+}
+
+// RequestCancelOrder handles POST /api/orders/:id/request-cancel.
+// Buyer requests cancellation of an escrowed order.
+func (ch *CheckoutHandler) RequestCancelOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body requestCancelBody
+	_ = c.ShouldBindJSON(&body)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.BuyerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can request a cancel")
+		return
+	}
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+	if order.Status != models.OrderStatusEscrowed {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Cancel can only be requested while the order is escrowed. Use request-refund once shipped.")
+		return
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status":               models.OrderStatusCancelRequested,
+		"cancel_reason":        strings.TrimSpace(body.Reason),
+		"cancel_requested_at":  now,
+	}
+	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCancelRequested,
+		UserID:  order.BuyerID,
+		Title:   "Cancel Request Submitted",
+		Message: fmt.Sprintf("Your cancel request for order #%s has been submitted. The seller will review it shortly.", shortID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusCancelRequested,
+			"reason":  body.Reason,
+		},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCancelRequested,
+		UserID:  order.SellerID,
+		Title:   "Buyer Wants to Cancel",
+		Message: fmt.Sprintf("The buyer requested to cancel order #%s. Reason: %s. Please approve or reject.", shortID, body.Reason),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusCancelRequested,
+			"reason":  body.Reason,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Cancel request submitted", gin.H{
+		"orderId":           order.ID,
+		"status":            models.OrderStatusCancelRequested,
+		"cancelRequestedAt": now,
+	})
+}
+
+// ApproveCancelOrder handles POST /api/orders/:id/approve-cancel.
+// Seller approves the buyer's cancel request. Returns an unsigned on-chain cancel tx.
+// Seller must sign/broadcast and then call SubmitCancelOrder with the tx hash.
+func (ch *CheckoutHandler) ApproveCancelOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can approve a cancel request")
+		return
+	}
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+	if order.Status != models.OrderStatusCancelRequested {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot approve cancel: order is in %s status", order.Status))
+		return
+	}
+	if user.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+
+	contractOrderID := services.GenerateOrderID(order.ID)
+	cancelTxBytes, err := ch.EscrowService.PrepareCancelOrder(contractOrderID, user.WalletAddress)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare cancel transaction")
+		return
+	}
+
+	var cancelTx map[string]interface{}
+	if err := json.Unmarshal(cancelTxBytes, &cancelTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode cancel transaction")
+		return
+	}
+
+	if err := config.DB.Model(&order).Update("merchant_approved_cancel", true).Error; err != nil {
+		log.Printf("ApproveCancelOrder flag update error: %v", err)
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Cancel transaction prepared", gin.H{
+		"cancelTx": cancelTx,
+		"orderId":  order.ID,
+	})
+}
+
+// SubmitCancelOrder handles POST /api/orders/:id/submit-cancel.
+// Seller submits the broadcast tx hash for the approved cancel; status → cancelled.
+func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body submitCancelBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "txHash is required")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can submit the cancel tx")
+		return
+	}
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+	if order.Status != models.OrderStatusCancelRequested {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit cancel: order is in %s status", order.Status))
+		return
+	}
+
+	receipt := ch.BlockchainService.GetTransactionReceipt(body.TxHash, "sonic")
+	switch receipt.Status {
+	case "confirmed":
+		// OK
+	case "error":
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify cancel transaction — try again later")
+		return
+	case "pending":
+		utils.ErrorResponse(c, http.StatusConflict, "Cancel transaction is still pending — please wait and retry")
+		return
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "Cancel transaction failed on-chain")
+		return
+	}
+
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return
+	}
+	if err := tx.Model(&order).Updates(map[string]interface{}{
+		"status":          models.OrderStatusCancelled,
+		"release_tx_hash": body.TxHash,
+	}).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+	if err := tx.Model(&models.Product{}).
+		Where("id = ?", order.ProductID).
+		UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+		tx.Rollback()
+		log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCancelApproved,
+		UserID:  order.BuyerID,
+		Title:   "Cancel Approved",
+		Message: fmt.Sprintf("Your cancel request for order #%s was approved. Funds have been returned.", shortID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusCancelled,
+			"txHash":  body.TxHash,
+		},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCancelApproved,
+		UserID:  order.SellerID,
+		Title:   "Order Cancelled",
+		Message: fmt.Sprintf("You approved the cancellation of order #%s. Funds returned to buyer.", shortID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusCancelled,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+		"orderId": order.ID,
+		"status":  models.OrderStatusCancelled,
+	})
+}
+
+// RejectCancelOrder handles POST /api/orders/:id/reject-cancel.
+// Seller rejects the buyer's cancel request; order returns to escrowed.
+func (ch *CheckoutHandler) RejectCancelOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body rejectCancelBody
+	_ = c.ShouldBindJSON(&body)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can reject a cancel request")
+		return
+	}
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+	if order.Status != models.OrderStatusCancelRequested {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot reject cancel: order is in %s status", order.Status))
+		return
+	}
+
+	updates := map[string]interface{}{
+		"status":                   models.OrderStatusEscrowed,
+		"merchant_approved_cancel": false,
+	}
+	if notes := strings.TrimSpace(body.Notes); notes != "" {
+		updates["notes"] = notes
+	}
+	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderCancelRejected,
+		UserID:  order.BuyerID,
+		Title:   "Cancel Request Rejected",
+		Message: fmt.Sprintf("The seller rejected your cancel request for order #%s. The order remains active. You can raise a dispute if you disagree.", shortID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"status":  models.OrderStatusEscrowed,
+			"notes":   body.Notes,
+		},
+	})
+
+	utils.SuccessResponse(c, http.StatusOK, "Cancel request rejected", gin.H{
+		"orderId": order.ID,
+		"status":  models.OrderStatusEscrowed,
+	})
+}
+
+// RaiseDispute handles POST /api/orders/:id/dispute.
+// Either buyer or seller can escalate to admin. Dispute freezes mutation endpoints.
+func (ch *CheckoutHandler) RaiseDispute(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body raiseDisputeBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "A reason is required")
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if len(reason) < 10 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Please describe the issue in at least 10 characters")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	var role string
+	switch user.ID {
+	case order.BuyerID:
+		role = "buyer"
+	case order.SellerID:
+		role = "seller"
+	default:
+		utils.ErrorResponse(c, http.StatusForbidden, "You are not a party to this order")
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is already under dispute")
+		return
+	}
+
+	switch order.Status {
+	case models.OrderStatusCompleted, models.OrderStatusRefunded, models.OrderStatusCancelled:
+		utils.ErrorResponse(c, http.StatusBadRequest, "Disputes cannot be raised on closed orders")
+		return
+	case models.OrderStatusPendingPayment:
+		// No on-chain escrow exists yet for AdminResolveDispute to act on.
+		// The buyer (or seller) can cancel directly while pending_payment.
+		utils.ErrorResponse(c, http.StatusBadRequest, "Dispute can only be raised after payment is escrowed. Cancel the order directly if payment hasn't been made yet.")
+		return
+	}
+
+	now := time.Now()
+	if err := config.DB.Model(&order).Updates(map[string]interface{}{
+		"disputed_at":       now,
+		"dispute_reason":    reason,
+		"dispute_raised_by": role,
+	}).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to raise dispute")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	var otherParty uuid.UUID
+	if role == "buyer" {
+		otherParty = order.SellerID
+	} else {
+		otherParty = order.BuyerID
+	}
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputed,
+		UserID:  otherParty,
+		Title:   "Order Escalated to Admin",
+		Message: fmt.Sprintf("Order #%s has been escalated to admin by the %s. Reason: %s. An admin will review shortly.", shortID, role, reason),
+		Data: map[string]interface{}{
+			"orderId":  order.ID.String(),
+			"raisedBy": role,
+			"reason":   reason,
+		},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputed,
+		UserID:  user.ID,
+		Title:   "Dispute Submitted",
+		Message: fmt.Sprintf("Your dispute for order #%s has been submitted. An admin will review it shortly.", shortID),
+		Data: map[string]interface{}{
+			"orderId": order.ID.String(),
+			"reason":  reason,
+		},
+	})
+
+	// Notify all admins / super-admins
+	var admins []models.User
+	if err := config.DB.Where("role IN (?)", []string{models.RoleAdmin, models.RoleSuperAdmin}).Find(&admins).Error; err == nil {
+		for _, a := range admins {
+			ch.EventBus.Publish(events.Event{
+				Type:    events.OrderDisputed,
+				UserID:  a.ID,
+				Title:   "New Dispute Requires Review",
+				Message: fmt.Sprintf("Order #%s has a new dispute raised by the %s: %s", shortID, role, reason),
+				Data: map[string]interface{}{
+					"orderId":  order.ID.String(),
+					"raisedBy": role,
+					"reason":   reason,
+				},
+			})
+		}
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Dispute raised", gin.H{
+		"orderId":    order.ID,
+		"disputedAt": now,
+	})
+}
+
+// GetDisputedOrders handles GET /api/admin/orders/disputed.
+func (ch *CheckoutHandler) GetDisputedOrders(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	query := config.DB.Model(&models.Order{}).Where("disputed_at IS NOT NULL")
+
+	var total int64
+	query.Count(&total)
+
+	var orders []models.Order
+	if err := query.Order("disputed_at ASC").Offset(offset).Limit(limit).Find(&orders).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch disputed orders")
+		return
+	}
+
+	totalPages := int(total) / limit
+	if int(total)%limit != 0 {
+		totalPages++
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Disputed orders fetched", gin.H{
+		"orders": orders,
+		"pagination": gin.H{
+			"page":       page,
+			"limit":      limit,
+			"total":      total,
+			"totalPages": totalPages,
+		},
 	})
 }
 

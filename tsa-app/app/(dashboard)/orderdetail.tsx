@@ -8,6 +8,10 @@ import {
   ActivityIndicator,
   Alert,
   Pressable,
+  Modal,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -19,6 +23,9 @@ import {
   prepareConfirm,
   submitConfirm,
   requestRefund,
+  cancelOrder,
+  requestCancelOrder,
+  raiseDispute,
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
@@ -37,6 +44,10 @@ const OrderDetailScreen = () => {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cancelModalVisible, setCancelModalVisible] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [disputeModalVisible, setDisputeModalVisible] = useState(false);
+  const [disputeReason, setDisputeReason] = useState('');
 
   const fetchOrder = useCallback(async () => {
     if (!id) return;
@@ -125,6 +136,80 @@ const OrderDetailScreen = () => {
               fetchOrder();
             } catch (err: any) {
               Alert.alert('Error', err.message || 'Failed to request refund');
+            } finally {
+              setActionLoading(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const submitCancelRequest = async () => {
+    if (!order) return;
+    const reason = cancelReason.trim();
+    if (reason.length < 3) {
+      Alert.alert('Reason required', 'Please give a brief reason for the cancel request.');
+      return;
+    }
+    setActionLoading(true);
+    setCancelModalVisible(false);
+    try {
+      const result = await requestCancelOrder(order.id, reason);
+      if (!result.success) throw new Error(result.message || 'Failed to submit cancel request');
+      Alert.alert('Cancel Request Submitted', 'The seller will be notified to approve or reject.');
+      setCancelReason('');
+      fetchOrder();
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to submit cancel request');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const submitDispute = async () => {
+    if (!order) return;
+    const reason = disputeReason.trim();
+    if (reason.length < 10) {
+      Alert.alert('More detail needed', 'Please describe the issue in at least 10 characters.');
+      return;
+    }
+    setActionLoading(true);
+    setDisputeModalVisible(false);
+    try {
+      const result = await raiseDispute(order.id, reason);
+      if (!result.success) throw new Error(result.message || 'Failed to raise dispute');
+      Alert.alert('Dispute Submitted', 'Admin will review and resolve shortly.');
+      setDisputeReason('');
+      fetchOrder();
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to raise dispute');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleCancelOrder = () => {
+    if (!order) return;
+    Alert.alert(
+      'Cancel Order',
+      'Are you sure you want to cancel this order? This cannot be undone.',
+      [
+        { text: 'Keep Order', style: 'cancel' },
+        {
+          text: 'Cancel Order',
+          style: 'destructive',
+          onPress: async () => {
+            setActionLoading(true);
+            try {
+              const result = await cancelOrder(order.id);
+              if (!result.success) {
+                throw new Error(result.message || 'Failed to cancel order');
+              }
+              Alert.alert('Order Cancelled', 'Your order has been cancelled.');
+              fetchOrder();
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to cancel order');
             } finally {
               setActionLoading(false);
             }
@@ -286,6 +371,18 @@ const OrderDetailScreen = () => {
               <ActivityIndicator size="large" color="#8B5A2B" />
               <Text style={styles.actionLoadingText}>Processing transaction...</Text>
             </View>
+          ) : order.disputedAt ? (
+            <View style={styles.actionContainer}>
+              <View style={[styles.waitingBanner, { backgroundColor: '#FEE2E2' }]}>
+                <Ionicons name="alert-circle-outline" size={20} color="#991B1B" />
+                <Text style={[styles.waitingText, { color: '#991B1B' }]}>
+                  This order is under admin review. Actions are paused until a resolution.
+                </Text>
+              </View>
+              {order.disputeReason ? (
+                <Text style={styles.mutedNote}>Reason: {order.disputeReason}</Text>
+              ) : null}
+            </View>
           ) : (
             <>
               {order.status === 'escrowed' && (
@@ -294,8 +391,40 @@ const OrderDetailScreen = () => {
                     <Ionicons name="time-outline" size={20} color="#0C5460" />
                     <Text style={styles.waitingText}>Waiting for seller to ship</Text>
                   </View>
+                  <TouchableOpacity
+                    style={styles.refundButton}
+                    onPress={() => setCancelModalVisible(true)}
+                  >
+                    <Text style={styles.refundButtonText}>Request Cancel</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
                     <Text style={styles.refundButtonText}>Request Refund</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.linkButton}
+                    onPress={() => setDisputeModalVisible(true)}
+                  >
+                    <Text style={styles.linkButtonText}>Report to Admin</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {order.status === 'cancel_requested' && (
+                <View style={styles.actionContainer}>
+                  <View style={styles.waitingBanner}>
+                    <Ionicons name="hourglass-outline" size={20} color="#856404" />
+                    <Text style={[styles.waitingText, { color: '#856404' }]}>
+                      Your cancel request is pending seller approval.
+                    </Text>
+                  </View>
+                  {order.cancelReason ? (
+                    <Text style={styles.mutedNote}>Your reason: {order.cancelReason}</Text>
+                  ) : null}
+                  <TouchableOpacity
+                    style={styles.linkButton}
+                    onPress={() => setDisputeModalVisible(true)}
+                  >
+                    <Text style={styles.linkButtonText}>Report to Admin</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -324,6 +453,12 @@ const OrderDetailScreen = () => {
                   <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
                     <Text style={styles.refundButtonText}>Request Refund</Text>
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.linkButton}
+                    onPress={() => setDisputeModalVisible(true)}
+                  >
+                    <Text style={styles.linkButtonText}>Report to Admin</Text>
+                  </TouchableOpacity>
                 </View>
               )}
 
@@ -343,6 +478,29 @@ const OrderDetailScreen = () => {
                   <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
                     <Text style={styles.refundButtonText}>Request Refund</Text>
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.linkButton}
+                    onPress={() => setDisputeModalVisible(true)}
+                  >
+                    <Text style={styles.linkButtonText}>Report to Admin</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {order.status === 'refund_requested' && (
+                <View style={styles.actionContainer}>
+                  <View style={styles.waitingBanner}>
+                    <Ionicons name="hourglass-outline" size={20} color="#856404" />
+                    <Text style={[styles.waitingText, { color: '#856404' }]}>
+                      Refund requested. Awaiting seller or admin review.
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.linkButton}
+                    onPress={() => setDisputeModalVisible(true)}
+                  >
+                    <Text style={styles.linkButtonText}>Report to Admin</Text>
+                  </TouchableOpacity>
                 </View>
               )}
 
@@ -354,6 +512,9 @@ const OrderDetailScreen = () => {
                       Awaiting payment. Complete checkout to fund escrow.
                     </Text>
                   </View>
+                  <TouchableOpacity style={styles.refundButton} onPress={handleCancelOrder}>
+                    <Text style={styles.refundButtonText}>Cancel Order</Text>
+                  </TouchableOpacity>
                 </View>
               )}
             </>
@@ -362,6 +523,90 @@ const OrderDetailScreen = () => {
           <View style={{ height: 32 }} />
         </ScrollView>
       </LinearGradient>
+
+      {/* Cancel request modal */}
+      <Modal
+        visible={cancelModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCancelModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={modalStyles.overlay}
+        >
+          <View style={modalStyles.card}>
+            <Text style={modalStyles.title}>Request to Cancel</Text>
+            <Text style={modalStyles.body}>
+              Tell the seller why you want to cancel. They will approve or reject the request.
+            </Text>
+            <TextInput
+              style={modalStyles.input}
+              placeholder="e.g. Ordered the wrong item"
+              placeholderTextColor="#999"
+              value={cancelReason}
+              onChangeText={setCancelReason}
+              multiline
+            />
+            <View style={modalStyles.row}>
+              <TouchableOpacity
+                style={modalStyles.cancelBtn}
+                onPress={() => {
+                  setCancelModalVisible(false);
+                  setCancelReason('');
+                }}
+              >
+                <Text style={modalStyles.cancelBtnText}>Keep Order</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={modalStyles.submitBtn} onPress={submitCancelRequest}>
+                <Text style={modalStyles.submitBtnText}>Submit Request</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Dispute modal */}
+      <Modal
+        visible={disputeModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDisputeModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={modalStyles.overlay}
+        >
+          <View style={modalStyles.card}>
+            <Text style={modalStyles.title}>Report to Admin</Text>
+            <Text style={modalStyles.body}>
+              Describe the issue in detail (minimum 10 characters). An admin will review and resolve.
+            </Text>
+            <TextInput
+              style={[modalStyles.input, { minHeight: 90 }]}
+              placeholder="What went wrong?"
+              placeholderTextColor="#999"
+              value={disputeReason}
+              onChangeText={setDisputeReason}
+              multiline
+            />
+            <View style={modalStyles.row}>
+              <TouchableOpacity
+                style={modalStyles.cancelBtn}
+                onPress={() => {
+                  setDisputeModalVisible(false);
+                  setDisputeReason('');
+                }}
+              >
+                <Text style={modalStyles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={modalStyles.submitBtn} onPress={submitDispute}>
+                <Text style={modalStyles.submitBtnText}>Submit Dispute</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -559,6 +804,22 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
+  linkButton: {
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  linkButtonText: {
+    color: '#8B5A2B',
+    fontSize: 13,
+    fontWeight: '500',
+    textDecorationLine: 'underline',
+  },
+  mutedNote: {
+    color: '#6B5A4B',
+    fontSize: 12,
+    fontStyle: 'italic',
+    paddingHorizontal: 4,
+  },
   waitingBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -580,6 +841,69 @@ const styles = StyleSheet.create({
   actionLoadingText: {
     fontSize: 14,
     color: '#8B5A2B',
+  },
+});
+
+const modalStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  card: {
+    backgroundColor: '#FFF',
+    borderRadius: 16,
+    padding: 20,
+    gap: 12,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1F2937',
+  },
+  body: {
+    fontSize: 13,
+    color: '#6B7280',
+    lineHeight: 18,
+  },
+  input: {
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 14,
+    color: '#111827',
+    minHeight: 70,
+    textAlignVertical: 'top',
+  },
+  row: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  cancelBtn: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: '#D1D5DB',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    color: '#4B5563',
+    fontWeight: '600',
+  },
+  submitBtn: {
+    flex: 1,
+    backgroundColor: '#8B5A2B',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  submitBtnText: {
+    color: '#FFF',
+    fontWeight: '700',
   },
 });
 

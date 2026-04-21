@@ -154,10 +154,10 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
         onRequestClose={() => setModalVisible(false)}
       >
         <KeyboardAvoidingView
-          style={{ flex: 1 }}
+          style={styles.modalOverlay}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={0}
         >
-        <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>{placeholder}</Text>
@@ -219,7 +219,6 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
               }
             />
           </View>
-        </View>
         </KeyboardAvoidingView>
       </Modal>
     </View>

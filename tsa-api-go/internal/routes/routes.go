@@ -193,6 +193,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderGroup.POST("/:id/submit-confirm", ch.SubmitConfirm)
 		orderGroup.POST("/:id/request-refund", ch.RequestRefund)
 		orderGroup.POST("/:id/cancel", ch.CancelOrder)
+		orderGroup.POST("/:id/request-cancel", ch.RequestCancelOrder)
+		orderGroup.POST("/:id/approve-cancel", ch.ApproveCancelOrder)
+		orderGroup.POST("/:id/submit-cancel", ch.SubmitCancelOrder)
+		orderGroup.POST("/:id/reject-cancel", ch.RejectCancelOrder)
+		orderGroup.POST("/:id/dispute", ch.RaiseDispute)
 	}
 
 	// Admin order routes
@@ -200,7 +205,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	adminOrderGroup.Use(adminAuth)
 	if ch != nil {
 		adminOrderGroup.GET("", ch.GetAllOrders)
+		adminOrderGroup.GET("/disputed", ch.GetDisputedOrders)
 		adminOrderGroup.POST("/:id/resolve", ch.AdminResolveDispute)
+		adminOrderGroup.POST("/:id/submit-resolve", ch.SubmitAdminResolve)
 	}
 
 	// Cart routes

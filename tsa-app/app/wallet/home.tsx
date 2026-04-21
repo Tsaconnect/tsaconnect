@@ -78,11 +78,14 @@ const WalletHome = () => {
       const backedUp = list.find(w => w.address === address)?.backedUp;
       setSeedBackedUp(backedUp ?? false);
 
-      // Fetch balances from all chains in parallel
+      // Fetch balances from all chains in parallel, scoped to the active wallet
       const [chainResults, txResult] = await Promise.all([
         Promise.all(
           CHAIN_KEYS.map(async (chainKey) => {
-            const result = await getWalletBalances(CHAINS[chainKey].chainId);
+            const result = await getWalletBalances(
+              CHAINS[chainKey].chainId,
+              address || undefined
+            );
             return { chainKey, result };
           })
         ),
@@ -155,6 +158,9 @@ const WalletHome = () => {
     setSelectorVisible(false);
     if (address === walletAddress) return;
     setLoading(true);
+    setBalances([]);
+    setTransactions([]);
+    setWalletAddress(address);
     try {
       await setActiveWalletService(address);
       await registerWalletAddress(address);

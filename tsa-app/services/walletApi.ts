@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
+import { getActiveWallet } from './wallet';
 
 export interface WalletBalance {
   symbol: string;
@@ -312,12 +313,19 @@ export async function registerWalletAddress(address: string): Promise<ApiRespons
 /**
  * Fetch wallet balances for supported tokens.
  * Pass chainId to filter by chain, or omit to get all balances.
+ * Pass address to fetch balances for a specific wallet (multi-wallet support);
+ * otherwise falls back to the user's registered address.
  */
-export async function getWalletBalances(chainId?: number): Promise<ApiResponse<WalletBalance[]>> {
+export async function getWalletBalances(
+  chainId?: number,
+  address?: string
+): Promise<ApiResponse<WalletBalance[]>> {
   try {
     const headers = await getAuthHeaders();
+    const resolvedAddress = address || (await getActiveWallet()) || undefined;
     const qp = new URLSearchParams({ network: getNetwork() });
     if (chainId) qp.append('chainId', String(chainId));
+    if (resolvedAddress) qp.append('address', resolvedAddress);
     const params = `?${qp.toString()}`;
     const response = await fetch(`${API_BASE_URL}/wallet/balances${params}`, {
       method: 'GET',
