@@ -175,15 +175,25 @@ func resolveNetwork(c *gin.Context) string {
 }
 
 // GetWalletBalances handles GET /api/wallet/balances.
-// Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional).
+// Query params: ?network=mainnet|testnet (default mainnet), ?chainId=<numeric> (optional),
+// ?address=<hex> (optional — overrides the user's registered wallet for multi-wallet clients).
 func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
+
+	address := strings.TrimSpace(c.Query("address"))
+	if address == "" {
+		address = user.WalletAddress
+	}
+	if address == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+	if !ethAddressRegex.MatchString(address) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address")
 		return
 	}
 
@@ -270,7 +280,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		chainBalances := make(map[string]tokenBalance)
 
 		if client != nil {
-			if nativeBal, err := client.GetBalance(user.WalletAddress); err == nil {
+			if nativeBal, err := client.GetBalance(address); err == nil {
 				balStr := formatTokenBalance(nativeBal, 18)
 				balFloat, _ := strconv.ParseFloat(balStr, 64)
 				price := prices[cq.cfg.NativeCurrency]
@@ -289,7 +299,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 				if tc == cq.name {
 					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
 					if tokenAddr != "" && client != nil {
-						if bal, err := client.GetTokenBalance(tokenAddr, user.WalletAddress); err == nil {
+						if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
 							balStr := formatTokenBalance(bal, tok.Decimals)
 							balFloat, _ := strconv.ParseFloat(balStr, 64)
 							price := prices[tok.Symbol]
@@ -312,7 +322,7 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Wallet balances retrieved", gin.H{
-		"walletAddress": user.WalletAddress,
+		"walletAddress": address,
 		"network":       network,
 		"balances":      result,
 	})

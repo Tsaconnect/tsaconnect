@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -57,11 +59,14 @@ func (h *Handlers) GetProfile(c *gin.Context) {
 
 // updateProfileRequest defines allowed fields for profile update.
 type updateProfileRequest struct {
-	Name        string `json:"name"`
-	PhoneNumber string `json:"phoneNumber"`
-	Address     string `json:"address"`
-	State       string `json:"state"`
-	City        string `json:"city"`
+	Name           string               `json:"name"`
+	Username       string               `json:"username"`
+	PhoneNumber    string               `json:"phoneNumber"`
+	Address        string               `json:"address"`
+	State          string               `json:"state"`
+	City           string               `json:"city"`
+	Country        string               `json:"country"`
+	ProfilePicture *models.ProfilePhoto `json:"profilePicture"`
 }
 
 // UpdateProfile handles PUT /api/users/profile (auth required).
@@ -88,6 +93,37 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 	if req.Name != "" {
 		updates["name"] = req.Name
 	}
+	if req.Username != "" {
+		// Apply the same normalization and rules as signup (auth_handler.go):
+		// lowercase, 3-20 chars of [a-zA-Z0-9_], and uniqueness across other users.
+		usernameLower := strings.ToLower(strings.TrimSpace(req.Username))
+		if !regexp.MustCompile(`^[a-zA-Z0-9_]{3,20}$`).MatchString(usernameLower) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Username must be 3-20 characters, letters, numbers, or underscores only",
+			})
+			return
+		}
+		if usernameLower != user.Username {
+			var existing models.User
+			err := config.DB.Where("username = ? AND id <> ?", usernameLower, user.ID).First(&existing).Error
+			if err == nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"message": "Username already taken",
+				})
+				return
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("UpdateProfile username check error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": "Failed to update profile",
+				})
+				return
+			}
+			updates["username"] = usernameLower
+		}
+	}
 	if req.PhoneNumber != "" {
 		updates["phone_number"] = req.PhoneNumber
 	}
@@ -99,6 +135,15 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 	}
 	if req.City != "" {
 		updates["city"] = req.City
+	}
+	if req.Country != "" {
+		updates["country"] = req.Country
+	}
+	if req.ProfilePicture != nil && req.ProfilePicture.URL != "" {
+		photoJSON, err := json.Marshal(req.ProfilePicture)
+		if err == nil {
+			updates["profile_photo"] = photoJSON
+		}
 	}
 
 	if len(updates) == 0 {

@@ -23,9 +23,14 @@ import {
   markOrderDelivered,
   approveRefund,
   rejectRefund,
+  approveCancelOrder,
+  submitCancelOrder,
+  rejectCancelOrder,
+  raiseDispute,
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
+import { signAndBroadcast } from '@/services/transaction';
 import api from '@/components/services/api';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
 
@@ -132,6 +137,14 @@ const MerchantOrderDetail = () => {
   // Refund decision modal
   const [refundModalVisible, setRefundModalVisible] = useState<'approve' | 'reject' | null>(null);
   const [refundNotes, setRefundNotes] = useState('');
+
+  // Cancel decision modal
+  const [cancelModalVisible, setCancelModalVisible] = useState<'approve' | 'reject' | null>(null);
+  const [cancelNotes, setCancelNotes] = useState('');
+
+  // Dispute modal
+  const [disputeModalVisible, setDisputeModalVisible] = useState(false);
+  const [disputeReason, setDisputeReason] = useState('');
 
   const fetchOrder = useCallback(async () => {
     if (!orderId) return;
@@ -271,6 +284,69 @@ const MerchantOrderDetail = () => {
     }
   };
 
+  const handleCancelDecision = async () => {
+    if (!order || !cancelModalVisible) return;
+
+    if (cancelModalVisible === 'reject') {
+      setActionLoading(true);
+      const result = await rejectCancelOrder(order.id, cancelNotes.trim() || undefined);
+      setActionLoading(false);
+      if (result.success) {
+        setCancelModalVisible(null);
+        setCancelNotes('');
+        Alert.alert('Cancel Rejected', 'The order returns to escrowed. The buyer has been notified.');
+        fetchOrder();
+      } else {
+        Alert.alert('Error', result.message || 'Failed to reject cancel request');
+      }
+      return;
+    }
+
+    // Approve — prepare, sign, submit
+    setActionLoading(true);
+    try {
+      const prep = await approveCancelOrder(order.id);
+      if (!prep.success || !prep.data?.cancelTx) {
+        throw new Error(prep.message || 'Failed to prepare cancel transaction');
+      }
+      const txHash = await signAndBroadcast(prep.data.cancelTx, 'sonic');
+      const submit = await submitCancelOrder(order.id, txHash);
+      if (!submit.success) {
+        throw new Error(submit.message || 'Failed to submit cancel');
+      }
+      setCancelModalVisible(null);
+      setCancelNotes('');
+      Alert.alert('Cancel Approved', 'Funds have been returned to the buyer.');
+      fetchOrder();
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to approve cancel');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const submitDispute = async () => {
+    if (!order) return;
+    const reason = disputeReason.trim();
+    if (reason.length < 10) {
+      Alert.alert('More detail needed', 'Please describe the issue in at least 10 characters.');
+      return;
+    }
+    setActionLoading(true);
+    setDisputeModalVisible(false);
+    try {
+      const result = await raiseDispute(order.id, reason);
+      if (!result.success) throw new Error(result.message || 'Failed to raise dispute');
+      Alert.alert('Dispute Submitted', 'Admin will review and resolve shortly.');
+      setDisputeReason('');
+      fetchOrder();
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to raise dispute');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const openExplorer = async (hash: string) => {
     const url = TX_EXPLORER_URL + hash;
     try {
@@ -311,9 +387,12 @@ const MerchantOrderDetail = () => {
   }
 
   const statusColor = STATUS_COLORS[order.status] || STATUS_COLORS.cancelled;
-  const canShip = order.status === 'escrowed';
-  const canDeliver = order.status === 'shipped';
-  const canResolveRefund = order.status === 'refund_requested';
+  const isDisputed = !!order.disputedAt;
+  const canShip = !isDisputed && order.status === 'escrowed';
+  const canDeliver = !isDisputed && order.status === 'shipped';
+  const canResolveRefund = !isDisputed && order.status === 'refund_requested';
+  const canHandleCancel = !isDisputed && order.status === 'cancel_requested';
+  const canRaiseDispute = !isDisputed && ['escrowed', 'shipped', 'delivered', 'cancel_requested', 'refund_requested'].includes(order.status);
   const timeline = buildTimeline(order);
   const buyerLabel =
     order.buyer?.name?.trim() ||
@@ -345,6 +424,14 @@ const MerchantOrderDetail = () => {
             <View style={styles.refundFlag}>
               <Ionicons name="checkmark-circle" size={14} color="#16A34A" />
               <Text style={styles.refundFlagText}>You approved this refund. Awaiting admin.</Text>
+            </View>
+          )}
+          {order.status === 'cancel_requested' && order.cancelReason && (
+            <View style={[styles.refundFlag, { backgroundColor: '#FEF3C7' }]}>
+              <Ionicons name="information-circle" size={14} color="#92400E" />
+              <Text style={[styles.refundFlagText, { color: '#92400E' }]}>
+                Buyer's reason: {order.cancelReason}
+              </Text>
             </View>
           )}
         </View>
@@ -532,8 +619,22 @@ const MerchantOrderDetail = () => {
         )}
       </ScrollView>
 
+      {/* Dispute banner — overrides action bar when disputed */}
+      {isDisputed && (
+        <View style={[styles.actionBar, { backgroundColor: '#FEE2E2' }]}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={{ color: '#991B1B', fontWeight: '700' }}>Under admin review</Text>
+            <Text style={{ color: '#991B1B', fontSize: 12 }}>
+              {order.disputeReason
+                ? `Reason: ${order.disputeReason}`
+                : 'Actions are paused until the admin resolves this dispute.'}
+            </Text>
+          </View>
+        </View>
+      )}
+
       {/* Action bar */}
-      {(canShip || canDeliver || canResolveRefund) && (
+      {!isDisputed && (canShip || canDeliver || canResolveRefund || canHandleCancel || canRaiseDispute) && (
         <View style={styles.actionBar}>
           {canShip && (
             <TouchableOpacity style={[styles.actionBtn, { backgroundColor: GOLD }]} onPress={() => setShipModalVisible(true)}>
@@ -564,6 +665,29 @@ const MerchantOrderDetail = () => {
                 <Text style={styles.actionBtnText}>Approve Refund</Text>
               </TouchableOpacity>
             </View>
+          )}
+          {canHandleCancel && (
+            <View style={styles.refundActions}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.refundRejectBtn]}
+                onPress={() => { setCancelNotes(''); setCancelModalVisible('reject'); }}
+              >
+                <Ionicons name="close-circle-outline" size={18} color="#DC2626" />
+                <Text style={[styles.actionBtnText, { color: '#DC2626' }]}>Reject Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionBtn, { backgroundColor: '#16A34A' }]}
+                onPress={() => { setCancelNotes(''); setCancelModalVisible('approve'); }}
+              >
+                <Ionicons name="checkmark-circle-outline" size={18} color="#FFF" />
+                <Text style={styles.actionBtnText}>Approve Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {canRaiseDispute && (
+            <TouchableOpacity onPress={() => setDisputeModalVisible(true)} style={{ alignItems: 'center', paddingVertical: 6 }}>
+              <Text style={{ color: '#8B5A2B', fontSize: 13, textDecorationLine: 'underline' }}>Report to Admin</Text>
+            </TouchableOpacity>
           )}
         </View>
       )}
@@ -724,6 +848,113 @@ const MerchantOrderDetail = () => {
             </View>
           </View>
         </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Cancel decision modal */}
+      <Modal visible={!!cancelModalVisible} transparent animationType="slide">
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>
+                {cancelModalVisible === 'approve' ? 'Approve Cancel Request' : 'Reject Cancel Request'}
+              </Text>
+              <Text style={styles.modalHint}>
+                {cancelModalVisible === 'approve'
+                  ? "You agree to cancel this order. You'll sign an on-chain transaction to return the buyer's funds."
+                  : 'You disagree with the cancel request. The order will return to escrowed status and you can proceed to ship.'}
+              </Text>
+
+              {cancelModalVisible === 'reject' && (
+                <>
+                  <Text style={styles.inputLabel}>Note to the buyer (optional)</Text>
+                  <TextInput
+                    style={[styles.input, { height: 90 }]}
+                    value={cancelNotes}
+                    onChangeText={setCancelNotes}
+                    placeholder="Why are you keeping the order active?"
+                    placeholderTextColor="#BBB"
+                    multiline
+                  />
+                </>
+              )}
+
+              <View style={styles.modalActions}>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.modalBtnSecondary]}
+                  onPress={() => setCancelModalVisible(null)}
+                  disabled={actionLoading}
+                >
+                  <Text style={styles.modalBtnSecondaryText}>Back</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalBtn,
+                    cancelModalVisible === 'approve' ? { backgroundColor: '#16A34A' } : { backgroundColor: '#DC2626' },
+                    actionLoading && { opacity: 0.5 },
+                  ]}
+                  onPress={handleCancelDecision}
+                  disabled={actionLoading}
+                >
+                  {actionLoading ? (
+                    <ActivityIndicator color="#FFF" size="small" />
+                  ) : (
+                    <Text style={styles.modalBtnPrimaryText}>
+                      {cancelModalVisible === 'approve' ? 'Approve & Sign' : 'Reject'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Dispute modal */}
+      <Modal visible={disputeModalVisible} transparent animationType="slide">
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <Text style={styles.modalTitle}>Report to Admin</Text>
+              <Text style={styles.modalHint}>
+                Describe the issue in detail (minimum 10 characters). An admin will review and resolve.
+              </Text>
+              <TextInput
+                style={[styles.input, { height: 110 }]}
+                value={disputeReason}
+                onChangeText={setDisputeReason}
+                placeholder="What went wrong?"
+                placeholderTextColor="#BBB"
+                multiline
+              />
+              <View style={styles.modalActions}>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.modalBtnSecondary]}
+                  onPress={() => { setDisputeModalVisible(false); setDisputeReason(''); }}
+                  disabled={actionLoading}
+                >
+                  <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.modalBtnPrimary, actionLoading && { opacity: 0.5 }]}
+                  onPress={submitDispute}
+                  disabled={actionLoading}
+                >
+                  {actionLoading ? (
+                    <ActivityIndicator color="#FFF" size="small" />
+                  ) : (
+                    <Text style={styles.modalBtnPrimaryText}>Submit Dispute</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
         </KeyboardAvoidingView>
       </Modal>
     </View>

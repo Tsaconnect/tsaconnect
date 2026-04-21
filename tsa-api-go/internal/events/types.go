@@ -20,6 +20,11 @@ const (
 	OrderRefundApproved   = "order.refund_approved"
 	OrderRefundRejected   = "order.refund_rejected"
 	OrderRefunded         = "order.refunded"
+	OrderCancelRequested  = "order.cancel_requested"
+	OrderCancelApproved   = "order.cancel_approved"
+	OrderCancelRejected   = "order.cancel_rejected"
+	OrderDisputed         = "order.disputed"
+	OrderDisputeResolved  = "order.dispute_resolved"
 
 	// Security events
 	SecurityLoginNewDevice  = "security.login_new_device"

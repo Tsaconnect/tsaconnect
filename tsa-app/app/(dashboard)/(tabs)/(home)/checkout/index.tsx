@@ -10,6 +10,7 @@ import {
   Alert,
   Image,
   Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -603,9 +604,15 @@ const CheckoutScreen = () => {
     <SafeAreaView style={s.safe}>
       <Header />
 
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={s.scroll}
+        keyboardShouldPersistTaps="handled"
       >
         {/* Step Indicators */}
         <View style={s.steps}>
@@ -824,6 +831,7 @@ const CheckoutScreen = () => {
           </View>
         </View>
       </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Fixed Footer */}
       <View style={s.footer}>

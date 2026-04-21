@@ -35,6 +35,12 @@ export interface Order {
   deliveryProofUrl?: string;
   trackingNumber?: string;
   merchantApprovedRefund?: boolean;
+  cancelReason?: string;
+  cancelRequestedAt?: string;
+  merchantApprovedCancel?: boolean;
+  disputedAt?: string;
+  disputeReason?: string;
+  disputeRaisedBy?: 'buyer' | 'seller' | string;
   shippingCity?: string;
   shippingState?: string;
   shippingCountry?: string;
@@ -343,6 +349,157 @@ export async function requestRefund(orderId: string): Promise<ApiResponse<any>> 
   } catch (error: any) {
     console.error('Request refund error:', error);
     return { success: false, message: error.message || 'Failed to request refund' };
+  }
+}
+
+// Cancel an order. Buyer may cancel while pending_payment. Seller may cancel
+// while pending_payment (DB transition) or while escrowed (returns an unsigned
+// on-chain cancelTx that must be signed and broadcast by the seller).
+export async function cancelOrder(
+  orderId: string
+): Promise<ApiResponse<{ cancelTx?: UnsignedTx; status?: string; orderId?: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/cancel`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Cancel order error:', error);
+    return { success: false, message: error.message || 'Failed to cancel order' };
+  }
+}
+
+// Buyer requests cancellation of an escrowed order. Seller must approve or reject.
+export async function requestCancelOrder(
+  orderId: string,
+  reason: string
+): Promise<ApiResponse<{ orderId: string; status: string; cancelRequestedAt: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/request-cancel`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Request cancel error:', error);
+    return { success: false, message: error.message || 'Failed to request cancel' };
+  }
+}
+
+// Seller approves the buyer's cancel request; returns an unsigned on-chain cancel tx.
+export async function approveCancelOrder(
+  orderId: string
+): Promise<ApiResponse<{ cancelTx: UnsignedTx; orderId: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/approve-cancel`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Approve cancel error:', error);
+    return { success: false, message: error.message || 'Failed to approve cancel' };
+  }
+}
+
+// Seller submits the broadcast cancel tx hash; completes the cancel.
+export async function submitCancelOrder(
+  orderId: string,
+  txHash: string
+): Promise<ApiResponse<{ orderId: string; status: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/submit-cancel`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ txHash }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Submit cancel error:', error);
+    return { success: false, message: error.message || 'Failed to submit cancel' };
+  }
+}
+
+// Seller rejects the buyer's cancel request; order returns to escrowed.
+export async function rejectCancelOrder(
+  orderId: string,
+  notes?: string
+): Promise<ApiResponse<{ orderId: string; status: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/reject-cancel`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ notes: notes || '' }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Reject cancel error:', error);
+    return { success: false, message: error.message || 'Failed to reject cancel' };
+  }
+}
+
+// Either party escalates the order to admin for resolution.
+export async function raiseDispute(
+  orderId: string,
+  reason: string
+): Promise<ApiResponse<{ orderId: string; disputedAt: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/dispute`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Raise dispute error:', error);
+    return { success: false, message: error.message || 'Failed to raise dispute' };
+  }
+}
+
+// Admin-only: list disputed orders.
+export async function getDisputedOrders(
+  page: number = 1,
+  limit: number = 20
+): Promise<ApiResponse<{ orders: Order[]; pagination: any }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const qp = new URLSearchParams({ page: String(page), limit: String(limit) });
+    const response = await fetch(`${API_BASE_URL}/admin/orders/disputed?${qp.toString()}`, {
+      method: 'GET',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Get disputed orders error:', error);
+    return { success: false, message: error.message || 'Failed to fetch disputed orders' };
+  }
+}
+
+// Admin-only: resolve a dispute / cancel_requested / refund_requested order.
+// Returns an unsigned resolve tx the admin must sign and broadcast.
+export async function adminResolveDispute(
+  orderId: string,
+  refundBuyer: boolean
+): Promise<ApiResponse<{ resolveTx: UnsignedTx; refundBuyer: boolean }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/admin/orders/${orderId}/resolve`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ refundBuyer }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Admin resolve dispute error:', error);
+    return { success: false, message: error.message || 'Failed to resolve dispute' };
   }
 }
 

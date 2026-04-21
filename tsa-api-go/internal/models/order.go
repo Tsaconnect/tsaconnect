@@ -29,6 +29,12 @@ type Order struct {
 	DeliveryProofURL string     `json:"deliveryProofUrl,omitempty"`
 	TrackingNumber   string     `json:"trackingNumber,omitempty"`
 	MerchantApprovedRefund bool `gorm:"default:false" json:"merchantApprovedRefund"`
+	CancelReason           string     `json:"cancelReason,omitempty"`
+	CancelRequestedAt      *time.Time `json:"cancelRequestedAt,omitempty"`
+	MerchantApprovedCancel bool       `gorm:"default:false" json:"merchantApprovedCancel"`
+	DisputedAt             *time.Time `json:"disputedAt,omitempty"`
+	DisputeReason          string     `json:"disputeReason,omitempty"`
+	DisputeRaisedBy        string     `json:"disputeRaisedBy,omitempty"`
 	Status           string     `gorm:"not null;default:'pending_payment';index" json:"status"`
 	BuyerConfirmedAt *time.Time `json:"buyerConfirmedAt,omitempty"`
 	SellerShippedAt  *time.Time `json:"sellerShippedAt,omitempty"`
@@ -51,6 +57,7 @@ const (
 	OrderStatusDelivered       = "delivered"
 	OrderStatusCompleted       = "completed"
 	OrderStatusRefundRequested = "refund_requested"
+	OrderStatusCancelRequested = "cancel_requested"
 	OrderStatusRefunded        = "refunded"
 	OrderStatusCancelled       = "cancelled"
 )
@@ -61,7 +68,7 @@ func ValidNextStatuses(current string) []string {
 	case OrderStatusPendingPayment:
 		return []string{OrderStatusEscrowed, OrderStatusCancelled}
 	case OrderStatusEscrowed:
-		return []string{OrderStatusShipped, OrderStatusDelivered, OrderStatusRefunded, OrderStatusCancelled}
+		return []string{OrderStatusShipped, OrderStatusDelivered, OrderStatusRefunded, OrderStatusCancelled, OrderStatusCancelRequested}
 	case OrderStatusShipped:
 		return []string{OrderStatusDelivered, OrderStatusRefundRequested, OrderStatusRefunded}
 	case OrderStatusDelivered:
@@ -69,6 +76,9 @@ func ValidNextStatuses(current string) []string {
 	case OrderStatusRefundRequested:
 		// Admin can refund; merchant rejection returns to delivered; admin can also mark completed.
 		return []string{OrderStatusRefunded, OrderStatusDelivered, OrderStatusCompleted}
+	case OrderStatusCancelRequested:
+		// Seller approval cancels the order; rejection returns to escrowed; admin can also refund.
+		return []string{OrderStatusCancelled, OrderStatusEscrowed, OrderStatusRefunded}
 	case OrderStatusCompleted:
 		return []string{}
 	case OrderStatusRefunded:

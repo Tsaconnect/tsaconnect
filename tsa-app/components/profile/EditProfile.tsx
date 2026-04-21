@@ -16,11 +16,9 @@ import { useRouter } from 'expo-router';
 import { COLORS } from '../../constants';
 import PhoneInput from 'react-native-international-phone-number';
 import { Ionicons } from '@expo/vector-icons';
-import axios from 'axios';
-import { baseUrl } from '../../constants/api/apiClient';
 import { useAuth } from '../../AuthContext/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
-import { generateFileName } from '../../constants/api/filename';
+import apiService from '../services/api';
 
 const COUNTRY_TO_CCA2: Record<string, string> = {
   'Nigeria': 'NG',
@@ -84,45 +82,51 @@ const EditProfileScreen = ({ user }) => {
     }
 
     setSaving(true);
-    const formData = new FormData();
-
-    if (imageUri) {
-      // @ts-ignore
-      formData.append('profilePicture', {
-        uri: imageUri,
-        type: 'image/jpeg',
-        name: `image_${generateFileName()}.jpg`,
-      });
-    }
-
-    formData.append('name', name.trim());
-    formData.append('username', username.trim());
-    formData.append('address', address.trim());
-    formData.append(
-      'phoneNumber',
-      selectedCountry
-        ? selectedCountry.callingCode.replace(/\s+/g, '') + phoneNumber.replace(/\s+/g, '')
-        : phoneNumber,
-    );
 
     try {
-      await axios.patch(
-        `${baseUrl}/users/${user.id}`,
-        formData,
-        {
-          headers: {
-            Authorization: `${token}`,
-            'Content-Type': 'multipart/form-data',
-          },
-        },
-      );
+      if (token) {
+        // AuthContext stores the token with the "Bearer " prefix baked in, but
+        // apiService.getHeaders() re-adds "Bearer " on every request. Strip it here
+        // so we don't end up sending "Authorization: Bearer Bearer <jwt>".
+        const rawJwt = token.replace(/^Bearer\s+/i, '');
+        apiService.setToken(rawJwt);
+      }
+
+      let profilePicture: { url: string; publicId?: string } | undefined;
+      if (imageUri) {
+        const upload = await apiService.uploadImage(imageUri, 'profile');
+        if (!upload.success || !upload.data?.url) {
+          Alert.alert('Error', upload.message || 'Failed to upload profile picture');
+          setSaving(false);
+          return;
+        }
+        profilePicture = { url: upload.data.url, publicId: upload.data.publicId };
+      }
+
+      const payload: Parameters<typeof apiService.updateProfile>[0] = {
+        name: name.trim(),
+        username: username.trim(),
+        address: address.trim(),
+        phoneNumber: selectedCountry
+          ? selectedCountry.callingCode.replace(/\s+/g, '') +
+            phoneNumber.replace(/\s+/g, '')
+          : phoneNumber,
+      };
+      if (profilePicture) {
+        payload.profilePicture = profilePicture;
+      }
+
+      const result = await apiService.updateProfile(payload);
+
+      if (!result.success) {
+        Alert.alert('Error', result.message || 'Failed to update profile');
+        return;
+      }
+
       Alert.alert('Success', 'Profile updated successfully');
       router.push('/profile');
     } catch (error: any) {
-      Alert.alert(
-        'Error',
-        error?.response?.data?.message || error.message || 'Failed to update profile',
-      );
+      Alert.alert('Error', error?.message || 'Failed to update profile');
     } finally {
       setSaving(false);
     }
