@@ -138,3 +138,22 @@ func (u *User) SetProfilePhoto(pp *ProfilePhoto) {
 	data, _ := json.Marshal(pp)
 	u.ProfilePhoto = data
 }
+
+// MarshalJSON ensures every user response includes a flat `profilePicture`
+// URL derived from the ProfilePhoto JSONB, so clients that read
+// `user.profilePicture` as a plain string work alongside the structured
+// `profilePhoto` object. Omits the field when no photo is set.
+func (u User) MarshalJSON() ([]byte, error) {
+	type userAlias User
+	pic := ""
+	if pp := u.GetProfilePhoto(); pp != nil {
+		pic = pp.URL
+	}
+	return json.Marshal(&struct {
+		userAlias
+		ProfilePicture string `json:"profilePicture,omitempty"`
+	}{
+		userAlias:      userAlias(u),
+		ProfilePicture: pic,
+	})
+}

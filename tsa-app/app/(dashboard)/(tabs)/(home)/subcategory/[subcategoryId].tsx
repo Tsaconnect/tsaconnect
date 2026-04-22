@@ -8,6 +8,7 @@ import {
   Platform,
   Text,
   Pressable,
+  Image,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SearchBar } from '@/components/common/SearchBar';
@@ -123,13 +124,21 @@ export default function SubcategorySellersScreen() {
 
       {/* Category Info */}
       <View style={styles.categoryHeader}>
-        <View style={styles.categoryIconContainer}>
-          <Icon
-            name={categoryInfo?.icon ?? 'category'}
-            size={32}
-            color="#D4AF37"
+        {categoryInfo?.image ? (
+          <Image
+            source={{ uri: categoryInfo.image }}
+            style={styles.categoryImage}
+            resizeMode="cover"
           />
-        </View>
+        ) : (
+          <View style={styles.categoryIconContainer}>
+            <Icon
+              name={categoryInfo?.icon ?? 'category'}
+              size={32}
+              color="#D4AF37"
+            />
+          </View>
+        )}
 
         <View style={styles.categoryInfo}>
           <Text style={styles.categoryTitle}>
@@ -382,6 +391,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 16,
+  },
+  categoryImage: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    marginRight: 16,
+    backgroundColor: '#F5F5F5',
   },
   categoryInfo: { flex: 1 },
   categoryTitle: {
