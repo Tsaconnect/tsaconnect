@@ -89,9 +89,35 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 		return
 	}
 
+	// Reload the current user so we can compare against live DB state
+	// (the token-derived `user` may be slightly stale).
+	var dbUser models.User
+	if err := config.DB.First(&dbUser, "id = ?", user.ID).Error; err != nil {
+		log.Printf("UpdateProfile load-user error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to load current profile",
+		})
+		return
+	}
+
 	updates := map[string]interface{}{}
 	if req.Name != "" {
-		updates["name"] = req.Name
+		trimmedName := strings.TrimSpace(req.Name)
+		if trimmedName != dbUser.Name {
+			// Once a user has passed identity verification, their legal name is
+			// locked. Letting them change it silently would either break the
+			// link to their KYC record or kick them back into re-verification,
+			// neither of which is acceptable UX. Require support to intervene.
+			if dbUser.VerificationStatus == models.VerificationStatusVerified {
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": "Your name is locked because your identity has been verified. Contact support to update your legal name.",
+				})
+				return
+			}
+			updates["name"] = trimmedName
+		}
 	}
 	if req.Username != "" {
 		// Apply the same normalization and rules as signup (auth_handler.go):
@@ -104,7 +130,7 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 			})
 			return
 		}
-		if usernameLower != user.Username {
+		if usernameLower != dbUser.Username {
 			var existing models.User
 			err := config.DB.Where("username = ? AND id <> ?", usernameLower, user.ID).First(&existing).Error
 			if err == nil {
@@ -125,7 +151,26 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 		}
 	}
 	if req.PhoneNumber != "" {
-		updates["phone_number"] = req.PhoneNumber
+		phone := strings.TrimSpace(req.PhoneNumber)
+		if phone != dbUser.PhoneNumber {
+			var existing models.User
+			err := config.DB.Where("phone_number = ? AND id <> ?", phone, user.ID).First(&existing).Error
+			if err == nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"message": "Phone number is already registered to another account",
+				})
+				return
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("UpdateProfile phone check error: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": "Failed to update profile",
+				})
+				return
+			}
+			updates["phone_number"] = phone
+		}
 	}
 	if req.Address != "" {
 		updates["address"] = req.Address
@@ -156,17 +201,7 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 
 	updates["updated_at"] = time.Now()
 
-	var updatedUser models.User
-	if err := config.DB.First(&updatedUser, "id = ?", user.ID).Error; err != nil {
-		log.Printf("UpdateProfile error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to update profile",
-		})
-		return
-	}
-
-	if err := config.DB.Model(&updatedUser).Updates(updates).Error; err != nil {
+	if err := config.DB.Model(&dbUser).Updates(updates).Error; err != nil {
 		log.Printf("UpdateProfile error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -178,7 +213,7 @@ func (h *Handlers) UpdateProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Profile updated successfully",
-		"data":    updatedUser,
+		"data":    dbUser,
 	})
 }
 

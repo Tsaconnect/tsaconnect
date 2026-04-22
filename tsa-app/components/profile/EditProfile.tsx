@@ -35,7 +35,7 @@ const COUNTRY_TO_CCA2: Record<string, string> = {
 
 //@ts-ignore
 const EditProfileScreen = ({ user }) => {
-  const { token } = useAuth();
+  const { token, setCurrentUser } = useAuth();
   const router = useRouter();
   const defaultCca2 = COUNTRY_TO_CCA2[user.country] || 'NG';
 
@@ -44,7 +44,9 @@ const EditProfileScreen = ({ user }) => {
   const [phoneNumber, setPhoneNumber] = useState(user.phoneNumber || '');
   const [address, setAddress] = useState(user.address || '');
   const [selectedCountry, setSelectedCountry] = useState<any>(null);
-  const [profileImage, setProfileImage] = useState(user.profilePicture);
+  const [profileImage, setProfileImage] = useState(
+    user.profilePicture || user.profilePhoto?.url || user.profilePhoto
+  );
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -121,6 +123,12 @@ const EditProfileScreen = ({ user }) => {
       if (!result.success) {
         Alert.alert('Error', result.message || 'Failed to update profile');
         return;
+      }
+
+      // Refresh AuthContext so the new profile picture (and any other field)
+      // shows up immediately in the rest of the app.
+      if (result.data) {
+        setCurrentUser(result.data);
       }
 
       Alert.alert('Success', 'Profile updated successfully');
