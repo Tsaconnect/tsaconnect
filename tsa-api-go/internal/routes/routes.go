@@ -208,6 +208,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminOrderGroup.GET("/disputed", ch.GetDisputedOrders)
 		adminOrderGroup.POST("/:id/resolve", ch.AdminResolveDispute)
 		adminOrderGroup.POST("/:id/submit-resolve", ch.SubmitAdminResolve)
+		adminOrderGroup.POST("/:id/dismiss-request", ch.DismissRequest)
 	}
 
 	// Cart routes
