@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   RefreshControl,
   Dimensions,
+  Image,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import TradeAndEarnScreen from './TradeAndEarnScreen';
@@ -30,6 +31,7 @@ interface CategoryItem {
   title: string;
   description?: string;
   icon: string;
+  image?: string;
   color: string;
   productCount: number;
   children: CategoryItem[];
@@ -71,6 +73,7 @@ const MarketplaceScreen: React.FC = () => {
       title: cat.title,
       description: cat.description || '',
       icon: ICON_MAP[cat.title] || 'category',
+      image: typeof cat.image === 'string' && cat.image.trim() !== '' ? cat.image : undefined,
       color: cat.color || '#666',
       productCount: cat.productCount || 0,
       children: cat.children
@@ -79,6 +82,7 @@ const MarketplaceScreen: React.FC = () => {
             title: child.title,
             description: child.description || '',
             icon: ICON_MAP[child.title] || 'label',
+            image: typeof child.image === 'string' && child.image.trim() !== '' ? child.image : undefined,
             color: child.color || '#666',
             productCount: child.productCount || 0,
             children: [],
@@ -251,9 +255,17 @@ const MarketplaceScreen: React.FC = () => {
                     onPress={() => handleCategoryPress(cat)}
                     activeOpacity={0.7}
                   >
-                    <View style={[styles.categoryIcon, { backgroundColor: `${cat.color}15` }]}>
-                      <Icon name={cat.icon as any} size={26} color={cat.color === '#666666' ? '#D4AF37' : cat.color} />
-                    </View>
+                    {cat.image ? (
+                      <Image
+                        source={{ uri: cat.image }}
+                        style={styles.categoryImage}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View style={[styles.categoryIcon, { backgroundColor: `${cat.color}15` }]}>
+                        <Icon name={cat.icon as any} size={26} color={cat.color === '#666666' ? '#D4AF37' : cat.color} />
+                      </View>
+                    )}
                     <Text style={styles.categoryTitle} numberOfLines={2}>{cat.title}</Text>
                     {cat.productCount > 0 && (
                       <Text style={styles.categoryCount}>
@@ -396,6 +408,11 @@ const styles = StyleSheet.create({
     width: 48, height: 48, borderRadius: 14,
     justifyContent: 'center', alignItems: 'center',
     marginBottom: 12,
+  },
+  categoryImage: {
+    width: 48, height: 48, borderRadius: 14,
+    marginBottom: 12,
+    backgroundColor: '#F5F5F5',
   },
   categoryTitle: {
     fontSize: 14, fontWeight: '700', color: '#1A1A1A',
