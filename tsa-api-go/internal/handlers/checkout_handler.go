@@ -1912,6 +1912,147 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 	})
 }
 
+// adminDismissBody is the request for DismissRequest. `notes` is optional.
+type adminDismissBody struct {
+	Notes string `json:"notes"`
+}
+
+// DismissRequest handles POST /api/admin/orders/:id/dismiss-request.
+// Admin-only. Reverts an off-chain refund/cancel request (and/or clears a
+// raised dispute) without touching the escrow contract — use when the request
+// was raised in error (e.g., buyer changed their mind after receiving the
+// product) and both parties are OK proceeding with the normal flow.
+//
+// Reversion rules (pure DB transitions, no on-chain tx):
+//
+//	refund_requested  →  delivered (if sellerDeliveredAt set) or shipped
+//	                     (if sellerShippedAt set) or escrowed
+//	cancel_requested  →  escrowed
+//	disputed only     →  status unchanged; dispute fields cleared
+//
+// Does NOT touch stock. Does NOT fire release_tx_hash. After dismissal, the
+// normal flow resumes (buyer can confirm receipt, seller can ship, etc.).
+func (ch *CheckoutHandler) DismissRequest(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var body adminDismissBody
+	_ = c.ShouldBindJSON(&body)
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	isDisputed := order.DisputedAt != nil
+	hasRefundRequest := order.Status == models.OrderStatusRefundRequested
+	hasCancelRequest := order.Status == models.OrderStatusCancelRequested
+	if !isDisputed && !hasRefundRequest && !hasCancelRequest {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Nothing to dismiss: order has no active request or dispute")
+		return
+	}
+
+	// Determine reverted status for active requests.
+	var revertedStatus string
+	switch {
+	case hasRefundRequest:
+		switch {
+		case order.SellerDeliveredAt != nil:
+			revertedStatus = models.OrderStatusDelivered
+		case order.SellerShippedAt != nil:
+			revertedStatus = models.OrderStatusShipped
+		default:
+			revertedStatus = models.OrderStatusEscrowed
+		}
+	case hasCancelRequest:
+		revertedStatus = models.OrderStatusEscrowed
+	default:
+		// Dispute-only: leave status where it is.
+		revertedStatus = order.Status
+	}
+
+	updates := map[string]interface{}{}
+	if revertedStatus != order.Status {
+		updates["status"] = revertedStatus
+	}
+	if hasRefundRequest {
+		updates["merchant_approved_refund"] = false
+	}
+	if hasCancelRequest {
+		updates["merchant_approved_cancel"] = false
+		updates["cancel_reason"] = ""
+		updates["cancel_requested_at"] = nil
+	}
+	if isDisputed {
+		updates["disputed_at"] = nil
+		updates["dispute_reason"] = ""
+		updates["dispute_raised_by"] = ""
+	}
+	if notes := strings.TrimSpace(body.Notes); notes != "" {
+		updates["notes"] = notes
+	}
+
+	if len(updates) > 0 {
+		if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
+			log.Printf("DismissRequest update error for order %s: %v", order.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to dismiss request")
+			return
+		}
+	}
+
+	shortID := order.ID.String()[:8]
+	var summary string
+	switch {
+	case hasRefundRequest:
+		summary = fmt.Sprintf("Admin dismissed the refund request on order #%s. You can proceed with the normal flow.", shortID)
+	case hasCancelRequest:
+		summary = fmt.Sprintf("Admin dismissed the cancel request on order #%s. The order is active again.", shortID)
+	default:
+		summary = fmt.Sprintf("Admin cleared the dispute on order #%s. You can proceed with the normal flow.", shortID)
+	}
+
+	// Notify both parties so whoever raised the request/dispute knows it was dismissed.
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputeResolved,
+		UserID:  order.BuyerID,
+		Title:   "Request Dismissed",
+		Message: summary,
+		Data: map[string]interface{}{
+			"orderId":  order.ID.String(),
+			"status":   revertedStatus,
+			"dismissedBy": "admin",
+		},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type:    events.OrderDisputeResolved,
+		UserID:  order.SellerID,
+		Title:   "Request Dismissed",
+		Message: summary,
+		Data: map[string]interface{}{
+			"orderId":  order.ID.String(),
+			"status":   revertedStatus,
+			"dismissedBy": "admin",
+		},
+	})
+
+	_ = user
+
+	utils.SuccessResponse(c, http.StatusOK, "Request dismissed", gin.H{
+		"orderId": order.ID,
+		"status":  revertedStatus,
+	})
+}
+
 // --- Cancel-request workflow ---
 
 type requestCancelBody struct {
