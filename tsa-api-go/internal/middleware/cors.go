@@ -2,17 +2,26 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
 // CORS returns a Gin middleware that handles Cross-Origin Resource Sharing.
-// It allows requests from the configured FrontendURL and AdminURL with credentials.
+// It allows requests from the configured FrontendURL, AdminURL, and LandingURL
+// with credentials. Each env value may contain a comma-separated list of
+// origins, and trailing slashes are stripped to match the browser's Origin
+// header (which never includes a path).
 func CORS(cfg *config.Config) gin.HandlerFunc {
-	allowedOrigins := map[string]bool{
-		cfg.FrontendURL: true,
-		cfg.AdminURL:    true,
+	allowedOrigins := map[string]bool{}
+	for _, raw := range []string{cfg.FrontendURL, cfg.AdminURL, cfg.LandingURL} {
+		for _, origin := range strings.Split(raw, ",") {
+			origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+			if origin != "" {
+				allowedOrigins[origin] = true
+			}
+		}
 	}
 
 	return func(c *gin.Context) {

@@ -12,6 +12,7 @@ import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "@/components/services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
+import CurrencySelector from "../../components/currency/CurrencySelector";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
@@ -170,6 +171,10 @@ const SettingsScreen = () => {
 
   const sections: SettingsSection[] = [
     {
+      title: "Currency",
+      items: [],
+    },
+    {
       title: "Wallet",
       items: [
         {
@@ -296,39 +301,45 @@ const SettingsScreen = () => {
         <View key={section.title} style={styles.section}>
           <Text style={styles.sectionTitle}>{section.title}</Text>
           <View style={styles.sectionCard}>
-            {section.items.map((item, index) => (
-              <TouchableOpacity
-                key={item.label}
-                style={[
-                  styles.row,
-                  index < section.items.length - 1 && styles.rowBorder,
-                ]}
-                onPress={item.onPress}
-                activeOpacity={0.6}
-              >
-                <View
+            {section.title === "Currency" ? (
+              <View style={{ padding: 4 }}>
+                <CurrencySelector variant="card" showRates />
+              </View>
+            ) : (
+              section.items.map((item, index) => (
+                <TouchableOpacity
+                  key={item.label}
                   style={[
-                    styles.iconContainer,
-                    item.danger && styles.iconContainerDanger,
+                    styles.row,
+                    index < section.items.length - 1 && styles.rowBorder,
                   ]}
+                  onPress={item.onPress}
+                  activeOpacity={0.6}
                 >
-                  <Icon
-                    name={item.icon}
-                    size={22}
-                    color={item.danger ? "#EF4444" : "#9D6B38"}
-                  />
-                </View>
-                <View style={styles.textContainer}>
-                  <Text
-                    style={[styles.label, item.danger && styles.labelDanger]}
+                  <View
+                    style={[
+                      styles.iconContainer,
+                      item.danger && styles.iconContainerDanger,
+                    ]}
                   >
-                    {item.label}
-                  </Text>
-                  <Text style={styles.description}>{item.description}</Text>
-                </View>
-                <Icon name="chevron-right" size={22} color="#C0C0C0" />
-              </TouchableOpacity>
-            ))}
+                    <Icon
+                      name={item.icon}
+                      size={22}
+                      color={item.danger ? "#EF4444" : "#9D6B38"}
+                    />
+                  </View>
+                  <View style={styles.textContainer}>
+                    <Text
+                      style={[styles.label, item.danger && styles.labelDanger]}
+                    >
+                      {item.label}
+                    </Text>
+                    <Text style={styles.description}>{item.description}</Text>
+                  </View>
+                  <Icon name="chevron-right" size={22} color="#C0C0C0" />
+                </TouchableOpacity>
+              ))
+            )}
           </View>
         </View>
       ))}

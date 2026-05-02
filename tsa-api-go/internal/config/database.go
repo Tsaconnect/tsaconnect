@@ -42,7 +42,9 @@ func AutoMigrate() error {
 		&models.Notification{},
 		&models.EmailVerification{},
 		&models.PasswordReset{},
+		&models.PrivateSaleSubmission{},
 		&models.TPEarning{},
+		&models.CashbackEarning{},
 		&models.RefreshToken{},
 	); err != nil {
 		return err

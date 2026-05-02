@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
@@ -24,6 +25,7 @@ type Config struct {
 	JWTSecret           string
 	FrontendURL         string
 	AdminURL            string
+	LandingURL          string
 	Port                string
 	Env                 string
 	CloudinaryCloudName string
@@ -57,6 +59,10 @@ type Config struct {
 	PersonaBaseURL       string
 	PersonaWebhookSecret string
 
+	// Open Exchange Rates configuration
+	OpenExchangeRatesAppID string
+	SupportedCurrencies     []string
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -70,7 +76,8 @@ func Load() *Config {
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
-		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173"),
+		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
+		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 getEnv("ENV", "development"),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),
@@ -104,6 +111,11 @@ func Load() *Config {
 	cfg.PersonaTemplateID = os.Getenv("PERSONA_TEMPLATE_ID")
 	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
 	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
+
+	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
+	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")
+	currenciesStr := getEnv("SUPPORTED_CURRENCIES", "USD,NGN,GHS,KES,ZAR,UGX,TZS,RWF,XOF,XAF")
+	cfg.SupportedCurrencies = splitAndTrim(currenciesStr, ",")
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from https://docs.soniclabs.com/sonic/build-on-sonic/contract-addresses
@@ -166,7 +178,7 @@ func Load() *Config {
 func getEnvInt64(key string, fallback int64) int64 {
 	if value, exists := os.LookupEnv(key); exists {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-			return parsed
+		return parsed
 		}
 	}
 	return fallback
@@ -177,4 +189,15 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func splitAndTrim(s, sep string) []string {
+	var result []string
+	for _, part := range strings.Split(s, sep) {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+		result = append(result, trimmed)
+		}
+	}
+	return result
 }

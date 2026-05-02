@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
+contract ProductEscrow is
+    Initializable,
+    UUPSUpgradeable,
+    OwnableUpgradeable,
+    ReentrancyGuard,
+    PausableUpgradeable
+{
     using SafeERC20 for IERC20;
 
     struct Order {
@@ -51,6 +59,10 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
 
     mapping(bytes32 => Order) public orders;
 
+    /// @dev Addresses authorized to call adminResolve. Owner is always implicitly
+    ///      admin (see isAdmin) and does not need to be added to this mapping.
+    mapping(address => bool) public admins;
+
     event OrderCreated(
         bytes32 indexed orderId,
         address indexed buyer,
@@ -78,10 +90,56 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
     event TokenAcceptanceUpdated(address indexed token, bool accepted);
     event McgpTokenUpdated(address indexed oldToken, address indexed newToken);
     event ExcessSwept(address indexed token, uint256 amount);
+    event AdminAdded(address indexed account);
+    event AdminRemoved(address indexed account);
 
-    constructor(address initialOwner) Ownable(initialOwner) {}
+    modifier onlyAdmin() {
+        require(isAdmin(msg.sender), "Not admin");
+        _;
+    }
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
+        address initialOwner,
+        address[] calldata initialAdmins
+    ) external initializer {
+        __Ownable_init(initialOwner);
+        __Pausable_init();
+
+        for (uint256 i = 0; i < initialAdmins.length; i++) {
+            address a = initialAdmins[i];
+            require(a != address(0), "Zero address");
+            require(!admins[a], "Already admin");
+            admins[a] = true;
+            emit AdminAdded(a);
+        }
+    }
+
+    /// @dev Restricts upgrade authority to owner. Admin role does not grant upgrade rights.
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 
     // --- Admin functions ---
+
+    function addAdmin(address account) external onlyOwner {
+        require(account != address(0), "Zero address");
+        require(!admins[account], "Already admin");
+        admins[account] = true;
+        emit AdminAdded(account);
+    }
+
+    function removeAdmin(address account) external onlyOwner {
+        require(admins[account], "Not admin");
+        admins[account] = false;
+        emit AdminRemoved(account);
+    }
+
+    function isAdmin(address account) public view returns (bool) {
+        return admins[account] || account == owner();
+    }
 
     function setMcgpToken(address _mcgpToken) external onlyOwner {
         require(_mcgpToken != address(0), "Invalid MCGP address");
@@ -255,7 +313,7 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
     }
 
     /// @notice Admin resolves a disputed order (buyer requested refund after seller delivered)
-    function adminResolve(bytes32 orderId, bool refundBuyer) external onlyOwner nonReentrant {
+    function adminResolve(bytes32 orderId, bool refundBuyer) external onlyAdmin nonReentrant {
         Order storage order = orders[orderId];
         require(order.buyer != address(0), "Order does not exist");
         require(!order.resolved, "Order already resolved");
@@ -329,4 +387,9 @@ contract ProductEscrow is Ownable, ReentrancyGuard, Pausable {
 
         token.safeTransfer(order.seller, sellerAmount);
     }
+
+    /// @dev Reserved slots for future state variables. When adding a new state
+    ///      variable, place it above this gap and shrink the gap by the same
+    ///      number of slots. 48 slots = ~1 full "page".
+    uint256[47] private __gap;
 }

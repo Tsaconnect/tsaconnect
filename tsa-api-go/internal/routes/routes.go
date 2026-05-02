@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, wsHub *ws.Hub) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -68,6 +68,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.GET("/referrals", h.GetReferralsWithTP)
 		userGroup.GET("/tp-balance", h.GetTPBalance)
 		userGroup.GET("/tp-earnings", h.GetTPEarnings)
+		userGroup.GET("/cashback-balance", h.GetCashbackBalance)
+		userGroup.GET("/cashback-earnings", h.GetCashbackEarnings)
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
@@ -288,6 +290,29 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		notifGroup.GET("/unread-count", h.GetUnreadCount)
 		notifGroup.GET("/preferences", h.GetNotificationPreferences)
 		notifGroup.PATCH("/preferences", h.UpdateNotificationPreferences)
+	}
+
+	// Private sale routes
+	if psh := psh; psh != nil {
+		// Public endpoint - no auth required (called from landing page)
+		api.POST("/private-sale/submit", psh.SubmitPrivateSale)
+
+		// Admin endpoints
+		adminPrivateSale := api.Group("/admin/private-sale")
+		adminPrivateSale.Use(adminAuth)
+		{
+			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
+			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// Exchange rate routes (public — no auth required)
+	if eh != nil {
+		exchangeGroup := api.Group("/exchange")
+		{
+			exchangeGroup.GET("/rates", eh.GetRates)
+			exchangeGroup.POST("/convert", eh.ConvertPrice)
+		}
 	}
 
 	// WebSocket route for real-time notifications (JWT auth via query param)

@@ -16,6 +16,8 @@ import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSellerData } from '@/hooks/useSellerData';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { formatPrice as formatPriceUtil, formatPriceDual } from '@/utils/formatPrice';
 
 const { width } = Dimensions.get('window');
 const PRODUCT_WIDTH = (width - 48) / 2;
@@ -34,6 +36,9 @@ export default function SellerCatalogueScreen() {
   }>();
 
   const router = useRouter();
+  const { currency, rate } = useCurrency();
+
+  const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
 
   const {
     sellerData,
@@ -126,7 +131,7 @@ export default function SellerCatalogueScreen() {
         </Text>
         <View style={styles.priceContainer}>
           <Text style={styles.productPrice}>
-            ${item.price?.toFixed(2) || '0.00'}
+            {fmtPrice(item.price || 0)}
           </Text>
           {item.stock !== undefined && (
             <View style={styles.stockContainer}>

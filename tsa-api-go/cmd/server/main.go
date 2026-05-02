@@ -64,11 +64,19 @@ func main() {
 	sonicClient := blockchainService.ClientForChain("sonic")
 	escrowService := services.NewEscrowService(sonicClient, cfg)
 
+	verifyEscrowAdmin(escrowService)
+
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
 
 	// Initialize OTC service
 	otcService := services.NewOTCService(sonicClient, cfg)
+
+	// Initialize exchange rate service (Open Exchange Rates)
+	p2pService := services.NewP2PService(
+		cfg.OpenExchangeRatesAppID,
+		cfg.SupportedCurrencies,
+	)
 
 	// Initialize event bus and WebSocket hub
 	eventBus := events.NewBus()
@@ -79,11 +87,13 @@ func main() {
 	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService)
 
 	// Initialize handlers with dependency injection
-	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService)
+	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService, p2pService)
+	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
+	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
@@ -113,7 +123,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, wsHub)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, psh, wsHub, eh)
 
 	// Configure HTTP server
 	port := cfg.Port
@@ -152,4 +162,17 @@ func main() {
 	}
 
 	log.Println("Server exited gracefully")
+}
+
+// verifyEscrowAdmin logs the escrow contract's on-chain owner on startup so
+// operators can sanity-check that the API is pointed at the right deployment.
+// Admin role membership is verified per-request via IsAdmin — there's nothing
+// to validate statically here.
+func verifyEscrowAdmin(s *services.EscrowService) {
+	onchain, err := s.Owner()
+	if err != nil {
+		log.Printf("WARN: could not read escrow owner() on startup: %v", err)
+		return
+	}
+	log.Printf("Escrow contract owner (on-chain): %s", onchain)
 }

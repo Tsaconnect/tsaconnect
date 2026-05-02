@@ -319,6 +319,22 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		log.Printf("TP distribution failed for service contact %s: %v", payment.ID, err)
 	}
 
+	// Record cashback for caller (12.5% of fee) — matches ServiceContact CALLER_BPS
+	feeWei := h.ServiceContactService.GetFeeAmount()
+	feeUSD := weiToUSDFloat(feeWei.String(), tokenSymbol)
+	callerCashbackUSD := feeUSD * 0.125
+	if err := RecordCashbackEarning(config.DB, user.ID, provider.ID, "service_contact", payment.ID, callerCashbackUSD, req.PayFeeTxHash); err != nil {
+		log.Printf("Cashback recording failed for caller on service contact %s: %v", payment.ID, err)
+	}
+
+	// Record cashback for caller's upline (12.5% of fee) — matches ServiceContact UPLINE_BPS
+	if user.ReferredBy != nil {
+		uplineCashbackUSD := feeUSD * 0.125
+		if err := RecordCashbackEarning(config.DB, *user.ReferredBy, user.ID, "service_contact", payment.ID, uplineCashbackUSD, req.PayFeeTxHash); err != nil {
+			log.Printf("Cashback recording failed for upline on service contact %s: %v", payment.ID, err)
+		}
+	}
+
 	utils.SuccessResponse(c, http.StatusOK, "Contact fee paid successfully", gin.H{
 		"payment": payment,
 		"contact": gin.H{

@@ -1216,6 +1216,26 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 				log.Printf("Failed to mark TP distributed for order %s: %v", order.ID, err)
 			}
 		}
+
+		// Record cashback for buyer (0.5% of productAmount) — matches ProductEscrow BUYER_CASHBACK_BPS
+		if strings.ToUpper(order.Token) != "MCGP" {
+			productUSD := weiToUSDFloat(order.ProductAmount, order.Token)
+			buyerCashbackUSD := productUSD * 0.005
+			if err := RecordCashbackEarning(config.DB, order.BuyerID, order.SellerID, "checkout", order.ID, buyerCashbackUSD, order.EscrowTxHash); err != nil {
+				log.Printf("Cashback recording failed for buyer on order %s: %v", order.ID, err)
+			}
+
+			// Record cashback for buyer's upline (0.5% of productAmount) — matches ProductEscrow UPLINE_FEE_BPS
+			if order.BuyerUpline != "" && order.BuyerUpline != "0x0000000000000000000000000000000000000000" {
+				var uplineUser models.User
+				if err := config.DB.Where("wallet_address = ?", order.BuyerUpline).First(&uplineUser).Error; err == nil {
+					uplineCashbackUSD := productUSD * 0.005
+					if err := RecordCashbackEarning(config.DB, uplineUser.ID, order.BuyerID, "checkout", order.ID, uplineCashbackUSD, order.EscrowTxHash); err != nil {
+						log.Printf("Cashback recording failed for upline on order %s: %v", order.ID, err)
+					}
+				}
+			}
+		}
 	}
 
 	ch.EventBus.Publish(events.Event{
@@ -1752,9 +1772,27 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 		return
 	}
 
+	// Gate on the contract's isAdmin view. Source of truth for "can this wallet
+	// call adminResolve" is the contract itself, so no env-drift bugs possible.
+	isAdmin, err := ch.EscrowService.IsAdmin(user.WalletAddress)
+	if err != nil {
+		log.Printf("AdminResolveDispute IsAdmin check failed admin=%s: %v", user.WalletAddress, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify admin authorization")
+		return
+	}
+	if !isAdmin {
+		utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf(
+			"Connected wallet (%s) is not registered as an escrow admin",
+			user.WalletAddress,
+		))
+		return
+	}
+
 	contractOrderID := services.GenerateOrderID(order.ID)
 	resolveTxBytes, err := ch.EscrowService.PrepareAdminResolve(contractOrderID, req.RefundBuyer, user.WalletAddress)
 	if err != nil {
+		log.Printf("AdminResolveDispute PrepareAdminResolve failed order=%s admin=%s refundBuyer=%v: %v",
+			order.ID, user.WalletAddress, req.RefundBuyer, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare resolve transaction")
 		return
 	}

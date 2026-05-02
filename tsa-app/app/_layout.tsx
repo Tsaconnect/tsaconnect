@@ -6,6 +6,7 @@ import * as Updates from "expo-updates";
 import { AppProvider } from "../AuthContext/AuthContext";
 import { TokenProvider } from "../hooks/useTokens";
 import { NotificationProvider } from '../contexts/NotificationContext';
+import { CurrencyProvider } from '../contexts/CurrencyContext';
 
 const RootLayout = () => {
   useEffect(() => {
@@ -38,15 +39,17 @@ const RootLayout = () => {
     <AppProvider>
       <TokenProvider>
         <NotificationProvider>
-          <StatusBar barStyle="dark-content" backgroundColor="#fff" />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen
-              name="index"
-              options={{
-                headerShown: false,
-              }}
-            />
-          </Stack>
+          <CurrencyProvider>
+            <StatusBar barStyle="dark-content" backgroundColor="#fff" />
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen
+                name="index"
+                options={{
+                  headerShown: false,
+                }}
+              />
+            </Stack>
+          </CurrencyProvider>
         </NotificationProvider>
       </TokenProvider>
     </AppProvider>

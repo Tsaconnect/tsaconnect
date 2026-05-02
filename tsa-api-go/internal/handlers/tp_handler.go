@@ -207,3 +207,96 @@ func (h *Handlers) GetReferralsWithTP(c *gin.Context) {
 		},
 	})
 }
+
+// GetCashbackBalance handles GET /api/users/cashback-balance (auth required).
+func (h *Handlers) GetCashbackBalance(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"cashbackBalance": user.CashbackBalance,
+		},
+	})
+}
+
+// GetCashbackEarnings handles GET /api/users/cashback-earnings?page=1&limit=20 (auth required).
+func (h *Handlers) GetCashbackEarnings(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	var total int64
+	config.DB.Model(&models.CashbackEarning{}).Where("user_id = ?", user.ID).Count(&total)
+
+	type earningWithName struct {
+		models.CashbackEarning
+		SourceUserName string `json:"sourceUserName"`
+	}
+
+	var earnings []earningWithName
+	config.DB.Model(&models.CashbackEarning{}).
+		Select("cashback_earnings.*, users.name as source_user_name").
+		Joins("LEFT JOIN users ON users.id = cashback_earnings.source_user_id").
+		Where("cashback_earnings.user_id = ?", user.ID).
+		Order("cashback_earnings.created_at DESC").
+		Offset(offset).Limit(limit).
+		Find(&earnings)
+
+	if earnings == nil {
+		earnings = []earningWithName{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"earnings": earnings,
+			"total":    total,
+			"page":     page,
+			"limit":    limit,
+		},
+	})
+}
+
+// RecordCashbackEarning creates a cashback earning record and updates user balance.
+// Called by handlers when on-chain cashback is paid.
+func RecordCashbackEarning(db *gorm.DB, userID uuid.UUID, sourceUserID uuid.UUID, sourceType string, sourceID uuid.UUID, amountUSD float64, txHash string) error {
+	if amountUSD <= 0 {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		earning := models.CashbackEarning{
+			ID:           uuid.New(),
+			UserID:       userID,
+			SourceUserID: sourceUserID,
+			SourceType:   sourceType,
+			SourceID:     sourceID,
+			AmountUSD:    amountUSD,
+			TxHash:       txHash,
+		}
+		if err := tx.Create(&earning).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", userID).
+			Update("cashback_balance", gorm.Expr("cashback_balance + ?", amountUSD)).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}

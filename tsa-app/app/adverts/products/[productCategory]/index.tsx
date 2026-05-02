@@ -1,6 +1,8 @@
 import api from '@/components/services/api';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState, useCallback } from 'react';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
     View,
     Text,
@@ -160,15 +162,11 @@ const CategoryProductsScreen = () => {
         fetchProducts(1);
     };
 
-    // Format price
-    const formatPrice = (price: number) => {
-        return new Intl.NumberFormat('en-NG', {
-            style: 'currency',
-            currency: 'NGN',
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0,
-        }).format(price);
-    };
+    const { currency, rate } = useCurrency();
+
+    // Format price in selected currency
+    const formatPrice = (usdPrice: number) =>
+        formatPriceUtil(usdPrice, { currency, rate, minDecimals: 0, maxDecimals: 0 });
 
     // Calculate discount percentage
     const calculateDiscount = (price: number, discountedPrice?: number) => {
