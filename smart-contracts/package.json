@@ -10,10 +10,12 @@
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
     "hardhat": "^2.28.3"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.4.0",
+    "@openzeppelin/contracts-upgradeable": "^5.6.1",
     "dotenv": "^16.4.5",
     "solc": "^0.8.20"
   }

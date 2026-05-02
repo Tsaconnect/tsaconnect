@@ -661,6 +661,42 @@ class APIService {
     }
   }
 
+  // Get cashback balance
+  async getCashbackBalance(): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/cashback-balance`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get cashback balance error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch cashback balance.',
+      };
+    }
+  }
+
+  // Get cashback earnings history (paginated)
+  async getCashbackEarnings(page: number = 1, limit: number = 20): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/cashback-earnings?page=${page}&limit=${limit}`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get cashback earnings error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch cashback earnings.',
+      };
+    }
+  }
+
   // ==================== UTILITY FUNCTIONS ====================
 
   // Check if user is authenticated

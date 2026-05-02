@@ -18,6 +18,8 @@ import api, { Product } from '@/components/services/api';
 import { cartService } from '@/components/services/cart';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const IMAGE_HEIGHT = SCREEN_WIDTH * 0.85;
@@ -36,6 +38,10 @@ export default function ProductDetailsScreen() {
   const [quantity, setQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [cartCount, setCartCount] = useState(0);
+  const { currency, rate } = useCurrency();
+
+  const formatPrice = (price: number) =>
+    formatPriceUtil(price, { currency, rate });
 
   const loadCartCount = useCallback(async () => {
     if (!token) return;
@@ -163,8 +169,7 @@ export default function ProductDetailsScreen() {
     );
   };
 
-  const formatPrice = (price: number) =>
-    `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  // formatPrice is now defined via useCurrency above
 
   const getCategoryName = () => {
     if (!product?.category) return product?.categoryName || null;

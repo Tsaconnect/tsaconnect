@@ -43,6 +43,7 @@ type User struct {
 	MuteNotifications          bool           `gorm:"default:false" json:"muteNotifications"`
 	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
 	TPBalance                  float64    `gorm:"default:0" json:"tpBalance"`
+	CashbackBalance            float64    `gorm:"default:0" json:"cashbackBalance"`
 	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
 	CreatedAt                  time.Time      `json:"createdAt"`

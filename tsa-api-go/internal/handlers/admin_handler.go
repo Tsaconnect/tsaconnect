@@ -33,6 +33,9 @@ func (h *Handlers) GetAdminStats(c *gin.Context) {
 	var revenue float64
 	config.DB.Model(&models.Order{}).Where("status = ?", models.OrderStatusCompleted).Select("COALESCE(SUM(total), 0)").Scan(&revenue)
 
+	var pendingPrivateSales int64
+	config.DB.Model(&models.PrivateSaleSubmission{}).Where("status = ?", "pending").Count(&pendingPrivateSales)
+
 	utils.SuccessResponse(c, http.StatusOK, "Admin stats fetched", gin.H{
 		"totalUsers":           totalUsers,
 		"totalProducts":        totalProducts,
@@ -41,5 +44,6 @@ func (h *Handlers) GetAdminStats(c *gin.Context) {
 		"pendingAdverts":       pendingAdverts,
 		"totalOrders":          totalOrders,
 		"revenue":              revenue,
+		"pendingPrivateSales":  pendingPrivateSales,
 	})
 }

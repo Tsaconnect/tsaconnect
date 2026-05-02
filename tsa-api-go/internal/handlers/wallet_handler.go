@@ -37,12 +37,13 @@ type prepareTxRequest struct {
 
 // submitTxRequest is the request body for SubmitTransaction.
 type submitTxRequest struct {
-	SignedTx    string `json:"signedTx" binding:"required"`
-	TxType      string `json:"txType" binding:"required"`
-	TokenSymbol string `json:"tokenSymbol" binding:"required"`
-	ToAddress   string `json:"toAddress" binding:"required"`
-	Amount      string `json:"amount" binding:"required"`
-	ChainID     int64  `json:"chainId" binding:"required"`
+	SignedTx    string  `json:"signedTx" binding:"required"`
+	TxType      string  `json:"txType" binding:"required"`
+	TokenSymbol string  `json:"tokenSymbol" binding:"required"`
+	ToAddress   string  `json:"toAddress" binding:"required"`
+	Amount      string  `json:"amount" binding:"required"`
+	ChainID     int64   `json:"chainId" binding:"required"`
+	FeeUSD      float64 `json:"feeUSD"` // optional: system fee in USD for TP distribution
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -484,6 +485,42 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 			"txHash": txHash,
 		})
 		return
+	}
+
+	// Distribute TP for swap and send transaction types.
+	// Escrow TP is handled separately by the checkout handler on order resolution.
+	if req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend {
+		systemFeeUSD := req.FeeUSD
+		if systemFeeUSD <= 0 {
+			// Fallback: estimate system fee from transaction amount
+			amountFloat, _ := strconv.ParseFloat(req.Amount, 64)
+			switch req.TxType {
+			case models.TxTypeSwap:
+				// System earns ~1% of swap amount (remainder of 2% platform fee after cashback+splits)
+				systemFeeUSD = amountFloat * 0.01
+			case models.TxTypeSend:
+				// Nominal fee proxy for P2P sends (gas cost equivalent)
+				systemFeeUSD = 0.01
+			}
+		}
+		if systemFeeUSD > 0 {
+			if err := DistributeTPEarnings(config.DB, user.ID, req.TxType, walletTx.ID, systemFeeUSD); err != nil {
+				log.Printf("TP distribution failed for %s tx %s: %v", req.TxType, walletTx.ID, err)
+			}
+
+			// Record cashback: 25% of system fee back to user, 25% to direct upline
+			buyerCashbackUSD := systemFeeUSD * 0.25
+			if err := RecordCashbackEarning(config.DB, user.ID, user.ID, req.TxType, walletTx.ID, buyerCashbackUSD, walletTx.TxHash); err != nil {
+				log.Printf("Cashback recording failed for user on %s tx %s: %v", req.TxType, walletTx.ID, err)
+			}
+
+			if user.ReferredBy != nil {
+				uplineCashbackUSD := systemFeeUSD * 0.25
+				if err := RecordCashbackEarning(config.DB, *user.ReferredBy, user.ID, req.TxType, walletTx.ID, uplineCashbackUSD, walletTx.TxHash); err != nil {
+					log.Printf("Cashback recording failed for upline on %s tx %s: %v", req.TxType, walletTx.ID, err)
+				}
+			}
+		}
 	}
 
 	utils.SuccessResponse(c, http.StatusCreated, "Transaction submitted", gin.H{

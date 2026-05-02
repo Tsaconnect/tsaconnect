@@ -20,6 +20,7 @@ import TradeAndEarnScreen from './TradeAndEarnScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '@/components/services/api';
 import CartIconBadge from '@/components/common/CartIconBadge';
+import CurrencySelector from '@/components/currency/CurrencySelector';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_GAP = 10;
@@ -211,6 +212,7 @@ const MarketplaceScreen: React.FC = () => {
                 </TouchableOpacity>
               )}
             </View>
+            <CurrencySelector variant="header" />
             <CartIconBadge color="#D4AF37" size={24} />
           </View>
         </View>

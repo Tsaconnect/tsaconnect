@@ -22,6 +22,8 @@ import {
   CartItem,
   Product,
 } from '@/components/services/cart';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { formatPrice as formatPriceUtil, formatPriceDual } from '@/utils/formatPrice';
 import {
   createOrders,
   prepareApprove,
@@ -96,6 +98,9 @@ const CheckoutScreen = () => {
   });
   const [shippingEstimateTotal, setShippingEstimateTotal] = useState<number | null>(null);
   const [shippingEstimateLoading, setShippingEstimateLoading] = useState(false);
+  const { currency, rate } = useCurrency();
+
+  const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
 
   const loadCart = useCallback(async () => {
     setLoading(true);
@@ -400,7 +405,7 @@ const CheckoutScreen = () => {
     summary.subtotal + shippingTotal + gasFee - summary.discount;
   const totalDisplay = shippingEstimateLoading
     ? 'Updating...'
-    : `$${estimatedTotal.toFixed(2)}`;
+    : fmtPrice(estimatedTotal);
 
   // ===== HEADER =====
   const Header = ({
@@ -764,7 +769,7 @@ const CheckoutScreen = () => {
                   <Text style={s.itemQty}>Qty: {item.quantity}</Text>
                 </View>
                 <Text style={s.itemPrice}>
-                  ${(item.price * item.quantity).toFixed(2)}
+                  {fmtPrice(item.price * item.quantity)}
                 </Text>
               </View>
             );
@@ -782,7 +787,7 @@ const CheckoutScreen = () => {
 
           <View style={s.summaryRow}>
             <Text style={s.summaryLabel}>Subtotal</Text>
-            <Text style={s.summaryValue}>${summary.subtotal.toFixed(2)}</Text>
+            <Text style={s.summaryValue}>{fmtPrice(summary.subtotal)}</Text>
           </View>
           <View style={s.summaryRow}>
             <Text style={s.summaryLabel}>Shipping</Text>
@@ -790,21 +795,21 @@ const CheckoutScreen = () => {
               {shippingEstimateLoading
                 ? 'Calculating...'
                 : shippingTotal > 0
-                ? `$${shippingTotal.toFixed(2)}`
+                ? fmtPrice(shippingTotal)
                 : 'Free'}
             </Text>
           </View>
           {!isMCGP && gasFee > 0 && (
             <View style={s.summaryRow}>
               <Text style={s.summaryLabel}>Gas Fee</Text>
-              <Text style={s.summaryValue}>${gasFee.toFixed(2)}</Text>
+              <Text style={s.summaryValue}>{fmtPrice(gasFee)}</Text>
             </View>
           )}
           {summary.discount > 0 && (
             <View style={s.summaryRow}>
               <Text style={s.summaryLabel}>Discount</Text>
               <Text style={[s.summaryValue, { color: '#16A34A' }]}>
-                -${summary.discount.toFixed(2)}
+                -{fmtPrice(summary.discount)}
               </Text>
             </View>
           )}

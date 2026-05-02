@@ -11,6 +11,8 @@ import {
 import { Product } from '@/components/services/api';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { formatPrice, formatPriceDual } from '@/utils/formatPrice';
 
 interface ProductCardProps {
     product: Product;
@@ -22,9 +24,11 @@ const { width } = Dimensions.get('window');
 
 const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = 'list' }) => {
     const [imageError, setImageError] = useState(false);
+    const { currency, rate } = useCurrency();
 
     const primaryImage = product.images?.[0]?.url;
-    const price = typeof product.price === 'number' ? product.price.toFixed(2) : '0.00';
+    const formattedPrice = formatPrice(product.price, { currency, rate });
+    const dualPrice = formatPriceDual(product.price, rate, currency);
     const rating = product.rating?.average || 0;
     const ratingCount = product.rating?.count || 0;
     const isInStock = product.stock > 0;
@@ -68,7 +72,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                         {product.name}
                     </Text>
 
-                    <Text style={styles.gridPrice}>${price}</Text>
+                    <Text style={styles.gridPrice}>{formattedPrice}</Text>
 
                     {rating > 0 && (
                         <View style={styles.ratingContainer}>
@@ -133,7 +137,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                         )}
                     </View>
 
-                    <Text style={styles.listPrice}>${price}</Text>
+                    <Text style={styles.listPrice}>{formattedPrice}</Text>
                 </View>
 
                 <Text style={styles.listDescription} numberOfLines={2}>

@@ -52,6 +52,7 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			mute_notifications INTEGER DEFAULT 0,
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
+			cashback_balance REAL DEFAULT 0,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
@@ -67,6 +68,16 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			fee_amount_usd REAL NOT NULL,
 			percentage REAL NOT NULL,
 			tp_earned REAL NOT NULL,
+			created_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS cashback_earnings (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			source_user_id TEXT NOT NULL,
+			source_type TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			amount_usd REAL NOT NULL,
+			tx_hash TEXT,
 			created_at DATETIME NOT NULL
 		)`,
 	}
@@ -371,6 +382,89 @@ func TestGetReferralsWithTP(t *testing.T) {
 	}
 	if _, hasTP := referral["tpContributed"]; !hasTP {
 		t.Error("expected referral to have tpContributed field")
+	}
+}
+
+func TestRecordCashbackEarning(t *testing.T) {
+	db := setupTPTestDB(t)
+	user := createTPTestUser(t, db, "Alice", "alice_cb", nil)
+	sourceUser := createTPTestUser(t, db, "Bob", "bob_cb", &user.ID)
+
+	sourceID := uuid.New()
+	err := RecordCashbackEarning(db, user.ID, sourceUser.ID, "checkout", sourceID, 0.50, "0xabc123")
+	if err != nil {
+		t.Fatalf("RecordCashbackEarning failed: %v", err)
+	}
+
+	// Verify earning record
+	var earnings []models.CashbackEarning
+	db.Where("user_id = ?", user.ID).Find(&earnings)
+	if len(earnings) != 1 {
+		t.Fatalf("expected 1 cashback earning, got %d", len(earnings))
+	}
+	if earnings[0].AmountUSD != 0.50 {
+		t.Errorf("expected amount 0.50, got %f", earnings[0].AmountUSD)
+	}
+	if earnings[0].TxHash != "0xabc123" {
+		t.Errorf("expected txHash 0xabc123, got %s", earnings[0].TxHash)
+	}
+
+	// Verify balance updated
+	var updatedUser models.User
+	db.First(&updatedUser, "id = ?", user.ID)
+	if updatedUser.CashbackBalance != 0.50 {
+		t.Errorf("expected cashbackBalance 0.50, got %f", updatedUser.CashbackBalance)
+	}
+}
+
+func TestRecordCashbackEarning_ZeroAmount(t *testing.T) {
+	db := setupTPTestDB(t)
+	user := createTPTestUser(t, db, "Alice", "alice_cb2", nil)
+	sourceUser := createTPTestUser(t, db, "Bob", "bob_cb2", &user.ID)
+
+	sourceID := uuid.New()
+	err := RecordCashbackEarning(db, user.ID, sourceUser.ID, "swap", sourceID, 0.0, "")
+	if err != nil {
+		t.Fatalf("RecordCashbackEarning zero amount should not error: %v", err)
+	}
+
+	var earnings []models.CashbackEarning
+	db.Where("user_id = ?", user.ID).Find(&earnings)
+	if len(earnings) != 0 {
+		t.Errorf("expected 0 earnings for zero amount, got %d", len(earnings))
+	}
+}
+
+func TestGetCashbackBalance(t *testing.T) {
+	db := setupTPTestDB(t)
+	h := setupTPHandlers(t)
+
+	user := createTPTestUser(t, db, "Alice", "alice_cb3", nil)
+	db.Model(&models.User{}).Where("id = ?", user.ID).Update("cashback_balance", 3.25)
+	user.CashbackBalance = 3.25
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", &user)
+	c.Request, _ = http.NewRequest("GET", "/cashback-balance", nil)
+
+	h.GetCashbackBalance(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an object, got %T", resp["data"])
+	}
+	if data["cashbackBalance"] != 3.25 {
+		t.Errorf("expected cashbackBalance=3.25, got %v", data["cashbackBalance"])
 	}
 }
 

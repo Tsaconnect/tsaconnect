@@ -1,10 +1,12 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -23,6 +25,8 @@ const productEscrowABI = `[
 	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"requestRefund","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"cancelOrder","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"orderId","type":"bytes32"},{"name":"refundBuyer","type":"bool"}],"name":"adminResolve","outputs":[],"stateMutability":"nonpayable","type":"function"},
+	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
 ]`
 
@@ -97,6 +101,69 @@ func (s *EscrowService) PrepareCancelOrder(orderId [32]byte, seller string) ([]b
 		return nil, fmt.Errorf("failed to pack cancelOrder: %w", err)
 	}
 	return s.buildUnsignedTx(seller, data)
+}
+
+// Owner reads the escrow contract's owner() via eth_call. Used on startup to
+// log the active deployment's owner. Admin-role authorization for adminResolve
+// is checked per-request via IsAdmin — owner isn't queried for that path.
+func (s *EscrowService) Owner() (string, error) {
+	if s.client == nil {
+		return "", fmt.Errorf("blockchain client not available")
+	}
+	data, err := parsedEscrowABI.Pack("owner")
+	if err != nil {
+		return "", fmt.Errorf("failed to pack owner(): %w", err)
+	}
+	escrowAddr := common.HexToAddress(s.escrowAddress)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{
+		To:   &escrowAddr,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("owner() call failed: %w", err)
+	}
+	unpacked, err := parsedEscrowABI.Unpack("owner", out)
+	if err != nil || len(unpacked) == 0 {
+		return "", fmt.Errorf("failed to decode owner(): %w", err)
+	}
+	addr, ok := unpacked[0].(common.Address)
+	if !ok {
+		return "", fmt.Errorf("owner() returned unexpected type %T", unpacked[0])
+	}
+	return addr.Hex(), nil
+}
+
+// IsAdmin reads the escrow contract's isAdmin(account) view via eth_call.
+// Returns true if account is the owner or has been granted the admin role.
+func (s *EscrowService) IsAdmin(account string) (bool, error) {
+	if s.client == nil {
+		return false, fmt.Errorf("blockchain client not available")
+	}
+	data, err := parsedEscrowABI.Pack("isAdmin", common.HexToAddress(account))
+	if err != nil {
+		return false, fmt.Errorf("failed to pack isAdmin: %w", err)
+	}
+	escrowAddr := common.HexToAddress(s.escrowAddress)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{
+		To:   &escrowAddr,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return false, fmt.Errorf("isAdmin() call failed: %w", err)
+	}
+	unpacked, err := parsedEscrowABI.Unpack("isAdmin", out)
+	if err != nil || len(unpacked) == 0 {
+		return false, fmt.Errorf("failed to decode isAdmin: %w", err)
+	}
+	ok, okCast := unpacked[0].(bool)
+	if !okCast {
+		return false, fmt.Errorf("isAdmin returned unexpected type %T", unpacked[0])
+	}
+	return ok, nil
 }
 
 // PrepareAdminResolve encodes the adminResolve call.

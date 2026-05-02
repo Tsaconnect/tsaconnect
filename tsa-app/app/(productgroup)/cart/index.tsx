@@ -17,6 +17,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import api, { CartItem, CartSummary, ItemsBySeller } from "@/components/services/cart";
+import { useCurrency } from "@/contexts/CurrencyContext";
+import { formatPrice as formatPriceUtil } from "@/utils/formatPrice";
 
 const Cart = () => {
     const router = useRouter();
@@ -26,6 +28,7 @@ const Cart = () => {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [updatingItem, setUpdatingItem] = useState<string | null>(null);
+    const { currency, rate } = useCurrency();
 
     useEffect(() => {
         checkAuthAndLoadCart();
@@ -235,9 +238,8 @@ const Cart = () => {
         }
     };
 
-    const formatPrice = (price: number) => {
-        return `$${price.toLocaleString()}`;
-    };
+    const formatPrice = (price: number) =>
+        formatPriceUtil(price, { currency, rate });
 
     const renderSellerSection = ({ item }: { item: ItemsBySeller }) => (
         <View style={styles.sellerSection}>

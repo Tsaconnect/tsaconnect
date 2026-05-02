@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const {
   loadFixture,
   time,
@@ -21,7 +21,12 @@ describe("ProductEscrow", function () {
 
     // Deploy escrow contract with owner as system wallet
     const ProductEscrow = await ethers.getContractFactory("ProductEscrow");
-    const escrow = await ProductEscrow.deploy(owner.address);
+    const escrow = await upgrades.deployProxy(
+        ProductEscrow,
+        [owner.address, []],
+        { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+    );
+    await escrow.waitForDeployment();
 
     // Set MCGP token address and whitelist tokens
     await escrow.setMcgpToken(await mcgp.getAddress());
@@ -396,7 +401,7 @@ describe("ProductEscrow", function () {
       // Non-owner cannot resolve
       await expect(
         escrow.connect(other).adminResolve(orderId, true)
-      ).to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
+      ).to.be.revertedWith("Not admin");
     });
   });
 
@@ -630,7 +635,7 @@ describe("ProductEscrow", function () {
 
       await expect(
         escrow.connect(other).adminResolve(orderId, true)
-      ).to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
+      ).to.be.revertedWith("Not admin");
     });
 
     it("should not allow non-seller to mark delivered", async function () {
@@ -954,6 +959,126 @@ describe("ProductEscrow", function () {
       await expect(
         escrow.connect(other).sweepExcess(await usdt.getAddress(), 1000n)
       ).to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
+    });
+  });
+
+  describe("Admin role", function () {
+    it("isAdmin(owner) returns true without addAdmin", async function () {
+      const { escrow, owner } = await loadFixture(deployFixture);
+      expect(await escrow.isAdmin(owner.address)).to.equal(true);
+    });
+
+    it("isAdmin(random) returns false", async function () {
+      const { escrow, other } = await loadFixture(deployFixture);
+      expect(await escrow.isAdmin(other.address)).to.equal(false);
+    });
+
+    it("addAdmin from owner flips mapping and emits event", async function () {
+      const { escrow, owner, other } = await loadFixture(deployFixture);
+      await expect(escrow.connect(owner).addAdmin(other.address))
+        .to.emit(escrow, "AdminAdded")
+        .withArgs(other.address);
+      expect(await escrow.admins(other.address)).to.equal(true);
+      expect(await escrow.isAdmin(other.address)).to.equal(true);
+    });
+
+    it("addAdmin reverts for zero address", async function () {
+      const { escrow, owner } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(owner).addAdmin(ethers.ZeroAddress)
+      ).to.be.revertedWith("Zero address");
+    });
+
+    it("addAdmin reverts when already admin", async function () {
+      const { escrow, owner, other } = await loadFixture(deployFixture);
+      await escrow.connect(owner).addAdmin(other.address);
+      await expect(
+        escrow.connect(owner).addAdmin(other.address)
+      ).to.be.revertedWith("Already admin");
+    });
+
+    it("addAdmin reverts for non-owner caller", async function () {
+      const { escrow, other, buyer } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(other).addAdmin(buyer.address)
+      ).to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
+    });
+
+    it("removeAdmin flips mapping and emits event", async function () {
+      const { escrow, owner, other } = await loadFixture(deployFixture);
+      await escrow.connect(owner).addAdmin(other.address);
+      await expect(escrow.connect(owner).removeAdmin(other.address))
+        .to.emit(escrow, "AdminRemoved")
+        .withArgs(other.address);
+      expect(await escrow.admins(other.address)).to.equal(false);
+    });
+
+    it("removeAdmin reverts on non-admin", async function () {
+      const { escrow, owner, other } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(owner).removeAdmin(other.address)
+      ).to.be.revertedWith("Not admin");
+    });
+
+    it("owner is unrevokable as admin", async function () {
+      const { escrow, owner } = await loadFixture(deployFixture);
+      // Owner was never added via addAdmin, so removeAdmin(owner) must revert.
+      await expect(
+        escrow.connect(owner).removeAdmin(owner.address)
+      ).to.be.revertedWith("Not admin");
+      // And even if addAdmin + removeAdmin were run, isAdmin stays true via
+      // the implicit owner clause.
+      await escrow.connect(owner).addAdmin(owner.address);
+      await escrow.connect(owner).removeAdmin(owner.address);
+      expect(await escrow.isAdmin(owner.address)).to.equal(true);
+    });
+
+    it("initialize seeds initialAdmins", async function () {
+      const signers = await ethers.getSigners();
+      const deployer = signers[0];
+      const seeded = signers[4];
+      const ProductEscrow = await ethers.getContractFactory("ProductEscrow");
+      const escrow = await upgrades.deployProxy(
+        ProductEscrow,
+        [deployer.address, [seeded.address]],
+        { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+      );
+      await escrow.waitForDeployment();
+      expect(await escrow.admins(seeded.address)).to.equal(true);
+    });
+
+    it("adminResolve succeeds for explicitly added admin", async function () {
+      const { escrow, usdt, owner, buyer, seller, upline, other } = await loadFixture(deployFixture);
+      const { orderId } = await createStandardOrder(escrow, usdt, buyer, seller, upline);
+      await escrow.connect(seller).markDelivered(orderId);
+      await escrow.connect(buyer).requestRefund(orderId);
+
+      await escrow.connect(owner).addAdmin(other.address);
+      await expect(
+        escrow.connect(other).adminResolve(orderId, true)
+      ).to.emit(escrow, "DisputeResolved").withArgs(orderId, true);
+    });
+
+    it("adminResolve succeeds for owner (implicit admin)", async function () {
+      const { escrow, usdt, owner, buyer, seller, upline } = await loadFixture(deployFixture);
+      const { orderId } = await createStandardOrder(escrow, usdt, buyer, seller, upline);
+      await escrow.connect(seller).markDelivered(orderId);
+      await escrow.connect(buyer).requestRefund(orderId);
+
+      await expect(
+        escrow.connect(owner).adminResolve(orderId, true)
+      ).to.emit(escrow, "DisputeResolved");
+    });
+
+    it("adminResolve reverts for random EOA", async function () {
+      const { escrow, usdt, buyer, seller, upline, other } = await loadFixture(deployFixture);
+      const { orderId } = await createStandardOrder(escrow, usdt, buyer, seller, upline);
+      await escrow.connect(seller).markDelivered(orderId);
+      await escrow.connect(buyer).requestRefund(orderId);
+
+      await expect(
+        escrow.connect(other).adminResolve(orderId, true)
+      ).to.be.revertedWith("Not admin");
     });
   });
 

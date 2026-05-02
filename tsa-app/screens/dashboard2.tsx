@@ -13,8 +13,9 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import { Ionicons } from '@expo/vector-icons';
 import { api, Asset } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
+import { router } from 'expo-router';
 import CartIconBadge from '@/components/common/CartIconBadge';
+import CurrencySelector from '@/components/currency/CurrencySelector';
 import {
   getWalletBalances,
   getTransactionHistory,
@@ -59,6 +60,8 @@ const Dashboard: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [tpBalance, setTpBalance] = useState(0);
+  const [cashbackBalance, setCashbackBalance] = useState(0);
 
   // ── Auth token ──
   useEffect(() => {
@@ -129,6 +132,20 @@ const Dashboard: React.FC = () => {
         }
       } catch {}
 
+      // Fetch TP and cashback balances
+      try {
+        const tpRes = await api.getTPBalance();
+        if (tpRes.success && tpRes.data) {
+          setTpBalance(tpRes.data.tpBalance || 0);
+        }
+      } catch {}
+      try {
+        const cbRes = await api.getCashbackBalance();
+        if (cbRes.success && cbRes.data) {
+          setCashbackBalance(cbRes.data.cashbackBalance || 0);
+        }
+      } catch {}
+
     } catch (err: any) {
       console.error('Dashboard fetch error:', err);
       setError(err.message || 'Failed to load dashboard');
@@ -166,6 +183,7 @@ const Dashboard: React.FC = () => {
       <View style={styles.dashHeader}>
         <Text style={styles.dashHeaderTitle}>TSA Connect</Text>
         <View style={styles.dashHeaderActions}>
+          <CurrencySelector variant="header" />
           <CartIconBadge color="#D4AF37" size={24} />
         </View>
       </View>
@@ -187,6 +205,28 @@ const Dashboard: React.FC = () => {
         isValuesHidden={isValuesHidden}
         onToggleVisibility={() => setIsValuesHidden(v => !v)}
       />
+
+      {/* TP & Cashback Summary */}
+      {(tpBalance > 0 || cashbackBalance > 0) && (
+        <Pressable
+          style={styles.tpCashbackRow}
+          onPress={() => router.push('/easyswap')}
+        >
+          <View style={styles.tpCashbackItem}>
+            <Icon name="stars" size={16} color="#D4AF37" />
+            <Text style={styles.tpCashbackValue}>{tpBalance.toFixed(2)}</Text>
+            <Text style={styles.tpCashbackLabel}>TP</Text>
+          </View>
+          <View style={styles.tpCashbackDivider} />
+          <View style={styles.tpCashbackItem}>
+            <Icon name="payments" size={16} color="#4ADE80" />
+            <Text style={styles.tpCashbackValue}>
+              {isValuesHidden ? '••••' : `$${cashbackBalance.toFixed(2)}`}
+            </Text>
+            <Text style={styles.tpCashbackLabel}>Cashback</Text>
+          </View>
+        </Pressable>
+      )}
 
       <AssetList assets={assets} isValuesHidden={isValuesHidden} />
 
@@ -226,6 +266,39 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     opacity: 0.5,
   },
+  // TP & Cashback Summary
+  tpCashbackRow: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginTop: 12,
+    backgroundColor: '#FFF',
+    borderRadius: 14,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  tpCashbackItem: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 4,
+  },
+  tpCashbackDivider: {
+    width: 1,
+    backgroundColor: '#F0F0F0',
+  },
+  tpCashbackValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1A1A1A',
+  },
+  tpCashbackLabel: {
+    fontSize: 11,
+    color: '#888',
+  },
+
   // Error
   errorBanner: {
     flexDirection: 'row', alignItems: 'center', gap: 8,

@@ -1,4 +1,4 @@
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -16,11 +16,15 @@ async function main() {
   await mockMCGP.waitForDeployment();
   console.log("MockMCGP deployed:", await mockMCGP.getAddress());
 
-  // 2. Deploy ProductEscrow
+  // 2. Deploy ProductEscrow (UUPS proxy)
   const ProductEscrow = await ethers.getContractFactory("ProductEscrow");
-  const escrow = await ProductEscrow.deploy(deployer.address);
+  const escrow = await upgrades.deployProxy(
+    ProductEscrow,
+    [deployer.address, []],
+    { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+  );
   await escrow.waitForDeployment();
-  console.log("ProductEscrow deployed:", await escrow.getAddress());
+  console.log("ProductEscrow proxy deployed:", await escrow.getAddress());
 
   // 3. Deploy ServiceContact
   const ServiceContact = await ethers.getContractFactory("ServiceContact");

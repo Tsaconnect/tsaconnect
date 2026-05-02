@@ -32,15 +32,17 @@ const COLORS = {
 const TradeAndEarnScreen: React.FC = () => {
   const [referralCode, setReferralCode] = useState('');
   const [tpBalance, setTpBalance] = useState(0);
+  const [cashbackBalance, setCashbackBalance] = useState(0);
   const [totalReferrals, setTotalReferrals] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = async () => {
     try {
-      const [profileRes, tpRes, referralsRes] = await Promise.all([
+      const [profileRes, tpRes, referralsRes, cashbackRes] = await Promise.all([
         api.getProfile(),
         api.getTPBalance(),
         api.getReferrals(),
+        api.getCashbackBalance(),
       ]);
 
       if (profileRes.success && profileRes.data) {
@@ -51,6 +53,9 @@ const TradeAndEarnScreen: React.FC = () => {
       }
       if (referralsRes.success && referralsRes.data) {
         setTotalReferrals(referralsRes.data.totalReferrals || 0);
+      }
+      if (cashbackRes.success && cashbackRes.data) {
+        setCashbackBalance(cashbackRes.data.cashbackBalance || 0);
       }
     } catch (error) {
       console.error('Error fetching trade & earn data:', error);
@@ -138,7 +143,7 @@ const TradeAndEarnScreen: React.FC = () => {
               <View style={[styles.statDot, { backgroundColor: '#FFF3E0' }]}>
                 <Icon name="payments" size={16} color="#F57C00" />
               </View>
-              <Text style={styles.statValue}>$0.00</Text>
+              <Text style={styles.statValue}>${cashbackBalance.toFixed(2)}</Text>
               <Text style={styles.statLabel}>Cashback</Text>
             </TouchableOpacity>
 
@@ -155,18 +160,10 @@ const TradeAndEarnScreen: React.FC = () => {
 
             <View style={styles.statItem}>
               <View style={[styles.statDot, { backgroundColor: '#E3F2FD' }]}>
-                <Icon name="swap-horiz" size={16} color="#1976D2" />
-              </View>
-              <Text style={styles.statValue}>$0.00</Text>
-              <Text style={styles.statLabel}>P2P</Text>
-            </View>
-
-            <View style={styles.statItem}>
-              <View style={[styles.statDot, { backgroundColor: '#F3E5F5' }]}>
-                <Icon name="stars" size={16} color="#7B1FA2" />
+                <Icon name="stars" size={16} color="#1976D2" />
               </View>
               <Text style={styles.statValue}>{tpBalance.toFixed(2)}</Text>
-              <Text style={styles.statLabel}>TP</Text>
+              <Text style={styles.statLabel}>TP Earned</Text>
             </View>
           </View>
 
@@ -185,7 +182,7 @@ const TradeAndEarnScreen: React.FC = () => {
               <View style={styles.methodInfo}>
                 <Text style={styles.methodTitle}>Cashback</Text>
                 <Text style={styles.methodDesc}>
-                  Earn on every product & service purchase
+                  Earn instant dollar cashback on purchases & services
                 </Text>
               </View>
               <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
@@ -202,9 +199,9 @@ const TradeAndEarnScreen: React.FC = () => {
                 <Icon name="people" size={22} color="#2E7D32" />
               </View>
               <View style={styles.methodInfo}>
-                <Text style={styles.methodTitle}>Referral Program</Text>
+                <Text style={styles.methodTitle}>Trade Points</Text>
                 <Text style={styles.methodDesc}>
-                  Earn TP when your referrals trade
+                  Earn TP from fees across 10 generations of your network
                 </Text>
               </View>
               <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
@@ -215,15 +212,15 @@ const TradeAndEarnScreen: React.FC = () => {
             <TouchableOpacity
               style={styles.methodRow}
               activeOpacity={0.7}
-              onPress={() => router.push('/services')}
+              onPress={() => router.push('/easyswap')}
             >
               <View style={[styles.methodIcon, { backgroundColor: '#E3F2FD' }]}>
                 <Icon name="swap-horiz" size={22} color="#1976D2" />
               </View>
               <View style={styles.methodInfo}>
-                <Text style={styles.methodTitle}>P2P Commission</Text>
+                <Text style={styles.methodTitle}>Swap & Instant Pay</Text>
                 <Text style={styles.methodDesc}>
-                  0.5% from P2P fiat trades as a merchant
+                  Earn TP & cashback on every swap and instant transfer
                 </Text>
               </View>
               <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
@@ -237,10 +234,10 @@ const TradeAndEarnScreen: React.FC = () => {
             <View style={styles.detailSection}>
               <View style={styles.detailHeader}>
                 <Icon name="payments" size={18} color="#F57C00" />
-                <Text style={styles.detailTitle}>Cashback</Text>
+                <Text style={styles.detailTitle}>Cashback (Trade & Earn)</Text>
               </View>
               <Text style={styles.detailText}>
-                Earn 1% cashback on all product/service purchases. Payments must be in USDT or USDC.
+                Paid to you and your direct upline in dollars instantly for every purchase, service order, swap, and Instant Pay — debited from system fees even if it's $0.00001.
               </Text>
             </View>
 
@@ -249,10 +246,10 @@ const TradeAndEarnScreen: React.FC = () => {
             <View style={styles.detailSection}>
               <View style={styles.detailHeader}>
                 <Icon name="people" size={18} color="#2E7D32" />
-                <Text style={styles.detailTitle}>Referral Earnings</Text>
+                <Text style={styles.detailTitle}>Trade Points (TP) Network</Text>
               </View>
               <Text style={styles.detailText}>
-                Earn TP from up to 10 generations of your referral network. Every time someone in your network trades, you earn automatically.
+                System fees from every transaction are split across 10 generations. You earn 35.4% of fees directly, your direct upline earns 17.7%, and it cascades down to 0.4% at the 10th generation.
               </Text>
             </View>
 
@@ -261,34 +258,34 @@ const TradeAndEarnScreen: React.FC = () => {
             <View style={styles.detailSection}>
               <View style={styles.detailHeader}>
                 <Icon name="swap-horiz" size={18} color="#1976D2" />
-                <Text style={styles.detailTitle}>P2P Commission</Text>
+                <Text style={styles.detailTitle}>Swap & Instant Pay TP</Text>
               </View>
               <Text style={styles.detailText}>
-                Earn 0.5% commission from P2P fiat deposit/withdrawal trades. Available for internal sellers and external buyers.
+                Every swap (MCGP/USDC) and Instant Pay transfer now earns TP from system fees. TP is credited instantly and visible on your dashboard.
               </Text>
             </View>
           </View>
 
           {/* TP Conversion Rates */}
-          <Text style={styles.sectionTitle}>TP Conversion Rates</Text>
+          <Text style={styles.sectionTitle}>How TP Is Earned</Text>
 
           <View style={styles.conversionCard}>
             <View style={styles.conversionRow}>
-              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>0.01 TP = $0.1 trades</Text>
+              <Icon name="info-outline" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>TP is earned from system fees, not trade volume</Text>
             </View>
             <View style={styles.conversionRow}>
-              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>0.1 TP = $1 trades</Text>
+              <Icon name="people" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>Split across you + 10 generations of upline</Text>
             </View>
             <View style={styles.conversionRow}>
-              <Icon name="currency-exchange" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>1 TP = $10 trades</Text>
+              <Icon name="flash-on" size={16} color={COLORS.dark} />
+              <Text style={styles.conversionText}>Credited instantly after each transaction</Text>
             </View>
             <View style={styles.conversionNote}>
               <Icon name="info-outline" size={14} color={COLORS.dark} />
               <Text style={styles.conversionNoteText}>
-                Minimum purchase to gain TP is $0.1. TPs will be converted to cash in future.
+                Every time you trade, swap, purchase products/services, or send via Instant Pay, the system fees are split into TP and distributed to you and your upline network.
               </Text>
             </View>
           </View>
