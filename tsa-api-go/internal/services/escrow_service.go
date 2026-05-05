@@ -63,6 +63,7 @@ func GenerateOrderID(dbOrderID uuid.UUID) [32]byte {
 
 // PrepareCreateOrder encodes the createOrder call and builds an UnsignedTx.
 // Must be called AFTER the buyer has broadcast the approve tx, so gas estimation works.
+// Always targets the currently-configured escrow contract — new orders go to the latest deployment.
 func (s *EscrowService) PrepareCreateOrder(orderId [32]byte, buyer, seller, token string, productAmount, shippingAmount *big.Int, upline string) ([]byte, error) {
 	sellerAddr := common.HexToAddress(seller)
 	tokenAddr := common.HexToAddress(token)
@@ -73,34 +74,40 @@ func (s *EscrowService) PrepareCreateOrder(orderId [32]byte, buyer, seller, toke
 		return nil, fmt.Errorf("failed to pack createOrder: %w", err)
 	}
 
-	return s.buildUnsignedTx(buyer, data)
+	return s.buildUnsignedTx(buyer, s.escrowAddress, data)
 }
 
-// PrepareConfirmReceipt encodes the confirmReceipt call.
-func (s *EscrowService) PrepareConfirmReceipt(orderId [32]byte, buyer string) ([]byte, error) {
+// CurrentEscrowAddress returns the contract address from current config.
+// Used by handlers to stamp new orders at submit-escrow time.
+func (s *EscrowService) CurrentEscrowAddress() string {
+	return s.escrowAddress
+}
+
+// PrepareConfirmReceipt encodes the confirmReceipt call against the order's escrow contract.
+func (s *EscrowService) PrepareConfirmReceipt(orderId [32]byte, buyer, escrowAddr string) ([]byte, error) {
 	data, err := parsedEscrowABI.Pack("confirmReceipt", orderId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack confirmReceipt: %w", err)
 	}
-	return s.buildUnsignedTx(buyer, data)
+	return s.buildUnsignedTx(buyer, escrowAddr, data)
 }
 
-// PrepareRequestRefund encodes the requestRefund call.
-func (s *EscrowService) PrepareRequestRefund(orderId [32]byte, buyer string) ([]byte, error) {
+// PrepareRequestRefund encodes the requestRefund call against the order's escrow contract.
+func (s *EscrowService) PrepareRequestRefund(orderId [32]byte, buyer, escrowAddr string) ([]byte, error) {
 	data, err := parsedEscrowABI.Pack("requestRefund", orderId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack requestRefund: %w", err)
 	}
-	return s.buildUnsignedTx(buyer, data)
+	return s.buildUnsignedTx(buyer, escrowAddr, data)
 }
 
-// PrepareCancelOrder encodes the cancelOrder call.
-func (s *EscrowService) PrepareCancelOrder(orderId [32]byte, seller string) ([]byte, error) {
+// PrepareCancelOrder encodes the cancelOrder call against the order's escrow contract.
+func (s *EscrowService) PrepareCancelOrder(orderId [32]byte, seller, escrowAddr string) ([]byte, error) {
 	data, err := parsedEscrowABI.Pack("cancelOrder", orderId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack cancelOrder: %w", err)
 	}
-	return s.buildUnsignedTx(seller, data)
+	return s.buildUnsignedTx(seller, escrowAddr, data)
 }
 
 // Owner reads the escrow contract's owner() via eth_call. Used on startup to
@@ -135,9 +142,11 @@ func (s *EscrowService) Owner() (string, error) {
 	return addr.Hex(), nil
 }
 
-// IsAdmin reads the escrow contract's isAdmin(account) view via eth_call.
-// Returns true if account is the owner or has been granted the admin role.
-func (s *EscrowService) IsAdmin(account string) (bool, error) {
+// IsAdmin reads the escrow contract's isAdmin(account) view via eth_call against
+// the supplied contract address. Pass the order's escrow address when checking
+// admin authorization for that specific order — admin sets can differ between
+// deployments after a contract migration.
+func (s *EscrowService) IsAdmin(account, contractAddr string) (bool, error) {
 	if s.client == nil {
 		return false, fmt.Errorf("blockchain client not available")
 	}
@@ -145,7 +154,7 @@ func (s *EscrowService) IsAdmin(account string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to pack isAdmin: %w", err)
 	}
-	escrowAddr := common.HexToAddress(s.escrowAddress)
+	escrowAddr := common.HexToAddress(contractAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{
@@ -166,13 +175,13 @@ func (s *EscrowService) IsAdmin(account string) (bool, error) {
 	return ok, nil
 }
 
-// PrepareAdminResolve encodes the adminResolve call.
-func (s *EscrowService) PrepareAdminResolve(orderId [32]byte, refundBuyer bool, admin string) ([]byte, error) {
+// PrepareAdminResolve encodes the adminResolve call against the order's escrow contract.
+func (s *EscrowService) PrepareAdminResolve(orderId [32]byte, refundBuyer bool, admin, escrowAddr string) ([]byte, error) {
 	data, err := parsedEscrowABI.Pack("adminResolve", orderId, refundBuyer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack adminResolve: %w", err)
 	}
-	return s.buildUnsignedTx(admin, data)
+	return s.buildUnsignedTx(admin, escrowAddr, data)
 }
 
 // VerifyEscrowCreated fetches the receipt and parses the OrderCreated event.
@@ -220,14 +229,19 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string) ([32]byte, error) {
 	return empty, fmt.Errorf("OrderCreated event not found in receipt")
 }
 
-// buildUnsignedTx creates an UnsignedTx JSON for the escrow contract with real gas estimation.
-func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, error) {
+// buildUnsignedTx creates an UnsignedTx JSON targeting the supplied escrow contract,
+// with real gas estimation when a chain client is available.
+func (s *EscrowService) buildUnsignedTx(from, contractAddr string, callData []byte) ([]byte, error) {
+	if contractAddr == "" {
+		return nil, fmt.Errorf("escrow contract address is empty")
+	}
+
 	if s.client == nil {
 		if s.cfg != nil && s.cfg.Env == "production" {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
 		tx := blockchain.UnsignedTx{
-			To:    s.escrowAddress,
+			To:    contractAddr,
 			Value: "0",
 			Data:  common.Bytes2Hex(callData),
 		}
@@ -235,7 +249,7 @@ func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, e
 	}
 
 	fromAddr := common.HexToAddress(from)
-	escrowAddr := common.HexToAddress(s.escrowAddress)
+	escrowAddr := common.HexToAddress(contractAddr)
 
 	nonce, err := s.client.GetNonce(from)
 	if err != nil {
@@ -260,7 +274,7 @@ func (s *EscrowService) buildUnsignedTx(from string, callData []byte) ([]byte, e
 		Nonce:    nonce,
 		GasPrice: gasPrice.String(),
 		GasLimit: gasLimit,
-		To:       s.escrowAddress,
+		To:       contractAddr,
 		Value:    "0",
 		Data:     common.Bytes2Hex(callData),
 		ChainID:  s.client.ChainID().String(),
