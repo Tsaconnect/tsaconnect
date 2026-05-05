@@ -21,8 +21,9 @@ type Order struct {
 	ShippingCity     string     `json:"shippingCity,omitempty"`
 	ShippingState    string     `json:"shippingState,omitempty"`
 	ShippingCountry  string     `json:"shippingCountry,omitempty"`
-	ContractOrderID  string     `json:"contractOrderId,omitempty"`
-	EscrowTxHash     string     `json:"escrowTxHash,omitempty"`
+	ContractOrderID        string `json:"contractOrderId,omitempty"`
+	EscrowContractAddress  string `json:"escrowContractAddress,omitempty"`
+	EscrowTxHash           string `json:"escrowTxHash,omitempty"`
 	ApproveTxHash    string     `json:"approveTxHash,omitempty"`
 	ReleaseTxHash    string     `json:"releaseTxHash,omitempty"`
 	BuyerUpline      string     `json:"buyerUpline,omitempty"`

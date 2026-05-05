@@ -42,6 +42,15 @@ func NewCheckoutHandler(cfg *config.Config, bs *services.BlockchainService, es *
 	}
 }
 
+// orderEscrowContract returns the contract address that the order's escrow lives on.
+// Falls back to current config for orders predating the per-order column (backfill window).
+func (ch *CheckoutHandler) orderEscrowContract(order *models.Order) string {
+	if order.EscrowContractAddress != "" {
+		return order.EscrowContractAddress
+	}
+	return ch.Config.ProductEscrowAddress
+}
+
 // --- Shipping zone detection ---
 
 const (
@@ -729,11 +738,12 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	escrowExpires := time.Now().Add(30 * 24 * time.Hour)
 	updates := map[string]interface{}{
-		"status":            models.OrderStatusEscrowed,
-		"approve_tx_hash":   req.ApproveTxHash,
-		"escrow_tx_hash":    req.EscrowTxHash,
-		"contract_order_id": fmt.Sprintf("0x%x", contractOrderID),
-		"escrow_expires_at": escrowExpires,
+		"status":                   models.OrderStatusEscrowed,
+		"approve_tx_hash":          req.ApproveTxHash,
+		"escrow_tx_hash":           req.EscrowTxHash,
+		"contract_order_id":        fmt.Sprintf("0x%x", contractOrderID),
+		"escrow_contract_address":  ch.EscrowService.CurrentEscrowAddress(),
+		"escrow_expires_at":        escrowExpires,
 	}
 
 	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
@@ -1121,7 +1131,7 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 	}
 
 	contractOrderID := services.GenerateOrderID(order.ID)
-	confirmTxBytes, err := ch.EscrowService.PrepareConfirmReceipt(contractOrderID, user.WalletAddress)
+	confirmTxBytes, err := ch.EscrowService.PrepareConfirmReceipt(contractOrderID, user.WalletAddress, ch.orderEscrowContract(&order))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare confirm transaction")
 		return
@@ -1295,7 +1305,7 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 	case models.OrderStatusEscrowed:
 		// Before delivery — prepare unsigned requestRefund tx
 		contractOrderID := services.GenerateOrderID(order.ID)
-		refundTxBytes, err := ch.EscrowService.PrepareRequestRefund(contractOrderID, user.WalletAddress)
+		refundTxBytes, err := ch.EscrowService.PrepareRequestRefund(contractOrderID, user.WalletAddress, ch.orderEscrowContract(&order))
 		if err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare refund transaction")
 			return
@@ -1453,7 +1463,7 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 	}
 
 	contractOrderID := services.GenerateOrderID(order.ID)
-	cancelTxBytes, err := ch.EscrowService.PrepareCancelOrder(contractOrderID, user.WalletAddress)
+	cancelTxBytes, err := ch.EscrowService.PrepareCancelOrder(contractOrderID, user.WalletAddress, ch.orderEscrowContract(&order))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare cancel transaction")
 		return
@@ -1772,24 +1782,26 @@ func (ch *CheckoutHandler) AdminResolveDispute(c *gin.Context) {
 		return
 	}
 
-	// Gate on the contract's isAdmin view. Source of truth for "can this wallet
-	// call adminResolve" is the contract itself, so no env-drift bugs possible.
-	isAdmin, err := ch.EscrowService.IsAdmin(user.WalletAddress)
+	// Gate on the order's escrow contract isAdmin view. Source of truth for
+	// "can this wallet call adminResolve" is the contract that holds the funds —
+	// admin sets can differ across deployments after a contract migration.
+	escrowAddr := ch.orderEscrowContract(&order)
+	isAdmin, err := ch.EscrowService.IsAdmin(user.WalletAddress, escrowAddr)
 	if err != nil {
-		log.Printf("AdminResolveDispute IsAdmin check failed admin=%s: %v", user.WalletAddress, err)
+		log.Printf("AdminResolveDispute IsAdmin check failed admin=%s contract=%s: %v", user.WalletAddress, escrowAddr, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify admin authorization")
 		return
 	}
 	if !isAdmin {
 		utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf(
-			"Connected wallet (%s) is not registered as an escrow admin",
-			user.WalletAddress,
+			"Connected wallet (%s) is not registered as an escrow admin on %s",
+			user.WalletAddress, escrowAddr,
 		))
 		return
 	}
 
 	contractOrderID := services.GenerateOrderID(order.ID)
-	resolveTxBytes, err := ch.EscrowService.PrepareAdminResolve(contractOrderID, req.RefundBuyer, user.WalletAddress)
+	resolveTxBytes, err := ch.EscrowService.PrepareAdminResolve(contractOrderID, req.RefundBuyer, user.WalletAddress, escrowAddr)
 	if err != nil {
 		log.Printf("AdminResolveDispute PrepareAdminResolve failed order=%s admin=%s refundBuyer=%v: %v",
 			order.ID, user.WalletAddress, req.RefundBuyer, err)
@@ -2228,7 +2240,7 @@ func (ch *CheckoutHandler) ApproveCancelOrder(c *gin.Context) {
 	}
 
 	contractOrderID := services.GenerateOrderID(order.ID)
-	cancelTxBytes, err := ch.EscrowService.PrepareCancelOrder(contractOrderID, user.WalletAddress)
+	cancelTxBytes, err := ch.EscrowService.PrepareCancelOrder(contractOrderID, user.WalletAddress, ch.orderEscrowContract(&order))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare cancel transaction")
 		return
