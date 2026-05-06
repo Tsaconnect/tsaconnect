@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -17,6 +18,10 @@ import (
 type EVMClient struct {
 	Client  *ethclient.Client
 	chainID *big.Int
+
+	// decimalsCache memoises ERC-20 decimals() results keyed by lowercase
+	// contract address. Decimals are immutable on-chain so we cache forever.
+	decimalsCache sync.Map
 }
 
 // NewEVMClient connects to the given RPC endpoint and returns a ready client.

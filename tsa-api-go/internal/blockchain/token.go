@@ -29,7 +29,8 @@ const erc20ABI = `[
 	{"constant":true,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"},
 	{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"type":"function"},
 	{"constant":false,"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"type":"function"},
-	{"constant":true,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+	{"constant":true,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+	{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}
 ]`
 
 var parsedERC20ABI abi.ABI
@@ -78,6 +79,48 @@ func (c *EVMClient) GetTokenBalance(tokenAddress, walletAddress string) (*big.In
 	}
 
 	return balance, nil
+}
+
+// GetTokenDecimals returns the on-chain decimals() value for an ERC-20 token,
+// memoised per contract address. This is the only safe way to handle the same
+// symbol with different decimals on different chains (e.g. USDT is 6 on
+// Ethereum/Tron/Polygon but 18 on BSC's Binance-Peg contract).
+func (c *EVMClient) GetTokenDecimals(tokenAddress string) (int, error) {
+	key := strings.ToLower(tokenAddress)
+	if v, ok := c.decimalsCache.Load(key); ok {
+		return v.(int), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tokenAddr := common.HexToAddress(tokenAddress)
+	data, err := parsedERC20ABI.Pack("decimals")
+	if err != nil {
+		return 0, fmt.Errorf("pack decimals call: %w", err)
+	}
+
+	result, err := c.Client.CallContract(ctx, ethereum.CallMsg{
+		To:   &tokenAddr,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return 0, fmt.Errorf("call decimals on %s: %w", tokenAddress, err)
+	}
+	if len(result) == 0 {
+		return 0, fmt.Errorf("decimals() returned empty data for %s", tokenAddress)
+	}
+
+	outputs, err := parsedERC20ABI.Unpack("decimals", result)
+	if err != nil {
+		return 0, fmt.Errorf("unpack decimals result: %w", err)
+	}
+	d, ok := outputs[0].(uint8)
+	if !ok {
+		return 0, fmt.Errorf("unexpected decimals return type")
+	}
+	c.decimalsCache.Store(key, int(d))
+	return int(d), nil
 }
 
 // GetTokenAllowance returns the approved allowance that owner has granted to spender.

@@ -301,7 +301,18 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 					tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, cq.name, tok.Symbol)
 					if tokenAddr != "" && client != nil {
 						if bal, err := client.GetTokenBalance(tokenAddr, address); err == nil {
-							balStr := formatTokenBalance(bal, tok.Decimals)
+							// Decimals are per-contract (USDT is 6 on
+							// Ethereum/Polygon but 18 on BSC). Query the
+							// contract directly; fall back to the DB row only
+							// if the RPC fails.
+							decimals := tok.Decimals
+							if onChainDec, derr := client.GetTokenDecimals(tokenAddr); derr == nil {
+								decimals = onChainDec
+							} else {
+								log.Printf("[wallet] decimals() failed for %s on %s (%s); falling back to DB value %d: %v",
+									tok.Symbol, cq.name, tokenAddr, tok.Decimals, derr)
+							}
+							balStr := formatTokenBalance(bal, decimals)
 							balFloat, _ := strconv.ParseFloat(balStr, 64)
 							price := prices[tok.Symbol]
 							chainBalances[tok.Symbol] = tokenBalance{
