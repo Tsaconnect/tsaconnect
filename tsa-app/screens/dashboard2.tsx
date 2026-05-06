@@ -29,6 +29,7 @@ import { RecentActivity } from '@/components/dashboard/RecentActivity';
 import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
 import { useNetwork } from '../hooks/useNetwork';
+import { useCurrency } from '@/contexts/CurrencyContext';
 
 // The three transactable assets shown on the dashboard
 const DEFAULT_ASSETS: Asset[] = [
@@ -51,6 +52,7 @@ const DEFAULT_ASSETS: Asset[] = [
 
 const Dashboard: React.FC = () => {
   const { network } = useNetwork();
+  const { formatPrice } = useCurrency();
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
@@ -221,7 +223,7 @@ const Dashboard: React.FC = () => {
           <View style={styles.tpCashbackItem}>
             <Icon name="payments" size={16} color="#4ADE80" />
             <Text style={styles.tpCashbackValue}>
-              {isValuesHidden ? '••••' : `$${cashbackBalance.toFixed(2)}`}
+              {isValuesHidden ? '••••' : formatPrice(cashbackBalance)}
             </Text>
             <Text style={styles.tpCashbackLabel}>Cashback</Text>
           </View>

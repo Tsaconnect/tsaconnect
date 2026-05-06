@@ -3,6 +3,7 @@ import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { router } from 'expo-router';
+import { useCurrency } from '@/contexts/CurrencyContext';
 
 interface BalanceCardProps {
   totalUsdValue: number;
@@ -24,6 +25,7 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
   isValuesHidden,
   onToggleVisibility,
 }) => {
+  const { formatPrice } = useCurrency();
   const changeColor = dailyChange >= 0 ? '#4ADE80' : '#F87171';
   const changePrefix = dailyChange >= 0 ? '+' : '';
 
@@ -41,9 +43,7 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
       </View>
 
       <Text style={styles.balance}>
-        {isValuesHidden
-          ? '••••••'
-          : `$${totalUsdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+        {isValuesHidden ? '••••••' : formatPrice(totalUsdValue)}
       </Text>
 
       {dailyChange !== 0 && (
@@ -54,7 +54,7 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
             color={changeColor}
           />
           <Text style={[styles.changeText, { color: changeColor }]}>
-            {changePrefix}${Math.abs(dailyChange).toFixed(2)} today
+            {changePrefix}{formatPrice(Math.abs(dailyChange))} today
           </Text>
         </View>
       )}
