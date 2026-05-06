@@ -6,60 +6,73 @@ import {
   View,
 } from "react-native";
 import React, { useEffect, useState } from "react";
-import {
-  GestureHandlerRootView,
-  TouchableOpacity,
-} from "react-native-gesture-handler";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { router, useLocalSearchParams } from "expo-router";
 import ProductCard from "../../components/designs/productcard";
 import { useAuth } from "../../AuthContext/AuthContext";
-import axios from "axios";
-import { baseUrl } from "../../constants/api/apiClient";
 import { COLORS } from "../../constants";
+import { api, Product } from "../../components/services/api";
 
 const Products = () => {
-  const { token, setAppService } = useAuth();
-  //const { setAppService } = useAuth();
-  const { value } = useLocalSearchParams();
-  const [products, setProducts] = useState([]);
+  const { setAppService } = useAuth();
+  const { value } = useLocalSearchParams<{ value?: string }>();
+  const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
-  const filteredData = products.filter((item) => item.category === value);
-  console.log(filteredData);
 
   useEffect(() => {
-    const fetchedProducts = async () => {
-      try {
-        const response = await axios.get(`${baseUrl}/products?type=Product`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        });
-        const fetchProducts = response.data.results;
-        setProducts(fetchProducts);
-      } catch (error) {
-        // alert(error?.response.data.message)
-      } finally {
-        setLoading(false);
+    if (!value) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const response = await api.getProductsByCategory({
+        categoryId: value,
+        type: "Product",
+      });
+      if (cancelled) return;
+      if (response.success && Array.isArray(response.data?.products)) {
+        setProducts(response.data.products);
+      } else {
+        console.warn("Failed to load products:", response.message);
+        setProducts([]);
       }
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
     };
-    fetchedProducts();
-  }, []);
+  }, [value]);
 
   if (loading) {
     return (
       <GestureHandlerRootView style={styles.container}>
-        <ActivityIndicator size={"large"} color="#0000ff" />
+        <ActivityIndicator size="large" color={COLORS.primary} />
       </GestureHandlerRootView>
     );
   }
 
   return (
     <GestureHandlerRootView style={styles.container}>
-      {filteredData.length > 0 ? (
+      {products.length > 0 ? (
         <FlatList
-          data={filteredData}
-          renderItem={({ item }) => <ProductCard item={item} />}
-          keyExtractor={(item) => item.id}
+          data={products}
+          renderItem={({ item }) => (
+            <ProductCard
+              item={{
+                id: item.id || (item as any)._id,
+                name: item.name,
+                companyName: item.companyName ?? "",
+                location: item.location,
+                price: item.price,
+                averageRating: (item as any).rating?.average ?? 0,
+                images: (item.images || [])
+                  .map((img: any) => (typeof img === "string" ? img : img?.url))
+                  .filter((u: unknown): u is string => typeof u === "string"),
+              }}
+            />
+          )}
+          keyExtractor={(item) => item.id || (item as any)._id}
           numColumns={2}
         />
       ) : (
@@ -67,20 +80,6 @@ const Products = () => {
           <Text style={styles.notFoundText}>
             No registered available vendor merchant at the moment.
           </Text>
-          {/*  <Text style={styles.subText}>
-            Do you offer such product or service?
-          </Text>
-          <TouchableOpacity
-            onPress={() => {
-              router.push({
-                pathname: "/serviceaction",
-                params: { index: 0 },
-              });
-            }}
-            style={styles.registerLink}
-          >
-            <Text style={styles.registerLinkText}>Register</Text>
-          </TouchableOpacity> */}
         </View>
       )}
       <View style={{ position: "absolute", alignItems: "center", bottom: 5 }}>
@@ -101,15 +100,6 @@ const Products = () => {
 export default Products;
 
 const styles = StyleSheet.create({
-  noResultsContainer: {
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 20,
-  },
-  noResultsText: {
-    fontSize: 16,
-    color: "#555",
-  },
   container: {
     flex: 1,
     alignItems: "center",
@@ -121,17 +111,5 @@ const styles = StyleSheet.create({
   },
   notFoundText: {
     fontSize: 14,
-  },
-  subText: {
-    fontSize: 14,
-  },
-  registerLink: {
-    fontSize: 16,
-    color: "#E8A14A",
-    marginTop: 20,
-  },
-  registerLinkText: {
-    fontSize: 16,
-    color: "#E8A14A",
   },
 });

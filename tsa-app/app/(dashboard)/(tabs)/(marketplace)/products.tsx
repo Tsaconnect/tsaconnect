@@ -2,37 +2,31 @@ import React, { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { COLORS } from "../../../../constants";
 import HeaderSearch from "../../../../components/marketplace/header";
-import { useAuth } from "../../../../AuthContext/AuthContext";
-import axios from "axios";
-import { baseUrl } from "../../../../constants/api/apiClient";
 import ProductListCard from "../../../../components/accessories/ProductListCard";
+import { api, Category } from "../../../../components/services/api";
 
 const Products = () => {
-  const [categories, setCategories] = useState([]);
-  const { token } = useAuth();
+  const [categories, setCategories] = useState<Category[]>([]);
 
   useEffect(() => {
-    const fetchCategories = async () => {
-      try {
-        const response = await axios.get(`${baseUrl}/category?type=Product`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        });
-        const fetchedCategories = response.data.results;
-        setCategories(fetchedCategories);
-      } catch (error) {
-        console.error('Failed to fetch product categories:', error?.response?.data?.message || error);
+    let cancelled = false;
+    (async () => {
+      const response = await api.getCategoryTree("Product");
+      if (cancelled) return;
+      if (response.success && Array.isArray(response.data)) {
+        setCategories(response.data);
+      } else {
+        console.warn("Failed to load product categories:", response.message);
       }
+    })();
+    return () => {
+      cancelled = true;
     };
-    if (token) {
-      fetchCategories();
-    }
-  }, [token]);
+  }, []);
 
   return (
     <View style={styles.container}>
-      <HeaderSearch type='Product'/>
+      <HeaderSearch type="Product" />
       <ProductListCard itemList={categories} itemValue="categoryproducts" />
     </View>
   );
