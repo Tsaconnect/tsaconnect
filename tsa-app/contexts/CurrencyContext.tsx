@@ -63,7 +63,14 @@ interface CurrencyContextType {
   staleSeconds: number | null;
   setCurrency: (code: string) => Promise<void>;
   refreshRates: () => Promise<void>;
+  /** Single-line price formatted in the selected currency (e.g. "₦27,500.00" or "$20.00"). */
   formatPrice: (usdAmount: number) => string;
+  /**
+   * Dual-line price: primary is always USD with `$` prefix; secondary is the
+   * same value in the selected currency, with the ISO code prefix when on USD
+   * (so the two lines are visually distinct: "$20.00" / "USD 20.00").
+   */
+  formatDualPrice: (usdAmount: number) => { primary: string; secondary: string };
 }
 
 const CurrencyContext = createContext<CurrencyContextType>({
@@ -78,6 +85,7 @@ const CurrencyContext = createContext<CurrencyContextType>({
   setCurrency: async () => {},
   refreshRates: async () => {},
   formatPrice: () => "$0.00",
+  formatDualPrice: () => ({ primary: "$0.00", secondary: "USD 0.00" }),
 });
 
 interface CurrencyProviderProps {
@@ -315,6 +323,36 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
     [currency, rate, isSelectedRateStale],
   );
 
+  // Helper used by formatDualPrice for the USD primary line. Always renders
+  // the value with the `$` symbol regardless of the user's selected currency.
+  const formatUSD = (usdAmount: number) =>
+    `$${usdAmount.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+
+  const formatDualPriceFn = useCallback(
+    (usdAmount: number): { primary: string; secondary: string } => {
+      const primary = formatUSD(usdAmount);
+
+      // When the user is on USD (or rates aren't loaded yet) we prefix the
+      // secondary line with the ISO code so the two lines stay visually
+      // distinct: "$20.00" / "USD 20.00".
+      if (currency.code === "USD" || rate === null) {
+        const secondary = `USD ${usdAmount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+        return { primary, secondary };
+      }
+
+      // Non-USD: reuse formatPrice for the local-symbol line. It already
+      // appends "*" when the rate is stale, which we want here too.
+      return { primary, secondary: formatPriceFn(usdAmount) };
+    },
+    [currency, rate, formatPriceFn],
+  );
+
   return (
     <CurrencyContext.Provider
       value={{
@@ -329,6 +367,7 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
         setCurrency,
         refreshRates,
         formatPrice: formatPriceFn,
+        formatDualPrice: formatDualPriceFn,
       }}
     >
       {children}

@@ -25,9 +25,11 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
   isValuesHidden,
   onToggleVisibility,
 }) => {
-  const { formatPrice } = useCurrency();
+  const { formatDualPrice } = useCurrency();
+  const dualBalance = formatDualPrice(totalUsdValue);
+  const dualChange = formatDualPrice(Math.abs(dailyChange));
   const changeColor = dailyChange >= 0 ? '#4ADE80' : '#F87171';
-  const changePrefix = dailyChange >= 0 ? '+' : '';
+  const changePrefix = dailyChange >= 0 ? '+' : '-';
 
   return (
     <View style={styles.card}>
@@ -43,7 +45,10 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
       </View>
 
       <Text style={styles.balance}>
-        {isValuesHidden ? '••••••' : formatPrice(totalUsdValue)}
+        {isValuesHidden ? '••••••' : dualBalance.primary}
+      </Text>
+      <Text style={styles.balanceSecondary}>
+        {isValuesHidden ? '••••' : dualBalance.secondary}
       </Text>
 
       {dailyChange !== 0 && (
@@ -54,7 +59,7 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
             color={changeColor}
           />
           <Text style={[styles.changeText, { color: changeColor }]}>
-            {changePrefix}{formatPrice(Math.abs(dailyChange))} today
+            {changePrefix}{dualChange.primary} today
           </Text>
         </View>
       )}
@@ -92,7 +97,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   label: { fontSize: 13, color: 'rgba(255,255,255,0.6)' },
-  balance: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', marginBottom: 4 },
+  balance: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', marginBottom: 2 },
+  balanceSecondary: { fontSize: 14, fontWeight: '500', color: 'rgba(255,255,255,0.65)', marginBottom: 4 },
   changeRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 },
   changeText: { fontSize: 12, fontWeight: '500' },
   actionsRow: {

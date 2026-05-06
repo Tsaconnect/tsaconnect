@@ -52,7 +52,7 @@ const DEFAULT_ASSETS: Asset[] = [
 
 const Dashboard: React.FC = () => {
   const { network } = useNetwork();
-  const { formatPrice } = useCurrency();
+  const { formatDualPrice } = useCurrency();
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
@@ -223,7 +223,10 @@ const Dashboard: React.FC = () => {
           <View style={styles.tpCashbackItem}>
             <Icon name="payments" size={16} color="#4ADE80" />
             <Text style={styles.tpCashbackValue}>
-              {isValuesHidden ? '••••' : formatPrice(cashbackBalance)}
+              {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
+            </Text>
+            <Text style={styles.tpCashbackSecondary}>
+              {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
             </Text>
             <Text style={styles.tpCashbackLabel}>Cashback</Text>
           </View>
@@ -295,6 +298,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: '#1A1A1A',
+  },
+  tpCashbackSecondary: {
+    fontSize: 11,
+    color: '#666',
   },
   tpCashbackLabel: {
     fontSize: 11,
