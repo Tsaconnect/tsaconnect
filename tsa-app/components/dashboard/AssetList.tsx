@@ -2,6 +2,7 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Asset } from '@/components/services/api';
+import { useCurrency } from '@/contexts/CurrencyContext';
 
 const ASSET_COLORS: Record<string, string[]> = {
   MCGP: ['#D4AF37', '#B8941F'],
@@ -15,6 +16,7 @@ interface AssetListProps {
 }
 
 export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) => {
+  const { formatPrice } = useCurrency();
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -41,7 +43,7 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) 
                 {isValuesHidden ? '••••' : asset.balance.toFixed(2)}
               </Text>
               <Text style={styles.usdText}>
-                {isValuesHidden ? '••••' : `$${asset.usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                {isValuesHidden ? '••••' : formatPrice(asset.usdValue)}
               </Text>
             </View>
           </View>
