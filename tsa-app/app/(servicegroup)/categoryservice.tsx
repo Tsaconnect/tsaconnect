@@ -4,8 +4,11 @@ import {
   Text,
   View,
   ActivityIndicator,
+  Pressable,
 } from "react-native";
 import React, { useState, useEffect } from "react";
+import Icon from "react-native-vector-icons/MaterialIcons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ServiceCard from "../../components/services/ServiceCard";
 import { router, useLocalSearchParams } from "expo-router";
 import { useAuth } from "../../AuthContext/AuthContext";
@@ -17,6 +20,7 @@ const Services = () => {
   const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const { setAppService } = useAuth();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (!value) {
@@ -43,15 +47,33 @@ const Services = () => {
     };
   }, [value]);
 
+  const handleRegister = () => {
+    setAppService("Register your service");
+    router.push({ pathname: "/serviceaction", params: { index: 1 } });
+  };
+
   return (
-    <View style={{ backgroundColor: "#fff", flex: 1, alignItems: "center" }}>
-      <ScrollView>
-        {loading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#E8A14A" />
-          </View>
-        ) : services.length > 0 ? (
-          services.map((item) => (
+    <View style={styles.container}>
+      {loading ? (
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+        </View>
+      ) : services.length === 0 ? (
+        <View style={styles.centered}>
+          <Icon name="storefront" size={56} color="#E0E0E0" />
+          <Text style={styles.emptyTitle}>No vendors yet</Text>
+          <Text style={styles.emptyBody}>
+            No registered vendor merchants in this category at the moment.
+          </Text>
+        </View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={[
+            styles.scrollContent,
+            { paddingBottom: 80 + insets.bottom },
+          ]}
+        >
+          {services.map((item) => (
             <ServiceCard
               key={item.id || (item as any)._id}
               id={item.id || (item as any)._id}
@@ -59,34 +81,14 @@ const Services = () => {
               description={item.description}
               image={item.images?.[0]?.url || (item.images?.[0] as any) || ""}
             />
-          ))
-        ) : (
-          <View style={styles.noResultsContainer}>
-            <View style={styles.notFoundContainer}>
-              <Text style={styles.notFoundText}>
-                No registered available vendor merchant at the moment.
-              </Text>
-            </View>
-          </View>
-        )}
-      </ScrollView>
-      <View
-        style={{
-          position: "absolute",
-          bottom: 5,
-          justifyContent: "center",
-          alignContent: "center",
-        }}
-      >
-        <Text
-          onPress={() => {
-            setAppService("Register your service");
-            router.push({ pathname: "/serviceaction", params: { index: 1 } });
-          }}
-          style={{ color: COLORS.primary, fontWeight: "500" }}
-        >
-          Click here to register as a vendor
-        </Text>
+          ))}
+        </ScrollView>
+      )}
+
+      <View style={[styles.footer, { paddingBottom: 12 + insets.bottom }]}>
+        <Pressable onPress={handleRegister} hitSlop={8}>
+          <Text style={styles.footerLink}>Click here to register as a vendor</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -95,40 +97,47 @@ const Services = () => {
 export default Services;
 
 const styles = StyleSheet.create({
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    height: "100%",
-  },
-  noResultsContainer: {
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 20,
-  },
-  noResultsText: {
-    fontSize: 16,
-    color: "#555",
-  },
   container: {
     flex: 1,
-    alignItems: "center",
+    backgroundColor: "#F5F5F7",
   },
-  notFoundContainer: {
+  scrollContent: {
+    paddingTop: 8,
+  },
+  centered: {
     flex: 1,
+    alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: 32,
+    paddingBottom: 80,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#1A1A1A",
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  emptyBody: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+    lineHeight: 20,
+  },
+  footer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: 12,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "#EEE",
     alignItems: "center",
   },
-  notFoundText: {
+  footerLink: {
+    color: COLORS.primary,
+    fontWeight: "600",
     fontSize: 14,
-  },
-  subText: {
-    fontSize: 14,
-  },
-  registerLink: {
-    fontSize: 16,
-    color: "#E8A14A",
-    marginTop: 15,
   },
 });
