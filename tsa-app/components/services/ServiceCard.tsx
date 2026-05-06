@@ -1,36 +1,48 @@
 import { Image, StyleSheet, Text, View } from "react-native";
 import React from "react";
-import { COLORS, SIZES } from "../../constants";
+import Icon from "react-native-vector-icons/MaterialIcons";
+import { COLORS } from "../../constants";
 import CardButton from "../buttons/CardButton";
 import { router } from "expo-router";
-//@ts-ignore
-const ServiceCard = ({ id, title, image, description }) => {
-  function selectService() {
+
+interface ServiceCardProps {
+  id: string;
+  title: string;
+  image?: string;
+  description?: string;
+}
+
+const ServiceCard: React.FC<ServiceCardProps> = ({ id, title, image, description }) => {
+  const hasImage = typeof image === "string" && image.length > 0;
+
+  const selectService = () => {
     router.push({
       pathname: "/servicedetail",
-      params: { id, title, image, description },
+      params: { id, title, image: image ?? "", description: description ?? "" },
     });
-  }
+  };
+
   return (
-    <View style={styles.cardContainer}>
+    <View style={styles.card}>
       <View style={styles.imageContainer}>
-        <Image
-          source={{ uri: image }}
-          resizeMode="contain"
-          style={{ width: "100%", height: "100%" }}
-        />
+        {hasImage ? (
+          <Image source={{ uri: image }} resizeMode="cover" style={styles.image} />
+        ) : (
+          <View style={styles.imagePlaceholder}>
+            <Icon name="storefront" size={48} color={COLORS.primary} />
+          </View>
+        )}
       </View>
-      <View style={styles.textContainer}>
-        <View
-          style={{
-            backgroundColor: COLORS.white,
-            width: SIZES.width * 0.9069767,
-          }}
-        >
-          <Text style={styles.titleText}>{title}</Text>
-          <Text>{description}</Text>
-        </View>
-        <View>
+      <View style={styles.body}>
+        <Text style={styles.title} numberOfLines={2}>
+          {title}
+        </Text>
+        {description ? (
+          <Text style={styles.description} numberOfLines={3}>
+            {description}
+          </Text>
+        ) : null}
+        <View style={styles.buttonWrap}>
           <CardButton handlPress={selectService} title="Request Service" />
         </View>
       </View>
@@ -41,25 +53,49 @@ const ServiceCard = ({ id, title, image, description }) => {
 export default ServiceCard;
 
 const styles = StyleSheet.create({
-  cardContainer: {
-    width: SIZES.width,
-    justifyContent: "center",
-    alignItems: "center",
+  card: {
     backgroundColor: COLORS.white,
+    borderRadius: 12,
+    marginHorizontal: 16,
+    marginVertical: 8,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 2,
   },
   imageContainer: {
     width: "100%",
-    height: SIZES.height * 0.370172,
+    height: 180,
+    backgroundColor: "#FAFAFA",
   },
-  textContainer: {
+  image: {
     width: "100%",
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: COLORS.white,
-    alignContent: "center",
+    height: "100%",
   },
-  titleText: {
-    fontWeight: "600",
-    fontSize: 20,
+  imagePlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF5EA",
+  },
+  body: {
+    padding: 16,
+  },
+  title: {
+    fontWeight: "700",
+    fontSize: 18,
+    color: "#1A1A1A",
+    marginBottom: 6,
+  },
+  description: {
+    fontSize: 14,
+    color: "#666",
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  buttonWrap: {
+    alignItems: "center",
   },
 });
