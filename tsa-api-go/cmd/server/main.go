@@ -72,10 +72,11 @@ func main() {
 	// Initialize OTC service
 	otcService := services.NewOTCService(sonicClient, cfg)
 
-	// Initialize exchange rate service (Open Exchange Rates)
+	// Initialize exchange rate service (OER + Bybit P2P hybrid)
 	p2pService := services.NewP2PService(
 		cfg.OpenExchangeRatesAppID,
 		cfg.SupportedCurrencies,
+		cfg.BybitP2PCurrencies,
 	)
 
 	// Initialize event bus and WebSocket hub

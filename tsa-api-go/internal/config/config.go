@@ -63,6 +63,9 @@ type Config struct {
 	OpenExchangeRatesAppID string
 	SupportedCurrencies     []string
 
+	// Currencies routed through Bybit P2P (others use OER)
+	BybitP2PCurrencies []string
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -114,8 +117,13 @@ func Load() *Config {
 
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
 	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")
-	currenciesStr := getEnv("SUPPORTED_CURRENCIES", "USD,NGN,GHS,KES,ZAR,UGX,TZS,RWF,XOF,XAF")
+	// "*" returns every ISO 4217 fiat currency in the metadata table; otherwise comma-separated.
+	currenciesStr := getEnv("SUPPORTED_CURRENCIES", "*")
 	cfg.SupportedCurrencies = splitAndTrim(currenciesStr, ",")
+
+	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
+	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
+	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from https://docs.soniclabs.com/sonic/build-on-sonic/contract-addresses

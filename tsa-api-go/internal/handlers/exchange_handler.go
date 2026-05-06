@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"errors"
+	"log"
+	"math"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -18,29 +21,27 @@ func NewExchangeHandler(ps *services.P2PService) *ExchangeHandler {
 	return &ExchangeHandler{P2PService: ps}
 }
 
-// GetRates handles GET /api/exchange/rates
+// GetRates handles GET /api/exchange/rates.
 // Returns live P2P exchange rates for all supported currencies.
 func (eh *ExchangeHandler) GetRates(c *gin.Context) {
-	rates, err := eh.P2PService.GetAllRates()
+	snap, err := eh.P2PService.GetSnapshot()
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch exchange rates")
+		log.Printf("[ExchangeHandler] GetSnapshot failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Exchange rates are temporarily unavailable")
 		return
 	}
 
-	// Convert to response shape
-	rateMap := make(map[string]services.P2PRate, len(rates))
-	for code, rate := range rates {
-		rateMap[code] = rate
-	}
-
 	utils.SuccessResponse(c, http.StatusOK, "Exchange rates fetched", services.P2PRatesResponse{
-		Base:      "USD",
-		Rates:     rateMap,
-		UpdatedAt: rateMap["USD"].UpdatedAt, // all rates are fetched together
+		Base:  "USD",
+		Rates: snap.Rates,
+		// Use the snapshot's cachedAt as the authoritative timestamp; relying
+		// on USD's UpdatedAt would be fragile if a future code path bumped it.
+		UpdatedAt:    snap.CachedAt.Unix(),
+		StaleSeconds: snap.StaleSeconds,
 	})
 }
 
-// ConvertPrice handles POST /api/exchange/convert
+// ConvertPrice handles POST /api/exchange/convert.
 // Converts a USD amount to the specified local currency.
 type convertPriceRequest struct {
 	Amount   float64 `json:"amount" binding:"required"`
@@ -53,37 +54,45 @@ func (eh *ExchangeHandler) ConvertPrice(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "amount and currency are required")
 		return
 	}
-
-	localAmount, err := eh.P2PService.ConvertUSD(req.Amount, req.Currency)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+	// Reject negative, zero, NaN, ±Inf. `binding:"required"` already rejects 0
+	// for floats, but does not catch NaN/Inf or negative values.
+	if !isPositiveFinite(req.Amount) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount must be a positive finite number")
 		return
 	}
 
-	rate, _ := eh.P2PService.GetRate(req.Currency)
+	// Single GetRate call. Distinguish "unknown currency" (real 400) from any
+	// other error (upstream/internal — 500). Don't leak internal error
+	// messages to clients on the 500 path.
+	rate, err := eh.P2PService.GetRate(req.Currency)
+	if err != nil {
+		if errors.Is(err, services.ErrUnsupportedCurrency) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "unsupported currency")
+			return
+		}
+		log.Printf("[ExchangeHandler] GetRate(%q) failed: %v", req.Currency, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Exchange rates are temporarily unavailable")
+		return
+	}
+
+	localAmount := req.Amount * rate.MidRate
 
 	utils.SuccessResponse(c, http.StatusOK, "Price converted", gin.H{
-		"usdAmount":     req.Amount,
-		"localAmount":   localAmount,
-		"currency":      req.Currency,
-		"symbol":        currencySymbolStatic(req.Currency),
-		"rate":          rate.MidRate,
-		"binanceBuy":    rate.BinanceBuy,
-		"binanceSell":   rate.BinanceSell,
-		"exchangeRate":  rate.MidRate,
+		"usdAmount":    req.Amount,
+		"localAmount":  localAmount,
+		"currency":     req.Currency,
+		"symbol":       rate.Symbol,
+		"rate":         rate.MidRate,
+		"binanceBuy":   rate.BinanceBuy,
+		"binanceSell":  rate.BinanceSell,
+		"exchangeRate": rate.MidRate,
+		// Stale signaling — clients quoting against this response MUST refuse
+		// to settle if `stale` is true, or render a warning to the user.
+		"stale":  rate.Stale,
+		"source": rate.Source,
 	})
 }
 
-// currencySymbolStatic is a local copy to avoid importing the services package
-// in a way that creates a circular dependency. Keep in sync.
-func currencySymbolStatic(code string) string {
-	symbols := map[string]string{
-		"USD": "$", "NGN": "₦", "GHS": "GH₵", "KES": "KSh",
-		"ZAR": "R", "UGX": "USh", "TZS": "TSh", "RWF": "FRw",
-		"XOF": "CFA", "XAF": "FCFA", "EUR": "€", "GBP": "£",
-	}
-	if sym, ok := symbols[code]; ok {
-		return sym
-	}
-	return ""
+func isPositiveFinite(f float64) bool {
+	return f > 0 && !math.IsNaN(f) && !math.IsInf(f, 0)
 }

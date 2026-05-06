@@ -2,11 +2,11 @@
 // Price format utilities — handles USD → local currency display
 // ──────────────────────────────────────────────
 
-import { CurrencyConfig, CURRENCY_MAP, DEFAULT_CURRENCY } from "../constants/currencies";
+import { CurrencyConfig, DEFAULT_CURRENCY } from "../constants/currencies";
 
 export interface FormatPriceOptions {
-  /** The exchange rate (1 USD = X local). If omitted, returns USD. */
-  rate?: number;
+  /** The exchange rate (1 USD = X local). If omitted or null, returns USD. */
+  rate?: number | null;
   /** Target currency config. Defaults to USD. */
   currency?: CurrencyConfig;
   /** Minimum decimal places (default: 2 for most currencies). */
@@ -36,8 +36,9 @@ export function formatPrice(usdAmount: number, options: FormatPriceOptions = {})
     compact = false,
   } = options;
 
-  // If currency is USD or no rate provided, return USD formatted
-  if (currency.code === "USD" || rate === undefined || rate === 0) {
+  // If currency is USD or no rate available, return USD formatted (don't
+  // silently apply a 1:1 fallback — that would 100x mis-render NGN etc.).
+  if (currency.code === "USD" || rate == null || rate === 0) {
     return formatUSD(usdAmount, { compact, showCode });
   }
 
@@ -98,7 +99,7 @@ export function formatUSD(usdAmount: number, options: { compact?: boolean; showC
  */
 export function formatPriceDual(
   usdAmount: number,
-  rate: number,
+  rate: number | null | undefined,
   currency: CurrencyConfig,
 ): { local: string; usd: string; full: string } {
   const local = formatPrice(usdAmount, { rate, currency });
@@ -106,6 +107,6 @@ export function formatPriceDual(
   return {
     local,
     usd,
-    full: currency.code === "USD" ? usd : `${local} (${usd})`,
+    full: currency.code === "USD" || rate == null ? usd : `${local} (${usd})`,
   };
 }
