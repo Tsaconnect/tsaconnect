@@ -8,60 +8,56 @@ import {
 import React, { useState, useEffect } from "react";
 import ServiceCard from "../../components/services/ServiceCard";
 import { router, useLocalSearchParams } from "expo-router";
-import { baseUrl } from "../../constants/api/apiClient";
-import axios from "axios";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { COLORS } from "../../constants";
+import { api, Product } from "../../components/services/api";
 
 const Services = () => {
-  const { value } = useLocalSearchParams();
-  const [services, setServices] = useState([]);
+  const { value } = useLocalSearchParams<{ value?: string }>();
+  const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
-  const { token, setAppService } = useAuth();
+  const { setAppService } = useAuth();
 
   useEffect(() => {
-    const fetchedServices = async () => {
-      try {
-        const response = await axios.get(`${baseUrl}/products?type=Service`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-        });
-        const fetchServices = response.data.results;
-        setServices(fetchServices);
-      } catch (error) {
-        //@ts-ignore
-        alert(error?.response.data.message);
-      } finally {
-        setLoading(false); // Set loading to false once data is fetched
-      }
-    };
-    if (token) {
-      fetchedServices();
+    if (!value) {
+      setLoading(false);
+      return;
     }
-  }, []);
-  //@ts-ignore
-  const filteredData = services.filter((item) => item.category === value);
+    let cancelled = false;
+    (async () => {
+      const response = await api.getProductsByCategory({
+        categoryId: value,
+        type: "Service",
+      });
+      if (cancelled) return;
+      if (response.success && Array.isArray(response.data?.products)) {
+        setServices(response.data.products);
+      } else {
+        console.warn("Failed to load services:", response.message);
+        setServices([]);
+      }
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [value]);
 
   return (
     <View style={{ backgroundColor: "#fff", flex: 1, alignItems: "center" }}>
       <ScrollView>
-        {loading ? ( // Show loading spinner when loading
+        {loading ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color="#E8A14A" />
           </View>
-        ) : filteredData.length > 0 ? (
-          filteredData.map((item, index) => (
+        ) : services.length > 0 ? (
+          services.map((item) => (
             <ServiceCard
-              key={index}
-              //@ts-ignore
-              id={item._id || item.id}
-              //@ts-ignore
+              key={item.id || (item as any)._id}
+              id={item.id || (item as any)._id}
               title={item.name}
-              //@ts-ignore
               description={item.description}
-              //@ts-ignore
-              image={item.images[0]}
+              image={item.images?.[0]?.url || (item.images?.[0] as any) || ""}
             />
           ))
         ) : (

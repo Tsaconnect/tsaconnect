@@ -14,7 +14,10 @@ import { AppContext } from "../../AuthContext/AuthContext";
 interface Item {
   id: string;
   title: string;
-  image: string;
+  // Backend categories carry `icon` (URL or asset name); some legacy data
+  // shipped `image`. Accept either so we render whatever the API provides.
+  icon?: string;
+  image?: string;
 }
 
 interface ProductListCardProps {
@@ -72,11 +75,15 @@ const ProductListCard: React.FC<ProductListCardProps> = ({
             disabled={isDisabled}
           >
             <View style={styles.itemContainer}>
-              <Image
-                source={{ uri: item.image }}
-                style={styles.iconStyle}
-                resizeMode="contain"
-              />
+              {(item.icon || item.image) ? (
+                <Image
+                  source={{ uri: item.icon || item.image }}
+                  style={styles.iconStyle}
+                  resizeMode="contain"
+                />
+              ) : (
+                <View style={[styles.iconStyle, styles.iconPlaceholder]} />
+              )}
               <Text style={styles.itemText}>{item.title}</Text>
             </View>
           </Pressable>
@@ -123,6 +130,9 @@ const styles = StyleSheet.create({
     height: "96%",
     marginRight: 5,
     borderRadius: 60,
+  },
+  iconPlaceholder: {
+    backgroundColor: "#FFE5C4",
   },
   itemText: {
     fontSize: 16,

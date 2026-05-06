@@ -34,28 +34,19 @@ const SERVICE_ITEMS = [
   {
     key: 'marketplace',
     title: 'Marketplace',
-    description: 'Browse products & services',
+    description: 'Browse products by category',
     icon: 'storefront',
     color: '#2E7D32',
     bg: 'rgba(46,125,50,0.10)',
     route: '/products',
   },
   {
-    key: 'professional',
-    title: 'Professional',
-    description: 'Legal, Accounting & more',
+    key: 'browse-services',
+    title: 'Browse Services',
+    description: 'Find vendors by category',
     icon: 'business-center',
     color: '#1976D2',
     bg: 'rgba(25,118,210,0.10)',
-    route: '/service',
-  },
-  {
-    key: 'farming',
-    title: 'Farming',
-    description: 'Agriculture & environment',
-    icon: 'agriculture',
-    color: '#689F38',
-    bg: 'rgba(104,159,56,0.10)',
     route: '/service',
   },
   {
@@ -80,7 +71,7 @@ const SERVICE_ITEMS = [
 
 const QUICK_ACTIONS = [
   { key: 'deposit', label: 'Deposit', icon: 'account-balance-wallet', color: '#16A34A', bg: 'rgba(22,163,74,0.12)', route: '/sellp2p' },
-  { key: 'order', label: 'Order Service', icon: 'receipt-long', color: '#3B82F6', bg: 'rgba(59,130,246,0.12)', route: '/service' },
+  { key: 'my-listings', label: 'My Listings', icon: 'inventory', color: '#3B82F6', bg: 'rgba(59,130,246,0.12)', route: '/myAdverts' },
   { key: 'merchant', label: 'Become Merchant', icon: 'store', color: GOLD, bg: 'rgba(212,175,55,0.12)', route: '/merchants/merchant-request' },
   { key: 'wallet', label: 'Wallet', icon: 'account-balance', color: '#8B5CF6', bg: 'rgba(139,92,246,0.12)', route: '/tokenization' },
 ];
@@ -190,10 +181,8 @@ const ServicesScreen: React.FC = () => {
   const RegistrationModal = () => {
     const handleProceed = () => {
       if (registrationType === 'internal') {
-        //@ts-expect-error
         router.push('/sellp2p');
       } else {
-        //@ts-expect-error
         router.push('/buyp2p');
       }
       setShowRegistrationModal(false);
