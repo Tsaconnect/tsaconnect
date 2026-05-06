@@ -2,19 +2,21 @@
 // CurrencySelector — dropdown to switch display currency
 // ──────────────────────────────────────────────
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   Modal,
   FlatList,
   StyleSheet,
   ActivityIndicator,
+  Keyboard,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useCurrency } from "../../contexts/CurrencyContext";
-import { SUPPORTED_CURRENCIES, CurrencyConfig } from "../../constants/currencies";
+import { CurrencyConfig } from "../../constants/currencies";
 
 interface CurrencySelectorProps {
   /** Show as a minimal header button vs full-width card. Default: 'header' */
@@ -30,12 +32,12 @@ export default function CurrencySelector({
   onChange,
   showRates = false,
 }: CurrencySelectorProps) {
-  const { currency, setCurrency, allRates, loading } = useCurrency();
+  const { currency, setCurrency, allRates, supportedCurrencies, loading } = useCurrency();
   const [visible, setVisible] = useState(false);
 
   const handleSelect = async (code: string) => {
     await setCurrency(code);
-    const selected = SUPPORTED_CURRENCIES.find((c) => c.code === code);
+    const selected = supportedCurrencies.find((c) => c.code === code);
     if (selected && onChange) onChange(selected);
     setVisible(false);
   };
@@ -50,7 +52,8 @@ export default function CurrencySelector({
           activeOpacity={0.7}
         >
           <Text style={styles.cardButtonText}>
-            {currency.flag} {currency.symbol} {currency.code} — {currency.name}
+            {currency.flag ? `${currency.flag} ` : ""}
+            {currency.symbol} {currency.code} — {currency.name}
           </Text>
           <Ionicons name="chevron-down" size={18} color="#666" />
         </TouchableOpacity>
@@ -62,6 +65,7 @@ export default function CurrencySelector({
           selectedCode={currency.code}
           allRates={allRates}
           showRates={showRates}
+          currencies={supportedCurrencies}
         />
       </View>
     );
@@ -91,6 +95,7 @@ export default function CurrencySelector({
         selectedCode={currency.code}
         allRates={allRates}
         showRates={showRates}
+        currencies={supportedCurrencies}
       />
     </>
   );
@@ -105,6 +110,7 @@ interface CurrencyModalProps {
   selectedCode: string;
   allRates: Record<string, any>;
   showRates: boolean;
+  currencies: CurrencyConfig[];
 }
 
 function CurrencyModal({
@@ -114,33 +120,73 @@ function CurrencyModal({
   selectedCode,
   allRates,
   showRates,
+  currencies,
 }: CurrencyModalProps) {
-  // Filter to currencies that have rates available + USD
-  const availableCurrencies = SUPPORTED_CURRENCIES.filter(
-    (c) => allRates[c.code] || c.code === "USD",
-  );
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return currencies;
+    return currencies.filter(
+      (c) =>
+        c.code.toLowerCase().includes(q) ||
+        c.name.toLowerCase().includes(q) ||
+        (c.symbol && c.symbol.toLowerCase().includes(q)),
+    );
+  }, [currencies, query]);
+
+  const handleClose = () => {
+    setQuery("");
+    Keyboard.dismiss();
+    onClose();
+  };
 
   return (
     <Modal
       visible={visible}
       transparent
       animationType="slide"
-      onRequestClose={onClose}
+      onRequestClose={handleClose}
     >
       <View style={styles.modalOverlay}>
         <View style={styles.modalContainer}>
           {/* Header */}
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Select Currency</Text>
-            <TouchableOpacity onPress={onClose}>
+            <TouchableOpacity onPress={handleClose}>
               <Ionicons name="close" size={24} color="#333" />
             </TouchableOpacity>
           </View>
 
+          {/* Search */}
+          <View style={styles.searchContainer}>
+            <Ionicons name="search" size={18} color="#888" style={styles.searchIcon} />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search currencies (e.g. NGN, Naira)"
+              placeholderTextColor="#999"
+              value={query}
+              onChangeText={setQuery}
+              autoCorrect={false}
+              autoCapitalize="characters"
+              clearButtonMode="while-editing"
+              returnKeyType="search"
+            />
+            {query.length > 0 && (
+              <TouchableOpacity onPress={() => setQuery("")} style={styles.searchClear}>
+                <Ionicons name="close-circle" size={18} color="#bbb" />
+              </TouchableOpacity>
+            )}
+          </View>
+
           {/* List */}
           <FlatList
-            data={availableCurrencies}
+            data={filtered}
             keyExtractor={(item) => item.code}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>No currencies match "{query}"</Text>
+            }
             renderItem={({ item }) => {
               const isSelected = item.code === selectedCode;
               const rate = allRates[item.code];
@@ -148,7 +194,10 @@ function CurrencyModal({
               return (
                 <TouchableOpacity
                   style={[styles.currencyItem, isSelected && styles.currencyItemSelected]}
-                  onPress={() => onSelect(item.code)}
+                  onPress={() => {
+                    setQuery("");
+                    onSelect(item.code);
+                  }}
                   activeOpacity={0.7}
                 >
                   <View style={styles.currencyLeft}>
@@ -246,7 +295,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFF",
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: "70%",
+    maxHeight: "80%",
     paddingBottom: 30,
   },
   modalHeader: {
@@ -262,6 +311,37 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     color: "#1A1A1A",
+  },
+
+  // Search
+  searchContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: 20,
+    marginVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: "#F4F4F4",
+    borderRadius: 10,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: "#1A1A1A",
+    padding: 0,
+  },
+  searchClear: {
+    paddingLeft: 6,
+  },
+
+  emptyText: {
+    textAlign: "center",
+    color: "#888",
+    fontSize: 14,
+    paddingVertical: 30,
   },
   listContent: {
     paddingBottom: 20,

@@ -1,83 +1,80 @@
-// ──────────────────────────────────────────────
-// CurrencyContext — manages selected currency & exchange rates
-// ──────────────────────────────────────────────
+// CurrencyContext — manages selected currency & exchange rates.
+//
+// The list of supported currencies and their metadata is driven by the backend
+// rates response. Only USD is hardcoded as a guaranteed offline fallback.
 
 import React, {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useState,
   ReactNode,
   useCallback,
   useRef,
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { CurrencyConfig, CURRENCY_MAP, DEFAULT_CURRENCY } from "../constants/currencies";
+import { CurrencyConfig, DEFAULT_CURRENCY } from "../constants/currencies";
 import { exchangeRateService, P2PRate } from "../services/exchangeRateApi";
 import { useAuth } from "../AuthContext/AuthContext";
 
 const SELECTED_CURRENCY_KEY = "selected_currency";
 
-// Map ISO 3166-1 alpha-2 country codes to supported currency codes
 const COUNTRY_CURRENCY_MAP: Record<string, string> = {
-  NG: "NGN",
-  GH: "GHS",
-  KE: "KES",
-  ZA: "ZAR",
-  UG: "UGX",
-  TZ: "TZS",
-  RW: "RWF",
-  SN: "XOF",
-  CI: "XOF",
-  ML: "XOF",
-  BF: "XOF",
-  BJ: "XOF",
-  TG: "XOF",
-  NE: "XOF",
-  CM: "XAF",
-  CF: "XAF",
-  TD: "XAF",
-  GQ: "XAF",
-  GA: "XAF",
-  CG: "XAF",
-  GB: "GBP",
-  US: "USD",
-  DE: "EUR",
-  FR: "EUR",
-  IT: "EUR",
-  ES: "EUR",
-  NL: "EUR",
-  BE: "EUR",
+  NG: "NGN", GH: "GHS", KE: "KES", ZA: "ZAR", UG: "UGX", TZ: "TZS", RW: "RWF",
+  SN: "XOF", CI: "XOF", ML: "XOF", BF: "XOF", BJ: "XOF", TG: "XOF", NE: "XOF",
+  CM: "XAF", CF: "XAF", TD: "XAF", GQ: "XAF", GA: "XAF", CG: "XAF",
+  GB: "GBP", US: "USD",
+  DE: "EUR", FR: "EUR", IT: "EUR", ES: "EUR", NL: "EUR", BE: "EUR",
 };
 
+function rateToConfig(rate: P2PRate): CurrencyConfig {
+  return {
+    code: rate.currency,
+    symbol: rate.symbol || rate.currency,
+    name: rate.name || rate.currency,
+    flag: rate.flag,
+  };
+}
+
+// Compare CurrencyConfigs by value, not identity. Used to decide whether
+// metadata genuinely changed before triggering a re-render of every consumer.
+function configsEqual(a: CurrencyConfig, b: CurrencyConfig): boolean {
+  return (
+    a.code === b.code &&
+    a.symbol === b.symbol &&
+    a.name === b.name &&
+    a.flag === b.flag &&
+    a.locale === b.locale
+  );
+}
+
 interface CurrencyContextType {
-  /** Currently selected currency config */
   currency: CurrencyConfig;
-  /** All supported currencies */
   supportedCurrencies: CurrencyConfig[];
-  /** Exchange rate for selected currency (1 USD = X local) */
-  rate: number;
-  /** All raw P2P rates from backend */
+  /** Exchange rate for the selected currency (1 USD = X local). null when rates haven't loaded for this currency. */
+  rate: number | null;
   allRates: Record<string, P2PRate>;
-  /** Whether rates are being fetched */
   loading: boolean;
-  /** Error message if fetching failed */
   error: string | null;
-  /** Switch to a different currency */
+  /** True when the selected currency's rate is stale (Bybit fallback, expired cache, or missing). */
+  isSelectedRateStale: boolean;
+  /** Seconds since the last successful backend fetch; absent on cold start failure. */
+  staleSeconds: number | null;
   setCurrency: (code: string) => Promise<void>;
-  /** Force refresh exchange rates */
   refreshRates: () => Promise<void>;
-  /** Format a USD price in the selected currency */
   formatPrice: (usdAmount: number) => string;
 }
 
 const CurrencyContext = createContext<CurrencyContextType>({
   currency: DEFAULT_CURRENCY,
-  supportedCurrencies: [],
-  rate: 1,
+  supportedCurrencies: [DEFAULT_CURRENCY],
+  rate: null,
   allRates: {},
   loading: true,
   error: null,
+  isSelectedRateStale: false,
+  staleSeconds: null,
   setCurrency: async () => {},
   refreshRates: async () => {},
   formatPrice: () => "$0.00",
@@ -93,97 +90,198 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
   const [allRates, setAllRates] = useState<Record<string, P2PRate>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [initialized, setInitialized] = useState(false);
+  const [staleSeconds, setStaleSeconds] = useState<number | null>(null);
   const userChosenRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Derive the rate for the selected currency ──
-  const rate = allRates[currency.code]?.midRate ?? 1;
+  const currencyMap = useMemo<Record<string, CurrencyConfig>>(() => {
+    const map: Record<string, CurrencyConfig> = { USD: DEFAULT_CURRENCY };
+    for (const [code, rate] of Object.entries(allRates)) {
+      map[code] = rateToConfig(rate);
+    }
+    return map;
+  }, [allRates]);
 
-  // ── Fetch rates ──
-  const fetchRates = useCallback(async () => {
-    try {
-      const response = await exchangeRateService.getRates();
-      setAllRates(response.rates);
+  const supportedCurrencies = useMemo<CurrencyConfig[]>(() => {
+    const all = Object.values(currencyMap);
+    const usd = all.find((c) => c.code === "USD") ?? DEFAULT_CURRENCY;
+    const others = all
+      .filter((c) => c.code !== "USD")
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return [usd, ...others];
+  }, [currencyMap]);
+
+  // Stub configs created during init (saved-pref load, country-default) only carry
+  // the code. Once `currencyMap` is populated, replace the stub with real metadata.
+  // Compares by value to avoid re-rendering every consumer on each rate poll, when
+  // `currencyMap` is rebuilt with new object identities but the same data.
+  // `currency` is intentionally excluded from deps — including it would loop.
+  useEffect(() => {
+    const fresh = currencyMap[currency.code];
+    if (fresh && !configsEqual(fresh, currency)) {
+      setCurrencyState(fresh);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currencyMap]);
+
+  // selectedRow may be undefined on cold start before rates have loaded.
+  // We deliberately do NOT default to a 1:1 USD-equivalent rate — that would
+  // silently render NGN prices as if 1 USD == 1 NGN (≈100x mispricing).
+  const selectedRow = allRates[currency.code];
+  const rate = selectedRow?.midRate ?? null;
+  const isSelectedRateStale = !!selectedRow?.stale || (rate === null && currency.code !== "USD");
+
+  // tagAllAsStale marks every row in the prior allRates as stale=true and
+  // recomputes staleSeconds from each row's updatedAt. Used when fetchRates
+  // fails — keeping the rows visible at all is a UX choice (better than
+  // forcing the app into an empty state) but the FE must surface the staleness.
+  const tagAllAsStale = useCallback(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    setAllRates((prev) => {
+      const out: Record<string, P2PRate> = {};
+      let oldestUpdated = nowSec;
+      for (const [k, v] of Object.entries(prev)) {
+        if (typeof v.updatedAt === "number" && v.updatedAt > 0 && v.updatedAt < oldestUpdated) {
+          oldestUpdated = v.updatedAt;
+        }
+        out[k] = { ...v, stale: true };
+      }
+      // Bump staleSeconds based on the oldest row we still hold.
+      if (Object.keys(out).length > 0) {
+        setStaleSeconds(Math.max(0, nowSec - oldestUpdated));
+      }
+      return out;
+    });
+  }, []);
+
+  // User-facing error strings. Technical detail goes to console.warn; the
+  // UI sees one of these consistent messages so banners don't churn between
+  // "AbortError" / "Exchange rate API returned 500" / friendly text.
+  const ERROR_STALE = "Showing cached exchange rates; live rates are temporarily unavailable.";
+  const ERROR_UNAVAILABLE = "Exchange rates are temporarily unavailable.";
+
+  // Apply a rates response to context state. When the response is stale
+  // (FE service served from AsyncStorage fallback, or backend served from its
+  // own expired-cache rescue), set a non-null `error` so consumers that
+  // surface `error` as a banner — and not just `isSelectedRateStale` —
+  // still inform users their quote is degraded.
+  const applyRatesResponse = useCallback((response: { rates: Record<string, P2PRate>; staleSeconds?: number }) => {
+    setAllRates(response.rates);
+    setStaleSeconds(response.staleSeconds ?? null);
+    if (response.staleSeconds && response.staleSeconds > 0) {
+      setError(ERROR_STALE);
+    } else {
       setError(null);
-    } catch (err: any) {
-      setError(err.message || "Failed to fetch exchange rates");
-      // Keep old rates on failure
-    } finally {
-      setLoading(false);
     }
   }, []);
 
-  // ── Force refresh ──
+  const fetchRates = useCallback(async () => {
+    try {
+      const response = await exchangeRateService.getRates();
+      applyRatesResponse(response);
+    } catch (err) {
+      console.warn("[CurrencyContext] rate fetch failed", err);
+      setError(ERROR_UNAVAILABLE);
+      // Keep prior rates so the app remains usable, but mark them stale so
+      // formatPrice and any consumer checking `isSelectedRateStale` knows.
+      tagAllAsStale();
+    } finally {
+      setLoading(false);
+    }
+  }, [applyRatesResponse, tagAllAsStale]);
+
   const refreshRates = useCallback(async () => {
     setLoading(true);
     try {
       await exchangeRateService.clearCache();
       const response = await exchangeRateService.getRates(true);
-      setAllRates(response.rates);
-      setError(null);
-    } catch (err: any) {
-      setError(err.message || "Failed to refresh exchange rates");
+      applyRatesResponse(response);
+    } catch (err) {
+      console.warn("[CurrencyContext] rate refresh failed", err);
+      setError(ERROR_UNAVAILABLE);
+      tagAllAsStale();
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyRatesResponse, tagAllAsStale]);
 
-  // ── Load saved currency preference + fetch rates ──
   useEffect(() => {
     async function init() {
       try {
         const savedCode = await AsyncStorage.getItem(SELECTED_CURRENCY_KEY);
-        if (savedCode && CURRENCY_MAP[savedCode]) {
-          setCurrencyState(CURRENCY_MAP[savedCode]);
+        if (savedCode) {
+          setCurrencyState({
+            code: savedCode,
+            name: savedCode,
+            symbol: savedCode,
+          });
           userChosenRef.current = true;
         }
-        // No saved preference — will be set by the currentUser effect below
-      } catch {}
+      } catch (e) {
+        console.warn("[CurrencyContext] AsyncStorage read failed", e);
+      }
       await fetchRates();
-      setInitialized(true);
     }
     init();
 
-    // Poll for rates every 60 seconds
+    // 60s polling: keeps the FE responsive to backend cache rotations and lets
+    // a backend recovery propagate within a minute even when the previous fetch
+    // returned a stale snapshot.
     intervalRef.current = setInterval(fetchRates, 60_000);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [fetchRates]);
 
-  // ── Set default currency from user's country when profile loads ──
   useEffect(() => {
-    if (userChosenRef.current) return; // User has explicitly chosen
-    if (!currentUser?.country) return; // Profile not loaded yet
+    if (userChosenRef.current) return;
+    if (!currentUser?.country) return;
 
     const country = currentUser.country.toUpperCase();
     const currencyCode = COUNTRY_CURRENCY_MAP[country];
-
-    if (currencyCode && CURRENCY_MAP[currencyCode]) {
-      setCurrencyState(CURRENCY_MAP[currencyCode]);
-    } else {
-      // Country not in our supported list — keep USD default
+    if (!currencyCode) {
       setCurrencyState(DEFAULT_CURRENCY);
+      return;
     }
-  }, [currentUser]);
+    const config = currencyMap[currencyCode];
+    if (config) {
+      setCurrencyState(config);
+    } else {
+      setCurrencyState({ code: currencyCode, name: currencyCode, symbol: currencyCode });
+    }
+  }, [currentUser, currencyMap]);
 
-  // ── Switch currency ──
-  const setCurrency = useCallback(async (code: string) => {
-    const config = CURRENCY_MAP[code.toUpperCase()];
-    if (!config) return;
+  const setCurrency = useCallback(
+    async (code: string) => {
+      const upper = code.toUpperCase();
+      const config = currencyMap[upper];
+      if (!config) return;
 
-    userChosenRef.current = true;
-    setCurrencyState(config);
-    try {
-      await AsyncStorage.setItem(SELECTED_CURRENCY_KEY, code.toUpperCase());
-    } catch {}
-  }, []);
+      userChosenRef.current = true;
+      setCurrencyState(config);
+      try {
+        await AsyncStorage.setItem(SELECTED_CURRENCY_KEY, upper);
+      } catch (e) {
+        console.warn("[CurrencyContext] AsyncStorage write failed", e);
+      }
+    },
+    [currencyMap],
+  );
 
-  // ── Format a USD price in the selected currency ──
   const formatPriceFn = useCallback(
     (usdAmount: number): string => {
-      if (currency.code === "USD" || rate === 1) {
+      // Plain USD path — no rate needed.
+      if (currency.code === "USD") {
+        return `$${usdAmount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+      }
+
+      // Rates haven't loaded yet for the selected non-USD currency. Render
+      // the USD value rather than silently quoting in local currency at 1:1.
+      // Caller should also be checking isSelectedRateStale to disable trades.
+      if (rate === null) {
         return `$${usdAmount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -192,33 +290,42 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
 
       const localAmount = usdAmount * rate;
 
+      let formatted: string;
       try {
-        return new Intl.NumberFormat(currency.locale, {
+        formatted = new Intl.NumberFormat(currency.locale ?? "en-US", {
           style: "currency",
           currency: currency.code,
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         }).format(localAmount);
-      } catch {
+      } catch (e) {
+        console.warn(`[CurrencyContext] Intl format failed for ${currency.code}`, e);
         const sym = currency.symbol || currency.code;
-        return `${sym}${localAmount.toLocaleString("en-US", {
+        formatted = `${sym}${localAmount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         })}`;
       }
+
+      // Visually flag stale rates so consumers that haven't been audited for
+      // the Stale flag still surface *something* to the user instead of
+      // silently quoting an outdated rate.
+      return isSelectedRateStale ? `${formatted}*` : formatted;
     },
-    [currency, rate],
+    [currency, rate, isSelectedRateStale],
   );
 
   return (
     <CurrencyContext.Provider
       value={{
         currency,
-        supportedCurrencies: Object.values(CURRENCY_MAP).filter((c) => allRates[c.code] || c.code === "USD"),
+        supportedCurrencies,
         rate,
         allRates,
         loading,
         error,
+        isSelectedRateStale,
+        staleSeconds,
         setCurrency,
         refreshRates,
         formatPrice: formatPriceFn,
