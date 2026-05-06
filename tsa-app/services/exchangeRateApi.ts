@@ -72,6 +72,18 @@ function isValidRateMap(v: unknown): v is Record<string, P2PRate> {
   return true;
 }
 
+// fetchWithTimeout works on every JS runtime; Hermes on older Expo SDKs lacks
+// AbortSignal.timeout (ES2022) so we can't use it directly.
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class ExchangeRateService {
   private cachedRates: RatesResponse | null = null;
   private lastFetchTime = 0;
@@ -101,11 +113,10 @@ class ExchangeRateService {
     }
 
     try {
-      const response = await fetch(`${API_BASE_URL}/exchange/rates`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/exchange/rates`, {
         method: "GET",
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(5000),
-      });
+      }, 5000);
 
       if (!response.ok) {
         throw new Error(`Exchange rate API returned ${response.status}`);
@@ -241,15 +252,14 @@ class ExchangeRateService {
    * settle if true.
    */
   async convert(usdAmount: number, currency: string): Promise<ConvertResponse> {
-    const response = await fetch(`${API_BASE_URL}/exchange/convert`, {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/exchange/convert`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
       body: JSON.stringify({ amount: usdAmount, currency: currency.toUpperCase() }),
-      signal: AbortSignal.timeout(5000),
-    });
+    }, 5000);
 
     if (!response.ok) {
       throw new Error(`Convert API returned ${response.status}`);
