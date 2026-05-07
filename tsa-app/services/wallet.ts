@@ -281,15 +281,23 @@ export function clearProviderCache() {
 /**
  * Get a JSON-RPC provider for a given chain.
  * Providers are cached so repeated calls return the same instance.
+ *
+ * `staticNetwork` tells ethers the chain identity is known and to skip the
+ * background `eth_chainId` probe. Without it, a flaky mobile connection can
+ * land in a "JsonRpcProvider failed to detect network" retry loop that never
+ * succeeds and silently hangs every broadcast/wait call.
  */
 export function getProvider(chainKey: ChainKey): ethers.JsonRpcProvider {
   const cached = providerCache.get(chainKey);
   if (cached) return cached;
 
   const chain: ChainConfig = CHAINS[chainKey];
-  const provider = new ethers.JsonRpcProvider(chain.rpcUrl, {
+  const network = ethers.Network.from({
     chainId: chain.chainId,
     name: chain.name,
+  });
+  const provider = new ethers.JsonRpcProvider(chain.rpcUrl, network, {
+    staticNetwork: network,
   });
 
   providerCache.set(chainKey, provider);

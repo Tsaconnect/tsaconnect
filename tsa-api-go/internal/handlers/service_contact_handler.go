@@ -42,7 +42,7 @@ type submitContactFeeRequest struct {
 // tokenSymbolFromAddress returns the token symbol for a known address, or empty string.
 func (h *ServiceContactHandler) tokenSymbolFromAddress(addr string) string {
 	lower := strings.ToLower(addr)
-	for _, symbol := range []string{"USDC", "USDT"} {
+	for _, symbol := range []string{"USDC", "USDT", "MCGP"} {
 		if strings.ToLower(h.BlockchainService.TokenAddress("sonic", symbol)) == lower {
 			return symbol
 		}
@@ -115,8 +115,8 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 
 	// Determine token (default USDC, accept query param)
 	tokenSymbol := strings.ToUpper(c.DefaultQuery("token", "USDC"))
-	if tokenSymbol != "USDC" && tokenSymbol != "USDT" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC or USDT")
+	if tokenSymbol != "USDC" && tokenSymbol != "USDT" && tokenSymbol != "MCGP" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
 		return
 	}
 
@@ -143,6 +143,7 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 	}
 
 	feeAmount := h.ServiceContactService.GetFeeAmount()
+	approvalAmount := h.ServiceContactService.GetApprovalAmount(tokenSymbol)
 
 	// Prepare approve tx
 	client := h.BlockchainService.ClientForChain("sonic")
@@ -151,7 +152,7 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 		return
 	}
 
-	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, feeAmount)
+	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, approvalAmount)
 	if err != nil {
 		log.Printf("Failed to prepare approve tx: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
