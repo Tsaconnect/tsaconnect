@@ -23,12 +23,23 @@ import {
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
+// ApiError is thrown when the backend returned a structured error response.
+// Its message is already user-friendly (the API author wrote it for users),
+// so the alert path passes it through verbatim instead of pattern-matching.
+class ApiError extends Error {
+  readonly fromApi = true;
+}
+
 // humanizePaymentError maps the noisy ethers/network/contract errors that
 // surface during the contact-fee flow into plain-language alerts. The raw
 // strings (e.g. `transaction execution reverted (action="sendTransaction",
 // data=null, reason=null, …)`) are useless to the user, so we look for
-// well-known substrings and pick a sensible message.
+// well-known substrings and pick a sensible message. Errors flagged as
+// `fromApi` skip this entirely and use the BE's own message.
 function humanizePaymentError(err: unknown, tokenSymbol: string): string {
+  if ((err as any)?.fromApi && (err as Error)?.message) {
+    return (err as Error).message;
+  }
   const raw = String((err as any)?.message ?? err ?? '').toLowerCase();
   const has = (needle: string) => raw.includes(needle.toLowerCase());
 
@@ -153,7 +164,7 @@ const ServiceDetail = () => {
       setPaymentStep('approving');
       const prepResult = await prepareContactFee(serviceId, selectedToken);
       if (!prepResult.success || !prepResult.data) {
-        throw new Error(prepResult.message || 'Failed to prepare transactions');
+        throw new ApiError(prepResult.message || 'Failed to prepare transactions');
       }
 
       const { approveTx, payFeeTx } = prepResult.data;
@@ -219,7 +230,7 @@ const ServiceDetail = () => {
       );
 
       if (!submitResult.success || !submitResult.data) {
-        throw new Error(submitResult.message || 'Payment verification failed');
+        throw new ApiError(submitResult.message || 'Payment verification failed');
       }
 
       setContact(submitResult.data.contact);
@@ -268,14 +279,6 @@ const ServiceDetail = () => {
             <Text style={styles.modalDesc}>
               Pay {feeDisplay} in {selectedToken} to reveal this provider's contact details.
             </Text>
-
-            <View style={styles.splitInfo}>
-              <Text style={styles.splitTitle}>Fee breakdown:</Text>
-              <Text style={styles.splitLine}>Provider: 25%</Text>
-              <Text style={styles.splitLine}>You (cashback): 12.5%</Text>
-              <Text style={styles.splitLine}>Referral upline: 12.5%</Text>
-              <Text style={styles.splitLine}>Platform: 50%</Text>
-            </View>
 
             {/* Token selector — contract uses a single global feeAmount sized
                 for 6-decimal stablecoins, so only USDC/USDT are supported. */}
@@ -360,25 +363,6 @@ const styles = StyleSheet.create({
     color: '#555',
     marginBottom: 16,
     lineHeight: 20,
-  },
-  splitInfo: {
-    backgroundColor: '#f9f6f2',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-  },
-  splitTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.primary,
-    marginBottom: 6,
-  },
-  splitLine: {
-    fontSize: 13,
-    color: '#555',
-    marginBottom: 2,
   },
   tokenSelector: {
     flexDirection: 'row',

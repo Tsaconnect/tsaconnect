@@ -20,14 +20,20 @@ import (
 )
 
 // formatStablecoinAmount renders a 6-decimal token's smallest-unit amount
-// as a USD-style decimal string (e.g. 100000 → "0.10"). Used in user-facing
-// error messages where a "0.10 USDC" reads better than "100000".
+// as a USD-style decimal string (e.g. 100000 → "0.10"). Trailing zeros past
+// two decimals are stripped so amounts read naturally in error messages.
 func formatStablecoinAmount(amount *big.Int) string {
 	const decimals = 6
 	div := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
 	whole := new(big.Int).Div(amount, div)
 	frac := new(big.Int).Mod(amount, div)
-	return fmt.Sprintf("%s.%0*s", whole.String(), decimals, frac.String())
+	fracStr := fmt.Sprintf("%0*s", decimals, frac.String())
+	// Always keep two decimals; trim only the trailing zeros beyond that.
+	trimmed := strings.TrimRight(fracStr, "0")
+	if len(trimmed) < 2 {
+		trimmed = fracStr[:2]
+	}
+	return whole.String() + "." + trimmed
 }
 
 // ServiceContactHandler handles service contact fee endpoints.
