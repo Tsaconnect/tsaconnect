@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const {
   loadFixture,
 } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
@@ -14,20 +14,28 @@ describe("ServiceContact", function () {
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const usdt = await MockERC20.deploy("Tether USD", "USDT", 6);
     const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
+    const mcgp = await MockERC20.deploy("MCG Point", "MCGP", 18); // 18-dec
     const unapproved = await MockERC20.deploy("Bad Token", "BAD", 6);
 
     const ServiceContact = await ethers.getContractFactory("ServiceContact");
-    const service = await ServiceContact.deploy(owner.address);
+    const service = await upgrades.deployProxy(
+      ServiceContact,
+      [owner.address],
+      { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] },
+    );
+    await service.waitForDeployment();
 
-    // Accept USDT and USDC
+    // Accept and set fees for the stables
     await service.setTokenAcceptance(await usdt.getAddress(), true);
     await service.setTokenAcceptance(await usdc.getAddress(), true);
+    await service.setFeeAmount(await usdt.getAddress(), FEE_AMOUNT);
+    await service.setFeeAmount(await usdc.getAddress(), FEE_AMOUNT);
 
     // Mint tokens to caller
     await usdt.mint(caller.address, 10000_000000n);
     await usdc.mint(caller.address, 10000_000000n);
 
-    return { service, usdt, usdc, unapproved, owner, caller, provider, upline, other };
+    return { service, usdt, usdc, mcgp, unapproved, owner, caller, provider, upline, other };
   }
 
   describe("Happy path: pay contact fee with 4-way split", function () {
@@ -52,11 +60,10 @@ describe("ServiceContact", function () {
           await usdt.getAddress()
         );
 
-      // Expected splits — system gets remainder
-      const providerAmount = (FEE_AMOUNT * 2500n) / 10000n; // 25000
-      const callerCashback = (FEE_AMOUNT * 1250n) / 10000n; // 12500
-      const uplineAmount = (FEE_AMOUNT * 1250n) / 10000n; // 12500
-      const systemAmount = FEE_AMOUNT - providerAmount - callerCashback - uplineAmount; // 50000
+      const providerAmount = (FEE_AMOUNT * 2500n) / 10000n;
+      const callerCashback = (FEE_AMOUNT * 1250n) / 10000n;
+      const uplineAmount = (FEE_AMOUNT * 1250n) / 10000n;
+      const systemAmount = FEE_AMOUNT - providerAmount - callerCashback - uplineAmount;
 
       expect(await usdt.balanceOf(owner.address)).to.equal(
         ownerBefore + systemAmount
@@ -64,7 +71,6 @@ describe("ServiceContact", function () {
       expect(await usdt.balanceOf(provider.address)).to.equal(
         providerBefore + providerAmount
       );
-      // Caller paid FEE_AMOUNT but gets cashback
       expect(await usdt.balanceOf(caller.address)).to.equal(
         callerBefore - FEE_AMOUNT + callerCashback
       );
@@ -94,6 +100,70 @@ describe("ServiceContact", function () {
     });
   });
 
+  describe("Per-token fee", function () {
+    it("supports an 18-decimal token alongside 6-decimal stables", async function () {
+      const { service, mcgp, owner, caller, provider, upline } =
+        await loadFixture(deployFixture);
+
+      // Configure MCGP at $0.10 worth assuming MCGP ≈ $0.02 → 5 MCGP at 18-dec
+      const mcgpFee = ethers.parseUnits("5", 18);
+      await service.setTokenAcceptance(await mcgp.getAddress(), true);
+      await service.setFeeAmount(await mcgp.getAddress(), mcgpFee);
+
+      // Mint and approve
+      await mcgp.mint(caller.address, ethers.parseUnits("100", 18));
+      await mcgp
+        .connect(caller)
+        .approve(await service.getAddress(), mcgpFee);
+
+      const providerBefore = await mcgp.balanceOf(provider.address);
+      const ownerBefore = await mcgp.balanceOf(owner.address);
+
+      await service
+        .connect(caller)
+        .payContactFee(
+          provider.address,
+          upline.address,
+          await mcgp.getAddress()
+        );
+
+      const providerAmount = (mcgpFee * 2500n) / 10000n;
+      expect(await mcgp.balanceOf(provider.address)).to.equal(
+        providerBefore + providerAmount
+      );
+      // Owner gets system share (50%)
+      const callerCashback = (mcgpFee * 1250n) / 10000n;
+      const uplineAmount = (mcgpFee * 1250n) / 10000n;
+      const systemAmount = mcgpFee - providerAmount - callerCashback - uplineAmount;
+      expect(await mcgp.balanceOf(owner.address)).to.equal(
+        ownerBefore + systemAmount
+      );
+    });
+
+    it("rejects payment in a token whose fee is unset", async function () {
+      const { service, usdc, caller, provider, upline } = await loadFixture(
+        deployFixture
+      );
+
+      // Clear the configured fee for USDC
+      await service.setFeeAmount(await usdc.getAddress(), 0n);
+
+      await usdc
+        .connect(caller)
+        .approve(await service.getAddress(), FEE_AMOUNT);
+
+      await expect(
+        service
+          .connect(caller)
+          .payContactFee(
+            provider.address,
+            upline.address,
+            await usdc.getAddress()
+          )
+      ).to.be.revertedWith("Fee not configured for token");
+    });
+  });
+
   describe("Zero upline", function () {
     it("should send upline share to system wallet when upline is address(0)", async function () {
       const { service, usdt, owner, caller, provider } = await loadFixture(
@@ -119,7 +189,6 @@ describe("ServiceContact", function () {
       const uplineAmount = (FEE_AMOUNT * 1250n) / 10000n;
       const systemAmount = FEE_AMOUNT - providerAmount - callerCashback - uplineAmount;
 
-      // Owner gets system + upline share
       expect(await usdt.balanceOf(owner.address)).to.equal(
         ownerBefore + systemAmount + uplineAmount
       );
@@ -127,13 +196,17 @@ describe("ServiceContact", function () {
   });
 
   describe("Owner can update fee amount", function () {
-    it("should update fee amount", async function () {
-      const { service, owner } = await loadFixture(deployFixture);
+    it("should update per-token fee", async function () {
+      const { service, usdt, owner } = await loadFixture(deployFixture);
 
       const newFee = 200000n; // $0.20
-      await service.connect(owner).setFeeAmount(newFee);
+      await service
+        .connect(owner)
+        .setFeeAmount(await usdt.getAddress(), newFee);
 
-      expect(await service.feeAmount()).to.equal(newFee);
+      expect(await service.feeAmounts(await usdt.getAddress())).to.equal(
+        newFee
+      );
     });
 
     it("should use updated fee for next payment", async function () {
@@ -141,7 +214,9 @@ describe("ServiceContact", function () {
         await loadFixture(deployFixture);
 
       const newFee = 200000n;
-      await service.connect(owner).setFeeAmount(newFee);
+      await service
+        .connect(owner)
+        .setFeeAmount(await usdt.getAddress(), newFee);
 
       await usdt.connect(caller).approve(await service.getAddress(), newFee);
 
@@ -162,18 +237,31 @@ describe("ServiceContact", function () {
     });
 
     it("should reject fee below minimum", async function () {
-      const { service, owner } = await loadFixture(deployFixture);
+      const { service, usdt, owner } = await loadFixture(deployFixture);
 
       await expect(
-        service.connect(owner).setFeeAmount(MIN_FEE - 1n)
+        service
+          .connect(owner)
+          .setFeeAmount(await usdt.getAddress(), MIN_FEE - 1n)
       ).to.be.revertedWith("Fee below minimum");
     });
 
     it("should accept fee at exactly minimum", async function () {
-      const { service, owner } = await loadFixture(deployFixture);
+      const { service, usdt, owner } = await loadFixture(deployFixture);
 
-      await service.connect(owner).setFeeAmount(MIN_FEE);
-      expect(await service.feeAmount()).to.equal(MIN_FEE);
+      await service
+        .connect(owner)
+        .setFeeAmount(await usdt.getAddress(), MIN_FEE);
+      expect(await service.feeAmounts(await usdt.getAddress())).to.equal(
+        MIN_FEE
+      );
+    });
+
+    it("should accept zero to clear", async function () {
+      const { service, usdt, owner } = await loadFixture(deployFixture);
+
+      await service.connect(owner).setFeeAmount(await usdt.getAddress(), 0n);
+      expect(await service.feeAmounts(await usdt.getAddress())).to.equal(0n);
     });
   });
 
@@ -204,10 +292,12 @@ describe("ServiceContact", function () {
 
   describe("Access control", function () {
     it("should not allow non-owner to update fee", async function () {
-      const { service, other } = await loadFixture(deployFixture);
+      const { service, usdt, other } = await loadFixture(deployFixture);
 
       await expect(
-        service.connect(other).setFeeAmount(200000n)
+        service
+          .connect(other)
+          .setFeeAmount(await usdt.getAddress(), 200000n)
       ).to.be.revertedWithCustomError(service, "OwnableUnauthorizedAccount");
     });
 
@@ -218,6 +308,20 @@ describe("ServiceContact", function () {
         service
           .connect(other)
           .setTokenAcceptance(await usdt.getAddress(), false)
+      ).to.be.revertedWithCustomError(service, "OwnableUnauthorizedAccount");
+    });
+
+    it("should not allow non-owner to upgrade", async function () {
+      const { service, other } = await loadFixture(deployFixture);
+      // upgradeTo is restricted by _authorizeUpgrade onlyOwner
+      const ServiceContact = await ethers.getContractFactory(
+        "ServiceContact",
+        other,
+      );
+      await expect(
+        upgrades.upgradeProxy(await service.getAddress(), ServiceContact, {
+          unsafeAllow: ["constructor"],
+        }),
       ).to.be.revertedWithCustomError(service, "OwnableUnauthorizedAccount");
     });
   });
@@ -250,7 +354,6 @@ describe("ServiceContact", function () {
         deployFixture
       );
 
-      // No approval given
       await expect(
         service
           .connect(caller)
@@ -267,7 +370,6 @@ describe("ServiceContact", function () {
         deployFixture
       );
 
-      // other has no tokens
       await usdt
         .connect(other)
         .approve(await service.getAddress(), FEE_AMOUNT);
@@ -298,7 +400,7 @@ describe("ServiceContact", function () {
         service
           .connect(caller)
           .payContactFee(
-            caller.address, // caller == provider
+            caller.address,
             upline.address,
             await usdt.getAddress()
           )
@@ -346,8 +448,6 @@ describe("ServiceContact", function () {
           upline.address,
           await usdt.getAddress()
         );
-
-      // Should succeed — just verify no revert
     });
   });
 
@@ -404,13 +504,15 @@ describe("ServiceContact", function () {
     });
 
     it("should emit FeeAmountUpdated on fee change", async function () {
-      const { service, owner } = await loadFixture(deployFixture);
+      const { service, usdt, owner } = await loadFixture(deployFixture);
 
       const newFee = 200000n;
 
-      await expect(service.connect(owner).setFeeAmount(newFee))
+      await expect(
+        service.connect(owner).setFeeAmount(await usdt.getAddress(), newFee)
+      )
         .to.emit(service, "FeeAmountUpdated")
-        .withArgs(FEE_AMOUNT, newFee);
+        .withArgs(await usdt.getAddress(), FEE_AMOUNT, newFee);
     });
 
     it("should emit TokenAcceptanceUpdated on token change", async function () {

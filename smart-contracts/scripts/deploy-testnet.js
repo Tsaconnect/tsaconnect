@@ -26,11 +26,15 @@ async function main() {
   await escrow.waitForDeployment();
   console.log("ProductEscrow proxy deployed:", await escrow.getAddress());
 
-  // 3. Deploy ServiceContact
+  // 3. Deploy ServiceContact (UUPS proxy)
   const ServiceContact = await ethers.getContractFactory("ServiceContact");
-  const service = await ServiceContact.deploy(deployer.address);
+  const service = await upgrades.deployProxy(
+    ServiceContact,
+    [deployer.address],
+    { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+  );
   await service.waitForDeployment();
-  console.log("ServiceContact deployed:", await service.getAddress());
+  console.log("ServiceContact proxy deployed:", await service.getAddress());
 
   // 4. Configure ProductEscrow
   let tx = await escrow.setMcgpToken(await mockMCGP.getAddress());
@@ -45,10 +49,12 @@ async function main() {
   await tx.wait();
   console.log("ProductEscrow: MCGP accepted");
 
-  // 5. Configure ServiceContact
+  // 5. Configure ServiceContact (per-token fees: $0.10 in 6-dec USDC)
   tx = await service.setTokenAcceptance(await mockUSDC.getAddress(), true);
   await tx.wait();
-  console.log("ServiceContact: USDC accepted");
+  tx = await service.setFeeAmount(await mockUSDC.getAddress(), 100000n);
+  await tx.wait();
+  console.log("ServiceContact: USDC accepted at $0.10 fee");
 
   // 6. Mint test tokens to deployer
   tx = await mockUSDC.mint(deployer.address, ethers.parseUnits("100000", 6));
