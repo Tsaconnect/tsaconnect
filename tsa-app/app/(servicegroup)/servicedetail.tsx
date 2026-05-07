@@ -23,6 +23,22 @@ import {
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
+// withTimeout wraps a promise so a broadcast/wait that hangs (flaky RPC,
+// network drop, dead node) eventually surfaces a real error instead of
+// silently spinning forever.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s — check your network and try again`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+}
+
 const STEP_LABELS: Record<PaymentStep, string> = {
   idle: '',
   approving: 'Approving token...',
@@ -46,7 +62,7 @@ const ServiceDetail = () => {
   const [loading, setLoading] = useState(false);
   const [paymentStep, setPaymentStep] = useState<PaymentStep>('idle');
   const [showModal, setShowModal] = useState(false);
-  const [selectedToken, setSelectedToken] = useState<'USDC' | 'USDT'>('USDC');
+  const [selectedToken, setSelectedToken] = useState<'USDC' | 'USDT' | 'MCGP'>('USDC');
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -106,8 +122,12 @@ const ServiceDetail = () => {
 
       const signedApprove = await signTransaction(approveUnsigned);
       const provider = getProvider('sonic');
-      const approveResponse = await provider.broadcastTransaction(signedApprove);
-      const approveReceipt = await approveResponse.wait();
+      const approveResponse = await withTimeout(
+        provider.broadcastTransaction(signedApprove),
+        30_000,
+        'Approve broadcast',
+      );
+      const approveReceipt = await withTimeout(approveResponse.wait(), 60_000, 'Approve confirmation');
 
       // Fix #7: Check receipt is non-null and successful
       if (!approveReceipt || approveReceipt.status === 0) {
@@ -128,8 +148,12 @@ const ServiceDetail = () => {
       };
 
       const signedPayFee = await signTransaction(payFeeUnsigned);
-      const payFeeResponse = await provider.broadcastTransaction(signedPayFee);
-      const payFeeReceipt = await payFeeResponse.wait();
+      const payFeeResponse = await withTimeout(
+        provider.broadcastTransaction(signedPayFee),
+        30_000,
+        'Pay fee broadcast',
+      );
+      const payFeeReceipt = await withTimeout(payFeeResponse.wait(), 60_000, 'Pay fee confirmation');
 
       // Fix #7: Check receipt is non-null and successful
       if (!payFeeReceipt || payFeeReceipt.status === 0) {
@@ -205,38 +229,25 @@ const ServiceDetail = () => {
 
             {/* Token selector */}
             <View style={styles.tokenSelector}>
-              <TouchableOpacity
-                style={[
-                  styles.tokenPill,
-                  selectedToken === 'USDC' && styles.tokenPillActive,
-                ]}
-                onPress={() => setSelectedToken('USDC')}
-              >
-                <Text
+              {(['USDC', 'USDT', 'MCGP'] as const).map((tk) => (
+                <TouchableOpacity
+                  key={tk}
                   style={[
-                    styles.tokenPillText,
-                    selectedToken === 'USDC' && styles.tokenPillTextActive,
+                    styles.tokenPill,
+                    selectedToken === tk && styles.tokenPillActive,
                   ]}
+                  onPress={() => setSelectedToken(tk)}
                 >
-                  USDC
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.tokenPill,
-                  selectedToken === 'USDT' && styles.tokenPillActive,
-                ]}
-                onPress={() => setSelectedToken('USDT')}
-              >
-                <Text
-                  style={[
-                    styles.tokenPillText,
-                    selectedToken === 'USDT' && styles.tokenPillTextActive,
-                  ]}
-                >
-                  USDT
-                </Text>
-              </TouchableOpacity>
+                  <Text
+                    style={[
+                      styles.tokenPillText,
+                      selectedToken === tk && styles.tokenPillTextActive,
+                    ]}
+                  >
+                    {tk}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             <TouchableOpacity style={styles.payButton} onPress={handlePayAndReveal}>

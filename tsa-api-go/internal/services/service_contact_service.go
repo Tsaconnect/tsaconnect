@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 
@@ -45,9 +46,32 @@ func NewServiceContactService(client *blockchain.EVMClient, cfg *config.Config) 
 	}
 }
 
-// GetFeeAmount returns the contact fee in the smallest token unit (100000 = $0.10 for 6-decimal tokens).
+// GetFeeAmount returns the contact fee in the smallest unit of a 6-decimal
+// stablecoin (100000 = $0.10). Kept for display callers that show a USD
+// figure; for ERC-20 approval amounts use GetApprovalAmount, which is
+// per-token because the same nominal fee maps to different wei counts on
+// tokens with different decimals.
 func (s *ServiceContactService) GetFeeAmount() *big.Int {
 	return big.NewInt(100000)
+}
+
+// GetApprovalAmount returns the amount to approve for the ServiceContact
+// contract to pull, denominated in the token's smallest unit.
+//
+// USDC/USDT have 6 decimals so $0.10 is 100000 wei. MCGP has 18 decimals
+// and trades around a few cents; we approve a generous 100 MCGP (~$2) so
+// the contract's internal fee math has headroom regardless of the live
+// price. Approving more than necessary is safe — the contract only pulls
+// what its `payContactFee` logic dictates.
+func (s *ServiceContactService) GetApprovalAmount(tokenSymbol string) *big.Int {
+	switch strings.ToUpper(tokenSymbol) {
+	case "MCGP":
+		amount := new(big.Int)
+		amount.SetString("100000000000000000000", 10) // 100 MCGP at 18 decimals
+		return amount
+	default:
+		return big.NewInt(100000) // $0.10 at 6 decimals (USDC/USDT)
+	}
 }
 
 // PreparePayContactFee encodes the payContactFee call and builds an UnsignedTx.
@@ -90,18 +114,18 @@ func (s *ServiceContactService) VerifyContactFeePaid(txHash, expectedCaller, exp
 	contractAddr := common.HexToAddress(s.contractAddress)
 	contactFeePaidSig := parsedServiceContactABI.Events["ContactFeePaid"].ID
 
-	for _, log := range receipt.Logs {
-		if log.Address != contractAddr {
+	for _, l := range receipt.Logs {
+		if l.Address != contractAddr {
 			continue
 		}
-		if len(log.Topics) < 4 || log.Topics[0] != contactFeePaidSig {
+		if len(l.Topics) < 4 || l.Topics[0] != contactFeePaidSig {
 			continue
 		}
 
 		// Topics: [0]=sig, [1]=caller(indexed), [2]=serviceProvider(indexed), [3]=token(indexed)
-		caller := common.BytesToAddress(log.Topics[1].Bytes())
-		provider := common.BytesToAddress(log.Topics[2].Bytes())
-		token := common.BytesToAddress(log.Topics[3].Bytes())
+		caller := common.BytesToAddress(l.Topics[1].Bytes())
+		provider := common.BytesToAddress(l.Topics[2].Bytes())
+		token := common.BytesToAddress(l.Topics[3].Bytes())
 
 		// Validate that the on-chain caller/provider match the authenticated user/provider
 		if caller != common.HexToAddress(expectedCaller) {
@@ -118,7 +142,19 @@ func (s *ServiceContactService) VerifyContactFeePaid(txHash, expectedCaller, exp
 		}, nil
 	}
 
-	return nil, fmt.Errorf("ContactFeePaid event not found in receipt")
+	// Diagnostic dump: when the event is missing, log every log entry we *did*
+	// see so operators can spot contract-address or ABI drift. This is the
+	// first thing to check when a tx succeeds on-chain but verification fails.
+	log.Printf("[ContactFee] verification failed for tx=%s expected_contract=%s expected_sig=%s",
+		txHash, contractAddr.Hex(), contactFeePaidSig.Hex())
+	for i, l := range receipt.Logs {
+		topic0 := "<none>"
+		if len(l.Topics) > 0 {
+			topic0 = l.Topics[0].Hex()
+		}
+		log.Printf("[ContactFee]   log[%d] addr=%s topic0=%s topics=%d", i, l.Address.Hex(), topic0, len(l.Topics))
+	}
+	return nil, fmt.Errorf("ContactFeePaid event not found in receipt (logs=%d, expected contract %s)", len(receipt.Logs), contractAddr.Hex())
 }
 
 // buildUnsignedTx creates an UnsignedTx JSON for the ServiceContact contract.
