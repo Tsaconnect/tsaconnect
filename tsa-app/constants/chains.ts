@@ -7,6 +7,13 @@ export interface ChainConfig {
   name: string;
   shortName: string;
   rpcUrl: string;
+  /**
+   * Backup RPC endpoints, tried in order if the primary fails on broadcast.
+   * Useful when a specific endpoint is unreachable from a user's carrier or
+   * region (we've seen this with Sonic's official RPC on some Nigerian
+   * networks).
+   */
+  fallbackRpcUrls?: string[];
   explorerUrl: string;
   nativeCurrency: {
     symbol: string;
@@ -34,6 +41,7 @@ export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
     name: 'Sonic Network',
     shortName: 'SONIC',
     rpcUrl: 'https://rpc.soniclabs.com',
+    fallbackRpcUrls: ['https://sonic.drpc.org'],
     explorerUrl: 'https://sonicscan.org',
     nativeCurrency: { symbol: 'S', decimals: 18 },
     iconColor: '#5B6EF5',
@@ -44,6 +52,7 @@ export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
     name: 'BNB Smart Chain',
     shortName: 'BEP20',
     rpcUrl: 'https://bsc-dataseed.binance.org',
+    fallbackRpcUrls: ['https://bsc-dataseed1.defibit.io', 'https://bsc-dataseed1.ninicoin.io'],
     explorerUrl: 'https://bscscan.com',
     nativeCurrency: { symbol: 'BNB', decimals: 18 },
     iconColor: '#F0B90B',
