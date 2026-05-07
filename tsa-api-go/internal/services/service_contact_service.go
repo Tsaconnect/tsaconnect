@@ -188,13 +188,20 @@ func (s *ServiceContactService) buildUnsignedTx(from string, callData []byte) ([
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
 
+	// Gas estimation will revert with "ERC20: transfer amount exceeds
+	// allowance" because the approve TX from this same prepare call hasn't
+	// been broadcast yet — that's expected. Fall back to a conservative
+	// hardcoded limit; payContactFee does ~4 transfers + a few SLOADs and
+	// fits comfortably under 200k. Other revert reasons (provider == caller,
+	// wrong token, paused) will surface when the user actually broadcasts.
 	gasLimit, err := s.client.EstimateGas(ethereum.CallMsg{
 		From: fromAddr,
 		To:   &contractAddr,
 		Data: callData,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
+		log.Printf("[ServiceContact] EstimateGas failed (likely pre-approve allowance check) — falling back to 250000: %v", err)
+		gasLimit = 250000
 	}
 
 	tx := blockchain.UnsignedTx{
