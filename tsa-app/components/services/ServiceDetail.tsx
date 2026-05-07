@@ -14,6 +14,12 @@ interface ServiceDetailCardProps {
   loading?: boolean;
   onRevealPress?: () => void;
   onCopyPress?: (value: string) => void;
+  /**
+   * If provided, renders the "See Catalogue" link and triggers it on tap.
+   * Pass undefined to hide the link entirely (e.g. when the merchant only
+   * uploaded the hero image and there's no additional gallery).
+   */
+  onCataloguePress?: () => void;
 }
 
 const ServiceDetailCard = ({
@@ -26,6 +32,7 @@ const ServiceDetailCard = ({
   loading,
   onRevealPress,
   onCopyPress,
+  onCataloguePress,
 }: ServiceDetailCardProps) => {
   return (
     <View style={styles.card}>
@@ -109,11 +116,13 @@ const ServiceDetailCard = ({
           </View>
         )}
 
-        <View style={styles.payCatalogue}>
-          <TouchableOpacity>
-            <Text style={styles.catalogue}>See Catalogue</Text>
-          </TouchableOpacity>
-        </View>
+        {onCataloguePress ? (
+          <View style={styles.payCatalogue}>
+            <TouchableOpacity onPress={onCataloguePress} hitSlop={8}>
+              <Text style={styles.catalogue}>See Catalogue</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </View>
     </View>
   );

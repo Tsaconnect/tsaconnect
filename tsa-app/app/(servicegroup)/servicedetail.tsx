@@ -6,7 +6,11 @@ import {
   TouchableOpacity,
   Alert,
   ScrollView,
+  Image,
+  Dimensions,
+  FlatList,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState, useCallback } from 'react';
 import * as Clipboard from 'expo-clipboard';
 import ServiceDetailCard from '../../components/services/ServiceDetail';
@@ -20,6 +24,7 @@ import {
   getServiceContact,
   type ContactInfo,
 } from '../../services/serviceContactApi';
+import { api } from '../../components/services/api';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -124,6 +129,11 @@ const ServiceDetail = () => {
   const [paymentStep, setPaymentStep] = useState<PaymentStep>('idle');
   const [showModal, setShowModal] = useState(false);
   const [selectedToken, setSelectedToken] = useState<'USDC' | 'USDT'>('USDC');
+  // Catalogue images come from the merchant's multi-image upload on
+  // AddService. The detail card only shows the hero; "See Catalogue" opens
+  // a modal with the rest of the gallery.
+  const [catalogueImages, setCatalogueImages] = useState<string[]>([]);
+  const [showCatalogue, setShowCatalogue] = useState(false);
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -149,6 +159,27 @@ const ServiceDetail = () => {
     if (!serviceId || !token) return;
     checkContactStatus();
   }, [serviceId, token, checkContactStatus]);
+
+  // Fetch the full product so we can render the catalogue gallery — the
+  // navigation params only carry the hero image. Network failure leaves
+  // the catalogue button hidden, which is the right fallback.
+  useEffect(() => {
+    if (!serviceId) return;
+    let cancelled = false;
+    (async () => {
+      const res = await api.getProductById(serviceId);
+      if (cancelled) return;
+      const imgs = res.data?.images;
+      if (!Array.isArray(imgs)) return;
+      const urls = imgs
+        .map((img: any) => (typeof img === 'string' ? img : img?.url))
+        .filter((u: unknown): u is string => typeof u === 'string' && u.length > 0);
+      setCatalogueImages(urls);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [serviceId]);
 
   const handleRevealPress = () => {
     setShowModal(true);
@@ -269,6 +300,7 @@ const ServiceDetail = () => {
         loading={loading}
         onRevealPress={handleRevealPress}
         onCopyPress={handleCopy}
+        onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
       />
 
       {/* Payment Confirmation Modal */}
@@ -315,6 +347,43 @@ const ServiceDetail = () => {
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* Catalogue gallery — shows the merchant's full multi-image upload. */}
+      <Modal
+        visible={showCatalogue}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowCatalogue(false)}
+      >
+        <View style={styles.catalogueOverlay}>
+          <View style={styles.catalogueHeader}>
+            <Text style={styles.catalogueTitle}>Catalogue</Text>
+            <TouchableOpacity
+              onPress={() => setShowCatalogue(false)}
+              hitSlop={12}
+            >
+              <Ionicons name="close" size={26} color="#fff" />
+            </TouchableOpacity>
+          </View>
+          <FlatList
+            data={catalogueImages}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            keyExtractor={(uri, idx) => `${idx}-${uri}`}
+            renderItem={({ item }) => (
+              <Image
+                source={{ uri: item }}
+                style={styles.catalogueImage}
+                resizeMode="contain"
+              />
+            )}
+          />
+          <Text style={styles.catalogueHint}>
+            {catalogueImages.length} image{catalogueImages.length === 1 ? '' : 's'} — swipe to browse
+          </Text>
         </View>
       </Modal>
     </ScrollView>
@@ -408,5 +477,41 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     fontSize: 14,
     color: '#777',
+  },
+
+  // Catalogue gallery modal
+  catalogueOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+  },
+  catalogueHeader: {
+    position: 'absolute',
+    top: 40,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    zIndex: 1,
+  },
+  catalogueTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  catalogueImage: {
+    width: Dimensions.get('window').width,
+    height: '100%',
+  },
+  catalogueHint: {
+    position: 'absolute',
+    bottom: 40,
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
   },
 });
