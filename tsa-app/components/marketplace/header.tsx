@@ -10,104 +10,142 @@ import {
 } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { SIZES, COLORS } from "../../constants";
-import axios from "axios";
-import { baseUrl } from "../../constants/api/apiClient";
-import { useAuth } from "../../AuthContext/AuthContext";
 import { useDebounce } from "use-debounce";
 import { router } from "expo-router";
+import { api, Product } from "../services/api";
 
-// Define types for the props and data items
 type HeaderSearchProps = {
-  type: string;
-};
-
-type SearchResultItem = {
-  id: string;
-  name: string;
+  type: "Product" | "Service";
 };
 
 const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
-  const { token } = useAuth();
   const [search, setSearch] = useState<string>("");
-  const [debouncedSearch] = useDebounce(search, 300); // Debounced search input
-  const [results, setResults] = useState<SearchResultItem[]>([]);
+  const [debouncedSearch] = useDebounce(search, 300);
+  const [results, setResults] = useState<Product[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [isFocused, setIsFocused] = useState<boolean>(false);
 
-  // Fetch search results based on debounced input
   useEffect(() => {
-    const fetchSearchResults = async (query: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await axios.get<SearchResultItem[]>(`${baseUrl}/search`, {
-          headers: {
-            Authorization: `${token}`,
-          },
-          params: {
-            name: query,
-            type,
-          },
-        });
-        setResults(response.data);
-      } catch (err) {
-        setError("Failed to fetch search results");
-        console.error("Error fetching search results:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (debouncedSearch.trim()) {
-      fetchSearchResults(debouncedSearch);
-    } else {
+    if (!debouncedSearch.trim()) {
       setResults([]);
+      setError(null);
+      setLoading(false);
+      return;
     }
-  }, [debouncedSearch, token, type]);
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    (async () => {
+      const response = await api.getMarketplaceProducts({
+        search: debouncedSearch,
+        type,
+      });
+      if (cancelled) return;
+      if (response.success && Array.isArray(response.data?.products)) {
+        setResults(response.data.products);
+      } else {
+        console.warn("Search failed:", response.message);
+        setError("Failed to fetch search results");
+        setResults([]);
+      }
+      setLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedSearch, type]);
+
+  const handleSelect = (item: Product) => {
+    const id = item.id || (item as any)._id;
+    const image =
+      item.images?.[0]?.url || ((item.images?.[0] as any) ?? "");
+    if (type === "Service") {
+      router.push({
+        pathname: "/servicedetail",
+        params: {
+          id,
+          title: item.name,
+          description: item.description ?? "",
+          image,
+        },
+      });
+    } else {
+      router.push({
+        pathname: "/productdetails",
+        params: {
+          id,
+          name: item.name,
+          description: item.description ?? "",
+          price: String(item.price ?? ""),
+          image,
+        },
+      });
+    }
+    clearSearch();
+  };
 
   const renderSearchResults = () => {
+    if (!isFocused || debouncedSearch.trim() === "") return null;
+
     if (loading) {
       return (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
+        <View style={styles.dropdown}>
+          <View style={styles.statusContainer}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+          </View>
         </View>
       );
     }
 
     if (error) {
       return (
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
+        <View style={styles.dropdown}>
+          <View style={styles.statusContainer}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
         </View>
       );
     }
 
-    if (isFocused && debouncedSearch.trim() !== "" && results.length > 0) {
+    if (results.length === 0) {
       return (
         <View style={styles.dropdown}>
-          <FlatList
-            data={results}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.dropdownItem}
-                onPress={() => {
-                  router.push({
-                    pathname: "/productdetails",
-                    params: item,
-                  });
-                }}
-              >
-                <Text>{item.name}</Text>
-              </TouchableOpacity>
-            )}
-          />
+          <View style={styles.statusContainer}>
+            <Text style={styles.emptyText}>
+              No {type === "Service" ? "services" : "products"} match "{debouncedSearch}"
+            </Text>
+          </View>
         </View>
       );
     }
 
-    return null;
+    return (
+      <View style={styles.dropdown}>
+        <FlatList
+          data={results}
+          keyboardShouldPersistTaps="handled"
+          keyExtractor={(item) => item.id || (item as any)._id}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={styles.dropdownItem}
+              onPress={() => handleSelect(item)}
+            >
+              <Text style={styles.dropdownItemTitle} numberOfLines={1}>
+                {item.name}
+              </Text>
+              {item.companyName ? (
+                <Text style={styles.dropdownItemSub} numberOfLines={1}>
+                  {item.companyName}
+                </Text>
+              ) : null}
+            </TouchableOpacity>
+          )}
+        />
+      </View>
+    );
   };
 
   const clearSearch = () => {
@@ -121,16 +159,23 @@ const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
       <View style={styles.searchBar}>
         <Ionicons name="search" size={20} color="#666" style={styles.searchIcon} />
         <TextInput
-          placeholder="Search..."
+          placeholder={`Search ${type === "Service" ? "services" : "products"}...`}
           value={search}
           onChangeText={setSearch}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           style={styles.searchInput}
+          autoCorrect={false}
+          returnKeyType="search"
         />
         {search !== "" && (
           <TouchableOpacity onPress={clearSearch}>
-            <Ionicons name="close-circle" size={20} color="#666" style={styles.clearIcon} />
+            <Ionicons
+              name="close-circle"
+              size={20}
+              color="#666"
+              style={styles.clearIcon}
+            />
           </TouchableOpacity>
         )}
       </View>
@@ -169,17 +214,18 @@ const styles = StyleSheet.create({
   clearIcon: {
     marginLeft: 10,
   },
-  loadingContainer: {
+  statusContainer: {
+    paddingVertical: 16,
     alignItems: "center",
-    marginTop: 10,
-  },
-  errorContainer: {
-    alignItems: "center",
-    marginTop: 10,
   },
   errorText: {
-    color: "red",
+    color: "#DC2626",
     textAlign: "center",
+  },
+  emptyText: {
+    color: "#888",
+    textAlign: "center",
+    fontSize: 14,
   },
   dropdown: {
     position: "absolute",
@@ -195,13 +241,24 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 5,
     zIndex: 1000,
-    paddingHorizontal: 15,
-    paddingVertical: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     width: "98%",
   },
   dropdownItem: {
-    padding: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
     borderBottomColor: COLORS.gray,
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  dropdownItemTitle: {
+    fontSize: 14,
+    color: "#1A1A1A",
+    fontWeight: "600",
+  },
+  dropdownItemSub: {
+    fontSize: 12,
+    color: "#888",
+    marginTop: 2,
   },
 });
