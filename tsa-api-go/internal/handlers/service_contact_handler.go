@@ -3,7 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +18,17 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
+
+// formatStablecoinAmount renders a 6-decimal token's smallest-unit amount
+// as a USD-style decimal string (e.g. 100000 → "0.10"). Used in user-facing
+// error messages where a "0.10 USDC" reads better than "100000".
+func formatStablecoinAmount(amount *big.Int) string {
+	const decimals = 6
+	div := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	whole := new(big.Int).Div(amount, div)
+	frac := new(big.Int).Mod(amount, div)
+	return fmt.Sprintf("%s.%0*s", whole.String(), decimals, frac.String())
+}
 
 // ServiceContactHandler handles service contact fee endpoints.
 type ServiceContactHandler struct {
@@ -147,11 +160,28 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 
 	feeAmount := h.ServiceContactService.GetFeeAmount()
 
-	// Prepare approve tx
 	client := h.BlockchainService.ClientForChain("sonic")
 	if client == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain service unavailable")
 		return
+	}
+
+	// Pre-flight: refuse early if the user can't actually pay. EstimateGas
+	// for the eventual payContactFee always reverts here (allowance hasn't
+	// been broadcast yet), so we can't rely on that signal — but we can
+	// check the user's token balance up front and return a clean 400
+	// instead of having them spend gas on an approve that ends in a
+	// reverted payContactFee.
+	if balance, berr := client.GetTokenBalance(tokenAddr, user.WalletAddress); berr == nil {
+		if balance.Cmp(feeAmount) < 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
+				"Insufficient %s balance on Sonic. You need at least %s %s to pay the contact fee.",
+				tokenSymbol, formatStablecoinAmount(feeAmount), tokenSymbol,
+			))
+			return
+		}
+	} else {
+		log.Printf("[ContactFee] balance check failed for %s/%s: %v — proceeding without pre-flight", user.WalletAddress, tokenSymbol, berr)
 	}
 
 	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, feeAmount)

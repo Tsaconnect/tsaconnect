@@ -23,6 +23,56 @@ import {
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
+// humanizePaymentError maps the noisy ethers/network/contract errors that
+// surface during the contact-fee flow into plain-language alerts. The raw
+// strings (e.g. `transaction execution reverted (action="sendTransaction",
+// data=null, reason=null, …)`) are useless to the user, so we look for
+// well-known substrings and pick a sensible message.
+function humanizePaymentError(err: unknown, tokenSymbol: string): string {
+  const raw = String((err as any)?.message ?? err ?? '').toLowerCase();
+  const has = (needle: string) => raw.includes(needle.toLowerCase());
+
+  // Network / RPC failures
+  if (has('network request failed') || has('failed to detect network')) {
+    return 'Network issue while reaching the blockchain. Check your connection and try again.';
+  }
+  if (has('timed out')) return (err as Error).message; // already user-friendly from withTimeout
+
+  // ERC-20 + ServiceContact custom reverts
+  if (has('exceeds balance') || has('transfer amount exceeds balance')) {
+    return `You don't have enough ${tokenSymbol} on Sonic to pay the contact fee. Please fund your wallet and try again.`;
+  }
+  if (has('exceeds allowance') || has('insufficient allowance')) {
+    return 'The token approval did not go through. Please try again.';
+  }
+  if (has('cannot pay for own contact')) return "You can't pay the contact fee for your own service.";
+  if (has('token not accepted')) return `${tokenSymbol} isn't accepted for contact fees right now.`;
+  if (has('fee not configured for token')) return `${tokenSymbol} fee isn't configured yet — contact support.`;
+  if (has('enforcedpause') || has('paused')) return 'Service contact payments are temporarily paused. Try again later.';
+  if (has('cannot pay for own')) return "You can't pay the contact fee for your own service.";
+
+  // Generic transaction-execution-reverted with no extra detail (typical
+  // when the contract rejected the call without a reason string).
+  if (has('transaction execution reverted') || has('execution reverted')) {
+    return 'The on-chain payment was rejected. The most common cause is insufficient ' +
+      `${tokenSymbol} balance — please verify your wallet has enough on Sonic.`;
+  }
+
+  // User cancelled in their wallet
+  if (has('user rejected') || has('user denied')) return 'You cancelled the transaction.';
+
+  // Receipt status === 0 path from the catch
+  if (has('failed or was dropped')) return 'The transaction was dropped or reverted on-chain. Please try again.';
+
+  // Verification failure from the BE (after broadcast)
+  if (has('contactfeepaid event not found')) {
+    return 'The payment went through on-chain but the system could not verify it. Please contact support with your transaction hash.';
+  }
+
+  // Anything else — fall back to a short prefix; never dump the raw JSON.
+  return 'Payment failed. Please try again, or contact support if it keeps happening.';
+}
+
 // withTimeout wraps a promise so a broadcast/wait that hangs (flaky RPC,
 // network drop, dead node) eventually surfaces a real error instead of
 // silently spinning forever.
@@ -176,7 +226,8 @@ const ServiceDetail = () => {
       setContactPaid(true);
       setPaymentStep('done');
     } catch (error: any) {
-      Alert.alert('Payment Failed', error.message || 'Something went wrong');
+      console.warn('[contact-fee]', error);
+      Alert.alert('Payment Failed', humanizePaymentError(error, selectedToken));
       setPaymentStep('idle');
     } finally {
       setLoading(false);
