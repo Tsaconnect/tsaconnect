@@ -287,21 +287,65 @@ export function clearProviderCache() {
  * land in a "JsonRpcProvider failed to detect network" retry loop that never
  * succeeds and silently hangs every broadcast/wait call.
  */
-export function getProvider(chainKey: ChainKey): ethers.JsonRpcProvider {
-  const cached = providerCache.get(chainKey);
+export function getProvider(chainKey: ChainKey, rpcUrl?: string): ethers.JsonRpcProvider {
+  const chain: ChainConfig = CHAINS[chainKey];
+  const url = rpcUrl ?? chain.rpcUrl;
+  // Per-URL cache so fallbacks each get their own provider instance.
+  const cacheKey = `${chainKey}::${url}`;
+  const cached = providerCache.get(cacheKey as ChainKey);
   if (cached) return cached;
 
-  const chain: ChainConfig = CHAINS[chainKey];
   const network = ethers.Network.from({
     chainId: chain.chainId,
     name: chain.name,
   });
-  const provider = new ethers.JsonRpcProvider(chain.rpcUrl, network, {
+  const provider = new ethers.JsonRpcProvider(url, network, {
     staticNetwork: network,
   });
 
-  providerCache.set(chainKey, provider);
+  providerCache.set(cacheKey as ChainKey, provider);
   return provider;
+}
+
+/**
+ * Broadcast a signed transaction via the chain's primary RPC, falling back to
+ * configured alternates if the primary throws a connection error. Returns
+ * the first provider's TransactionResponse on success.
+ *
+ * Connection failures (the device cannot reach the URL — typical "Network
+ * request failed" on Android) are retried; semantic failures (replay, nonce
+ * too low, insufficient funds) are not — those are real problems the user
+ * needs to see.
+ */
+export async function broadcastTransaction(
+  chainKey: ChainKey,
+  signedTx: string,
+): Promise<ethers.TransactionResponse> {
+  const chain = CHAINS[chainKey];
+  const urls = [chain.rpcUrl, ...(chain.fallbackRpcUrls ?? [])];
+  let lastErr: any;
+
+  for (const url of urls) {
+    try {
+      console.log(`[wallet] broadcasting via ${url}`);
+      const provider = getProvider(chainKey, url);
+      return await provider.broadcastTransaction(signedTx);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message ?? err);
+      // Only retry on transport errors. Semantic chain errors aren't going to
+      // resolve by hitting a different node.
+      const isTransport =
+        msg.includes('Network request failed') ||
+        msg.includes('failed to detect network') ||
+        msg.includes('SERVER_ERROR') ||
+        err?.code === 'NETWORK_ERROR' ||
+        err?.code === 'TIMEOUT';
+      console.warn(`[wallet] broadcast via ${url} failed: ${msg}`);
+      if (!isTransport) throw err;
+    }
+  }
+  throw lastErr ?? new Error('Failed to broadcast transaction on any configured RPC');
 }
 
 // ---------------------------------------------------------------------------

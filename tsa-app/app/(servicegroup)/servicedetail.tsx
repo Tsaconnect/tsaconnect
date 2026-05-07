@@ -13,7 +13,7 @@ import ServiceDetailCard from '../../components/services/ServiceDetail';
 import { useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { COLORS } from '../../constants';
-import { signTransaction, getProvider } from '../../services/wallet';
+import { signTransaction, broadcastTransaction } from '../../services/wallet';
 import {
   prepareContactFee,
   submitContactFee,
@@ -62,7 +62,7 @@ const ServiceDetail = () => {
   const [loading, setLoading] = useState(false);
   const [paymentStep, setPaymentStep] = useState<PaymentStep>('idle');
   const [showModal, setShowModal] = useState(false);
-  const [selectedToken, setSelectedToken] = useState<'USDC' | 'USDT' | 'MCGP'>('USDC');
+  const [selectedToken, setSelectedToken] = useState<'USDC' | 'USDT'>('USDC');
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -121,9 +121,8 @@ const ServiceDetail = () => {
       };
 
       const signedApprove = await signTransaction(approveUnsigned);
-      const provider = getProvider('sonic');
       const approveResponse = await withTimeout(
-        provider.broadcastTransaction(signedApprove),
+        broadcastTransaction('sonic', signedApprove),
         30_000,
         'Approve broadcast',
       );
@@ -149,7 +148,7 @@ const ServiceDetail = () => {
 
       const signedPayFee = await signTransaction(payFeeUnsigned);
       const payFeeResponse = await withTimeout(
-        provider.broadcastTransaction(signedPayFee),
+        broadcastTransaction('sonic', signedPayFee),
         30_000,
         'Pay fee broadcast',
       );
@@ -227,9 +226,10 @@ const ServiceDetail = () => {
               <Text style={styles.splitLine}>Platform: 50%</Text>
             </View>
 
-            {/* Token selector */}
+            {/* Token selector — contract uses a single global feeAmount sized
+                for 6-decimal stablecoins, so only USDC/USDT are supported. */}
             <View style={styles.tokenSelector}>
-              {(['USDC', 'USDT', 'MCGP'] as const).map((tk) => (
+              {(['USDC', 'USDT'] as const).map((tk) => (
                 <TouchableOpacity
                   key={tk}
                   style={[

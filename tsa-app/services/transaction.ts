@@ -1,4 +1,4 @@
-import { signTransaction, getProvider } from './wallet';
+import { signTransaction, broadcastTransaction } from './wallet';
 import { type ChainKey } from '../constants/chains';
 import type { UnsignedTx } from './orderApi';
 
@@ -26,8 +26,8 @@ export async function signAndBroadcast(
   }
 
   const signed = await signTransaction(txReq);
-  const provider = getProvider(chainKey);
-  const txResponse = await provider.broadcastTransaction(signed);
+  // Routes through fallback RPCs if the primary is unreachable.
+  const txResponse = await broadcastTransaction(chainKey, signed);
 
   const receipt = await Promise.race([
     txResponse.wait(),
