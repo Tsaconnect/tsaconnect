@@ -38,7 +38,28 @@ type ServiceContactService struct {
 }
 
 // NewServiceContactService creates a new ServiceContactService.
+//
+// Verifies the configured contract has bytecode on the connected chain at
+// startup. A misconfigured SERVICE_CONTACT_ADDRESS (e.g. a testnet address
+// behind a mainnet RPC) would otherwise let the BE happily prepare TXs that
+// hit an empty EOA — the call data gets ignored, no events emitted,
+// transaction status=success, and users' funds are spent on what is
+// effectively a no-op.
 func NewServiceContactService(client *blockchain.EVMClient, cfg *config.Config) *ServiceContactService {
+	if client != nil && cfg.ServiceContractAddress != "" {
+		code, err := client.GetCode(cfg.ServiceContractAddress)
+		if err != nil {
+			log.Printf("[ServiceContact] WARNING: could not verify contract bytecode at %s: %v", cfg.ServiceContractAddress, err)
+		} else if len(code) == 0 {
+			log.Printf("[ServiceContact] FATAL CONFIG ERROR: SERVICE_CONTACT_ADDRESS %s has NO bytecode on chain %s. "+
+				"Calls to this address would succeed with no effect (funds spent on a no-op). "+
+				"Either deploy ServiceContact to this chain or point the service at the chain where it exists.",
+				cfg.ServiceContractAddress, client.ChainID().String())
+		} else {
+			log.Printf("[ServiceContact] verified contract %s has %d bytes of bytecode on chain %s",
+				cfg.ServiceContractAddress, len(code), client.ChainID().String())
+		}
+	}
 	return &ServiceContactService{
 		client:          client,
 		contractAddress: cfg.ServiceContractAddress,
@@ -46,32 +67,14 @@ func NewServiceContactService(client *blockchain.EVMClient, cfg *config.Config) 
 	}
 }
 
-// GetFeeAmount returns the contact fee in the smallest unit of a 6-decimal
-// stablecoin (100000 = $0.10). Kept for display callers that show a USD
-// figure; for ERC-20 approval amounts use GetApprovalAmount, which is
-// per-token because the same nominal fee maps to different wei counts on
-// tokens with different decimals.
+// GetFeeAmount returns the contact fee in the smallest token unit.
+// The on-chain ServiceContact uses a single global `feeAmount = 100000`
+// sized for 6-decimal stablecoins ($0.10 in USDC/USDT). 18-decimal tokens
+// like MCGP are not supported by this contract design — adding them would
+// transfer dust through the splits. Don't change this without a contract
+// redesign that derives per-token fees from on-chain prices.
 func (s *ServiceContactService) GetFeeAmount() *big.Int {
 	return big.NewInt(100000)
-}
-
-// GetApprovalAmount returns the amount to approve for the ServiceContact
-// contract to pull, denominated in the token's smallest unit.
-//
-// USDC/USDT have 6 decimals so $0.10 is 100000 wei. MCGP has 18 decimals
-// and trades around a few cents; we approve a generous 100 MCGP (~$2) so
-// the contract's internal fee math has headroom regardless of the live
-// price. Approving more than necessary is safe — the contract only pulls
-// what its `payContactFee` logic dictates.
-func (s *ServiceContactService) GetApprovalAmount(tokenSymbol string) *big.Int {
-	switch strings.ToUpper(tokenSymbol) {
-	case "MCGP":
-		amount := new(big.Int)
-		amount.SetString("100000000000000000000", 10) // 100 MCGP at 18 decimals
-		return amount
-	default:
-		return big.NewInt(100000) // $0.10 at 6 decimals (USDC/USDT)
-	}
 }
 
 // PreparePayContactFee encodes the payContactFee call and builds an UnsignedTx.

@@ -45,6 +45,21 @@ func (c *EVMClient) ChainID() *big.Int {
 	return c.chainID
 }
 
+// GetCode returns the contract bytecode at the given address. An empty
+// result (len == 0) means the address is not a contract — calls to it will
+// succeed as no-ops, which is typically a misconfiguration.
+func (c *EVMClient) GetCode(address string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	addr := common.HexToAddress(address)
+	code, err := c.Client.CodeAt(ctx, addr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get code for %s: %w", address, err)
+	}
+	return code, nil
+}
+
 // GetBalance returns the native token balance for the given address in wei.
 func (c *EVMClient) GetBalance(address string) (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

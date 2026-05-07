@@ -101,7 +101,7 @@ func Load() *Config {
 
 		// Smart contract addresses
 		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"),
-		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xf870DCC5741030990aF1e43D021D986A286C77A6"),
+		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 

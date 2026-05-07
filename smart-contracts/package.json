@@ -6,7 +6,8 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "clean": "hardhat clean",
-    "deploy:mainnet:escrow": "hardhat run scripts/deploy-mainnet-escrow.js --network sonicMainnet"
+    "deploy:mainnet:escrow": "hardhat run scripts/deploy-mainnet-escrow.js --network sonicMainnet",
+    "deploy:mainnet:service-contact": "hardhat run scripts/deploy-mainnet-service-contact.js --network sonicMainnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

@@ -42,7 +42,7 @@ type submitContactFeeRequest struct {
 // tokenSymbolFromAddress returns the token symbol for a known address, or empty string.
 func (h *ServiceContactHandler) tokenSymbolFromAddress(addr string) string {
 	lower := strings.ToLower(addr)
-	for _, symbol := range []string{"USDC", "USDT", "MCGP"} {
+	for _, symbol := range []string{"USDC", "USDT"} {
 		if strings.ToLower(h.BlockchainService.TokenAddress("sonic", symbol)) == lower {
 			return symbol
 		}
@@ -113,10 +113,13 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 		return
 	}
 
-	// Determine token (default USDC, accept query param)
+	// Determine token (default USDC, accept query param). MCGP is excluded
+	// here because the on-chain ServiceContact uses a single global
+	// `feeAmount` sized for 6-decimal stablecoins; an 18-decimal token would
+	// transfer dust through the contract.
 	tokenSymbol := strings.ToUpper(c.DefaultQuery("token", "USDC"))
-	if tokenSymbol != "USDC" && tokenSymbol != "USDT" && tokenSymbol != "MCGP" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
+	if tokenSymbol != "USDC" && tokenSymbol != "USDT" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC or USDT")
 		return
 	}
 
@@ -143,7 +146,6 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 	}
 
 	feeAmount := h.ServiceContactService.GetFeeAmount()
-	approvalAmount := h.ServiceContactService.GetApprovalAmount(tokenSymbol)
 
 	// Prepare approve tx
 	client := h.BlockchainService.ClientForChain("sonic")
@@ -152,7 +154,7 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 		return
 	}
 
-	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, approvalAmount)
+	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, feeAmount)
 	if err != nil {
 		log.Printf("Failed to prepare approve tx: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
