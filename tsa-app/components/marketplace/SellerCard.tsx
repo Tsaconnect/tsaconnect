@@ -71,6 +71,7 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   const totalCount = seller.productCount || seller.products?.length || 0;
   const hasMoreProducts = totalCount > 4;
   const hasRating = seller.reviewCount != null && seller.reviewCount > 0;
+  const isActive = (seller.products || []).some((p: any) => p.status === 'active');
 
   return (
     <View style={styles.container}>
@@ -99,7 +100,7 @@ export const SellerCard: React.FC<SellerCardProps> = ({
                   style={styles.cartOverlay}
                   onPress={(e) => {
                     e.stopPropagation();
-                    console.log('Add to cart:', product._id || product.id);
+                    onProductPress(product._id || product.id, product);
                   }}
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 >
@@ -117,7 +118,12 @@ export const SellerCard: React.FC<SellerCardProps> = ({
                     <Text style={styles.conditionText}>{product.condition}</Text>
                   </View>
                 )}
-                <Text style={styles.tilePrice}>{formatPrice(product.price)}</Text>
+                <View style={styles.priceRow}>
+                  <Text style={styles.tilePrice}>{formatPrice(product.price)}</Text>
+                  {product.type === 'Service' && (
+                    <Text style={styles.contactFeeText}>0.1$ contact fee</Text>
+                  )}
+                </View>
               </View>
             </TouchableOpacity>
           );
@@ -139,7 +145,7 @@ export const SellerCard: React.FC<SellerCardProps> = ({
         </View>
         <View style={styles.sellerInfo}>
           <Text style={styles.sellerLabel} numberOfLines={1}>
-            <Text style={styles.sellerPrefix}>Sold by </Text>
+            <Text style={styles.sellerPrefix}>Offers by </Text>
             {sellerDisplayName}
           </Text>
           {hasRating && (
@@ -151,6 +157,11 @@ export const SellerCard: React.FC<SellerCardProps> = ({
           )}
         </View>
         <View style={styles.sellerCta}>
+          <View style={[styles.statusBadge, isActive ? styles.activeBadge : styles.inactiveBadge]}>
+            <Text style={[styles.statusBadgeText, isActive ? styles.activeText : styles.inactiveText]}>
+              {isActive ? 'Active' : 'Inactive'}
+            </Text>
+          </View>
           <Text style={styles.sellerCtaCount}>{totalCount} {totalCount === 1 ? 'Product' : 'Products'}</Text>
           <Ionicons name="chevron-forward" size={14} color="#D4AF37" />
         </View>
@@ -304,8 +315,8 @@ const styles = StyleSheet.create({
     color: '#555',
   },
   sellerPrefix: {
-    fontWeight: '400',
-    color: '#999',
+    fontWeight: '600',
+    color: '#16a34a',
   },
   ratingRow: {
     flexDirection: 'row',
@@ -325,12 +336,44 @@ const styles = StyleSheet.create({
   sellerCta: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 4,
   },
   sellerCtaCount: {
     fontSize: 12,
     color: '#D4AF37',
     fontWeight: '500',
+  },
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  contactFeeText: {
+    fontSize: 11,
+    color: '#dc2626',
+    fontWeight: '500',
+  },
+  statusBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  activeBadge: {
+    backgroundColor: '#f3e8ff',
+  },
+  inactiveBadge: {
+    backgroundColor: '#f3f4f6',
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  activeText: {
+    color: '#7c3aed',
+  },
+  inactiveText: {
+    color: '#6b7280',
   },
 });
 
