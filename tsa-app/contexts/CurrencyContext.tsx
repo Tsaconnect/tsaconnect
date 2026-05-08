@@ -315,12 +315,13 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
         })}`;
       }
 
-      // Visually flag stale rates so consumers that haven't been audited for
-      // the Stale flag still surface *something* to the user instead of
-      // silently quoting an outdated rate.
-      return isSelectedRateStale ? `${formatted}*` : formatted;
+      // Stale rates surface via the `error` banner and `isSelectedRateStale`
+      // flag for consumers that need to gate trades; we no longer suffix the
+      // formatted value with `*` because it leaked into prominent display
+      // surfaces (portfolio header, asset rows) and read as a typo.
+      return formatted;
     },
-    [currency, rate, isSelectedRateStale],
+    [currency, rate],
   );
 
   // Helper used by formatDualPrice for the USD primary line. Always renders
