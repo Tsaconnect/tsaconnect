@@ -166,6 +166,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
 		productGroup.PATCH("/:id/featured", adminAuth, h.ToggleFeatured)
+		productGroup.PATCH("/:id/status", auth, h.UpdateStatus)
 	}
 
 	// Deposit routes (admin)

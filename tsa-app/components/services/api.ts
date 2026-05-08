@@ -1040,6 +1040,27 @@ class APIService {
     }
   }
 
+  // Toggle product active/inactive status (merchant-owned products only)
+  async toggleProductStatus(
+    productId: string,
+    status: 'active' | 'inactive'
+  ): Promise<ApiResponse<{ status: string }>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/products/${productId}/status`, {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      return this.handleResponse<{ status: string }>(response);
+    } catch (error: any) {
+      console.error('Toggle product status error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to update product status',
+      };
+    }
+  }
+
   // Get product statistics
   async getProductStats(): Promise<ApiResponse<any>> {
     try {
