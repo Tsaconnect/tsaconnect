@@ -53,6 +53,24 @@ export default function SellerCatalogueScreen() {
   });
 
   const handleProductPress = useCallback((productId: string, productData?: any) => {
+    // A merchant's catalogue mixes products and services; services have their
+    // own detail screen and shouldn't render with the cart/stock UI.
+    if (productData?.type === 'Service') {
+      const heroImage =
+        productData.images?.find?.((img: any) => img?.url)?.url ||
+        (typeof productData.image === 'string' ? productData.image : '') ||
+        '';
+      router.push({
+        pathname: '/servicedetail',
+        params: {
+          id: productId,
+          title: productData.name ?? '',
+          description: productData.description ?? '',
+          image: heroImage,
+        },
+      });
+      return;
+    }
     if (productData) {
       router.push(`/product/${productId}?productData=${encodeURIComponent(JSON.stringify(productData))}`);
     } else {

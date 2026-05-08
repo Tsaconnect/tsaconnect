@@ -60,6 +60,31 @@ export default function ProductDetailsScreen() {
     loadCartCount();
   }, [productId, token]);
 
+  // Services and products share the same backend collection, so a service id
+  // can land on this product route from any "View product" link. Detect it
+  // here and bounce to /servicedetail so services never render with stock,
+  // cart and "Buy Now" UI.
+  const redirectIfService = useCallback(
+    (p: any): boolean => {
+      if (p?.type !== 'Service') return false;
+      const heroImage =
+        p.images?.find((img: any) => img?.url)?.url ||
+        (typeof (p as any).image === 'string' ? (p as any).image : '') ||
+        '';
+      router.replace({
+        pathname: '/servicedetail',
+        params: {
+          id: p.id || p._id || (productId as string),
+          title: p.name ?? '',
+          description: p.description ?? '',
+          image: heroImage,
+        },
+      });
+      return true;
+    },
+    [router, productId],
+  );
+
   const loadProduct = async () => {
     if (!productId) return;
 
@@ -67,6 +92,7 @@ export default function ProductDetailsScreen() {
       try {
         const parsed = JSON.parse(productDataParam as string);
         if (!parsed._id && parsed.id) parsed._id = parsed.id;
+        if (redirectIfService(parsed)) return;
         setProduct(parsed);
         setLoading(false);
         return;
@@ -80,6 +106,7 @@ export default function ProductDetailsScreen() {
       setError(null);
       const response = await api.getProductById(productId as string);
       if (response.success && response.data) {
+        if (redirectIfService(response.data)) return;
         setProduct(response.data);
       } else {
         setError(response.message || 'Failed to load product details');
