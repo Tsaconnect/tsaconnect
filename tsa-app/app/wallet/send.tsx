@@ -4,7 +4,7 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, Modal, FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
@@ -36,8 +36,27 @@ const TokenBadge = ({ symbol, size = 36 }: { symbol: string; size?: number }) =>
 const SendToken = () => {
   const { tokens, tokenList } = useTokens();
 
-  const [selectedToken, setSelectedToken] = useState('USDT');
-  const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
+  // Discovered-token params (set when arriving from the wallet/token detail
+  // screen for an auto-discovered ERC-20). When present, we skip the
+  // per-chain balance scan and prepare the tx with explicit contract +
+  // decimals, since the token isn't in supported_tokens.
+  const navParams = useLocalSearchParams<{
+    token?: string;
+    chainKey?: string;
+    contractAddress?: string;
+    discovered?: string;
+    decimals?: string;
+    balance?: string;
+    usdValue?: string;
+    name?: string;
+  }>();
+  const isDiscovered = navParams.discovered === '1' && !!navParams.contractAddress;
+  const discoveredDecimals = navParams.decimals ? parseInt(navParams.decimals, 10) : undefined;
+
+  const [selectedToken, setSelectedToken] = useState(navParams.token || 'USDT');
+  const [selectedChain, setSelectedChain] = useState<ChainKey>(
+    (navParams.chainKey as ChainKey) || 'sonic',
+  );
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [inputMode, setInputMode] = useState<'token' | 'usd'>('token');
@@ -67,14 +86,34 @@ const SendToken = () => {
   }, [balances, tokens]);
 
   useEffect(() => {
+    // Discovered tokens come pre-pinned to a single chain via nav params;
+    // don't let the per-chain auto-correct overwrite that selection.
+    if (isDiscovered) return;
     const chains = getSupportedChainsForToken(selectedToken);
     if (chains.length === 0) return;
     if (!chains.includes(selectedChain)) {
       setSelectedChain(chains[0]);
     }
-  }, [getSupportedChainsForToken, selectedChain, selectedToken]);
+  }, [getSupportedChainsForToken, selectedChain, selectedToken, isDiscovered]);
 
   const loadBalances = useCallback(async () => {
+    // Discovered token: skip the multi-chain scan entirely (the token
+    // isn't in supported_tokens, so it wouldn't appear) and seed a
+    // single synthetic entry from the nav params.
+    if (isDiscovered) {
+      setBalances([{
+        symbol: navParams.token || '',
+        name: navParams.name || navParams.token || '',
+        balance: navParams.balance || '0',
+        usdValue: navParams.usdValue || '0',
+        contractAddress: navParams.contractAddress || '',
+        decimals: discoveredDecimals ?? 18,
+        chainKey: (navParams.chainKey as ChainKey) || 'sonic',
+        chainName: CHAINS[(navParams.chainKey as ChainKey) || 'sonic']?.shortName || (navParams.chainKey as string) || '',
+      }]);
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       const chainResults = await Promise.all(
@@ -113,7 +152,7 @@ const SendToken = () => {
     } catch (err) {
       console.error('Send: load balances error:', err);
     } finally { setLoading(false); }
-  }, [tokenList]);
+  }, [tokenList, isDiscovered, navParams.token, navParams.name, navParams.balance, navParams.usdValue, navParams.contractAddress, navParams.chainKey, discoveredDecimals]);
 
   useEffect(() => { loadBalances(); }, [loadBalances]);
 
@@ -159,7 +198,18 @@ const SendToken = () => {
     setError('');
     try {
       setLoading(true);
-      const r = await prepareSendTransaction(selectedToken, toAddress.trim(), tokenAmount, activeChain?.chainId || CHAINS.sonic.chainId);
+      const r = await prepareSendTransaction(
+        selectedToken,
+        toAddress.trim(),
+        tokenAmount,
+        activeChain?.chainId || CHAINS.sonic.chainId,
+        isDiscovered
+          ? {
+              tokenAddress: navParams.contractAddress,
+              decimals: discoveredDecimals,
+            }
+          : undefined,
+      );
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare transaction.');
       try {
         const gpStr = r.data.gasPrice || '0';
@@ -180,7 +230,18 @@ const SendToken = () => {
 
     setScreen('sending'); setError('');
     try {
-      const r = await prepareSendTransaction(selectedToken, toAddress.trim(), tokenAmount, activeChain?.chainId || CHAINS.sonic.chainId);
+      const r = await prepareSendTransaction(
+        selectedToken,
+        toAddress.trim(),
+        tokenAmount,
+        activeChain?.chainId || CHAINS.sonic.chainId,
+        isDiscovered
+          ? {
+              tokenAddress: navParams.contractAddress,
+              decimals: discoveredDecimals,
+            }
+          : undefined,
+      );
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
       const signed = await signTransaction({
         type: 0, // legacy transaction format
