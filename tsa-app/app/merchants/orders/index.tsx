@@ -12,9 +12,15 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
+import {
+  listContactPayments,
+  ContactPayment,
+} from '@/services/serviceContactApi';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
 
 const GOLD = '#D4AF37';
+
+type Mode = 'products' | 'services';
 
 const STATUS_FILTERS = [
   { key: '', label: 'All' },
@@ -28,7 +34,9 @@ const STATUS_FILTERS = [
 ];
 
 const MerchantOrders = () => {
+  const [mode, setMode] = useState<Mode>('products');
   const [orders, setOrders] = useState<Order[]>([]);
+  const [servicePayments, setServicePayments] = useState<ContactPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,16 +70,51 @@ const MerchantOrders = () => {
     [selectedStatus]
   );
 
+  // Service requests have no escrow lifecycle (the on-chain split settles
+  // when the contact fee is paid), so the status filter doesn't apply here
+  // — we just paginate by createdAt DESC.
+  const fetchServicePayments = useCallback(
+    async (pageNum: number = 1, append: boolean = false) => {
+      try {
+        setError(null);
+        const result = await listContactPayments({
+          role: 'provider',
+          page: pageNum,
+          limit: 20,
+        });
+        if (result.success && result.data) {
+          const fetched = result.data.items || [];
+          setServicePayments((prev) => (append ? [...prev, ...fetched] : fetched));
+          const pagination = result.data.pagination;
+          setHasMore(pagination ? pageNum < pagination.totalPages : fetched.length === 20);
+        } else {
+          if (!append) setServicePayments([]);
+          setError(result.message || 'Failed to load service requests');
+        }
+      } catch (err: any) {
+        setError(err.message || 'Failed to load service requests');
+      }
+    },
+    []
+  );
+
+  // Re-fetch when the active tab changes, or when the status filter
+  // changes while on the products tab. The service tab doesn't depend on
+  // selectedStatus so it only re-runs on tab switch.
   useEffect(() => {
     setLoading(true);
     setPage(1);
-    fetchOrders(1, false).finally(() => setLoading(false));
-  }, [fetchOrders]);
+    setHasMore(true);
+    const run = mode === 'products' ? fetchOrders(1, false) : fetchServicePayments(1, false);
+    run.finally(() => setLoading(false));
+  }, [mode, fetchOrders, fetchServicePayments]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     setPage(1);
-    await fetchOrders(1, false);
+    setHasMore(true);
+    if (mode === 'products') await fetchOrders(1, false);
+    else await fetchServicePayments(1, false);
     setRefreshing(false);
   };
 
@@ -79,7 +122,8 @@ const MerchantOrders = () => {
     if (!hasMore || loading) return;
     const nextPage = page + 1;
     setPage(nextPage);
-    fetchOrders(nextPage, true);
+    if (mode === 'products') fetchOrders(nextPage, true);
+    else fetchServicePayments(nextPage, true);
   };
 
   const renderOrderCard = ({ item }: { item: Order }) => {
@@ -150,6 +194,58 @@ const MerchantOrders = () => {
     );
   };
 
+  const renderServiceCard = ({ item }: { item: ContactPayment }) => {
+    const buyerLabel =
+      item.counterparty?.name?.trim() ||
+      (item.counterparty?.username ? `@${item.counterparty.username}` : '') ||
+      item.counterparty?.email ||
+      'Buyer';
+    const serviceName = item.service?.name || `Service ${item.serviceId.slice(0, 6)}`;
+    const earnedDisplay = `$${item.providerUSD.toFixed(2)}`;
+    const totalDisplay = `$${item.feeUSD.toFixed(2)}`;
+
+    return (
+      <View style={styles.orderCard}>
+        <View style={styles.orderCardHeader}>
+          <View style={{ flex: 1, marginRight: 8 }}>
+            <Text style={styles.productName} numberOfLines={1}>{serviceName}</Text>
+            <Text style={styles.orderId} numberOfLines={1}>#{item.id.slice(0, 8)} · {buyerLabel}</Text>
+          </View>
+          <View style={[styles.statusBadge, { backgroundColor: '#E6F9EE' }]}>
+            <Text style={[styles.statusText, { color: '#16A34A' }]}>PAID</Text>
+          </View>
+        </View>
+
+        <View style={styles.orderCardBody}>
+          <View style={[styles.thumbnail, styles.thumbnailPlaceholder]}>
+            <Ionicons name="briefcase-outline" size={24} color={GOLD} />
+          </View>
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <View style={styles.orderInfoRow}>
+              <Ionicons name="cash-outline" size={14} color={GOLD} />
+              <Text style={styles.orderInfoText}>You earned {earnedDisplay} of {totalDisplay} ({item.token})</Text>
+            </View>
+            {item.counterparty?.email ? (
+              <View style={styles.orderInfoRow}>
+                <Ionicons name="mail-outline" size={14} color={GOLD} />
+                <Text style={styles.orderInfoText} numberOfLines={1}>{item.counterparty.email}</Text>
+              </View>
+            ) : null}
+            <View style={styles.orderInfoRow}>
+              <Ionicons name="calendar-outline" size={14} color={GOLD} />
+              <Text style={styles.orderInfoText}>{formatDate(item.createdAt)}</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.orderCardFooter}>
+          <Text style={styles.viewDetail}>Settled on-chain</Text>
+          <Ionicons name="checkmark-circle" size={16} color="#16A34A" />
+        </View>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -160,39 +256,57 @@ const MerchantOrders = () => {
         <View style={{ width: 40 }} />
       </View>
 
-      {/* Status filter tabs */}
-      <FlatList
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        data={STATUS_FILTERS}
-        keyExtractor={(item) => item.key}
-        contentContainerStyle={styles.filterContainer}
-        style={styles.filterList}
-        renderItem={({ item: filter }) => (
+      {/* Mode tabs: Products (escrow) vs Services (contact-fee) */}
+      <View style={styles.modeRow}>
+        {(['products', 'services'] as const).map((m) => (
           <TouchableOpacity
-            style={[
-              styles.filterPill,
-              selectedStatus === filter.key && styles.filterPillActive,
-            ]}
-            onPress={() => setSelectedStatus(filter.key)}
+            key={m}
+            style={[styles.modeTab, mode === m && styles.modeTabActive]}
+            onPress={() => setMode(m)}
+            activeOpacity={0.7}
           >
-            <Text
-              style={[
-                styles.filterPillText,
-                selectedStatus === filter.key && styles.filterPillTextActive,
-              ]}
-            >
-              {filter.label}
+            <Text style={[styles.modeTabText, mode === m && styles.modeTabTextActive]}>
+              {m === 'products' ? 'Products' : 'Services'}
             </Text>
           </TouchableOpacity>
-        )}
-      />
+        ))}
+      </View>
+
+      {/* Status filter — only meaningful for the products escrow flow */}
+      {mode === 'products' && (
+        <FlatList
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          data={STATUS_FILTERS}
+          keyExtractor={(item) => item.key}
+          contentContainerStyle={styles.filterContainer}
+          style={styles.filterList}
+          renderItem={({ item: filter }) => (
+            <TouchableOpacity
+              style={[
+                styles.filterPill,
+                selectedStatus === filter.key && styles.filterPillActive,
+              ]}
+              onPress={() => setSelectedStatus(filter.key)}
+            >
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedStatus === filter.key && styles.filterPillTextActive,
+                ]}
+              >
+                {filter.label}
+              </Text>
+            </TouchableOpacity>
+          )}
+        />
+      )}
 
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={GOLD} />
         </View>
-      ) : (
+      ) : mode === 'products' ? (
         <FlatList
           data={orders}
           keyExtractor={(item) => item.id}
@@ -220,6 +334,34 @@ const MerchantOrders = () => {
             </View>
           }
         />
+      ) : (
+        <FlatList
+          data={servicePayments}
+          keyExtractor={(item) => item.id}
+          renderItem={renderServiceCard}
+          contentContainerStyle={servicePayments.length === 0 ? styles.centered : styles.listContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={GOLD} />
+          }
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.3}
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Ionicons name="briefcase-outline" size={64} color="#D9B68B" />
+              <Text style={styles.emptyTitle}>
+                {error ? 'Something went wrong' : 'No service requests yet'}
+              </Text>
+              <Text style={styles.emptySubtitle}>
+                {error || 'When a buyer unlocks your contact info, the request appears here.'}
+              </Text>
+              {error && (
+                <TouchableOpacity style={styles.retryBtn} onPress={() => fetchServicePayments(1, false)}>
+                  <Text style={styles.retryText}>Try again</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          }
+        />
       )}
     </View>
   );
@@ -241,6 +383,23 @@ const styles = StyleSheet.create({
   },
   backBtn: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
   title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
+
+  modeRow: {
+    flexDirection: 'row',
+    backgroundColor: '#FFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F0F0F0',
+  },
+  modeTab: {
+    flex: 1,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  modeTabActive: { borderBottomColor: GOLD },
+  modeTabText: { fontSize: 14, fontWeight: '600', color: '#888' },
+  modeTabTextActive: { color: '#1A1A1A', fontWeight: '700' },
 
   filterList: { maxHeight: 52, flexGrow: 0 },
   filterContainer: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
