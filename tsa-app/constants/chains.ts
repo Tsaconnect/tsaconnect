@@ -1,6 +1,12 @@
 // constants/chains.ts
 // Centralized chain & token registry for TSA Connect
-// To add a new EVM chain: add entries to both MAINNET_CHAINS and TESTNET_CHAINS.
+//
+// To add a new EVM chain:
+//   1. Add a key to ChainKey
+//   2. Add entries in MAINNET_CHAINS and TESTNET_CHAINS (testnet may be empty
+//      if we don't ship support for that chain's testnet)
+//   3. Add the BE counterpart in tsa-api-go/internal/config/config.go so the
+//      backend can resolve balances for the new chain
 
 export interface ChainConfig {
   chainId: number;
@@ -33,7 +39,16 @@ export interface TokenConfig {
 }
 
 export type NetworkType = 'mainnet' | 'testnet';
-export type ChainKey = 'sonic' | 'bsc';
+export type ChainKey =
+  | 'sonic'
+  | 'bsc'
+  | 'ethereum'
+  | 'polygon'
+  | 'arbitrum'
+  | 'base'
+  | 'optimism'
+  | 'avalanche'
+  | 'linea';
 
 export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
   sonic: {
@@ -58,6 +73,83 @@ export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
     iconColor: '#F0B90B',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
   },
+  ethereum: {
+    chainId: 1,
+    name: 'Ethereum',
+    shortName: 'ETH',
+    rpcUrl: 'https://eth.llamarpc.com',
+    fallbackRpcUrls: ['https://cloudflare-eth.com', 'https://ethereum-rpc.publicnode.com'],
+    explorerUrl: 'https://etherscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#627EEA',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png',
+  },
+  polygon: {
+    chainId: 137,
+    name: 'Polygon',
+    shortName: 'MATIC',
+    rpcUrl: 'https://polygon-rpc.com',
+    fallbackRpcUrls: ['https://polygon.llamarpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    explorerUrl: 'https://polygonscan.com',
+    nativeCurrency: { symbol: 'POL', decimals: 18 },
+    iconColor: '#8247E5',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/4713/small/polygon.png',
+  },
+  arbitrum: {
+    chainId: 42161,
+    name: 'Arbitrum One',
+    shortName: 'ARB',
+    rpcUrl: 'https://arb1.arbitrum.io/rpc',
+    fallbackRpcUrls: ['https://arbitrum.llamarpc.com', 'https://arbitrum-one-rpc.publicnode.com'],
+    explorerUrl: 'https://arbiscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#28A0F0',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/16547/small/arb.jpg',
+  },
+  base: {
+    chainId: 8453,
+    name: 'Base',
+    shortName: 'BASE',
+    rpcUrl: 'https://mainnet.base.org',
+    fallbackRpcUrls: ['https://base.llamarpc.com', 'https://base-rpc.publicnode.com'],
+    explorerUrl: 'https://basescan.org',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#0052FF',
+    iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/131/small/base-network.png',
+  },
+  optimism: {
+    chainId: 10,
+    name: 'Optimism',
+    shortName: 'OP',
+    rpcUrl: 'https://mainnet.optimism.io',
+    fallbackRpcUrls: ['https://optimism.llamarpc.com', 'https://optimism-rpc.publicnode.com'],
+    explorerUrl: 'https://optimistic.etherscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#FF0420',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/25244/small/Optimism.png',
+  },
+  avalanche: {
+    chainId: 43114,
+    name: 'Avalanche C-Chain',
+    shortName: 'AVAX',
+    rpcUrl: 'https://api.avax.network/ext/bc/C/rpc',
+    fallbackRpcUrls: ['https://avalanche-c-chain-rpc.publicnode.com'],
+    explorerUrl: 'https://snowtrace.io',
+    nativeCurrency: { symbol: 'AVAX', decimals: 18 },
+    iconColor: '#E84142',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/12559/small/Avalanche_Circle_RedWhite_Trans.png',
+  },
+  linea: {
+    chainId: 59144,
+    name: 'Linea',
+    shortName: 'LINEA',
+    rpcUrl: 'https://rpc.linea.build',
+    fallbackRpcUrls: ['https://linea-rpc.publicnode.com'],
+    explorerUrl: 'https://lineascan.build',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#121212',
+    iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/135/small/linea.jpeg',
+  },
 };
 
 export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
@@ -81,6 +173,83 @@ export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
     iconColor: '#F0B90B',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
   },
+  ethereum: {
+    chainId: 11155111,
+    name: 'Sepolia',
+    shortName: 'SEP',
+    rpcUrl: 'https://ethereum-sepolia-rpc.publicnode.com',
+    fallbackRpcUrls: ['https://rpc.sepolia.org'],
+    explorerUrl: 'https://sepolia.etherscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#627EEA',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png',
+  },
+  polygon: {
+    chainId: 80002,
+    name: 'Polygon Amoy',
+    shortName: 'MATIC',
+    rpcUrl: 'https://rpc-amoy.polygon.technology',
+    fallbackRpcUrls: ['https://polygon-amoy-bor-rpc.publicnode.com'],
+    explorerUrl: 'https://amoy.polygonscan.com',
+    nativeCurrency: { symbol: 'POL', decimals: 18 },
+    iconColor: '#8247E5',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/4713/small/polygon.png',
+  },
+  arbitrum: {
+    chainId: 421614,
+    name: 'Arbitrum Sepolia',
+    shortName: 'ARB',
+    rpcUrl: 'https://sepolia-rollup.arbitrum.io/rpc',
+    fallbackRpcUrls: ['https://arbitrum-sepolia-rpc.publicnode.com'],
+    explorerUrl: 'https://sepolia.arbiscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#28A0F0',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/16547/small/arb.jpg',
+  },
+  base: {
+    chainId: 84532,
+    name: 'Base Sepolia',
+    shortName: 'BASE',
+    rpcUrl: 'https://sepolia.base.org',
+    fallbackRpcUrls: ['https://base-sepolia-rpc.publicnode.com'],
+    explorerUrl: 'https://sepolia.basescan.org',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#0052FF',
+    iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/131/small/base-network.png',
+  },
+  optimism: {
+    chainId: 11155420,
+    name: 'OP Sepolia',
+    shortName: 'OP',
+    rpcUrl: 'https://sepolia.optimism.io',
+    fallbackRpcUrls: ['https://optimism-sepolia-rpc.publicnode.com'],
+    explorerUrl: 'https://sepolia-optimism.etherscan.io',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#FF0420',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/25244/small/Optimism.png',
+  },
+  avalanche: {
+    chainId: 43113,
+    name: 'Avalanche Fuji',
+    shortName: 'AVAX',
+    rpcUrl: 'https://api.avax-test.network/ext/bc/C/rpc',
+    fallbackRpcUrls: ['https://avalanche-fuji-c-chain-rpc.publicnode.com'],
+    explorerUrl: 'https://testnet.snowtrace.io',
+    nativeCurrency: { symbol: 'AVAX', decimals: 18 },
+    iconColor: '#E84142',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/12559/small/Avalanche_Circle_RedWhite_Trans.png',
+  },
+  linea: {
+    chainId: 59141,
+    name: 'Linea Sepolia',
+    shortName: 'LINEA',
+    rpcUrl: 'https://rpc.sepolia.linea.build',
+    fallbackRpcUrls: ['https://linea-sepolia-rpc.publicnode.com'],
+    explorerUrl: 'https://sepolia.lineascan.build',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#121212',
+    iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/135/small/linea.jpeg',
+  },
 };
 
 // Active chain config — defaults to mainnet, updated by useNetwork hook
@@ -96,6 +265,11 @@ export function setActiveNetwork(network: NetworkType) {
 
 // Default tokens — used as fallback when backend is unreachable.
 // The canonical token list is fetched from the backend at runtime.
+//
+// USDT/USDC are listed as multi-chain because users routinely bridge
+// stablecoins between L1/L2s. Native gas tokens (ETH on most L2s, AVAX,
+// POL) are listed per-chain so the wallet shows the correct symbol on each
+// network's row.
 export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
   MCGP: {
     symbol: 'MCGP',
@@ -112,13 +286,46 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     iconUrl: 'https://coin-images.coingecko.com/coins/images/38108/small/200x200_Sonic_Logo.png',
     chains: ['sonic'],
   },
+  ETH: {
+    symbol: 'ETH',
+    name: 'Ether',
+    decimals: 18,
+    iconColor: '#627EEA',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png',
+    // ETH is the native gas token on Ethereum L1 and on most major L2s.
+    chains: ['ethereum', 'arbitrum', 'base', 'optimism', 'linea'],
+  },
+  BNB: {
+    symbol: 'BNB',
+    name: 'BNB',
+    decimals: 18,
+    iconColor: '#F0B90B',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
+    chains: ['bsc'],
+  },
+  POL: {
+    symbol: 'POL',
+    name: 'Polygon',
+    decimals: 18,
+    iconColor: '#8247E5',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/4713/small/polygon.png',
+    chains: ['polygon'],
+  },
+  AVAX: {
+    symbol: 'AVAX',
+    name: 'Avalanche',
+    decimals: 18,
+    iconColor: '#E84142',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/12559/small/Avalanche_Circle_RedWhite_Trans.png',
+    chains: ['avalanche'],
+  },
   USDT: {
     symbol: 'USDT',
     name: 'Tether',
     decimals: 6,
     iconColor: '#26A17B',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/325/small/Tether.png',
-    chains: ['sonic', 'bsc'],
+    chains: ['sonic', 'bsc', 'ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'avalanche', 'linea'],
   },
   USDC: {
     symbol: 'USDC',
@@ -126,13 +333,23 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     decimals: 6,
     iconColor: '#2775CA',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/usdc.png',
-    chains: ['sonic', 'bsc'],
+    chains: ['sonic', 'bsc', 'ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'avalanche', 'linea'],
   },
 };
 
 // Helpers
 
-export const CHAIN_KEYS: ChainKey[] = ['sonic', 'bsc'];
+export const CHAIN_KEYS: ChainKey[] = [
+  'sonic',
+  'bsc',
+  'ethereum',
+  'polygon',
+  'arbitrum',
+  'base',
+  'optimism',
+  'avalanche',
+  'linea',
+];
 
 export function getChain(key: ChainKey): ChainConfig {
   return CHAINS[key];
