@@ -353,12 +353,12 @@ export interface DiscoveredToken {
   balance: string;
   /** USD value if the price service knows the symbol; 0 otherwise. */
   usdValue: number;
-  source: 'alchemy' | 'moralis' | string;
+  source: 'ankr' | 'moralis' | string;
 }
 
 export interface DiscoveredTokensResponse {
   walletAddress: string;
-  /** false when neither ALCHEMY_API_KEY nor MORALIS_API_KEY is configured on the BE. */
+  /** false when neither ANKR_API_KEY nor MORALIS_API_KEY is configured on the BE. */
   providerAvailable: boolean;
   tokens: DiscoveredToken[];
 }
@@ -397,20 +397,29 @@ export async function getDiscoveredTokens(
 }
 
 /**
- * Prepare a send transaction (get unsigned tx from backend)
+ * Prepare a send transaction (get unsigned tx from backend).
+ *
+ * `tokenAddress` and `decimals` are overrides used when sending an
+ * auto-discovered ERC-20 — i.e. a token the user holds but isn't in the
+ * curated supported_tokens list. When omitted, the BE resolves both from
+ * its supported_tokens config.
  */
 export async function prepareSendTransaction(
   tokenSymbol: string,
   toAddress: string,
   amount: string,
-  chainId: number
+  chainId: number,
+  options?: { tokenAddress?: string; decimals?: number }
 ): Promise<ApiResponse<PreparedTransaction>> {
   try {
     const headers = await getAuthHeaders();
+    const body: Record<string, unknown> = { tokenSymbol, toAddress, amount, chainId };
+    if (options?.tokenAddress) body.tokenAddress = options.tokenAddress;
+    if (typeof options?.decimals === 'number') body.decimals = options.decimals;
     const response = await fetch(`${API_BASE_URL}/wallet/prepare-tx`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ tokenSymbol, toAddress, amount, chainId }),
+      body: JSON.stringify(body),
     });
     const result = await safeJson<any>(response);
     const normalizedTx = normalizePreparedTransactionData(result?.data);

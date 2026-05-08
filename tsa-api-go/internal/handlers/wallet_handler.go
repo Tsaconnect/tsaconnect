@@ -30,11 +30,18 @@ type registerWalletRequest struct {
 }
 
 // prepareTxRequest is the request body for PrepareSendTransaction.
+//
+// TokenAddress + Decimals are optional overrides: when set, the handler
+// uses them directly instead of resolving the token from the configured
+// supported_tokens map. This is the path for sending auto-discovered
+// ERC-20s (tokens the user holds but the operator hasn't curated).
 type prepareTxRequest struct {
-	TokenSymbol string `json:"tokenSymbol" binding:"required"`
-	ToAddress   string `json:"toAddress" binding:"required"`
-	Amount      string `json:"amount" binding:"required"`
-	ChainID     int64  `json:"chainId" binding:"required"`
+	TokenSymbol  string `json:"tokenSymbol" binding:"required"`
+	ToAddress    string `json:"toAddress" binding:"required"`
+	Amount       string `json:"amount" binding:"required"`
+	ChainID      int64  `json:"chainId" binding:"required"`
+	TokenAddress string `json:"tokenAddress,omitempty"`
+	Decimals     *int   `json:"decimals,omitempty"`
 }
 
 // submitTxRequest is the request body for SubmitTransaction.
@@ -449,8 +456,13 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		network = "mainnet"
 	}
 
+	// Decimals: caller override takes precedence (auto-discovered tokens
+	// can have any decimals — 6, 8, 9, 18 — and we won't have curated
+	// metadata for them). Otherwise fall back to the historical defaults.
 	decimals := 18
-	if tokenUpper == "USDT" || tokenUpper == "USDC" {
+	if req.Decimals != nil && *req.Decimals >= 0 && *req.Decimals <= 36 {
+		decimals = *req.Decimals
+	} else if tokenUpper == "USDT" || tokenUpper == "USDC" {
 		decimals = 6
 	}
 	amountWei, ok := parseTokenAmount(req.Amount, decimals)
@@ -465,10 +477,20 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
 		txBytes, err = client.PrepareNativeTransfer(user.WalletAddress, req.ToAddress, amountWei)
 	} else {
-		tokenAddr := h.BlockchainService.TokenAddressForNetwork(network, chainName, tokenUpper)
-		if tokenAddr == "" {
-			utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
-			return
+		// Resolve token contract: explicit override (discovered tokens)
+		// wins over the supported_tokens lookup.
+		tokenAddr := strings.TrimSpace(req.TokenAddress)
+		if tokenAddr != "" {
+			if !isValidEthAddress(tokenAddr) {
+				utils.ErrorResponse(c, http.StatusBadRequest, "Invalid token contract address")
+				return
+			}
+		} else {
+			tokenAddr = h.BlockchainService.TokenAddressForNetwork(network, chainName, tokenUpper)
+			if tokenAddr == "" {
+				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Token %s not configured on %s", tokenUpper, chainName))
+				return
+			}
 		}
 		txBytes, err = client.PrepareERC20Transfer(tokenAddr, user.WalletAddress, req.ToAddress, amountWei)
 	}

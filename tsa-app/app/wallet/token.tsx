@@ -117,9 +117,25 @@ const TokenDetailScreen: React.FC = () => {
     iconColor: string;
     iconUrl: string;
     type: string;
+    // Auto-discovered ERC-20s aren't in supported_tokens; the wallet
+    // forwards the contract + financials so this screen (and Send) can
+    // address them by contract and render balances without re-fetching.
+    contractAddress: string;
+    discovered: string;
+    balance: string;
+    usdValue: string;
+    decimals: string;
   }>();
 
-  const { symbol, chainKey, name, iconColor, iconUrl, type } = params;
+  const {
+    symbol, chainKey, name, iconColor, iconUrl, type,
+    contractAddress, discovered,
+    balance: discoveredBalanceParam,
+    usdValue: discoveredUsdValueParam,
+    decimals: discoveredDecimalsParam,
+  } = params;
+  const isDiscovered = discovered === '1';
+  const discoveredDecimals = discoveredDecimalsParam ? parseInt(discoveredDecimalsParam, 10) : undefined;
 
   const { tokens: allTokens } = useTokens();
   const tokenConfig = allTokens[symbol];
@@ -138,6 +154,18 @@ const TokenDetailScreen: React.FC = () => {
 
   const fetchBalance = useCallback(async () => {
     setLoadingBalance(true);
+    // Discovered tokens aren't in supported_tokens, so getWalletBalances
+    // can't return them. The wallet screen already has the numbers from
+    // the discovery call — use those directly.
+    if (isDiscovered) {
+      const parsedBalance = parseFloat(discoveredBalanceParam || '0');
+      const parsedUsdValue = parseFloat(discoveredUsdValueParam || '0');
+      setBalance(Number.isFinite(parsedBalance) ? parsedBalance : 0);
+      setUsdValue(Number.isFinite(parsedUsdValue) ? parsedUsdValue : 0);
+      setUsdPrice(parsedBalance > 0 ? parsedUsdValue / parsedBalance : 0);
+      setLoadingBalance(false);
+      return;
+    }
     try {
       const result = await getWalletBalances(CHAINS[activeChainKey]?.chainId);
       if (result.success && result.data) {
@@ -161,7 +189,7 @@ const TokenDetailScreen: React.FC = () => {
     } finally {
       setLoadingBalance(false);
     }
-  }, [activeChainKey, symbol]);
+  }, [activeChainKey, symbol, isDiscovered, discoveredBalanceParam, discoveredUsdValueParam]);
 
   const fetchPriceHistory = useCallback(async (days: number) => {
     setLoadingChart(true);
@@ -313,7 +341,23 @@ const TokenDetailScreen: React.FC = () => {
       <View style={styles.actionsCard}>
         <Pressable
           style={[styles.actionBtn, { backgroundColor: displayColor }]}
-          onPress={() => router.push({ pathname: '/wallet/send', params: { token: symbol, chainKey: activeChainKey } } as any)}
+          onPress={() => router.push({
+            pathname: '/wallet/send',
+            params: {
+              token: symbol,
+              chainKey: activeChainKey,
+              ...(isDiscovered && contractAddress
+                ? {
+                    contractAddress,
+                    discovered: '1',
+                    decimals: discoveredDecimals != null ? String(discoveredDecimals) : '',
+                    balance: String(balance),
+                    usdValue: String(usdValue),
+                    name,
+                  }
+                : {}),
+            },
+          } as any)}
         >
           <Icon name="send" size={20} color="#FFF" />
           <Text style={styles.actionBtnText}>Send</Text>

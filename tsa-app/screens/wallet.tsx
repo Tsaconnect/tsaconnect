@@ -1,6 +1,6 @@
 // screens/wallet.tsx
 import { router } from 'expo-router';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -44,6 +44,8 @@ interface WalletAsset {
   discovered?: boolean;
   /** ERC-20 contract address; required for discovered rows so Send works. */
   contractAddress?: string;
+  /** Token decimals; required for discovered rows so amount→wei conversion is correct. */
+  decimals?: number;
   details?: {
     type: string;
     chain: string;
@@ -126,6 +128,7 @@ async function mergeDiscoveredTokens(
         iconColor: hashColor(t.symbol),
         discovered: true,
         contractAddress: t.contractAddress,
+        decimals: t.decimals,
         details: { type: 'Discovered', chain: chain.name, chainKey },
       });
     }
@@ -341,6 +344,12 @@ const WalletScreen: React.FC = () => {
   const [activeAddress, setActiveAddress] = useState('');
   const [showWalletSelector, setShowWalletSelector] = useState(false);
 
+  // Each fetchBalances invocation increments this; the discovery .then
+  // resolves only if its captured token still matches, so a slower
+  // in-flight discovery from a previous fetch can't overwrite newer state
+  // (e.g., user pulls to refresh while discovery is mid-flight).
+  const fetchTokenRef = useRef(0);
+
   const buildAssetList = useCallback((): WalletAsset[] => {
     const list: WalletAsset[] = [];
     let id = 1;
@@ -386,6 +395,7 @@ const WalletScreen: React.FC = () => {
 
   const fetchBalances = useCallback(async (refreshing = false) => {
     if (refreshing) setIsRefreshing(true); else setIsLoading(true);
+    const fetchToken = ++fetchTokenRef.current;
 
     // Load wallet list for switcher
     await migrateFromSingleWallet();
@@ -431,7 +441,7 @@ const WalletScreen: React.FC = () => {
       // balance fetch (multi-chain fan-out), so we run it after the main
       // list is on screen and merge in additions when it completes.
       void mergeDiscoveredTokens(updated, addr || undefined).then((merged) => {
-        if (merged) setAssets(merged);
+        if (merged && fetchToken === fetchTokenRef.current) setAssets(merged);
       });
     } catch (err) {
       console.error('Wallet fetch error:', err);
@@ -478,6 +488,16 @@ const WalletScreen: React.FC = () => {
         iconColor: asset.iconColor,
         iconUrl: asset.iconUrl || '',
         type: asset.details?.type || '',
+        // Discovered tokens aren't in supported_tokens, so the detail
+        // screen must address them by contract. Pass balance/usdValue/
+        // decimals as well so the detail and Send screens can render
+        // and prepare a tx without re-hitting discovery (BE caches it
+        // anyway, but skipping the round-trip keeps the UI snappy).
+        contractAddress: asset.contractAddress || '',
+        discovered: asset.discovered ? '1' : '',
+        balance: asset.discovered ? String(asset.balance) : '',
+        usdValue: asset.discovered ? String(asset.usdValue) : '',
+        decimals: asset.discovered && typeof asset.decimals === 'number' ? String(asset.decimals) : '',
       },
     } as any);
   };
