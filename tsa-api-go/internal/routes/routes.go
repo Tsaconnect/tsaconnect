@@ -277,6 +277,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			serviceGroup.POST("/:id/prepare-contact-fee", sch.PrepareContactFee)
 			serviceGroup.POST("/:id/submit-contact-fee", sch.SubmitContactFee)
 			serviceGroup.GET("/:id/contact", sch.GetServiceContact)
+			// List the caller's contact-fee history (default: as provider).
+			// Defined on the same group so it shares the auth middleware;
+			// the literal path keeps it from colliding with /:id routes.
+			serviceGroup.GET("/contact-payments", sch.ListContactPayments)
 		}
 	}
 

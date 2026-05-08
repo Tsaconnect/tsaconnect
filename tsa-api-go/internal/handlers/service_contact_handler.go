@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -463,6 +464,167 @@ func (h *ServiceContactHandler) GetServiceContact(c *gin.Context) {
 			"phone":   provider.PhoneNumber,
 			"email":   provider.Email,
 			"address": provider.Address,
+		},
+	})
+}
+
+// providerSplitBPS mirrors ServiceContact.PROVIDER_BPS in the on-chain
+// contract — 25% of every contact fee is transferred directly to the
+// service provider on the same tx that records the payment.
+const providerSplitBPS = 2500
+
+// ListContactPayments handles GET /api/services/contact-payments
+//
+// Query params:
+//   - role=provider (default) — payments received as the service provider
+//   - role=caller             — payments the user has made as a buyer
+//   - page (default 1), limit (default 20, capped at 100)
+//
+// Each row is enriched with the counterparty user (buyer for provider role,
+// provider for caller role), the service summary, and the merchant's
+// 25% on-chain split converted to USD for display.
+func (h *ServiceContactHandler) ListContactPayments(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	role := strings.ToLower(strings.TrimSpace(c.DefaultQuery("role", "provider")))
+	if role != "provider" && role != "caller" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "role must be 'provider' or 'caller'")
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	column := "service_provider_id"
+	if role == "caller" {
+		column = "caller_id"
+	}
+
+	var total int64
+	if err := config.DB.Model(&models.ServiceContactPayment{}).
+		Where(column+" = ?", user.ID).
+		Count(&total).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to count contact payments")
+		return
+	}
+
+	var payments []models.ServiceContactPayment
+	if err := config.DB.
+		Where(column+" = ?", user.ID).
+		Order("created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&payments).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load contact payments")
+		return
+	}
+
+	// Batch-load related users and services so the response can render
+	// without N+1 queries on the frontend.
+	counterpartyIDs := make([]uuid.UUID, 0, len(payments))
+	serviceIDs := make([]uuid.UUID, 0, len(payments))
+	for _, p := range payments {
+		if role == "provider" {
+			counterpartyIDs = append(counterpartyIDs, p.CallerID)
+		} else {
+			counterpartyIDs = append(counterpartyIDs, p.ServiceProviderID)
+		}
+		serviceIDs = append(serviceIDs, p.ServiceID)
+	}
+
+	users := make(map[uuid.UUID]models.User, len(counterpartyIDs))
+	if len(counterpartyIDs) > 0 {
+		var rows []models.User
+		if err := config.DB.Where("id IN ?", counterpartyIDs).Find(&rows).Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load counterparties")
+			return
+		}
+		for _, u := range rows {
+			users[u.ID] = u
+		}
+	}
+
+	// Map name uses the noun rather than the package alias `services`,
+	// which is imported on this handler for the on-chain service helpers.
+	serviceMap := make(map[uuid.UUID]models.Product, len(serviceIDs))
+	if len(serviceIDs) > 0 {
+		var rows []models.Product
+		if err := config.DB.Where("id IN ?", serviceIDs).Find(&rows).Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load services")
+			return
+		}
+		for _, p := range rows {
+			serviceMap[p.ID] = p
+		}
+	}
+
+	items := make([]gin.H, 0, len(payments))
+	for _, p := range payments {
+		feeUSD := weiToUSDFloat(p.FeeAmount, p.Token)
+		providerUSD := feeUSD * float64(providerSplitBPS) / 10000.0
+
+		var counterpartyID uuid.UUID
+		if role == "provider" {
+			counterpartyID = p.CallerID
+		} else {
+			counterpartyID = p.ServiceProviderID
+		}
+
+		var counterparty gin.H
+		if u, ok := users[counterpartyID]; ok {
+			counterparty = gin.H{
+				"id":       u.ID,
+				"name":     u.Name,
+				"username": u.Username,
+				"email":    u.Email,
+				"phone":    u.PhoneNumber,
+			}
+		}
+
+		var serviceSummary gin.H
+		if s, ok := serviceMap[p.ServiceID]; ok {
+			serviceSummary = gin.H{
+				"id":   s.ID,
+				"name": s.Name,
+			}
+		}
+
+		items = append(items, gin.H{
+			"id":             p.ID,
+			"serviceId":      p.ServiceID,
+			"service":        serviceSummary,
+			"counterparty":   counterparty,
+			"token":          p.Token,
+			"feeAmount":      p.FeeAmount,
+			"feeUSD":         feeUSD,
+			"providerUSD":    providerUSD,
+			"approveTxHash":  p.ApproveTxHash,
+			"payFeeTxHash":   p.PayFeeTxHash,
+			"createdAt":      p.CreatedAt,
+		})
+	}
+
+	totalPages := int((total + int64(limit) - 1) / int64(limit))
+	utils.SuccessResponse(c, http.StatusOK, "Contact payments retrieved", gin.H{
+		"items": items,
+		"pagination": gin.H{
+			"page":       page,
+			"limit":      limit,
+			"total":      total,
+			"totalPages": totalPages,
 		},
 	})
 }
