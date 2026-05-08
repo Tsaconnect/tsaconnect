@@ -112,6 +112,72 @@ export async function submitContactFee(
 }
 
 /**
+ * One row from GET /services/contact-payments. Each entry corresponds to a
+ * single ContactFeePaid event recorded on-chain and persisted to the DB.
+ */
+export interface ContactPayment {
+  id: string;
+  serviceId: string;
+  service?: { id: string; name: string };
+  counterparty?: {
+    id: string;
+    name?: string;
+    username?: string;
+    email?: string;
+    phone?: string;
+  };
+  token: string;
+  feeAmount: string;
+  feeUSD: number;
+  /** Merchant's 25% on-chain split converted to USD; identical to feeUSD * 0.25. */
+  providerUSD: number;
+  approveTxHash: string;
+  payFeeTxHash: string;
+  createdAt: string;
+}
+
+export interface ContactPaymentsPage {
+  items: ContactPayment[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+/**
+ * List the user's contact-fee payments. Default role=provider returns
+ * service requests received (for merchants); role=caller returns the
+ * buyer's own unlock history.
+ */
+export async function listContactPayments(params: {
+  role?: 'provider' | 'caller';
+  page?: number;
+  limit?: number;
+} = {}): Promise<ApiResponse<ContactPaymentsPage>> {
+  try {
+    const headers = await getAuthHeaders();
+    const query = new URLSearchParams();
+    if (params.role) query.set('role', params.role);
+    if (params.page) query.set('page', String(params.page));
+    if (params.limit) query.set('limit', String(params.limit));
+    const qs = query.toString();
+    const response = await fetch(
+      `${API_BASE_URL}/services/contact-payments${qs ? `?${qs}` : ''}`,
+      { method: 'GET', headers },
+    );
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('List contact payments error:', error);
+    return {
+      success: false,
+      message: error.message || 'Failed to load contact payments',
+    };
+  }
+}
+
+/**
  * Check if contact fee has been paid and get contact details if so
  */
 export async function getServiceContact(
