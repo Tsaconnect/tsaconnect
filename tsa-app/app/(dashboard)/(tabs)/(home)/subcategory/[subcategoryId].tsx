@@ -102,13 +102,33 @@ export default function SubcategorySellersScreen() {
   );
   const handleProductPress = useCallback(
     (productId: string, productData?: any) => {
+      // Services need their own detail screen (contact-fee unlock, no cart);
+      // route by item type when available, falling back to the screen flag.
+      const treatAsService =
+        productData?.type === 'Service' || (!productData?.type && isService);
+      if (treatAsService) {
+        const heroImage =
+          productData?.images?.find?.((img: any) => img?.url)?.url ||
+          (typeof productData?.image === 'string' ? productData.image : '') ||
+          '';
+        router.push({
+          pathname: '/servicedetail',
+          params: {
+            id: productId,
+            title: productData?.name ?? '',
+            description: productData?.description ?? '',
+            image: heroImage,
+          },
+        });
+        return;
+      }
       if (productData) {
         router.push(`/product/${productId}?productData=${encodeURIComponent(JSON.stringify(productData))}`);
       } else {
         router.push(`/product/${productId}`);
       }
     },
-    [router]
+    [router, isService]
   );
 
   const handleBackPress = useCallback(() => {
