@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
@@ -337,6 +339,72 @@ func (h *Handlers) GetWalletBalances(c *gin.Context) {
 		"walletAddress": address,
 		"network":       network,
 		"balances":      result,
+	})
+}
+
+// GetDiscoveredTokens handles GET /api/wallet/discovered-tokens.
+//
+// Returns every ERC-20 token an address holds, across all chains we have
+// indexer coverage for. This is the auto-discovery counterpart to
+// GetWalletBalances, which only knows about tokens registered in the
+// supported_tokens table. Supports an optional ?chains=ethereum,polygon
+// filter so the FE can fan out per-chain spinners if needed.
+//
+// The endpoint always returns 200 with an empty list when no indexer
+// keys are configured; the response carries `providerAvailable: false` so
+// the FE can render an explanatory empty state instead of "you hold no
+// tokens" (which would be misleading).
+func (h *Handlers) GetDiscoveredTokens(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	address := strings.TrimSpace(c.Query("address"))
+	if address == "" {
+		address = user.WalletAddress
+	}
+	if address == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+	if !ethAddressRegex.MatchString(address) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address")
+		return
+	}
+
+	// Optional comma-separated chain filter; empty = query everything.
+	var chainKeys []string
+	if raw := strings.TrimSpace(c.Query("chains")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			if p := strings.TrimSpace(strings.ToLower(part)); p != "" {
+				chainKeys = append(chainKeys, p)
+			}
+		}
+	}
+
+	if h.TokenDiscoveryService == nil || !h.TokenDiscoveryService.HasAnyProvider() {
+		utils.SuccessResponse(c, http.StatusOK, "Token discovery is not configured", gin.H{
+			"walletAddress":     address,
+			"providerAvailable": false,
+			"tokens":            []services.DiscoveredToken{},
+		})
+		return
+	}
+
+	// 25s budget for the whole multi-chain fan-out. Per-chain timeout is
+	// 10s inside the discovery service, so even a single slow indexer
+	// call won't blow this; the budget mainly protects us against an
+	// unexpected hang in net/http itself.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
+	defer cancel()
+	tokens := h.TokenDiscoveryService.DiscoverTokens(ctx, address, chainKeys)
+
+	utils.SuccessResponse(c, http.StatusOK, "Discovered tokens retrieved", gin.H{
+		"walletAddress":     address,
+		"providerAvailable": true,
+		"tokens":            tokens,
 	})
 }
 
