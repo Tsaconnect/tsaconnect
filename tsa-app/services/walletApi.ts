@@ -339,6 +339,64 @@ export async function getWalletBalances(
 }
 
 /**
+ * One row from GET /wallet/discovered-tokens — an ERC-20 the indexer
+ * found in the wallet, regardless of whether we have it in supported_tokens.
+ */
+export interface DiscoveredToken {
+  chain: string;
+  chainId?: number;
+  contractAddress: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  /** Raw on-chain balance (smallest unit, integer string). */
+  balance: string;
+  /** USD value if the price service knows the symbol; 0 otherwise. */
+  usdValue: number;
+  source: 'alchemy' | 'moralis' | string;
+}
+
+export interface DiscoveredTokensResponse {
+  walletAddress: string;
+  /** false when neither ALCHEMY_API_KEY nor MORALIS_API_KEY is configured on the BE. */
+  providerAvailable: boolean;
+  tokens: DiscoveredToken[];
+}
+
+/**
+ * Auto-discover every ERC-20 the wallet holds across all supported
+ * chains. Pass `chains` to constrain the fan-out (e.g. ["ethereum",
+ * "polygon"]); omit to query everything the BE has indexer coverage for.
+ *
+ * Slow on cold caches — the BE fans out to indexers in parallel with a
+ * 25s budget. Render a skeleton/spinner until this resolves.
+ */
+export async function getDiscoveredTokens(
+  chains?: ChainKey[],
+  address?: string,
+): Promise<ApiResponse<DiscoveredTokensResponse>> {
+  try {
+    const headers = await getAuthHeaders();
+    const resolvedAddress = address || (await getActiveWallet()) || undefined;
+    const qp = new URLSearchParams();
+    if (resolvedAddress) qp.append('address', resolvedAddress);
+    if (chains && chains.length > 0) qp.append('chains', chains.join(','));
+    const qs = qp.toString();
+    const response = await fetch(
+      `${API_BASE_URL}/wallet/discovered-tokens${qs ? `?${qs}` : ''}`,
+      { method: 'GET', headers },
+    );
+    return await safeJson(response);
+  } catch (error: any) {
+    console.error('Get discovered tokens error:', error);
+    return {
+      success: false,
+      message: error.message || 'Failed to discover tokens',
+    };
+  }
+}
+
+/**
  * Prepare a send transaction (get unsigned tx from backend)
  */
 export async function prepareSendTransaction(

@@ -8,25 +8,29 @@ import (
 
 // Handlers holds references to all services needed by route handlers.
 type Handlers struct {
-	PriceService      *services.PriceService
-	BlockchainService *services.BlockchainService
-	OTCService        *services.OTCService
-	P2PService        *services.P2PService
-	Config            *config.Config
-	EventBus          *events.Bus
-	EmailService      *services.EmailService
+	PriceService           *services.PriceService
+	BlockchainService      *services.BlockchainService
+	OTCService             *services.OTCService
+	P2PService             *services.P2PService
+	TokenDiscoveryService  *services.TokenDiscoveryService
+	Config                 *config.Config
+	EventBus               *events.Bus
+	EmailService           *services.EmailService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
+// TokenDiscoveryService is constructed in-place because it has no
+// dependencies beyond the price service and reads its own env vars.
 func NewHandlers(ps *services.PriceService, bs *services.BlockchainService, cfg *config.Config, bus *events.Bus, es *services.EmailService, otc *services.OTCService, p2p *services.P2PService) *Handlers {
 	return &Handlers{
-		PriceService:      ps,
-		BlockchainService: bs,
-		OTCService:        otc,
-		P2PService:        p2p,
-		Config:            cfg,
-		EventBus:          bus,
-		EmailService:      es,
+		PriceService:          ps,
+		BlockchainService:     bs,
+		OTCService:            otc,
+		P2PService:            p2p,
+		TokenDiscoveryService: services.NewTokenDiscoveryService(ps),
+		Config:                cfg,
+		EventBus:              bus,
+		EmailService:          es,
 	}
 }
 
