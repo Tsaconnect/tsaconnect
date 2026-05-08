@@ -12,7 +12,13 @@ import {
   Image,
 } from 'react-native';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { getWalletBalances, normalizeWalletBalances, registerWalletAddress } from '../services/walletApi';
+import {
+  getWalletBalances,
+  normalizeWalletBalances,
+  registerWalletAddress,
+  getDiscoveredTokens,
+  type DiscoveredToken,
+} from '../services/walletApi';
 import {
   getWalletList,
   getActiveWallet,
@@ -34,11 +40,101 @@ interface WalletAsset {
   usdPrice: number;
   iconColor: string;
   iconUrl?: string;
+  /** Set on rows surfaced by the indexer instead of supported_tokens. */
+  discovered?: boolean;
+  /** ERC-20 contract address; required for discovered rows so Send works. */
+  contractAddress?: string;
   details?: {
     type: string;
     chain: string;
     chainKey: ChainKey;
   };
+}
+
+// hashColor produces a stable HSL color from a string — used as a deterministic
+// avatar fallback for discovered tokens we don't have an icon for.
+function hashColor(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return `hsl(${Math.abs(hash) % 360}, 55%, 50%)`;
+}
+
+// formatTokenBalance converts a raw integer balance string at `decimals`
+// precision to a number. Uses string manipulation rather than Number()
+// to avoid IEEE-754 precision loss on large 18-decimal balances.
+function formatTokenBalance(rawBalance: string, decimals: number): number {
+  if (!rawBalance || rawBalance === '0') return 0;
+  if (decimals <= 0) return parseFloat(rawBalance);
+  const padded = rawBalance.padStart(decimals + 1, '0');
+  const cut = padded.length - decimals;
+  const whole = padded.slice(0, cut) || '0';
+  const frac = padded.slice(cut).replace(/0+$/, '');
+  return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
+}
+
+// mergeDiscoveredTokens fetches the auto-discovery list and appends any
+// rows that aren't already in `existing` (matched by chainKey+symbol or
+// chainKey+contract). Returns null when there's nothing to add or the
+// indexer is offline, so the caller can skip a useless setState.
+async function mergeDiscoveredTokens(
+  existing: WalletAsset[],
+  address: string | undefined,
+): Promise<WalletAsset[] | null> {
+  try {
+    const result = await getDiscoveredTokens(undefined, address);
+    if (!result.success || !result.data || !result.data.providerAvailable) {
+      return null;
+    }
+    const discovered: DiscoveredToken[] = result.data.tokens || [];
+    if (discovered.length === 0) return null;
+
+    // Index existing rows by chainKey+symbol AND chainKey+contract so we
+    // don't duplicate either USDC-on-base (matched by symbol) or a custom
+    // token previously imported (matched by address).
+    const seenSymbol = new Set(
+      existing
+        .filter((a) => a.details?.chainKey)
+        .map((a) => `${a.details!.chainKey}::${a.symbol.toUpperCase()}`),
+    );
+    const seenContract = new Set(
+      existing
+        .filter((a) => a.contractAddress && a.details?.chainKey)
+        .map((a) => `${a.details!.chainKey}::${a.contractAddress!.toLowerCase()}`),
+    );
+
+    let nextId = existing.length + 1;
+    const additions: WalletAsset[] = [];
+    for (const t of discovered) {
+      const chainKey = t.chain as ChainKey;
+      const chain = CHAINS[chainKey];
+      if (!chain) continue;
+      const symbolKey = `${chainKey}::${t.symbol.toUpperCase()}`;
+      const contractKey = `${chainKey}::${t.contractAddress.toLowerCase()}`;
+      if (seenSymbol.has(symbolKey) || seenContract.has(contractKey)) continue;
+
+      const balance = formatTokenBalance(t.balance, t.decimals);
+      const usdValue = Number.isFinite(t.usdValue) ? t.usdValue : 0;
+      additions.push({
+        id: String(nextId++),
+        symbol: t.symbol,
+        name: t.name || t.symbol,
+        balance,
+        usdValue,
+        usdPrice: balance > 0 && usdValue > 0 ? usdValue / balance : 0,
+        iconColor: hashColor(t.symbol),
+        discovered: true,
+        contractAddress: t.contractAddress,
+        details: { type: 'Discovered', chain: chain.name, chainKey },
+      });
+    }
+    if (additions.length === 0) return null;
+    return [...existing, ...additions];
+  } catch (err) {
+    console.warn('[wallet] discovery merge failed:', err);
+    return null;
+  }
 }
 
 // ── Quick Actions ──
@@ -114,7 +210,14 @@ const AssetRow: React.FC<{
         )}
       </View>
       <View style={styles.assetInfo}>
-        <Text style={styles.assetSymbol}>{asset.symbol}</Text>
+        <View style={styles.assetSymbolRow}>
+          <Text style={styles.assetSymbol}>{asset.symbol}</Text>
+          {asset.discovered && (
+            <View style={styles.discoveredBadge}>
+              <Text style={styles.discoveredBadgeText}>NEW</Text>
+            </View>
+          )}
+        </View>
         <View style={styles.assetMeta}>
           <Text style={styles.assetName}>{asset.name}</Text>
           {asset.details?.chain && (
@@ -297,14 +400,18 @@ const WalletScreen: React.FC = () => {
 
     const assetList = buildAssetList();
     try {
+      // Known-token balances: fast path, single BE call against the
+      // supported_tokens table. We render this immediately and then
+      // append discovery results below.
       const result = await getWalletBalances();
+      let updated = assetList;
       if (result.success && result.data) {
         const normalizedBalances = normalizeWalletBalances(result.data);
         const balanceMap = new Map(
           normalizedBalances.map((entry) => [`${entry.symbol}-${entry.chainKey}`, entry] as const)
         );
 
-        const updated = assetList.map(asset => {
+        updated = assetList.map(asset => {
           const chainKey = asset.details?.chainKey;
           if (!chainKey) return asset;
 
@@ -316,10 +423,16 @@ const WalletScreen: React.FC = () => {
           const usdPrice = entry?.usdPrice || (balance > 0 ? usdValue / balance : 0);
           return { ...asset, balance, usdValue, usdPrice };
         });
-        setAssets(updated);
-      } else {
-        setAssets(assetList);
       }
+      setAssets(updated);
+
+      // Auto-discovery: ask the BE for every ERC-20 the indexer found
+      // that isn't already in our supported_tokens list. Slower than the
+      // balance fetch (multi-chain fan-out), so we run it after the main
+      // list is on screen and merge in additions when it completes.
+      void mergeDiscoveredTokens(updated, addr || undefined).then((merged) => {
+        if (merged) setAssets(merged);
+      });
     } catch (err) {
       console.error('Wallet fetch error:', err);
       setAssets(assetList);
@@ -591,7 +704,15 @@ const styles = StyleSheet.create({
   assetAvatarImage: { width: 24, height: 24, borderRadius: 12 },
   assetAvatarText: { fontSize: 16, fontWeight: '700' },
   assetInfo: { flex: 1 },
+  assetSymbolRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   assetSymbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
+  discoveredBadge: {
+    backgroundColor: 'rgba(212,175,55,0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  discoveredBadgeText: { fontSize: 9, fontWeight: '800', color: '#8B6914', letterSpacing: 0.5 },
   assetMeta: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
   assetName: { fontSize: 12, color: '#888' },
   chainDot: { width: 5, height: 5, borderRadius: 2.5, marginLeft: 6, marginRight: 3 },
