@@ -10,6 +10,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { getChainByChainId } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, fetchPendingNonce, signLiFiTransaction } from '@/services/wallet';
+import { ethers } from 'ethers';
 import { getLiFiTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
@@ -51,7 +52,9 @@ export default function AllSwapScreen() {
   }, [fromChainId]));
 
   useEffect(() => {
-    getLiFiTokens(fromChainId).then(setAllTokens).catch(() => {});
+    let active = true;
+    getLiFiTokens(fromChainId).then(tokens => { if (active) setAllTokens(tokens); }).catch(() => {});
+    return () => { active = false; };
   }, [fromChainId]);
 
   const loadBalances = async () => {
@@ -72,7 +75,7 @@ export default function AllSwapScreen() {
     setQuoteStatus('quoting');
     timer.current = setTimeout(async () => {
       try {
-        const amountWei = BigInt(Math.round(Number(fromAmount) * 10 ** fromToken.decimals)).toString();
+        const amountWei = ethers.parseUnits(fromAmount, fromToken.decimals).toString();
         const q = await getLiFiQuote({
           fromChain: fromChainId,
           toChain: toChainId,
@@ -109,7 +112,13 @@ export default function AllSwapScreen() {
     if (!fromToken) return 'Select a token to send';
     if (!toToken) return 'Select a token to receive';
     if (!fromAmount || Number(fromAmount) <= 0) return 'Enter an amount';
-    if (Number(fromAmount) > Number(fromBalance)) return `Insufficient ${fromToken.symbol} balance`;
+    try {
+      const amountUnits = ethers.parseUnits(fromAmount, fromToken.decimals);
+      const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
+      if (amountUnits > balanceUnits) return `Insufficient ${fromToken.symbol} balance`;
+    } catch {
+      return 'Enter a valid amount';
+    }
     if (!quote) return 'Waiting for price...';
     return null;
   };
@@ -123,12 +132,12 @@ export default function AllSwapScreen() {
       const chainKey = chainKeyResult.key;
 
       let nonce = await fetchPendingNonce(walletAddress, chainKey);
-      const fromAmountWei = BigInt(Math.round(Number(fromAmount) * 10 ** fromToken.decimals)).toString();
+      const fromAmountWei = ethers.parseUnits(fromAmount, fromToken.decimals).toString();
       const humanAmount = String(Number(fromAmountWei) / Math.pow(10, fromToken.decimals));
 
       if (quote.approvalAddress && quote.approvalToken) {
         setSigningStatus('Step 1 of 2: Approving…');
-        const calldata = buildERC20ApproveCalldata(quote.approvalAddress, fromAmountWei);
+        const calldata = buildERC20ApproveCalldata(quote.approvalAddress, ethers.MaxUint256.toString());
         const approveTx = {
           to: quote.approvalToken,
           data: calldata,
@@ -320,7 +329,6 @@ export default function AllSwapScreen() {
       <TokenPickerModal
         visible={pickerMode !== null}
         mode={pickerMode ?? 'from'}
-        selectedChainId={pickerMode === 'from' ? fromChainId : toChainId}
         chainId={pickerMode === 'from' ? fromChainId : toChainId}
         userBalances={balances}
         allTokens={allTokens}
