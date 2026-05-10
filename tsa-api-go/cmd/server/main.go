@@ -94,6 +94,7 @@ func main() {
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
+	slh := handlers.NewSwapLiFiHandler()
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 
 	// Set Gin mode based on environment
@@ -124,7 +125,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, psh, wsHub, eh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh)
 
 	// Configure HTTP server
 	port := cfg.Port
