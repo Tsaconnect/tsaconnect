@@ -12,7 +12,6 @@ const GOLD = '#D4AF37';
 interface Props {
   visible: boolean;
   mode: 'from' | 'to';
-  selectedChainId: number;
   userBalances: WalletBalanceWithChain[];
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
