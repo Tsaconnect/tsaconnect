@@ -280,7 +280,7 @@ export function normalizeWalletBalances(
 /**
  * Get authorization headers from stored token
  */
-async function getAuthHeaders(): Promise<Record<string, string>> {
+export async function getAuthHeaders(): Promise<Record<string, string>> {
   const token = await AsyncStorage.getItem('authToken');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
