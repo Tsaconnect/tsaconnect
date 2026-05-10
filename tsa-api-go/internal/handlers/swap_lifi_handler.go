@@ -65,7 +65,7 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		utils.ErrorResponse(c, http.StatusBadGateway, "LiFi token fetch failed")
+		c.Data(resp.StatusCode, "application/json", body)
 		return
 	}
 

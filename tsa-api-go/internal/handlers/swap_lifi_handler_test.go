@@ -122,8 +122,8 @@ func TestGetQuote_ForwardsParamsToLiFi(t *testing.T) {
 		if q.Get("fromChain") != "56" || q.Get("toChain") != "1" {
 			t.Errorf("params not forwarded correctly: %v", q)
 		}
-		if q.Get("slippage") == "" {
-			t.Error("expected default slippage to be set")
+		if q.Get("slippage") != "0.005" {
+			t.Errorf("expected default slippage 0.005, got %s", q.Get("slippage"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -135,6 +135,29 @@ func TestGetQuote_ForwardsParamsToLiFi(t *testing.T) {
 	r := setupTestRouter(h)
 
 	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetQuote_PreservesCallerSlippage(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("slippage") != "0.01" {
+			t.Errorf("expected caller slippage 0.01, got %s", r.URL.Query().Get("slippage"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"toAmount":"1000","transactionRequest":{"to":"0x1","data":"0x","value":"0x0","chainId":56,"gasLimit":"200000"}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123&slippage=0.01", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
