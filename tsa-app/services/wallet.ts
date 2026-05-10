@@ -349,6 +349,66 @@ export async function broadcastTransaction(
 }
 
 // ---------------------------------------------------------------------------
+// LiFi transaction support
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the next usable nonce for an address on a given chain.
+ * Uses 'pending' so it accounts for unconfirmed txs already in the mempool.
+ */
+export async function fetchPendingNonce(address: string, chainKey: ChainKey): Promise<number> {
+  return await getProvider(chainKey).getTransactionCount(address, 'pending');
+}
+
+/**
+ * Sign a LiFi transactionRequest.
+ * Handles both legacy (type-0, gasPrice) and EIP-1559 (type-2, maxFeePerGas) transactions.
+ * LiFi returns type-2 txs on Ethereum, Polygon, Arbitrum, Base, Optimism, Avalanche.
+ */
+export async function signLiFiTransaction(tx: {
+  to: string;
+  data: string;
+  value: string;
+  chainId: number;
+  nonce: number;
+  gasLimit: string;
+  gasPrice?: string;
+  maxFeePerGas?: string;
+  maxPriorityFeePerGas?: string;
+}): Promise<string> {
+  const privateKey = await getPrivateKey();
+  if (!privateKey) {
+    throw new Error('No private key found. Please set up your wallet first.');
+  }
+
+  const base = {
+    to: tx.to,
+    value: tx.value || '0x0',
+    data: tx.data || '0x',
+    nonce: Number(tx.nonce),
+    gasLimit: tx.gasLimit,
+    chainId: Number(tx.chainId),
+  };
+
+  const txObj = tx.maxFeePerGas
+    ? ethers.Transaction.from({
+        ...base,
+        type: 2,
+        maxFeePerGas: tx.maxFeePerGas,
+        maxPriorityFeePerGas: tx.maxPriorityFeePerGas ?? tx.maxFeePerGas,
+      })
+    : ethers.Transaction.from({
+        ...base,
+        type: 0,
+        gasPrice: tx.gasPrice,
+      });
+
+  const signingKey = new ethers.SigningKey(privateKey);
+  txObj.signature = signingKey.sign(txObj.unsignedHash);
+  return txObj.serialized;
+}
+
+// ---------------------------------------------------------------------------
 // Migration from single-wallet storage
 // ---------------------------------------------------------------------------
 
