@@ -178,3 +178,51 @@ func TestGetTokens_MissingChainId_Returns400(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestGetTokens_InvalidChainId_Returns400(t *testing.T) {
+	h := newTestLiFiHandler("http://unused")
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/tokens?chainId=notanumber", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetTokens_LiFiUnreachable_Returns502(t *testing.T) {
+	// Use a server that immediately closes the connection
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // close before the request
+
+	h := newTestLiFiHandler(url)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/tokens?chainId=56", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestGetQuote_LiFiUnreachable_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	h := newTestLiFiHandler(url)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 )
 
 const defaultLiFiBaseURL = "https://li.quest/v1"
+
+var liFiHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type tokenCacheEntry struct {
 	data      []byte
@@ -41,6 +44,10 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "chainId is required")
 		return
 	}
+	if _, err := strconv.ParseUint(chainId, 10, 64); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "chainId must be a positive numeric chain ID")
+		return
+	}
 
 	h.mu.Lock()
 	entry, ok := h.tokenCache[chainId]
@@ -52,7 +59,7 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := http.Get(fmt.Sprintf("%s/tokens?chains=%s", h.lifiBaseURL, chainId))
+	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/tokens?chains=%s", h.lifiBaseURL, chainId))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -84,7 +91,7 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 		params.Set("slippage", "0.005")
 	}
 
-	resp, err := http.Get(fmt.Sprintf("%s/quote?%s", h.lifiBaseURL, params.Encode()))
+	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/quote?%s", h.lifiBaseURL, params.Encode()))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
