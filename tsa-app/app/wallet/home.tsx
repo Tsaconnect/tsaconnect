@@ -383,6 +383,15 @@ const WalletHome = () => {
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionButton}
+          onPress={() => router.push('/easyswap?tab=allswap')}
+        >
+          <View style={styles.actionIconContainer}>
+            <Ionicons name="swap-vertical-outline" size={20} color="#FFF" />
+          </View>
+          <Text style={styles.actionLabel}>Swap</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionButton}
           onPress={() => router.push('/wallet/receive')}
         >
           <View style={styles.actionIconContainer}>
