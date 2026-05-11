@@ -90,6 +90,8 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 	if params.Get("slippage") == "" {
 		params.Set("slippage", "0.005")
 	}
+	params.Set("fee", "0.03")
+	params.Set("integrator", "tsaconnect")
 
 	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/quote?%s", h.lifiBaseURL, params.Encode()))
 	if err != nil {
