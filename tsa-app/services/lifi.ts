@@ -8,6 +8,7 @@ export interface LiFiToken {
   name: string;
   decimals: number;
   logoURI: string;
+  priceUSD?: string;
 }
 
 export interface LiFiQuoteParams {
