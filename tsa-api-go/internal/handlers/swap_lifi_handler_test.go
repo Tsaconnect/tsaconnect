@@ -125,6 +125,12 @@ func TestGetQuote_ForwardsParamsToLiFi(t *testing.T) {
 		if q.Get("slippage") != "0.005" {
 			t.Errorf("expected default slippage 0.005, got %s", q.Get("slippage"))
 		}
+		if q.Get("fee") != "0.03" {
+			t.Errorf("expected fee=0.03, got %s", q.Get("fee"))
+		}
+		if q.Get("integrator") != "tsaconnect" {
+			t.Errorf("expected integrator=tsaconnect, got %s", q.Get("integrator"))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"toAmount":"1000","transactionRequest":{"to":"0x1","data":"0x","value":"0x0","chainId":56,"gasLimit":"200000"}}`))
