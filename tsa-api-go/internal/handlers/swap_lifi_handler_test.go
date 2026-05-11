@@ -237,6 +237,34 @@ func TestGetQuote_AlwaysInjectsFeeAndIntegrator(t *testing.T) {
 	}
 }
 
+func TestGetQuote_OverridesClientFeeAndIntegrator(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("fee") != "0.03" {
+			t.Errorf("expected fee=0.03, got %q", q.Get("fee"))
+		}
+		if q.Get("integrator") != "tsaconnect" {
+			t.Errorf("expected integrator=tsaconnect, got %q", q.Get("integrator"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"toAmount":"1000","transactionRequest":{"to":"0x1","data":"0x","value":"0x0","chainId":56,"gasLimit":"200000"}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	// Client tries to override fee and integrator — server must win
+	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123&fee=0&integrator=hacker", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestGetQuote_LiFiUnreachable_Returns502(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
