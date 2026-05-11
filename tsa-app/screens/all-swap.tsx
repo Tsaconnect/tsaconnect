@@ -336,7 +336,7 @@ export default function AllSwapScreen() {
         {quoteStatus === 'quoted' && quote && (
           <View style={s.infoBar}>
             <Ionicons name="flash" size={14} color={GOLD} />
-            <Text style={s.infoText}>via {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · ${quote.gasCostUSD} gas · {TSA_FEE_PCT}% TSA fee</Text>
+            <Text style={s.infoText}>via {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {TSA_FEE_PCT}% TSA Fee · ${quote.gasCostUSD} gas</Text>
           </View>
         )}
         {quoteStatus === 'no_route' && (
