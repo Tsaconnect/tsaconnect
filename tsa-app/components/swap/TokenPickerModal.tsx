@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Pressable, SectionList,
+  StyleSheet, Pressable, SectionList, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { LiFiToken } from '../../services/lifi';
@@ -19,25 +19,53 @@ interface Props {
   chainId: number;
 }
 
+function formatBalance(balance: string): string {
+  const n = Number(balance);
+  if (isNaN(n) || n === 0) return '0';
+  if (n < 0.000001) return '<0.000001';
+  // up to 6 significant decimals, trailing zeros removed
+  return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
+}
+
+function formatUSD(balance: string, usdValue: string, priceUSD?: string): string | null {
+  const usd = Number(usdValue);
+  if (usd > 0) return usd.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  // fall back to LiFi price × balance
+  if (priceUSD) {
+    const computed = Number(balance) * Number(priceUSD);
+    if (computed > 0) return computed.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  }
+  return null;
+}
+
 function TokenRow({
   token, chainId, balance, usdValue, onPress,
 }: {
   token: LiFiToken; chainId: number; balance?: string; usdValue?: string; onPress: () => void;
 }) {
   const initial = token.symbol[0] ?? '?';
+  const displayBalance = balance !== undefined ? formatBalance(balance) : undefined;
+  const displayUSD = balance !== undefined ? formatUSD(balance, usdValue ?? '0', token.priceUSD) : null;
+
   return (
     <TouchableOpacity style={s.row} onPress={onPress} activeOpacity={0.7}>
-      <View style={[s.icon, { backgroundColor: GOLD }]}>
-        <Text style={s.iconText}>{initial}</Text>
+      <View style={s.iconWrap}>
+        {token.logoURI ? (
+          <Image source={{ uri: token.logoURI }} style={s.iconImg} />
+        ) : (
+          <View style={[s.iconFallback, { backgroundColor: GOLD }]}>
+            <Text style={s.iconText}>{initial}</Text>
+          </View>
+        )}
       </View>
       <View style={s.rowMid}>
         <Text style={s.symbol}>{token.symbol}</Text>
         <Text style={s.name} numberOfLines={1}>{token.name}</Text>
       </View>
-      {balance !== undefined && (
+      {displayBalance !== undefined && (
         <View style={s.rowRight}>
-          <Text style={s.balance}>{balance}</Text>
-          {usdValue ? <Text style={s.usd}>${usdValue}</Text> : null}
+          <Text style={s.balance}>{displayBalance}</Text>
+          {displayUSD ? <Text style={s.usd}>${displayUSD}</Text> : null}
         </View>
       )}
     </TouchableOpacity>
@@ -147,7 +175,9 @@ const s = StyleSheet.create({
     paddingVertical: 8, backgroundColor: '#FFF',
   },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, gap: 12 },
-  icon: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  iconWrap: { width: 36, height: 36 },
+  iconImg: { width: 36, height: 36, borderRadius: 18 },
+  iconFallback: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
   iconText: { fontSize: 14, fontWeight: '700', color: '#FFF' },
   rowMid: { flex: 1 },
   symbol: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
