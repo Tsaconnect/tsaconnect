@@ -4,21 +4,26 @@ import {
   StyleSheet, Pressable, SectionList, Image, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { CHAINS, getChainByChainId } from '../../constants/chains';
 import type { LiFiToken } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
 const GOLD = '#D4AF37';
 
 const CHAIN_OPTIONS = [
-  { chainId: 56,    label: 'BSC' },
-  { chainId: 1,     label: 'ETH' },
-  { chainId: 137,   label: 'POL' },
-  { chainId: 42161, label: 'ARB' },
-  { chainId: 8453,  label: 'BASE' },
-  { chainId: 10,    label: 'OP' },
-  { chainId: 43114, label: 'AVAX' },
-  { chainId: 146,   label: 'SONIC' },
-];
+  CHAINS.bsc,
+  CHAINS.ethereum,
+  CHAINS.polygon,
+  CHAINS.arbitrum,
+  CHAINS.base,
+  CHAINS.optimism,
+  CHAINS.avalanche,
+  CHAINS.sonic,
+  CHAINS.linea,
+].map(chain => ({
+  chainId: chain.chainId,
+  label: chain.shortName === 'BEP20' ? 'BSC' : chain.shortName,
+}));
 
 interface Props {
   visible: boolean;
@@ -89,10 +94,12 @@ export default function TokenPickerModal({
 }: Props) {
   const [search, setSearch] = useState('');
 
+  const chainKey = useMemo(() => getChainByChainId(chainId)?.key, [chainId]);
+
   const heldTokens = useMemo(() => {
     if (mode === 'to') return [];
     return userBalances
-      .filter(b => Number(b.balance) > 0)
+      .filter(b => Number(b.balance) > 0 && (!chainKey || b.chainKey === chainKey))
       .map(b => {
         const match = allTokens.find(
           t => t.symbol.toLowerCase() === b.symbol.toLowerCase()
@@ -100,26 +107,39 @@ export default function TokenPickerModal({
         return match ? { token: match, balance: b.balance, usdValue: b.usdValue } : null;
       })
       .filter(Boolean) as { token: LiFiToken; balance: string; usdValue: string }[];
-  }, [userBalances, allTokens, mode]);
+  }, [userBalances, allTokens, mode, chainKey]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
+    const heldAddresses = new Set(heldTokens.map(h => h.token.address));
     return allTokens.filter(
       t =>
-        t.symbol.toLowerCase().includes(q) ||
-        t.name.toLowerCase().includes(q) ||
-        t.address.toLowerCase().includes(q)
+        !heldAddresses.has(t.address) &&
+        (t.symbol.toLowerCase().includes(q) ||
+          t.name.toLowerCase().includes(q) ||
+          t.address.toLowerCase().includes(q))
     );
-  }, [allTokens, search]);
+  }, [allTokens, search, heldTokens]);
+
+  const filteredHeld = useMemo(() => {
+    if (!search) return heldTokens;
+    const q = search.toLowerCase();
+    return heldTokens.filter(
+      h =>
+        h.token.symbol.toLowerCase().includes(q) ||
+        h.token.name.toLowerCase().includes(q) ||
+        h.token.address.toLowerCase().includes(q)
+    );
+  }, [heldTokens, search]);
 
   const sections = useMemo(() => {
     const result: { title: string; data: (LiFiToken & { _held?: { balance: string; usdValue: string } })[] }[] = [];
-    if (heldTokens.length > 0) {
-      result.push({ title: 'YOUR TOKENS', data: heldTokens.map(h => ({ ...h.token, _held: { balance: h.balance, usdValue: h.usdValue } })) });
+    if (filteredHeld.length > 0) {
+      result.push({ title: 'YOUR TOKENS', data: filteredHeld.map(h => ({ ...h.token, _held: { balance: h.balance, usdValue: h.usdValue } })) });
     }
     result.push({ title: 'ALL TOKENS', data: filtered });
     return result;
-  }, [heldTokens, filtered]);
+  }, [filteredHeld, filtered]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -128,7 +148,12 @@ export default function TokenPickerModal({
           <View style={s.handle} />
           <Text style={s.title}>Select Token</Text>
           {onChainChange && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.chainScroll} contentContainerStyle={s.chainRow}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={s.chainScroll}
+              contentContainerStyle={s.chainRow}
+            >
               {CHAIN_OPTIONS.map(opt => (
                 <TouchableOpacity
                   key={opt.chainId}
@@ -136,7 +161,14 @@ export default function TokenPickerModal({
                   onPress={() => onChainChange(opt.chainId)}
                   activeOpacity={0.7}
                 >
-                  <Text style={[s.chainChipText, opt.chainId === chainId && s.chainChipTextActive]}>{opt.label}</Text>
+                  <Text
+                    style={[s.chainChipText, opt.chainId === chainId && s.chainChipTextActive]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.85}
+                  >
+                    {opt.label}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -155,7 +187,7 @@ export default function TokenPickerModal({
           </View>
           <SectionList
             sections={sections}
-            keyExtractor={item => item.address}
+            keyExtractor={(item, index) => `${item.address}-${index}`}
             renderSectionHeader={({ section }) => (
               <Text style={s.sectionLabel}>{section.title}</Text>
             )}
@@ -191,11 +223,22 @@ const s = StyleSheet.create({
     alignSelf: 'center', marginBottom: 16,
   },
   title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 12, textAlign: 'center' },
-  chainScroll: { marginBottom: 8 },
-  chainRow: { flexDirection: 'row', gap: 8, paddingVertical: 4 },
-  chainChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: '#F0F0F0' },
+  chainScroll: {
+    height: 42,
+    marginBottom: 16,
+  },
+  chainRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4, paddingRight: 4 },
+  chainChip: {
+    minWidth: 68,
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#F0F0F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   chainChipActive: { backgroundColor: GOLD },
-  chainChipText: { fontSize: 12, fontWeight: '600', color: '#555' },
+  chainChipText: { fontSize: 12, lineHeight: 16, fontWeight: '700', color: '#555', textAlign: 'center' },
   chainChipTextActive: { color: '#FFF' },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
