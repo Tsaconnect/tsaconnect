@@ -15,6 +15,7 @@ import { getLiFiTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken,
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
 const GOLD = '#D4AF37';
+const TSA_FEE_PCT = 3;
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
@@ -257,6 +258,7 @@ export default function AllSwapScreen() {
           <View style={s.detRow}><Text style={s.detL}>Route</Text><Text style={s.detV}>{quote?.tool}</Text></View>
           <View style={s.detRow}><Text style={s.detL}>Est. time</Text><Text style={s.detV}>{quote ? Math.ceil(quote.estimatedDuration / 60) : '—'} min</Text></View>
           <View style={s.detRow}><Text style={s.detL}>Gas cost</Text><Text style={s.detV}>${quote?.gasCostUSD}</Text></View>
+          <View style={s.detRow}><Text style={s.detL}>TSA Fee</Text><Text style={s.detV}>{TSA_FEE_PCT}% (collected by LiFi)</Text></View>
           <View style={s.detRow}><Text style={s.detL}>Slippage</Text><Text style={s.detV}>{slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`}</Text></View>
         </View>
         {quote?.approvalAddress && (
@@ -334,7 +336,7 @@ export default function AllSwapScreen() {
         {quoteStatus === 'quoted' && quote && (
           <View style={s.infoBar}>
             <Ionicons name="flash" size={14} color={GOLD} />
-            <Text style={s.infoText}>via {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · ${quote.gasCostUSD} gas</Text>
+            <Text style={s.infoText}>via {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · ${quote.gasCostUSD} gas · {TSA_FEE_PCT}% TSA fee</Text>
           </View>
         )}
         {quoteStatus === 'no_route' && (
