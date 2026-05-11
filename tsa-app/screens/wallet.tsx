@@ -475,6 +475,7 @@ const WalletScreen: React.FC = () => {
     if (action === 'fund') setShowFundModal(true);
     else if (action === 'send') setShowSendModal(true);
     else if (action === 'instant-pay') router.push('/wallet/instant-pay' as any);
+    else if (action === 'swap') router.push('/easyswap' as any);
     else router.push(`/${action}` as any);
   };
 
