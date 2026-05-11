@@ -14,6 +14,12 @@ import (
 
 const defaultLiFiBaseURL = "https://li.quest/v1"
 
+const (
+	lifiDefaultSlippage = "0.005"
+	lifiIntegratorFee   = "0.03"
+	lifiIntegratorID    = "tsaconnect"
+)
+
 var liFiHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type tokenCacheEntry struct {
@@ -84,14 +90,15 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 }
 
 // GetQuote handles GET /api/swap/lifi/quote
-// Forwards all query params to LiFi and returns the response unmodified.
+// Forwards query params to LiFi, injecting fee=0.03 and integrator=tsaconnect
+// unconditionally and defaulting slippage to 0.005 if not supplied.
 func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 	params := c.Request.URL.Query()
 	if params.Get("slippage") == "" {
-		params.Set("slippage", "0.005")
+		params.Set("slippage", lifiDefaultSlippage)
 	}
-	params.Set("fee", "0.03")
-	params.Set("integrator", "tsaconnect")
+	params.Set("fee", lifiIntegratorFee)
+	params.Set("integrator", lifiIntegratorID)
 
 	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/quote?%s", h.lifiBaseURL, params.Encode()))
 	if err != nil {
