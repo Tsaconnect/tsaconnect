@@ -7,7 +7,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import { getChainByChainId } from '@/constants/chains';
+import { getChainByChainId, CHAINS } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, fetchPendingNonce, signLiFiTransaction } from '@/services/wallet';
 import { ethers } from 'ethers';
@@ -33,6 +33,7 @@ export default function AllSwapScreen() {
   const [screen, setScreen] = useState<Screen>('form');
   const [pickerMode, setPickerMode] = useState<'from' | 'to' | null>(null);
   const [allTokens, setAllTokens] = useState<LiFiToken[]>([]);
+  const [toAllTokens, setToAllTokens] = useState<LiFiToken[]>([]);
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [signingStatus, setSigningStatus] = useState('');
   const [txHash, setTxHash] = useState('');
@@ -56,6 +57,12 @@ export default function AllSwapScreen() {
     getLiFiTokens(fromChainId).then(tokens => { if (active) setAllTokens(tokens); }).catch(() => {});
     return () => { active = false; };
   }, [fromChainId]);
+
+  useEffect(() => {
+    let active = true;
+    getLiFiTokens(toChainId).then(tokens => { if (active) setToAllTokens(tokens); }).catch(() => {});
+    return () => { active = false; };
+  }, [toChainId]);
 
   const loadBalances = async () => {
     try {
@@ -169,9 +176,29 @@ export default function AllSwapScreen() {
     }
   };
 
-  const outputAmount = quote
-    ? String(Number(quote.toAmount) / Math.pow(10, toToken?.decimals ?? 18))
+  const outputAmount = quote && toToken
+    ? (() => {
+        try {
+          const raw = ethers.formatUnits(quote.toAmount, toToken.decimals);
+          const n = Number(raw);
+          if (isNaN(n) || n === 0) return '0';
+          return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
+        } catch { return '0'; }
+      })()
     : null;
+
+  const chainName = (chainId: number) => {
+    const entry = Object.values(CHAINS).find(c => c.chainId === chainId);
+    return entry?.shortName ?? String(chainId);
+  };
+
+  const formattedBalance = fromBalance
+    ? (() => {
+        const n = Number(fromBalance);
+        if (isNaN(n) || n === 0) return '0';
+        return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
+      })()
+    : '0';
 
   if (screen === 'signing') return (
     <View style={s.container}>
@@ -264,7 +291,10 @@ export default function AllSwapScreen() {
           <Text style={s.cardLabel}>YOU PAY</Text>
           <View style={s.cardRow}>
             <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('from')} activeOpacity={0.7}>
-              <Text style={s.tokenBtnText}>{fromToken?.symbol ?? 'Select'}</Text>
+              <View>
+                <Text style={s.tokenBtnText}>{fromToken?.symbol ?? 'Select'}</Text>
+                {fromToken && <Text style={s.tokenChain}>{chainName(fromChainId)}</Text>}
+              </View>
               <Ionicons name="chevron-down" size={14} color="#888" />
             </TouchableOpacity>
             <TextInput
@@ -277,7 +307,7 @@ export default function AllSwapScreen() {
             />
           </View>
           <TouchableOpacity onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
-            <Text style={s.balanceText}>Balance: {fromBalance} {fromToken?.symbol}</Text>
+            <Text style={s.balanceText}>Balance: {formattedBalance} {fromToken?.symbol}</Text>
           </TouchableOpacity>
 
           <View style={s.arrowWrap}>
@@ -289,7 +319,10 @@ export default function AllSwapScreen() {
           <Text style={s.cardLabel}>YOU RECEIVE</Text>
           <View style={s.cardRow}>
             <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('to')} activeOpacity={0.7}>
-              <Text style={s.tokenBtnText}>{toToken?.symbol ?? 'Select'}</Text>
+              <View>
+                <Text style={s.tokenBtnText}>{toToken?.symbol ?? 'Select'}</Text>
+                {toToken && <Text style={s.tokenChain}>{chainName(toChainId)}</Text>}
+              </View>
               <Ionicons name="chevron-down" size={14} color="#888" />
             </TouchableOpacity>
             {quoteStatus === 'quoting'
@@ -331,7 +364,11 @@ export default function AllSwapScreen() {
         mode={pickerMode ?? 'from'}
         chainId={pickerMode === 'from' ? fromChainId : toChainId}
         userBalances={balances}
-        allTokens={allTokens}
+        allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
+        onChainChange={(newChainId) => {
+          if (pickerMode === 'from') setFromChainId(newChainId);
+          else setToChainId(newChainId);
+        }}
         onSelect={(token, chainId) => {
           if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
           else { setToToken(token); setToChainId(chainId); }
@@ -384,6 +421,7 @@ const s = StyleSheet.create({
   cardRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 },
   tokenBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#F5F5F5', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
   tokenBtnText: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
+  tokenChain: { fontSize: 10, color: '#888', marginTop: 1 },
   amountInput: { flex: 1, fontSize: 26, fontWeight: '700', color: '#1A1A1A', textAlign: 'right', padding: 0 },
   amountOutput: { flex: 1, fontSize: 26, fontWeight: '700', color: GOLD, textAlign: 'right' },
   balanceText: { fontSize: 12, color: GOLD, fontWeight: '500', textAlign: 'right', marginBottom: 16 },

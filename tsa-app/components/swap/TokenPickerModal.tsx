@@ -1,13 +1,24 @@
 import React, { useState, useMemo } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Pressable, SectionList, Image,
+  StyleSheet, Pressable, SectionList, Image, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { LiFiToken } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
 const GOLD = '#D4AF37';
+
+const CHAIN_OPTIONS = [
+  { chainId: 56,    label: 'BSC' },
+  { chainId: 1,     label: 'ETH' },
+  { chainId: 137,   label: 'POL' },
+  { chainId: 42161, label: 'ARB' },
+  { chainId: 8453,  label: 'BASE' },
+  { chainId: 10,    label: 'OP' },
+  { chainId: 43114, label: 'AVAX' },
+  { chainId: 146,   label: 'SONIC' },
+];
 
 interface Props {
   visible: boolean;
@@ -17,6 +28,7 @@ interface Props {
   onClose: () => void;
   allTokens: LiFiToken[];
   chainId: number;
+  onChainChange?: (chainId: number) => void;
 }
 
 function formatBalance(balance: string): string {
@@ -73,7 +85,7 @@ function TokenRow({
 }
 
 export default function TokenPickerModal({
-  visible, mode, userBalances, onSelect, onClose, allTokens, chainId,
+  visible, mode, userBalances, onSelect, onClose, allTokens, chainId, onChainChange,
 }: Props) {
   const [search, setSearch] = useState('');
 
@@ -115,6 +127,20 @@ export default function TokenPickerModal({
         <Pressable style={s.sheet} onPress={() => {}}>
           <View style={s.handle} />
           <Text style={s.title}>Select Token</Text>
+          {onChainChange && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.chainScroll} contentContainerStyle={s.chainRow}>
+              {CHAIN_OPTIONS.map(opt => (
+                <TouchableOpacity
+                  key={opt.chainId}
+                  style={[s.chainChip, opt.chainId === chainId && s.chainChipActive]}
+                  onPress={() => onChainChange(opt.chainId)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[s.chainChipText, opt.chainId === chainId && s.chainChipTextActive]}>{opt.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
           <View style={s.searchRow}>
             <Ionicons name="search" size={16} color="#AAA" />
             <TextInput
@@ -165,6 +191,12 @@ const s = StyleSheet.create({
     alignSelf: 'center', marginBottom: 16,
   },
   title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 12, textAlign: 'center' },
+  chainScroll: { marginBottom: 8 },
+  chainRow: { flexDirection: 'row', gap: 8, paddingVertical: 4 },
+  chainChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: '#F0F0F0' },
+  chainChipActive: { backgroundColor: GOLD },
+  chainChipText: { fontSize: 12, fontWeight: '600', color: '#555' },
+  chainChipTextActive: { color: '#FFF' },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#F5F5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
