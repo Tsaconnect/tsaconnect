@@ -9,6 +9,7 @@ export interface LiFiToken {
   decimals: number;
   logoURI: string;
   priceUSD?: string;
+  chainId?: number;
 }
 
 export interface LiFiQuoteParams {
@@ -68,9 +69,10 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
   const data = await res.json();
   if (!res.ok) throw new Error(data?.message || 'Failed to fetch quote');
 
+  // LiFi v1: toAmount lives in estimate, not at the top level
   return {
-    toAmount: data.toAmount,
-    toAmountUSD: data.toAmountUSD,
+    toAmount: data.estimate?.toAmount ?? data.toAmount ?? '0',
+    toAmountUSD: data.estimate?.toAmountUSD ?? data.toAmountUSD ?? '0',
     estimatedDuration: data.estimate?.executionDuration ?? 0,
     gasCostUSD: data.estimate?.gasCosts?.[0]?.amountUSD ?? '0',
     tool: data.toolDetails?.name ?? data.tool ?? 'LiFi',
