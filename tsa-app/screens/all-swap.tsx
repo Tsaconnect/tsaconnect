@@ -35,6 +35,8 @@ export default function AllSwapScreen() {
   const [pickerMode, setPickerMode] = useState<'from' | 'to' | null>(null);
   const [allTokens, setAllTokens] = useState<LiFiToken[]>([]);
   const [toAllTokens, setToAllTokens] = useState<LiFiToken[]>([]);
+  const [tokensLoading, setTokensLoading] = useState(false);
+  const [toTokensLoading, setToTokensLoading] = useState(false);
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [signingStatus, setSigningStatus] = useState('');
   const [txHash, setTxHash] = useState('');
@@ -55,13 +57,21 @@ export default function AllSwapScreen() {
 
   useEffect(() => {
     let active = true;
-    getLiFiTokens(fromChainId).then(tokens => { if (active) setAllTokens(tokens); }).catch(() => {});
+    setTokensLoading(true);
+    getLiFiTokens(fromChainId)
+      .then(tokens => { if (active) setAllTokens(tokens); })
+      .catch(() => {})
+      .finally(() => { if (active) setTokensLoading(false); });
     return () => { active = false; };
   }, [fromChainId]);
 
   useEffect(() => {
     let active = true;
-    getLiFiTokens(toChainId).then(tokens => { if (active) setToAllTokens(tokens); }).catch(() => {});
+    setToTokensLoading(true);
+    getLiFiTokens(toChainId)
+      .then(tokens => { if (active) setToAllTokens(tokens); })
+      .catch(() => {})
+      .finally(() => { if (active) setToTokensLoading(false); });
     return () => { active = false; };
   }, [toChainId]);
 
@@ -367,6 +377,7 @@ export default function AllSwapScreen() {
         chainId={pickerMode === 'from' ? fromChainId : toChainId}
         userBalances={balances}
         allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
+        tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
         onChainChange={(newChainId) => {
           if (pickerMode === 'from') setFromChainId(newChainId);
           else setToChainId(newChainId);

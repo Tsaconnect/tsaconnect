@@ -53,8 +53,7 @@ export interface LiFiQuote {
 }
 
 export async function getLiFiChains(): Promise<LiFiChain[]> {
-  const headers = await getAuthHeaders();
-  const res = await fetch(`${API_BASE_URL}/swap/lifi/chains`, { headers });
+  const res = await fetch('https://li.quest/v1/chains?chainTypes=EVM');
   if (!res.ok) throw new Error('Failed to fetch LiFi chains');
   const data = await res.json();
   return Array.isArray(data?.chains) ? data.chains : [];
