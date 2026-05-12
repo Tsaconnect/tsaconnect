@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet,
   ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Pressable,
-  Switch,
+  Switch, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -15,12 +15,23 @@ import { getLiFiTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken,
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
 const GOLD = '#D4AF37';
-const TSA_FEE_PCT = 3;
+const DARK = '#1A1A1A';
+const FEE_PCT = 3;
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
 type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
+
+function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
+  if (uri) return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  if (!symbol) return null;
+  return (
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#E0E0E0', alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#555' }}>{symbol[0]}</Text>
+    </View>
+  );
+}
 
 export default function AllSwapScreen() {
   const [fromToken, setFromToken] = useState<LiFiToken | null>(null);
@@ -154,7 +165,7 @@ export default function AllSwapScreen() {
       const humanAmount = String(Number(fromAmountWei) / Math.pow(10, fromToken.decimals));
 
       if (quote.approvalAddress && quote.approvalToken) {
-        setSigningStatus('Step 1 of 2: Approving…');
+        setSigningStatus('Step 1 of 2: Approving token…');
         const calldata = buildERC20ApproveCalldata(quote.approvalAddress, ethers.MaxUint256.toString());
         const approveTx = {
           to: quote.approvalToken,
@@ -172,7 +183,7 @@ export default function AllSwapScreen() {
         nonce += 1;
       }
 
-      setSigningStatus('Step 2 of 2: Swapping…');
+      setSigningStatus('Step 2 of 2: Executing swap…');
       const swapTx = { ...quote.transactionRequest, nonce };
       const signedSwap = await signLiFiTransaction(swapTx);
       const res = await submitTransaction(signedSwap, 'swap', fromToken.symbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId);
@@ -211,29 +222,48 @@ export default function AllSwapScreen() {
       })()
     : '0';
 
+  // ── Signing ──────────────────────────────────────────────────
   if (screen === 'signing') return (
     <View style={s.container}>
       <View style={s.center}>
-        <ActivityIndicator size="large" color={GOLD} style={{ marginBottom: 16 }} />
+        <View style={s.signingRing}>
+          <ActivityIndicator size="large" color={GOLD} />
+        </View>
         <Text style={s.bigTitle}>Processing Swap</Text>
-        <Text style={[s.sub, { color: GOLD, marginTop: 8 }]}>{signingStatus}</Text>
+        <Text style={s.signingStep}>{signingStatus}</Text>
+        <Text style={s.signingHint}>Please keep the app open</Text>
       </View>
     </View>
   );
 
+  // ── Success / Failure ─────────────────────────────────────────
   if (screen === 'success' || screen === 'failure') {
     const ok = screen === 'success';
     return (
       <View style={s.container}>
         <View style={s.center}>
           <View style={[s.resIcon, { backgroundColor: ok ? '#D1FAE5' : '#FEE2E2' }]}>
-            <Ionicons name={ok ? 'checkmark-circle' : 'close-circle'} size={48} color={ok ? '#16A34A' : '#DC2626'} />
+            <Ionicons name={ok ? 'checkmark-circle' : 'close-circle'} size={52} color={ok ? '#16A34A' : '#DC2626'} />
           </View>
-          <Text style={s.bigTitle}>{ok ? 'Swap Complete!' : 'Swap Failed'}</Text>
-          <Text style={[s.sub, { textAlign: 'center', marginTop: 8, paddingHorizontal: 24 }]}>
-            {ok ? `Swapped ${fromAmount} ${fromToken?.symbol} → ${outputAmount} ${toToken?.symbol}` : error}
-          </Text>
-          {txHash ? <Text style={s.txHash} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text> : null}
+          <Text style={s.bigTitle}>{ok ? 'Swap Complete' : 'Swap Failed'}</Text>
+          {ok && fromToken && toToken ? (
+            <View style={s.successSummary}>
+              <View style={s.successTokenRow}>
+                <TokenIcon uri={fromToken.logoURI} symbol={fromToken.symbol} size={28} />
+                <Text style={s.successAmt}>{fromAmount} {fromToken.symbol}</Text>
+              </View>
+              <Ionicons name="arrow-down" size={16} color="#AAA" />
+              <View style={s.successTokenRow}>
+                <TokenIcon uri={toToken.logoURI} symbol={toToken.symbol} size={28} />
+                <Text style={s.successAmt}>{outputAmount} {toToken.symbol}</Text>
+              </View>
+            </View>
+          ) : (
+            <Text style={s.errorMsg}>{error}</Text>
+          )}
+          {txHash ? (
+            <Text style={s.txHash} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text>
+          ) : null}
           <TouchableOpacity style={s.btn} onPress={() => ok ? router.back() : setScreen('form')}>
             <Text style={s.btnT}>{ok ? 'Done' : 'Try Again'}</Text>
           </TouchableOpacity>
@@ -242,38 +272,65 @@ export default function AllSwapScreen() {
     );
   }
 
+  // ── Confirm ───────────────────────────────────────────────────
   if (screen === 'confirm') return (
     <View style={s.container}>
       <ScrollView contentContainerStyle={s.scroll}>
         <TouchableOpacity onPress={() => setScreen('form')} style={s.backRow}>
-          <Ionicons name="chevron-back" size={22} color={GOLD} />
+          <Ionicons name="chevron-back" size={20} color={GOLD} />
           <Text style={[s.sub, { color: GOLD }]}>Back</Text>
         </TouchableOpacity>
         <Text style={s.bigTitle}>Confirm Swap</Text>
+
+        {/* From → To summary */}
         <View style={s.card}>
-          <View style={s.confirmRow}>
+          <View style={s.confirmSection}>
             <Text style={s.cardLabel}>YOU PAY</Text>
-            <Text style={s.confirmAmount}>{fromAmount} {fromToken?.symbol}</Text>
-            <Text style={s.sub}>{fromToken?.name}</Text>
+            <View style={s.confirmTokenRow}>
+              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={40} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.confirmAmount}>{fromAmount} {fromToken?.symbol}</Text>
+                <Text style={s.confirmMeta}>{fromToken?.name} · {chainName(fromChainId)}</Text>
+              </View>
+            </View>
           </View>
-          <View style={{ alignItems: 'center', paddingVertical: 8 }}>
-            <Ionicons name="arrow-down" size={20} color={GOLD} />
+
+          <View style={s.arrowDivider}>
+            <View style={s.arrowDividerLine} />
+            <View style={s.arrowCircle}>
+              <Ionicons name="arrow-down" size={16} color="#FFF" />
+            </View>
+            <View style={s.arrowDividerLine} />
           </View>
-          <View style={s.confirmRow}>
+
+          <View style={s.confirmSection}>
             <Text style={s.cardLabel}>YOU RECEIVE</Text>
-            <Text style={s.confirmAmount}>{outputAmount} {toToken?.symbol}</Text>
-            <Text style={s.sub}>{toToken?.name}</Text>
+            <View style={s.confirmTokenRow}>
+              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={40} />
+              <View style={{ flex: 1 }}>
+                <Text style={[s.confirmAmount, { color: GOLD }]}>{outputAmount} {toToken?.symbol}</Text>
+                <Text style={s.confirmMeta}>{toToken?.name} · {chainName(toChainId)}</Text>
+              </View>
+            </View>
           </View>
-          <View style={s.divider} />
-          <View style={s.detRow}><Text style={s.detL}>Route</Text><Text style={s.detV}>{quote?.tool}</Text></View>
-          <View style={s.detRow}><Text style={s.detL}>Est. time</Text><Text style={s.detV}>{quote ? Math.ceil(quote.estimatedDuration / 60) : '—'} min</Text></View>
-          <View style={s.detRow}><Text style={s.detL}>Gas cost</Text><Text style={s.detV}>${quote?.gasCostUSD}</Text></View>
-          <View style={s.detRow}><Text style={s.detL}>TSA Fee</Text><Text style={s.detV}>{TSA_FEE_PCT}% (collected by LiFi)</Text></View>
-          <View style={s.detRow}><Text style={s.detL}>Slippage</Text><Text style={s.detV}>{slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`}</Text></View>
         </View>
+
+        {/* Details */}
+        <View style={[s.card, { marginTop: 12 }]}>
+          <DetailRow label="Route" value={quote?.tool ?? '—'} />
+          <DetailRow label="Est. time" value={quote ? `~${Math.ceil(quote.estimatedDuration / 60)} min` : '—'} />
+          <DetailRow label="Gas cost" value={`$${quote?.gasCostUSD ?? '0'}`} />
+          <DetailRow label="Fee" value={`${FEE_PCT}%`} highlight />
+          <DetailRow label="Slippage" value={slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`} last />
+        </View>
+
         {quote?.approvalAddress && (
-          <Text style={s.disc}>Two transactions: token approval + swap.</Text>
+          <View style={s.approvalNote}>
+            <Ionicons name="information-circle-outline" size={14} color="#888" />
+            <Text style={s.disc}>Two transactions required: token approval + swap</Text>
+          </View>
         )}
+
         <TouchableOpacity style={s.btn} onPress={handleSwap}>
           <Ionicons name="swap-vertical" size={18} color="#FFF" style={{ marginRight: 8 }} />
           <Text style={s.btnT}>Confirm Swap</Text>
@@ -285,6 +342,7 @@ export default function AllSwapScreen() {
     </View>
   );
 
+  // ── Form ──────────────────────────────────────────────────────
   const validationError = validate();
   return (
     <KeyboardAvoidingView style={s.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -300,14 +358,16 @@ export default function AllSwapScreen() {
         </View>
 
         <View style={s.card}>
+          {/* From */}
           <Text style={s.cardLabel}>YOU PAY</Text>
           <View style={s.cardRow}>
             <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('from')} activeOpacity={0.7}>
+              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
               <View>
                 <Text style={s.tokenBtnText}>{fromToken?.symbol ?? 'Select'}</Text>
                 {fromToken && <Text style={s.tokenChain}>{chainName(fromChainId)}</Text>}
               </View>
-              <Ionicons name="chevron-down" size={14} color="#888" />
+              <Ionicons name="chevron-down" size={13} color="#888" />
             </TouchableOpacity>
             <TextInput
               style={s.amountInput}
@@ -322,20 +382,23 @@ export default function AllSwapScreen() {
             <Text style={s.balanceText}>Balance: {formattedBalance} {fromToken?.symbol}</Text>
           </TouchableOpacity>
 
+          {/* Swap direction button */}
           <View style={s.arrowWrap}>
             <TouchableOpacity style={s.arrowBtn} onPress={swapDirection} activeOpacity={0.7}>
-              <Ionicons name="swap-vertical" size={20} color="#FFF" />
+              <Ionicons name="swap-vertical" size={18} color="#FFF" />
             </TouchableOpacity>
           </View>
 
+          {/* To */}
           <Text style={s.cardLabel}>YOU RECEIVE</Text>
           <View style={s.cardRow}>
             <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('to')} activeOpacity={0.7}>
+              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
               <View>
                 <Text style={s.tokenBtnText}>{toToken?.symbol ?? 'Select'}</Text>
                 {toToken && <Text style={s.tokenChain}>{chainName(toChainId)}</Text>}
               </View>
-              <Ionicons name="chevron-down" size={14} color="#888" />
+              <Ionicons name="chevron-down" size={13} color="#888" />
             </TouchableOpacity>
             {quoteStatus === 'quoting'
               ? <ActivityIndicator size="small" color={GOLD} style={{ flex: 1 }} />
@@ -343,21 +406,24 @@ export default function AllSwapScreen() {
           </View>
         </View>
 
+        {/* Quote info / errors */}
         {quoteStatus === 'quoted' && quote && (
           <View style={s.infoBar}>
-            <Ionicons name="flash" size={14} color={GOLD} />
-            <Text style={s.infoText}>via {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {TSA_FEE_PCT}% TSA Fee · ${quote.gasCostUSD} gas</Text>
+            <Ionicons name="flash" size={13} color={GOLD} />
+            <Text style={s.infoText}>
+              {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
+            </Text>
           </View>
         )}
         {quoteStatus === 'no_route' && (
           <View style={[s.infoBar, s.infoError]}>
-            <Ionicons name="warning" size={14} color="#DC2626" />
+            <Ionicons name="warning" size={13} color="#DC2626" />
             <Text style={[s.infoText, { color: '#DC2626' }]}>No route available for this pair. Try a different token or amount.</Text>
           </View>
         )}
         {quoteStatus === 'error' && (
           <View style={[s.infoBar, s.infoError]}>
-            <Ionicons name="alert-circle" size={14} color="#DC2626" />
+            <Ionicons name="alert-circle" size={13} color="#DC2626" />
             <Text style={[s.infoText, { color: '#DC2626' }]}>{quoteError || 'Swap pricing unavailable. Try again shortly.'}</Text>
           </View>
         )}
@@ -394,20 +460,27 @@ export default function AllSwapScreen() {
       <Modal visible={slippageSheetVisible} transparent animationType="slide">
         <Pressable style={s.overlay} onPress={() => setSlippageSheetVisible(false)}>
           <Pressable style={s.slippageSheet} onPress={() => {}}>
-            <Text style={[s.bigTitle, { fontSize: 18 }]}>Slippage Tolerance</Text>
+            <View style={s.slippageHandle} />
+            <Text style={s.slippageTitle}>Slippage Tolerance</Text>
             <View style={s.slippageRow}>
-              <Text style={s.detL}>Auto (0.5%)</Text>
-              <Switch value={slippageAuto} onValueChange={setSlippageAuto} trackColor={{ true: GOLD }} />
+              <View>
+                <Text style={s.detL}>Auto</Text>
+                <Text style={s.slippageHint}>0.5% — recommended</Text>
+              </View>
+              <Switch value={slippageAuto} onValueChange={setSlippageAuto} trackColor={{ true: GOLD }} thumbColor="#FFF" />
             </View>
             {!slippageAuto && (
-              <TextInput
-                style={s.slippageInput}
-                value={String(Number(slippage) * 100)}
-                onChangeText={v => { const n = Number(v); if (!isNaN(n) && n >= 0.1 && n <= 49) setSlippage(String(n / 100)); }}
-                keyboardType="decimal-pad"
-                placeholder="0.5"
-                placeholderTextColor="#CCC"
-              />
+              <View style={s.slippageInputWrap}>
+                <TextInput
+                  style={s.slippageInput}
+                  value={String(Number(slippage) * 100)}
+                  onChangeText={v => { const n = Number(v); if (!isNaN(n) && n >= 0.1 && n <= 49) setSlippage(String(n / 100)); }}
+                  keyboardType="decimal-pad"
+                  placeholder="Enter %"
+                  placeholderTextColor="#CCC"
+                />
+                <Text style={s.slippagePct}>%</Text>
+              </View>
             )}
           </Pressable>
         </Pressable>
@@ -416,54 +489,127 @@ export default function AllSwapScreen() {
   );
 }
 
+function DetailRow({ label, value, highlight, last }: { label: string; value: string; highlight?: boolean; last?: boolean }) {
+  return (
+    <View style={[s.detRow, !last && s.detRowBorder]}>
+      <Text style={s.detL}>{label}</Text>
+      <Text style={[s.detV, highlight && { color: GOLD }]}>{value}</Text>
+    </View>
+  );
+}
+
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FAFAFA' },
-  scroll: { flexGrow: 1, padding: 20, paddingBottom: 40 },
+  scroll: { flexGrow: 1, padding: 20, paddingBottom: 48 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+
+  // Header
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 },
-  bigTitle: { fontSize: 26, fontWeight: '700', color: '#1A1A1A' },
+  bigTitle: { fontSize: 26, fontWeight: '700', color: DARK },
   sub: { fontSize: 13, color: '#888', marginTop: 2 },
   settingsBtn: { padding: 8 },
+
+  // Card
   card: {
-    backgroundColor: '#FFF', borderRadius: 16, padding: 16,
+    backgroundColor: '#FFF', borderRadius: 20, padding: 18,
     borderWidth: 1, borderColor: '#F0F0F0',
-    elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04, shadowRadius: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05, shadowRadius: 10, elevation: 2,
   },
-  cardLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 10 },
-  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 },
-  tokenBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#F5F5F5', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20 },
-  tokenBtnText: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
-  tokenChain: { fontSize: 10, color: '#888', marginTop: 1 },
-  amountInput: { flex: 1, fontSize: 26, fontWeight: '700', color: '#1A1A1A', textAlign: 'right', padding: 0 },
-  amountOutput: { flex: 1, fontSize: 26, fontWeight: '700', color: GOLD, textAlign: 'right' },
+  cardLabel: { fontSize: 10, fontWeight: '700', color: '#BBB', letterSpacing: 1.2, marginBottom: 10 },
+  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 },
+
+  // Token button
+  tokenBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#F5F5F5', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 20,
+    maxWidth: '50%',
+  },
+  tokenBtnText: { fontSize: 15, fontWeight: '700', color: DARK },
+  tokenChain: { fontSize: 10, color: '#AAA', marginTop: 1 },
+
+  // Amount
+  amountInput: { flex: 1, fontSize: 28, fontWeight: '700', color: DARK, textAlign: 'right', padding: 0 },
+  amountOutput: { flex: 1, fontSize: 28, fontWeight: '700', color: GOLD, textAlign: 'right' },
   balanceText: { fontSize: 12, color: GOLD, fontWeight: '500', textAlign: 'right', marginBottom: 16 },
-  arrowWrap: { alignItems: 'center', zIndex: 10, marginVertical: -2 },
+
+  // Swap arrow
+  arrowWrap: { alignItems: 'center', marginVertical: 4 },
   arrowBtn: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: GOLD,
+    width: 38, height: 38, borderRadius: 19, backgroundColor: DARK,
     justifyContent: 'center', alignItems: 'center',
-    elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3, shadowRadius: 4, marginVertical: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 4,
   },
-  infoBar: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, backgroundColor: '#FFF8E1', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 10, padding: 10, marginTop: 12 },
+
+  // Info bar
+  infoBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A',
+    borderRadius: 12, padding: 10, marginTop: 12,
+  },
   infoError: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
   infoText: { fontSize: 12, color: '#92400E', flex: 1 },
-  btn: { flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginTop: 20, elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
+
+  // Buttons
+  btn: {
+    flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16,
+    borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginTop: 20,
+    shadowColor: GOLD, shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3, shadowRadius: 10, elevation: 4,
+  },
   btnT: { fontSize: 16, fontWeight: '700', color: '#FFF' },
-  btn2: { paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 10 },
-  btn2T: { fontSize: 15, color: '#888', fontWeight: '600' },
-  backRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 4 },
-  confirmRow: { paddingVertical: 10 },
-  confirmAmount: { fontSize: 22, fontWeight: '700', color: '#1A1A1A', marginTop: 4 },
-  divider: { height: 1, backgroundColor: '#F0F0F0', marginVertical: 12 },
-  detRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },
+  btn2: { paddingVertical: 14, borderRadius: 16, alignItems: 'center', marginTop: 8 },
+  btn2T: { fontSize: 15, color: '#AAA', fontWeight: '600' },
+
+  // Confirm screen
+  backRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 2 },
+  confirmSection: { paddingVertical: 12 },
+  confirmTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
+  confirmAmount: { fontSize: 22, fontWeight: '700', color: DARK },
+  confirmMeta: { fontSize: 12, color: '#AAA', marginTop: 2 },
+  arrowDivider: { flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 4 },
+  arrowDividerLine: { flex: 1, height: 1, backgroundColor: '#F0F0F0' },
+  arrowCircle: {
+    width: 28, height: 28, borderRadius: 14, backgroundColor: GOLD,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // Details table
+  detRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 11 },
+  detRowBorder: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
   detL: { fontSize: 13, color: '#888' },
-  detV: { fontSize: 13, fontWeight: '600', color: '#1A1A1A' },
-  disc: { fontSize: 12, color: '#AAA', textAlign: 'center', marginBottom: 8, marginTop: 4 },
-  resIcon: { width: 80, height: 80, borderRadius: 40, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-  txHash: { fontSize: 12, color: '#AAA', marginBottom: 24, maxWidth: '80%' },
+  detV: { fontSize: 13, fontWeight: '600', color: DARK },
+
+  // Approval note
+  approvalNote: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 4 },
+  disc: { fontSize: 12, color: '#AAA', flex: 1 },
+
+  // Signing screen
+  signingRing: {
+    width: 80, height: 80, borderRadius: 40,
+    borderWidth: 2, borderColor: '#F0F0F0',
+    alignItems: 'center', justifyContent: 'center', marginBottom: 24,
+  },
+  signingStep: { fontSize: 14, color: GOLD, fontWeight: '600', marginTop: 8 },
+  signingHint: { fontSize: 12, color: '#AAA', marginTop: 6 },
+
+  // Success / failure
+  resIcon: { width: 88, height: 88, borderRadius: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
+  successSummary: { alignItems: 'center', gap: 8, marginTop: 16, marginBottom: 24 },
+  successTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  successAmt: { fontSize: 16, fontWeight: '700', color: DARK },
+  errorMsg: { fontSize: 14, color: '#DC2626', textAlign: 'center', marginTop: 8, marginBottom: 24, paddingHorizontal: 24 },
+  txHash: { fontSize: 11, color: '#AAA', marginBottom: 24, maxWidth: '85%' },
+
+  // Slippage sheet
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  slippageSheet: { backgroundColor: '#FFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 24, gap: 16 },
+  slippageSheet: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingTop: 16, gap: 20 },
+  slippageHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: '#E0E0E0', alignSelf: 'center', marginBottom: 8 },
+  slippageTitle: { fontSize: 17, fontWeight: '700', color: DARK },
   slippageRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  slippageInput: { borderWidth: 1, borderColor: '#E0E0E0', borderRadius: 10, padding: 12, fontSize: 16, color: '#1A1A1A' },
+  slippageHint: { fontSize: 12, color: '#AAA', marginTop: 2 },
+  slippageInputWrap: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#E0E0E0', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12 },
+  slippageInput: { flex: 1, fontSize: 16, color: DARK },
+  slippagePct: { fontSize: 15, fontWeight: '600', color: '#AAA' },
 });
