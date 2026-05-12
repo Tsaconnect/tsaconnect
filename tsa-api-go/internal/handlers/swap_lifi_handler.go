@@ -27,10 +27,16 @@ type tokenCacheEntry struct {
 	fetchedAt time.Time
 }
 
+type chainsCacheEntry struct {
+	data      []byte
+	fetchedAt time.Time
+}
+
 // SwapLiFiHandler proxies LiFi aggregator endpoints for token lists and swap quotes.
 type SwapLiFiHandler struct {
 	mu          sync.Mutex
 	tokenCache  map[string]tokenCacheEntry
+	chainsCache *chainsCacheEntry
 	lifiBaseURL string
 }
 
@@ -84,6 +90,42 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 
 	h.mu.Lock()
 	h.tokenCache[chainId] = tokenCacheEntry{data: body, fetchedAt: time.Now()}
+	h.mu.Unlock()
+
+	c.Data(http.StatusOK, "application/json", body)
+}
+
+// GetChains handles GET /api/swap/lifi/chains
+// Proxies LiFi EVM chain list with a 24-hour in-memory cache.
+func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
+	h.mu.Lock()
+	if h.chainsCache != nil && time.Since(h.chainsCache.fetchedAt) < 24*time.Hour {
+		data := h.chainsCache.data
+		h.mu.Unlock()
+		c.Data(http.StatusOK, "application/json", data)
+		return
+	}
+	h.mu.Unlock()
+
+	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/chains?chainTypes=EVM", h.lifiBaseURL))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		c.Data(resp.StatusCode, "application/json", body)
+		return
+	}
+
+	h.mu.Lock()
+	h.chainsCache = &chainsCacheEntry{data: body, fetchedAt: time.Now()}
 	h.mu.Unlock()
 
 	c.Data(http.StatusOK, "application/json", body)

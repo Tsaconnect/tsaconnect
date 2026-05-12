@@ -1,29 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
   StyleSheet, Pressable, SectionList, Image, ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { CHAINS, getChainByChainId } from '../../constants/chains';
-import type { LiFiToken } from '../../services/lifi';
+import type { LiFiToken, LiFiChain } from '../../services/lifi';
+import { getLiFiChains } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
 const GOLD = '#D4AF37';
-
-const CHAIN_OPTIONS = [
-  CHAINS.bsc,
-  CHAINS.ethereum,
-  CHAINS.polygon,
-  CHAINS.arbitrum,
-  CHAINS.base,
-  CHAINS.optimism,
-  CHAINS.avalanche,
-  CHAINS.sonic,
-  CHAINS.linea,
-].map(chain => ({
-  chainId: chain.chainId,
-  label: chain.shortName === 'BEP20' ? 'BSC' : chain.shortName,
-}));
 
 interface Props {
   visible: boolean;
@@ -40,14 +26,12 @@ function formatBalance(balance: string): string {
   const n = Number(balance);
   if (isNaN(n) || n === 0) return '0';
   if (n < 0.000001) return '<0.000001';
-  // up to 6 significant decimals, trailing zeros removed
   return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
 }
 
 function formatUSD(balance: string, usdValue: string, priceUSD?: string): string | null {
   const usd = Number(usdValue);
   if (usd > 0) return usd.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-  // fall back to LiFi price × balance
   if (priceUSD) {
     const computed = Number(balance) * Number(priceUSD);
     if (computed > 0) return computed.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -93,13 +77,26 @@ export default function TokenPickerModal({
   visible, mode, userBalances, onSelect, onClose, allTokens, chainId, onChainChange,
 }: Props) {
   const [search, setSearch] = useState('');
+  const [chains, setChains] = useState<LiFiChain[]>([]);
+  const [chainsLoading, setChainsLoading] = useState(true);
 
-  const chainKey = useMemo(() => getChainByChainId(chainId)?.key, [chainId]);
+  useEffect(() => {
+    getLiFiChains()
+      .then(setChains)
+      .catch(() => {})
+      .finally(() => setChainsLoading(false));
+  }, []);
+
+  // Reset search each time the picker opens
+  useEffect(() => {
+    if (visible) setSearch('');
+  }, [visible]);
 
   const heldTokens = useMemo(() => {
     if (mode === 'to') return [];
+    const activeChain = chains.find(c => c.id === chainId);
     return userBalances
-      .filter(b => Number(b.balance) > 0 && (!chainKey || b.chainKey === chainKey))
+      .filter(b => Number(b.balance) > 0 && (!activeChain || b.chainKey === activeChain.key.toLowerCase()))
       .map(b => {
         const match = allTokens.find(
           t => t.symbol.toLowerCase() === b.symbol.toLowerCase()
@@ -107,28 +104,29 @@ export default function TokenPickerModal({
         return match ? { token: match, balance: b.balance, usdValue: b.usdValue } : null;
       })
       .filter(Boolean) as { token: LiFiToken; balance: string; usdValue: string }[];
-  }, [userBalances, allTokens, mode, chainKey]);
+  }, [userBalances, allTokens, mode, chainId, chains]);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
     const heldAddresses = new Set(heldTokens.map(h => h.token.address));
     return allTokens.filter(
       t =>
         !heldAddresses.has(t.address) &&
-        (t.symbol.toLowerCase().includes(q) ||
+        (q === '' ||
+          t.symbol.toLowerCase().includes(q) ||
           t.name.toLowerCase().includes(q) ||
-          t.address.toLowerCase().includes(q))
+          t.address.toLowerCase().startsWith(q))
     );
   }, [allTokens, search, heldTokens]);
 
   const filteredHeld = useMemo(() => {
-    if (!search) return heldTokens;
-    const q = search.toLowerCase();
+    if (!search.trim()) return heldTokens;
+    const q = search.toLowerCase().trim();
     return heldTokens.filter(
       h =>
         h.token.symbol.toLowerCase().includes(q) ||
         h.token.name.toLowerCase().includes(q) ||
-        h.token.address.toLowerCase().includes(q)
+        h.token.address.toLowerCase().startsWith(q)
     );
   }, [heldTokens, search]);
 
@@ -137,9 +135,14 @@ export default function TokenPickerModal({
     if (filteredHeld.length > 0) {
       result.push({ title: 'YOUR TOKENS', data: filteredHeld.map(h => ({ ...h.token, _held: { balance: h.balance, usdValue: h.usdValue } })) });
     }
-    result.push({ title: 'ALL TOKENS', data: filtered });
+    if (filtered.length > 0) {
+      result.push({ title: 'ALL TOKENS', data: filtered });
+    }
     return result;
   }, [filteredHeld, filtered]);
+
+  const noResults = sections.length === 0 && search.trim().length > 0;
+  const noTokens = sections.length === 0 && search.trim().length === 0 && allTokens.length === 0;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -147,6 +150,7 @@ export default function TokenPickerModal({
         <Pressable style={s.sheet} onPress={() => {}}>
           <View style={s.handle} />
           <Text style={s.title}>Select Token</Text>
+
           {onChainChange && (
             <ScrollView
               horizontal
@@ -154,58 +158,85 @@ export default function TokenPickerModal({
               style={s.chainScroll}
               contentContainerStyle={s.chainRow}
             >
-              {CHAIN_OPTIONS.map(opt => (
-                <TouchableOpacity
-                  key={opt.chainId}
-                  style={[s.chainChip, opt.chainId === chainId && s.chainChipActive]}
-                  onPress={() => onChainChange(opt.chainId)}
-                  activeOpacity={0.7}
-                >
-                  <Text
-                    style={[s.chainChipText, opt.chainId === chainId && s.chainChipTextActive]}
-                    numberOfLines={1}
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.85}
+              {chainsLoading ? (
+                <ActivityIndicator size="small" color={GOLD} style={{ marginHorizontal: 8 }} />
+              ) : (
+                chains.map(chain => (
+                  <TouchableOpacity
+                    key={chain.id}
+                    style={[s.chainChip, chain.id === chainId && s.chainChipActive]}
+                    onPress={() => onChainChange(chain.id)}
+                    activeOpacity={0.7}
                   >
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    {chain.logoURI ? (
+                      <Image source={{ uri: chain.logoURI }} style={s.chainIcon} />
+                    ) : null}
+                    <Text
+                      style={[s.chainChipText, chain.id === chainId && s.chainChipTextActive]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.85}
+                    >
+                      {chain.key}
+                    </Text>
+                  </TouchableOpacity>
+                ))
+              )}
             </ScrollView>
           )}
+
           <View style={s.searchRow}>
             <Ionicons name="search" size={16} color="#AAA" />
             <TextInput
               style={s.searchInput}
-              placeholder="Search name or paste address"
+              placeholder="Search name, symbol or paste address"
               placeholderTextColor="#CCC"
               value={search}
               onChangeText={setSearch}
               autoCapitalize="none"
               autoCorrect={false}
             />
-          </View>
-          <SectionList
-            sections={sections}
-            keyExtractor={(item, index) => `${item.address}-${index}`}
-            renderSectionHeader={({ section }) => (
-              <Text style={s.sectionLabel}>{section.title}</Text>
+            {search.length > 0 && (
+              <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close-circle" size={16} color="#AAA" />
+              </TouchableOpacity>
             )}
-            renderItem={({ item }) => {
-              const held = (item as any)._held;
-              return (
-                <TokenRow
-                  token={item}
-                  chainId={chainId}
-                  balance={held?.balance}
-                  usdValue={held?.usdValue}
-                  onPress={() => { onSelect(item, chainId); onClose(); }}
-                />
-              );
-            }}
-            stickySectionHeadersEnabled={false}
-            showsVerticalScrollIndicator={false}
-          />
+          </View>
+
+          {noResults ? (
+            <View style={s.emptyWrap}>
+              <Text style={s.emptyText}>No tokens found for "{search}"</Text>
+              <Text style={s.emptyHint}>Try searching by symbol, name, or contract address</Text>
+            </View>
+          ) : noTokens ? (
+            <View style={s.emptyWrap}>
+              <ActivityIndicator size="small" color={GOLD} />
+              <Text style={s.emptyText}>Loading tokens…</Text>
+            </View>
+          ) : (
+            <SectionList
+              sections={sections}
+              keyExtractor={(item, index) => `${item.address}-${index}`}
+              renderSectionHeader={({ section }) => (
+                <Text style={s.sectionLabel}>{section.title}</Text>
+              )}
+              renderItem={({ item }) => {
+                const held = (item as any)._held;
+                return (
+                  <TokenRow
+                    token={item}
+                    chainId={chainId}
+                    balance={held?.balance}
+                    usdValue={held?.usdValue}
+                    onPress={() => { onSelect(item, chainId); onClose(); }}
+                  />
+                );
+              }}
+              keyboardShouldPersistTaps="handled"
+              stickySectionHeadersEnabled={false}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
         </Pressable>
       </Pressable>
     </Modal>
@@ -223,22 +254,22 @@ const s = StyleSheet.create({
     alignSelf: 'center', marginBottom: 16,
   },
   title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 12, textAlign: 'center' },
-  chainScroll: {
-    height: 42,
-    marginBottom: 16,
-  },
+  chainScroll: { height: 42, marginBottom: 16 },
   chainRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4, paddingRight: 4 },
   chainChip: {
-    minWidth: 68,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    minWidth: 52,
     height: 34,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     borderRadius: 16,
     backgroundColor: '#F0F0F0',
-    alignItems: 'center',
     justifyContent: 'center',
   },
   chainChipActive: { backgroundColor: GOLD },
-  chainChipText: { fontSize: 12, lineHeight: 16, fontWeight: '700', color: '#555', textAlign: 'center' },
+  chainIcon: { width: 14, height: 14, borderRadius: 7 },
+  chainChipText: { fontSize: 11, lineHeight: 16, fontWeight: '700', color: '#555', textAlign: 'center' },
   chainChipTextActive: { color: '#FFF' },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -260,4 +291,7 @@ const s = StyleSheet.create({
   rowRight: { alignItems: 'flex-end' },
   balance: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
   usd: { fontSize: 11, color: '#AAA', marginTop: 1 },
+  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 48, gap: 8 },
+  emptyText: { fontSize: 14, fontWeight: '600', color: '#555', textAlign: 'center' },
+  emptyHint: { fontSize: 12, color: '#AAA', textAlign: 'center' },
 });

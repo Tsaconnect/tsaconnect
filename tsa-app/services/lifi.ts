@@ -2,6 +2,14 @@ import { ethers } from 'ethers';
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
 
+export interface LiFiChain {
+  id: number;
+  name: string;
+  key: string;
+  logoURI?: string;
+  coin: string;
+}
+
 export interface LiFiToken {
   address: string;
   symbol: string;
@@ -42,6 +50,14 @@ export interface LiFiQuote {
   transactionRequest: LiFiTransactionRequest;
   approvalAddress?: string;
   approvalToken?: string;
+}
+
+export async function getLiFiChains(): Promise<LiFiChain[]> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/chains`, { headers });
+  if (!res.ok) throw new Error('Failed to fetch LiFi chains');
+  const data = await res.json();
+  return Array.isArray(data?.chains) ? data.chains : [];
 }
 
 export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
