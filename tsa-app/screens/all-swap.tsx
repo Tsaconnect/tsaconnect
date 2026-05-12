@@ -4,6 +4,10 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Pressable,
   Switch, Image,
 } from 'react-native';
+import Animated, {
+  useSharedValue, useAnimatedStyle, withSpring, withTiming,
+  withDelay, withSequence,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -237,40 +241,23 @@ export default function AllSwapScreen() {
   );
 
   // ── Success / Failure ─────────────────────────────────────────
-  if (screen === 'success' || screen === 'failure') {
-    const ok = screen === 'success';
-    return (
-      <View style={s.container}>
-        <View style={s.center}>
-          <View style={[s.resIcon, { backgroundColor: ok ? '#D1FAE5' : '#FEE2E2' }]}>
-            <Ionicons name={ok ? 'checkmark-circle' : 'close-circle'} size={52} color={ok ? '#16A34A' : '#DC2626'} />
-          </View>
-          <Text style={s.bigTitle}>{ok ? 'Swap Complete' : 'Swap Failed'}</Text>
-          {ok && fromToken && toToken ? (
-            <View style={s.successSummary}>
-              <View style={s.successTokenRow}>
-                <TokenIcon uri={fromToken.logoURI} symbol={fromToken.symbol} size={28} />
-                <Text style={s.successAmt}>{fromAmount} {fromToken.symbol}</Text>
-              </View>
-              <Ionicons name="arrow-down" size={16} color="#AAA" />
-              <View style={s.successTokenRow}>
-                <TokenIcon uri={toToken.logoURI} symbol={toToken.symbol} size={28} />
-                <Text style={s.successAmt}>{outputAmount} {toToken.symbol}</Text>
-              </View>
-            </View>
-          ) : (
-            <Text style={s.errorMsg}>{error}</Text>
-          )}
-          {txHash ? (
-            <Text style={s.txHash} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text>
-          ) : null}
-          <TouchableOpacity style={s.btn} onPress={() => ok ? router.back() : setScreen('form')}>
-            <Text style={s.btnT}>{ok ? 'Done' : 'Try Again'}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
+  if (screen === 'success') return (
+    <SwapSuccessScreen
+      fromToken={fromToken}
+      toToken={toToken}
+      fromAmount={fromAmount}
+      outputAmount={outputAmount}
+      txHash={txHash}
+      onDone={() => router.back()}
+    />
+  );
+
+  if (screen === 'failure') return (
+    <SwapFailureScreen
+      error={error}
+      onRetry={() => setScreen('form')}
+    />
+  );
 
   // ── Confirm ───────────────────────────────────────────────────
   if (screen === 'confirm') return (
@@ -489,6 +476,140 @@ export default function AllSwapScreen() {
   );
 }
 
+function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, onDone }: {
+  fromToken: LiFiToken | null; toToken: LiFiToken | null;
+  fromAmount: string; outputAmount: string | null;
+  txHash: string; onDone: () => void;
+}) {
+  const iconScale = useSharedValue(0);
+  const ringScale = useSharedValue(1);
+  const ringOpacity = useSharedValue(0);
+  const contentOpacity = useSharedValue(0);
+  const contentTranslateY = useSharedValue(28);
+  const btnOpacity = useSharedValue(0);
+  const btnTranslateY = useSharedValue(20);
+
+  useEffect(() => {
+    iconScale.value = withSpring(1, { damping: 11, stiffness: 160 });
+    ringOpacity.value = withDelay(80, withSequence(
+      withTiming(0.5, { duration: 100 }),
+      withTiming(0, { duration: 550 }),
+    ));
+    ringScale.value = withDelay(80, withTiming(2.2, { duration: 650 }));
+    contentOpacity.value = withDelay(320, withTiming(1, { duration: 380 }));
+    contentTranslateY.value = withDelay(320, withSpring(0, { damping: 15 }));
+    btnOpacity.value = withDelay(560, withTiming(1, { duration: 300 }));
+    btnTranslateY.value = withDelay(560, withSpring(0, { damping: 14 }));
+  }, []);
+
+  const iconStyle = useAnimatedStyle(() => ({ transform: [{ scale: iconScale.value }] }));
+  const ringStyle = useAnimatedStyle(() => ({ transform: [{ scale: ringScale.value }], opacity: ringOpacity.value }));
+  const contentStyle = useAnimatedStyle(() => ({ opacity: contentOpacity.value, transform: [{ translateY: contentTranslateY.value }] }));
+  const btnStyle = useAnimatedStyle(() => ({ opacity: btnOpacity.value, transform: [{ translateY: btnTranslateY.value }] }));
+
+  return (
+    <View style={[s.container, { justifyContent: 'center', padding: 24 }]}>
+      {/* Animated checkmark */}
+      <View style={{ alignItems: 'center', marginBottom: 32 }}>
+        <View style={{ width: 100, height: 100, alignItems: 'center', justifyContent: 'center' }}>
+          <Animated.View style={[{
+            position: 'absolute', width: 100, height: 100, borderRadius: 50,
+            backgroundColor: '#D1FAE5',
+          }, ringStyle]} />
+          <Animated.View style={[{
+            width: 72, height: 72, borderRadius: 36,
+            backgroundColor: '#16A34A',
+            alignItems: 'center', justifyContent: 'center',
+            shadowColor: '#16A34A', shadowOffset: { width: 0, height: 6 },
+            shadowOpacity: 0.3, shadowRadius: 12, elevation: 8,
+          }, iconStyle]}>
+            <Ionicons name="checkmark" size={38} color="#FFF" />
+          </Animated.View>
+        </View>
+      </View>
+
+      {/* Title + swap summary */}
+      <Animated.View style={[{ alignItems: 'center' }, contentStyle]}>
+        <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 24 }]}>Swap Complete</Text>
+
+        <View style={[s.card, { width: '100%', gap: 0 }]}>
+          <View style={s.successTokenRow}>
+            <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
+            <View style={{ flex: 1 }}>
+              <Text style={s.successAmt}>{fromAmount} {fromToken?.symbol}</Text>
+              <Text style={s.successTokenName}>{fromToken?.name}</Text>
+            </View>
+          </View>
+          <View style={s.successArrowRow}>
+            <View style={s.successArrowLine} />
+            <Ionicons name="arrow-down" size={14} color="#AAA" />
+            <View style={s.successArrowLine} />
+          </View>
+          <View style={s.successTokenRow}>
+            <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
+            <View style={{ flex: 1 }}>
+              <Text style={[s.successAmt, { color: GOLD }]}>{outputAmount} {toToken?.symbol}</Text>
+              <Text style={s.successTokenName}>{toToken?.name}</Text>
+            </View>
+          </View>
+        </View>
+
+        {txHash ? (
+          <Text style={s.txHash} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text>
+        ) : null}
+      </Animated.View>
+
+      {/* Done button */}
+      <Animated.View style={[{ width: '100%', marginTop: 28 }, btnStyle]}>
+        <TouchableOpacity style={s.btn} onPress={onDone}>
+          <Text style={s.btnT}>Done</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+}
+
+function SwapFailureScreen({ error, onRetry }: { error: string; onRetry: () => void }) {
+  const iconScale = useSharedValue(0);
+  const contentOpacity = useSharedValue(0);
+
+  useEffect(() => {
+    iconScale.value = withSpring(1, { damping: 11, stiffness: 160 });
+    contentOpacity.value = withDelay(280, withTiming(1, { duration: 350 }));
+  }, []);
+
+  const iconStyle = useAnimatedStyle(() => ({ transform: [{ scale: iconScale.value }] }));
+  const contentStyle = useAnimatedStyle(() => ({ opacity: contentOpacity.value }));
+
+  return (
+    <View style={[s.container, { justifyContent: 'center', padding: 24 }]}>
+      <View style={{ alignItems: 'center', marginBottom: 32 }}>
+        <Animated.View style={[{
+          width: 72, height: 72, borderRadius: 36,
+          backgroundColor: '#DC2626',
+          alignItems: 'center', justifyContent: 'center',
+          shadowColor: '#DC2626', shadowOffset: { width: 0, height: 6 },
+          shadowOpacity: 0.25, shadowRadius: 12, elevation: 8,
+        }, iconStyle]}>
+          <Ionicons name="close" size={36} color="#FFF" />
+        </Animated.View>
+      </View>
+
+      <Animated.View style={[{ alignItems: 'center', width: '100%' }, contentStyle]}>
+        <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 12 }]}>Swap Failed</Text>
+        {error ? (
+          <View style={[s.card, { width: '100%', backgroundColor: '#FEF2F2' }]}>
+            <Text style={{ fontSize: 13, color: '#DC2626', textAlign: 'center', lineHeight: 20 }}>{error}</Text>
+          </View>
+        ) : null}
+        <TouchableOpacity style={[s.btn, { marginTop: 28, width: '100%' }]} onPress={onRetry}>
+          <Text style={s.btnT}>Try Again</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+}
+
 function DetailRow({ label, value, highlight, last }: { label: string; value: string; highlight?: boolean; last?: boolean }) {
   return (
     <View style={[s.detRow, !last && s.detRowBorder]}>
@@ -595,12 +716,12 @@ const s = StyleSheet.create({
   signingHint: { fontSize: 12, color: '#AAA', marginTop: 6 },
 
   // Success / failure
-  resIcon: { width: 88, height: 88, borderRadius: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
-  successSummary: { alignItems: 'center', gap: 8, marginTop: 16, marginBottom: 24 },
-  successTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  successTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
   successAmt: { fontSize: 16, fontWeight: '700', color: DARK },
-  errorMsg: { fontSize: 14, color: '#DC2626', textAlign: 'center', marginTop: 8, marginBottom: 24, paddingHorizontal: 24 },
-  txHash: { fontSize: 11, color: '#AAA', marginBottom: 24, maxWidth: '85%' },
+  successTokenName: { fontSize: 12, color: '#AAA', marginTop: 2 },
+  successArrowRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
+  successArrowLine: { flex: 1, height: 1, backgroundColor: '#F0F0F0' },
+  txHash: { fontSize: 11, color: '#BBB', marginTop: 16, maxWidth: '90%', textAlign: 'center' },
 
   // Slippage sheet
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
