@@ -41,15 +41,19 @@ function formatUSD(balance: string, usdValue: string, priceUSD?: string): string
   return null;
 }
 
-function ChainCircle({ chain, selected, onPress }: { chain: LiFiChain; selected: boolean; onPress: () => void }) {
+function ChainChip({ chain, selected, onPress }: { chain: LiFiChain; selected: boolean; onPress: () => void }) {
   return (
-    <TouchableOpacity style={[cs.circle, selected && cs.circleActive]} onPress={onPress} activeOpacity={0.7}>
+    <TouchableOpacity style={[cs.chip, selected && cs.chipActive]} onPress={onPress} activeOpacity={0.75}>
       {chain.nativeToken?.logoURI ? (
-        <Image source={{ uri: chain.nativeToken.logoURI }} style={cs.circleImg} />
+        <Image source={{ uri: chain.nativeToken.logoURI }} style={cs.chipImg} />
       ) : (
-        <Text style={cs.circleLetter}>{chain.key[0]?.toUpperCase()}</Text>
+        <View style={cs.chipImgFallback}>
+          <Text style={cs.chipImgLetter}>{chain.key[0]?.toUpperCase()}</Text>
+        </View>
       )}
-      {selected && <View style={cs.circleSelectedRing} />}
+      <Text style={[cs.chipLabel, selected && cs.chipLabelActive]} numberOfLines={1}>
+        {chain.key.toUpperCase()}
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -263,7 +267,7 @@ export default function TokenPickerModal({
                 ) : (
                   <>
                     {inlineChains.map(chain => (
-                      <ChainCircle
+                      <ChainChip
                         key={chain.id}
                         chain={chain}
                         selected={chain.id === chainId}
@@ -271,9 +275,9 @@ export default function TokenPickerModal({
                       />
                     ))}
                     {remainingCount > 0 && (
-                      <TouchableOpacity style={s.moreBtn} onPress={() => setChainPickerVisible(true)} activeOpacity={0.7}>
+                      <TouchableOpacity style={s.moreBtn} onPress={() => setChainPickerVisible(true)} activeOpacity={0.75}>
                         <Text style={s.moreBtnText}>{remainingCount}+</Text>
-                        <Ionicons name="chevron-down" size={12} color="#555" />
+                        <Ionicons name="chevron-down" size={11} color="#FFF" />
                       </TouchableOpacity>
                     )}
                   </>
@@ -348,21 +352,23 @@ export default function TokenPickerModal({
   );
 }
 
-// Chain circle styles
+// Chain chip styles
 const cs = StyleSheet.create({
-  circle: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: '#F0F0F0',
-    alignItems: 'center', justifyContent: 'center',
-    position: 'relative',
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: '#1A1A1A', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 7,
+    borderWidth: 1.5, borderColor: 'transparent',
   },
-  circleActive: { backgroundColor: '#FFF8E1' },
-  circleImg: { width: 32, height: 32, borderRadius: 16 },
-  circleLetter: { fontSize: 15, fontWeight: '700', color: '#555' },
-  circleSelectedRing: {
-    position: 'absolute', inset: -2,
-    borderRadius: 24, borderWidth: 2, borderColor: GOLD,
+  chipActive: { borderColor: GOLD },
+  chipImg: { width: 18, height: 18, borderRadius: 9 },
+  chipImgFallback: {
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: '#444', alignItems: 'center', justifyContent: 'center',
   },
+  chipImgLetter: { fontSize: 9, fontWeight: '700', color: '#FFF' },
+  chipLabel: { fontSize: 11, fontWeight: '700', color: '#AAA' },
+  chipLabelActive: { color: GOLD },
 });
 
 // Chain picker modal styles
@@ -416,10 +422,11 @@ const s = StyleSheet.create({
   },
   moreBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 3,
-    backgroundColor: '#F0F0F0', borderRadius: 20,
-    paddingHorizontal: 10, paddingVertical: 6, height: 44,
+    backgroundColor: '#1A1A1A', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 7,
+    borderWidth: 1.5, borderColor: 'transparent',
   },
-  moreBtnText: { fontSize: 12, fontWeight: '700', color: '#555' },
+  moreBtnText: { fontSize: 11, fontWeight: '700', color: '#AAA' },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#F5F5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
