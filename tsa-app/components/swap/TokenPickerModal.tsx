@@ -1,8 +1,8 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
-  StyleSheet, Pressable, SectionList, Image, ScrollView,
-  ActivityIndicator,
+  StyleSheet, Pressable, SectionList, FlatList, Image,
+  ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { LiFiToken, LiFiChain } from '../../services/lifi';
@@ -10,6 +10,7 @@ import { getLiFiChains } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
 const GOLD = '#D4AF37';
+const INLINE_CHAIN_COUNT = 4;
 
 interface Props {
   visible: boolean;
@@ -38,6 +39,100 @@ function formatUSD(balance: string, usdValue: string, priceUSD?: string): string
     if (computed > 0) return computed.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   }
   return null;
+}
+
+function ChainCircle({ chain, selected, onPress }: { chain: LiFiChain; selected: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={[cs.circle, selected && cs.circleActive]} onPress={onPress} activeOpacity={0.7}>
+      {chain.nativeToken?.logoURI ? (
+        <Image source={{ uri: chain.nativeToken.logoURI }} style={cs.circleImg} />
+      ) : (
+        <Text style={cs.circleLetter}>{chain.key[0]?.toUpperCase()}</Text>
+      )}
+      {selected && <View style={cs.circleSelectedRing} />}
+    </TouchableOpacity>
+  );
+}
+
+function ChainPickerModal({
+  visible, chains, selectedId, onSelect, onClose,
+}: {
+  visible: boolean;
+  chains: LiFiChain[];
+  selectedId: number;
+  onSelect: (id: number) => void;
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState('');
+
+  useEffect(() => { if (visible) setSearch(''); }, [visible]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return chains;
+    return chains.filter(c => c.name.toLowerCase().includes(q) || c.key.toLowerCase().includes(q));
+  }, [chains, search]);
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={cp.container}>
+        <View style={cp.header}>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="arrow-back" size={22} color="#1A1A1A" />
+          </TouchableOpacity>
+          <Text style={cp.title}>Networks</Text>
+          <View style={{ width: 22 }} />
+        </View>
+
+        <View style={cp.searchRow}>
+          <Ionicons name="search" size={16} color="#AAA" />
+          <TextInput
+            style={cp.searchInput}
+            placeholder="Search networks"
+            placeholderTextColor="#AAA"
+            value={search}
+            onChangeText={setSearch}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {search.length > 0 && (
+            <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="close-circle" size={16} color="#AAA" />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <FlatList
+          data={filtered}
+          keyExtractor={item => String(item.id)}
+          keyboardShouldPersistTaps="handled"
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={cp.row}
+              onPress={() => { onSelect(item.id); onClose(); }}
+              activeOpacity={0.7}
+            >
+              <View style={cp.chainIcon}>
+                {item.nativeToken?.logoURI ? (
+                  <Image source={{ uri: item.nativeToken.logoURI }} style={cp.chainImg} />
+                ) : (
+                  <View style={[cp.chainImg, cp.chainFallback]}>
+                    <Text style={cp.chainLetter}>{item.key[0]?.toUpperCase()}</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={cp.chainName}>{item.name}</Text>
+              <View style={[cp.radio, item.id === selectedId && cp.radioActive]}>
+                {item.id === selectedId && <View style={cp.radioDot} />}
+              </View>
+            </TouchableOpacity>
+          )}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ paddingBottom: 24 }}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
 }
 
 function TokenRow({
@@ -80,6 +175,7 @@ export default function TokenPickerModal({
   const [search, setSearch] = useState('');
   const [chains, setChains] = useState<LiFiChain[]>([]);
   const [chainsLoading, setChainsLoading] = useState(true);
+  const [chainPickerVisible, setChainPickerVisible] = useState(false);
 
   useEffect(() => {
     getLiFiChains()
@@ -88,24 +184,31 @@ export default function TokenPickerModal({
       .finally(() => setChainsLoading(false));
   }, []);
 
-  // Reset search each time the picker opens
   useEffect(() => {
     if (visible) setSearch('');
   }, [visible]);
 
+  // Inline chips: always include selected chain, fill rest from list
+  const inlineChains = useMemo(() => {
+    if (chains.length === 0) return [];
+    const selected = chains.find(c => c.id === chainId);
+    const others = chains.filter(c => c.id !== chainId).slice(0, INLINE_CHAIN_COUNT);
+    const inline = selected ? [selected, ...others].slice(0, INLINE_CHAIN_COUNT) : others;
+    return inline;
+  }, [chains, chainId]);
+
+  const remainingCount = chains.length - inlineChains.length;
+
   const heldTokens = useMemo(() => {
     if (mode === 'to') return [];
-    const activeChain = chains.find(c => c.id === chainId);
     return userBalances
-      .filter(b => Number(b.balance) > 0 && (!activeChain || b.chainKey === activeChain.key.toLowerCase()))
+      .filter(b => Number(b.balance) > 0)
       .map(b => {
-        const match = allTokens.find(
-          t => t.symbol.toLowerCase() === b.symbol.toLowerCase()
-        );
+        const match = allTokens.find(t => t.symbol.toLowerCase() === b.symbol.toLowerCase());
         return match ? { token: match, balance: b.balance, usdValue: b.usdValue } : null;
       })
       .filter(Boolean) as { token: LiFiToken; balance: string; usdValue: string }[];
-  }, [userBalances, allTokens, mode, chainId, chains]);
+  }, [userBalances, allTokens, mode]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -143,135 +246,180 @@ export default function TokenPickerModal({
   }, [filteredHeld, filtered]);
 
   const noResults = sections.length === 0 && search.trim().length > 0 && !tokensLoading;
-  const noTokens = sections.length === 0 && search.trim().length === 0 && (allTokens.length === 0 || tokensLoading);
+  const noTokens = sections.length === 0 && search.trim().length === 0 && (allTokens.length === 0 || !!tokensLoading);
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={s.overlay} onPress={onClose}>
-        <Pressable style={s.sheet} onPress={() => {}}>
-          <View style={s.handle} />
-          <Text style={s.title}>Select Token</Text>
+    <>
+      <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+        <Pressable style={s.overlay} onPress={onClose}>
+          <Pressable style={s.sheet} onPress={() => {}}>
+            <View style={s.handle} />
+            <Text style={s.title}>Select Token</Text>
 
-          {onChainChange && (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={s.chainScroll}
-              contentContainerStyle={s.chainRow}
-            >
-              {chainsLoading ? (
-                <ActivityIndicator size="small" color={GOLD} style={{ marginHorizontal: 8 }} />
-              ) : (
-                chains.map(chain => (
-                  <TouchableOpacity
-                    key={chain.id}
-                    style={[s.chainChip, chain.id === chainId && s.chainChipActive]}
-                    onPress={() => onChainChange(chain.id)}
-                    activeOpacity={0.7}
-                  >
-                    {chain.nativeToken?.logoURI ? (
-                      <Image source={{ uri: chain.nativeToken.logoURI }} style={s.chainIcon} />
-                    ) : null}
-                    <Text
-                      style={[s.chainChipText, chain.id === chainId && s.chainChipTextActive]}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.85}
-                    >
-                      {chain.key}
-                    </Text>
-                  </TouchableOpacity>
-                ))
-              )}
-            </ScrollView>
-          )}
-
-          <View style={s.searchRow}>
-            <Ionicons name="search" size={16} color="#AAA" />
-            <TextInput
-              style={s.searchInput}
-              placeholder="Search name, symbol or paste address"
-              placeholderTextColor="#CCC"
-              value={search}
-              onChangeText={setSearch}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            {search.length > 0 && (
-              <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Ionicons name="close-circle" size={16} color="#AAA" />
-              </TouchableOpacity>
+            {onChainChange && (
+              <View style={s.chainRow}>
+                {chainsLoading ? (
+                  <ActivityIndicator size="small" color={GOLD} />
+                ) : (
+                  <>
+                    {inlineChains.map(chain => (
+                      <ChainCircle
+                        key={chain.id}
+                        chain={chain}
+                        selected={chain.id === chainId}
+                        onPress={() => onChainChange(chain.id)}
+                      />
+                    ))}
+                    {remainingCount > 0 && (
+                      <TouchableOpacity style={s.moreBtn} onPress={() => setChainPickerVisible(true)} activeOpacity={0.7}>
+                        <Text style={s.moreBtnText}>{remainingCount}+</Text>
+                        <Ionicons name="chevron-down" size={12} color="#555" />
+                      </TouchableOpacity>
+                    )}
+                  </>
+                )}
+              </View>
             )}
-          </View>
 
-          {noResults ? (
-            <View style={s.emptyWrap}>
-              <Text style={s.emptyText}>No tokens found for "{search}"</Text>
-              <Text style={s.emptyHint}>Try searching by symbol, name, or contract address</Text>
-            </View>
-          ) : noTokens ? (
-            <View style={s.emptyWrap}>
-              <ActivityIndicator size="small" color={GOLD} />
-              <Text style={s.emptyText}>{tokensLoading ? 'Loading tokens…' : 'No tokens available'}</Text>
-            </View>
-          ) : (
-            <SectionList
-              sections={sections}
-              keyExtractor={(item, index) => `${item.address}-${index}`}
-              renderSectionHeader={({ section }) => (
-                <Text style={s.sectionLabel}>{section.title}</Text>
+            <View style={s.searchRow}>
+              <Ionicons name="search" size={16} color="#AAA" />
+              <TextInput
+                style={s.searchInput}
+                placeholder="Search name, symbol or paste address"
+                placeholderTextColor="#CCC"
+                value={search}
+                onChangeText={setSearch}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {search.length > 0 && (
+                <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="close-circle" size={16} color="#AAA" />
+                </TouchableOpacity>
               )}
-              renderItem={({ item }) => {
-                const held = (item as any)._held;
-                return (
-                  <TokenRow
-                    token={item}
-                    chainId={chainId}
-                    balance={held?.balance}
-                    usdValue={held?.usdValue}
-                    onPress={() => { onSelect(item, chainId); onClose(); }}
-                  />
-                );
-              }}
-              keyboardShouldPersistTaps="handled"
-              stickySectionHeadersEnabled={false}
-              showsVerticalScrollIndicator={false}
-            />
-          )}
+            </View>
+
+            {noResults ? (
+              <View style={s.emptyWrap}>
+                <Text style={s.emptyText}>No tokens found for "{search}"</Text>
+                <Text style={s.emptyHint}>Try searching by symbol, name, or contract address</Text>
+              </View>
+            ) : noTokens ? (
+              <View style={s.emptyWrap}>
+                <ActivityIndicator size="small" color={GOLD} />
+                <Text style={s.emptyText}>{tokensLoading ? 'Loading tokens…' : 'No tokens available'}</Text>
+              </View>
+            ) : (
+              <SectionList
+                sections={sections}
+                keyExtractor={(item, index) => `${item.address}-${index}`}
+                renderSectionHeader={({ section }) => (
+                  <Text style={s.sectionLabel}>{section.title}</Text>
+                )}
+                renderItem={({ item }) => {
+                  const held = (item as any)._held;
+                  return (
+                    <TokenRow
+                      token={item}
+                      chainId={chainId}
+                      balance={held?.balance}
+                      usdValue={held?.usdValue}
+                      onPress={() => { onSelect(item, chainId); onClose(); }}
+                    />
+                  );
+                }}
+                keyboardShouldPersistTaps="handled"
+                stickySectionHeadersEnabled={false}
+                showsVerticalScrollIndicator={false}
+              />
+            )}
+          </Pressable>
         </Pressable>
-      </Pressable>
-    </Modal>
+      </Modal>
+
+      <ChainPickerModal
+        visible={chainPickerVisible}
+        chains={chains}
+        selectedId={chainId}
+        onSelect={(id) => { onChainChange?.(id); }}
+        onClose={() => setChainPickerVisible(false)}
+      />
+    </>
   );
 }
 
+// Chain circle styles
+const cs = StyleSheet.create({
+  circle: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#F0F0F0',
+    alignItems: 'center', justifyContent: 'center',
+    position: 'relative',
+  },
+  circleActive: { backgroundColor: '#FFF8E1' },
+  circleImg: { width: 32, height: 32, borderRadius: 16 },
+  circleLetter: { fontSize: 15, fontWeight: '700', color: '#555' },
+  circleSelectedRing: {
+    position: 'absolute', inset: -2,
+    borderRadius: 24, borderWidth: 2, borderColor: GOLD,
+  },
+});
+
+// Chain picker modal styles
+const cp = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#FFF' },
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#F0F0F0',
+  },
+  title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
+  searchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#F5F5F5', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10,
+    margin: 16,
+  },
+  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A' },
+  row: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0',
+  },
+  chainIcon: { width: 40, height: 40 },
+  chainImg: { width: 40, height: 40, borderRadius: 20 },
+  chainFallback: { backgroundColor: '#E0E0E0', alignItems: 'center', justifyContent: 'center' },
+  chainLetter: { fontSize: 16, fontWeight: '700', color: '#555' },
+  chainName: { flex: 1, fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
+  radio: {
+    width: 22, height: 22, borderRadius: 11,
+    borderWidth: 2, borderColor: '#CCC',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  radioActive: { borderColor: GOLD },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: GOLD },
+});
+
+// Token picker bottom sheet styles
 const s = StyleSheet.create({
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: 20, maxHeight: '80%',
+    padding: 20, maxHeight: '82%',
   },
   handle: {
     width: 40, height: 4, borderRadius: 2, backgroundColor: '#E0E0E0',
     alignSelf: 'center', marginBottom: 16,
   },
-  title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 12, textAlign: 'center' },
-  chainScroll: { height: 42, marginBottom: 16 },
-  chainRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4, paddingRight: 4 },
-  chainChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    minWidth: 52,
-    height: 34,
-    paddingHorizontal: 10,
-    borderRadius: 16,
-    backgroundColor: '#F0F0F0',
-    justifyContent: 'center',
+  title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 16, textAlign: 'center' },
+  chainRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginBottom: 16,
   },
-  chainChipActive: { backgroundColor: GOLD },
-  chainIcon: { width: 14, height: 14, borderRadius: 7 },
-  chainChipText: { fontSize: 11, lineHeight: 16, fontWeight: '700', color: '#555', textAlign: 'center' },
-  chainChipTextActive: { color: '#FFF' },
+  moreBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: '#F0F0F0', borderRadius: 20,
+    paddingHorizontal: 10, paddingVertical: 6, height: 44,
+  },
+  moreBtnText: { fontSize: 12, fontWeight: '700', color: '#555' },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#F5F5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
