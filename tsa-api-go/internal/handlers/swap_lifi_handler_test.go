@@ -20,9 +20,86 @@ func newTestLiFiHandler(lifiURL string) *SwapLiFiHandler {
 func setupTestRouter(h *SwapLiFiHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.GET("/swap/lifi/chains", h.GetChains)
 	r.GET("/swap/lifi/tokens", h.GetTokens)
 	r.GET("/swap/lifi/quote", h.GetQuote)
 	return r
+}
+
+func TestGetChains_ReturnsLiFiResponse(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chains" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("chainTypes") != "EVM" {
+			t.Errorf("expected chainTypes=EVM, got %s", r.URL.Query().Get("chainTypes"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"chains":[{"id":1,"name":"Ethereum","key":"ETH","coin":"ETH"}]}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/chains", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if body["chains"] == nil {
+		t.Fatal("expected chains in response")
+	}
+}
+
+func TestGetChains_Cache_SecondCallSkipsLiFi(t *testing.T) {
+	callCount := 0
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"chains":[]}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/swap/lifi/chains", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("call %d: expected 200, got %d", i+1, w.Code)
+		}
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 LiFi call (cached), got %d", callCount)
+	}
+}
+
+func TestGetChains_LiFiUnreachable_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	h := newTestLiFiHandler(url)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/chains", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
 }
 
 func TestGetTokens_ReturnsLiFiResponse(t *testing.T) {

@@ -256,6 +256,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		lifiGroup := api.Group("/swap/lifi")
 		lifiGroup.Use(auth)
 		{
+			lifiGroup.GET("/chains", slh.GetChains)
 			lifiGroup.GET("/tokens", slh.GetTokens)
 			lifiGroup.GET("/quote", slh.GetQuote)
 		}
