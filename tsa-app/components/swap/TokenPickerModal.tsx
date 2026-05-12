@@ -18,6 +18,7 @@ interface Props {
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
   allTokens: LiFiToken[];
+  tokensLoading?: boolean;
   chainId: number;
   onChainChange?: (chainId: number) => void;
 }
@@ -74,7 +75,7 @@ function TokenRow({
 }
 
 export default function TokenPickerModal({
-  visible, mode, userBalances, onSelect, onClose, allTokens, chainId, onChainChange,
+  visible, mode, userBalances, onSelect, onClose, allTokens, tokensLoading, chainId, onChainChange,
 }: Props) {
   const [search, setSearch] = useState('');
   const [chains, setChains] = useState<LiFiChain[]>([]);
@@ -141,8 +142,8 @@ export default function TokenPickerModal({
     return result;
   }, [filteredHeld, filtered]);
 
-  const noResults = sections.length === 0 && search.trim().length > 0;
-  const noTokens = sections.length === 0 && search.trim().length === 0 && allTokens.length === 0;
+  const noResults = sections.length === 0 && search.trim().length > 0 && !tokensLoading;
+  const noTokens = sections.length === 0 && search.trim().length === 0 && (allTokens.length === 0 || tokensLoading);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -211,7 +212,7 @@ export default function TokenPickerModal({
           ) : noTokens ? (
             <View style={s.emptyWrap}>
               <ActivityIndicator size="small" color={GOLD} />
-              <Text style={s.emptyText}>Loading tokens…</Text>
+              <Text style={s.emptyText}>{tokensLoading ? 'Loading tokens…' : 'No tokens available'}</Text>
             </View>
           ) : (
             <SectionList
