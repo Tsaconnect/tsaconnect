@@ -6,8 +6,8 @@ export interface LiFiChain {
   id: number;
   name: string;
   key: string;
-  logoURI?: string;
   coin: string;
+  nativeToken?: { logoURI?: string };
 }
 
 export interface LiFiToken {

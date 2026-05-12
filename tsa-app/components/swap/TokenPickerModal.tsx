@@ -169,8 +169,8 @@ export default function TokenPickerModal({
                     onPress={() => onChainChange(chain.id)}
                     activeOpacity={0.7}
                   >
-                    {chain.logoURI ? (
-                      <Image source={{ uri: chain.logoURI }} style={s.chainIcon} />
+                    {chain.nativeToken?.logoURI ? (
+                      <Image source={{ uri: chain.nativeToken.logoURI }} style={s.chainIcon} />
                     ) : null}
                     <Text
                       style={[s.chainChipText, chain.id === chainId && s.chainChipTextActive]}
