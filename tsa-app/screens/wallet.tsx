@@ -609,7 +609,9 @@ const WalletScreen: React.FC = () => {
     } as any);
   };
 
-  const assetsWithBalance = visibleAssets.filter(a => a.balance > 0);
+  const assetsWithBalance = visibleAssets
+    .filter(a => a.balance > 0)
+    .sort((a, b) => b.usdValue - a.usdValue);
   const nativeZeroBalance = visibleAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
 
   // Skeleton loading
