@@ -1,5 +1,6 @@
 // screens/wallet.tsx
 import { router } from 'expo-router';
+import WalletHistory from './wallet-history';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -150,7 +151,7 @@ const QUICK_ACTIONS = [
   { key: 'fund', label: 'Fund', icon: 'account-balance' },
   { key: 'swap', label: 'Swap', icon: 'swap-horiz' },
   { key: 'send', label: 'Send', icon: 'send' },
-  { key: 'history', label: 'Activity', icon: 'history' },
+  { key: 'instant-pay', label: 'Instant Pay', icon: 'flash-on' },
 ] as const;
 
 // ── Balance Card ──
@@ -582,7 +583,6 @@ const WalletScreen: React.FC = () => {
     else if (action === 'send') setShowSendModal(true);
     else if (action === 'instant-pay') router.push('/wallet/instant-pay' as any);
     else if (action === 'swap') router.push('/easyswap' as any);
-    else if (action === 'history') router.push('/wallet/history' as any);
     else router.push(`/${action}` as any);
   };
 
@@ -614,6 +614,12 @@ const WalletScreen: React.FC = () => {
     .filter(a => a.balance > 0)
     .sort((a, b) => b.usdValue - a.usdValue);
   const nativeZeroBalance = visibleAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
+
+  const ASSET_PREVIEW = 5;
+  const previewAssets = assetsWithBalance.slice(0, ASSET_PREVIEW);
+  const previewNatives = nativeZeroBalance.slice(0, Math.max(0, ASSET_PREVIEW - previewAssets.length));
+  const totalVisible = assetsWithBalance.length + nativeZeroBalance.length;
+  const hasMoreTokens = totalVisible > ASSET_PREVIEW;
 
   // Skeleton loading
   if (isLoading && !isRefreshing) {
@@ -657,21 +663,27 @@ const WalletScreen: React.FC = () => {
       <View style={styles.assetsCard}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Assets</Text>
-          <Pressable style={styles.manageBtn} onPress={() => setShowManageModal(true)}>
-            <Icon name="tune" size={15} color="#888" />
-            <Text style={styles.manageBtnText}>Manage</Text>
-          </Pressable>
+          <View style={{ flexDirection: 'row', gap: 12 }}>
+            <Pressable style={styles.manageBtn} onPress={() => router.push('/wallet/history' as any)}>
+              <Icon name="history" size={15} color="#888" />
+              <Text style={styles.manageBtnText}>Activity</Text>
+            </Pressable>
+            <Pressable style={styles.manageBtn} onPress={() => setShowManageModal(true)}>
+              <Icon name="tune" size={15} color="#888" />
+              <Text style={styles.manageBtnText}>Manage</Text>
+            </Pressable>
+          </View>
         </View>
 
-        {assetsWithBalance.map(asset => (
+        {previewAssets.map(asset => (
           <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
         ))}
 
-        {nativeZeroBalance.length > 0 && (
+        {previewNatives.length > 0 && (
           <>
-            {assetsWithBalance.length > 0 && <View style={styles.divider} />}
+            {previewAssets.length > 0 && <View style={styles.divider} />}
             <Text style={styles.zeroBalanceLabel}>Networks</Text>
-            {nativeZeroBalance.map(asset => (
+            {previewNatives.map(asset => (
               <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
             ))}
           </>
@@ -684,6 +696,25 @@ const WalletScreen: React.FC = () => {
             <Text style={styles.emptyAssetsHint}>Pull to refresh or fund your wallet</Text>
           </View>
         )}
+
+        {hasMoreTokens && (
+          <Pressable style={styles.seeAllBtn} onPress={() => router.push('/wallet/tokens' as any)}>
+            <Text style={styles.seeAllText}>See all {totalVisible} tokens</Text>
+            <Icon name="chevron-right" size={16} color="#D4AF37" />
+          </Pressable>
+        )}
+      </View>
+
+      {/* Recent Activity */}
+      <View style={styles.assetsCard}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Recent Activity</Text>
+          <Pressable style={styles.manageBtn} onPress={() => router.push('/wallet/history' as any)}>
+            <Text style={styles.manageBtnText}>See all</Text>
+            <Icon name="chevron-right" size={15} color="#888" />
+          </Pressable>
+        </View>
+        <WalletHistory embedded onSeeAll={() => router.push('/wallet/history' as any)} />
       </View>
 
       <View style={{ height: 40 }} />
@@ -831,6 +862,8 @@ const styles = StyleSheet.create({
   manageBtnText: { fontSize: 12, color: '#888', fontWeight: '600' },
   zeroBalanceLabel: { fontSize: 11, fontWeight: '700', color: '#BBB', letterSpacing: 0.8, marginTop: 8, marginBottom: 4, paddingHorizontal: 2 },
   emptyAssets: { alignItems: 'center', paddingVertical: 32, gap: 8 },
+  seeAllBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0F0F0', marginTop: 4 },
+  seeAllText: { fontSize: 14, fontWeight: '600', color: '#D4AF37' },
   emptyAssetsText: { fontSize: 15, fontWeight: '600', color: '#BBB' },
   emptyAssetsHint: { fontSize: 12, color: '#CCC' },
   divider: {
