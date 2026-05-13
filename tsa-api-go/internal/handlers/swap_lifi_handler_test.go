@@ -22,6 +22,7 @@ func setupTestRouter(h *SwapLiFiHandler) *gin.Engine {
 	r := gin.New()
 	r.GET("/swap/lifi/chains", h.GetChains)
 	r.GET("/swap/lifi/tokens", h.GetTokens)
+	r.GET("/swap/lifi/token", h.GetToken)
 	r.GET("/swap/lifi/quote", h.GetQuote)
 	return r
 }
@@ -99,6 +100,46 @@ func TestGetChains_LiFiUnreachable_Returns502(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestGetToken_ForwardsChainAndAddress(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("chain") != "56" || r.URL.Query().Get("token") != "0xabc" {
+			t.Errorf("unexpected params: %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"address":"0xabc","symbol":"TEST","decimals":18,"name":"Test Token"}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/token?chain=56&token=0xabc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetToken_MissingParams_Returns400(t *testing.T) {
+	h := newTestLiFiHandler("http://unused")
+	r := setupTestRouter(h)
+
+	for _, url := range []string{"/swap/lifi/token", "/swap/lifi/token?chain=56", "/swap/lifi/token?token=0xabc"} {
+		req := httptest.NewRequest("GET", url, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for %s, got %d", url, w.Code)
+		}
 	}
 }
 

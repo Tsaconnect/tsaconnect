@@ -131,6 +131,33 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", body)
 }
 
+// GetToken handles GET /api/swap/lifi/token?chain=56&token=0xabc
+// Looks up a single token by contract address on a given chain. No caching —
+// used for custom address entry so results must be fresh.
+func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
+	chain := c.Query("chain")
+	token := c.Query("token")
+	if chain == "" || token == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "chain and token are required")
+		return
+	}
+
+	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/token?chain=%s&token=%s", h.lifiBaseURL, chain, token))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "failed to read LiFi response")
+		return
+	}
+
+	c.Data(resp.StatusCode, "application/json", body)
+}
+
 // GetQuote handles GET /api/swap/lifi/quote
 // Forwards query params to LiFi, injecting fee=0.03 and integrator=tsaconnect
 // unconditionally and defaulting slippage to 0.005 if not supplied.
