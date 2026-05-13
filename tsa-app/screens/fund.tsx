@@ -4,7 +4,6 @@ import {
   Modal, Share, Image, SafeAreaView, Pressable,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { getActiveWallet } from '@/services/wallet';
@@ -278,15 +277,6 @@ export default function FundScreen() {
 
   return (
     <SafeAreaView style={s.container}>
-      {/* Header */}
-      <View style={s.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={12}>
-          <Ionicons name="arrow-back" size={22} color={DARK} />
-        </TouchableOpacity>
-        <Text style={s.headerTitle}>Receive</Text>
-        <View style={{ width: 22 }} />
-      </View>
-
       {/* Search */}
       <View style={s.searchRow}>
         <Ionicons name="search" size={16} color="#AAA" />
@@ -348,9 +338,6 @@ export default function FundScreen() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14 },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: DARK },
-
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginBottom: 12, backgroundColor: '#F5F5F5', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
   searchInput: { flex: 1, fontSize: 15, color: DARK },
 
