@@ -1,6 +1,6 @@
 // screens/wallet.tsx
 import { router } from 'expo-router';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,12 @@ import {
   Pressable,
   Modal,
   Image,
+  Switch,
+  TextInput,
+  FlatList,
+  SafeAreaView,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
 import {
   getWalletBalances,
@@ -329,6 +334,89 @@ const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visibl
   </Modal>
 );
 
+// ── Manage Tokens Modal ──
+const ManageTokensModal: React.FC<{
+  visible: boolean;
+  assets: WalletAsset[];
+  hiddenTokens: Set<string>;
+  tokenKey: (chainKey: string, symbol: string, contractAddress?: string) => string;
+  onToggle: (key: string) => void;
+  onClose: () => void;
+}> = ({ visible, assets, hiddenTokens, tokenKey, onToggle, onClose }) => {
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    return q
+      ? assets.filter(a => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q))
+      : assets;
+  }, [assets, search]);
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#FFF' }}>
+        <View style={manStyles.header}>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Icon name="arrow-back" size={22} color="#1A1A1A" />
+          </Pressable>
+          <Text style={manStyles.title}>Manage Tokens</Text>
+          <View style={{ width: 22 }} />
+        </View>
+
+        <View style={manStyles.searchRow}>
+          <Icon name="search" size={18} color="#AAA" />
+          <TextInput
+            style={manStyles.searchInput}
+            placeholder="Search tokens"
+            placeholderTextColor="#BBB"
+            value={search}
+            onChangeText={setSearch}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {search.length > 0 && (
+            <Pressable onPress={() => setSearch('')} hitSlop={8}>
+              <Icon name="close" size={18} color="#AAA" />
+            </Pressable>
+          )}
+        </View>
+
+        <FlatList
+          data={filtered}
+          keyExtractor={item => `${item.details?.chainKey}-${item.symbol}-${item.contractAddress || ''}`}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          renderItem={({ item }) => {
+            const key = tokenKey(item.details?.chainKey || '', item.symbol, item.contractAddress);
+            const isVisible = !hiddenTokens.has(key);
+            return (
+              <Pressable style={manStyles.row} onPress={() => onToggle(key)}>
+                <View style={[manStyles.avatar, { backgroundColor: item.iconColor + '20' }]}>
+                  {item.iconUrl
+                    ? <Image source={{ uri: item.iconUrl }} style={manStyles.avatarImg} />
+                    : <Text style={[manStyles.avatarText, { color: item.iconColor }]}>{item.symbol[0]}</Text>
+                  }
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={manStyles.symbol}>{item.symbol}</Text>
+                  <Text style={manStyles.meta}>{item.name}  ·  {item.details?.chain}</Text>
+                </View>
+                <Switch
+                  value={isVisible}
+                  onValueChange={() => onToggle(key)}
+                  trackColor={{ false: '#E0E0E0', true: '#D4AF3750' }}
+                  thumbColor={isVisible ? '#D4AF37' : '#BBB'}
+                />
+              </Pressable>
+            );
+          }}
+          contentContainerStyle={{ paddingBottom: 32 }}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
 // ── Main Screen ──
 const WalletScreen: React.FC = () => {
   const { tokenList } = useTokens();
@@ -343,6 +431,26 @@ const WalletScreen: React.FC = () => {
   const [activeLabel, setActiveLabel] = useState('Wallet');
   const [activeAddress, setActiveAddress] = useState('');
   const [showWalletSelector, setShowWalletSelector] = useState(false);
+  const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
+  const [showManageModal, setShowManageModal] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
+      if (v) setHiddenTokens(new Set(JSON.parse(v)));
+    });
+  }, []);
+
+  const tokenKey = (chainKey: string, symbol: string, contractAddress?: string) =>
+    `${chainKey}::${contractAddress || symbol}`;
+
+  const toggleHidden = useCallback((key: string) => {
+    setHiddenTokens(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      AsyncStorage.setItem('wallet_hidden_tokens', JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
 
   // Each fetchBalances invocation increments this; the discovery .then
   // resolves only if its captured token still matches, so a slower
@@ -350,54 +458,24 @@ const WalletScreen: React.FC = () => {
   // (e.g., user pulls to refresh while discovery is mid-flight).
   const fetchTokenRef = useRef(0);
 
-  const buildAssetList = useCallback((): WalletAsset[] => {
-    const list: WalletAsset[] = [];
-    let id = 1;
-
-    // Native tokens per chain
-    for (const [chainKey, chain] of Object.entries(CHAINS)) {
-      list.push({
-        id: String(id++),
-        symbol: chain.nativeCurrency.symbol,
-        name: `${chain.name} Native`,
-        balance: 0,
-        usdValue: 0,
-        usdPrice: 0,
-        iconColor: chain.iconColor,
-        iconUrl: chain.iconUrl,
-        details: { type: 'Native Token', chain: chain.name, chainKey: chainKey as ChainKey },
-      });
-    }
-
-    // ERC-20 tokens per chain
-    for (const token of tokenList) {
-      for (const chainKey of token.chains) {
-        const chain = CHAINS[chainKey];
-        list.push({
-          id: String(id++),
-          symbol: token.symbol,
-          name: token.name,
-          balance: 0,
-          usdValue: 0,
-          usdPrice: 0,
-          iconColor: token.iconColor,
-          iconUrl: token.iconUrl,
-          details: {
-            type: token.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Stablecoin',
-            chain: chain.name,
-            chainKey,
-          },
-        });
-      }
-    }
-    return list;
-  }, [tokenList]);
+  // Only native tokens form the skeleton — ERC-20s are added dynamically
+  // from balance responses and discovery (balance > 0 only).
+  const buildNativeAssets = useCallback((): WalletAsset[] => {
+    return Object.entries(CHAINS).map(([chainKey, chain], i) => ({
+      id: String(i + 1),
+      symbol: chain.nativeCurrency.symbol,
+      name: chain.name,
+      balance: 0, usdValue: 0, usdPrice: 0,
+      iconColor: chain.iconColor,
+      iconUrl: chain.iconUrl,
+      details: { type: 'Native Token', chain: chain.name, chainKey: chainKey as ChainKey },
+    }));
+  }, []);
 
   const fetchBalances = useCallback(async (refreshing = false) => {
     if (refreshing) setIsRefreshing(true); else setIsLoading(true);
     const fetchToken = ++fetchTokenRef.current;
 
-    // Load wallet list for switcher
     await migrateFromSingleWallet();
     const list = await getWalletList();
     setWalletList(list);
@@ -408,49 +486,72 @@ const WalletScreen: React.FC = () => {
       setActiveLabel(meta?.label || 'Wallet');
     }
 
-    const assetList = buildAssetList();
+    const nativeAssets = buildNativeAssets();
     try {
-      // Known-token balances: fast path, single BE call against the
-      // supported_tokens table. We render this immediately and then
-      // append discovery results below.
       const result = await getWalletBalances();
-      let updated = assetList;
+      let updated: WalletAsset[] = nativeAssets;
+
       if (result.success && result.data) {
-        const normalizedBalances = normalizeWalletBalances(result.data);
-        const balanceMap = new Map(
-          normalizedBalances.map((entry) => [`${entry.symbol}-${entry.chainKey}`, entry] as const)
-        );
+        const normalized = normalizeWalletBalances(result.data);
+        const balanceMap = new Map(normalized.map(e => [`${e.symbol}-${e.chainKey}`, e] as const));
 
-        updated = assetList.map(asset => {
-          const chainKey = asset.details?.chainKey;
-          if (!chainKey) return asset;
-
-          const entry = balanceMap.get(`${asset.symbol}-${chainKey}`);
-          const parsedBal = parseFloat(entry?.balance || '0');
-          const parsedUsdValue = parseFloat(entry?.usdValue || '0');
-          const balance = Number.isFinite(parsedBal) ? parsedBal : 0;
-          const usdValue = Number.isFinite(parsedUsdValue) ? parsedUsdValue : 0;
-          const usdPrice = entry?.usdPrice || (balance > 0 ? usdValue / balance : 0);
-          return { ...asset, balance, usdValue, usdPrice };
+        // Overlay balances onto native tokens
+        let id = nativeAssets.length + 1;
+        updated = nativeAssets.map(asset => {
+          const entry = balanceMap.get(`${asset.symbol}-${asset.details!.chainKey}`);
+          if (!entry) return asset;
+          const balance = parseFloat(entry.balance) || 0;
+          const usdValue = parseFloat(entry.usdValue) || 0;
+          return { ...asset, balance, usdValue, usdPrice: entry.usdPrice || (balance > 0 ? usdValue / balance : 0) };
         });
+
+        // Add ERC-20s only if balance > 0
+        for (const entry of normalized) {
+          const bal = parseFloat(entry.balance);
+          if (!bal || bal <= 0) continue;
+          const isNative = nativeAssets.some(
+            a => a.symbol === entry.symbol && a.details?.chainKey === entry.chainKey
+          );
+          if (isNative) continue;
+
+          const tokenConfig = tokenList.find(
+            t => t.symbol === entry.symbol && t.chains.includes(entry.chainKey)
+          );
+          const chain = CHAINS[entry.chainKey];
+          if (!chain) continue;
+
+          updated.push({
+            id: String(id++),
+            symbol: entry.symbol,
+            name: tokenConfig?.name || entry.name || entry.symbol,
+            balance: bal,
+            usdValue: parseFloat(entry.usdValue) || 0,
+            usdPrice: entry.usdPrice || 0,
+            iconColor: tokenConfig?.iconColor || '#888',
+            iconUrl: tokenConfig?.iconUrl,
+            contractAddress: entry.contractAddress || undefined,
+            decimals: entry.decimals,
+            details: {
+              type: entry.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Token',
+              chain: chain.name,
+              chainKey: entry.chainKey,
+            },
+          });
+        }
       }
       setAssets(updated);
 
-      // Auto-discovery: ask the BE for every ERC-20 the indexer found
-      // that isn't already in our supported_tokens list. Slower than the
-      // balance fetch (multi-chain fan-out), so we run it after the main
-      // list is on screen and merge in additions when it completes.
       void mergeDiscoveredTokens(updated, addr || undefined).then((merged) => {
         if (merged && fetchToken === fetchTokenRef.current) setAssets(merged);
       });
     } catch (err) {
       console.error('Wallet fetch error:', err);
-      setAssets(assetList);
+      setAssets(nativeAssets);
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [buildAssetList, network]);
+  }, [buildNativeAssets, tokenList, network]);
 
   useEffect(() => { fetchBalances(); }, [fetchBalances]);
 
@@ -469,7 +570,12 @@ const WalletScreen: React.FC = () => {
     }
   }, [activeAddress, fetchBalances]);
 
-  const totalUsdValue = assets.reduce((s, a) => s + (Number.isFinite(a.usdValue) ? a.usdValue : 0), 0);
+  const visibleAssets = useMemo(
+    () => assets.filter(a => !hiddenTokens.has(tokenKey(a.details?.chainKey || '', a.symbol, a.contractAddress))),
+    [assets, hiddenTokens]
+  );
+
+  const totalUsdValue = visibleAssets.reduce((s, a) => s + (Number.isFinite(a.usdValue) ? a.usdValue : 0), 0);
 
   const handleQuickAction = (action: string) => {
     if (action === 'fund') setShowFundModal(true);
@@ -503,9 +609,8 @@ const WalletScreen: React.FC = () => {
     } as any);
   };
 
-  // Group assets: those with balance first, then zero-balance
-  const assetsWithBalance = assets.filter(a => a.balance > 0);
-  const assetsWithoutBalance = assets.filter(a => !(a.balance > 0));
+  const assetsWithBalance = visibleAssets.filter(a => a.balance > 0);
+  const nativeZeroBalance = visibleAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
 
   // Skeleton loading
   if (isLoading && !isRefreshing) {
@@ -549,29 +654,47 @@ const WalletScreen: React.FC = () => {
       <View style={styles.assetsCard}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Assets</Text>
-          <Text style={styles.assetCount}>{assets.length} tokens</Text>
+          <Pressable style={styles.manageBtn} onPress={() => setShowManageModal(true)}>
+            <Icon name="tune" size={15} color="#888" />
+            <Text style={styles.manageBtnText}>Manage</Text>
+          </Pressable>
         </View>
 
-        {assetsWithBalance.length > 0 && (
+        {assetsWithBalance.map(asset => (
+          <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
+        ))}
+
+        {nativeZeroBalance.length > 0 && (
           <>
-            {assetsWithBalance.map(asset => (
+            {assetsWithBalance.length > 0 && <View style={styles.divider} />}
+            <Text style={styles.zeroBalanceLabel}>Networks</Text>
+            {nativeZeroBalance.map(asset => (
               <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
             ))}
-            {assetsWithoutBalance.length > 0 && (
-              <View style={styles.divider} />
-            )}
           </>
         )}
 
-        {assetsWithoutBalance.map(asset => (
-          <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} />
-        ))}
+        {assetsWithBalance.length === 0 && nativeZeroBalance.length === 0 && (
+          <View style={styles.emptyAssets}>
+            <Icon name="account-balance-wallet" size={36} color="#DDD" />
+            <Text style={styles.emptyAssetsText}>No tokens found</Text>
+            <Text style={styles.emptyAssetsHint}>Pull to refresh or fund your wallet</Text>
+          </View>
+        )}
       </View>
 
       <View style={{ height: 40 }} />
 
       <FundModal visible={showFundModal} onClose={() => setShowFundModal(false)} />
       <SendModal visible={showSendModal} onClose={() => setShowSendModal(false)} />
+      <ManageTokensModal
+        visible={showManageModal}
+        assets={assets}
+        hiddenTokens={hiddenTokens}
+        tokenKey={tokenKey}
+        onToggle={toggleHidden}
+        onClose={() => setShowManageModal(false)}
+      />
 
       {/* Wallet Selector */}
       <Modal visible={showWalletSelector} transparent animationType="slide" onRequestClose={() => setShowWalletSelector(false)}>
@@ -701,6 +824,12 @@ const styles = StyleSheet.create({
   },
   sectionTitle: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
   assetCount: { fontSize: 12, color: '#888' },
+  manageBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4 },
+  manageBtnText: { fontSize: 12, color: '#888', fontWeight: '600' },
+  zeroBalanceLabel: { fontSize: 11, fontWeight: '700', color: '#BBB', letterSpacing: 0.8, marginTop: 8, marginBottom: 4, paddingHorizontal: 2 },
+  emptyAssets: { alignItems: 'center', paddingVertical: 32, gap: 8 },
+  emptyAssetsText: { fontSize: 15, fontWeight: '600', color: '#BBB' },
+  emptyAssetsHint: { fontSize: 12, color: '#CCC' },
   divider: {
     height: 1,
     backgroundColor: '#F0F0F0',
@@ -767,6 +896,19 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.9)',
     fontWeight: '600',
   },
+});
+
+const manStyles = StyleSheet.create({
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
+  title: { fontSize: 17, fontWeight: '700', color: '#1A1A1A' },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, margin: 16, backgroundColor: '#F5F5F5', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A' },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F8F8F8' },
+  avatar: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
+  avatarImg: { width: 40, height: 40, borderRadius: 20 },
+  avatarText: { fontSize: 16, fontWeight: '700' },
+  symbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
+  meta: { fontSize: 12, color: '#AAA', marginTop: 2 },
 });
 
 export default WalletScreen;
