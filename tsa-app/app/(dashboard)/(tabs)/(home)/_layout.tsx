@@ -20,7 +20,7 @@ export default function Layout() {
         />
         <Stack.Screen
           name="fundfiat"
-          options={{ title: "Deposit Fiat" }}
+          options={{ title: "Fiat Deposit" }}
         />
         <Stack.Screen
           name="send"
