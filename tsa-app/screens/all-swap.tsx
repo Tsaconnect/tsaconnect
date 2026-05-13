@@ -188,7 +188,13 @@ export default function AllSwapScreen() {
       if (!chainKeyResult) throw new Error('Unsupported chain in route');
       const chainKey = chainKeyResult.key;
 
-      let nonce = await fetchPendingNonce(walletAddress, chainKey);
+      let nonce;
+      try {
+        nonce = await fetchPendingNonce(walletAddress, chainKey);
+      } catch {
+        throw new Error('Could not reach the network. Check your connection and try again.');
+      }
+
       const fromAmountWei = ethers.parseUnits(fromAmount, fromToken.decimals).toString();
       const humanAmount = String(Number(fromAmountWei) / Math.pow(10, fromToken.decimals));
 
@@ -207,14 +213,23 @@ export default function AllSwapScreen() {
             : { gasPrice: quote.transactionRequest.gasPrice }),
         };
         const signedApprove = await signLiFiTransaction(approveTx);
-        await submitTransaction(signedApprove, 'approve', fromToken.symbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId);
+        try {
+          await submitTransaction(signedApprove, 'approve', fromToken.symbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId);
+        } catch {
+          throw new Error('Token approval failed. The network may be congested — try again.');
+        }
         nonce += 1;
       }
 
       setSigningStatus('Step 2 of 2: Executing swap…');
       const swapTx = { ...quote.transactionRequest, nonce };
       const signedSwap = await signLiFiTransaction(swapTx);
-      const res = await submitTransaction(signedSwap, 'swap', fromToken.symbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId);
+      let res;
+      try {
+        res = await submitTransaction(signedSwap, 'swap', fromToken.symbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId);
+      } catch {
+        throw new Error('Swap broadcast failed. The network may be congested — try again.');
+      }
 
       if (res.success && res.data) {
         setTxHash(res.data.txHash); setScreen('success');
