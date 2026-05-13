@@ -50,6 +50,8 @@ export interface LiFiQuote {
   transactionRequest: LiFiTransactionRequest;
   approvalAddress?: string;
   approvalToken?: string;
+  /** Unix timestamp (seconds) after which this quote is stale */
+  validUntil?: number;
 }
 
 export async function getLiFiChains(): Promise<LiFiChain[]> {
@@ -66,6 +68,15 @@ export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
   const data = await res.json();
   const chainTokens = data?.tokens?.[String(chainId)];
   return Array.isArray(chainTokens) ? chainTokens : [];
+}
+
+/** Look up a single token by contract address. Returns null if not found. */
+export async function getLiFiToken(chainId: number, address: string): Promise<LiFiToken | null> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/token?chain=${chainId}&token=${address}`, { headers });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data?.address ? (data as LiFiToken) : null;
 }
 
 export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> {
@@ -94,6 +105,7 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     transactionRequest: data.transactionRequest,
     approvalAddress: data.estimate?.approvalAddress || undefined,
     approvalToken: data.action?.fromToken?.address || undefined,
+    validUntil: data.estimate?.validUntil ?? undefined,
   };
 }
 

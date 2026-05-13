@@ -24,7 +24,7 @@ const FEE_PCT = 3;
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
 
-type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error';
+type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expired';
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
 function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
@@ -60,7 +60,10 @@ export default function AllSwapScreen() {
   const [slippage, setSlippage] = useState('0.005');
   const [slippageSheetVisible, setSlippageSheetVisible] = useState(false);
   const [walletAddress, setWalletAddress] = useState('');
+  const [quoteSecondsLeft, setQuoteSecondsLeft] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     getActiveWallet().then(addr => { if (addr) setWalletAddress(addr); });
@@ -119,6 +122,20 @@ export default function AllSwapScreen() {
           slippage: slippageAuto ? '0.005' : slippage,
         });
         setQuote(q); setQuoteStatus('quoted'); setQuoteError('');
+        // Start expiry countdown — use validUntil from LiFi if present, else 30s
+        const expiresAt = q.validUntil
+          ? q.validUntil * 1000
+          : Date.now() + 30_000;
+        if (countdownRef.current) clearInterval(countdownRef.current);
+        countdownRef.current = setInterval(() => {
+          const left = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+          setQuoteSecondsLeft(left);
+          if (left === 0) {
+            clearInterval(countdownRef.current!);
+            setQuoteStatus('expired');
+          }
+        }, 1000);
+        setQuoteSecondsLeft(Math.round((expiresAt - Date.now()) / 1000));
       } catch (e: any) {
         const msg: string = e?.message ?? '';
         if (msg.toLowerCase().includes('no available quotes') || msg.toLowerCase().includes('not supported')) {
@@ -129,8 +146,11 @@ export default function AllSwapScreen() {
         setQuote(null);
       }
     }, 500);
-    return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, slippageAuto, slippage]);
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, slippageAuto, slippage, refreshKey]);
 
   const swapDirection = () => {
     const [nf, nfc, nt, ntc] = [toToken, toChainId, fromToken, fromChainId];
@@ -152,6 +172,7 @@ export default function AllSwapScreen() {
     } catch {
       return 'Enter a valid amount';
     }
+    if (quoteStatus === 'expired') return 'Quote expired — refresh first';
     if (!quote) return 'Waiting for price...';
     return null;
   };
@@ -211,6 +232,20 @@ export default function AllSwapScreen() {
           return n.toLocaleString('en-US', { maximumFractionDigits: 6, minimumFractionDigits: 0 });
         } catch { return '0'; }
       })()
+    : null;
+
+  const refreshQuote = () => {
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    setQuote(null); setQuoteStatus('quoting'); setQuoteSecondsLeft(0);
+    setRefreshKey(k => k + 1);
+  };
+
+  const fromAmountUSD = fromToken?.priceUSD && fromAmount && Number(fromAmount) > 0
+    ? Number(fromAmount) * Number(fromToken.priceUSD)
+    : null;
+  const toAmountUSD = quote?.toAmountUSD ? Number(quote.toAmountUSD) : null;
+  const priceImpactPct = fromAmountUSD && toAmountUSD && fromAmountUSD > 0
+    ? ((toAmountUSD - fromAmountUSD) / fromAmountUSD) * 100
     : null;
 
   const chainName = (chainId: number) => {
@@ -365,9 +400,14 @@ export default function AllSwapScreen() {
               keyboardType="decimal-pad"
             />
           </View>
-          <TouchableOpacity onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
-            <Text style={s.balanceText}>Balance: {formattedBalance} {fromToken?.symbol}</Text>
-          </TouchableOpacity>
+          <View style={s.amountMeta}>
+            {fromAmountUSD != null && (
+              <Text style={s.usdValue}>≈ ${fromAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
+            )}
+            <TouchableOpacity onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
+              <Text style={s.balanceText}>Balance: {formattedBalance} {fromToken?.symbol}</Text>
+            </TouchableOpacity>
+          </View>
 
           {/* Swap direction button */}
           <View style={s.arrowWrap}>
@@ -389,16 +429,41 @@ export default function AllSwapScreen() {
             </TouchableOpacity>
             {quoteStatus === 'quoting'
               ? <ActivityIndicator size="small" color={GOLD} style={{ flex: 1 }} />
-              : <Text style={s.amountOutput}>{outputAmount ?? '—'}</Text>}
+              : <View style={{ flex: 1, alignItems: 'flex-end' }}>
+                  <Text style={s.amountOutput}>{outputAmount ?? '—'}</Text>
+                  {toAmountUSD != null && (
+                    <Text style={s.usdValue}>≈ ${toAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
+                  )}
+                </View>
+            }
           </View>
         </View>
 
         {/* Quote info / errors */}
-        {quoteStatus === 'quoted' && quote && (
+        {(quoteStatus === 'quoted' || quoteStatus === 'expired') && quote && (
           <View style={s.infoBar}>
             <Ionicons name="flash" size={13} color={GOLD} />
             <Text style={s.infoText}>
               {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
+            </Text>
+            {quoteStatus === 'expired' ? (
+              <TouchableOpacity onPress={refreshQuote} style={s.refreshBtn}>
+                <Ionicons name="refresh" size={13} color={GOLD} />
+                <Text style={s.refreshText}>Refresh</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={s.countdown}>
+                <Text style={s.countdownText}>{quoteSecondsLeft}s</Text>
+              </View>
+            )}
+          </View>
+        )}
+        {/* Price impact warning */}
+        {priceImpactPct != null && priceImpactPct < -5 && (
+          <View style={[s.infoBar, priceImpactPct < -15 ? s.infoError : s.infoWarn]}>
+            <Ionicons name="warning" size={13} color={priceImpactPct < -15 ? '#DC2626' : '#D97706'} />
+            <Text style={[s.infoText, { color: priceImpactPct < -15 ? '#DC2626' : '#92400E' }]}>
+              {priceImpactPct < -15 ? 'High' : 'Moderate'} price impact ({Math.abs(priceImpactPct).toFixed(1)}%) — check liquidity before swapping
             </Text>
           </View>
         )}
@@ -412,6 +477,12 @@ export default function AllSwapScreen() {
           <View style={[s.infoBar, s.infoError]}>
             <Ionicons name="alert-circle" size={13} color="#DC2626" />
             <Text style={[s.infoText, { color: '#DC2626' }]}>{quoteError || 'Swap pricing unavailable. Try again shortly.'}</Text>
+          </View>
+        )}
+        {quoteStatus === 'expired' && (
+          <View style={[s.infoBar, s.infoWarn]}>
+            <Ionicons name="time-outline" size={13} color="#D97706" />
+            <Text style={[s.infoText, { color: '#92400E' }]}>Quote expired — tap Refresh for a new price</Text>
           </View>
         )}
 
@@ -652,7 +723,9 @@ const s = StyleSheet.create({
   // Amount
   amountInput: { flex: 1, fontSize: 28, fontWeight: '700', color: DARK, textAlign: 'right', padding: 0 },
   amountOutput: { flex: 1, fontSize: 28, fontWeight: '700', color: GOLD, textAlign: 'right' },
-  balanceText: { fontSize: 12, color: GOLD, fontWeight: '500', textAlign: 'right', marginBottom: 16 },
+  amountMeta: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  usdValue: { fontSize: 12, color: '#AAA', fontWeight: '400' },
+  balanceText: { fontSize: 12, color: GOLD, fontWeight: '500' },
 
   // Swap arrow
   arrowWrap: { alignItems: 'center', marginVertical: 4 },
@@ -670,7 +743,12 @@ const s = StyleSheet.create({
     borderRadius: 12, padding: 10, marginTop: 12,
   },
   infoError: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
+  infoWarn: { backgroundColor: '#FFFBEB', borderColor: '#FCD34D' },
   infoText: { fontSize: 12, color: '#92400E', flex: 1 },
+  countdown: { backgroundColor: '#F0F0F0', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 },
+  countdownText: { fontSize: 11, fontWeight: '700', color: '#888' },
+  refreshBtn: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  refreshText: { fontSize: 12, fontWeight: '700', color: GOLD },
 
   // Buttons
   btn: {

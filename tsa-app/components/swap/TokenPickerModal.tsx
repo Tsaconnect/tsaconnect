@@ -1,12 +1,12 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
   StyleSheet, Pressable, SectionList, FlatList, Image,
-  ActivityIndicator, SafeAreaView,
+  ActivityIndicator, SafeAreaView, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { LiFiToken, LiFiChain } from '../../services/lifi';
-import { getLiFiChains } from '../../services/lifi';
+import { getLiFiChains, getLiFiToken } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
 const GOLD = '#D4AF37';
@@ -180,6 +180,10 @@ export default function TokenPickerModal({
   const [chains, setChains] = useState<LiFiChain[]>([]);
   const [chainsLoading, setChainsLoading] = useState(true);
   const [chainPickerVisible, setChainPickerVisible] = useState(false);
+  const [addrToken, setAddrToken] = useState<LiFiToken | null>(null);
+  const [addrLoading, setAddrLoading] = useState(false);
+  const [addrNotFound, setAddrNotFound] = useState(false);
+  const addrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     getLiFiChains()
@@ -189,8 +193,23 @@ export default function TokenPickerModal({
   }, []);
 
   useEffect(() => {
-    if (visible) setSearch('');
+    if (visible) { setSearch(''); setAddrToken(null); setAddrNotFound(false); }
   }, [visible]);
+
+  // Address lookup — debounced 600ms
+  const isAddressSearch = search.trim().startsWith('0x') && search.trim().length >= 40;
+  useEffect(() => {
+    if (!isAddressSearch) { setAddrToken(null); setAddrNotFound(false); return; }
+    setAddrLoading(true); setAddrToken(null); setAddrNotFound(false);
+    if (addrTimer.current) clearTimeout(addrTimer.current);
+    addrTimer.current = setTimeout(async () => {
+      const token = await getLiFiToken(chainId, search.trim()).catch(() => null);
+      setAddrToken(token);
+      setAddrNotFound(!token);
+      setAddrLoading(false);
+    }, 600);
+    return () => { if (addrTimer.current) clearTimeout(addrTimer.current); };
+  }, [search, chainId]);
 
   // Inline chips: always include selected chain, fill rest from list
   const inlineChains = useMemo(() => {
@@ -303,7 +322,39 @@ export default function TokenPickerModal({
               )}
             </View>
 
-            {noResults ? (
+            {/* Address search result */}
+          {isAddressSearch && (
+            addrLoading ? (
+              <View style={s.addrRow}>
+                <ActivityIndicator size="small" color={GOLD} />
+                <Text style={s.addrLabel}>Looking up contract…</Text>
+              </View>
+            ) : addrToken ? (
+              <TouchableOpacity
+                style={s.addrRow}
+                onPress={() => { onSelect(addrToken, chainId); onClose(); }}
+                activeOpacity={0.7}
+              >
+                {addrToken.logoURI
+                  ? <Image source={{ uri: addrToken.logoURI }} style={s.addrIcon} />
+                  : <View style={[s.addrIcon, s.addrIconFallback]}><Text style={s.addrIconLetter}>{addrToken.symbol[0]}</Text></View>
+                }
+                <View style={{ flex: 1 }}>
+                  <Text style={s.addrSymbol}>{addrToken.symbol}</Text>
+                  <Text style={s.addrName} numberOfLines={1}>{addrToken.name}</Text>
+                  <Text style={s.addrAddress} numberOfLines={1}>{addrToken.address}</Text>
+                </View>
+                <View style={s.addrBadge}><Text style={s.addrBadgeText}>Add</Text></View>
+              </TouchableOpacity>
+            ) : addrNotFound ? (
+              <View style={s.addrRow}>
+                <Ionicons name="alert-circle-outline" size={20} color="#DC2626" />
+                <Text style={[s.addrLabel, { color: '#DC2626' }]}>Token not found on this chain</Text>
+              </View>
+            ) : null
+          )}
+
+          {noResults ? (
               <View style={s.emptyWrap}>
                 <Text style={s.emptyText}>No tokens found for "{search}"</Text>
                 <Text style={s.emptyHint}>Try searching by symbol, name, or contract address</Text>
@@ -447,6 +498,16 @@ const s = StyleSheet.create({
   rowRight: { alignItems: 'flex-end' },
   balance: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
   usd: { fontSize: 11, color: '#AAA', marginTop: 1 },
+  addrRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 4, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0', marginBottom: 4 },
+  addrIcon: { width: 40, height: 40, borderRadius: 20 },
+  addrIconFallback: { backgroundColor: GOLD, alignItems: 'center', justifyContent: 'center' },
+  addrIconLetter: { fontSize: 16, fontWeight: '700', color: '#FFF' },
+  addrLabel: { fontSize: 13, color: '#888' },
+  addrSymbol: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
+  addrName: { fontSize: 12, color: '#888', marginTop: 1 },
+  addrAddress: { fontSize: 10, color: '#BBB', marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  addrBadge: { backgroundColor: '#1A1A1A', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 4 },
+  addrBadgeText: { fontSize: 11, fontWeight: '700', color: '#FFF' },
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 48, gap: 8 },
   emptyText: { fontSize: 14, fontWeight: '600', color: '#555', textAlign: 'center' },
   emptyHint: { fontSize: 12, color: '#AAA', textAlign: 'center' },
