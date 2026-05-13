@@ -2,6 +2,7 @@
 // Token detail screen — shows balance, price, chart, and actions for a single asset
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
+import WalletHistory from '@/screens/wallet-history';
 import {
   View,
   Text,
@@ -335,6 +336,20 @@ const TokenDetailScreen: React.FC = () => {
         {activeChainConfig?.explorerUrl && (
           <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} />
         )}
+      </View>
+
+      {/* Transaction History */}
+      <View style={styles.infoCard}>
+        <Text style={styles.sectionTitle}>Recent Activity</Text>
+        <WalletHistory
+          chainId={activeChainConfig?.chainId}
+          tokenSymbol={symbol}
+          embedded
+          onSeeAll={() => router.push({
+            pathname: '/wallet/history',
+            params: { chainId: String(activeChainConfig?.chainId ?? ''), tokenSymbol: symbol },
+          } as any)}
+        />
       </View>
 
       {/* Actions */}
