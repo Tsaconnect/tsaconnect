@@ -9,6 +9,38 @@ import type { LiFiToken, LiFiChain } from '../../services/lifi';
 import { getLiFiChains, getLiFiToken } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
 
+// Reliable chain logos by chain ID — LiFi's nativeToken.logoURI for L2s
+// all resolve to the ETH logo (their native token IS ETH), so we maintain
+// correct per-chain logos here for the chains we care about.
+const CHAIN_LOGOS: Record<number, string> = {
+  1:       'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png',
+  56:      'https://coin-images.coingecko.com/coins/images/825/small/bnb-icon2_2x.png',
+  137:     'https://coin-images.coingecko.com/coins/images/4713/small/polygon.png',
+  10:      'https://coin-images.coingecko.com/coins/images/25244/small/Optimism.png',
+  42161:   'https://coin-images.coingecko.com/coins/images/16547/small/arb.jpg',
+  8453:    'https://coin-images.coingecko.com/asset_platforms/images/131/small/base-network.png',
+  43114:   'https://coin-images.coingecko.com/coins/images/12559/small/Avalanche_Circle_RedWhite_Trans.png',
+  59144:   'https://coin-images.coingecko.com/asset_platforms/images/135/small/linea.jpeg',
+  146:     'https://coin-images.coingecko.com/coins/images/38108/small/200x200_Sonic_Logo.png',
+  100:     'https://coin-images.coingecko.com/coins/images/11062/small/Identity-Primary-DarkBG.png',
+  324:     'https://coin-images.coingecko.com/coins/images/24091/small/zksync.png',
+  534352:  'https://coin-images.coingecko.com/coins/images/30393/small/scrollEcosystemToken.png',
+  5000:    'https://coin-images.coingecko.com/coins/images/30980/small/token.png',
+  81457:   'https://coin-images.coingecko.com/coins/images/35585/small/blast.jpeg',
+  8217:    'https://coin-images.coingecko.com/coins/images/22597/small/klay.png',
+  42220:   'https://coin-images.coingecko.com/coins/images/11090/small/InjXBvM.png',
+  250:     'https://coin-images.coingecko.com/coins/images/4001/small/Fantom_round.png',
+  1284:    'https://coin-images.coingecko.com/coins/images/22459/small/glmr.png',
+  1088:    'https://coin-images.coingecko.com/coins/images/15595/small/metis.jpeg',
+  25:      'https://coin-images.coingecko.com/coins/images/7310/small/cro_token_logo.png',
+  130:     'https://coin-images.coingecko.com/asset_platforms/images/237/small/unichain.png',
+  480:     'https://coin-images.coingecko.com/asset_platforms/images/162/small/world-chain.png',
+};
+
+function chainLogoUri(chain: LiFiChain): string | undefined {
+  return CHAIN_LOGOS[chain.id] || chain.nativeToken?.logoURI;
+}
+
 const GOLD = '#D4AF37';
 const INLINE_CHAIN_COUNT = 4;
 
@@ -44,8 +76,8 @@ function formatUSD(balance: string, usdValue: string, priceUSD?: string): string
 function ChainChip({ chain, selected, onPress }: { chain: LiFiChain; selected: boolean; onPress: () => void }) {
   return (
     <TouchableOpacity style={[cs.chip, selected && cs.chipActive]} onPress={onPress} activeOpacity={0.75}>
-      {chain.nativeToken?.logoURI ? (
-        <Image source={{ uri: chain.nativeToken.logoURI }} style={cs.chipImg} />
+      {chainLogoUri(chain) ? (
+        <Image source={{ uri: chainLogoUri(chain) }} style={cs.chipImg} />
       ) : (
         <View style={cs.chipImgFallback}>
           <Text style={cs.chipImgLetter}>{chain.key[0]?.toUpperCase()}</Text>
@@ -117,8 +149,8 @@ function ChainPickerModal({
               activeOpacity={0.7}
             >
               <View style={cp.chainIcon}>
-                {item.nativeToken?.logoURI ? (
-                  <Image source={{ uri: item.nativeToken.logoURI }} style={cp.chainImg} />
+                {chainLogoUri(item) ? (
+                  <Image source={{ uri: chainLogoUri(item) }} style={cp.chainImg} />
                 ) : (
                   <View style={[cp.chainImg, cp.chainFallback]}>
                     <Text style={cp.chainLetter}>{item.key[0]?.toUpperCase()}</Text>
