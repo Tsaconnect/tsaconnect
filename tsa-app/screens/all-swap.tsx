@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet,
   ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Pressable,
-  Switch, Image,
+  Switch, Image, Linking,
 } from 'react-native';
 import Animated, {
   useSharedValue, useAnimatedStyle, withSpring, withTiming,
@@ -62,11 +62,14 @@ export default function AllSwapScreen() {
   const [walletAddress, setWalletAddress] = useState('');
   const [quoteSecondsLeft, setQuoteSecondsLeft] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [walletLoading, setWalletLoading] = useState(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    getActiveWallet().then(addr => { if (addr) setWalletAddress(addr); });
+    getActiveWallet()
+      .then(addr => { if (addr) setWalletAddress(addr); })
+      .finally(() => setWalletLoading(false));
   }, []);
 
   useFocusEffect(useCallback(() => {
@@ -283,6 +286,7 @@ export default function AllSwapScreen() {
       fromAmount={fromAmount}
       outputAmount={outputAmount}
       txHash={txHash}
+      chainId={quote?.transactionRequest.chainId ?? fromChainId}
       onDone={() => router.back()}
     />
   );
@@ -361,6 +365,25 @@ export default function AllSwapScreen() {
           <Text style={s.btn2T}>Cancel</Text>
         </TouchableOpacity>
       </ScrollView>
+    </View>
+  );
+
+  // ── Wallet not connected ─────────────────────────────────────
+  if (!walletLoading && !walletAddress) return (
+    <View style={s.container}>
+      <View style={s.center}>
+        <View style={[s.resIcon, { backgroundColor: '#F5F5F5' }]}>
+          <Ionicons name="wallet-outline" size={40} color="#AAA" />
+        </View>
+        <Text style={s.bigTitle}>No Wallet Connected</Text>
+        <Text style={[s.sub, { textAlign: 'center', marginTop: 8, paddingHorizontal: 32 }]}>
+          You need a wallet to swap tokens. Set one up in the Wallet tab first.
+        </Text>
+        <TouchableOpacity style={[s.btn, { marginTop: 32, paddingHorizontal: 32 }]} onPress={() => router.push('/wallet')}>
+          <Ionicons name="wallet-outline" size={18} color="#FFF" style={{ marginRight: 8 }} />
+          <Text style={s.btnT}>Go to Wallet</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 
@@ -547,10 +570,10 @@ export default function AllSwapScreen() {
   );
 }
 
-function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, onDone }: {
+function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHash, chainId, onDone }: {
   fromToken: LiFiToken | null; toToken: LiFiToken | null;
   fromAmount: string; outputAmount: string | null;
-  txHash: string; onDone: () => void;
+  txHash: string; chainId: number; onDone: () => void;
 }) {
   const iconScale = useSharedValue(0);
   const ringScale = useSharedValue(1);
@@ -625,9 +648,23 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
           </View>
         </View>
 
-        {txHash ? (
-          <Text style={s.txHash} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text>
-        ) : null}
+        {txHash ? (() => {
+          const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
+          const url = explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;
+          return (
+            <TouchableOpacity
+              style={s.explorerLink}
+              onPress={() => url && Linking.openURL(url)}
+              disabled={!url}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="open-outline" size={13} color={GOLD} />
+              <Text style={s.explorerText} numberOfLines={1} ellipsizeMode="middle">
+                {txHash.slice(0, 10)}…{txHash.slice(-8)}
+              </Text>
+            </TouchableOpacity>
+          );
+        })() : null}
       </Animated.View>
 
       {/* Done button */}
@@ -799,7 +836,8 @@ const s = StyleSheet.create({
   successTokenName: { fontSize: 12, color: '#AAA', marginTop: 2 },
   successArrowRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
   successArrowLine: { flex: 1, height: 1, backgroundColor: '#F0F0F0' },
-  txHash: { fontSize: 11, color: '#BBB', marginTop: 16, maxWidth: '90%', textAlign: 'center' },
+  explorerLink: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 16, padding: 8, borderRadius: 10, backgroundColor: '#FFF8E1' },
+  explorerText: { fontSize: 12, color: GOLD, fontWeight: '600', maxWidth: 220 },
 
   // Slippage sheet
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
