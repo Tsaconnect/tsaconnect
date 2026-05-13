@@ -119,10 +119,20 @@ var ankrSlugToChainKey = map[string]string{
 	"avalanche": "avalanche",
 }
 
-// moralisChainSlug covers chains Ankr doesn't support. As of 2026 only
-// Sonic falls in this bucket.
+// moralisChainSlug maps our chain keys to Moralis chain identifiers.
+// Moralis accepts hex chain IDs (e.g. "0x1") for EVM chains and named
+// slugs for newer chains. This covers every chain in our registry so
+// Moralis can serve as a full fallback when ANKR_API_KEY is not set.
 var moralisChainSlug = map[string]string{
-	"sonic": "sonic",
+	"ethereum":  "0x1",
+	"bsc":       "0x38",
+	"polygon":   "0x89",
+	"arbitrum":  "0xa4b1",
+	"base":      "0x2105",
+	"optimism":  "0xa",
+	"avalanche": "0xa86a",
+	"linea":     "0xe708",
+	"sonic":     "0x92",
 }
 
 // NewTokenDiscoveryService reads ANKR_API_KEY and MORALIS_API_KEY from
@@ -181,12 +191,14 @@ func (s *TokenDiscoveryService) DiscoverTokens(ctx context.Context, address stri
 	}
 
 	// If chainKeys is empty, query every chain we have coverage for.
+	// Deduplicate: moralisChainSlug now overlaps with ankrChainSlug.
 	if len(chainKeys) == 0 {
+		seen := make(map[string]bool)
 		for k := range ankrChainSlug {
-			chainKeys = append(chainKeys, k)
+			if !seen[k] { chainKeys = append(chainKeys, k); seen[k] = true }
 		}
 		for k := range moralisChainSlug {
-			chainKeys = append(chainKeys, k)
+			if !seen[k] { chainKeys = append(chainKeys, k); seen[k] = true }
 		}
 	}
 
@@ -237,6 +249,8 @@ func (s *TokenDiscoveryService) DiscoverTokens(ctx context.Context, address stri
 // an acceptable trade for the cost saving.
 func (s *TokenDiscoveryService) fetchUncached(ctx context.Context, address string, chainKeys []string) []DiscoveredToken {
 	// Split requested chains by provider.
+	// Ankr takes priority when its key is available; Moralis covers the
+	// remainder (including all Ankr chains when ANKR_API_KEY is not set).
 	var ankrChains, moralisChains []string
 	for _, k := range chainKeys {
 		if _, ok := ankrChainSlug[k]; ok && s.ankrKey != "" {
