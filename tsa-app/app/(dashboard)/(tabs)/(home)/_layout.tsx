@@ -16,7 +16,7 @@ export default function Layout() {
         />
         <Stack.Screen
           name="fund"
-          options={{ title: "Fund Wallet" }}
+          options={{ title: "Receive" }}
         />
         <Stack.Screen
           name="fundfiat"
