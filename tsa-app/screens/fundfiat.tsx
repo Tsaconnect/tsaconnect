@@ -8,10 +8,6 @@ const GOLD = '#D4AF37';
 export default function FundFiatScreen() {
   return (
     <View style={s.container}>
-      <TouchableOpacity style={s.back} onPress={() => router.back()} hitSlop={12}>
-        <Ionicons name="arrow-back" size={22} color="#1A1A1A" />
-      </TouchableOpacity>
-
       <View style={s.center}>
         <View style={s.iconWrap}>
           <Ionicons name="time-outline" size={48} color={GOLD} />
@@ -30,7 +26,6 @@ export default function FundFiatScreen() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FAFAFA' },
-  back: { position: 'absolute', top: 56, left: 20, zIndex: 10 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40 },
   iconWrap: {
     width: 96, height: 96, borderRadius: 48,
