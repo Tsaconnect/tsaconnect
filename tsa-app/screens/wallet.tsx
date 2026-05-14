@@ -1,6 +1,6 @@
 // screens/wallet.tsx
 import { router } from 'expo-router';
-import WalletHistory from './wallet-history';
+import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -664,7 +664,7 @@ const WalletScreen: React.FC = () => {
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Assets</Text>
           <View style={{ flexDirection: 'row', gap: 12 }}>
-            <Pressable style={styles.manageBtn} onPress={() => router.push('/wallet/history' as any)}>
+            <Pressable style={styles.manageBtn} onPress={() => router.push('/activity' as any)}>
               <Icon name="history" size={15} color="#888" />
               <Text style={styles.manageBtnText}>Activity</Text>
             </Pressable>
@@ -709,12 +709,16 @@ const WalletScreen: React.FC = () => {
       <View style={styles.assetsCard}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Recent Activity</Text>
-          <Pressable style={styles.manageBtn} onPress={() => router.push('/wallet/history' as any)}>
+          <Pressable style={styles.manageBtn} onPress={() => router.push('/activity' as any)}>
             <Text style={styles.manageBtnText}>See all</Text>
             <Icon name="chevron-right" size={15} color="#888" />
           </Pressable>
         </View>
-        <WalletHistory embedded onSeeAll={() => router.push('/wallet/history' as any)} />
+        <ActivityFeed
+          types={['wallet', 'swap']}
+          embedded
+          onSeeAll={() => router.push('/wallet/history' as any)}
+        />
       </View>
 
       <View style={{ height: 40 }} />

@@ -42,12 +42,8 @@ const RootLayout = () => {
           <CurrencyProvider>
             <StatusBar barStyle="dark-content" backgroundColor="#fff" />
             <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen
-                name="index"
-                options={{
-                  headerShown: false,
-                }}
-              />
+              <Stack.Screen name="index" options={{ headerShown: false }} />
+              <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
             </Stack>
           </CurrencyProvider>
         </NotificationProvider>
