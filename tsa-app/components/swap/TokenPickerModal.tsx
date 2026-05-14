@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Modal, View, Text, TextInput, TouchableOpacity,
   StyleSheet, Pressable, SectionList, FlatList, Image,
-  ActivityIndicator, SafeAreaView, Platform,
+  ActivityIndicator, SafeAreaView, Platform, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { LiFiToken, LiFiChain } from '../../services/lifi';
@@ -351,7 +351,12 @@ export default function TokenPickerModal({
             <Text style={s.title}>Select Token</Text>
 
             {onChainChange && (
-              <View style={s.chainRow}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={s.chainScroll}
+                contentContainerStyle={s.chainRow}
+              >
                 {/* All chip */}
                 <TouchableOpacity
                   style={[cs.chip, isAllChains && cs.chipActive]}
@@ -362,7 +367,7 @@ export default function TokenPickerModal({
                 </TouchableOpacity>
 
                 {chainsLoading ? (
-                  <ActivityIndicator size="small" color={GOLD} />
+                  <ActivityIndicator size="small" color={GOLD} style={{ marginHorizontal: 8 }} />
                 ) : (
                   <>
                     {inlineChains.map(chain => (
@@ -385,7 +390,7 @@ export default function TokenPickerModal({
                     )}
                   </>
                 )}
-              </View>
+              </ScrollView>
             )}
 
             <View style={s.searchRow}>
@@ -561,9 +566,10 @@ const s = StyleSheet.create({
     alignSelf: 'center', marginBottom: 16,
   },
   title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 16, textAlign: 'center' },
+  chainScroll: { marginBottom: 16 },
   chainRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    marginBottom: 16,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingRight: 8,
   },
   moreBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 3,
