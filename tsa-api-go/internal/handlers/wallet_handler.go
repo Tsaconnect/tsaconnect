@@ -627,6 +627,67 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Transaction submitted", gin.H{
 		"transaction": walletTx,
 	})
+
+	// Poll the blockchain in the background until the tx is mined, then update status.
+	go awaitAndConfirmTx(h.BlockchainService, txHash, walletTx.ID.String(), req.ChainID)
+}
+
+// BackfillPendingTransactions is called once at server startup. It finds all
+// WalletTransactions with status "pending" and a non-empty txHash (submitted
+// before receipt-polling was added) and checks each one against the chain.
+func BackfillPendingTransactions(bs *services.BlockchainService) {
+	var txns []models.WalletTransaction
+	if err := config.DB.
+		Where("status = ? AND tx_hash != ''", models.TxStatusPending).
+		Find(&txns).Error; err != nil {
+		log.Printf("BackfillPendingTransactions: query failed: %v", err)
+		return
+	}
+	log.Printf("BackfillPendingTransactions: checking %d pending transactions", len(txns))
+	for _, tx := range txns {
+		client, _ := bs.ClientForChainID(tx.ChainID)
+		if client == nil {
+			continue
+		}
+		receipt, err := client.GetTransactionReceipt(tx.TxHash)
+		if err != nil || receipt == nil {
+			continue
+		}
+		newStatus := models.TxStatusConfirmed
+		if receipt.Status == 0 {
+			newStatus = models.TxStatusFailed
+		}
+		config.DB.Model(&tx).Update("status", newStatus)
+	}
+	log.Printf("BackfillPendingTransactions: done")
+}
+
+// awaitAndConfirmTx polls eth_getTransactionReceipt every 5 s for up to 5 min
+// and updates the WalletTransaction status once the tx is mined.
+func awaitAndConfirmTx(bs *services.BlockchainService, txHash, txID string, chainID int64) {
+	client, _ := bs.ClientForChainID(chainID)
+	if client == nil {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		receipt, err := client.GetTransactionReceipt(txHash)
+		if err != nil || receipt == nil {
+			// Not yet mined — keep polling.
+			continue
+		}
+		newStatus := models.TxStatusConfirmed
+		if receipt.Status == 0 {
+			newStatus = models.TxStatusFailed
+		}
+		if dbErr := config.DB.Model(&models.WalletTransaction{}).
+			Where("id = ?", txID).
+			Update("status", newStatus).Error; dbErr != nil {
+			log.Printf("awaitAndConfirmTx: db update failed for %s: %v", txID, dbErr)
+		}
+		return
+	}
 }
 
 // GetTransactionHistory handles GET /api/wallet/transactions.

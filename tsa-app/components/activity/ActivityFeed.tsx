@@ -35,13 +35,15 @@ function explorerUrl(item: ActivityItem): string | null {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { color: string; bg: string }> = {
-    confirmed: { color: '#22C55E', bg: '#F0FDF4' },
-    completed: { color: '#22C55E', bg: '#F0FDF4' },
-    pending:   { color: '#F59E0B', bg: '#FFFBEB' },
+    confirmed:       { color: '#22C55E', bg: '#F0FDF4' },
+    completed:       { color: '#22C55E', bg: '#F0FDF4' },
+    submitted:       { color: '#3B82F6', bg: '#EFF6FF' },
+    shipped:         { color: '#3B82F6', bg: '#EFF6FF' },
+    pending:         { color: '#F59E0B', bg: '#FFFBEB' },
     pending_payment: { color: '#F59E0B', bg: '#FFFBEB' },
-    failed:    { color: '#EF4444', bg: '#FEF2F2' },
-    cancelled: { color: '#EF4444', bg: '#FEF2F2' },
-    disputed:  { color: '#EF4444', bg: '#FEF2F2' },
+    failed:          { color: '#EF4444', bg: '#FEF2F2' },
+    cancelled:       { color: '#EF4444', bg: '#FEF2F2' },
+    disputed:        { color: '#EF4444', bg: '#FEF2F2' },
   };
   const st = map[status] ?? map.pending;
   const label = status.replace(/_/g, ' ');

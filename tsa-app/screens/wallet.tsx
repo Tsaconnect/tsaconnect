@@ -14,10 +14,10 @@ import {
   Switch,
   TextInput,
   FlatList,
-  SafeAreaView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialIcons as Icon } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -30,11 +30,13 @@ import {
   getActiveWallet,
   setActiveWallet,
   migrateFromSingleWallet,
+  getProvider,
   WalletMeta,
 } from '../services/wallet';
-import { useTokens } from '../hooks/useTokens';
+import { useTokens, type CustomToken } from '../hooks/useTokens';
 import { CHAINS, type ChainKey } from '../constants/chains';
 import { useNetwork } from '../hooks/useNetwork';
+import { ethers } from 'ethers';
 
 // ── Types ──
 interface WalletAsset {
@@ -80,6 +82,15 @@ function formatTokenBalance(rawBalance: string, decimals: number): number {
   const whole = padded.slice(0, cut) || '0';
   const frac = padded.slice(cut).replace(/0+$/, '');
   return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
+}
+
+function getManageTokenMeta(asset: WalletAsset): string {
+  const name = asset.name?.trim() || '';
+  const chain = asset.details?.chain?.trim() || '';
+
+  if (!name) return chain;
+  if (!chain || name.toLowerCase() === chain.toLowerCase()) return name;
+  return `${name} · ${chain}`;
 }
 
 // mergeDiscoveredTokens fetches the auto-discovery list and appends any
@@ -142,6 +153,71 @@ async function mergeDiscoveredTokens(
     return [...existing, ...additions];
   } catch (err) {
     console.warn('[wallet] discovery merge failed:', err);
+    return null;
+  }
+}
+
+// mergeCustomTokens reads on-chain balanceOf for each user-imported token and
+// merges any not already in `existing` (matched by chainKey+contract). Returns
+// null when there's nothing to add, so the caller can skip a setState.
+async function mergeCustomTokens(
+  existing: WalletAsset[],
+  address: string | undefined,
+  customTokens: CustomToken[],
+): Promise<WalletAsset[] | null> {
+  if (!address || customTokens.length === 0) return null;
+  try {
+    const seenContract = new Set(
+      existing
+        .filter((a) => a.contractAddress && a.details?.chainKey)
+        .map((a) => `${a.details!.chainKey}::${a.contractAddress!.toLowerCase()}`),
+    );
+
+    let nextId = existing.length + 1;
+    const additions: WalletAsset[] = [];
+
+    const results = await Promise.allSettled(
+      customTokens.map(async (t) => {
+        const provider = getProvider(t.chainKey);
+        const contract = new ethers.Contract(
+          t.contractAddress,
+          ['function balanceOf(address) view returns (uint256)'],
+          provider,
+        );
+        const raw: bigint = await contract.balanceOf(address);
+        return { token: t, raw };
+      }),
+    );
+
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const { token, raw } = r.value;
+      const contractKey = `${token.chainKey}::${token.contractAddress.toLowerCase()}`;
+      if (seenContract.has(contractKey)) continue;
+
+      const balance = Number(ethers.formatUnits(raw, token.decimals));
+      const chain = CHAINS[token.chainKey];
+      if (!chain) continue;
+
+      additions.push({
+        id: String(nextId++),
+        symbol: token.symbol,
+        name: token.name,
+        balance,
+        usdValue: 0,
+        usdPrice: 0,
+        iconColor: token.iconColor || hashColor(token.symbol),
+        iconUrl: token.iconUrl,
+        contractAddress: token.contractAddress,
+        decimals: token.decimals,
+        details: { type: 'Imported', chain: chain.name, chainKey: token.chainKey },
+      });
+    }
+
+    if (additions.length === 0) return null;
+    return [...existing, ...additions];
+  } catch (err) {
+    console.warn('[wallet] custom-token merge failed:', err);
     return null;
   }
 }
@@ -250,90 +326,98 @@ const AssetRow: React.FC<{
 };
 
 // ── Fund Modal ──
-const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-    <View style={styles.modalOverlay}>
-      <View style={styles.modalContent}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Fund Your Wallet</Text>
-          <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
+const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Fund Your Wallet</Text>
+            <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
+          </View>
+          <Pressable
+            style={styles.modalOption}
+            onPress={() => { onClose(); router.push('/fundfiat'); }}
+          >
+            <View style={[styles.modalOptionIcon, { backgroundColor: '#E3F2FD' }]}>
+              <Icon name="account-balance" size={24} color="#1976D2" />
+            </View>
+            <View style={styles.modalOptionInfo}>
+              <Text style={styles.modalOptionTitle}>Fiat Deposit</Text>
+              <Text style={styles.modalOptionDesc}>Bank transfer or credit card</Text>
+            </View>
+            <Icon name="chevron-right" size={20} color="#CCC" />
+          </Pressable>
+          <Pressable
+            style={styles.modalOption}
+            onPress={() => { onClose(); router.push('/fund'); }}
+          >
+            <View style={[styles.modalOptionIcon, { backgroundColor: '#FFF3E0' }]}>
+              <Icon name="account-balance-wallet" size={24} color="#E65100" />
+            </View>
+            <View style={styles.modalOptionInfo}>
+              <Text style={styles.modalOptionTitle}>Crypto Deposit</Text>
+              <Text style={styles.modalOptionDesc}>From external wallet or exchange</Text>
+            </View>
+            <Icon name="chevron-right" size={20} color="#CCC" />
+          </Pressable>
+          <Pressable style={styles.modalCancel} onPress={onClose}>
+            <Text style={styles.modalCancelText}>Cancel</Text>
+          </Pressable>
         </View>
-        <Pressable
-          style={styles.modalOption}
-          onPress={() => { onClose(); router.push('/fundfiat'); }}
-        >
-          <View style={[styles.modalOptionIcon, { backgroundColor: '#E3F2FD' }]}>
-            <Icon name="account-balance" size={24} color="#1976D2" />
-          </View>
-          <View style={styles.modalOptionInfo}>
-            <Text style={styles.modalOptionTitle}>Fiat Deposit</Text>
-            <Text style={styles.modalOptionDesc}>Bank transfer or credit card</Text>
-          </View>
-          <Icon name="chevron-right" size={20} color="#CCC" />
-        </Pressable>
-        <Pressable
-          style={styles.modalOption}
-          onPress={() => { onClose(); router.push('/fund'); }}
-        >
-          <View style={[styles.modalOptionIcon, { backgroundColor: '#FFF3E0' }]}>
-            <Icon name="account-balance-wallet" size={24} color="#E65100" />
-          </View>
-          <View style={styles.modalOptionInfo}>
-            <Text style={styles.modalOptionTitle}>Crypto Deposit</Text>
-            <Text style={styles.modalOptionDesc}>From external wallet or exchange</Text>
-          </View>
-          <Icon name="chevron-right" size={20} color="#CCC" />
-        </Pressable>
-        <Pressable style={styles.modalCancel} onPress={onClose}>
-          <Text style={styles.modalCancelText}>Cancel</Text>
-        </Pressable>
       </View>
-    </View>
-  </Modal>
-);
+    </Modal>
+  );
+};
 
 // ── Send Modal ──
-const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-    <View style={styles.modalOverlay}>
-      <View style={styles.modalContent}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Send Funds</Text>
-          <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
+const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Send Funds</Text>
+            <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
+          </View>
+          <Pressable
+            style={styles.modalOption}
+            onPress={() => { onClose(); router.push('/sendfiat'); }}
+          >
+            <View style={[styles.modalOptionIcon, { backgroundColor: '#E8F5E9' }]}>
+              <Icon name="attach-money" size={24} color="#2E7D32" />
+            </View>
+            <View style={styles.modalOptionInfo}>
+              <Text style={styles.modalOptionTitle}>Withdraw as Fiat</Text>
+              <Text style={styles.modalOptionDesc}>Bank transfer or mobile money</Text>
+            </View>
+            <Icon name="chevron-right" size={20} color="#CCC" />
+          </Pressable>
+          <Pressable
+            style={styles.modalOption}
+            onPress={() => { onClose(); router.push('/wallet/send'); }}
+          >
+            <View style={[styles.modalOptionIcon, { backgroundColor: '#F3E5F5' }]}>
+              <Icon name="account-balance-wallet" size={24} color="#7B1FA2" />
+            </View>
+            <View style={styles.modalOptionInfo}>
+              <Text style={styles.modalOptionTitle}>Send Crypto</Text>
+              <Text style={styles.modalOptionDesc}>To external wallet or exchange</Text>
+            </View>
+            <Icon name="chevron-right" size={20} color="#CCC" />
+          </Pressable>
+          <Pressable style={styles.modalCancel} onPress={onClose}>
+            <Text style={styles.modalCancelText}>Cancel</Text>
+          </Pressable>
         </View>
-        <Pressable
-          style={styles.modalOption}
-          onPress={() => { onClose(); router.push('/sendfiat'); }}
-        >
-          <View style={[styles.modalOptionIcon, { backgroundColor: '#E8F5E9' }]}>
-            <Icon name="attach-money" size={24} color="#2E7D32" />
-          </View>
-          <View style={styles.modalOptionInfo}>
-            <Text style={styles.modalOptionTitle}>Withdraw as Fiat</Text>
-            <Text style={styles.modalOptionDesc}>Bank transfer or mobile money</Text>
-          </View>
-          <Icon name="chevron-right" size={20} color="#CCC" />
-        </Pressable>
-        <Pressable
-          style={styles.modalOption}
-          onPress={() => { onClose(); router.push('/wallet/send'); }}
-        >
-          <View style={[styles.modalOptionIcon, { backgroundColor: '#F3E5F5' }]}>
-            <Icon name="account-balance-wallet" size={24} color="#7B1FA2" />
-          </View>
-          <View style={styles.modalOptionInfo}>
-            <Text style={styles.modalOptionTitle}>Send Crypto</Text>
-            <Text style={styles.modalOptionDesc}>To external wallet or exchange</Text>
-          </View>
-          <Icon name="chevron-right" size={20} color="#CCC" />
-        </Pressable>
-        <Pressable style={styles.modalCancel} onPress={onClose}>
-          <Text style={styles.modalCancelText}>Cancel</Text>
-        </Pressable>
       </View>
-    </View>
-  </Modal>
-);
+    </Modal>
+  );
+};
 
 // ── Manage Tokens Modal ──
 const ManageTokensModal: React.FC<{
@@ -343,26 +427,88 @@ const ManageTokensModal: React.FC<{
   tokenKey: (chainKey: string, symbol: string, contractAddress?: string) => string;
   onToggle: (key: string) => void;
   onClose: () => void;
-}> = ({ visible, assets, hiddenTokens, tokenKey, onToggle, onClose }) => {
+  onImport: () => void;
+}> = ({ visible, assets, hiddenTokens, tokenKey, onToggle, onClose, onImport }) => {
   const [search, setSearch] = useState('');
+  const [chainFilter, setChainFilter] = useState<'all' | ChainKey>('all');
+  const insets = useSafeAreaInsets();
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
-    return q
-      ? assets.filter(a => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q))
-      : assets;
-  }, [assets, search]);
+    return assets.filter(a => {
+      if (chainFilter !== 'all' && a.details?.chainKey !== chainFilter) return false;
+      if (!q) return true;
+      return a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q);
+    });
+  }, [assets, search, chainFilter]);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: '#FFF' }}>
+      <View style={[manStyles.screen, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
         <View style={manStyles.header}>
-          <Pressable onPress={onClose} hitSlop={12}>
-            <Icon name="arrow-back" size={22} color="#1A1A1A" />
-          </Pressable>
-          <Text style={manStyles.title}>Manage Tokens</Text>
-          <View style={{ width: 22 }} />
+          <View style={manStyles.headerSide}>
+            <Pressable style={manStyles.headerIconButton} onPress={onClose} hitSlop={12}>
+              <Icon name="arrow-back" size={24} color="#1A1A1A" />
+            </Pressable>
+          </View>
+          <Text style={manStyles.title} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+            Manage crypto
+          </Text>
+          <View style={[manStyles.headerSide, manStyles.headerSideRight]}>
+            <Pressable onPress={onImport} hitSlop={8}>
+              <Text style={manStyles.importAction} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                Import tokens
+              </Text>
+            </Pressable>
+          </View>
         </View>
+
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={manStyles.chipRow}
+          contentContainerStyle={manStyles.chipRowContent}
+        >
+          <Pressable
+            style={[manStyles.chip, chainFilter === 'all' && manStyles.chipActive]}
+            onPress={() => setChainFilter('all')}
+          >
+            <Text
+              numberOfLines={1}
+              style={[manStyles.chipText, chainFilter === 'all' && manStyles.chipTextActive]}
+            >
+              All
+            </Text>
+          </Pressable>
+          {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
+            const isActive = chainFilter === key;
+            return (
+              <Pressable
+                key={key}
+                style={[manStyles.chip, isActive && manStyles.chipActive]}
+                onPress={() => setChainFilter(key)}
+              >
+                <View style={manStyles.chipIconWrap}>
+                  {chain.iconUrl ? (
+                    <Image
+                      source={{ uri: chain.iconUrl }}
+                      style={manStyles.chipIcon}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View style={[manStyles.chipDot, { backgroundColor: chain.iconColor }]} />
+                  )}
+                </View>
+                <Text
+                  numberOfLines={1}
+                  style={[manStyles.chipText, isActive && manStyles.chipTextActive]}
+                >
+                  {chain.shortName}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
 
         <View style={manStyles.searchRow}>
           <Icon name="search" size={18} color="#AAA" />
@@ -390,6 +536,7 @@ const ManageTokensModal: React.FC<{
           renderItem={({ item }) => {
             const key = tokenKey(item.details?.chainKey || '', item.symbol, item.contractAddress);
             const isVisible = !hiddenTokens.has(key);
+            const meta = getManageTokenMeta(item);
             return (
               <Pressable style={manStyles.row} onPress={() => onToggle(key)}>
                 <View style={[manStyles.avatar, { backgroundColor: item.iconColor + '20' }]}>
@@ -400,7 +547,7 @@ const ManageTokensModal: React.FC<{
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={manStyles.symbol}>{item.symbol}</Text>
-                  <Text style={manStyles.meta}>{item.name}  ·  {item.details?.chain}</Text>
+                  {meta ? <Text style={manStyles.meta} numberOfLines={1}>{meta}</Text> : null}
                 </View>
                 <Switch
                   value={isVisible}
@@ -411,16 +558,16 @@ const ManageTokensModal: React.FC<{
               </Pressable>
             );
           }}
-          contentContainerStyle={{ paddingBottom: 32 }}
+          contentContainerStyle={[manStyles.listContent, { paddingBottom: Math.max(insets.bottom, 20) + 12 }]}
         />
-      </SafeAreaView>
+      </View>
     </Modal>
   );
 };
 
 // ── Main Screen ──
 const WalletScreen: React.FC = () => {
-  const { tokenList } = useTokens();
+  const { tokenList, customTokens } = useTokens();
   const { network, switchNetwork } = useNetwork();
   const [assets, setAssets] = useState<WalletAsset[]>([]);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
@@ -434,6 +581,8 @@ const WalletScreen: React.FC = () => {
   const [showWalletSelector, setShowWalletSelector] = useState(false);
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
+  const [selectedChain, setSelectedChain] = useState<'all' | ChainKey>('all');
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -540,9 +689,14 @@ const WalletScreen: React.FC = () => {
           });
         }
       }
-      setAssets(updated);
+      // Inject user-imported custom tokens synchronously before discovery so
+      // they appear in the first render of the asset list; discovery merges
+      // on top and dedupes by chainKey+contract.
+      const withCustom = await mergeCustomTokens(updated, addr || undefined, customTokens);
+      const baseAssets = withCustom ?? updated;
+      setAssets(baseAssets);
 
-      void mergeDiscoveredTokens(updated, addr || undefined).then((merged) => {
+      void mergeDiscoveredTokens(baseAssets, addr || undefined).then((merged) => {
         if (merged && fetchToken === fetchTokenRef.current) setAssets(merged);
       });
     } catch (err) {
@@ -552,7 +706,7 @@ const WalletScreen: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [buildNativeAssets, tokenList, network]);
+  }, [buildNativeAssets, tokenList, customTokens, network]);
 
   useEffect(() => { fetchBalances(); }, [fetchBalances]);
 
@@ -610,10 +764,17 @@ const WalletScreen: React.FC = () => {
     } as any);
   };
 
-  const assetsWithBalance = visibleAssets
+  const chainFilteredAssets = useMemo(
+    () => selectedChain === 'all'
+      ? visibleAssets
+      : visibleAssets.filter(a => a.details?.chainKey === selectedChain),
+    [visibleAssets, selectedChain],
+  );
+
+  const assetsWithBalance = chainFilteredAssets
     .filter(a => a.balance > 0)
     .sort((a, b) => b.usdValue - a.usdValue);
-  const nativeZeroBalance = visibleAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
+  const nativeZeroBalance = chainFilteredAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
 
   const ASSET_PREVIEW = 5;
   const previewAssets = assetsWithBalance.slice(0, ASSET_PREVIEW);
@@ -675,6 +836,44 @@ const WalletScreen: React.FC = () => {
           </View>
         </View>
 
+        {/* Chain filter */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.chainFilterRow}
+          contentContainerStyle={styles.chainFilterContent}
+        >
+          <Pressable
+            style={[styles.chainChip, selectedChain === 'all' && styles.chainChipActive]}
+            onPress={() => setSelectedChain('all')}
+          >
+            <Text style={[styles.chainChipText, selectedChain === 'all' && styles.chainChipTextActive]}>
+              All
+            </Text>
+          </Pressable>
+          {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
+            const isActive = selectedChain === key;
+            const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+            return (
+              <Pressable
+                key={key}
+                style={[styles.chainChip, isActive && styles.chainChipActive]}
+                onPress={() => setSelectedChain(key)}
+              >
+                {chain.iconUrl ? (
+                  <Image source={{ uri: chain.iconUrl }} style={styles.chainChipIcon} />
+                ) : (
+                  <View style={[styles.chainChipDot, { backgroundColor: chain.iconColor }]} />
+                )}
+                <Text style={[styles.chainChipText, isActive && styles.chainChipTextActive]}>
+                  {chain.shortName}
+                </Text>
+                {hasBalance && !isActive && <View style={styles.chainChipDotIndicator} />}
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
         {previewAssets.map(asset => (
           <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
         ))}
@@ -732,12 +931,17 @@ const WalletScreen: React.FC = () => {
         tokenKey={tokenKey}
         onToggle={toggleHidden}
         onClose={() => setShowManageModal(false)}
+        onImport={() => {
+          setShowManageModal(false);
+          router.push('/wallet/import-token' as any);
+        }}
       />
 
       {/* Wallet Selector */}
       <Modal visible={showWalletSelector} transparent animationType="slide" onRequestClose={() => setShowWalletSelector(false)}>
         <Pressable style={styles.modalOverlay} onPress={() => setShowWalletSelector(false)}>
-          <View style={styles.modalContent}>
+          <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+            <View style={styles.sheetHandle} />
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Select Wallet</Text>
               <Pressable onPress={() => setShowWalletSelector(false)}><Icon name="close" size={24} color="#888" /></Pressable>
@@ -911,6 +1115,46 @@ const styles = StyleSheet.create({
   assetBalance: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
   assetUsd: { fontSize: 12, color: '#888', marginTop: 2 },
 
+  // Chain filter
+  chainFilterRow: { marginBottom: 8, marginHorizontal: -4 },
+  chainFilterContent: { paddingHorizontal: 4, gap: 6 },
+  chainChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+    backgroundColor: '#F5F5F5',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  chainChipActive: {
+    backgroundColor: '#D4AF3715',
+    borderColor: '#D4AF37',
+  },
+  chainChipIcon: { width: 14, height: 14, borderRadius: 7 },
+  chainChipDot: { width: 8, height: 8, borderRadius: 4 },
+  chainChipText: { fontSize: 11, fontWeight: '600', color: '#888' },
+  chainChipTextActive: { color: '#D4AF37' },
+  chainChipDotIndicator: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#4CAF50',
+    marginLeft: 2,
+  },
+
+  // Sheet handle
+  sheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#E0E0E0',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+
   // Modals
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 34 },
@@ -939,16 +1183,31 @@ const styles = StyleSheet.create({
 });
 
 const manStyles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
-  title: { fontSize: 17, fontWeight: '700', color: '#1A1A1A' },
-  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, margin: 16, backgroundColor: '#F5F5F5', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
-  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F8F8F8' },
-  avatar: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  avatarImg: { width: 40, height: 40, borderRadius: 20 },
+  screen: { flex: 1, backgroundColor: '#FFF' },
+  header: { minHeight: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
+  headerSide: { width: 104, justifyContent: 'center' },
+  headerSideRight: { alignItems: 'flex-end' },
+  headerIconButton: { width: 32, height: 32, alignItems: 'flex-start', justifyContent: 'center' },
+  title: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700', color: '#1A1A1A' },
+  importAction: { fontSize: 14, fontWeight: '700', color: '#D4AF37' },
+  chipRow: { flexGrow: 0, marginTop: 12 },
+  chipRowContent: { paddingHorizontal: 20, paddingVertical: 4, paddingRight: 28, alignItems: 'center' },
+  chip: { flexShrink: 0, minHeight: 36, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, paddingVertical: 7, borderRadius: 18, backgroundColor: '#F5F5F5', borderWidth: 1, borderColor: 'transparent', marginRight: 8 },
+  chipActive: { backgroundColor: '#D4AF3715', borderColor: '#D4AF37' },
+  chipIconWrap: { width: 16, height: 16, marginRight: 6, alignItems: 'center', justifyContent: 'center' },
+  chipIcon: { width: 16, height: 16, borderRadius: 8 },
+  chipDot: { width: 10, height: 10, borderRadius: 5 },
+  chipText: { fontSize: 12, fontWeight: '500', color: '#666', includeFontPadding: false },
+  chipTextActive: { color: '#D4AF37', fontWeight: '700' },
+  searchRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginTop: 10, marginBottom: 12, backgroundColor: '#F5F5F5', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10 },
+  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A', paddingVertical: 0 },
+  listContent: { paddingTop: 2 },
+  row: { minHeight: 78, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F8F8F8' },
+  avatar: { width: 54, height: 54, borderRadius: 27, justifyContent: 'center', alignItems: 'center' },
+  avatarImg: { width: 54, height: 54, borderRadius: 27 },
   avatarText: { fontSize: 16, fontWeight: '700' },
-  symbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  meta: { fontSize: 12, color: '#AAA', marginTop: 2 },
+  symbol: { fontSize: 16, fontWeight: '600', color: '#1A1A1A' },
+  meta: { fontSize: 13, color: '#AAA', marginTop: 4 },
 });
 
 export default WalletScreen;

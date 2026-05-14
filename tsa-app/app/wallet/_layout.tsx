@@ -14,6 +14,7 @@ const WalletLayout = () => {
       <Stack.Screen name="seedphrase" options={{ title: 'Seed Phrase' }} />
       <Stack.Screen name="history" options={{ title: 'Transaction History' }} />
       <Stack.Screen name="tokens" options={{ title: 'All Tokens' }} />
+      <Stack.Screen name="import-token" options={{ title: 'Import crypto' }} />
     </Stack>
   );
 };
