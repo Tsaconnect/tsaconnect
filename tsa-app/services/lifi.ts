@@ -70,6 +70,25 @@ export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
   return Array.isArray(chainTokens) ? chainTokens : [];
 }
 
+/** Fetch tokens for multiple chains in parallel, stamping chainId on each token. */
+export async function getLiFiAllTokens(chainIds: number[]): Promise<LiFiToken[]> {
+  const headers = await getAuthHeaders();
+  const results = await Promise.allSettled(
+    chainIds.map(chainId =>
+      fetch(`${API_BASE_URL}/swap/lifi/tokens?chainId=${chainId}`, { headers })
+        .then(r => r.json())
+        .then(data => {
+          const tokens: LiFiToken[] = data?.tokens?.[String(chainId)] ?? [];
+          return tokens.map(t => ({ ...t, chainId }));
+        })
+        .catch(() => [] as LiFiToken[])
+    )
+  );
+  return results
+    .filter(r => r.status === 'fulfilled')
+    .flatMap(r => (r as PromiseFulfilledResult<LiFiToken[]>).value);
+}
+
 /** Look up a single token by contract address. Returns null if not found. */
 export async function getLiFiToken(chainId: number, address: string): Promise<LiFiToken | null> {
   const headers = await getAuthHeaders();
