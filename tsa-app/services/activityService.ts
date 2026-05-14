@@ -37,6 +37,25 @@ async function get<T>(path: string): Promise<T | null> {
   } catch { return null; }
 }
 
+// ── Helpers ────────────────────────────────────────────────────
+
+const TOKEN_DECIMALS: Record<string, number> = {
+  MCGP: 18, ETH: 18, BNB: 18, MATIC: 18, AVAX: 18,
+  S: 18, ARB: 18, OP: 18,
+  USDC: 6, USDT: 6, DAI: 18, BUSD: 18,
+};
+
+function weiToHuman(rawWei: string | number, tokenSymbol: string): number {
+  const decimals = TOKEN_DECIMALS[tokenSymbol.toUpperCase()] ?? 18;
+  const str = String(rawWei ?? '0');
+  if (str === '0' || str === '') return 0;
+  const padded = str.padStart(decimals + 1, '0');
+  const cut = padded.length - decimals;
+  const whole = padded.slice(0, cut) || '0';
+  const frac = padded.slice(cut).replace(/0+$/, '');
+  return parseFloat(frac ? `${whole}.${frac}` : whole);
+}
+
 // ── Normalizers ────────────────────────────────────────────────
 
 function truncate(addr: string): string {
@@ -80,7 +99,10 @@ function fromWalletTx(tx: any): ActivityItem {
         : tx.chain ?? '',
     amount: `${tx.amount} ${tx.tokenSymbol}`,
     positive: isReceive,
-    status: tx.status ?? 'confirmed',
+    // "pending" from the backend means the tx was broadcast but receipt not yet
+    // confirmed. If a txHash exists, the tx reached the chain — show "submitted"
+    // so it doesn't read as stuck. Confirmed/failed are used as-is.
+    status: tx.status === 'pending' && tx.txHash ? 'submitted' : (tx.status ?? 'confirmed'),
     timestamp: tx.createdAt,
     txHash: tx.txHash,
     chainId: tx.chainId,
@@ -129,18 +151,21 @@ function fromOrder(order: any): ActivityItem {
   const statusColors: Record<string, string> = {
     completed: '#22C55E',
     pending_payment: '#F59E0B',
+    shipped: '#3B82F6',
     cancelled: '#EF4444',
     disputed: '#EF4444',
   };
   const color = statusColors[order.status] ?? '#888';
+  const token = (order.token ?? '').toUpperCase();
+  const humanAmount = weiToHuman(order.totalAmount ?? '0', token);
   return {
     id: order.id,
     type: 'order',
     subtype: order.status,
     title: order.product?.name ? `Order: ${order.product.name}` : 'Product order',
-    subtitle: `${order.status.replace(/_/g, ' ')} · ${order.token}`,
-    amount: `$${Number(order.totalAmount ?? 0).toFixed(2)}`,
-    amountUSD: Number(order.totalAmount ?? 0),
+    subtitle: `${order.status.replace(/_/g, ' ')} · ${token}`,
+    amount: `${humanAmount.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${token}`,
+    amountUSD: undefined,
     positive: false,
     status: order.status,
     timestamp: order.createdAt,

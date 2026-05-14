@@ -97,6 +97,10 @@ func main() {
 	slh := handlers.NewSwapLiFiHandler()
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 
+	// Backfill any pending transactions that already have a txHash.
+	// These were submitted before the receipt-polling goroutine was added.
+	go handlers.BackfillPendingTransactions(blockchainService)
+
 	// Set Gin mode based on environment
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
