@@ -15,7 +15,7 @@ import { getChainByChainId, CHAINS } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, fetchPendingNonce, signLiFiTransaction } from '@/services/wallet';
 import { ethers } from 'ethers';
-import { getLiFiTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
+import { getLiFiTokens, getLiFiAllTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
 const GOLD = '#D4AF37';
@@ -52,6 +52,8 @@ export default function AllSwapScreen() {
   const [toAllTokens, setToAllTokens] = useState<LiFiToken[]>([]);
   const [tokensLoading, setTokensLoading] = useState(false);
   const [toTokensLoading, setToTokensLoading] = useState(false);
+  const [allChainsTokens, setAllChainsTokens] = useState<LiFiToken[]>([]);
+  const [allChainsLoading, setAllChainsLoading] = useState(true);
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [signingStatus, setSigningStatus] = useState('');
   const [txHash, setTxHash] = useState('');
@@ -70,6 +72,15 @@ export default function AllSwapScreen() {
     getActiveWallet()
       .then(addr => { if (addr) setWalletAddress(addr); })
       .finally(() => setWalletLoading(false));
+  }, []);
+
+  // Pre-fetch tokens for all supported chains once at mount
+  useEffect(() => {
+    const chainIds = Object.values(CHAINS).map(c => c.chainId);
+    getLiFiAllTokens(chainIds)
+      .then(tokens => setAllChainsTokens(tokens))
+      .catch(() => {})
+      .finally(() => setAllChainsLoading(false));
   }, []);
 
   useFocusEffect(useCallback(() => {
@@ -539,6 +550,8 @@ export default function AllSwapScreen() {
         chainId={pickerMode === 'from' ? fromChainId : toChainId}
         userBalances={balances}
         allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
+        allChainsTokens={allChainsTokens}
+        allChainsLoading={allChainsLoading}
         tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
         onChainChange={(newChainId) => {
           if (pickerMode === 'from') setFromChainId(newChainId);

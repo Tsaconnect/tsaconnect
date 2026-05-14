@@ -43,6 +43,7 @@ function chainLogoUri(chain: LiFiChain): string | undefined {
 
 const GOLD = '#D4AF37';
 const INLINE_CHAIN_COUNT = 4;
+const PAGE_SIZE = 50;
 
 interface Props {
   visible: boolean;
@@ -51,6 +52,8 @@ interface Props {
   onSelect: (token: LiFiToken, chainId: number) => void;
   onClose: () => void;
   allTokens: LiFiToken[];
+  allChainsTokens?: LiFiToken[];   // combined list across all chains
+  allChainsLoading?: boolean;
   tokensLoading?: boolean;
   chainId: number;
   onChainChange?: (chainId: number) => void;
@@ -172,9 +175,10 @@ function ChainPickerModal({
 }
 
 function TokenRow({
-  token, chainId, balance, usdValue, onPress,
+  token, chainId, balance, usdValue, chainBadge, onPress,
 }: {
-  token: LiFiToken; chainId: number; balance?: string; usdValue?: string; onPress: () => void;
+  token: LiFiToken; chainId: number; balance?: string; usdValue?: string;
+  chainBadge?: string; onPress: () => void;
 }) {
   const initial = token.symbol[0] ?? '?';
   const displayBalance = balance !== undefined ? formatBalance(balance) : undefined;
@@ -192,7 +196,14 @@ function TokenRow({
         )}
       </View>
       <View style={s.rowMid}>
-        <Text style={s.symbol}>{token.symbol}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={s.symbol}>{token.symbol}</Text>
+          {chainBadge && (
+            <View style={s.chainBadge}>
+              <Text style={s.chainBadgeText}>{chainBadge}</Text>
+            </View>
+          )}
+        </View>
         <Text style={s.name} numberOfLines={1}>{token.name}</Text>
       </View>
       {displayBalance !== undefined && (
@@ -206,16 +217,26 @@ function TokenRow({
 }
 
 export default function TokenPickerModal({
-  visible, mode, userBalances, onSelect, onClose, allTokens, tokensLoading, chainId, onChainChange,
+  visible, mode, userBalances, onSelect, onClose, allTokens, allChainsTokens, allChainsLoading,
+  tokensLoading, chainId, onChainChange,
 }: Props) {
   const [search, setSearch] = useState('');
   const [chains, setChains] = useState<LiFiChain[]>([]);
   const [chainsLoading, setChainsLoading] = useState(true);
   const [chainPickerVisible, setChainPickerVisible] = useState(false);
+  const [selectedChainId, setSelectedChainId] = useState<number | 'all'>('all');
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [addrToken, setAddrToken] = useState<LiFiToken | null>(null);
   const [addrLoading, setAddrLoading] = useState(false);
   const [addrNotFound, setAddrNotFound] = useState(false);
   const addrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Build chainId → name map for badges
+  const chainNameMap = useMemo(() => {
+    const m = new Map<number, string>();
+    chains.forEach(c => m.set(c.id, c.key.toUpperCase()));
+    return m;
+  }, [chains]);
 
   useEffect(() => {
     getLiFiChains()
@@ -225,7 +246,13 @@ export default function TokenPickerModal({
   }, []);
 
   useEffect(() => {
-    if (visible) { setSearch(''); setAddrToken(null); setAddrNotFound(false); }
+    if (visible) {
+      setSearch('');
+      setAddrToken(null);
+      setAddrNotFound(false);
+      setSelectedChainId('all');
+      setVisibleCount(PAGE_SIZE);
+    }
   }, [visible]);
 
   // Address lookup — debounced 600ms
@@ -254,21 +281,29 @@ export default function TokenPickerModal({
 
   const remainingCount = chains.length - inlineChains.length;
 
+  // Source list: "All" uses combined cross-chain tokens, specific chain uses that chain's list
+  const isAllChains = selectedChainId === 'all';
+  const sourceTokens = isAllChains
+    ? (allChainsTokens ?? allTokens)
+    : allTokens.filter(t => !t.chainId || t.chainId === selectedChainId);
+
   const heldTokens = useMemo(() => {
     if (mode === 'to') return [];
     return userBalances
       .filter(b => Number(b.balance) > 0)
       .map(b => {
-        const match = allTokens.find(t => t.symbol.toLowerCase() === b.symbol.toLowerCase());
+        const match = (allChainsTokens ?? allTokens).find(
+          t => t.symbol.toLowerCase() === b.symbol.toLowerCase()
+        );
         return match ? { token: match, balance: b.balance, usdValue: b.usdValue } : null;
       })
       .filter(Boolean) as { token: LiFiToken; balance: string; usdValue: string }[];
-  }, [userBalances, allTokens, mode]);
+  }, [userBalances, allTokens, allChainsTokens, mode]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     const heldAddresses = new Set(heldTokens.map(h => h.token.address));
-    return allTokens.filter(
+    return sourceTokens.filter(
       t =>
         !heldAddresses.has(t.address) &&
         (q === '' ||
@@ -276,7 +311,7 @@ export default function TokenPickerModal({
           t.name.toLowerCase().includes(q) ||
           t.address.toLowerCase().startsWith(q))
     );
-  }, [allTokens, search, heldTokens]);
+  }, [sourceTokens, search, heldTokens]);
 
   const filteredHeld = useMemo(() => {
     if (!search.trim()) return heldTokens;
@@ -289,19 +324,23 @@ export default function TokenPickerModal({
     );
   }, [heldTokens, search]);
 
+  // Paginate the "ALL TOKENS" list
+  const paginatedFiltered = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
+
   const sections = useMemo(() => {
     const result: { title: string; data: (LiFiToken & { _held?: { balance: string; usdValue: string } })[] }[] = [];
     if (filteredHeld.length > 0) {
       result.push({ title: 'YOUR TOKENS', data: filteredHeld.map(h => ({ ...h.token, _held: { balance: h.balance, usdValue: h.usdValue } })) });
     }
-    if (filtered.length > 0) {
-      result.push({ title: 'ALL TOKENS', data: filtered });
+    if (paginatedFiltered.length > 0) {
+      result.push({ title: 'ALL TOKENS', data: paginatedFiltered });
     }
     return result;
-  }, [filteredHeld, filtered]);
+  }, [filteredHeld, paginatedFiltered]);
 
-  const noResults = sections.length === 0 && search.trim().length > 0 && !tokensLoading;
-  const noTokens = sections.length === 0 && search.trim().length === 0 && (allTokens.length === 0 || !!tokensLoading);
+  const isLoading = isAllChains ? !!allChainsLoading : !!tokensLoading;
+  const noResults = sections.length === 0 && search.trim().length > 0 && !isAddressSearch && !isLoading;
+  const noTokens = sections.length === 0 && search.trim().length === 0 && isLoading;
 
   return (
     <>
@@ -313,6 +352,15 @@ export default function TokenPickerModal({
 
             {onChainChange && (
               <View style={s.chainRow}>
+                {/* All chip */}
+                <TouchableOpacity
+                  style={[cs.chip, isAllChains && cs.chipActive]}
+                  onPress={() => { setSelectedChainId('all'); setVisibleCount(PAGE_SIZE); }}
+                  activeOpacity={0.75}
+                >
+                  <Text style={[cs.chipLabel, isAllChains && cs.chipLabelActive]}>All</Text>
+                </TouchableOpacity>
+
                 {chainsLoading ? (
                   <ActivityIndicator size="small" color={GOLD} />
                 ) : (
@@ -321,8 +369,12 @@ export default function TokenPickerModal({
                       <ChainChip
                         key={chain.id}
                         chain={chain}
-                        selected={chain.id === chainId}
-                        onPress={() => onChainChange(chain.id)}
+                        selected={selectedChainId === chain.id}
+                        onPress={() => {
+                          setSelectedChainId(chain.id);
+                          setVisibleCount(PAGE_SIZE);
+                          onChainChange(chain.id);
+                        }}
                       />
                     ))}
                     {remainingCount > 0 && (
@@ -394,27 +446,37 @@ export default function TokenPickerModal({
             ) : noTokens ? (
               <View style={s.emptyWrap}>
                 <ActivityIndicator size="small" color={GOLD} />
-                <Text style={s.emptyText}>{tokensLoading ? 'Loading tokens…' : 'No tokens available'}</Text>
+                <Text style={s.emptyText}>Loading tokens…</Text>
               </View>
             ) : (
               <SectionList
                 sections={sections}
-                keyExtractor={(item, index) => `${item.address}-${index}`}
+                keyExtractor={(item, index) => `${item.address}-${item.chainId ?? 0}-${index}`}
                 renderSectionHeader={({ section }) => (
-                  <Text style={s.sectionLabel}>{section.title}</Text>
+                  <View style={s.sectionHeaderRow}>
+                    <Text style={s.sectionLabel}>{section.title}</Text>
+                    {section.title === 'ALL TOKENS' && filtered.length > visibleCount && (
+                      <Text style={s.sectionCount}>{visibleCount}/{filtered.length}</Text>
+                    )}
+                  </View>
                 )}
                 renderItem={({ item }) => {
                   const held = (item as any)._held;
+                  const tokenChainId = item.chainId ?? chainId;
+                  const chainBadge = isAllChains && item.chainId ? chainNameMap.get(item.chainId) : undefined;
                   return (
                     <TokenRow
                       token={item}
-                      chainId={chainId}
+                      chainId={tokenChainId}
                       balance={held?.balance}
                       usdValue={held?.usdValue}
-                      onPress={() => { onSelect(item, chainId); onClose(); }}
+                      chainBadge={chainBadge}
+                      onPress={() => { onSelect(item, tokenChainId); onClose(); }}
                     />
                   );
                 }}
+                onEndReached={() => setVisibleCount(c => c + PAGE_SIZE)}
+                onEndReachedThreshold={0.3}
                 keyboardShouldPersistTaps="handled"
                 stickySectionHeadersEnabled={false}
                 showsVerticalScrollIndicator={false}
@@ -515,10 +577,11 @@ const s = StyleSheet.create({
     backgroundColor: '#F5F5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
   },
   searchInput: { flex: 1, fontSize: 14, color: '#1A1A1A' },
-  sectionLabel: {
-    fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1,
-    paddingVertical: 8, backgroundColor: '#FFF',
-  },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#FFF', paddingVertical: 8 },
+  sectionLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1 },
+  sectionCount: { fontSize: 10, color: '#CCC' },
+  chainBadge: { backgroundColor: '#1A1A1A', borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 },
+  chainBadgeText: { fontSize: 9, fontWeight: '700', color: '#AAA' },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, gap: 12 },
   iconWrap: { width: 36, height: 36 },
   iconImg: { width: 36, height: 36, borderRadius: 18 },
