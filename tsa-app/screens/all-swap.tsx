@@ -15,7 +15,7 @@ import { getChainByChainId, CHAINS } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, fetchPendingNonce, signLiFiTransaction } from '@/services/wallet';
 import { ethers } from 'ethers';
-import { getLiFiTokens, getLiFiAllTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
+import { getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
 const GOLD = '#D4AF37';
@@ -53,7 +53,11 @@ export default function AllSwapScreen() {
   const [tokensLoading, setTokensLoading] = useState(false);
   const [toTokensLoading, setToTokensLoading] = useState(false);
   const [allChainsTokens, setAllChainsTokens] = useState<LiFiToken[]>([]);
-  const [allChainsLoading, setAllChainsLoading] = useState(true);
+  const [allChainsLoading, setAllChainsLoading] = useState(false);
+  const [allChainsTotal, setAllChainsTotal] = useState(0);
+  const [allChainsQuery, setAllChainsQuery] = useState('');
+  const allChainsLoadedQueryRef = useRef<string | null>(null);
+  const ALL_CHAINS_PAGE_SIZE = 100;
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [signingStatus, setSigningStatus] = useState('');
   const [txHash, setTxHash] = useState('');
@@ -74,14 +78,53 @@ export default function AllSwapScreen() {
       .finally(() => setWalletLoading(false));
   }, []);
 
-  // Pre-fetch tokens for all supported chains once at mount
+  // Lazy-load all-chain tokens paginated. Initial page is fetched the first
+  // time the picker is opened in "All" mode (see `loadAllChainsPage`); we don't
+  // pre-fetch at mount because the LiFi cross-chain blob is several MB and
+  // blocks the home screen if shipped eagerly.
+  const loadAllChainsPage = useCallback(async (opts: { reset?: boolean; q?: string } = {}) => {
+    const q = (opts.q ?? allChainsQuery).trim();
+    const reset = !!opts.reset;
+    if (allChainsLoading) return;
+    // When the query changes we always reset the cursor.
+    if (allChainsLoadedQueryRef.current !== q) {
+      allChainsLoadedQueryRef.current = q;
+    }
+    setAllChainsLoading(true);
+    try {
+      const offset = reset ? 0 : allChainsTokens.length;
+      const page = await getLiFiAllChainTokens({ offset, limit: ALL_CHAINS_PAGE_SIZE, q: q || undefined });
+      setAllChainsTotal(page.total);
+      setAllChainsTokens(prev => (reset ? page.tokens : [...prev, ...page.tokens]));
+    } catch {
+      // Swallow: picker will fall back to per-chain `allTokens`.
+    } finally {
+      setAllChainsLoading(false);
+    }
+  }, [allChainsLoading, allChainsTokens.length, allChainsQuery]);
+
+  // First-page load triggered when the picker opens for the first time.
   useEffect(() => {
-    const chainIds = Object.values(CHAINS).map(c => c.chainId);
-    getLiFiAllTokens(chainIds)
-      .then(tokens => setAllChainsTokens(tokens))
-      .catch(() => {})
-      .finally(() => setAllChainsLoading(false));
-  }, []);
+    if (pickerMode === null) return;
+    if (allChainsLoadedQueryRef.current !== null) return;
+    void loadAllChainsPage({ reset: true, q: '' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickerMode]);
+
+  // Reset+refetch when the user types into the picker's search (debounced
+  // inside the picker — see the `onSearchChange` prop).
+  const handleAllChainsSearchChange = useCallback((q: string) => {
+    setAllChainsQuery(q);
+    setAllChainsTokens([]);
+    allChainsLoadedQueryRef.current = null;
+    void loadAllChainsPage({ reset: true, q });
+  }, [loadAllChainsPage]);
+
+  const handleAllChainsLoadMore = useCallback(() => {
+    if (allChainsLoading) return;
+    if (allChainsTokens.length >= allChainsTotal) return;
+    void loadAllChainsPage();
+  }, [allChainsLoading, allChainsTokens.length, allChainsTotal, loadAllChainsPage]);
 
   useFocusEffect(useCallback(() => {
     loadBalances();
@@ -552,6 +595,9 @@ export default function AllSwapScreen() {
         allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
         allChainsTokens={allChainsTokens}
         allChainsLoading={allChainsLoading}
+        allChainsHasMore={allChainsTokens.length < allChainsTotal}
+        onAllChainsLoadMore={handleAllChainsLoadMore}
+        onAllChainsSearchChange={handleAllChainsSearchChange}
         tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
         onChainChange={(newChainId) => {
           if (pickerMode === 'from') setFromChainId(newChainId);

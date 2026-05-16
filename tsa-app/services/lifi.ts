@@ -89,6 +89,42 @@ export async function getLiFiAllTokens(chainIds: number[]): Promise<LiFiToken[]>
     .flatMap(r => (r as PromiseFulfilledResult<LiFiToken[]>).value);
 }
 
+export interface AllChainTokensPage {
+  tokens: LiFiToken[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+/**
+ * Paginated, optionally-filtered slice of every LiFi-indexed token across
+ * every supported chain. Server caches the full LiFi blob for 24h; pages
+ * are pure in-memory slices on the BE.
+ */
+export async function getLiFiAllChainTokens(params: {
+  offset?: number;
+  limit?: number;
+  q?: string;
+  chains?: number[];
+}): Promise<AllChainTokensPage> {
+  const headers = await getAuthHeaders();
+  const qs = new URLSearchParams();
+  if (params.offset != null) qs.append('offset', String(params.offset));
+  if (params.limit != null) qs.append('limit', String(params.limit));
+  if (params.q && params.q.trim()) qs.append('q', params.q.trim());
+  if (params.chains && params.chains.length > 0) qs.append('chains', params.chains.join(','));
+  const url = `${API_BASE_URL}/swap/lifi/tokens/all${qs.toString() ? `?${qs.toString()}` : ''}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error('Failed to fetch all-chain token list');
+  const data = await res.json();
+  return {
+    tokens: Array.isArray(data?.tokens) ? data.tokens : [],
+    total: typeof data?.total === 'number' ? data.total : 0,
+    offset: typeof data?.offset === 'number' ? data.offset : 0,
+    limit: typeof data?.limit === 'number' ? data.limit : 0,
+  };
+}
+
 /** Look up a single token by contract address. Returns null if not found. */
 export async function getLiFiToken(chainId: number, address: string): Promise<LiFiToken | null> {
   const headers = await getAuthHeaders();
