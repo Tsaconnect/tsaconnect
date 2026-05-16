@@ -54,6 +54,9 @@ interface Props {
   allTokens: LiFiToken[];
   allChainsTokens?: LiFiToken[];   // combined list across all chains
   allChainsLoading?: boolean;
+  allChainsHasMore?: boolean;
+  onAllChainsLoadMore?: () => void;
+  onAllChainsSearchChange?: (q: string) => void;
   tokensLoading?: boolean;
   chainId: number;
   onChainChange?: (chainId: number) => void;
@@ -77,6 +80,7 @@ function formatUSD(balance: string, usdValue: string, priceUSD?: string): string
 }
 
 function ChainChip({ chain, selected, onPress }: { chain: LiFiChain; selected: boolean; onPress: () => void }) {
+  const label = (chain.key || chain.name || '').toUpperCase().slice(0, 4);
   return (
     <TouchableOpacity style={[cs.chip, selected && cs.chipActive]} onPress={onPress} activeOpacity={0.75}>
       {chainLogoUri(chain) ? (
@@ -86,8 +90,12 @@ function ChainChip({ chain, selected, onPress }: { chain: LiFiChain; selected: b
           <Text style={cs.chipImgLetter}>{chain.key[0]?.toUpperCase()}</Text>
         </View>
       )}
-      <Text style={[cs.chipLabel, selected && cs.chipLabelActive]} numberOfLines={1}>
-        {chain.key.toUpperCase()}
+      <Text
+        style={[cs.chipLabel, selected && cs.chipLabelActive]}
+        numberOfLines={1}
+        ellipsizeMode="clip"
+      >
+        {label}
       </Text>
     </TouchableOpacity>
   );
@@ -218,6 +226,7 @@ function TokenRow({
 
 export default function TokenPickerModal({
   visible, mode, userBalances, onSelect, onClose, allTokens, allChainsTokens, allChainsLoading,
+  allChainsHasMore, onAllChainsLoadMore, onAllChainsSearchChange,
   tokensLoading, chainId, onChainChange,
 }: Props) {
   const [search, setSearch] = useState('');
@@ -227,6 +236,7 @@ export default function TokenPickerModal({
   const [selectedChainId, setSelectedChainId] = useState<number | 'all'>('all');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [addrToken, setAddrToken] = useState<LiFiToken | null>(null);
+  const [addrChainId, setAddrChainId] = useState<number | null>(null);
   const [addrLoading, setAddrLoading] = useState(false);
   const [addrNotFound, setAddrNotFound] = useState(false);
   const addrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -249,26 +259,88 @@ export default function TokenPickerModal({
     if (visible) {
       setSearch('');
       setAddrToken(null);
+      setAddrChainId(null);
       setAddrNotFound(false);
       setSelectedChainId('all');
       setVisibleCount(PAGE_SIZE);
     }
   }, [visible]);
 
-  // Address lookup — debounced 600ms
+  // Address lookup — debounced 600ms. When the user has the "All" chip
+  // selected we fan out across every LiFi-supported chain in parallel and
+  // pick the first hit, because the pasted contract is almost always on a
+  // chain other than whichever `chainId` happens to be passed in as a prop.
   const isAddressSearch = search.trim().startsWith('0x') && search.trim().length >= 40;
   useEffect(() => {
-    if (!isAddressSearch) { setAddrToken(null); setAddrNotFound(false); return; }
-    setAddrLoading(true); setAddrToken(null); setAddrNotFound(false);
+    if (!isAddressSearch) {
+      setAddrToken(null);
+      setAddrChainId(null);
+      setAddrNotFound(false);
+      return;
+    }
+    setAddrLoading(true);
+    setAddrToken(null);
+    setAddrChainId(null);
+    setAddrNotFound(false);
     if (addrTimer.current) clearTimeout(addrTimer.current);
     addrTimer.current = setTimeout(async () => {
-      const token = await getLiFiToken(chainId, search.trim()).catch(() => null);
-      setAddrToken(token);
-      setAddrNotFound(!token);
+      const trimmed = search.trim();
+      const shouldFanOut = selectedChainId === 'all' && chains.length > 0;
+      if (shouldFanOut) {
+        const candidateIds = chains.map((c) => c.id);
+        const results = await Promise.allSettled(
+          candidateIds.map((id) => getLiFiToken(id, trimmed)),
+        );
+        let hitToken: LiFiToken | null = null;
+        let hitChainId: number | null = null;
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status === 'fulfilled' && r.value) {
+            hitToken = r.value;
+            hitChainId = candidateIds[i];
+            break;
+          }
+        }
+        setAddrToken(hitToken);
+        setAddrChainId(hitChainId);
+        setAddrNotFound(!hitToken);
+      } else {
+        const lookupChainId = typeof selectedChainId === 'number' ? selectedChainId : chainId;
+        const token = await getLiFiToken(lookupChainId, trimmed).catch(() => null);
+        setAddrToken(token);
+        setAddrChainId(token ? lookupChainId : null);
+        setAddrNotFound(!token);
+      }
       setAddrLoading(false);
     }, 600);
-    return () => { if (addrTimer.current) clearTimeout(addrTimer.current); };
-  }, [search, chainId]);
+    return () => {
+      if (addrTimer.current) clearTimeout(addrTimer.current);
+    };
+  }, [search, chainId, selectedChainId, chains, isAddressSearch]);
+
+  // Forward typing into the search box to the parent's all-chains fetcher
+  // (debounced 350ms) so the BE-paginated list resets to a fresh query
+  // page. We skip this for address searches — they have their own path
+  // above — and for non-"All" chips since per-chain results are already
+  // pre-fetched client-side.
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastForwardedSearchRef = useRef<string>('');
+  const isAllChainsSelected = selectedChainId === 'all';
+  useEffect(() => {
+    if (!onAllChainsSearchChange) return;
+    if (!isAllChainsSelected) return;
+    if (isAddressSearch) return;
+    const next = search.trim();
+    if (next === lastForwardedSearchRef.current) return;
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      lastForwardedSearchRef.current = next;
+      onAllChainsSearchChange(next);
+    }, 350);
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, [search, isAllChainsSelected, isAddressSearch, onAllChainsSearchChange]);
 
   // Inline chips: always include selected chain, fill rest from list
   const inlineChains = useMemo(() => {
@@ -359,11 +431,16 @@ export default function TokenPickerModal({
               >
                 {/* All chip */}
                 <TouchableOpacity
-                  style={[cs.chip, isAllChains && cs.chipActive]}
+                  style={[cs.chip, cs.chipAll, isAllChains && cs.chipActive]}
                   onPress={() => { setSelectedChainId('all'); setVisibleCount(PAGE_SIZE); }}
                   activeOpacity={0.75}
                 >
-                  <Text style={[cs.chipLabel, isAllChains && cs.chipLabelActive]}>All</Text>
+                  <Text
+                    style={[cs.chipLabel, cs.chipLabelStandalone, isAllChains && cs.chipLabelActive]}
+                    numberOfLines={1}
+                  >
+                    All
+                  </Text>
                 </TouchableOpacity>
 
                 {chainsLoading ? (
@@ -421,7 +498,7 @@ export default function TokenPickerModal({
             ) : addrToken ? (
               <TouchableOpacity
                 style={s.addrRow}
-                onPress={() => { onSelect(addrToken, chainId); onClose(); }}
+                onPress={() => { onSelect(addrToken, addrChainId ?? chainId); onClose(); }}
                 activeOpacity={0.7}
               >
                 {addrToken.logoURI
@@ -429,7 +506,14 @@ export default function TokenPickerModal({
                   : <View style={[s.addrIcon, s.addrIconFallback]}><Text style={s.addrIconLetter}>{addrToken.symbol[0]}</Text></View>
                 }
                 <View style={{ flex: 1 }}>
-                  <Text style={s.addrSymbol}>{addrToken.symbol}</Text>
+                  <View style={s.addrSymbolRow}>
+                    <Text style={s.addrSymbol}>{addrToken.symbol}</Text>
+                    {addrChainId != null && chainNameMap.get(addrChainId) && (
+                      <View style={s.chainBadge}>
+                        <Text style={s.chainBadgeText}>{chainNameMap.get(addrChainId)}</Text>
+                      </View>
+                    )}
+                  </View>
                   <Text style={s.addrName} numberOfLines={1}>{addrToken.name}</Text>
                   <Text style={s.addrAddress} numberOfLines={1}>{addrToken.address}</Text>
                 </View>
@@ -438,7 +522,11 @@ export default function TokenPickerModal({
             ) : addrNotFound ? (
               <View style={s.addrRow}>
                 <Ionicons name="alert-circle-outline" size={20} color="#DC2626" />
-                <Text style={[s.addrLabel, { color: '#DC2626' }]}>Token not found on this chain</Text>
+                <Text style={[s.addrLabel, { color: '#DC2626' }]}>
+                  {selectedChainId === 'all'
+                    ? 'Token not found on any supported chain'
+                    : 'Token not found on this chain'}
+                </Text>
               </View>
             ) : null
           )}
@@ -480,8 +568,24 @@ export default function TokenPickerModal({
                     />
                   );
                 }}
-                onEndReached={() => setVisibleCount(c => c + PAGE_SIZE)}
+                onEndReached={() => {
+                  // Client-side window grows for the per-chain path (cheap
+                  // slice over the already-loaded `allTokens`). For the
+                  // all-chains path the server holds the canonical list,
+                  // so we ask the parent to fetch the next page.
+                  setVisibleCount(c => c + PAGE_SIZE);
+                  if (isAllChains && allChainsHasMore && !allChainsLoading) {
+                    onAllChainsLoadMore?.();
+                  }
+                }}
                 onEndReachedThreshold={0.3}
+                ListFooterComponent={
+                  isAllChains && allChainsLoading && sections.length > 0 ? (
+                    <View style={s.footerLoader}>
+                      <ActivityIndicator size="small" color={GOLD} />
+                    </View>
+                  ) : null
+                }
                 keyboardShouldPersistTaps="handled"
                 stickySectionHeadersEnabled={false}
                 showsVerticalScrollIndicator={false}
@@ -505,19 +609,38 @@ export default function TokenPickerModal({
 // Chain chip styles
 const cs = StyleSheet.create({
   chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#1A1A1A', borderRadius: 20,
-    paddingHorizontal: 10, paddingVertical: 7,
-    borderWidth: 1.5, borderColor: 'transparent',
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    backgroundColor: '#1A1A1A',
+    borderRadius: 20,
+    paddingLeft: 8,
+    paddingRight: 14,
+    paddingVertical: 8,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    minHeight: 34,
   },
-  chipActive: { borderColor: GOLD },
-  chipImg: { width: 18, height: 18, borderRadius: 9 },
+  chipAll: {
+    paddingHorizontal: 16,
+  },
+  chipActive: { borderColor: GOLD, backgroundColor: '#2A2516' },
+  chipImg: { width: 20, height: 20, borderRadius: 10 },
   chipImgFallback: {
-    width: 18, height: 18, borderRadius: 9,
+    width: 20, height: 20, borderRadius: 10,
     backgroundColor: '#444', alignItems: 'center', justifyContent: 'center',
   },
-  chipImgLetter: { fontSize: 9, fontWeight: '700', color: '#FFF' },
-  chipLabel: { fontSize: 11, fontWeight: '700', color: '#AAA' },
+  chipImgLetter: { fontSize: 10, fontWeight: '700', color: '#FFF' },
+  chipLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#D4D4D4',
+    marginLeft: 8,
+    letterSpacing: 0.3,
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+  },
+  chipLabelStandalone: { marginLeft: 0 },
   chipLabelActive: { color: GOLD },
 });
 
@@ -572,12 +695,26 @@ const s = StyleSheet.create({
     paddingRight: 8,
   },
   moreBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    backgroundColor: '#1A1A1A', borderRadius: 20,
-    paddingHorizontal: 10, paddingVertical: 7,
-    borderWidth: 1.5, borderColor: 'transparent',
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    backgroundColor: '#1A1A1A',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    minHeight: 34,
   },
-  moreBtnText: { fontSize: 11, fontWeight: '700', color: '#AAA' },
+  moreBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#D4D4D4',
+    marginRight: 4,
+    letterSpacing: 0.3,
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+  },
   searchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#F5F5F5', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8,
@@ -604,6 +741,7 @@ const s = StyleSheet.create({
   addrIconFallback: { backgroundColor: GOLD, alignItems: 'center', justifyContent: 'center' },
   addrIconLetter: { fontSize: 16, fontWeight: '700', color: '#FFF' },
   addrLabel: { fontSize: 13, color: '#888' },
+  addrSymbolRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   addrSymbol: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
   addrName: { fontSize: 12, color: '#888', marginTop: 1 },
   addrAddress: { fontSize: 10, color: '#BBB', marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
@@ -612,4 +750,5 @@ const s = StyleSheet.create({
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 48, gap: 8 },
   emptyText: { fontSize: 14, fontWeight: '600', color: '#555', textAlign: 'center' },
   emptyHint: { fontSize: 12, color: '#AAA', textAlign: 'center' },
+  footerLoader: { paddingVertical: 18, alignItems: 'center' },
 });

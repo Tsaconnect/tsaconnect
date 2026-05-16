@@ -258,6 +258,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			lifiGroup.GET("/chains", slh.GetChains)
 			lifiGroup.GET("/tokens", slh.GetTokens)
+			lifiGroup.GET("/tokens/all", slh.GetAllChainTokens)
 			lifiGroup.GET("/token", slh.GetToken)
 			lifiGroup.GET("/quote", slh.GetQuote)
 		}
