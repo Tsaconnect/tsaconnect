@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -6,12 +6,13 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
-  Alert,
   TextInput,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import { ethers } from 'ethers';
 import { router, useNavigation } from 'expo-router';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
@@ -26,6 +27,17 @@ import {
 } from '../../services/wallet';
 import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/walletApi';
 
+const SEED_LENGTH = 12;
+const enWordlist = ethers.wordlists.en;
+const isBip39Word = (w: string) => {
+  if (!w) return false;
+  try {
+    return enWordlist.getWordIndex(w.toLowerCase().trim()) >= 0;
+  } catch {
+    return false;
+  }
+};
+
 type Step = 'loading' | 'setup' | 'warning' | 'display' | 'verify' | 'success';
 
 const SeedPhrase = () => {
@@ -33,8 +45,12 @@ const SeedPhrase = () => {
   const [step, setStep] = useState<Step>('loading');
   const [words, setWords] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<'create' | 'import' | null>(null);
   const [error, setError] = useState('');
-  const [mnemonicInput, setMnemonicInput] = useState('');
+  const [wordInputs, setWordInputs] = useState<string[]>(() => Array(SEED_LENGTH).fill(''));
+  const [showWords, setShowWords] = useState(false);
+  const [pasted, setPasted] = useState(false);
+  const inputRefs = useRef<(TextInput | null)[]>(Array(SEED_LENGTH).fill(null));
 
   // Verification state: 4 random word indices to verify
   const [verifyIndices, setVerifyIndices] = useState<number[]>([]);
@@ -66,8 +82,89 @@ const SeedPhrase = () => {
     })();
   }, []);
 
+  const filledCount = useMemo(
+    () => wordInputs.filter((w) => w.trim().length > 0).length,
+    [wordInputs],
+  );
+
+  const invalidIndices = useMemo(() => {
+    const set = new Set<number>();
+    wordInputs.forEach((w, i) => {
+      const trimmed = w.trim();
+      if (trimmed.length > 0 && !isBip39Word(trimmed)) set.add(i);
+    });
+    return set;
+  }, [wordInputs]);
+
+  const distributeWords = (startIndex: number, parts: string[]) => {
+    setWordInputs((prev) => {
+      const next = [...prev];
+      parts.forEach((word, i) => {
+        const target = startIndex + i;
+        if (target < SEED_LENGTH) next[target] = word;
+      });
+      return next;
+    });
+    const focusIdx = Math.min(startIndex + parts.length, SEED_LENGTH - 1);
+    requestAnimationFrame(() => inputRefs.current[focusIdx]?.focus());
+  };
+
+  const handleWordChange = (index: number, text: string) => {
+    setError('');
+    const cleaned = text.toLowerCase().replace(/[^a-z\s]/g, '');
+    const parts = cleaned.split(/\s+/).filter(Boolean);
+
+    if (parts.length > 1) {
+      distributeWords(index, parts);
+      return;
+    }
+    setWordInputs((prev) => {
+      const next = [...prev];
+      next[index] = cleaned.replace(/\s+/g, '');
+      return next;
+    });
+  };
+
+  const handleSubmitEditing = (index: number) => {
+    if (index < SEED_LENGTH - 1) {
+      inputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleKeyPress = (index: number, e: any) => {
+    if (e?.nativeEvent?.key === 'Backspace' && !wordInputs[index] && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handlePasteAll = async () => {
+    const clip = await Clipboard.getStringAsync();
+    if (!clip) return;
+    const parts = clip
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, SEED_LENGTH);
+    if (!parts.length) return;
+    const next: string[] = Array(SEED_LENGTH).fill('');
+    parts.forEach((w, i) => (next[i] = w));
+    setWordInputs(next);
+    setError('');
+    setPasted(true);
+    setTimeout(() => setPasted(false), 1500);
+  };
+
+  const handleClearAll = () => {
+    setWordInputs(Array(SEED_LENGTH).fill(''));
+    setError('');
+    requestAnimationFrame(() => inputRefs.current[0]?.focus());
+  };
+
   const handleCreateNewWallet = async () => {
     setLoading(true);
+    setLoadingAction('create');
     setError('');
     try {
       const wallet = await generateWallet();
@@ -82,23 +179,30 @@ const SeedPhrase = () => {
       setError(err.message || 'Failed to create wallet.');
     } finally {
       setLoading(false);
+      setLoadingAction(null);
     }
   };
 
   const handleImportWallet = async () => {
-    if (!mnemonicInput.trim()) {
-      setError('Please enter your seed phrase.');
+    const trimmed = wordInputs.map((w) => w.trim());
+    if (trimmed.some((w) => !w)) {
+      setError(`Please fill all ${SEED_LENGTH} words.`);
       return;
     }
-    const inputWords = mnemonicInput.trim().split(/\s+/);
-    if (inputWords.length !== 12) {
-      setError('Seed phrase must be exactly 12 words.');
+    if (invalidIndices.size > 0) {
+      setError('Some words are not in the BIP39 wordlist. Check the highlighted cells.');
+      return;
+    }
+    const phrase = trimmed.join(' ');
+    if (!isValidMnemonic(phrase)) {
+      setError('Invalid recovery phrase. Double-check the order and spelling.');
       return;
     }
     setLoading(true);
+    setLoadingAction('import');
     setError('');
     try {
-      const walletInfo = await importWalletFromMnemonic(mnemonicInput);
+      const walletInfo = await importWalletFromMnemonic(phrase);
       const list = await getWalletList();
       await addWallet(walletInfo, `Wallet ${list.length + 1}`);
       await markWalletBackedUp(walletInfo.address);
@@ -110,6 +214,7 @@ const SeedPhrase = () => {
       setError(err.message || 'Failed to import wallet. Check your seed phrase.');
     } finally {
       setLoading(false);
+      setLoadingAction(null);
     }
   };
 
@@ -222,65 +327,154 @@ const SeedPhrase = () => {
 
   // Step 0: No wallet found — offer create or import
   if (step === 'setup') {
+    const allFilled = filledCount === SEED_LENGTH;
+    const hasInvalid = invalidIndices.size > 0;
+    const canSubmit = allFilled && !hasInvalid && !loading;
+
     return (
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.header}>
+            <Text style={styles.title}>Set up your wallet</Text>
             <Text style={styles.subtitle}>
-              No wallet found on this device. Create a new wallet or import an existing one using your seed phrase.
+              Restore an existing wallet with your 12-word recovery phrase, or create a brand-new one.
             </Text>
           </View>
 
-          <TouchableOpacity
-            style={[styles.primaryButton, loading && styles.disabledButton]}
-            onPress={handleCreateNewWallet}
-            disabled={loading}
-          >
-            {loading && !mnemonicInput.trim() ? (
-              <ActivityIndicator color={COLORS.white} />
-            ) : (
-              <Text style={styles.primaryButtonText}>Create New Wallet</Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.importCard}>
+            <View style={styles.importCardHeader}>
+              <View style={styles.importCardHeading}>
+                <Text style={styles.importCardTitle}>Restore existing wallet</Text>
+                <Text style={styles.importCardSubtitle}>
+                  Enter the 12 words in order. Tap a cell to start.
+                </Text>
+              </View>
+              <View style={styles.counterPill}>
+                <Text
+                  style={[
+                    styles.counterPillText,
+                    allFilled && !hasInvalid && styles.counterPillTextDone,
+                  ]}
+                >
+                  {filledCount}/{SEED_LENGTH}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.toolbar}>
+              <TouchableOpacity
+                style={styles.toolbarBtn}
+                onPress={handlePasteAll}
+                disabled={loading}
+              >
+                <Ionicons
+                  name={pasted ? 'checkmark' : 'clipboard-outline'}
+                  size={16}
+                  color={COLORS.primary}
+                />
+                <Text style={styles.toolbarBtnText}>{pasted ? 'Pasted' : 'Paste'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.toolbarBtn}
+                onPress={() => setShowWords((s) => !s)}
+                disabled={loading}
+              >
+                <Ionicons
+                  name={showWords ? 'eye-off-outline' : 'eye-outline'}
+                  size={16}
+                  color={COLORS.primary}
+                />
+                <Text style={styles.toolbarBtnText}>{showWords ? 'Hide' : 'Show'}</Text>
+              </TouchableOpacity>
+
+              {filledCount > 0 && (
+                <TouchableOpacity
+                  style={styles.toolbarBtn}
+                  onPress={handleClearAll}
+                  disabled={loading}
+                >
+                  <Ionicons name="close-circle-outline" size={16} color={COLORS.danger} />
+                  <Text style={[styles.toolbarBtnText, { color: COLORS.danger }]}>Clear</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View style={styles.wordInputGrid}>
+              {wordInputs.map((word, index) => {
+                const isInvalid = invalidIndices.has(index);
+                return (
+                  <View
+                    key={index}
+                    style={[
+                      styles.wordInputCell,
+                      word && !isInvalid && styles.wordInputCellFilled,
+                      isInvalid && styles.wordInputCellInvalid,
+                    ]}
+                  >
+                    <Text style={styles.wordInputNumber}>{index + 1}</Text>
+                    <TextInput
+                      ref={(r) => {
+                        inputRefs.current[index] = r;
+                      }}
+                      style={styles.wordInputField}
+                      value={word}
+                      onChangeText={(t) => handleWordChange(index, t)}
+                      onSubmitEditing={() => handleSubmitEditing(index)}
+                      onKeyPress={(e) => handleKeyPress(index, e)}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      autoComplete="off"
+                      spellCheck={false}
+                      secureTextEntry={!showWords && !!word}
+                      returnKeyType={index === SEED_LENGTH - 1 ? 'done' : 'next'}
+                      blurOnSubmit={index === SEED_LENGTH - 1}
+                      selectTextOnFocus
+                      placeholder=""
+                    />
+                  </View>
+                );
+              })}
+            </View>
+
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+            <TouchableOpacity
+              style={[styles.primaryButton, !canSubmit && styles.disabledButton]}
+              onPress={handleImportWallet}
+              disabled={!canSubmit}
+            >
+              {loadingAction === 'import' ? (
+                <ActivityIndicator color={COLORS.white} />
+              ) : (
+                <Text style={styles.primaryButtonText}>Restore wallet</Text>
+              )}
+            </TouchableOpacity>
+          </View>
 
           <View style={styles.separatorRow}>
             <View style={styles.separatorLine} />
-            <Text style={styles.separatorText}>OR</Text>
+            <Text style={styles.separatorText}>or</Text>
             <View style={styles.separatorLine} />
           </View>
 
-          <Text style={styles.label}>Import Existing Wallet</Text>
-          <TextInput
-            style={styles.mnemonicInput}
-            placeholder="Enter your 12-word seed phrase separated by spaces"
-            placeholderTextColor={COLORS.gray}
-            value={mnemonicInput}
-            onChangeText={(text) => {
-              setMnemonicInput(text);
-              setError('');
-            }}
-            multiline
-            autoCapitalize="none"
-            autoCorrect={false}
-            textAlignVertical="top"
-          />
-
           <TouchableOpacity
             style={[styles.secondaryButton, loading && styles.disabledButton]}
-            onPress={handleImportWallet}
+            onPress={handleCreateNewWallet}
             disabled={loading}
           >
-            {loading && mnemonicInput.trim() ? (
+            {loadingAction === 'create' ? (
               <ActivityIndicator color={COLORS.primary} />
             ) : (
-              <Text style={styles.secondaryButtonText}>Restore Wallet</Text>
+              <Text style={styles.secondaryButtonText}>Create a new wallet</Text>
             )}
           </TouchableOpacity>
-
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
         </ScrollView>
       </KeyboardAvoidingView>
     );
@@ -462,6 +656,12 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: 24,
   },
+  title: {
+    ...FONTS.h2,
+    color: COLORS.dark,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
   subtitle: {
     ...FONTS.body3,
     color: COLORS.gray,
@@ -551,15 +751,106 @@ const styles = StyleSheet.create({
     color: COLORS.dark,
     marginBottom: 8,
   },
-  mnemonicInput: {
+  importCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
     borderColor: COLORS.lightGray,
-    borderRadius: 12,
-    padding: 16,
-    ...FONTS.body3,
+    ...SHADOWS.light,
+  },
+  importCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    gap: 12,
+  },
+  importCardHeading: {
+    flex: 1,
+  },
+  importCardTitle: {
+    ...FONTS.h3,
     color: COLORS.dark,
-    minHeight: 120,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  importCardSubtitle: {
+    ...FONTS.body5,
+    color: COLORS.gray,
+    lineHeight: 18,
+  },
+  counterPill: {
+    backgroundColor: COLORS.lightGray,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  counterPillText: {
+    ...FONTS.body5,
+    color: COLORS.gray,
+    fontWeight: '700',
+  },
+  counterPillTextDone: {
+    color: COLORS.success,
+  },
+  toolbar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  toolbarBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#F3F4F6',
+  },
+  toolbarBtnText: {
+    ...FONTS.body5,
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  wordInputGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
     marginBottom: 16,
+  },
+  wordInputCell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '31.5%',
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    backgroundColor: '#FAFAFA',
+  },
+  wordInputCellFilled: {
+    backgroundColor: COLORS.white,
+    borderColor: COLORS.primary,
+  },
+  wordInputCellInvalid: {
+    backgroundColor: '#FEF2F2',
+    borderColor: COLORS.danger,
+  },
+  wordInputNumber: {
+    ...FONTS.body5,
+    color: COLORS.gray,
+    fontWeight: '700',
+    width: 18,
+  },
+  wordInputField: {
+    flex: 1,
+    ...FONTS.body4,
+    color: COLORS.dark,
+    paddingVertical: 0,
+    paddingHorizontal: 4,
   },
   // Word grid
   wordGrid: {
