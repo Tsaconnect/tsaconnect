@@ -30,7 +30,8 @@ import {
   getActiveWallet,
   setActiveWallet,
   migrateFromSingleWallet,
-  getProvider,
+  readErc20BalanceOf,
+  formatTokenBalance,
   WalletMeta,
 } from '../services/wallet';
 import { useTokens, type CustomToken } from '../hooks/useTokens';
@@ -69,19 +70,6 @@ function hashColor(str: string): string {
     hash = str.charCodeAt(i) + ((hash << 5) - hash);
   }
   return `hsl(${Math.abs(hash) % 360}, 55%, 50%)`;
-}
-
-// formatTokenBalance converts a raw integer balance string at `decimals`
-// precision to a number. Uses string manipulation rather than Number()
-// to avoid IEEE-754 precision loss on large 18-decimal balances.
-function formatTokenBalance(rawBalance: string, decimals: number): number {
-  if (!rawBalance || rawBalance === '0') return 0;
-  if (decimals <= 0) return parseFloat(rawBalance);
-  const padded = rawBalance.padStart(decimals + 1, '0');
-  const cut = padded.length - decimals;
-  const whole = padded.slice(0, cut) || '0';
-  const frac = padded.slice(cut).replace(/0+$/, '');
-  return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
 }
 
 function getManageTokenMeta(asset: WalletAsset): string {
@@ -157,15 +145,17 @@ async function mergeDiscoveredTokens(
   }
 }
 
-// mergeCustomTokens reads on-chain balanceOf for each user-imported token and
-// merges any not already in `existing` (matched by chainKey+contract). Returns
-// null when there's nothing to add, so the caller can skip a setState.
+// mergeCustomTokens surfaces user-imported tokens in the asset list and tries
+// to attach an on-chain balance for each. We always add the token (with
+// balance 0 if the read fails) so the user can see what they imported — public
+// RPCs go down often enough that silently dropping the row makes imports look
+// "lost".
 async function mergeCustomTokens(
   existing: WalletAsset[],
   address: string | undefined,
   customTokens: CustomToken[],
 ): Promise<WalletAsset[] | null> {
-  if (!address || customTokens.length === 0) return null;
+  if (customTokens.length === 0) return null;
   try {
     const seenContract = new Set(
       existing
@@ -173,31 +163,33 @@ async function mergeCustomTokens(
         .map((a) => `${a.details!.chainKey}::${a.contractAddress!.toLowerCase()}`),
     );
 
+    const balances = address
+      ? await Promise.all(
+          customTokens.map(async (t) => {
+            try {
+              const raw = await readErc20BalanceOf(t.contractAddress, address, t.chainKey);
+              return Number(ethers.formatUnits(raw, t.decimals));
+            } catch (err) {
+              console.warn(
+                `[wallet] balanceOf failed for custom ${t.symbol} on ${t.chainKey}:`,
+                err,
+              );
+              return null;
+            }
+          }),
+        )
+      : customTokens.map(() => null);
+
     let nextId = existing.length + 1;
     const additions: WalletAsset[] = [];
 
-    const results = await Promise.allSettled(
-      customTokens.map(async (t) => {
-        const provider = getProvider(t.chainKey);
-        const contract = new ethers.Contract(
-          t.contractAddress,
-          ['function balanceOf(address) view returns (uint256)'],
-          provider,
-        );
-        const raw: bigint = await contract.balanceOf(address);
-        return { token: t, raw };
-      }),
-    );
-
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue;
-      const { token, raw } = r.value;
+    customTokens.forEach((token, i) => {
       const contractKey = `${token.chainKey}::${token.contractAddress.toLowerCase()}`;
-      if (seenContract.has(contractKey)) continue;
-
-      const balance = Number(ethers.formatUnits(raw, token.decimals));
+      if (seenContract.has(contractKey)) return;
       const chain = CHAINS[token.chainKey];
-      if (!chain) continue;
+      if (!chain) return;
+
+      const balance = balances[i] ?? 0;
 
       additions.push({
         id: String(nextId++),
@@ -212,7 +204,7 @@ async function mergeCustomTokens(
         decimals: token.decimals,
         details: { type: 'Imported', chain: chain.name, chainKey: token.chainKey },
       });
-    }
+    });
 
     if (additions.length === 0) return null;
     return [...existing, ...additions];
@@ -772,7 +764,7 @@ const WalletScreen: React.FC = () => {
   );
 
   const assetsWithBalance = chainFilteredAssets
-    .filter(a => a.balance > 0)
+    .filter(a => a.balance > 0 || a.details?.type === 'Imported')
     .sort((a, b) => b.usdValue - a.usdValue);
   const nativeZeroBalance = chainFilteredAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
 
@@ -1202,12 +1194,26 @@ const manStyles = StyleSheet.create({
   searchRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginTop: 10, marginBottom: 12, backgroundColor: '#F5F5F5', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10 },
   searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A', paddingVertical: 0 },
   listContent: { paddingTop: 2 },
-  row: { minHeight: 78, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F8F8F8' },
-  avatar: { width: 54, height: 54, borderRadius: 27, justifyContent: 'center', alignItems: 'center' },
-  avatarImg: { width: 54, height: 54, borderRadius: 27 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#F4F4F4',
+  },
+  avatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  avatarImg: { width: 24, height: 24, borderRadius: 12 },
   avatarText: { fontSize: 16, fontWeight: '700' },
-  symbol: { fontSize: 16, fontWeight: '600', color: '#1A1A1A' },
-  meta: { fontSize: 13, color: '#AAA', marginTop: 4 },
+  symbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
+  meta: { fontSize: 12, color: '#888', marginTop: 2 },
 });
 
 export default WalletScreen;

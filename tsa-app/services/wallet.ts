@@ -221,6 +221,79 @@ export async function signTransaction(unsignedTx: ethers.TransactionLike): Promi
 }
 
 /**
+ * Convert a raw integer balance string (smallest-unit, e.g. wei) to a
+ * human-readable number using the token's decimals. Uses string slicing
+ * instead of Number()/division to avoid IEEE-754 precision loss on large
+ * 18-decimal balances. Returns 0 for empty/zero inputs.
+ *
+ * Shared by every place that has to render an indexer's raw `balance` field
+ * (wallet home, All Tokens screen, etc.) — keeping it in one spot prevents
+ * the "tokens.tsx forgot to divide by decimals" class of bug.
+ */
+export function formatTokenBalance(rawBalance: string, decimals: number): number {
+  if (!rawBalance || rawBalance === '0') return 0;
+  if (decimals <= 0) return parseFloat(rawBalance);
+  const padded = rawBalance.padStart(decimals + 1, '0');
+  const cut = padded.length - decimals;
+  const whole = padded.slice(0, cut) || '0';
+  const frac = padded.slice(cut).replace(/0+$/, '');
+  return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
+}
+
+/**
+ * Run a read against a chain's RPC, falling back through the configured
+ * `fallbackRpcUrls` when the primary endpoint fails with a transport-level
+ * error. Mirrors the strategy in `broadcastTransaction` but for reads.
+ *
+ * Public RPCs (bsc-dataseed, llamarpc, polygon-rpc, …) routinely rate-limit
+ * or 502 in mobile contexts. Without this, contract reads on non-Sonic chains
+ * appear "broken" to the user even though the chain is fine.
+ */
+async function withRpcFallback<T>(
+  chainKey: ChainKey,
+  fn: (provider: ethers.JsonRpcProvider) => Promise<T>,
+): Promise<T> {
+  const chain = CHAINS[chainKey];
+  const urls = [chain.rpcUrl, ...(chain.fallbackRpcUrls ?? [])];
+  let lastErr: any;
+  for (const url of urls) {
+    try {
+      const provider = getProvider(chainKey, url);
+      return await fn(provider);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message ?? err);
+      const code = err?.code;
+      const isTransport =
+        msg.includes('Network request failed') ||
+        msg.includes('failed to detect network') ||
+        msg.includes('SERVER_ERROR') ||
+        msg.includes('could not coalesce error') ||
+        msg.includes('TIMEOUT') ||
+        msg.includes('timeout') ||
+        msg.includes('429') ||
+        msg.includes('502') ||
+        msg.includes('503') ||
+        msg.includes('504') ||
+        code === 'NETWORK_ERROR' ||
+        code === 'TIMEOUT' ||
+        code === 'SERVER_ERROR';
+      console.warn(`[wallet] RPC read via ${url} failed: ${msg}`);
+      if (!isTransport) throw err;
+    }
+  }
+  throw lastErr ?? new Error(`All RPCs failed for ${chainKey}`);
+}
+
+const ERC20_METADATA_ABI = [
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+];
+
+const ERC20_BALANCE_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+/**
  * Read ERC20 token metadata from a contract address.
  * Returns null if the contract doesn't implement standard ERC20 metadata.
  */
@@ -229,23 +302,35 @@ export async function readTokenContract(
   chainKey: ChainKey
 ): Promise<{ name: string; symbol: string; decimals: number } | null> {
   try {
-    const provider = getProvider(chainKey);
-    const abi = [
-      'function name() view returns (string)',
-      'function symbol() view returns (string)',
-      'function decimals() view returns (uint8)',
-    ];
-    const contract = new ethers.Contract(contractAddress, abi, provider);
-    const [name, symbol, decimals] = await Promise.all([
-      contract.name(),
-      contract.symbol(),
-      contract.decimals(),
-    ]);
-    return { name, symbol, decimals: Number(decimals) };
+    return await withRpcFallback(chainKey, async (provider) => {
+      const contract = new ethers.Contract(contractAddress, ERC20_METADATA_ABI, provider);
+      const [name, symbol, decimals] = await Promise.all([
+        contract.name(),
+        contract.symbol(),
+        contract.decimals(),
+      ]);
+      return { name, symbol, decimals: Number(decimals) };
+    });
   } catch (err) {
     console.error('readTokenContract error:', err);
     return null;
   }
+}
+
+/**
+ * Read an ERC20 `balanceOf` against the given chain, trying fallback RPCs
+ * if the primary is unreachable. Throws if every configured RPC fails so
+ * the caller can distinguish "unknown balance" from "balance is zero".
+ */
+export async function readErc20BalanceOf(
+  contractAddress: string,
+  ownerAddress: string,
+  chainKey: ChainKey,
+): Promise<bigint> {
+  return await withRpcFallback(chainKey, async (provider) => {
+    const contract = new ethers.Contract(contractAddress, ERC20_BALANCE_ABI, provider);
+    return (await contract.balanceOf(ownerAddress)) as bigint;
+  });
 }
 
 // ---------------------------------------------------------------------------
