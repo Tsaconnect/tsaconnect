@@ -13,7 +13,7 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { getChainByChainId, CHAINS } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
-import { getActiveWallet, fetchPendingNonce, signLiFiTransaction } from '@/services/wallet';
+import { getActiveWallet, fetchPendingNonce, signLiFiTransaction, readErc20BalanceOf, getProvider } from '@/services/wallet';
 import { ethers } from 'ethers';
 import { getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
@@ -159,6 +159,41 @@ export default function AllSwapScreen() {
     } catch {}
   };
 
+  // Live on-chain balance for the currently-selected `fromToken`. The BE's
+  // /wallet/balances endpoint only knows about supported tokens, so user-
+  // imported customs (CREPE, etc.) come back as 0 and the swap form blocks
+  // input. Re-read directly via RPC whenever the picker changes, so any
+  // token the wallet actually holds — supported or imported — gets an
+  // accurate balance.
+  const [liveFromBalance, setLiveFromBalance] = useState<string | null>(null);
+  useEffect(() => {
+    if (!fromToken || !walletAddress) {
+      setLiveFromBalance(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const chain = getChainByChainId(fromChainId);
+        if (!chain) return;
+        const addr = fromToken.address.toLowerCase();
+        const isNative =
+          addr === '0x0000000000000000000000000000000000000000' ||
+          addr === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+        const raw = isNative
+          ? await getProvider(chain.key).getBalance(walletAddress)
+          : await readErc20BalanceOf(fromToken.address, walletAddress, chain.key);
+        if (cancelled) return;
+        setLiveFromBalance(ethers.formatUnits(raw, fromToken.decimals));
+      } catch {
+        if (!cancelled) setLiveFromBalance(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fromToken, fromChainId, walletAddress, refreshKey]);
+
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     if (!fromToken || !toToken || !fromAmount || isNaN(Number(fromAmount)) || Number(fromAmount) <= 0 || !walletAddress) {
@@ -216,7 +251,10 @@ export default function AllSwapScreen() {
     setFromAmount(''); setQuote(null); setQuoteStatus('idle');
   };
 
-  const fromBalance = balances.find(b => b.symbol === fromToken?.symbol)?.balance ?? '0';
+  const fromBalance =
+    liveFromBalance ??
+    balances.find(b => b.symbol === fromToken?.symbol)?.balance ??
+    '0';
 
   const validate = () => {
     if (!fromToken) return 'Select a token to send';
@@ -288,7 +326,26 @@ export default function AllSwapScreen() {
       if (res.success && res.data) {
         setTxHash(res.data.txHash); setScreen('success');
       } else {
-        throw new Error(res.message || 'Swap failed');
+        // The BE now passes the underlying RPC error through in res.message
+        // (e.g. "nonce too low", "insufficient funds for gas", "execution
+        // reverted: ..."). Map the common cases to user-friendly copy and
+        // keep the raw message visible for anything else.
+        const raw = res.message ?? '';
+        const low = raw.toLowerCase();
+        let friendly = raw;
+        if (low.includes('nonce too low')) {
+          friendly = 'Nonce out of sync — refresh the quote and try again.';
+        } else if (low.includes('insufficient funds') || low.includes('insufficient balance')) {
+          friendly = `Not enough native token to pay gas on this chain.`;
+        } else if (low.includes('underpriced') || low.includes('replacement transaction underpriced')) {
+          friendly = 'Gas price too low for current network conditions — refresh the quote and try again.';
+        } else if (low.includes('execution reverted')) {
+          // Keep the revert reason if LiFi included one.
+          friendly = raw.length > 0 ? raw : 'Transaction reverted on-chain.';
+        } else if (low.includes('transfer amount exceeds allowance')) {
+          friendly = 'Approval didn\'t confirm in time — try again, the network should catch up.';
+        }
+        throw new Error(friendly || 'Swap failed');
       }
     } catch (e: any) {
       setError(e?.message || 'Swap failed'); setScreen('failure');

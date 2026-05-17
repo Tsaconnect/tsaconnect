@@ -563,7 +563,12 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	txHash, err := client.SendRawTransaction(signedTxBytes)
 	if err != nil {
 		log.Printf("Failed to submit tx to %s: %v", chainName, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to submit transaction to blockchain")
+		// Surface the underlying RPC error to the client so the UI can show
+		// something actionable ("nonce too low", "insufficient funds for
+		// gas", "underpriced", "execution reverted: ...") instead of a
+		// generic message. The raw error already excludes user secrets;
+		// what's left (RPC method names, reason strings) is fine to leak.
+		utils.ErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to submit transaction to blockchain on %s: %v", chainName, err))
 		return
 	}
 
