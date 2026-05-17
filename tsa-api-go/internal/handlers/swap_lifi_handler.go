@@ -19,8 +19,6 @@ const defaultLiFiBaseURL = "https://li.quest/v1"
 
 const (
 	lifiDefaultSlippage = "0.005"
-	lifiIntegratorFee   = "0.03"
-	lifiIntegratorID    = "tsaconnect"
 
 	allTokensDefaultLimit = 100
 	allTokensMaxLimit     = 500
@@ -69,14 +67,42 @@ type SwapLiFiHandler struct {
 	allTokensInFlt  bool
 	allTokensWaitCh chan struct{}
 	lifiBaseURL     string
+	apiKey          string
+	integratorID    string
+	integratorFee   string
 }
 
 // NewSwapLiFiHandler creates a production SwapLiFiHandler.
-func NewSwapLiFiHandler() *SwapLiFiHandler {
+//
+// `apiKey` is forwarded as the `x-lifi-api-key` header on every upstream
+// call (empty = anonymous tier, rate-limited).
+//
+// `integratorID` + `integratorFee` are only injected on /quote when BOTH
+// are non-empty. Collecting an integrator fee requires the matching name
+// to be registered on portal.li.fi with a fee wallet configured; quoting
+// with an unregistered integrator + fee returns a 400 from LiFi.
+func NewSwapLiFiHandler(apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
 	return &SwapLiFiHandler{
-		tokenCache:  make(map[string]tokenCacheEntry),
-		lifiBaseURL: defaultLiFiBaseURL,
+		tokenCache:    make(map[string]tokenCacheEntry),
+		lifiBaseURL:   defaultLiFiBaseURL,
+		apiKey:        apiKey,
+		integratorID:  integratorID,
+		integratorFee: integratorFee,
 	}
+}
+
+// lifiGet performs a GET against the LiFi base URL and forwards the
+// configured API key when one is set. Keeps the per-endpoint code free of
+// header-plumbing noise.
+func (h *SwapLiFiHandler) lifiGet(client *http.Client, path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, h.lifiBaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if h.apiKey != "" {
+		req.Header.Set("x-lifi-api-key", h.apiKey)
+	}
+	return client.Do(req)
 }
 
 // GetTokens handles GET /api/swap/lifi/tokens
@@ -102,7 +128,7 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/tokens?chains=%s", h.lifiBaseURL, chainId))
+	resp, err := h.lifiGet(liFiHTTPClient, fmt.Sprintf("/tokens?chains=%s", chainId))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -138,7 +164,7 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/chains?chainTypes=EVM", h.lifiBaseURL))
+	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes=EVM")
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -173,7 +199,7 @@ func (h *SwapLiFiHandler) GetToken(c *gin.Context) {
 		return
 	}
 
-	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/token?chain=%s&token=%s", h.lifiBaseURL, chain, token))
+	resp, err := h.lifiGet(liFiHTTPClient, fmt.Sprintf("/token?chain=%s&token=%s", chain, token))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -338,7 +364,7 @@ func (h *SwapLiFiHandler) getOrFetchAllTokens() ([]tokenWithChain, error) {
 // Sort by symbol then chainId so paginated results are deterministic across
 // requests.
 func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
-	resp, err := liFiBulkHTTPClient.Get(fmt.Sprintf("%s/tokens", h.lifiBaseURL))
+	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens")
 	if err != nil {
 		return nil, fmt.Errorf("failed to reach LiFi")
 	}
@@ -411,17 +437,29 @@ func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
 }
 
 // GetQuote handles GET /api/swap/lifi/quote
-// Forwards query params to LiFi, injecting fee=0.03 and integrator=tsaconnect
-// unconditionally and defaulting slippage to 0.005 if not supplied.
+//
+// Forwards query params to LiFi, defaulting slippage to 0.005 if not
+// supplied. The integrator/fee combo is *only* injected when both
+// LIFI_INTEGRATOR_ID and LIFI_INTEGRATOR_FEE are configured — sending
+// either against an unregistered integrator at portal.li.fi makes LiFi
+// return a 400, so leaving both empty is the correct path when fee
+// collection isn't set up yet.
 func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 	params := c.Request.URL.Query()
 	if params.Get("slippage") == "" {
 		params.Set("slippage", lifiDefaultSlippage)
 	}
-	params.Set("fee", lifiIntegratorFee)
-	params.Set("integrator", lifiIntegratorID)
+	if h.integratorID != "" && h.integratorFee != "" {
+		params.Set("fee", h.integratorFee)
+		params.Set("integrator", h.integratorID)
+	} else {
+		// Strip any caller-supplied versions so we never leak an
+		// unregistered integrator string into the upstream request.
+		params.Del("fee")
+		params.Del("integrator")
+	}
 
-	resp, err := liFiHTTPClient.Get(fmt.Sprintf("%s/quote?%s", h.lifiBaseURL, params.Encode()))
+	resp, err := h.lifiGet(liFiHTTPClient, "/quote?"+params.Encode())
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return

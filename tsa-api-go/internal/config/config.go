@@ -59,6 +59,11 @@ type Config struct {
 	PersonaBaseURL       string
 	PersonaWebhookSecret string
 
+	// LiFi swap aggregator
+	LiFiAPIKey         string
+	LiFiIntegratorID   string
+	LiFiIntegratorFee  string
+
 	// Open Exchange Rates configuration
 	OpenExchangeRatesAppID string
 	SupportedCurrencies     []string
@@ -114,6 +119,14 @@ func Load() *Config {
 	cfg.PersonaTemplateID = os.Getenv("PERSONA_TEMPLATE_ID")
 	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
 	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
+
+	// LiFi swap aggregator. API key is optional — without it we hit the
+	// anonymous tier (rate-limited). Integrator + fee are also optional;
+	// when both are set we collect a percentage cut, which requires a
+	// matching registration at portal.li.fi with a fee wallet configured.
+	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
+	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
+	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
 
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
 	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")

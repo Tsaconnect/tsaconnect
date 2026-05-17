@@ -94,7 +94,7 @@ func main() {
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
-	slh := handlers.NewSwapLiFiHandler()
+	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 
 	// Backfill any pending transactions that already have a txHash.

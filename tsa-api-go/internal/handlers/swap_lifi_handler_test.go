@@ -17,6 +17,16 @@ func newTestLiFiHandler(lifiURL string) *SwapLiFiHandler {
 	}
 }
 
+// newTestLiFiHandlerWithIntegrator returns a handler pre-configured with
+// the "tsaconnect"/"0.03" fee/integrator pair used by the legacy tests
+// that asserted upstream injection behavior.
+func newTestLiFiHandlerWithIntegrator(lifiURL string) *SwapLiFiHandler {
+	h := newTestLiFiHandler(lifiURL)
+	h.integratorID = "tsaconnect"
+	h.integratorFee = "0.03"
+	return h
+}
+
 func setupTestRouter(h *SwapLiFiHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -255,7 +265,7 @@ func TestGetQuote_ForwardsParamsToLiFi(t *testing.T) {
 	}))
 	defer mockLiFi.Close()
 
-	h := newTestLiFiHandler(mockLiFi.URL)
+	h := newTestLiFiHandlerWithIntegrator(mockLiFi.URL)
 	r := setupTestRouter(h)
 
 	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123", nil)
@@ -334,7 +344,7 @@ func TestGetTokens_LiFiUnreachable_Returns502(t *testing.T) {
 	}
 }
 
-func TestGetQuote_AlwaysInjectsFeeAndIntegrator(t *testing.T) {
+func TestGetQuote_InjectsFeeAndIntegratorWhenConfigured(t *testing.T) {
 	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("fee") != "0.03" {
@@ -349,7 +359,7 @@ func TestGetQuote_AlwaysInjectsFeeAndIntegrator(t *testing.T) {
 	}))
 	defer mockLiFi.Close()
 
-	h := newTestLiFiHandler(mockLiFi.URL)
+	h := newTestLiFiHandlerWithIntegrator(mockLiFi.URL)
 	r := setupTestRouter(h)
 
 	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123", nil)
@@ -376,7 +386,7 @@ func TestGetQuote_OverridesClientFeeAndIntegrator(t *testing.T) {
 	}))
 	defer mockLiFi.Close()
 
-	h := newTestLiFiHandler(mockLiFi.URL)
+	h := newTestLiFiHandlerWithIntegrator(mockLiFi.URL)
 	r := setupTestRouter(h)
 
 	// Client tries to override fee and integrator — server must win
@@ -386,6 +396,68 @@ func TestGetQuote_OverridesClientFeeAndIntegrator(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// When integrator/fee are NOT configured (the default until portal.li.fi
+// is set up), the handler must NOT leak either param upstream — even when
+// a malicious caller tries to inject them via the query string. Sending
+// fee+integrator against an unregistered integrator name makes LiFi
+// return a 400.
+func TestGetQuote_NoIntegratorConfigured_StripsFeeAndIntegrator(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Has("fee") {
+			t.Errorf("expected fee absent, got %q", q.Get("fee"))
+		}
+		if q.Has("integrator") {
+			t.Errorf("expected integrator absent, got %q", q.Get("integrator"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"toAmount":"1000","transactionRequest":{"to":"0x1","data":"0x","value":"0x0","chainId":56,"gasLimit":"200000"}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL) // no integrator config
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123&fee=0.03&integrator=hacker", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// When an API key is configured, the handler must forward it as
+// `x-lifi-api-key`. Without it, the header should be absent so the
+// upstream call lands in the anonymous tier.
+func TestLiFiHandler_ForwardsAPIKeyHeader(t *testing.T) {
+	const wantKey = "test-key-abc"
+	var sawKey string
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawKey = r.Header.Get("x-lifi-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"chains":[]}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	h.apiKey = wantKey
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/chains", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if sawKey != wantKey {
+		t.Errorf("expected x-lifi-api-key=%q, got %q", wantKey, sawKey)
 	}
 }
 
