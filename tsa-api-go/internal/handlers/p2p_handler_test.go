@@ -481,7 +481,7 @@ func TestE2E_HandlerFlow_CreateConfirmOpenMarkRelease(t *testing.T) {
 
 	// Buyer opens trade
 	w = doJSON(t, buyerRouter, http.MethodPost, "/api/p2p/ads/"+adID.String()+"/trades", openTradeRequest{
-		FiatAmount: "150000000", PaymentMethodID: pmID.String(), BuyerAddress: "0xbuyer",
+		FiatAmount: "150000", PaymentMethodID: pmID.String(), BuyerAddress: "0xbuyer",
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("open trade: %d %s", w.Code, w.Body.String())
@@ -547,7 +547,7 @@ func TestGetTrade_NonParticipant_Returns403(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, seller.ID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyer.ID, "0xb", services.OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 
 	strangerRouter := newRouter(h, &stranger)
@@ -736,7 +736,7 @@ func TestDeletePaymentMethod_BlockedWhenTradeOpen(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, seller.ID, "", "0xtx")
 	_, _, _ = svc.OpenTrade(context.Background(), res.Ad.ID, buyer.ID, "0xb", services.OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 
 	// Now seller tries to delete a payment method that's bound to the open trade.

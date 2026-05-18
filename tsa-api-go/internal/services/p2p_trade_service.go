@@ -415,7 +415,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return nil, nil, ErrSelfTrade
 	}
 
-	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, ad.Rate)
+	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, ad.Rate, tokenDecimalsFor(ad.Token))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1826,10 +1826,41 @@ func stringifyUUIDs(ids []uuid.UUID) datatypes.JSONSlice[string] {
 	return datatypes.JSONSlice[string](out)
 }
 
-// computeTokenFromFiat divides fiat by rate to get token base units.
-// Rate is a fractional string (NUMERIC(38,10) in DB); we scale to integer
-// arithmetic by 10^10. Truncates remainder (round-down).
-func computeTokenFromFiat(fiatStr, rateStr string) (token, fiat *big.Int, err error) {
+// tokenDecimalsFor returns the on-chain decimals for the Phase-1 token set.
+// Phase 2 will replace this with a DB-backed registry, but for the three
+// tokens we ship the lookup is constant.
+func tokenDecimalsFor(symbol string) int {
+	switch strings.ToUpper(symbol) {
+	case "USDT", "USDC":
+		return 6
+	case "MCGP":
+		return 18
+	default:
+		return 18
+	}
+}
+
+// computeTokenFromFiat converts a fiat amount into the matching token amount
+// in base units, given the ad's rate.
+//
+// Semantics (matches what users type in the UI):
+//
+//	rate     = fiat per WHOLE token (e.g. "1500" = ₦1500 per 1 USDT)
+//	fiat     = integer fiat amount (Phase 1: NGN has no fractional unit)
+//	decimals = token's on-chain decimals (6 for USDT/USDC, 18 for MCGP)
+//
+// Formula:
+//
+//	whole_tokens = fiat / rate
+//	base_units   = whole_tokens * 10^decimals
+//
+// Implemented in integer math via:
+//
+//	base_units = fiat * 10^decimals * 10^rateScale / scaledRate
+//
+// where scaledRate = rate * 10^rateScale to absorb up to `rateScale`
+// fractional digits on the rate. Truncates remainder (round-down).
+func computeTokenFromFiat(fiatStr, rateStr string, decimals int) (token, fiat *big.Int, err error) {
 	const rateScale = 10
 	fiat, ok := new(big.Int).SetString(fiatStr, 10)
 	if !ok {
@@ -1845,7 +1876,8 @@ func computeTokenFromFiat(fiatStr, rateStr string) (token, fiat *big.Int, err er
 	if scaledRate.Sign() <= 0 {
 		return nil, nil, fmt.Errorf("%w: rate must be > 0", ErrInvalidParams)
 	}
-	numerator := new(big.Int).Mul(fiat, new(big.Int).Exp(big.NewInt(10), big.NewInt(rateScale), nil))
+	scale := big.NewInt(int64(decimals + rateScale))
+	numerator := new(big.Int).Mul(fiat, new(big.Int).Exp(big.NewInt(10), scale, nil))
 	token = new(big.Int).Quo(numerator, scaledRate)
 	return token, fiat, nil
 }

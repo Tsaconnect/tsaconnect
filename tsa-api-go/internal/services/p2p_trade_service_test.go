@@ -360,14 +360,14 @@ func TestE2E_CreateAd_OpenTrade_MarkPaid_Release(t *testing.T) {
 	buyerID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
 
-	// 1. createAd
+	// 1. createAd — 1000 USDT @ 1500 NGN/USDT = 1.5M NGN total ad value.
 	result, err := svc.CreateAd(ctx, sellerID, "0xseller", CreateAdParams{
 		Token:            "USDT",
-		TokenAmount:      "1000000000", // 1000 USDT
+		TokenAmount:      "1000000000", // 1000 USDT base units (decimals=6)
 		FiatCurrency:     "NGN",
-		Rate:             "1500", // 1 USDT base unit = 1500 NGN base unit
-		MinLimit:         "10000000000",
-		MaxLimit:         "500000000000",
+		Rate:             "1500", // 1500 NGN per whole USDT
+		MinLimit:         "1000",
+		MaxLimit:         "1500000",
 		PaymentMethodIDs: []uuid.UUID{pmID},
 	})
 	if err != nil {
@@ -395,13 +395,13 @@ func TestE2E_CreateAd_OpenTrade_MarkPaid_Release(t *testing.T) {
 		t.Fatalf("escrow tx not recorded")
 	}
 
-	// 3. openTrade
+	// 3. openTrade — buyer wants 300 USDT = 450,000 NGN.
 	esc.verifyOpenResult = &P2PTradeOpenedEvent{
 		Buyer:  common.HexToAddress("0xd00d"),
-		Amount: big.NewInt(300_000_000_000_000), // matches the computed token amount
+		Amount: big.NewInt(300_000_000),
 	}
 	trade, _, err := svc.OpenTrade(ctx, ad.ID, buyerID, "0xbuyer", OpenTradeParams{
-		FiatAmount:      "450000000000000000", // 450,000,000 NGN scaled? Let's use a simpler value.
+		FiatAmount:      "10000000", // 10M NGN — over max
 		PaymentMethodID: pmID,
 	})
 	if err == nil {
@@ -409,7 +409,7 @@ func TestE2E_CreateAd_OpenTrade_MarkPaid_Release(t *testing.T) {
 	}
 	// Re-issue within max
 	trade, openTx, err := svc.OpenTrade(ctx, ad.ID, buyerID, "0xbuyer", OpenTradeParams{
-		FiatAmount:      "150000000000", // 150B (within max 500B)
+		FiatAmount:      "450000", // 450K NGN → 300 USDT
 		PaymentMethodID: pmID,
 	})
 	if err != nil {
@@ -619,7 +619,7 @@ func TestMarkPaid_OnlyBuyer(t *testing.T) {
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 
 	trade, _, err := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	if err != nil {
 		t.Fatalf("openTrade: %v", err)
@@ -643,7 +643,7 @@ func TestRelease_OnlySeller(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	_, _ = svc.MarkPaid(context.Background(), trade.ID, buyerID, "url")
 
@@ -780,7 +780,7 @@ func TestConfirmOpenTrade_RejectsOnChainAmountMismatch(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 
 	esc.verifyOpenResult = &P2PTradeOpenedEvent{
@@ -807,7 +807,7 @@ func TestConfirmRelease_RejectsOnChainAmountMismatch(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	_, _ = svc.ConfirmOpenTrade(context.Background(), trade.ID, buyerID, "", "0xopen")
 	_, _ = svc.MarkPaid(context.Background(), trade.ID, buyerID, "url")
@@ -840,7 +840,7 @@ func TestRelease_AcceptsPendingPayment(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Skip MarkPaid — release directly from pending_payment.
 	res, err := svc.Release(context.Background(), trade.ID, sellerID, "0xs")
@@ -872,7 +872,7 @@ func TestRelease_RejectsTerminalStatus(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Force trade to terminal cancelled.
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
@@ -896,7 +896,7 @@ func TestOpenTrade_RejectsInactiveAd(t *testing.T) {
 	})
 	// Pending — confirm not yet called.
 	_, _, err := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	if !errors.Is(err, ErrAdNotActive) {
 		t.Fatalf("pending ad: want ErrAdNotActive, got %v", err)
@@ -906,7 +906,7 @@ func TestOpenTrade_RejectsInactiveAd(t *testing.T) {
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	_ = svc.PauseAd(context.Background(), result.Ad.ID, sellerID)
 	_, _, err = svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	if !errors.Is(err, ErrAdNotActive) {
 		t.Fatalf("paused ad: want ErrAdNotActive, got %v", err)
@@ -921,21 +921,21 @@ func TestOpenTrade_PartialFillsAccumulateCorrectly(t *testing.T) {
 	buyer2ID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
 
-	// Ad of 1000 token base units, rate 1500 → max fiat per buyer = 1500*1000.
+	// Ad of 1000 USDT (1e9 base units), rate 1500 NGN/USDT → ad fiat value 1.5M NGN.
 	result, _ := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
-		Token: "USDT", TokenAmount: "1000", FiatCurrency: "NGN", Rate: "1500",
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN", Rate: "1500",
 		PaymentMethodIDs: []uuid.UUID{pmID},
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 
-	// First buyer takes 400 token (= 600000 fiat).
+	// First buyer takes 400 USDT (= 600000 NGN → 400M base units).
 	_, _, err := svc.OpenTrade(context.Background(), result.Ad.ID, buyer1ID, "0xb1", OpenTradeParams{
 		FiatAmount: "600000", PaymentMethodID: pmID,
 	})
 	if err != nil {
 		t.Fatalf("first openTrade: %v", err)
 	}
-	// Second buyer takes 400 token (= 600000 fiat).
+	// Second buyer takes 400 USDT (= 600000 NGN → 400M base units).
 	_, _, err = svc.OpenTrade(context.Background(), result.Ad.ID, buyer2ID, "0xb2", OpenTradeParams{
 		FiatAmount: "600000", PaymentMethodID: pmID,
 	})
@@ -944,13 +944,14 @@ func TestOpenTrade_PartialFillsAccumulateCorrectly(t *testing.T) {
 	}
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", result.Ad.ID)
-	if ad.Remaining != "200" || ad.Reserved != "800" {
-		t.Fatalf("after two partials: remaining=%s reserved=%s; want 200/800",
+	if ad.Remaining != "200000000" || ad.Reserved != "800000000" {
+		t.Fatalf("after two partials: remaining=%s reserved=%s; want 200000000/800000000",
 			ad.Remaining, ad.Reserved)
 	}
 	// Third buyer attempt exceeding remaining must reject.
+	// 450000 NGN → 300M base units; remaining is only 200M → exceeds.
 	_, _, err = svc.OpenTrade(context.Background(), result.Ad.ID, uuid.New(), "0xb3", OpenTradeParams{
-		FiatAmount: "450000", PaymentMethodID: pmID, // 450000/1500 = 300 > 200
+		FiatAmount: "450000", PaymentMethodID: pmID,
 	})
 	if !errors.Is(err, ErrInsufficientRemaining) {
 		t.Fatalf("third openTrade: want ErrInsufficientRemaining, got %v", err)
@@ -969,24 +970,30 @@ func TestRelease_AdStaysActiveOnPartialRelease(t *testing.T) {
 	buyer2ID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
 
-	// Ad with 2 token total; two buyers each take 1.
+	// Ad of 2 USDT (2M base units); two buyers each take 1 USDT (= 1500 NGN → 1M base units).
 	result, _ := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
-		Token: "USDT", TokenAmount: "2", FiatCurrency: "NGN", Rate: "1500",
+		Token: "USDT", TokenAmount: "2000000", FiatCurrency: "NGN", Rate: "1500",
 		PaymentMethodIDs: []uuid.UUID{pmID},
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
-	t1, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyer1ID, "0xb1", OpenTradeParams{
+	t1, _, err := svc.OpenTrade(context.Background(), result.Ad.ID, buyer1ID, "0xb1", OpenTradeParams{
 		FiatAmount: "1500", PaymentMethodID: pmID,
 	})
-	_, _, _ = svc.OpenTrade(context.Background(), result.Ad.ID, buyer2ID, "0xb2", OpenTradeParams{
+	if err != nil {
+		t.Fatalf("first openTrade: %v", err)
+	}
+	_, _, err = svc.OpenTrade(context.Background(), result.Ad.ID, buyer2ID, "0xb2", OpenTradeParams{
 		FiatAmount: "1500", PaymentMethodID: pmID,
 	})
+	if err != nil {
+		t.Fatalf("second openTrade: %v", err)
+	}
 
 	// Release only trade 1. remaining=0, reserved=1 → ad stays active.
 	_, _ = svc.ConfirmOpenTrade(context.Background(), t1.ID, buyer1ID, "", "0xopen1")
 	_, _ = svc.MarkPaid(context.Background(), t1.ID, buyer1ID, "url")
 	_, _ = svc.Release(context.Background(), t1.ID, sellerID, "0xs")
-	_, err := svc.ConfirmRelease(context.Background(), t1.ID, sellerID, "0xrel1")
+	_, err = svc.ConfirmRelease(context.Background(), t1.ID, sellerID, "0xrel1")
 	if err != nil {
 		t.Fatalf("confirm release: %v", err)
 	}
@@ -1007,14 +1014,14 @@ func TestRelease_ExhaustedAdAfterFullDrain(t *testing.T) {
 	buyerID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
 
-	// Tiny ad: 1 token. Buyer drains it, releases it, ad must become exhausted.
+	// Tiny ad: 1 USDT (1M base units). Buyer drains it, releases it, ad must become exhausted.
 	result, _ := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
-		Token: "USDT", TokenAmount: "1", FiatCurrency: "NGN", Rate: "1500",
+		Token: "USDT", TokenAmount: "1000000", FiatCurrency: "NGN", Rate: "1500",
 		PaymentMethodIDs: []uuid.UUID{pmID},
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, err := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "1500", PaymentMethodID: pmID, // 1500/1500 = 1 token
+		FiatAmount: "1500", PaymentMethodID: pmID, // 1500 NGN → 1M base units = 1 USDT
 	})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -1053,7 +1060,7 @@ func TestCancel_RejectsBeforeExpiry(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Trade just created; expires_at is fixedClock + 30 min. Don't advance.
 	_, err := svc.Cancel(context.Background(), trade.ID, sellerID, "0xs")
@@ -1075,7 +1082,7 @@ func TestCancel_HappyPath_RestoresAdRemaining(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Verify reserved was credited.
 	var adMid models.P2PAd
@@ -1133,7 +1140,7 @@ func TestCancel_RejectsNonParticipant(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Advance past expiry.
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 18, 13, 0, 0, 0, time.UTC)})
@@ -1156,7 +1163,7 @@ func TestConfirmCancel_Idempotent(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), result.Ad.ID, sellerID, "", "0xtx")
 	trade, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 18, 13, 0, 0, 0, time.UTC)})
 	_, _ = svc.Cancel(context.Background(), trade.ID, sellerID, "0xs")
@@ -1190,12 +1197,12 @@ func TestListExpiredPendingTrades_ScopedToExpired(t *testing.T) {
 
 	// Open one trade right after the fixed clock — expires_at = now + 30m.
 	t1, _, _ := svc.OpenTrade(context.Background(), result.Ad.ID, buyer1, "0xb1", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Open a second trade "after" the clock advances.
 	svc2 := svc.WithClock(fixedClock{t: time.Date(2026, 5, 18, 14, 0, 0, 0, time.UTC)})
 	t2, _, _ := svc2.OpenTrade(context.Background(), result.Ad.ID, buyer2, "0xb2", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 
 	// Service-default clock is the fixed clock; trade 1 expires at 12:30
@@ -1231,7 +1238,7 @@ func reconcilerSetup(t *testing.T) (svc *P2PTradeService, db *gorm.DB, trade *mo
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	_, _ = svc.ConfirmOpenTrade(context.Background(), tr.ID, buyerID, "", "0xopen")
 	_, _ = svc.MarkPaid(context.Background(), tr.ID, buyerID, "url")
@@ -1329,8 +1336,8 @@ func TestReconcile_ChainResolved_AdminRefundBuyerKnown(t *testing.T) {
 	}
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", trade.AdID)
-	// refund-to-buyer: reserved -= 100K; remaining unchanged (999,900,000).
-	if ad.Reserved != "0" || ad.Remaining != "999900000" {
+	// refund-to-buyer: reserved -= 100M base; remaining unchanged at 900M.
+	if ad.Reserved != "0" || ad.Remaining != "900000000" {
 		t.Fatalf("ad accounting wrong: remaining=%s reserved=%s", ad.Remaining, ad.Reserved)
 	}
 	var d models.P2PDispute
@@ -1376,7 +1383,7 @@ func TestReconcile_ChainPaid_DBPending_BumpsToPaid(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Skip MarkPaid — DB still pending_payment.
 	mockReadTradeResult = &OnChainP2PTrade{Status: OnChainP2PStatusPaid, Exists: true}
@@ -1528,7 +1535,7 @@ func disputeHelper(t *testing.T) (svc *P2PTradeService, db *gorm.DB, ad *models.
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	_, _ = svc.ConfirmOpenTrade(context.Background(), tr.ID, buyerID, "", "0xopen")
 	_, _ = svc.MarkPaid(context.Background(), tr.ID, buyerID, "url")
@@ -1586,7 +1593,7 @@ func TestRaiseDispute_AcceptsPendingPayment(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	// Skip MarkPaid — dispute from pending_payment.
 	raw, err := svc.RaiseDispute(context.Background(), tr.ID, buyerID, "0xb", "paid but no UI confirm")
@@ -1610,7 +1617,7 @@ func TestRaiseDispute_RejectsTerminalStatus(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).
 		Update("status", models.P2PTradeStatusReleased)
@@ -1692,13 +1699,13 @@ func TestAdminResolveDispute_ToBuyer(t *testing.T) {
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", trade.AdID)
 	// Refund-to-buyer: reserved -= trade.amount; remaining unchanged.
-	// disputeHelper opens 150M fiat at rate 1500 → token = 100K base units.
-	// Ad starts at 1B; after open remaining = 999,900,000.
-	// After resolve-to-buyer: reserved 100K → 0, remaining unchanged.
+	// disputeHelper opens 150K NGN at rate 1500 NGN/USDT → 100M base units.
+	// Ad starts at 1B; after open remaining = 900,000,000.
+	// After resolve-to-buyer: reserved 100M → 0, remaining unchanged at 900M.
 	if ad.Reserved != "0" {
 		t.Fatalf("reserved after release-to-buyer: want 0, got %s", ad.Reserved)
 	}
-	if ad.Remaining != "999900000" {
+	if ad.Remaining != "900000000" {
 		t.Fatalf("remaining wrongly bumped: got %s", ad.Remaining)
 	}
 
@@ -1811,22 +1818,35 @@ func TestConfirmAdminResolveDispute_RejectsOnChainSemanticMismatch(t *testing.T)
 }
 
 func TestComputeTokenFromFiat(t *testing.T) {
+	// New semantics: rate is NGN per WHOLE token. fiat=1500 NGN at rate
+	// ₦1500/USDT → 1 USDT whole = 10^6 base units. Decimals parameter
+	// scales whole-tokens up to on-chain base units.
 	tests := []struct {
-		fiat, rate, wantToken string
+		fiat, rate string
+		decimals   int
+		wantToken  string
 	}{
-		{"1500", "1500", "1"},        // 1500 NGN / 1500 = 1 USDT base
-		{"150000000", "1500", "100000"},
-		{"100", "1500", "0"},         // truncates
-		{"1500", "1500.5", "0"},      // truncates because 1500 / 1500.5 < 1
+		// 1500 NGN at ₦1500/USDT (6-dec) = 1 USDT = 10^6 base units
+		{"1500", "1500", 6, "1000000"},
+		// 150,000,000 NGN at ₦1500/USDT (6-dec) = 100,000 USDT = 10^11 base units
+		{"150000000", "1500", 6, "100000000000"},
+		// 100 NGN at ₦1500/USDT (6-dec) — buys 0.0666... USDT, truncates
+		// to 66666 base units (0.066666 USDT)
+		{"100", "1500", 6, "66666"},
+		// MCGP (18-dec) is fee-free; 1500 NGN at ₦1500/MCGP = 1 MCGP = 10^18
+		{"1500", "1500", 18, "1000000000000000000"},
+		// Fractional rate truncates: 1500 * 10^6 / 1500.5 = 999666.7… → 999666
+		{"1500", "1500.5", 6, "999666"},
 	}
 	for _, tc := range tests {
-		token, _, err := computeTokenFromFiat(tc.fiat, tc.rate)
+		token, _, err := computeTokenFromFiat(tc.fiat, tc.rate, tc.decimals)
 		if err != nil {
-			t.Errorf("fiat=%s rate=%s: %v", tc.fiat, tc.rate, err)
+			t.Errorf("fiat=%s rate=%s dec=%d: %v", tc.fiat, tc.rate, tc.decimals, err)
 			continue
 		}
 		if token.String() != tc.wantToken {
-			t.Errorf("fiat=%s rate=%s: want %s got %s", tc.fiat, tc.rate, tc.wantToken, token)
+			t.Errorf("fiat=%s rate=%s dec=%d: want %s got %s",
+				tc.fiat, tc.rate, tc.decimals, tc.wantToken, token)
 		}
 	}
 }
@@ -1839,7 +1859,7 @@ func TestComputeTokenFromFiat_RejectsZeroAndNegative(t *testing.T) {
 		{"1500", "-1500"},
 	}
 	for _, c := range cases {
-		if _, _, err := computeTokenFromFiat(c.fiat, c.rate); !errors.Is(err, ErrInvalidParams) {
+		if _, _, err := computeTokenFromFiat(c.fiat, c.rate, 6); !errors.Is(err, ErrInvalidParams) {
 			t.Errorf("fiat=%s rate=%s: want ErrInvalidParams, got %v", c.fiat, c.rate, err)
 		}
 	}
