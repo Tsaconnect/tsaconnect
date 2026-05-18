@@ -200,13 +200,23 @@ const ResolveModal: React.FC<{
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // Reset choice when dispute changes.
+  // Clear selection whenever the modal opens or closes. Keying on
+  // `dispute?.id` would let a stale 'refund buyer' choice persist if
+  // an admin cancels and re-opens the same dispute — a footgun for a
+  // wrong-button resolution.
   React.useEffect(() => {
     setRefundBuyer(null);
     setNote('');
-  }, [dispute?.id]);
+  }, [dispute]);
 
   if (!dispute) return null;
+
+  const handleClose = () => {
+    if (busy) return;
+    setRefundBuyer(null);
+    setNote('');
+    onClose();
+  };
 
   const submit = async () => {
     if (refundBuyer === null || busy) return;
@@ -247,7 +257,7 @@ const ResolveModal: React.FC<{
   };
 
   return (
-    <Modal animationType="slide" transparent visible={!!dispute} onRequestClose={onClose}>
+    <Modal animationType="slide" transparent visible={!!dispute} onRequestClose={handleClose}>
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
           <Text style={styles.modalTitle}>Resolve dispute</Text>
@@ -307,7 +317,7 @@ const ResolveModal: React.FC<{
           <View style={styles.modalActions}>
             <TouchableOpacity
               style={styles.modalCancel}
-              onPress={onClose}
+              onPress={handleClose}
               disabled={busy}
             >
               <Text style={styles.modalCancelText}>Cancel</Text>

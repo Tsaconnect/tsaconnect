@@ -3,7 +3,7 @@
 // Trades the current user is a party to. Tabs switch between Buyer and Seller
 // roles, then a status pill picker narrows to Active (in-flight) or Done.
 import { router, useFocusEffect } from 'expo-router';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -54,10 +54,17 @@ const MyTradesScreen: React.FC = () => {
     setRefreshing(false);
   }, [role]);
 
+  // useFocusEffect only fires on screen focus events, so a role-tab swap
+  // while already focused wouldn't re-fetch. Pair it with a plain useEffect
+  // on `load` so any dependency change (role) refreshes the list.
   useFocusEffect(useCallback(() => {
     setLoading(true);
     load();
   }, [load]));
+  useEffect(() => {
+    setLoading(true);
+    load();
+  }, [load]);
 
   const visible = useMemo(() => {
     const active = new Set<P2PTrade['status']>(ACTIVE_STATUSES);
