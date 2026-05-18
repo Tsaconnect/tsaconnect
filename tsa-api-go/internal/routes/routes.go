@@ -354,6 +354,28 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/trades/:id/mark-paid", idem, p2p.MarkPaid)
 			p2pGroup.POST("/trades/:id/release", idem, p2p.PrepareRelease)
 			p2pGroup.POST("/trades/:id/release/confirm", idem, p2p.ConfirmRelease)
+			p2pGroup.POST("/trades/:id/cancel", idem, p2p.PrepareCancel)
+			p2pGroup.POST("/trades/:id/cancel/confirm", idem, p2p.ConfirmCancel)
+			p2pGroup.POST("/trades/:id/dispute", idem, p2p.RaiseDispute)
+			p2pGroup.POST("/trades/:id/dispute/confirm", idem, p2p.ConfirmRaiseDispute)
+			p2pGroup.GET("/trades/:id/dispute", p2p.GetDispute)
+
+			// Chat messages — text and image-URL posts; List paginates by
+			// `since` query param.
+			p2pGroup.GET("/trades/:id/messages", p2p.ListMessages)
+			p2pGroup.POST("/trades/:id/messages", idem, p2p.SendMessage)
+		}
+
+		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
+		// admits merchants/support too, so we layer RequireP2PAdmin on top
+		// to restrict to admin / super_admin.
+		adminP2P := api.Group("/admin/p2p")
+		adminP2P.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminP2P.GET("/disputes", p2p.AdminListDisputes)
+			adminP2P.GET("/disputes/:id", p2p.AdminGetDispute)
+			adminP2P.POST("/disputes/:id/resolve", idem, p2p.AdminResolveDispute)
+			adminP2P.POST("/disputes/:id/resolve/confirm", idem, p2p.ConfirmAdminResolveDispute)
 		}
 	}
 

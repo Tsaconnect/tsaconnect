@@ -104,6 +104,7 @@ func setupP2PHandlerDB(t *testing.T) *gorm.DB {
 			resolved_by_admin TEXT,
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,
+			expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,
@@ -111,6 +112,29 @@ func setupP2PHandlerDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, actor_id TEXT,
 			trade_id TEXT, ad_id TEXT,
 			action TEXT NOT NULL, metadata TEXT,
+			created_at DATETIME
+		)`,
+		`CREATE TABLE p2p_disputes (
+			id TEXT PRIMARY KEY,
+			trade_id TEXT NOT NULL UNIQUE,
+			raised_by TEXT NOT NULL,
+			raised_role TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'open',
+			resolved_by TEXT,
+			resolution TEXT,
+			refunded_to_buyer INTEGER,
+			resolve_tx_hash TEXT,
+			created_at DATETIME,
+			resolved_at DATETIME
+		)`,
+		`CREATE TABLE p2p_messages (
+			id TEXT PRIMARY KEY,
+			trade_id TEXT NOT NULL,
+			sender_id TEXT,
+			type TEXT NOT NULL,
+			body TEXT,
+			image_url TEXT,
 			created_at DATETIME
 		)`,
 		`CREATE TABLE request_idempotencies (
@@ -150,6 +174,39 @@ func (s *stubEscrow) PrepareRelease([32]byte, string) ([]byte, error) {
 }
 func (s *stubEscrow) PrepareCloseAd([32]byte, string) ([]byte, error) {
 	return []byte(`{}`), nil
+}
+func (s *stubEscrow) PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error) {
+	return []byte(`{"to":"0xescrow"}`), nil
+}
+func (s *stubEscrow) VerifyTradeCancelled(_ string, expectedTradeId [32]byte) (*services.P2PTradeCancelledEvent, error) {
+	amt := s.lastTradeAmount
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	return &services.P2PTradeCancelledEvent{TradeID: expectedTradeId, ReturnedToAd: amt}, nil
+}
+func (s *stubEscrow) PrepareRaiseDispute([32]byte, string) ([]byte, error) {
+	return []byte(`{"to":"0xescrow"}`), nil
+}
+func (s *stubEscrow) PrepareAdminResolve([32]byte, bool, string) ([]byte, error) {
+	return []byte(`{"to":"0xescrow"}`), nil
+}
+func (s *stubEscrow) VerifyTradeDisputed(_ string, expectedTradeId [32]byte) (*services.P2PTradeDisputedEvent, error) {
+	return &services.P2PTradeDisputedEvent{TradeID: expectedTradeId, By: common.HexToAddress("0xbeef")}, nil
+}
+func (s *stubEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
+	return &services.OnChainP2PTrade{Status: services.OnChainP2PStatusNone}, nil
+}
+
+func (s *stubEscrow) VerifyTradeResolved(_ string, expectedTradeId [32]byte) (*services.P2PTradeResolvedEvent, error) {
+	amt := s.lastTradeAmount
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	return &services.P2PTradeResolvedEvent{
+		TradeID: expectedTradeId, ReleasedToBuyer: true,
+		AmountMoved: amt, FeeToSystem: big.NewInt(0),
+	}, nil
 }
 func (s *stubEscrow) VerifyAdCreated(_ string, expectedAdId [32]byte) (*services.P2PAdCreatedEvent, error) {
 	amt := s.lastAdAmount
@@ -194,7 +251,9 @@ func buildHandler(t *testing.T) (*P2PHandler, *gorm.DB, *stubEscrow) {
 	svc.SetTokenResolver(func(symbol string) string {
 		return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 	})
-	return NewP2PHandler(db, svc), db, escrow
+	msgSvc := services.NewP2PMessageService(db, &stubBus{})
+	svc.SetMessageService(msgSvc)
+	return NewP2PHandler(db, svc, msgSvc), db, escrow
 }
 
 func seedUser(t *testing.T, db *gorm.DB, verified bool) models.User {

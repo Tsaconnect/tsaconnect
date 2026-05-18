@@ -62,8 +62,12 @@ type P2PTrade struct {
 	MarkedPaidAt    *time.Time `json:"markedPaidAt,omitempty"`
 	ReleasedAt      *time.Time `json:"releasedAt,omitempty"`
 	ExpiresAt       time.Time  `gorm:"index;not null" json:"expiresAt"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
+	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
+	// expired-notification fires exactly once per trade.
+	ExpiredNotifiedAt *time.Time `gorm:"index" json:"expiredNotifiedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
 func (P2PTrade) TableName() string {

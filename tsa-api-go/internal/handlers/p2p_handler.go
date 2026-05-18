@@ -21,15 +21,16 @@ import (
 // The service does the heavy lifting; the handler is purely HTTP I/O:
 // parse → validate-shape → dispatch → map errors → respond.
 type P2PHandler struct {
-	db    *gorm.DB
-	trade *services.P2PTradeService
+	db       *gorm.DB
+	trade    *services.P2PTradeService
+	messages *services.P2PMessageService
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
 // P2P routes — handlers will return a configuration-error response so the
 // frontend can show "feature unavailable" cleanly instead of a 500.
-func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService) *P2PHandler {
-	return &P2PHandler{db: db, trade: trade}
+func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService) *P2PHandler {
+	return &P2PHandler{db: db, trade: trade, messages: messages}
 }
 
 // IsConfigured reports whether the handler has its trade service wired up.
@@ -81,7 +82,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, services.ErrAdNotFound), errors.Is(err, services.ErrTradeNotFound),
-		errors.Is(err, services.ErrPaymentMethodMissing):
+		errors.Is(err, services.ErrPaymentMethodMissing),
+		errors.Is(err, services.ErrDisputeNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, services.ErrForbidden):
 		status = http.StatusForbidden
@@ -94,7 +96,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 	case errors.Is(err, services.ErrAdNotActive),
 		errors.Is(err, services.ErrInsufficientRemaining),
 		errors.Is(err, services.ErrInvalidTransition),
-		errors.Is(err, services.ErrAdHasOpenTrades):
+		errors.Is(err, services.ErrAdHasOpenTrades),
+		errors.Is(err, services.ErrDisputeAlreadyOpen):
 		status = http.StatusConflict
 	case errors.Is(err, services.ErrRateStale):
 		status = http.StatusServiceUnavailable
@@ -571,6 +574,322 @@ func (h *P2PHandler) PrepareRelease(c *gin.Context) {
 		"success": true,
 		"data":    gin.H{"unsignedTx": unsignedTxJSON(result.UnsignedTx)},
 	})
+}
+
+type cancelRequest struct {
+	CallerAddress string `json:"callerAddress"`
+}
+
+func (h *P2PHandler) PrepareCancel(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req cancelRequest
+	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
+		// Tolerate empty body — callerAddress defaults to user.WalletAddress.
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	callerAddr := req.CallerAddress
+	if callerAddr == "" {
+		callerAddr = user.WalletAddress
+	}
+	raw, err := h.trade.Cancel(c.Request.Context(), id, user.ID, callerAddr)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw)},
+	})
+}
+
+type raiseDisputeRequest struct {
+	Reason        string `json:"reason" binding:"required"`
+	CallerAddress string `json:"callerAddress"`
+}
+
+func (h *P2PHandler) RaiseDispute(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req raiseDisputeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	caller := req.CallerAddress
+	if caller == "" {
+		caller = user.WalletAddress
+	}
+	raw, err := h.trade.RaiseDispute(c.Request.Context(), id, user.ID, caller, req.Reason)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw)},
+	})
+}
+
+func (h *P2PHandler) ConfirmRaiseDispute(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req confirmTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	trade, err := h.trade.ConfirmRaiseDispute(c.Request.Context(), id, user.ID, req.TxHash)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
+}
+
+func (h *P2PHandler) GetDispute(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	d, err := h.trade.GetDispute(c.Request.Context(), id, user.ID, false)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": d})
+}
+
+// ─── Chat messages (Step 10) ───────────────────────────────────────────────
+
+type sendMessageRequest struct {
+	Type     string `json:"type" binding:"required"`
+	Body     string `json:"body"`
+	ImageURL string `json:"imageUrl"`
+}
+
+func (h *P2PHandler) SendMessage(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	tradeID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	if h.messages == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Chat not configured"})
+		return
+	}
+	var req sendMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	var msg *models.P2PMessage
+	var err error
+	switch req.Type {
+	case models.P2PMessageTypeText:
+		msg, err = h.messages.SendText(c.Request.Context(), tradeID, user.ID, req.Body)
+	case models.P2PMessageTypeImage:
+		msg, err = h.messages.SendImage(c.Request.Context(), tradeID, user.ID, req.ImageURL)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "type must be text or image"})
+		return
+	}
+	if mapMessageError(c, err) {
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": msg})
+}
+
+func (h *P2PHandler) ListMessages(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	tradeID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	if h.messages == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Chat not configured"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	var since *time.Time
+	if s := c.Query("since"); s != "" {
+		if parsed, err := time.Parse(time.RFC3339, s); err == nil {
+			since = &parsed
+		}
+	}
+	rows, err := h.messages.List(c.Request.Context(), tradeID, user.ID, services.MessageFilter{
+		Since: since,
+		Limit: limit,
+	})
+	if mapMessageError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+}
+
+// mapMessageError extends mapServiceError with chat-specific sentinels.
+func mapMessageError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, services.ErrMessageEmpty),
+		errors.Is(err, services.ErrImageURLInvalid):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return true
+	case errors.Is(err, services.ErrMessageTooLong):
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"success": false, "message": err.Error()})
+		return true
+	}
+	return mapServiceError(c, err)
+}
+
+// ─── Admin dispute resolution ──────────────────────────────────────────────
+
+// adminRequire is the admin equivalent of `require` — auth middleware
+// (`adminAuth`) already enforces role; this only pulls the user out.
+func (h *P2PHandler) adminRequire(c *gin.Context) (*models.User, bool) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"success": false, "message": "Please authenticate",
+		})
+		return nil, false
+	}
+	return user, true
+}
+
+func (h *P2PHandler) AdminListDisputes(c *gin.Context) {
+	if _, ok := h.adminRequire(c); !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	status := c.Query("status")
+	if status == "" {
+		status = models.P2PDisputeStatusOpen
+	}
+	rows, err := h.trade.ListDisputes(c.Request.Context(), status, limit, offset)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+}
+
+func (h *P2PHandler) AdminGetDispute(c *gin.Context) {
+	if _, ok := h.adminRequire(c); !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	d, err := h.trade.GetDispute(c.Request.Context(), id, uuid.Nil, true)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": d})
+}
+
+type p2pAdminResolveRequest struct {
+	RefundBuyer  bool   `json:"refundBuyer"`
+	Note         string `json:"note"`
+	AdminAddress string `json:"adminAddress"`
+}
+
+func (h *P2PHandler) AdminResolveDispute(c *gin.Context) {
+	admin, ok := h.adminRequire(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req p2pAdminResolveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	addr := req.AdminAddress
+	if addr == "" {
+		addr = admin.WalletAddress
+	}
+	raw, err := h.trade.AdminResolveDispute(c.Request.Context(), id, admin.ID, addr, req.RefundBuyer, req.Note)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw)},
+	})
+}
+
+func (h *P2PHandler) ConfirmAdminResolveDispute(c *gin.Context) {
+	admin, ok := h.adminRequire(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req confirmTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	trade, err := h.trade.ConfirmAdminResolveDispute(c.Request.Context(), id, admin.ID, req.TxHash)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
+}
+
+func (h *P2PHandler) ConfirmCancel(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req confirmTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	trade, err := h.trade.ConfirmCancel(c.Request.Context(), id, user.ID, req.TxHash)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
 }
 
 func (h *P2PHandler) ConfirmRelease(c *gin.Context) {

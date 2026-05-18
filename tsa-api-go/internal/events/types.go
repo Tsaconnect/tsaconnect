@@ -68,6 +68,10 @@ const (
 	P2PTradeCancelled = "p2p.trade.cancelled"
 	P2PTradeDisputed  = "p2p.trade.disputed"
 	P2PTradeResolved  = "p2p.trade.resolved"
+	// P2PTradeExpired fires when the timeout watchdog finds a pending_payment
+	// trade past its expiry. The buyer never marked paid; the seller should
+	// reclaim their escrow via the cancelByTimeout flow.
+	P2PTradeExpired = "p2p.trade.expired"
 )
 
 // Event is the payload passed through the event bus.
