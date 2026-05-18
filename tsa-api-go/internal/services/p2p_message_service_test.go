@@ -27,7 +27,7 @@ func msgTestSetup(t *testing.T) (*P2PMessageService, *gorm.DB, uuid.UUID, uuid.U
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	ms := NewP2PMessageService(db, bus).WithClock(fixedClock{
 		t: time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
@@ -199,7 +199,7 @@ func TestTradeService_AutoEmitsSystemMessageOnTransition(t *testing.T) {
 	})
 	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xtx")
 	tr, _, _ := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
-		FiatAmount: "150000000", PaymentMethodID: pmID,
+		FiatAmount: "150000", PaymentMethodID: pmID,
 	})
 	_, _ = svc.MarkPaid(context.Background(), tr.ID, buyerID, "url")
 
