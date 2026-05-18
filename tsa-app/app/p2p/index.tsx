@@ -77,6 +77,22 @@ const P2PMarketScreen: React.FC = () => {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.iconBtn}
+              onPress={() => router.push('/p2p/my-ads')}
+              activeOpacity={0.8}
+            >
+              <Icon name="list-alt" size={22} color={GOLD.dark} />
+              <Text style={styles.iconBtnText}>My ads</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => router.push('/p2p/my-trades')}
+              activeOpacity={0.8}
+            >
+              <Icon name="swap-horiz" size={22} color={GOLD.dark} />
+              <Text style={styles.iconBtnText}>My trades</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.iconBtn}
               onPress={() => router.push('/p2p/payment-methods')}
               activeOpacity={0.8}
             >
