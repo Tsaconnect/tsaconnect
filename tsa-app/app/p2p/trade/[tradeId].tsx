@@ -133,10 +133,33 @@ const TradeDetailScreen: React.FC = () => {
     lastMessageCount.current = messages.length;
   }, [messages.length]);
 
-  if (loading || !trade || !role) {
+  if (loading || !trade) {
     return (
       <SafeAreaView style={styles.container}>
         <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 80 }} />
+      </SafeAreaView>
+    );
+  }
+  if (!role) {
+    // Loaded trade, but the viewer is neither buyer nor seller.
+    // Admin lands on the admin queue, not here, so this is an error state.
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.deniedWrap}>
+          <Icon name="lock" size={48} color={GOLD.muted} />
+          <Text style={styles.deniedTitle}>Not your trade</Text>
+          <Text style={styles.deniedBody}>
+            You're not a party to this trade. If you're an admin reviewing a
+            dispute, open it from the admin queue.
+          </Text>
+          <TouchableOpacity
+            style={styles.deniedBtn}
+            onPress={() => router.back()}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.deniedBtnText}>Go back</Text>
+          </TouchableOpacity>
+        </View>
       </SafeAreaView>
     );
   }
@@ -742,6 +765,29 @@ function formatTime(iso: string): string {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },
   scroll: { padding: 16, paddingBottom: 16 },
+
+  deniedWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+    gap: 12,
+  },
+  deniedTitle: { fontSize: 20, fontWeight: '800', color: '#000' },
+  deniedBody: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  deniedBtn: {
+    backgroundColor: GOLD.primary,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  deniedBtnText: { color: '#000', fontWeight: '800' },
 
   statusBar: { marginBottom: 16, alignItems: 'center' },
   statusStages: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },

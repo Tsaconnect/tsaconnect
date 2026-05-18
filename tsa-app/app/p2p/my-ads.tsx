@@ -4,7 +4,7 @@
 // Close flows through the prepare → sign → broadcast → confirm pattern just
 // like create-ad and trade actions.
 import { router, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -58,10 +58,17 @@ const MyAdsScreen: React.FC = () => {
     setRefreshing(false);
   }, [filter]);
 
+  // useFocusEffect only fires on focus events, so a filter-pill swap while
+  // already focused wouldn't re-fetch. Pair it with a plain useEffect on
+  // `load` so any dependency change (filter) refreshes the list.
   useFocusEffect(useCallback(() => {
     setLoading(true);
     load();
   }, [load]));
+  useEffect(() => {
+    setLoading(true);
+    load();
+  }, [load]);
 
   const onTogglePause = async (ad: P2PAd) => {
     if (acting) return;
@@ -75,22 +82,26 @@ const MyAdsScreen: React.FC = () => {
   };
 
   const onClose = (ad: P2PAd) => {
+    if (acting) return;
+    // Hold the action lock for the duration of the confirm dialog so a
+    // concurrent pause/resume on the same card can't sneak in and starve
+    // the close flow with a silent `if (acting) return` no-op.
+    setActing(ad.id);
     Alert.alert(
       'Close this ad?',
       'Closing the ad refunds the unsold portion to your wallet and stops new trades. ' +
         'Trades already in progress will continue until they finish.',
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'Cancel', style: 'cancel', onPress: () => setActing('') },
         { text: 'Close ad', style: 'destructive', onPress: () => doClose(ad) },
       ],
+      { onDismiss: () => setActing((cur) => (cur === ad.id ? '' : cur)) },
     );
   };
 
   const doClose = async (ad: P2PAd) => {
-    if (acting) return;
     let broadcastHash: string | null = null;
     try {
-      setActing(ad.id);
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
       const prep = await adsApi.prepareClose(ad.id, sellerAddress);
