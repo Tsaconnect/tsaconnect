@@ -13,9 +13,10 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { getChainByChainId, CHAINS } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, submitTransaction, type WalletBalanceWithChain } from '@/services/walletApi';
-import { getActiveWallet, fetchPendingNonce, signLiFiTransaction, readErc20BalanceOf, getProvider } from '@/services/wallet';
+import { getActiveWallet, fetchPendingNonce, signLiFiTransaction, readErc20BalanceOf, getProvider, withRpcFallback } from '@/services/wallet';
 import { ethers } from 'ethers';
 import { getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
+import { mapSubmitError } from '@/services/swapErrors';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 
 const GOLD = '#D4AF37';
@@ -283,7 +284,8 @@ export default function AllSwapScreen() {
       let nonce;
       try {
         nonce = await fetchPendingNonce(walletAddress, chainKey);
-      } catch {
+      } catch (e) {
+        console.error('[swap] fetchPendingNonce failed', { chainKey, e });
         throw new Error('Could not reach the network. Check your connection and try again.');
       }
 
@@ -305,49 +307,82 @@ export default function AllSwapScreen() {
             : { gasPrice: quote.transactionRequest.gasPrice }),
         };
         const signedApprove = await signLiFiTransaction(approveTx);
+
+        // submitTransaction does not throw on backend errors — it returns
+        // { success: false, message }. Check explicitly so a failed approve
+        // surfaces here instead of silently advancing into the swap step
+        // with a stale nonce.
+        let approveRes;
         try {
-          await submitTransaction(signedApprove, 'approve', fromToken.symbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId);
-        } catch {
+          approveRes = await submitTransaction(signedApprove, 'approve', fromToken.symbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId);
+        } catch (e) {
+          console.error('[swap] approve submitTransaction threw', { chainKey, e });
           throw new Error('Token approval failed. The network may be congested — try again.');
         }
-        nonce += 1;
+        const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
+        if (!approveHash) {
+          console.error('[swap] approve rejected by backend', { chainKey, approveRes });
+          throw new Error(mapSubmitError(approveRes.message));
+        }
+
+        // Wait for the approve to land before submitting the swap. Without
+        // this we'd push two pending txs from the same sender into the
+        // mempool back-to-back. For wallets with EIP-7702 delegation (BSC
+        // Maxwell+, Pectra), nodes cap delegated EOAs at 1 in-flight tx and
+        // reject the second with "in-flight transaction limit reached for
+        // delegated accounts". Waiting fixes that and prevents nonce drift
+        // for everyone. The wait is wrapped in withRpcFallback so a flaky
+        // primary RPC doesn't burn the full timeout when an alternate could
+        // see the tx.
+        setSigningStatus('Step 1 of 2: Waiting for approval to confirm…');
+        let receipt;
+        try {
+          receipt = await withRpcFallback(chainKey, (p) =>
+            p.waitForTransaction(approveHash, 1, 90_000),
+          );
+        } catch (e) {
+          console.error('[swap] waitForTransaction failed', { chainKey, approveHash, e });
+          throw new Error(`Lost connection while waiting for the approval (tx ${approveHash}). Refresh the quote and try again.`);
+        }
+        if (!receipt) {
+          throw new Error(`Approval is taking longer than expected (tx ${approveHash}). Check the network and try again once it confirms.`);
+        }
+        if (receipt.status === 0) {
+          console.error('[swap] approve reverted on-chain', { chainKey, approveHash, receipt });
+          throw new Error(`Approval reverted on-chain (tx ${approveHash}). Refresh the quote and try again.`);
+        }
+
+        // Re-fetch the pending nonce after the wait rather than
+        // optimistically incrementing — guards against the user submitting
+        // an unrelated tx from another wallet UI during the ~3-6s wait.
+        try {
+          nonce = await fetchPendingNonce(walletAddress, chainKey);
+        } catch (e) {
+          console.error('[swap] fetchPendingNonce after approve failed; falling back to +1', { chainKey, e });
+          nonce += 1;
+        }
       }
 
-      setSigningStatus('Step 2 of 2: Executing swap…');
+      setSigningStatus(quote.approvalAddress ? 'Step 2 of 2: Executing swap…' : 'Executing swap…');
       const swapTx = { ...quote.transactionRequest, nonce };
       const signedSwap = await signLiFiTransaction(swapTx);
       let res;
       try {
         res = await submitTransaction(signedSwap, 'swap', fromToken.symbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId);
-      } catch {
+      } catch (e) {
+        console.error('[swap] swap submitTransaction threw', { chainKey, e });
         throw new Error('Swap broadcast failed. The network may be congested — try again.');
       }
 
-      if (res.success && res.data) {
-        setTxHash(res.data.txHash); setScreen('success');
+      const swapHash = res.success ? res.data?.txHash : undefined;
+      if (swapHash) {
+        setTxHash(swapHash); setScreen('success');
       } else {
-        // The BE now passes the underlying RPC error through in res.message
-        // (e.g. "nonce too low", "insufficient funds for gas", "execution
-        // reverted: ..."). Map the common cases to user-friendly copy and
-        // keep the raw message visible for anything else.
-        const raw = res.message ?? '';
-        const low = raw.toLowerCase();
-        let friendly = raw;
-        if (low.includes('nonce too low')) {
-          friendly = 'Nonce out of sync — refresh the quote and try again.';
-        } else if (low.includes('insufficient funds') || low.includes('insufficient balance')) {
-          friendly = `Not enough native token to pay gas on this chain.`;
-        } else if (low.includes('underpriced') || low.includes('replacement transaction underpriced')) {
-          friendly = 'Gas price too low for current network conditions — refresh the quote and try again.';
-        } else if (low.includes('execution reverted')) {
-          // Keep the revert reason if LiFi included one.
-          friendly = raw.length > 0 ? raw : 'Transaction reverted on-chain.';
-        } else if (low.includes('transfer amount exceeds allowance')) {
-          friendly = 'Approval didn\'t confirm in time — try again, the network should catch up.';
-        }
-        throw new Error(friendly || 'Swap failed');
+        console.error('[swap] swap rejected by backend', { chainKey, res });
+        throw new Error(mapSubmitError(res.message));
       }
     } catch (e: any) {
+      console.error('[swap] handleSwap failed', e);
       setError(e?.message || 'Swap failed'); setScreen('failure');
     }
   };
