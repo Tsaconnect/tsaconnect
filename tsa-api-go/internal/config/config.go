@@ -48,6 +48,7 @@ type Config struct {
 	ProductEscrowAddress   string
 	ServiceContractAddress string
 	OTCMarketplaceAddress  string
+	P2PEscrowAddress       string
 
 	// Mailjet email service
 	MailjetAPIKey    string
@@ -109,6 +110,11 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
+	// P2PEscrow proxy address; deployed via scripts/deploy-p2p-escrow.js.
+	// Empty default means the P2P feature is dormant — the service still
+	// constructs, but Prepare/Read calls return a configuration error so
+	// handlers can surface a clear "not deployed yet" response.
+	cfg.P2PEscrowAddress = getEnv("P2P_ESCROW_ADDRESS", "")
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")

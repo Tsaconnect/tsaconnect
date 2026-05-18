@@ -46,9 +46,31 @@ func AutoMigrate() error {
 		&models.TPEarning{},
 		&models.CashbackEarning{},
 		&models.RefreshToken{},
+		&models.RequestIdempotency{},
+		&models.WebhookEvent{},
+		&models.P2PPaymentMethod{},
+		&models.P2PAd{},
+		&models.P2PTrade{},
+		&models.P2PMessage{},
+		&models.P2PDispute{},
+		&models.P2PAuditLog{},
 	); err != nil {
 		return err
 	}
+
+	// P2P trade integrity constraints — buyer cannot equal seller. AutoMigrate
+	// doesn't emit CHECK constraints, so this is added explicitly. IF NOT
+	// EXISTS keeps repeat boots idempotent.
+	DB.Exec(`ALTER TABLE p2p_trades
+		DROP CONSTRAINT IF EXISTS p2p_trades_buyer_not_seller`)
+	DB.Exec(`ALTER TABLE p2p_trades
+		ADD CONSTRAINT p2p_trades_buyer_not_seller CHECK (buyer_id <> seller_id)`)
+
+	// Composite index for the timeout watchdog: it scans trades whose
+	// expires_at has elapsed in pending_payment state. Without this index
+	// the query is a full-table scan once we have thousands of trades.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_p2p_trades_status_expires
+		ON p2p_trades (status, expires_at) WHERE status = 'pending_payment'`)
 
 	// Rename smile_job_id → persona_inquiry_id (Persona KYC migration)
 	DB.Exec("ALTER TABLE users RENAME COLUMN smile_job_id TO persona_inquiry_id")
