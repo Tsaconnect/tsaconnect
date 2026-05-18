@@ -102,6 +102,33 @@ type P2PTradeReleasedEvent struct {
 	FeeToSystem   *big.Int
 }
 
+// P2PTradeCancelledEvent captures the TradeCancelled event payload — emitted
+// by `cancelByTimeout` on chain when a pending trade is reclaimed. The
+// returned amount goes back into the ad's `remaining` pool, so the confirm
+// path uses it to restore ad accounting.
+type P2PTradeCancelledEvent struct {
+	TradeID      [32]byte
+	ReturnedToAd *big.Int
+}
+
+// P2PTradeDisputedEvent captures TradeDisputed — emitted by raiseDispute.
+// Carries the party (buyer or seller) that escalated. The off-chain
+// confirm-dispute path uses this to attribute the dispute row authoritatively.
+type P2PTradeDisputedEvent struct {
+	TradeID [32]byte
+	By      common.Address
+}
+
+// P2PTradeResolvedEvent captures TradeResolved — emitted by adminResolve.
+// When `ReleasedToBuyer == true` the amounts mirror TradeReleased; when
+// false, AmountMoved and FeeToSystem are both zero (funds return to ad pool).
+type P2PTradeResolvedEvent struct {
+	TradeID         [32]byte
+	ReleasedToBuyer bool
+	AmountMoved     *big.Int
+	FeeToSystem     *big.Int
+}
+
 // P2PTradeOpenedEvent is parsed from openTrade receipts and confirms the
 // buyer + portion that actually landed on-chain.
 type P2PTradeOpenedEvent struct {
@@ -385,6 +412,35 @@ func (s *P2PEscrowService) VerifyTradeReleased(txHash string, expectedTradeId [3
 	return parseTradeReleasedFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
 }
 
+// VerifyTradeCancelled parses the TradeCancelled event for the supplied tx
+// hash. Returned amount must match the trade's TokenAmount; the confirm-cancel
+// path uses it to add the funds back to ad.remaining.
+func (s *P2PEscrowService) VerifyTradeCancelled(txHash string, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error) {
+	receipt, err := s.fetchReceiptAndCheckOK(txHash)
+	if err != nil {
+		return nil, err
+	}
+	return parseTradeCancelledFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
+}
+
+// VerifyTradeDisputed parses TradeDisputed and returns the raising party.
+func (s *P2PEscrowService) VerifyTradeDisputed(txHash string, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error) {
+	receipt, err := s.fetchReceiptAndCheckOK(txHash)
+	if err != nil {
+		return nil, err
+	}
+	return parseTradeDisputedFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
+}
+
+// VerifyTradeResolved parses TradeResolved (emitted by adminResolve).
+func (s *P2PEscrowService) VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error) {
+	receipt, err := s.fetchReceiptAndCheckOK(txHash)
+	if err != nil {
+		return nil, err
+	}
+	return parseTradeResolvedFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
+}
+
 // ─── Receipt parsers (testable without an RPC client) ──────────────────────
 
 // parseAdCreatedFromReceipt scans logs for an AdCreated event matching the
@@ -443,6 +499,71 @@ func parseTradeOpenedFromReceipt(receipt *types.Receipt, contractAddr common.Add
 		}, nil
 	}
 	return nil, fmt.Errorf("TradeOpened event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+func parseTradeDisputedFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error) {
+	sigID := parsedP2PEscrowABI.Events["TradeDisputed"].ID
+	for _, lg := range receipt.Logs {
+		if lg.Address != contractAddr || len(lg.Topics) < 3 || lg.Topics[0] != sigID {
+			continue
+		}
+		var got [32]byte
+		copy(got[:], lg.Topics[1].Bytes())
+		if got != expectedTradeId {
+			continue
+		}
+		by := common.BytesToAddress(lg.Topics[2].Bytes())
+		return &P2PTradeDisputedEvent{TradeID: got, By: by}, nil
+	}
+	return nil, fmt.Errorf("TradeDisputed event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+func parseTradeResolvedFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error) {
+	sigID := parsedP2PEscrowABI.Events["TradeResolved"].ID
+	for _, lg := range receipt.Logs {
+		if lg.Address != contractAddr || len(lg.Topics) < 2 || lg.Topics[0] != sigID {
+			continue
+		}
+		var got [32]byte
+		copy(got[:], lg.Topics[1].Bytes())
+		if got != expectedTradeId {
+			continue
+		}
+		nonIndexed, err := parsedP2PEscrowABI.Events["TradeResolved"].Inputs.NonIndexed().Unpack(lg.Data)
+		if err != nil || len(nonIndexed) < 3 {
+			return nil, fmt.Errorf("decode TradeResolved data: %w", err)
+		}
+		return &P2PTradeResolvedEvent{
+			TradeID:         got,
+			ReleasedToBuyer: nonIndexed[0].(bool),
+			AmountMoved:     nonIndexed[1].(*big.Int),
+			FeeToSystem:     nonIndexed[2].(*big.Int),
+		}, nil
+	}
+	return nil, fmt.Errorf("TradeResolved event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+func parseTradeCancelledFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error) {
+	sigID := parsedP2PEscrowABI.Events["TradeCancelled"].ID
+	for _, lg := range receipt.Logs {
+		if lg.Address != contractAddr || len(lg.Topics) < 2 || lg.Topics[0] != sigID {
+			continue
+		}
+		var got [32]byte
+		copy(got[:], lg.Topics[1].Bytes())
+		if got != expectedTradeId {
+			continue
+		}
+		nonIndexed, err := parsedP2PEscrowABI.Events["TradeCancelled"].Inputs.NonIndexed().Unpack(lg.Data)
+		if err != nil || len(nonIndexed) < 1 {
+			return nil, fmt.Errorf("decode TradeCancelled data: %w", err)
+		}
+		return &P2PTradeCancelledEvent{
+			TradeID:      got,
+			ReturnedToAd: nonIndexed[0].(*big.Int),
+		}, nil
+	}
+	return nil, fmt.Errorf("TradeCancelled event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
 }
 
 func parseTradeReleasedFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error) {

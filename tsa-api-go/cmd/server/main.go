@@ -118,7 +118,20 @@ func main() {
 		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
 			return blockchainService.TokenAddress("sonic", symbol)
 		})
-		p2pHandler = handlers.NewP2PHandler(config.DB, p2pTradeSvc)
+		// Chat service — system messages auto-emitted on every trade
+		// transition so the chat thread is self-documenting.
+		p2pMessageSvc := services.NewP2PMessageService(config.DB, eventBus)
+		p2pTradeSvc.SetMessageService(p2pMessageSvc)
+		p2pHandler = handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc)
+		// Register the timeout watchdog — scans for pending_payment trades
+		// past expires_at every minute and nudges participants to call the
+		// permissionless cancelByTimeout. Phase 1 has no operator EOA, so
+		// the watchdog itself doesn't broadcast a cancel tx.
+		scheduler.Register(jobs.NewP2PTimeoutWatchdog(p2pTradeSvc, eventBus))
+		// Register the chain reconciler — every 30s, walks non-terminal
+		// trades and corrects DB drift against on-chain truth. Safety net
+		// for dropped-response failures in the prepare/confirm flow.
+		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc))
 		if owner, err := p2pEscrowService.Owner(); err == nil {
 			log.Printf("P2PEscrow contract owner (on-chain): %s", owner)
 		}
