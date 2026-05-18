@@ -282,9 +282,14 @@ contract P2PEscrow is
     /// @notice Seller releases the trade after off-chain fiat receipt.
     /// Sends `amount - fee` to buyer and `fee` to systemWallet. Decrements
     /// ad.reserved (does NOT return to ad.remaining — funds have left).
+    /// @dev    Callable from Pending or Paid status. In P2P the buyer's
+    ///         markPaid is an unverifiable off-chain claim; the seller's
+    ///         signature on `release` is the real authorization gate. Gating
+    ///         release on Paid would force a useless on-chain markPaid step
+    ///         that doesn't add security but costs gas.
     function release(bytes32 tradeId) external nonReentrant whenNotPaused {
         Trade storage t = trades[tradeId];
-        require(t.status == Status.Paid, "Not paid");
+        require(t.status == Status.Pending || t.status == Status.Paid, "Not releasable");
         Ad storage ad = ads[t.adId];
         require(msg.sender == ad.seller, "Only seller");
 
@@ -293,10 +298,10 @@ contract P2PEscrow is
 
     /// @notice Admin-driven release. Used by Phase 2+ Flutterwave webhook
     /// (operator EOA registered as admin). Same semantics as `release` but
-    /// callable by any admin. Trade must be in Paid state.
+    /// callable by any admin. Trade must be Pending or Paid.
     function adminRelease(bytes32 tradeId) external onlyAdmin nonReentrant whenNotPaused {
         Trade storage t = trades[tradeId];
-        require(t.status == Status.Paid, "Not paid");
+        require(t.status == Status.Pending || t.status == Status.Paid, "Not releasable");
         Ad storage ad = ads[t.adId];
 
         _settleRelease(tradeId, t, ad);
@@ -325,15 +330,18 @@ contract P2PEscrow is
         emit TradeCancelled(tradeId, amt);
     }
 
-    /// @notice Either party can escalate a Paid trade to a Disputed state.
+    /// @notice Either party can escalate a Pending or Paid trade to Disputed.
     /// Funds are frozen until adminResolve is called.
-    /// @dev    There is no on-chain dispute timeout in v1 — once raised, the
-    ///         dispute can only be resolved by an admin. Funds are locked
-    ///         indefinitely on chain; the off-chain SLA governs resolution
-    ///         time. Phase 1.5 may add a force-resolve path after a deadline.
+    /// @dev    Callable from Pending or Paid — symmetric with release. A
+    ///         buyer who paid but didn't (or couldn't) call markPaid still
+    ///         needs a dispute path. There is no on-chain dispute timeout in
+    ///         v1; once raised, the dispute can only be resolved by an
+    ///         admin. Funds are locked indefinitely on chain; the off-chain
+    ///         SLA governs resolution time. Phase 1.5 may add a force-resolve
+    ///         path after a deadline.
     function raiseDispute(bytes32 tradeId) external whenNotPaused {
         Trade storage t = trades[tradeId];
-        require(t.status == Status.Paid, "Not paid");
+        require(t.status == Status.Pending || t.status == Status.Paid, "Not disputable");
         Ad storage ad = ads[t.adId];
         require(msg.sender == t.buyer || msg.sender == ad.seller, "Not a party");
 

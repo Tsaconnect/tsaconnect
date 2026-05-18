@@ -291,11 +291,17 @@ describe("P2PEscrow", function () {
       ).to.be.revertedWith("Only seller");
     });
 
-    it("release reverts before markPaid", async function () {
+    it("release without prior markPaid succeeds (Pending state is releasable)", async function () {
+      // P2P contract gates release on the seller's signature, not on the
+      // buyer's (unverifiable) markPaid claim. A seller who has off-chain
+      // proof of fiat can release directly from Pending.
       const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
       const { adId } = await postUsdtAd(escrow, usdt, seller);
-      const { tradeId } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
-      await expect(escrow.connect(seller).release(tradeId)).to.be.revertedWith("Not paid");
+      const { tradeId, amount } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
+      const fee = (amount * 50n) / 10000n;
+      await expect(escrow.connect(seller).release(tradeId))
+        .to.emit(escrow, "TradeReleased")
+        .withArgs(tradeId, buyer.address, amount - fee, fee);
     });
 
     it("double-release reverts", async function () {
@@ -304,7 +310,8 @@ describe("P2PEscrow", function () {
       const { tradeId } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
       await escrow.connect(buyer).markPaid(tradeId);
       await escrow.connect(seller).release(tradeId);
-      await expect(escrow.connect(seller).release(tradeId)).to.be.revertedWith("Not paid");
+      // Second release attempt: trade is now Released, not Pending/Paid.
+      await expect(escrow.connect(seller).release(tradeId)).to.be.revertedWith("Not releasable");
     });
 
     it("emits TradeReleased and TradePaid", async function () {
@@ -432,11 +439,15 @@ describe("P2PEscrow", function () {
       await expect(escrow.connect(other).raiseDispute(tradeId)).to.be.revertedWith("Not a party");
     });
 
-    it("cannot raise dispute before paid", async function () {
+    it("raiseDispute from Pending succeeds (buyer paid but didn't markPaid)", async function () {
+      // raiseDispute is symmetric with release: both accept Pending or Paid.
       const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
       const { adId } = await postUsdtAd(escrow, usdt, seller);
       const { tradeId } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
-      await expect(escrow.connect(buyer).raiseDispute(tradeId)).to.be.revertedWith("Not paid");
+      await expect(escrow.connect(buyer).raiseDispute(tradeId))
+        .to.emit(escrow, "TradeDisputed").withArgs(tradeId, buyer.address);
+      const tr = await escrow.getTrade(tradeId);
+      expect(tr.status).to.equal(5n); // Disputed
     });
 
     it("non-admin cannot adminResolve", async function () {
@@ -486,11 +497,27 @@ describe("P2PEscrow", function () {
       await expect(escrow.connect(other).adminRelease(tradeId)).to.be.revertedWith("Not admin");
     });
 
-    it("adminRelease reverts when not Paid", async function () {
+    it("adminRelease from Pending succeeds (webhook may fire before markPaid)", async function () {
+      // Phase-2 Flutterwave webhook may trigger adminRelease before the
+      // buyer's off-chain markPaid signal lands. Pending must be releasable.
+      const { escrow, usdt, operator, seller, buyer, system } = await loadFixture(deployFixture);
+      const { adId } = await postUsdtAd(escrow, usdt, seller);
+      const { tradeId, amount } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
+      const buyerBefore = await usdt.balanceOf(buyer.address);
+      const sysBefore = await usdt.balanceOf(system.address);
+      await escrow.connect(operator).adminRelease(tradeId);
+      const fee = (amount * 50n) / 10000n;
+      expect(await usdt.balanceOf(buyer.address)).to.equal(buyerBefore + amount - fee);
+      expect(await usdt.balanceOf(system.address)).to.equal(sysBefore + fee);
+    });
+
+    it("adminRelease reverts on terminal trade", async function () {
       const { escrow, usdt, operator, seller, buyer } = await loadFixture(deployFixture);
       const { adId } = await postUsdtAd(escrow, usdt, seller);
       const { tradeId } = await openUsdtTrade(escrow, adId, buyer, 100_000000n);
-      await expect(escrow.connect(operator).adminRelease(tradeId)).to.be.revertedWith("Not paid");
+      await escrow.connect(operator).adminRelease(tradeId);
+      // Already released — second call must revert.
+      await expect(escrow.connect(operator).adminRelease(tradeId)).to.be.revertedWith("Not releasable");
     });
   });
 
