@@ -51,6 +51,23 @@ const (
 	// Wallet events
 	WalletWhitelistAdded = "wallet.whitelist_added"
 	WalletLimitChanged   = "wallet.limit_changed"
+
+	// P2P events — fired by P2PTradeService on every state transition so the
+	// notification dispatcher, chat system-message emitter, and chain
+	// reconciler can react. UserID is set to the participant who triggered
+	// the transition (buyer / seller / admin); Data carries the trade & ad
+	// IDs for downstream handlers.
+	P2PAdCreated      = "p2p.ad.created"
+	P2PAdClosed       = "p2p.ad.closed"
+	P2PAdPaused       = "p2p.ad.paused"
+	P2PAdResumed      = "p2p.ad.resumed"
+	P2PTradeOpened    = "p2p.trade.opened"
+	P2PTradePaid      = "p2p.trade.paid"
+	P2PTradeReleasing = "p2p.trade.releasing"
+	P2PTradeReleased  = "p2p.trade.released"
+	P2PTradeCancelled = "p2p.trade.cancelled"
+	P2PTradeDisputed  = "p2p.trade.disputed"
+	P2PTradeResolved  = "p2p.trade.resolved"
 )
 
 // Event is the payload passed through the event bus.

@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -321,6 +321,39 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
 			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// P2P routes — every endpoint requires JWT auth + Persona-verified KYC
+	// (the handler itself enforces verification via the require() helper).
+	// Idempotency is applied to the write paths so retries are safe.
+	if p2p != nil && p2p.IsConfigured() {
+		idem := middleware.Idempotency(config.DB)
+
+		p2pGroup := api.Group("/p2p")
+		p2pGroup.Use(auth)
+		{
+			p2pGroup.GET("/payment-methods", p2p.ListPaymentMethods)
+			p2pGroup.POST("/payment-methods", idem, p2p.CreatePaymentMethod)
+			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
+
+			p2pGroup.GET("/ads", p2p.ListAds)
+			p2pGroup.GET("/ads/my", p2p.ListMyAds)
+			p2pGroup.GET("/ads/:id", p2p.GetAd)
+			p2pGroup.POST("/ads", idem, p2p.CreateAd)
+			p2pGroup.POST("/ads/:id/confirm", idem, p2p.ConfirmAd)
+			p2pGroup.POST("/ads/:id/pause", p2p.PauseAd)
+			p2pGroup.POST("/ads/:id/resume", p2p.ResumeAd)
+			p2pGroup.POST("/ads/:id/close", idem, p2p.PrepareCloseAd)
+			p2pGroup.POST("/ads/:id/close/confirm", idem, p2p.ConfirmCloseAd)
+			p2pGroup.POST("/ads/:id/trades", idem, p2p.OpenTrade)
+
+			p2pGroup.GET("/trades", p2p.ListTrades)
+			p2pGroup.GET("/trades/:id", p2p.GetTrade)
+			p2pGroup.POST("/trades/:id/open/confirm", idem, p2p.ConfirmOpenTrade)
+			p2pGroup.POST("/trades/:id/mark-paid", idem, p2p.MarkPaid)
+			p2pGroup.POST("/trades/:id/release", idem, p2p.PrepareRelease)
+			p2pGroup.POST("/trades/:id/release/confirm", idem, p2p.ConfirmRelease)
 		}
 	}
 

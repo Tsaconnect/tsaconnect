@@ -14,6 +14,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
+	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/routes"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -66,6 +67,10 @@ func main() {
 
 	verifyEscrowAdmin(escrowService)
 
+	// Initialize the P2P escrow adapter (separate contract; safe to no-op
+	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
+	p2pEscrowService := services.NewP2PEscrowService(sonicClient, cfg)
+
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
 
@@ -83,6 +88,13 @@ func main() {
 	eventBus := events.NewBus()
 	wsHub := ws.NewHub()
 
+	// Initialize the in-process periodic-worker scheduler. Workers are
+	// registered by feature wiring (Step 7 timeout watchdog, Step 9 chain
+	// reconciler, etc.). Phase 1 keeps this in-process — see
+	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
+	// path to River.
+	scheduler := jobs.NewScheduler()
+
 	// Initialize email and notification services
 	emailService := services.NewEmailService(cfg.MailjetAPIKey, cfg.MailjetSecretKey)
 	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService)
@@ -96,6 +108,23 @@ func main() {
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
+
+	// P2P trade service — wired only when the contract address is set.
+	// Without the address the handler stays nil and routes.go skips
+	// registration so the frontend gets clean 404s rather than 500s.
+	var p2pHandler *handlers.P2PHandler
+	if cfg.P2PEscrowAddress != "" && sonicClient != nil {
+		p2pTradeSvc := services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, cfg.SonicChainID)
+		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
+			return blockchainService.TokenAddress("sonic", symbol)
+		})
+		p2pHandler = handlers.NewP2PHandler(config.DB, p2pTradeSvc)
+		if owner, err := p2pEscrowService.Owner(); err == nil {
+			log.Printf("P2PEscrow contract owner (on-chain): %s", owner)
+		}
+	} else {
+		log.Printf("P2P feature dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
+	}
 
 	// Backfill any pending transactions that already have a txHash.
 	// These were submitted before the receipt-polling goroutine was added.
@@ -129,7 +158,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
@@ -141,6 +170,11 @@ func main() {
 		Addr:    ":" + port,
 		Handler: router,
 	}
+
+	// Start scheduler (no-op if no workers registered yet — future steps add them).
+	schedulerCtx, schedulerCancel := context.WithCancel(context.Background())
+	defer schedulerCancel()
+	scheduler.Start(schedulerCtx)
 
 	// Start server in a goroutine
 	go func() {
@@ -156,6 +190,9 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
+
+	// Stop scheduler first so workers don't accept new work mid-shutdown.
+	scheduler.Stop()
 
 	// Stop event bus
 	eventBus.Stop()
