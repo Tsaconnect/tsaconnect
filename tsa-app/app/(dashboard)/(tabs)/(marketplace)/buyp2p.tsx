@@ -1,6 +1,5 @@
-import BuyP2PScreen from '@/screens/buyP2P';
-import React from 'react';
+import { Redirect } from 'expo-router';
 
 export default function BuyP2P() {
-  return <BuyP2PScreen />;
+  return <Redirect href="/p2p" />;
 }
