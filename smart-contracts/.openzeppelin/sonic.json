@@ -10,6 +10,11 @@
       "address": "0x1304d7e287deB233131A9F75aA5867af1D9591d1",
       "txHash": "0xf0391f3461f5d6b7e707919495c4433a78ba7eee983d1d84027487d544a737b9",
       "kind": "uups"
+    },
+    {
+      "address": "0x84E45355Db0FB88707ea8fba67a60dA0bE5c77e6",
+      "txHash": "0xf15297e8e268a34d06e9f2b8648bcb50e4e33a51d3c49cab255c3156682789e0",
+      "kind": "uups"
     }
   ],
   "impls": {
@@ -357,6 +362,290 @@
           "t_uint256": {
             "label": "uint256",
             "numberOfBytes": "32"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Pausable": [
+            {
+              "contract": "PausableUpgradeable",
+              "label": "_paused",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol:21",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
+    },
+    "61911d07f9e6a120ada50b3d97b2b3d7a2f07fc44b9baed41a6d3aec9af247af": {
+      "address": "0x92A60263F99D8dA78A8934556A650086df773220",
+      "txHash": "0x500b9d6d955b3d0b73bf1a512f264a0ff4bddf85ac788b9e813713d445701fe8",
+      "layout": {
+        "solcVersion": "0.8.22",
+        "storage": [
+          {
+            "label": "mcgpToken",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_address",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:62"
+          },
+          {
+            "label": "systemWallet",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_address",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:66"
+          },
+          {
+            "label": "acceptedTokens",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:69"
+          },
+          {
+            "label": "admins",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:73"
+          },
+          {
+            "label": "ads",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_mapping(t_bytes32,t_struct(Ad)2666_storage)",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:75"
+          },
+          {
+            "label": "trades",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_mapping(t_bytes32,t_struct(Trade)2678_storage)",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:76"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_array(t_uint256)45_storage",
+            "contract": "P2PEscrow",
+            "src": "contracts/P2PEscrow.sol:441"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_struct(InitializableStorage)369_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)13_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(PausableStorage)115_storage": {
+            "label": "struct PausableUpgradeable.PausableStorage",
+            "members": [
+              {
+                "label": "_paused",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_uint256)45_storage": {
+            "label": "uint256[45]",
+            "numberOfBytes": "1440"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_enum(Status)2652": {
+            "label": "enum P2PEscrow.Status",
+            "members": [
+              "None",
+              "Pending",
+              "Paid",
+              "Released",
+              "Cancelled",
+              "Disputed",
+              "Resolved"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(Ad)2666_storage)": {
+            "label": "mapping(bytes32 => struct P2PEscrow.Ad)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(Trade)2678_storage)": {
+            "label": "mapping(bytes32 => struct P2PEscrow.Trade)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(Ad)2666_storage": {
+            "label": "struct P2PEscrow.Ad",
+            "members": [
+              {
+                "label": "seller",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "token",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "remaining",
+                "type": "t_uint96",
+                "offset": 20,
+                "slot": "1"
+              },
+              {
+                "label": "reserved",
+                "type": "t_uint96",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "createdAt",
+                "type": "t_uint40",
+                "offset": 12,
+                "slot": "2"
+              },
+              {
+                "label": "open",
+                "type": "t_bool",
+                "offset": 17,
+                "slot": "2"
+              }
+            ],
+            "numberOfBytes": "96"
+          },
+          "t_struct(Trade)2678_storage": {
+            "label": "struct P2PEscrow.Trade",
+            "members": [
+              {
+                "label": "adId",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "buyer",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint96",
+                "offset": 20,
+                "slot": "1"
+              },
+              {
+                "label": "createdAt",
+                "type": "t_uint40",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "status",
+                "type": "t_enum(Status)2652",
+                "offset": 5,
+                "slot": "2"
+              }
+            ],
+            "numberOfBytes": "96"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint40": {
+            "label": "uint40",
+            "numberOfBytes": "5"
+          },
+          "t_uint96": {
+            "label": "uint96",
+            "numberOfBytes": "12"
           }
         },
         "namespaces": {
