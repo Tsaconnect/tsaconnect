@@ -118,6 +118,7 @@ func main() {
 		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
 			return blockchainService.TokenAddress("sonic", symbol)
 		})
+		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		// Chat service — system messages auto-emitted on every trade
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc := services.NewP2PMessageService(config.DB, eventBus)

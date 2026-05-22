@@ -246,12 +246,20 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			side TEXT, token TEXT, chain_id INTEGER,
 			amount TEXT, remaining TEXT, reserved TEXT,
 			fiat_currency TEXT, rate TEXT,
+			rate_type TEXT NOT NULL DEFAULT 'fixed',
+			float_offset_bps INTEGER,
+			float_anchor TEXT NOT NULL DEFAULT 'bybit_sell',
 			min_limit TEXT, max_limit TEXT,
 			payment_method_ids TEXT, terms TEXT,
 			on_chain_ad_id TEXT, escrow_tx_hash TEXT,
 			status TEXT DEFAULT 'pending',
 			expires_at DATETIME,
-			created_at DATETIME, updated_at DATETIME, deleted_at DATETIME
+			created_at DATETIME, updated_at DATETIME, deleted_at DATETIME,
+			CHECK (rate_type IN ('fixed','float')),
+			CHECK (
+				(rate_type = 'fixed' AND float_offset_bps IS NULL) OR
+				(rate_type = 'float' AND float_offset_bps IS NOT NULL)
+			)
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY,
@@ -1901,5 +1909,377 @@ func TestCheckFiatLimits(t *testing.T) {
 	}
 	if err := checkFiatLimits(fiat, "", ""); err != nil {
 		t.Errorf("no limits: want nil, got %v", err)
+	}
+}
+
+// ─── Float-rate ad tests ────────────────────────────────────────────────────
+
+// freshNGNRates returns a non-stale snapshot with BinanceSell pinned.
+func freshNGNRates(binanceSell float64) *RatesSnapshot {
+	return &RatesSnapshot{
+		Rates: map[string]P2PRate{
+			"NGN": {
+				Currency:    "NGN",
+				BinanceBuy:  binanceSell,
+				BinanceSell: binanceSell,
+				MidRate:     binanceSell,
+				Stale:       false,
+			},
+		},
+		CachedAt: time.Now(),
+	}
+}
+
+func TestComputeEffectiveRate_Fixed_PassesThrough(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	// Even with no rate provider configured, fixed ads must not hit the feed.
+	svc.rates = nil
+
+	ad := &models.P2PAd{Rate: "1500.0000000000", RateType: models.P2PAdRateTypeFixed}
+	got, err := svc.ComputeEffectiveRate(ad)
+	if err != nil {
+		t.Fatalf("fixed pass-through: unexpected err %v", err)
+	}
+	if got != "1500.0000000000" {
+		t.Fatalf("fixed pass-through: want literal rate, got %q", got)
+	}
+}
+
+func TestComputeEffectiveRate_Float_PositiveOffset(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+
+	bps := 50 // +0.5%
+	ad := &models.P2PAd{
+		FiatCurrency:   "NGN",
+		RateType:       models.P2PAdRateTypeFloat,
+		FloatOffsetBps: &bps,
+		FloatAnchor:    models.P2PAdFloatAnchorBybitSell,
+	}
+	got, err := svc.ComputeEffectiveRate(ad)
+	if err != nil {
+		t.Fatalf("ComputeEffectiveRate: %v", err)
+	}
+	// 1500 * 10050/10000 = 1507.5
+	if got != "1507.5000000000" {
+		t.Fatalf("want 1507.5000000000, got %q", got)
+	}
+}
+
+func TestComputeEffectiveRate_Float_NegativeOffset(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+
+	bps := -100 // -1%
+	ad := &models.P2PAd{
+		FiatCurrency:   "NGN",
+		RateType:       models.P2PAdRateTypeFloat,
+		FloatOffsetBps: &bps,
+		FloatAnchor:    models.P2PAdFloatAnchorBybitSell,
+	}
+	got, err := svc.ComputeEffectiveRate(ad)
+	if err != nil {
+		t.Fatalf("ComputeEffectiveRate: %v", err)
+	}
+	// 1500 * 9900/10000 = 1485
+	if got != "1485.0000000000" {
+		t.Fatalf("want 1485.0000000000, got %q", got)
+	}
+}
+
+func TestComputeEffectiveRate_Float_StaleFeed(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: &RatesSnapshot{
+		Rates: map[string]P2PRate{
+			"NGN": {Currency: "NGN", BinanceSell: 1500, Stale: true},
+		},
+		StaleSeconds: 600,
+	}}
+
+	bps := 50
+	ad := &models.P2PAd{
+		FiatCurrency:   "NGN",
+		RateType:       models.P2PAdRateTypeFloat,
+		FloatOffsetBps: &bps,
+	}
+	_, err := svc.ComputeEffectiveRate(ad)
+	if !errors.Is(err, ErrRateStale) {
+		t.Fatalf("want ErrRateStale, got %v", err)
+	}
+}
+
+func TestComputeEffectiveRate_Float_MissingCurrency(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	// Snapshot has only USD; ad is in NGN.
+	svc.rates = &mockRates{snap: &RatesSnapshot{
+		Rates:    map[string]P2PRate{"USD": {Currency: "USD", BinanceSell: 1}},
+		CachedAt: time.Now(),
+	}}
+
+	bps := 50
+	ad := &models.P2PAd{
+		FiatCurrency:   "NGN",
+		RateType:       models.P2PAdRateTypeFloat,
+		FloatOffsetBps: &bps,
+	}
+	_, err := svc.ComputeEffectiveRate(ad)
+	if !errors.Is(err, ErrRateStale) {
+		t.Fatalf("want ErrRateStale for missing currency, got %v", err)
+	}
+}
+
+func TestComputeEffectiveRate_Float_NilProvider(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = nil
+
+	bps := 0
+	ad := &models.P2PAd{
+		FiatCurrency:   "NGN",
+		RateType:       models.P2PAdRateTypeFloat,
+		FloatOffsetBps: &bps,
+	}
+	_, err := svc.ComputeEffectiveRate(ad)
+	if !errors.Is(err, ErrRateStale) {
+		t.Fatalf("want ErrRateStale when provider is nil, got %v", err)
+	}
+}
+
+func TestCreateAd_Float_RejectsMissingOffset(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	_, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat, // no FloatOffsetBps set
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("want ErrInvalidParams for missing bps, got %v", err)
+	}
+}
+
+func TestCreateAd_Float_RejectsOffsetAboveCap(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	svc.SetFloatOffsetMaxBps(500) // tight ±5% for this test
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := 600
+	_, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("want ErrInvalidParams for over-cap bps, got %v", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "±500") {
+		t.Fatalf("error should mention configured cap, got %q", err.Error())
+	}
+}
+
+func TestCreateAd_Float_RejectsOffsetBelowCap(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	svc.SetFloatOffsetMaxBps(500)
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := -600
+	_, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("want ErrInvalidParams for under-cap bps, got %v", err)
+	}
+}
+
+func TestCreateAd_Float_RejectsUnknownAnchor(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := 50
+	_, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		FloatAnchor:      "coingecko_mid",
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("want ErrInvalidParams for unknown anchor, got %v", err)
+	}
+}
+
+func TestCreateAd_Fixed_RejectsStrayFloatOffset(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := 50
+	_, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		Rate:             "1500",
+		RateType:         models.P2PAdRateTypeFixed,
+		FloatOffsetBps:   &bps, // illegal on fixed
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("want ErrInvalidParams for stray float_offset on fixed ad, got %v", err)
+	}
+}
+
+func TestCreateAd_Float_HappyPath_PublishesWithComputedRate(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := 50 // +0.5% → 1507.5
+	result, err := svc.CreateAd(context.Background(), sellerID, "0xseller", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if err != nil {
+		t.Fatalf("CreateAd float: %v", err)
+	}
+	if result.Ad.RateType != models.P2PAdRateTypeFloat {
+		t.Fatalf("rate_type: want float, got %s", result.Ad.RateType)
+	}
+	if result.Ad.Rate != "1507.5000000000" {
+		t.Fatalf("ad.Rate: want 1507.5000000000 (cached), got %s", result.Ad.Rate)
+	}
+	if result.Ad.FloatOffsetBps == nil || *result.Ad.FloatOffsetBps != 50 {
+		t.Fatalf("FloatOffsetBps not persisted, got %v", result.Ad.FloatOffsetBps)
+	}
+	if result.Ad.FloatAnchor != models.P2PAdFloatAnchorBybitSell {
+		t.Fatalf("FloatAnchor default not applied, got %q", result.Ad.FloatAnchor)
+	}
+}
+
+func TestOpenTrade_FloatAd_StaleFeed_NoSideEffects(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	buyerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	// 1) Publish a float ad while feed is fresh.
+	bps := 50
+	res, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		MinLimit:         "1000",
+		MaxLimit:         "1500000",
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if err != nil {
+		t.Fatalf("CreateAd: %v", err)
+	}
+	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xadtxhash")
+
+	// 2) Flip the feed to stale. OpenTrade must refuse.
+	svc.rates = &mockRates{snap: &RatesSnapshot{
+		Rates:        map[string]P2PRate{"NGN": {Currency: "NGN", BinanceSell: 1500, Stale: true}},
+		StaleSeconds: 600,
+	}}
+
+	esc.verifyOpenResult = &P2PTradeOpenedEvent{Buyer: common.HexToAddress("0xd00d"), Amount: big.NewInt(300_000_000)}
+	_, _, err = svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
+		FiatAmount: "450000", PaymentMethodID: pmID,
+	})
+	if !errors.Is(err, ErrRateStale) {
+		t.Fatalf("OpenTrade on stale feed: want ErrRateStale, got %v", err)
+	}
+
+	// No trade row should have been created.
+	var n int64
+	db.Model(&models.P2PTrade{}).Where("ad_id = ?", res.Ad.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("expected 0 trade rows after stale-feed reject, got %d", n)
+	}
+
+	// Ad should remain active with reserved=0 (no escrow movement).
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", res.Ad.ID)
+	if ad.Status != models.P2PAdStatusActive {
+		t.Fatalf("ad status after stale-feed reject: want active, got %s", ad.Status)
+	}
+	if ad.Reserved != "0" {
+		t.Fatalf("ad.reserved after stale-feed reject: want 0, got %s", ad.Reserved)
+	}
+}
+
+func TestOpenTrade_FloatAd_RefreshesCacheRate(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	// Initial snapshot at 1500; trade-time snapshot at 1600.
+	svc.rates = &mockRates{snap: freshNGNRates(1500)}
+	sellerID := uuid.New()
+	buyerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	bps := 0 // exactly the anchor rate
+	res, err := svc.CreateAd(context.Background(), sellerID, "0xs", CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000000", FiatCurrency: "NGN",
+		RateType:         models.P2PAdRateTypeFloat,
+		FloatOffsetBps:   &bps,
+		MinLimit:         "1000",
+		MaxLimit:         "1600000",
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	})
+	if err != nil {
+		t.Fatalf("CreateAd: %v", err)
+	}
+	if res.Ad.Rate != "1500.0000000000" {
+		t.Fatalf("initial cache rate: want 1500.0000000000, got %s", res.Ad.Rate)
+	}
+	_, _ = svc.ConfirmAd(context.Background(), res.Ad.ID, sellerID, "", "0xadtxhash")
+
+	// Market moves up between publish and trade-open.
+	svc.rates = &mockRates{snap: freshNGNRates(1600)}
+	esc.verifyOpenResult = &P2PTradeOpenedEvent{Buyer: common.HexToAddress("0xd00d"), Amount: big.NewInt(160_000_000)}
+
+	trade, _, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xb", OpenTradeParams{
+		FiatAmount: "160000", PaymentMethodID: pmID,
+	})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	if trade.Rate != "1600.0000000000" {
+		t.Fatalf("trade snapshotted rate: want 1600.0000000000, got %s", trade.Rate)
+	}
+
+	// Ad cache should now reflect the just-quoted rate.
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", res.Ad.ID)
+	if ad.Rate != "1600.0000000000" {
+		t.Fatalf("ad cache after open: want 1600.0000000000, got %s", ad.Rate)
 	}
 }

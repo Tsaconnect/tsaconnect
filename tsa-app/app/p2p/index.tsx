@@ -144,16 +144,30 @@ const P2PMarketScreen: React.FC = () => {
 const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
   const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
+  const isFloat = ad.rateType === 'float';
+  const isStale = !!ad.rateStale;
   return (
     <TouchableOpacity
-      style={styles.card}
-      onPress={() => router.push(`/p2p/ad/${ad.id}`)}
-      activeOpacity={0.85}
+      style={[styles.card, isStale && styles.cardDisabled]}
+      onPress={() => {
+        if (isStale) return;
+        router.push(`/p2p/ad/${ad.id}`);
+      }}
+      activeOpacity={isStale ? 1 : 0.85}
+      disabled={isStale}
     >
       <View style={styles.cardTop}>
-        <Text style={styles.cardSeller}>
-          Seller •{ad.sellerId.slice(0, 6)}
-        </Text>
+        <View style={styles.cardSellerRow}>
+          <Text style={styles.cardSeller}>
+            Seller •{ad.sellerId.slice(0, 6)}
+          </Text>
+          {isFloat && (
+            <View style={styles.floatChip}>
+              <Icon name="trending-up" size={11} color={GOLD.dark} />
+              <Text style={styles.floatChipText}>Float</Text>
+            </View>
+          )}
+        </View>
         <View style={styles.statusBadge}>
           <Text style={styles.statusBadgeText}>{ad.status}</Text>
         </View>
@@ -162,6 +176,12 @@ const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
         <Text style={styles.cardRate}>₦{ad.rate}</Text>
         <Text style={styles.cardRateUnit}> / {ad.token}</Text>
       </View>
+      {isStale && (
+        <View style={styles.staleBadge}>
+          <Icon name="error-outline" size={13} color="#DC3545" />
+          <Text style={styles.staleBadgeText}>Live rate unavailable</Text>
+        </View>
+      )}
       <View style={styles.cardMeta}>
         <Text style={styles.cardMetaText}>
           Available: {remaining} {ad.token}
@@ -226,7 +246,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
+  cardDisabled: { opacity: 0.55 },
+  cardSellerRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   cardSeller: { fontSize: 12, color: '#888', fontWeight: '600' },
+  floatChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: GOLD.light,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  floatChipText: { fontSize: 10, color: GOLD.dark, fontWeight: '700' },
+  staleBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    backgroundColor: '#FDECEF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  staleBadgeText: { fontSize: 11, color: '#DC3545', fontWeight: '700' },
   statusBadge: { backgroundColor: GOLD.light, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
   statusBadgeText: { fontSize: 11, color: GOLD.dark, fontWeight: '700' },
   cardRow: { flexDirection: 'row', alignItems: 'baseline' },

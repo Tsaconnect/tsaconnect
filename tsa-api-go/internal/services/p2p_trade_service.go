@@ -106,7 +106,17 @@ type P2PTradeService struct {
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
 	// — internal calls go through `s.systemMsg` which guards.
 	messages *P2PMessageService
+	// floatOffsetMaxBps caps the absolute basis-point offset a seller can
+	// publish on a float-rate ad. 0 (or unset) means use defaultFloatOffsetMaxBps.
+	floatOffsetMaxBps int
 }
+
+// defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
+// is constructed without an explicit value. 1000 bps = ±10%, matching the
+// typical Binance P2P deviation cap. Production should always set this from
+// config (P2P_FLOAT_OFFSET_MAX_BPS); the default is a safety net for tests
+// and dev environments.
+const defaultFloatOffsetMaxBps = 1000
 
 func NewP2PTradeService(db *gorm.DB, escrow P2PEscrowAdapter, rates RateProvider, bus EventPublisher, chainID int64) *P2PTradeService {
 	return &P2PTradeService{
@@ -140,6 +150,26 @@ func (s *P2PTradeService) SetMessageService(m *P2PMessageService) {
 	s.messages = m
 }
 
+// SetFloatOffsetMaxBps sets the platform-wide cap on the absolute basis-point
+// offset accepted on float-rate ads. Values ≤ 0 fall back to
+// defaultFloatOffsetMaxBps. Called once at service construction from config.
+func (s *P2PTradeService) SetFloatOffsetMaxBps(bps int) {
+	if bps <= 0 {
+		s.floatOffsetMaxBps = defaultFloatOffsetMaxBps
+		return
+	}
+	s.floatOffsetMaxBps = bps
+}
+
+// floatOffsetCap returns the effective bps cap, falling back to the default
+// when SetFloatOffsetMaxBps was never called.
+func (s *P2PTradeService) floatOffsetCap() int {
+	if s.floatOffsetMaxBps <= 0 {
+		return defaultFloatOffsetMaxBps
+	}
+	return s.floatOffsetMaxBps
+}
+
 // systemMsg is the nil-safe gateway for system message writes. Failures here
 // must never break the live transition (the user has already moved money);
 // log and continue. The reconciler can re-fire any missed audit, but a
@@ -159,7 +189,10 @@ type CreateAdParams struct {
 	Token            string
 	TokenAmount      string // base units; e.g. "1000000000" = 1000 USDT
 	FiatCurrency     string
-	Rate             string // fiat per 1 token base unit
+	Rate             string // fiat per 1 token base unit; required when RateType=='fixed', ignored for 'float'
+	RateType         string // '' (defaults to 'fixed'), 'fixed', or 'float'
+	FloatOffsetBps   *int   // required when RateType=='float'; basis points, e.g. 50 = +0.5%
+	FloatAnchor      string // '' (defaults to 'bybit_sell'); reference feed key for float ads
 	MinLimit         string // fiat
 	MaxLimit         string // fiat
 	PaymentMethodIDs []uuid.UUID
@@ -206,6 +239,15 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return nil, err
 	}
 
+	rateType := strings.ToLower(strings.TrimSpace(params.RateType))
+	if rateType == "" {
+		rateType = models.P2PAdRateTypeFixed
+	}
+	anchor := strings.TrimSpace(params.FloatAnchor)
+	if anchor == "" {
+		anchor = models.P2PAdFloatAnchorBybitSell
+	}
+
 	ad := &models.P2PAd{
 		ID:               uuid.New(),
 		SellerID:         sellerID,
@@ -217,11 +259,26 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		Reserved:         "0",
 		FiatCurrency:     strings.ToUpper(params.FiatCurrency),
 		Rate:             params.Rate,
+		RateType:         rateType,
+		FloatOffsetBps:   params.FloatOffsetBps,
+		FloatAnchor:      anchor,
 		MinLimit:         params.MinLimit,
 		MaxLimit:         params.MaxLimit,
 		PaymentMethodIDs: stringifyUUIDs(params.PaymentMethodIDs),
 		Terms:            params.Terms,
 		Status:           models.P2PAdStatusPending,
+	}
+
+	// Float ads compute their initial cache value from the live feed so the
+	// browse list shows a real number from the moment the ad is published.
+	// requireFreshRate above already guaranteed the feed is fresh; failing
+	// here means a race we can't recover from cleanly, so bubble ErrRateStale.
+	if rateType == models.P2PAdRateTypeFloat {
+		effective, err := s.ComputeEffectiveRate(ad)
+		if err != nil {
+			return nil, err
+		}
+		ad.Rate = effective
 	}
 	ad.OnChainAdID = HashIDHex(ad.ID)
 	onChainAdID := HashID(ad.ID)
@@ -415,7 +472,15 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return nil, nil, ErrSelfTrade
 	}
 
-	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, ad.Rate, tokenDecimalsFor(ad.Token))
+	// Effective rate is recomputed live for float ads (snapshotted onto the
+	// trade row below), and returned verbatim for fixed ads. ErrRateStale on
+	// float ads is surfaced unchanged so the handler maps it to 503.
+	effectiveRate, err := s.ComputeEffectiveRate(&ad)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.Token))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -444,7 +509,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		TokenAmount:     tokenAmount.String(),
 		FiatAmount:      fiatAmount.String(),
 		FiatCurrency:    ad.FiatCurrency,
-		Rate:            ad.Rate,
+		Rate:            effectiveRate,
 		PaymentMethodID: params.PaymentMethodID,
 		Status:          models.P2PTradeStatusPendingPayment,
 		ExpiresAt:       s.clock.Now().Add(30 * time.Minute),
@@ -476,6 +541,19 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Post-commit cache refresh for float ads: best-effort update so the
+	// browse list shows the just-quoted rate on subsequent reads. The trade
+	// already has the snapshotted rate; this is purely a display cache. A
+	// crash between commit and this update leaves ad.rate stale until the
+	// next successful trade open — acceptable since it's not a price source.
+	if ad.RateType == models.P2PAdRateTypeFloat {
+		if dbErr := s.db.WithContext(ctx).Model(&models.P2PAd{}).
+			Where("id = ?", ad.ID).
+			Update("rate", effectiveRate).Error; dbErr != nil {
+			log.Printf("[p2p OpenTrade] cache refresh failed for ad=%s: %v", ad.ID, dbErr)
+		}
 	}
 
 	s.audit(ctx, models.P2PAuditTradeOpened, &buyerID, &ad.ID, &trade.ID, map[string]any{
@@ -1704,11 +1782,38 @@ func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
 	if strings.TrimSpace(p.FiatCurrency) == "" {
 		return fmt.Errorf("%w: fiat_currency", ErrInvalidParams)
 	}
-	if strings.TrimSpace(p.Rate) == "" {
-		return fmt.Errorf("%w: rate", ErrInvalidParams)
-	}
 	if len(p.PaymentMethodIDs) == 0 {
 		return fmt.Errorf("%w: at least one payment_method_id required", ErrInvalidParams)
+	}
+
+	// Rate-type validation: fixed ads need a literal rate; float ads need an
+	// offset within the configured cap. Anchor key must be in the allowlist.
+	rateType := strings.ToLower(strings.TrimSpace(p.RateType))
+	if rateType == "" {
+		rateType = models.P2PAdRateTypeFixed
+	}
+	switch rateType {
+	case models.P2PAdRateTypeFixed:
+		if strings.TrimSpace(p.Rate) == "" {
+			return fmt.Errorf("%w: rate", ErrInvalidParams)
+		}
+		if p.FloatOffsetBps != nil {
+			return fmt.Errorf("%w: float_offset_bps must not be set for fixed-rate ads", ErrInvalidParams)
+		}
+	case models.P2PAdRateTypeFloat:
+		if p.FloatOffsetBps == nil {
+			return fmt.Errorf("%w: float_offset_bps required for float-rate ads", ErrInvalidParams)
+		}
+		cap := s.floatOffsetCap()
+		if *p.FloatOffsetBps > cap || *p.FloatOffsetBps < -cap {
+			return fmt.Errorf("%w: float_offset_bps must be within ±%d", ErrInvalidParams, cap)
+		}
+		anchor := strings.TrimSpace(p.FloatAnchor)
+		if anchor != "" && anchor != models.P2PAdFloatAnchorBybitSell {
+			return fmt.Errorf("%w: unknown float_anchor %q", ErrInvalidParams, anchor)
+		}
+	default:
+		return fmt.Errorf("%w: rate_type must be 'fixed' or 'float'", ErrInvalidParams)
 	}
 	return nil
 }
@@ -1729,6 +1834,68 @@ func (s *P2PTradeService) requireFreshRate(currency string) error {
 		return ErrRateStale
 	}
 	return nil
+}
+
+// ComputeEffectiveRate returns the NGN-per-token rate to quote against for a
+// given ad. For fixed ads it is the literal stored rate. For float ads it
+// pulls the latest feed value for ad.FiatCurrency via the configured anchor,
+// validates freshness, applies the seller's bps offset, and formats the
+// result to 10 decimal places (matching the numeric(38,10) Rate column).
+//
+// Returns ErrRateStale when the underlying feed is missing or stale —
+// mapServiceError in the HTTP layer maps this to HTTP 503 so callers in the
+// browse-list or trade-open path can surface a clean "Live rate unavailable"
+// state to users.
+func (s *P2PTradeService) ComputeEffectiveRate(ad *models.P2PAd) (string, error) {
+	if ad == nil {
+		return "", fmt.Errorf("%w: nil ad", ErrInvalidParams)
+	}
+	if ad.RateType != models.P2PAdRateTypeFloat {
+		return ad.Rate, nil
+	}
+	if ad.FloatOffsetBps == nil {
+		// Shouldn't happen — the CHECK constraint and validator both reject
+		// this — but defend against bad data on read rather than crash.
+		return "", fmt.Errorf("%w: float ad missing float_offset_bps", ErrInvalidParams)
+	}
+	if s.rates == nil {
+		return "", ErrRateStale
+	}
+	snap, err := s.rates.GetSnapshot()
+	if err != nil {
+		return "", ErrRateStale
+	}
+	row, ok := snap.Rates[strings.ToUpper(ad.FiatCurrency)]
+	if !ok || row.Stale || snap.IsStale() {
+		return "", ErrRateStale
+	}
+
+	anchor := ad.FloatAnchor
+	if anchor == "" {
+		anchor = models.P2PAdFloatAnchorBybitSell
+	}
+	var anchorRate float64
+	switch anchor {
+	case models.P2PAdFloatAnchorBybitSell:
+		anchorRate = row.BinanceSell
+	default:
+		return "", fmt.Errorf("%w: unknown float_anchor %q", ErrInvalidParams, anchor)
+	}
+	if anchorRate <= 0 {
+		return "", ErrRateStale
+	}
+
+	// effective = anchor * (10000 + bps) / 10000
+	// All in big.Rat to avoid float drift on the seller's quote.
+	base := new(big.Rat).SetFloat64(anchorRate)
+	if base == nil {
+		return "", ErrRateStale
+	}
+	numerator := big.NewInt(int64(10000 + *ad.FloatOffsetBps))
+	denominator := big.NewInt(10000)
+	offset := new(big.Rat).SetFrac(numerator, denominator)
+	effective := new(big.Rat).Mul(base, offset)
+	return effective.FloatString(10), nil
 }
 
 func (s *P2PTradeService) validatePaymentMethodsOwned(userID uuid.UUID, ids []uuid.UUID, currency string) error {

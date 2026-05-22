@@ -23,9 +23,20 @@ import { getAuthHeaders } from './walletApi';
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at a fixed
- * fiat rate. Status lifecycle: pending → active → (paused ↔ active) →
- * exhausted | cancelled.
+ * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
+ * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
+ * time as `referenceRate * (1 + floatOffsetBps/10000)` (`rateType: 'float'`).
+ *
+ * For float ads, `rate` is a server-cached snapshot of the most recently
+ * computed effective rate — used for browse display only. The authoritative
+ * price at trade open is recomputed live from the feed and snapshotted onto
+ * the trade row.
+ *
+ * `rateStale` is set by the list endpoint when the reference feed is
+ * unavailable for a float ad. Buyers must not be allowed to open a trade in
+ * that state (the server will reject with 503 anyway).
+ *
+ * Status lifecycle: pending → active → (paused ↔ active) → exhausted | cancelled.
  */
 export interface P2PAd {
   id: string;
@@ -38,6 +49,10 @@ export interface P2PAd {
   reserved: string;
   fiatCurrency: string;
   rate: string;
+  rateType: 'fixed' | 'float';
+  floatOffsetBps?: number | null;
+  floatAnchor?: string;
+  rateStale?: boolean;
   minLimit?: string;
   maxLimit?: string;
   paymentMethodIds: string[];
@@ -148,6 +163,10 @@ export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
   data?: T;
+  /** HTTP status code of the underlying response (when reachable). Useful
+   *  for status-specific UX, e.g. distinguishing 503 STALE_FEED from generic
+   *  failure. Absent on network errors. */
+  status?: number;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -170,10 +189,11 @@ function makeIdempotencyKey(): string {
 async function safeJson<T = unknown>(response: Response): Promise<ApiResponse<T>> {
   const text = await response.text();
   if (!text) {
-    return { success: false, message: `Empty response (HTTP ${response.status})` };
+    return { success: false, message: `Empty response (HTTP ${response.status})`, status: response.status };
   }
   try {
-    return JSON.parse(text) as ApiResponse<T>;
+    const parsed = JSON.parse(text) as ApiResponse<T>;
+    return { ...parsed, status: response.status };
   } catch {
     const preview = text.length > 200 ? text.slice(0, 200) + '...' : text;
     return {
@@ -181,6 +201,7 @@ async function safeJson<T = unknown>(response: Response): Promise<ApiResponse<T>
       message: response.ok
         ? `Unexpected server response: ${preview}`
         : `Server error (HTTP ${response.status}): ${preview}`,
+      status: response.status,
     };
   }
 }
@@ -249,7 +270,13 @@ export interface CreateAdInput {
   token: string;
   tokenAmount: string;
   fiatCurrency: string;
-  rate: string;
+  /** Required when rateType === 'fixed' (the default). Must be omitted for 'float' ads. */
+  rate?: string;
+  rateType?: 'fixed' | 'float';
+  /** Required when rateType === 'float'. Basis points, e.g. 50 = +0.5%. */
+  floatOffsetBps?: number;
+  /** Defaults to 'bybit_sell' server-side. */
+  floatAnchor?: string;
   minLimit?: string;
   maxLimit?: string;
   paymentMethodIds: string[];

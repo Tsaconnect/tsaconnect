@@ -72,6 +72,11 @@ type Config struct {
 	// Currencies routed through Bybit P2P (others use OER)
 	BybitP2PCurrencies []string
 
+	// P2P float-rate offset cap in basis points (e.g. 1000 = ±10%). Sellers
+	// publishing float-rate ads pick an offset within ±this value relative
+	// to the reference feed. Tune via env to widen/tighten platform-wide.
+	P2PFloatOffsetMaxBps int
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -143,6 +148,10 @@ func Load() *Config {
 	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
 	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
 	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
+
+	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
+	// P2P's typical platform-wide deviation cap.
+	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public

@@ -66,6 +66,22 @@ func AutoMigrate() error {
 	DB.Exec(`ALTER TABLE p2p_trades
 		ADD CONSTRAINT p2p_trades_buyer_not_seller CHECK (buyer_id <> seller_id)`)
 
+	// P2P ad rate-type constraints: rate_type ∈ {fixed,float}, and
+	// float_offset_bps must be present iff rate_type='float'. Existing rows
+	// default to rate_type='fixed' / float_offset_bps=NULL so the constraint
+	// add is safe on a non-empty table.
+	DB.Exec(`ALTER TABLE p2p_ads
+		DROP CONSTRAINT IF EXISTS p2p_ads_rate_type_chk`)
+	DB.Exec(`ALTER TABLE p2p_ads
+		ADD CONSTRAINT p2p_ads_rate_type_chk CHECK (rate_type IN ('fixed','float'))`)
+	DB.Exec(`ALTER TABLE p2p_ads
+		DROP CONSTRAINT IF EXISTS p2p_ads_float_fields_chk`)
+	DB.Exec(`ALTER TABLE p2p_ads
+		ADD CONSTRAINT p2p_ads_float_fields_chk CHECK (
+			(rate_type = 'fixed' AND float_offset_bps IS NULL) OR
+			(rate_type = 'float' AND float_offset_bps IS NOT NULL)
+		)`)
+
 	// Composite index for the timeout watchdog: it scans trades whose
 	// expires_at has elapsed in pending_payment state. Without this index
 	// the query is a full-table scan once we have thousands of trades.

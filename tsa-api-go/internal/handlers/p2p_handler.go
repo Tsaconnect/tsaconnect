@@ -222,7 +222,14 @@ type createAdRequest struct {
 	Token            string   `json:"token" binding:"required"`
 	TokenAmount      string   `json:"tokenAmount" binding:"required"`
 	FiatCurrency     string   `json:"fiatCurrency" binding:"required"`
-	Rate             string   `json:"rate" binding:"required"`
+	// Rate is required for fixed-rate ads (the default) but must be omitted
+	// for float-rate ads. The service-layer validator enforces this; we
+	// can't use `binding:"required"` here because Gin would reject float
+	// requests before the service sees them.
+	Rate             string   `json:"rate"`
+	RateType         string   `json:"rateType"`
+	FloatOffsetBps   *int     `json:"floatOffsetBps"`
+	FloatAnchor      string   `json:"floatAnchor"`
 	MinLimit         string   `json:"minLimit"`
 	MaxLimit         string   `json:"maxLimit"`
 	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"required,min=1"`
@@ -250,6 +257,9 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		TokenAmount:      req.TokenAmount,
 		FiatCurrency:     req.FiatCurrency,
 		Rate:             req.Rate,
+		RateType:         req.RateType,
+		FloatOffsetBps:   req.FloatOffsetBps,
+		FloatAnchor:      req.FloatAnchor,
 		MinLimit:         req.MinLimit,
 		MaxLimit:         req.MaxLimit,
 		PaymentMethodIDs: pmIDs,
@@ -317,7 +327,42 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": ad})
+	// Detail page benefits from the same effective-rate / staleness signal
+	// as the browse list — let the FE disable Open Trade when the feed is stale.
+	decorated := h.decorateAdsWithEffectiveRate([]models.P2PAd{*ad})[0]
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": decorated})
+}
+
+// adListItem wraps a P2PAd with the transient rateStale flag computed at
+// response time. For float ads, ad.Rate is overwritten with the freshly
+// computed effective rate when the feed is fresh; on a stale feed the cached
+// ad.Rate is left as-is and rateStale is set so the FE can disable the card.
+type adListItem struct {
+	models.P2PAd
+	RateStale bool `json:"rateStale,omitempty"`
+}
+
+// decorateAdsWithEffectiveRate computes effective rate per row for the list
+// endpoints. Mutates the local copy of each ad (not the DB row).
+func (h *P2PHandler) decorateAdsWithEffectiveRate(rows []models.P2PAd) []adListItem {
+	out := make([]adListItem, len(rows))
+	for i := range rows {
+		ad := rows[i] // local copy — do NOT persist mutations
+		item := adListItem{P2PAd: ad}
+		rate, err := h.trade.ComputeEffectiveRate(&ad)
+		if err != nil {
+			if errors.Is(err, services.ErrRateStale) {
+				item.RateStale = true
+				// leave item.Rate at the cached value (last computed)
+			}
+			// Non-stale errors (e.g. malformed data) fall through with the
+			// cached rate so the list endpoint never 5xxs on one bad row.
+		} else {
+			item.Rate = rate
+		}
+		out[i] = item
+	}
+	return out
 }
 
 func (h *P2PHandler) ListAds(c *gin.Context) {
@@ -347,7 +392,7 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(rows)})
 }
 
 func (h *P2PHandler) ListMyAds(c *gin.Context) {
@@ -366,7 +411,7 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(rows)})
 }
 
 func (h *P2PHandler) PauseAd(c *gin.Context) {

@@ -90,7 +90,11 @@ const AdDetailScreen: React.FC = () => {
     return (fiat / rate).toFixed(Math.min(tokenDecimals, 4));
   }, [ad, fiatInput, tokenDecimals]);
 
-  const valid = !!ad && parseFloat(fiatInput || '0') > 0 && !!selectedPmId;
+  const valid =
+    !!ad &&
+    !ad.rateStale &&
+    parseFloat(fiatInput || '0') > 0 &&
+    !!selectedPmId;
 
   const handleOpen = async () => {
     if (!valid || !ad || submitting) return;
@@ -108,6 +112,16 @@ const AdDetailScreen: React.FC = () => {
         paymentMethodId: selectedPmId,
         buyerAddress,
       });
+      // 503 means the rate feed went stale between page-load and this click.
+      // Surface a clean message and refresh the ad so the stale badge appears.
+      if (openRes.status === 503) {
+        Alert.alert(
+          'Live rate unavailable',
+          "The seller's rate feed is temporarily down. Please try again in a few seconds — the ad will reactivate automatically once the feed recovers.",
+        );
+        load();
+        return;
+      }
       if (!openRes.success || !openRes.data) {
         throw new Error(openRes.message || 'Server rejected the trade');
       }
@@ -162,6 +176,23 @@ const AdDetailScreen: React.FC = () => {
             <Text style={styles.summaryRate}>
               ₦{ad.rate} <Text style={styles.summaryRateUnit}>/ {ad.token}</Text>
             </Text>
+            {ad.rateType === 'float' && (
+              <View style={styles.floatChipRow}>
+                <Icon name="trending-up" size={13} color={GOLD.dark} />
+                <Text style={styles.floatChipText}>
+                  Float rate — auto-updates from market
+                </Text>
+              </View>
+            )}
+            {ad.rateStale && (
+              <View style={styles.staleBanner}>
+                <Icon name="error-outline" size={15} color={GOLD.error} />
+                <Text style={styles.staleBannerText}>
+                  Live rate unavailable. Trades are temporarily disabled —
+                  the ad will reactivate automatically once the feed recovers.
+                </Text>
+              </View>
+            )}
             <Text style={styles.summaryAvail}>
               Available: {formatTokenAmount(ad.remaining, tokenDecimals, 4)} {ad.token}
             </Text>
@@ -286,6 +317,28 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   summaryRate: { fontSize: 28, fontWeight: '800', color: '#000' },
+  floatChipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+    backgroundColor: GOLD.light,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  floatChipText: { fontSize: 12, color: GOLD.dark, fontWeight: '700' },
+  staleBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    marginTop: 8,
+    backgroundColor: '#FDECEF',
+    padding: 10,
+    borderRadius: 8,
+  },
+  staleBannerText: { flex: 1, fontSize: 12, color: GOLD.error, lineHeight: 17 },
   summaryRateUnit: { fontSize: 14, color: '#666', fontWeight: '600' },
   summaryAvail: { fontSize: 13, color: '#444', marginTop: 8 },
   summaryLimits: { fontSize: 12, color: '#666', marginTop: 4 },
