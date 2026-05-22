@@ -20,9 +20,17 @@ import (
 // EscrowTxHash records the createAd transaction that flipped the ad from
 // pending → active.
 //
-// Rate is the fiat-per-token unit (e.g. NGN per USDT). Rate is locked at ad
-// creation and inherited by every trade opened against this ad; this avoids
+// Rate is the fiat-per-token unit (e.g. NGN per USDT). For fixed-rate ads
+// (RateType == 'fixed') Rate is the seller's literal quote, locked at ad
+// creation and inherited by every trade opened against this ad — this avoids
 // per-trade rate disputes.
+//
+// For float-rate ads (RateType == 'float') Rate is the most-recently-computed
+// effective rate, used purely as a display cache for the browse list. The
+// authoritative price at trade open is recomputed live from the reference
+// feed via FloatAnchor + FloatOffsetBps; the live value is then snapshotted
+// onto the P2PTrade.Rate column at open so in-flight trades are immune to
+// subsequent feed movement.
 //
 // Token amounts are stored as strings (numeric in DB) so we never lose
 // precision on USDT (6 dec), USDC (6 dec), or MCGP (18 dec).
@@ -37,6 +45,9 @@ type P2PAd struct {
 	Reserved         string         `gorm:"type:numeric(78,0);not null;default:'0'" json:"reserved"`
 	FiatCurrency     string         `gorm:"size:3;not null;index" json:"fiatCurrency"`
 	Rate             string         `gorm:"type:numeric(38,10);not null" json:"rate"`
+	RateType         string         `gorm:"size:8;not null;default:'fixed';index" json:"rateType"`
+	FloatOffsetBps   *int           `json:"floatOffsetBps,omitempty"`
+	FloatAnchor      string         `gorm:"size:16;not null;default:'bybit_sell'" json:"floatAnchor"`
 	MinLimit         string         `gorm:"type:numeric(78,0)" json:"minLimit,omitempty"`
 	MaxLimit         string         `gorm:"type:numeric(78,0)" json:"maxLimit,omitempty"`
 	PaymentMethodIDs datatypes.JSONSlice[string] `gorm:"type:jsonb;not null" json:"paymentMethodIds"`
@@ -63,4 +74,9 @@ const (
 	P2PAdStatusPaused    = "paused"
 	P2PAdStatusExhausted = "exhausted"
 	P2PAdStatusCancelled = "cancelled"
+
+	P2PAdRateTypeFixed = "fixed"
+	P2PAdRateTypeFloat = "float"
+
+	P2PAdFloatAnchorBybitSell = "bybit_sell"
 )

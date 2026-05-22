@@ -38,6 +38,7 @@ import {
 } from '../../services/p2p';
 import { getActiveWallet, signTransaction, broadcastTransaction } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
+import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 
 const GOLD = {
   primary: '#FFD700',
@@ -49,17 +50,22 @@ const GOLD = {
   success: '#28A745',
 };
 
-// Phase 1: USDT and MCGP on Sonic only. USDC will follow once mainnet
-// liquidity exists.
 const SUPPORTED_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
+  { symbol: 'USDC', decimals: 6 },
   { symbol: 'MCGP', decimals: 18 },
 ] as const;
+
+type RateType = 'fixed' | 'float';
 
 const CreateAdScreen: React.FC = () => {
   const [token, setToken] = useState<(typeof SUPPORTED_TOKENS)[number]>(SUPPORTED_TOKENS[0]);
   const [amountInput, setAmountInput] = useState(''); // human decimal
+  const [rateType, setRateType] = useState<RateType>('fixed');
   const [rateInput, setRateInput] = useState('');
+  // Signed decimal percent, e.g. "0.5" = +0.5%, "-1.25" = -1.25%. Converted
+  // to basis points on submit. Only consulted when rateType==='float'.
+  const [floatOffsetPctInput, setFloatOffsetPctInput] = useState('');
   const [minLimitInput, setMinLimitInput] = useState('');
   const [maxLimitInput, setMaxLimitInput] = useState('');
   const [paymentMethods, setPaymentMethods] = useState<P2PPaymentMethod[]>([]);
@@ -96,20 +102,43 @@ const CreateAdScreen: React.FC = () => {
     );
   };
 
-  // Derived totals for the live preview. Cheap to recompute on every input
-  // change; floats are fine for display since the source-of-truth string
-  // is what goes to the wire.
+  // Effective rate previewed to the seller. Fixed mode: the literal NGN
+  // input. Float mode: anchor × (1 + offset%/100), null if the feed is
+  // missing or stale. Floats here are display-only; the server recomputes
+  // at trade open with big.Rat precision.
+  const effectiveRate = useMemo(() => {
+    if (rateType === 'fixed') {
+      const r = parseFloat(rateInput || '0');
+      return isFinite(r) && r > 0 ? r : null;
+    }
+    if (suggestedRate == null || rateStale) return null;
+    const pct = parseFloat(floatOffsetPctInput || '0');
+    if (!isFinite(pct)) return null;
+    return suggestedRate * (1 + pct / 100);
+  }, [rateType, rateInput, suggestedRate, rateStale, floatOffsetPctInput]);
+
   const previewFiat = useMemo(() => {
     const amt = parseFloat(amountInput || '0');
-    const rate = parseFloat(rateInput || '0');
-    if (!isFinite(amt) || !isFinite(rate)) return 0;
-    return amt * rate;
-  }, [amountInput, rateInput]);
+    if (!isFinite(amt) || amt <= 0 || effectiveRate == null) return 0;
+    return amt * effectiveRate;
+  }, [amountInput, effectiveRate]);
+
+  // Float-mode validation: offset must parse, be within ±cap, and the
+  // reference feed must be fresh — we can't publish a float ad without a
+  // live anchor.
+  const floatOffsetPctValid = useMemo(() => {
+    if (rateType !== 'float') return true;
+    const pct = parseFloat(floatOffsetPctInput);
+    if (!isFinite(pct)) return false;
+    return Math.abs(pct) <= MAX_FLOAT_OFFSET_PCT;
+  }, [rateType, floatOffsetPctInput]);
 
   const valid =
     parseFloat(amountInput || '0') > 0 &&
-    parseFloat(rateInput || '0') > 0 &&
-    selectedPmIds.length > 0;
+    selectedPmIds.length > 0 &&
+    (rateType === 'fixed'
+      ? parseFloat(rateInput || '0') > 0
+      : floatOffsetPctValid && suggestedRate != null && !rateStale);
 
   const handleSubmit = async () => {
     if (!valid || submitting) return;
@@ -124,24 +153,31 @@ const CreateAdScreen: React.FC = () => {
 
       // 2. Convert human inputs to base units / canonical strings.
       const tokenAmount = parseTokenAmount(amountInput, token.decimals);
-      // Rate is fiat per token base unit. NUMERIC(38,10) on the server side,
-      // so a literal decimal string is fine.
-      const rate = rateInput.trim();
       const minLimit = minLimitInput.trim() ? minLimitInput.trim() : undefined;
       const maxLimit = maxLimitInput.trim() ? maxLimitInput.trim() : undefined;
 
-      // 3. Create ad (prepare phase).
+      // 3. Create ad (prepare phase). Fixed mode sends rate; float mode
+      // sends rateType + floatOffsetBps and the server computes the cached
+      // rate from the live feed.
       setSubmitStage('Preparing escrow transaction…');
-      const createRes = await adsApi.create({
+      const basePayload = {
         token: token.symbol,
         tokenAmount,
         fiatCurrency: 'NGN',
-        rate,
         minLimit,
         maxLimit,
         paymentMethodIds: selectedPmIds,
         sellerAddress,
-      });
+      };
+      const createRes = await adsApi.create(
+        rateType === 'fixed'
+          ? { ...basePayload, rate: rateInput.trim() }
+          : {
+              ...basePayload,
+              rateType: 'float',
+              floatOffsetBps: pctToBps(parseFloat(floatOffsetPctInput)),
+            }
+      );
       if (!createRes.success || !createRes.data) {
         throw new Error(createRes.message || 'Server rejected the ad');
       }
@@ -231,30 +267,100 @@ const CreateAdScreen: React.FC = () => {
             <Text style={styles.inputSuffix}>{token.symbol}</Text>
           </View>
 
-          <Text style={styles.label}>Rate (NGN per 1 {token.symbol})</Text>
-          <View style={styles.inputCard}>
-            <Text style={styles.inputPrefix}>₦</Text>
-            <TextInput
-              style={styles.inputField}
-              placeholder={suggestedRate ? String(suggestedRate) : '1500'}
-              placeholderTextColor="#999"
-              keyboardType="decimal-pad"
-              value={rateInput}
-              onChangeText={setRateInput}
-            />
-          </View>
-          {suggestedRate !== null && (
-            <View style={styles.rateHint}>
-              <Icon name="info-outline" size={14} color={rateStale ? GOLD.error : GOLD.dark} />
-              <Text style={[styles.rateHintText, rateStale && { color: GOLD.error }]}>
-                {rateStale
-                  ? `Bybit rate stale — verify before publishing`
-                  : `Current Bybit P2P sell rate: ₦${suggestedRate.toFixed(2)}`}
+          <Text style={styles.label}>Rate type</Text>
+          <View style={styles.segmentedRow}>
+            <TouchableOpacity
+              style={[styles.segmentBtn, rateType === 'fixed' && styles.segmentBtnActive]}
+              onPress={() => setRateType('fixed')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.segmentText, rateType === 'fixed' && styles.segmentTextActive]}>
+                Fixed
               </Text>
-              <TouchableOpacity onPress={() => setRateInput(String(suggestedRate))}>
-                <Text style={styles.rateApply}>Use</Text>
-              </TouchableOpacity>
-            </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.segmentBtn, rateType === 'float' && styles.segmentBtnActive]}
+              onPress={() => setRateType('float')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.segmentText, rateType === 'float' && styles.segmentTextActive]}>
+                Float (auto-update)
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {rateType === 'fixed' ? (
+            <>
+              <Text style={styles.label}>Rate (NGN per 1 {token.symbol})</Text>
+              <View style={styles.inputCard}>
+                <Text style={styles.inputPrefix}>₦</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder={suggestedRate ? String(suggestedRate) : '1500'}
+                  placeholderTextColor="#999"
+                  keyboardType="decimal-pad"
+                  value={rateInput}
+                  onChangeText={setRateInput}
+                />
+              </View>
+              {suggestedRate !== null && (
+                <View style={styles.rateHint}>
+                  <Icon name="info-outline" size={14} color={rateStale ? GOLD.error : GOLD.dark} />
+                  <Text style={[styles.rateHintText, rateStale && { color: GOLD.error }]}>
+                    {rateStale
+                      ? `Bybit rate stale — verify before publishing`
+                      : `Current Bybit P2P sell rate: ₦${suggestedRate.toFixed(2)}`}
+                  </Text>
+                  <TouchableOpacity onPress={() => setRateInput(String(suggestedRate))}>
+                    <Text style={styles.rateApply}>Use</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </>
+          ) : (
+            <>
+              <Text style={styles.label}>Offset from market</Text>
+              <View style={styles.inputCard}>
+                <Text style={styles.inputPrefix}>%</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="0.00"
+                  placeholderTextColor="#999"
+                  keyboardType="numbers-and-punctuation"
+                  value={floatOffsetPctInput}
+                  onChangeText={setFloatOffsetPctInput}
+                />
+              </View>
+              <Text style={styles.helperText}>
+                Positive sells above market, negative below. Capped at ±{MAX_FLOAT_OFFSET_PCT}%.
+              </Text>
+              {suggestedRate == null || rateStale ? (
+                <View style={[styles.rateHint, { marginTop: 8 }]}>
+                  <Icon name="error-outline" size={14} color={GOLD.error} />
+                  <Text style={[styles.rateHintText, { color: GOLD.error }]}>
+                    Live rate unavailable — float ads can't be published right now.
+                  </Text>
+                </View>
+              ) : (
+                <View style={[styles.rateHint, { marginTop: 8 }]}>
+                  <Icon name="info-outline" size={14} color={GOLD.dark} />
+                  <Text style={styles.rateHintText}>
+                    Anchor: Bybit P2P sell · Market: ₦{suggestedRate.toFixed(2)}
+                    {effectiveRate != null && (
+                      <Text> · Your rate: ₦{effectiveRate.toFixed(2)}</Text>
+                    )}
+                  </Text>
+                </View>
+              )}
+              {!floatOffsetPctValid && floatOffsetPctInput.trim() !== '' && (
+                <View style={[styles.rateHint, { marginTop: 4 }]}>
+                  <Icon name="warning" size={14} color={GOLD.error} />
+                  <Text style={[styles.rateHintText, { color: GOLD.error }]}>
+                    Enter a number within ±{MAX_FLOAT_OFFSET_PCT}%.
+                  </Text>
+                </View>
+              )}
+            </>
           )}
 
           <View style={styles.limitsRow}>
@@ -341,7 +447,10 @@ const CreateAdScreen: React.FC = () => {
             </View>
             <View style={styles.previewRow}>
               <Text style={styles.previewLabel}>At</Text>
-              <Text style={styles.previewValue}>₦{rateInput || '0'} / {token.symbol}</Text>
+              <Text style={styles.previewValue}>
+                ₦{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
+                {rateType === 'float' && <Text style={styles.previewMeta}> (auto)</Text>}
+              </Text>
             </View>
             <View style={styles.previewRow}>
               <Text style={styles.previewLabel}>Total value</Text>
@@ -483,6 +592,25 @@ const styles = StyleSheet.create({
   },
   previewLabel: { fontSize: 13, color: '#666' },
   previewValue: { fontSize: 14, fontWeight: '700', color: '#000' },
+  previewMeta: { fontSize: 11, fontWeight: '600', color: GOLD.dark },
+  segmentedRow: {
+    flexDirection: 'row',
+    backgroundColor: '#FFF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    overflow: 'hidden',
+  },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    backgroundColor: '#FFF',
+  },
+  segmentBtnActive: { backgroundColor: GOLD.primary },
+  segmentText: { fontSize: 14, fontWeight: '700', color: GOLD.dark },
+  segmentTextActive: { color: '#000' },
+  helperText: { marginTop: 6, fontSize: 12, color: '#666', paddingHorizontal: 4 },
   submit: {
     marginTop: 24,
     backgroundColor: GOLD.primary,
