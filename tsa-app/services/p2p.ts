@@ -244,6 +244,34 @@ async function request<T>(
   }
 }
 
+// ─── Nigerian banks (Nomba-backed) ──────────────────────────────────────────
+
+export interface NgBank {
+  code: string;
+  name: string;
+}
+
+export interface AccountResolveResult {
+  accountNumber: string;
+  accountName: string;
+}
+
+export const banksApi = {
+  /** Fetch the Nomba-supported Nigerian bank directory. Server caches 24h. */
+  list: () => request<NgBank[]>('GET', '/p2p/banks'),
+
+  /**
+   * NUBAN name enquiry. Resolves the account holder name for a 10-digit
+   * account number at the given bank. Returns a 404-shaped error
+   * (`status === 404`) when the account does not exist at that bank — UI
+   * should distinguish this from network/outage errors.
+   */
+  resolveAccount: (bankCode: string, accountNumber: string) =>
+    request<AccountResolveResult>('GET', '/p2p/banks/resolve', undefined, {
+      query: { bankCode, accountNumber },
+    }),
+};
+
 // ─── Payment methods ────────────────────────────────────────────────────────
 
 export const paymentMethodsApi = {

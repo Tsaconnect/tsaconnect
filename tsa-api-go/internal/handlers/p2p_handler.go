@@ -24,19 +24,30 @@ type P2PHandler struct {
 	db       *gorm.DB
 	trade    *services.P2PTradeService
 	messages *services.P2PMessageService
+	// nomba is optional — when nil, bank-list and account-resolve endpoints
+	// return a 503-ish "feature unavailable" response. The trade routes
+	// themselves don't depend on it.
+	nomba *services.NombaClient
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
 // P2P routes — handlers will return a configuration-error response so the
 // frontend can show "feature unavailable" cleanly instead of a 500.
-func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService) *P2PHandler {
-	return &P2PHandler{db: db, trade: trade, messages: messages}
+func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService, nomba *services.NombaClient) *P2PHandler {
+	return &P2PHandler{db: db, trade: trade, messages: messages, nomba: nomba}
 }
 
 // IsConfigured reports whether the handler has its trade service wired up.
 // routes.go checks this so we don't register routes that always 503.
 func (h *P2PHandler) IsConfigured() bool {
 	return h != nil && h.trade != nil
+}
+
+// HasNomba reports whether the bank directory / account-resolve endpoints
+// can serve requests. Used by routes.go to skip registering them when
+// credentials are absent.
+func (h *P2PHandler) HasNomba() bool {
+	return h != nil && h.nomba.IsEnabled()
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -214,6 +225,69 @@ func (h *P2PHandler) DeletePaymentMethod(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// ─── Bank directory & name enquiry (Nomba-backed) ──────────────────────────
+
+// ListNigerianBanks returns the Nomba-supported Nigerian bank directory.
+// The frontend uses this to populate the bank dropdown on the add-payment
+// form. Results are cached server-side; clients should additionally
+// AsyncStorage-cache to avoid hitting this on every form open.
+func (h *P2PHandler) ListNigerianBanks(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	if !h.HasNomba() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"message": "Bank directory is unavailable",
+		})
+		return
+	}
+	banks, err := h.nomba.ListBanks(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": banks})
+}
+
+// ResolveAccountName performs a NUBAN name enquiry against the given
+// bank code. Returns 404 when Nomba reports no match so the frontend can
+// distinguish "wrong number" from "outage".
+func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	if !h.HasNomba() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"message": "Account verification is unavailable",
+		})
+		return
+	}
+	bankCode := strings.TrimSpace(c.Query("bankCode"))
+	accountNumber := strings.TrimSpace(c.Query("accountNumber"))
+	if bankCode == "" || len(accountNumber) != 10 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "bankCode and a 10-digit accountNumber are required",
+		})
+		return
+	}
+	result, err := h.nomba.Lookup(c.Request.Context(), bankCode, accountNumber)
+	if err != nil {
+		if errors.Is(err, services.ErrNombaAccountNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"message": "Account could not be resolved at the selected bank",
+			})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
 }
 
 // ─── Ads ───────────────────────────────────────────────────────────────────

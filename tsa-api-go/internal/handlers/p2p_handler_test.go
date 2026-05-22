@@ -256,7 +256,7 @@ func buildHandler(t *testing.T) (*P2PHandler, *gorm.DB, *stubEscrow) {
 	})
 	msgSvc := services.NewP2PMessageService(db, &stubBus{})
 	svc.SetMessageService(msgSvc)
-	return NewP2PHandler(db, svc, msgSvc), db, escrow
+	return NewP2PHandler(db, svc, msgSvc, nil), db, escrow
 }
 
 func seedUser(t *testing.T, db *gorm.DB, verified bool) models.User {
