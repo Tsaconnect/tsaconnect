@@ -82,6 +82,7 @@ func main() {
 		cfg.OpenExchangeRatesAppID,
 		cfg.SupportedCurrencies,
 		cfg.BybitP2PCurrencies,
+		cfg.BybitProbeAmounts,
 	)
 
 	// Initialize event bus and WebSocket hub

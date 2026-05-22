@@ -72,6 +72,13 @@ type Config struct {
 	// Currencies routed through Bybit P2P (others use OER)
 	BybitP2PCurrencies []string
 
+	// Per-currency retail probe amount sent as the `amount` filter on Bybit
+	// queries. Picking a retail-tier amount (~$3–4 equivalent) gets us a
+	// tight, consensus-driven price; the unfiltered API returns by merchant
+	// rank, surfacing large-ticket whales whose prices drift from the
+	// retail consensus.
+	BybitProbeAmounts map[string]string
+
 	// P2P float-rate offset cap in basis points (e.g. 1000 = ±10%). Sellers
 	// publishing float-rate ads pick an offset within ±this value relative
 	// to the reference feed. Tune via env to widen/tighten platform-wide.
@@ -156,6 +163,10 @@ func Load() *Config {
 	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
 	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
 	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
+
+	// Bybit probe amounts — "CUR:AMT,CUR:AMT". NGN→5000 (~$3) by default.
+	// Add others as new currencies are routed through Bybit.
+	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000"))
 
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
@@ -298,6 +309,27 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries
+// missing a colon or with empty key/value are skipped silently — better
+// than failing boot over a typo, since the caller treats absence as
+// "no amount filter for this currency".
+func parseProbeAmounts(s string) map[string]string {
+	out := map[string]string{}
+	for _, part := range splitAndTrim(s, ",") {
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		cur := strings.ToUpper(strings.TrimSpace(kv[0]))
+		amt := strings.TrimSpace(kv[1])
+		if cur == "" || amt == "" {
+			continue
+		}
+		out[cur] = amt
+	}
+	return out
 }
 
 func splitAndTrim(s, sep string) []string {

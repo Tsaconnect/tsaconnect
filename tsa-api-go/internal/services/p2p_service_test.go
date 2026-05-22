@@ -746,7 +746,7 @@ func TestGetAllRates_SingleflightCoalescesConcurrentCalls(t *testing.T) {
 // ── Constructor validation (Bybit + casing) ────────────────
 
 func TestNewP2PService_DropsUnknownBybitCurrencies(t *testing.T) {
-	svc := NewP2PService("key", []string{"NGN"}, []string{"NGN", "ZZZ", "ngn"})
+	svc := NewP2PService("key", []string{"NGN"}, []string{"NGN", "ZZZ", "ngn"}, nil)
 	if !svc.bybitCurrencies["NGN"] {
 		t.Error("NGN should be in bybitCurrencies")
 	}
@@ -759,7 +759,7 @@ func TestNewP2PService_DropsUnknownBybitCurrencies(t *testing.T) {
 }
 
 func TestNewP2PService_UppercasesSupportedCurrencies(t *testing.T) {
-	svc := NewP2PService("key", []string{"ngn", "GHS", " kes "}, nil)
+	svc := NewP2PService("key", []string{"ngn", "GHS", " kes "}, nil, nil)
 	want := []string{"NGN", "GHS", "KES"}
 	for _, code := range want {
 		if !svc.isExplicitlySupported(code) {
