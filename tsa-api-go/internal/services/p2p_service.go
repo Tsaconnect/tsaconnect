@@ -468,13 +468,18 @@ type bybitResponse struct {
 // crossed book; we accept that as-is — a slightly inverted live rate is a
 // better quote than a stale or OER mid-market substitute.
 func (ps *P2PService) fetchBybitRate(currency string) (P2PRate, error) {
-	// side=1 (SELL ads, traders selling USDT): use to derive the rate when our user *buys* USDT
-	// side=0 (BUY ads, traders buying USDT):   use to derive the rate when our user *sells* USDT
-	buyPrice, err := ps.fetchBybitSide(currency, "1")
+	// Bybit's `side` is the *ad type*, NOT the visiting user's intent:
+	//   side=0 → SELL USDT ads (ask side): high NGN prices. A user who wants
+	//            to *buy* USDT takes one of these → BinanceBuy.
+	//   side=1 → BUY USDT ads  (bid side): lower NGN prices. A user who wants
+	//            to *sell* USDT takes one of these → BinanceSell.
+	// Earlier code had the sides swapped, so sellers were being shown the
+	// ASK (~1512 NGN) instead of the BID (~1382 NGN) when creating a sell ad.
+	buyPrice, err := ps.fetchBybitSide(currency, "0")
 	if err != nil {
 		return P2PRate{}, fmt.Errorf("bybit %s buy side: %w", currency, err)
 	}
-	sellPrice, err := ps.fetchBybitSide(currency, "0")
+	sellPrice, err := ps.fetchBybitSide(currency, "1")
 	if err != nil {
 		return P2PRate{}, fmt.Errorf("bybit %s sell side: %w", currency, err)
 	}
@@ -496,7 +501,9 @@ func (ps *P2PService) fetchBybitRate(currency string) (P2PRate, error) {
 }
 
 // fetchBybitSide returns the median qualifying-ad price for one side of the
-// book. Filters: priceType==0 (fixed price), recentExecuteRate≥90, finishNum≥50
+// book. `side` is the *ad type* exposed by Bybit's API: "0" = SELL USDT ads
+// (asks), "1" = BUY USDT ads (bids). Filters: priceType==0 (fixed price),
+// recentExecuteRate≥90, finishNum≥50
 // to skip new/unreliable traders. Median of top 5 absorbs single-ad outliers.
 func (ps *P2PService) fetchBybitSide(currency, side string) (float64, error) {
 	body, err := json.Marshal(map[string]any{

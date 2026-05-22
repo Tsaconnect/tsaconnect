@@ -457,7 +457,7 @@ func TestGetAllRates_BybitOverridesOER(t *testing.T) {
 	svc := newTestP2PServiceWithBybit(&mockTransport{
 		oerResponse: func() (int, any) { return 200, oerSuccessBody() },
 		bybitResponse: func(side string) (int, any) {
-			if side == "1" { // sell ads (buy side rate)
+			if side == "0" { // SELL USDT ads (asks) → BinanceBuy (user pays this when buying USDT)
 				return 200, bybitSuccessBody("1600", "1605", "1610", "1615", "1620")
 			}
 			return 200, bybitSuccessBody("1580", "1585", "1590", "1595", "1600")
@@ -474,10 +474,10 @@ func TestGetAllRates_BybitOverridesOER(t *testing.T) {
 		t.Errorf("expected source=bybit, got %s", ngn.Source)
 	}
 	if ngn.BinanceBuy != 1610 {
-		t.Errorf("expected BinanceBuy=1610 (median of sell ads), got %v", ngn.BinanceBuy)
+		t.Errorf("expected BinanceBuy=1610 (median of SELL/ask ads), got %v", ngn.BinanceBuy)
 	}
 	if ngn.BinanceSell != 1590 {
-		t.Errorf("expected BinanceSell=1590 (median of buy ads), got %v", ngn.BinanceSell)
+		t.Errorf("expected BinanceSell=1590 (median of BUY/bid ads), got %v", ngn.BinanceSell)
 	}
 	if ngn.MidRate != 1600 {
 		t.Errorf("expected MidRate=1600, got %v", ngn.MidRate)
