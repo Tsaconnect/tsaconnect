@@ -77,6 +77,14 @@ type Config struct {
 	// to the reference feed. Tune via env to widen/tighten platform-wide.
 	P2PFloatOffsetMaxBps int
 
+	// Nomba — used for Nigerian bank directory + account name enquiry today,
+	// and the auto-payout path in Phase 2. Falls back to "feature disabled"
+	// when credentials aren't set so dev environments work without them.
+	NombaBaseURL      string
+	NombaClientID     string
+	NombaClientSecret string
+	NombaAccountID    string
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -152,6 +160,13 @@ func Load() *Config {
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
 	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
+
+	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to
+	// https://api.nomba.com and provide live credentials.
+	cfg.NombaBaseURL = getEnv("NOMBA_BASE_URL", "https://sandbox.nomba.com")
+	cfg.NombaClientID = os.Getenv("NOMBA_CLIENT_ID")
+	cfg.NombaClientSecret = os.Getenv("NOMBA_CLIENT_SECRET")
+	cfg.NombaAccountID = os.Getenv("NOMBA_ACCOUNT_ID")
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public

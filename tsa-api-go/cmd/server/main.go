@@ -109,21 +109,33 @@ func main() {
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 
+	// Nomba — used for the Nigerian bank directory + name enquiry today,
+	// and the auto-payout path in Phase 2. Returns nil when credentials
+	// are absent; the handler then declines bank/resolve requests with a
+	// 503 so dev environments keep booting.
+	nombaClient := services.NewNombaClient(cfg.NombaBaseURL, cfg.NombaClientID, cfg.NombaClientSecret, cfg.NombaAccountID)
+	if nombaClient == nil {
+		log.Printf("Nomba dormant: NOMBA_CLIENT_ID / NOMBA_CLIENT_SECRET / NOMBA_ACCOUNT_ID not set — bank list and account verification disabled")
+	}
+
 	// P2P trade service — wired only when the contract address is set.
-	// Without the address the handler stays nil and routes.go skips
-	// registration so the frontend gets clean 404s rather than 500s.
-	var p2pHandler *handlers.P2PHandler
+	// The handler is always constructed (so the Nomba-backed bank/resolve
+	// routes work even before the escrow contract is deployed); trade
+	// routes are gated separately on p2pHandler.IsConfigured().
+	var (
+		p2pTradeSvc   *services.P2PTradeService
+		p2pMessageSvc *services.P2PMessageService
+	)
 	if cfg.P2PEscrowAddress != "" && sonicClient != nil {
-		p2pTradeSvc := services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, cfg.SonicChainID)
+		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, cfg.SonicChainID)
 		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
 			return blockchainService.TokenAddress("sonic", symbol)
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		// Chat service — system messages auto-emitted on every trade
 		// transition so the chat thread is self-documenting.
-		p2pMessageSvc := services.NewP2PMessageService(config.DB, eventBus)
+		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)
 		p2pTradeSvc.SetMessageService(p2pMessageSvc)
-		p2pHandler = handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc)
 		// Register the timeout watchdog — scans for pending_payment trades
 		// past expires_at every minute and nudges participants to call the
 		// permissionless cancelByTimeout. Phase 1 has no operator EOA, so
@@ -137,8 +149,9 @@ func main() {
 			log.Printf("P2PEscrow contract owner (on-chain): %s", owner)
 		}
 	} else {
-		log.Printf("P2P feature dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
+		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
+	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient)
 
 	// Backfill any pending transactions that already have a txHash.
 	// These were submitted before the receipt-polling goroutine was added.

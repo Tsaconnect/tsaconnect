@@ -5,11 +5,15 @@
 // Server side persists `verified: false` and a later Phase-2 onboarding
 // flow will flip it after FW verifies the account.
 import { router } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
+  FlatList,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
@@ -21,6 +25,11 @@ import {
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { paymentMethodsApi } from '../../../services/p2p';
+import {
+  getNigerianBanks,
+  NgBank,
+  resolveAccountName,
+} from '../../../services/ngBanks';
 
 const GOLD = {
   primary: '#FFD700',
@@ -31,51 +40,88 @@ const GOLD = {
   error: '#DC3545',
 };
 
-// Curated initial list — matches the FW-supported fintech-first banks
-// PM called out (OPay, PalmPay, Moniepoint, Kuda, GTBank). Phase 2 will
-// auto-populate from FW's banks endpoint.
-const NG_BANKS = [
-  'OPay',
-  'PalmPay',
-  'Moniepoint',
-  'Kuda Bank',
-  'GTBank',
-  'Access Bank',
-  'First Bank',
-  'UBA',
-  'Zenith Bank',
-  'Fidelity Bank',
-  'Union Bank',
-  'Ecobank',
-  'Stanbic IBTC',
-  'Sterling Bank',
-  'Wema Bank',
-  'FCMB',
-  'Polaris Bank',
-];
-
 const NewPaymentMethodScreen: React.FC = () => {
   const [type, setType] = useState<'bank' | 'mobile_money'>('bank');
-  const [bankName, setBankName] = useState('');
+  const [bank, setBank] = useState<NgBank | null>(null);
   const [showBankPicker, setShowBankPicker] = useState(false);
+  const [banks, setBanks] = useState<NgBank[]>([]);
+  const [banksLoading, setBanksLoading] = useState(true);
   const [accountNumber, setAccountNumber] = useState('');
   const [accountName, setAccountName] = useState('');
   const [isDefault, setIsDefault] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  // Name-enquiry state. `resolved` flags an auto-fill from Nomba so we can
+  // lock the input + show a check; `resolveError` lets the user know to
+  // either fix the digits or fall back to manual entry on outage.
+  const [resolving, setResolving] = useState(false);
+  const [resolved, setResolved] = useState(false);
+  const [resolveError, setResolveError] = useState<
+    null | 'not_found' | 'unavailable'
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await getNigerianBanks();
+      if (!cancelled) {
+        setBanks(list);
+        setBanksLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Debounced account-name resolution. Fires when the user has both a
+  // bank selected and a 10-digit account number. Re-firing on either
+  // change cancels the in-flight call via the captured `cancelled` flag.
+  // For mobile-money entries we skip the lookup — those aren't bank
+  // accounts and Nomba won't resolve them.
+  useEffect(() => {
+    if (type !== 'bank' || !bank || accountNumber.length !== 10) {
+      setResolving(false);
+      setResolved(false);
+      setResolveError(null);
+      return;
+    }
+    let cancelled = false;
+    setResolving(true);
+    setResolved(false);
+    setResolveError(null);
+    const timer = setTimeout(async () => {
+      const res = await resolveAccountName(bank.code, accountNumber);
+      if (cancelled) return;
+      setResolving(false);
+      if (res.ok) {
+        setAccountName(res.accountName);
+        setResolved(true);
+      } else {
+        setAccountName('');
+        setResolveError(res.reason);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [type, bank, accountNumber]);
+
   const valid =
-    bankName.trim().length > 0 &&
+    !!bank &&
     accountNumber.trim().length >= 10 &&
     accountName.trim().length >= 2;
 
   const handleSubmit = async () => {
-    if (!valid || submitting) return;
+    if (!valid || submitting || !bank) return;
     setSubmitting(true);
     const res = await paymentMethodsApi.create({
       type,
       country: 'NG',
       currency: 'NGN',
-      bankName: bankName.trim(),
+      bankName: bank.name,
+      bankCode: bank.code,
       accountNumber: accountNumber.trim(),
       accountName: accountName.trim(),
       isDefault,
@@ -120,31 +166,18 @@ const NewPaymentMethodScreen: React.FC = () => {
           <Text style={styles.label}>Bank</Text>
           <TouchableOpacity
             style={styles.input}
-            onPress={() => setShowBankPicker((s) => !s)}
+            onPress={() => setShowBankPicker(true)}
             activeOpacity={0.7}
           >
-            <Text style={[styles.inputText, !bankName && styles.placeholder]}>
-              {bankName || 'Choose a bank'}
+            <Text style={[styles.inputText, !bank && styles.placeholder]}>
+              {bank?.name || 'Choose a bank'}
             </Text>
-            <Icon name="arrow-drop-down" size={24} color={GOLD.dark} />
+            {banksLoading ? (
+              <ActivityIndicator size="small" color={GOLD.dark} />
+            ) : (
+              <Icon name="arrow-drop-down" size={24} color={GOLD.dark} />
+            )}
           </TouchableOpacity>
-          {showBankPicker && (
-            <View style={styles.pickerCard}>
-              {NG_BANKS.map((b) => (
-                <TouchableOpacity
-                  key={b}
-                  style={styles.pickerRow}
-                  onPress={() => {
-                    setBankName(b);
-                    setShowBankPicker(false);
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.pickerText}>{b}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
 
           <Text style={styles.label}>Account number</Text>
           <View style={styles.input}>
@@ -160,16 +193,54 @@ const NewPaymentMethodScreen: React.FC = () => {
           </View>
 
           <Text style={styles.label}>Account name</Text>
-          <View style={styles.input}>
+          <View
+            style={[
+              styles.input,
+              resolved && styles.inputVerified,
+              resolveError === 'not_found' && styles.inputError,
+            ]}
+          >
             <TextInput
               style={styles.inputField}
               autoCapitalize="words"
-              placeholder="As registered with the bank"
+              placeholder={
+                type === 'bank'
+                  ? 'Auto-fills when you enter the account number'
+                  : 'As registered with the provider'
+              }
               placeholderTextColor="#999"
               value={accountName}
-              onChangeText={setAccountName}
+              onChangeText={(v) => {
+                setAccountName(v);
+                if (resolved) setResolved(false);
+              }}
+              editable={!resolving && !resolved}
             />
+            {resolving && <ActivityIndicator size="small" color={GOLD.dark} />}
+            {resolved && (
+              <TouchableOpacity
+                onPress={() => {
+                  setResolved(false);
+                  setAccountName('');
+                }}
+                hitSlop={10}
+                style={styles.inputAction}
+              >
+                <Icon name="check-circle" size={20} color="#2E8B57" />
+              </TouchableOpacity>
+            )}
           </View>
+          {resolveError === 'not_found' && (
+            <Text style={styles.fieldError}>
+              We couldn’t find this account at the selected bank. Check the
+              digits or bank.
+            </Text>
+          )}
+          {resolveError === 'unavailable' && (
+            <Text style={styles.fieldHint}>
+              Account verification is offline. You can type the name manually.
+            </Text>
+          )}
 
           <View style={styles.switchRow}>
             <View style={{ flex: 1 }}>
@@ -206,7 +277,119 @@ const NewPaymentMethodScreen: React.FC = () => {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <BankPickerModal
+        visible={showBankPicker}
+        banks={banks}
+        loading={banksLoading}
+        selectedCode={bank?.code}
+        onSelect={(b) => {
+          setBank(b);
+          setShowBankPicker(false);
+        }}
+        onClose={() => setShowBankPicker(false)}
+      />
     </SafeAreaView>
+  );
+};
+
+interface BankPickerModalProps {
+  visible: boolean;
+  banks: NgBank[];
+  loading: boolean;
+  selectedCode?: string;
+  onSelect: (bank: NgBank) => void;
+  onClose: () => void;
+}
+
+const BankPickerModal: React.FC<BankPickerModalProps> = ({
+  visible,
+  banks,
+  loading,
+  selectedCode,
+  onSelect,
+  onClose,
+}) => {
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (!visible) setQuery('');
+  }, [visible]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return banks;
+    return banks.filter((b) => b.name.toLowerCase().includes(q));
+  }, [banks, query]);
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+    >
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={styles.modalSheet} onPress={() => {}}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Choose a bank</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <Icon name="close" size={24} color="#333" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.searchRow}>
+            <Icon name="search" size={20} color="#888" />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search bank"
+              placeholderTextColor="#999"
+              value={query}
+              onChangeText={setQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {query.length > 0 && (
+              <TouchableOpacity onPress={() => setQuery('')} hitSlop={8}>
+                <Icon name="cancel" size={18} color="#aaa" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {loading && banks.length === 0 ? (
+            <View style={styles.modalEmpty}>
+              <ActivityIndicator color={GOLD.dark} />
+              <Text style={styles.modalEmptyText}>Loading banks…</Text>
+            </View>
+          ) : filtered.length === 0 ? (
+            <View style={styles.modalEmpty}>
+              <Text style={styles.modalEmptyText}>No banks match “{query}”.</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filtered}
+              keyExtractor={(b) => b.code}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item }) => {
+                const selected = item.code === selectedCode;
+                return (
+                  <TouchableOpacity
+                    style={[styles.pickerRow, selected && styles.pickerRowSelected]}
+                    onPress={() => onSelect(item)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.pickerText}>{item.name}</Text>
+                    {selected && (
+                      <Icon name="check" size={20} color={GOLD.dark} />
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 };
 
@@ -251,21 +434,21 @@ const styles = StyleSheet.create({
   inputText: { flex: 1, fontSize: 16, color: '#000' },
   placeholder: { color: '#999' },
   inputField: { flex: 1, fontSize: 16, color: '#000', paddingVertical: 0 },
-  pickerCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    marginTop: 4,
-    maxHeight: 300,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    overflow: 'hidden',
-  },
+  inputVerified: { borderColor: '#2E8B57', backgroundColor: '#F1FAF4' },
+  inputError: { borderColor: GOLD.error },
+  inputAction: { paddingLeft: 8 },
+  fieldError: { color: GOLD.error, fontSize: 12, marginTop: 6 },
+  fieldHint: { color: '#666', fontSize: 12, marginTop: 6 },
   pickerRow: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingVertical: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#F0F0F0',
   },
+  pickerRowSelected: { backgroundColor: GOLD.light },
   pickerText: { fontSize: 15, color: '#000' },
   switchRow: {
     flexDirection: 'row',
@@ -302,6 +485,49 @@ const styles = StyleSheet.create({
   },
   submitDisabled: { opacity: 0.5 },
   submitText: { fontWeight: '800', color: '#000', fontSize: 16 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: '#FFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '85%',
+    paddingBottom: Platform.OS === 'ios' ? 24 : 12,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 10,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '700', color: '#000' },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 10,
+  },
+  searchInput: {
+    flex: 1,
+    marginLeft: 8,
+    fontSize: 15,
+    color: '#000',
+    paddingVertical: 0,
+  },
+  modalEmpty: {
+    paddingVertical: 40,
+    alignItems: 'center',
+  },
+  modalEmptyText: { marginTop: 8, color: '#777', fontSize: 14 },
 });
 
 export default NewPaymentMethodScreen;

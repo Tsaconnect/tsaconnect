@@ -324,6 +324,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
+	// Nomba-backed Nigerian bank directory + name enquiry. Registered as
+	// long as Nomba credentials are configured, even when the P2P escrow
+	// contract isn't deployed — the form for adding a payment method
+	// should still work in dev/sandbox environments.
+	if p2p != nil && p2p.HasNomba() {
+		banksGroup := api.Group("/p2p/banks")
+		banksGroup.Use(auth)
+		{
+			banksGroup.GET("", p2p.ListNigerianBanks)
+			banksGroup.GET("/resolve", p2p.ResolveAccountName)
+		}
+	}
+
 	// P2P routes — every endpoint requires JWT auth + Persona-verified KYC
 	// (the handler itself enforces verification via the require() helper).
 	// Idempotency is applied to the write paths so retries are safe.
