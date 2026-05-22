@@ -434,8 +434,14 @@ func (ps *P2PService) isExplicitlySupported(code string) bool {
 // ──────────────────────────────────────────────
 
 const (
-	bybitP2PURL    = "https://api2.bybit.com/fiat/otc/item/online"
-	bybitUserAgent = "tsaconnect/1.0 (+https://tsaconnectworld.com)"
+	bybitP2PURL = "https://api2.bybit.com/fiat/otc/item/online"
+	// Bybit's edge (Akamai) silently drops requests with custom/identifying
+	// User-Agent strings — connection is RST'd before a response body is
+	// returned. A plausible browser UA passes the check. Keep this string
+	// updated periodically; if Bybit fetches start failing again on the
+	// "always stale" symptom, bumping the Chrome version is the first
+	// thing to try.
+	bybitUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 type bybitItem struct {
