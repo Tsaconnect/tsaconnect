@@ -322,18 +322,23 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	}
 
 	// Verify the seller actually holds enough deposited capital before we
-	// publish a voucher promising it. The contract will reject openTrade if
-	// the seller's available balance is short, but failing here gives the
-	// seller a clean message at publish time instead of a confusing buyer-
-	// side revert later.
-	if bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr); err == nil {
-		if bal.Available.Cmp(amount) < 0 {
-			return nil, fmt.Errorf("%w: insufficient available balance (have %s, need %s)",
-				ErrInvalidParams, bal.Available, amount)
-		}
+	// publish a voucher promising it. The contract is still the authoritative
+	// gate (openTrade reverts if available < amount), but failing here means
+	// the seller doesn't sign a voucher they can't honour — protecting their
+	// reputation and preventing the off-chain ad/voucher accounting from
+	// diverging from the on-chain pool balance.
+	bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr)
+	if err != nil {
+		// Don't silently proceed: a stuck RPC during publish would let a
+		// seller stamp out unbacked vouchers (they sign, post, buyers later
+		// hit the on-chain "Seller balance insufficient" revert).
+		log.Printf("[p2p CreateAd] ReadBalance failed for seller=%s token=%s: %v", sellerAddress, tokenAddr, err)
+		return nil, fmt.Errorf("%w: could not verify pool balance, retry", ErrInvalidParams)
 	}
-	// If ReadBalance fails (RPC down), let it slide — the contract is still
-	// the authoritative gate and the seller can re-try sign/trade later.
+	if bal.Available.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("%w: insufficient available balance (have %s, need %s)",
+			ErrInvalidParams, bal.Available, amount)
+	}
 
 	ad := &models.P2PAd{
 		ID:               uuid.New(),
@@ -479,7 +484,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	ad.Status = models.P2PAdStatusActive
 	ad.VoucherSignature = sigHex
 
-	s.audit(ctx, models.P2PAuditAdCreated+".signed", &sellerID, &ad.ID, nil, map[string]any{
+	s.audit(ctx, models.P2PAuditAdSigned, &sellerID, &ad.ID, nil, map[string]any{
 		"voucherHash": ad.VoucherHash,
 	})
 	s.emit(events.P2PAdCreated, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
@@ -539,11 +544,19 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 	if ad.Status == models.P2PAdStatusCancelled {
 		return &ad, nil
 	}
+	// Status pre-check before the RPC verify call. The DB UPDATE below also
+	// gates on (active|paused) but RPC has cost (and a 500 status response
+	// can mask the real reason); fail-fast cheaply.
+	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
+		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
+	}
 	if ad.VoucherHash == "" {
 		return nil, fmt.Errorf("%w: ad has no voucher hash", ErrInvalidTransition)
 	}
-	var hash [32]byte
-	copy(hash[:], common.FromHex(ad.VoucherHash))
+	hash, err := decodeHex32(ad.VoucherHash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: stored voucher hash is corrupt (%v)", ErrInvalidTransition, err)
+	}
 
 	if _, err := s.escrow.VerifyVoucherCancelled(txHash, hash); err != nil {
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
@@ -555,6 +568,7 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 		Updates(map[string]any{
 			"status":     models.P2PAdStatusCancelled,
 			"remaining":  "0",
+			"reserved":   "0", // belt-and-braces: cancelVoucher on chain only succeeds when no open trades, so reserved should already be 0; zero explicitly so a future bug here doesn't leave the row with a non-zero reserved on a cancelled ad.
 			"updated_at": s.clock.Now(),
 		})
 	if res.Error != nil {
@@ -675,11 +689,20 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if ad.VoucherSignature == "" || ad.SellerAddress == "" {
 		return nil, nil, fmt.Errorf("%w: ad not yet signed", ErrInvalidTransition)
 	}
+	// Refuse to forward an expired voucher to the contract — the on-chain
+	// call would revert with "Voucher expired", but the DB transaction below
+	// has already debited ad.remaining / credited ad.reserved. Catch it here.
+	if ad.VoucherDeadline != nil && !s.clock.Now().Before(*ad.VoucherDeadline) {
+		return nil, nil, fmt.Errorf("%w: voucher expired (deadline %s)", ErrInvalidTransition, ad.VoucherDeadline)
+	}
 	voucher, err := s.adVoucher(&ad, ad.SellerAddress)
 	if err != nil {
 		return nil, nil, err
 	}
-	sig := common.FromHex(ad.VoucherSignature)
+	sig, err := decodeHexSig(ad.VoucherSignature)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: stored voucher signature is corrupt (%v)", ErrInvalidTransition, err)
+	}
 	unsignedTx, err := s.escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
 	if err != nil {
 		return nil, nil, fmt.Errorf("prepare openTrade: %w", err)
@@ -1152,7 +1175,7 @@ func (s *P2PTradeService) RaiseDispute(ctx context.Context, tradeID, userID uuid
 	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade",
 		"", map[string]any{"tradeId": trade.ID})
 	s.systemMsg(ctx, trade.ID, fmt.Sprintf("%s opened a dispute. Funds frozen pending admin review. Reason: %s",
-		strings.Title(role), reason))
+		capitalize(role), reason))
 
 	return unsignedTx, nil
 }
@@ -1195,6 +1218,15 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		return nil, ErrInvalidTransition
 	}
 	trade.Status = models.P2PTradeStatusDisputed
+
+	// Symmetric with the other Confirm* paths: emit an audit row + bus event
+	// once the on-chain transition is verified. Without this the operator
+	// timeline only shows the intent (RaiseDispute) and not the chain-side
+	// settle, making it hard to investigate disputes after the fact.
+	s.audit(ctx, models.P2PAuditTradeDisputeConfirmed, &userID, &trade.AdID, &trade.ID,
+		map[string]any{"txHash": txHash})
+	s.emit(events.P2PTradeDisputed, userID, "Dispute confirmed on chain", "",
+		map[string]any{"tradeId": trade.ID})
 	return &trade, nil
 }
 
@@ -1245,7 +1277,7 @@ func (s *P2PTradeService) AdminResolveDispute(ctx context.Context, tradeID, admi
 	// Pre-broadcast audit so concurrent admins racing this endpoint leave
 	// a traceable record of intent — the confirm step writes the final
 	// outcome separately.
-	s.audit(ctx, models.P2PAuditTradeResolved+".prepared", &adminID, &trade.AdID, &trade.ID, map[string]any{
+	s.audit(ctx, models.P2PAuditTradeResolvePrepared, &adminID, &trade.AdID, &trade.ID, map[string]any{
 		"refundBuyer": refundBuyer,
 		"note":        note,
 		"disputeId":   dispute.ID,
@@ -1686,15 +1718,28 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 
 func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
 	// Resolved depends on the admin's refundBuyer choice. The off-chain
-	// dispute row records the admin's intent. If absent, fall back to
-	// "refund to ad" (conservative — doesn't move funds beyond what chain
-	// already moved).
+	// dispute row records the admin's intent.
+	//
+	// CRITICAL: if the dispute row is missing OR RefundedToBuyer is nil
+	// (e.g. dispute was raised on chain bypassing the API, or the resolve
+	// happened before ConfirmAdminResolveDispute ran), we cannot tell which
+	// branch the chain settled. Defaulting to refundBuyer=false would
+	// silently credit ad.remaining even when funds actually went to the
+	// buyer — a double-credit. Refuse to touch ad accounting and flag for
+	// manual review; the next reconciler pass after the dispute row is
+	// populated will resolve cleanly.
 	var dispute models.P2PDispute
-	refundBuyer := false
 	err := s.db.WithContext(ctx).Where("trade_id = ?", trade.ID).First(&dispute).Error
-	if err == nil && dispute.RefundedToBuyer != nil {
-		refundBuyer = *dispute.RefundedToBuyer
+	if err != nil || dispute.RefundedToBuyer == nil {
+		log.Printf("[p2p reconciler] trade=%s resolved on chain but dispute outcome unknown (dispute=%v, refundedToBuyer=%v); skipping ad accounting",
+			trade.ID, err == nil, dispute.RefundedToBuyer)
+		s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
+			"from": trade.Status, "to": models.P2PTradeStatusResolved,
+			"reason": "chain Resolved with unknown refund target — manual review",
+		})
+		return ReconcileResult{Changed: false}, nil
 	}
+	refundBuyer := *dispute.RefundedToBuyer
 
 	now := s.clock.Now()
 	from := trade.Status
@@ -2139,12 +2184,18 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	return s.escrow.PrepareDeposit(sellerAddress, tokenAddr, amt)
 }
 
-// ConfirmDeposit verifies the Deposited event for the supplied tx hash and
-// emits an audit log + notification. Returns the parsed event so callers
-// can surface the actual on-chain amount back to the UI.
-func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, txHash string) (*P2PDepositedEvent, error) {
+// ConfirmDeposit verifies the Deposited event for the supplied tx hash AND
+// asserts the on-chain amount matches the caller's expected amount. Without
+// the amount check, an attacker who learns another seller's pending deposit
+// txHash could submit it under their own (smaller) amount and the audit row
+// + emitted event would silently record a number the caller never intended.
+func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string) (*P2PDepositedEvent, error) {
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	expected, ok := new(big.Int).SetString(expectedAmount, 10)
+	if !ok || expected.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
 	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
 	if err != nil {
@@ -2155,6 +2206,10 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 		common.HexToAddress(tokenAddr))
 	if err != nil {
 		return nil, fmt.Errorf("verify deposit: %w", err)
+	}
+	if ev.Amount.Cmp(expected) != 0 {
+		return nil, fmt.Errorf("%w: on-chain deposit amount %s does not match expected %s",
+			ErrInvalidParams, ev.Amount, expected)
 	}
 	s.audit(ctx, models.P2PAuditDepositConfirmed, &sellerID, nil, nil, map[string]any{
 		"token":  strings.ToUpper(tokenSymbol),
@@ -2195,10 +2250,16 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 	return s.escrow.PrepareWithdraw(sellerAddress, tokenAddr, amt)
 }
 
-// ConfirmWithdraw verifies the Withdrawn event for the supplied tx hash.
-func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, txHash string) (*P2PWithdrawnEvent, error) {
+// ConfirmWithdraw verifies the Withdrawn event for the supplied tx hash AND
+// asserts the on-chain amount matches the caller's expected amount (same
+// rationale as ConfirmDeposit).
+func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string) (*P2PWithdrawnEvent, error) {
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	expected, ok := new(big.Int).SetString(expectedAmount, 10)
+	if !ok || expected.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
 	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
 	if err != nil {
@@ -2209,6 +2270,10 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 		common.HexToAddress(tokenAddr))
 	if err != nil {
 		return nil, fmt.Errorf("verify withdraw: %w", err)
+	}
+	if ev.Amount.Cmp(expected) != 0 {
+		return nil, fmt.Errorf("%w: on-chain withdrawal amount %s does not match expected %s",
+			ErrInvalidParams, ev.Amount, expected)
 	}
 	s.audit(ctx, models.P2PAuditWithdrawConfirmed, &sellerID, nil, nil, map[string]any{
 		"token":  strings.ToUpper(tokenSymbol),
@@ -2261,8 +2326,10 @@ func (s *P2PTradeService) adVoucher(ad *models.P2PAd, sellerAddrOverride string)
 	if amount == nil {
 		return AdVoucher{}, fmt.Errorf("%w: ad amount", ErrInvalidParams)
 	}
-	var nonce [32]byte
-	copy(nonce[:], common.FromHex(ad.VoucherNonce))
+	nonce, err := decodeHex32(ad.VoucherNonce)
+	if err != nil {
+		return AdVoucher{}, fmt.Errorf("%w: stored voucher nonce is corrupt (%v)", ErrInvalidTransition, err)
+	}
 	return AdVoucher{
 		Seller:      common.HexToAddress(sellerAddr),
 		Token:       common.HexToAddress(tokenAddr),
@@ -2314,6 +2381,45 @@ func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher) *VoucherTypedData {
 			Nonce:       "0x" + common.Bytes2Hex(v.Nonce[:]),
 		},
 	}
+}
+
+// capitalize uppercases the first byte of s. Replacement for strings.Title
+// (deprecated in Go 1.18+) at sites where input is known to be lowercase
+// ASCII — buyer/seller role labels in the dispute system message.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	if c := s[0]; c >= 'a' && c <= 'z' {
+		return string(c-32) + s[1:]
+	}
+	return s
+}
+
+// decodeHex32 strict-decodes a 0x-prefixed 32-byte hex string. `common.FromHex`
+// returns nil/empty on malformed input rather than erroring, so a corrupted
+// or truncated DB column would silently become a zero hash and the contract
+// would then look up the wrong slot. Anywhere we read a voucher hash / nonce
+// out of a row must go through this guard.
+func decodeHex32(s string) ([32]byte, error) {
+	var out [32]byte
+	b := common.FromHex(s)
+	if len(b) != 32 {
+		return out, fmt.Errorf("expected 32-byte hex, got %d bytes (input %q)", len(b), s)
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+// decodeHexSig strict-decodes a 0x-prefixed 65-byte ECDSA signature. Same
+// rationale as decodeHex32: protects against silently propagating empty
+// signature bytes that would revert on chain with an opaque message.
+func decodeHexSig(s string) ([]byte, error) {
+	b := common.FromHex(s)
+	if len(b) != 65 {
+		return nil, fmt.Errorf("expected 65-byte signature, got %d bytes", len(b))
+	}
+	return b, nil
 }
 
 // recoverEIP712Signer recovers the signer address from a 65-byte signature

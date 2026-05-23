@@ -5,6 +5,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"errors"
@@ -32,15 +33,52 @@ type mockEscrow struct {
 	voucherCanc     bool
 	hashFunc        func(AdVoucher) [32]byte
 	preparedTxs     []string
-	depositedEvent  *P2PDepositedEvent
-	withdrawnEvent  *P2PWithdrawnEvent
-	cancelledEvent  *P2PVoucherCancelledEvent
-	openedEvent     *P2PTradeOpenedEvent
-	releasedEvent   *P2PTradeReleasedEvent
-	tradeCancelled  *P2PTradeCancelledEvent
-	disputedEvent   *P2PTradeDisputedEvent
-	resolvedEvent   *P2PTradeResolvedEvent
-	onChainTrade    *OnChainP2PTrade
+
+	// Per-method error injection — set to override the success default.
+	verifyDepositErr   error
+	verifyWithdrawnErr error
+	verifyCancelledErr error
+	verifyOpenedErr    error
+	verifyReleasedErr  error
+	verifyTradeCanErr  error
+	verifyDisputedErr  error
+	verifyResolvedErr  error
+
+	// Event fixtures the verify methods return on success.
+	depositedEvent *P2PDepositedEvent
+	withdrawnEvent *P2PWithdrawnEvent
+	cancelledEvent *P2PVoucherCancelledEvent
+	openedEvent    *P2PTradeOpenedEvent
+	releasedEvent  *P2PTradeReleasedEvent
+	tradeCancelled *P2PTradeCancelledEvent
+	disputedEvent  *P2PTradeDisputedEvent
+	resolvedEvent  *P2PTradeResolvedEvent
+	onChainTrade   *OnChainP2PTrade
+
+	// Captured args for assertion in tests that need to verify the right
+	// values were threaded through to the adapter (not just that *something*
+	// was prepared).
+	lastDepositArgs       depositArgs
+	lastWithdrawArgs      depositArgs
+	lastOpenTradeArgs     openTradeArgs
+	lastCancelVoucherArgs cancelVoucherArgs
+}
+
+type depositArgs struct {
+	Seller string
+	Token  string
+	Amount *big.Int
+}
+type openTradeArgs struct {
+	TradeID [32]byte
+	Voucher AdVoucher
+	Sig     []byte
+	Buyer   string
+	Amount  *big.Int
+}
+type cancelVoucherArgs struct {
+	Seller  string
+	Voucher AdVoucher
 }
 
 func newMockEscrow() *mockEscrow {
@@ -71,18 +109,27 @@ func (m *mockEscrow) ContractAddress() string { return m.contractAddress }
 
 func (m *mockEscrow) PrepareDeposit(seller, token string, amount *big.Int) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "deposit")
+	m.lastDepositArgs = depositArgs{Seller: seller, Token: token, Amount: new(big.Int).Set(amount)}
 	return []byte(`{"tx":"deposit"}`), nil
 }
 func (m *mockEscrow) PrepareWithdraw(seller, token string, amount *big.Int) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "withdraw")
+	m.lastWithdrawArgs = depositArgs{Seller: seller, Token: token, Amount: new(big.Int).Set(amount)}
 	return []byte(`{"tx":"withdraw"}`), nil
 }
 func (m *mockEscrow) PrepareCancelVoucher(seller string, v AdVoucher) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "cancelVoucher")
+	m.lastCancelVoucherArgs = cancelVoucherArgs{Seller: seller, Voucher: v}
 	return []byte(`{"tx":"cancelVoucher"}`), nil
 }
 func (m *mockEscrow) PrepareOpenTradeWithVoucher(tradeId [32]byte, v AdVoucher, sig []byte, buyer string, amount *big.Int) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "openTrade")
+	sigCopy := make([]byte, len(sig))
+	copy(sigCopy, sig)
+	m.lastOpenTradeArgs = openTradeArgs{
+		TradeID: tradeId, Voucher: v, Sig: sigCopy,
+		Buyer: buyer, Amount: new(big.Int).Set(amount),
+	}
 	return []byte(`{"tx":"openTrade"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error) {
@@ -102,48 +149,72 @@ func (m *mockEscrow) PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, adm
 }
 
 func (m *mockEscrow) VerifyDeposited(txHash string, seller, token common.Address) (*P2PDepositedEvent, error) {
+	if m.verifyDepositErr != nil {
+		return nil, m.verifyDepositErr
+	}
 	if m.depositedEvent != nil {
 		return m.depositedEvent, nil
 	}
 	return &P2PDepositedEvent{Seller: seller, Token: token, Amount: big.NewInt(100)}, nil
 }
 func (m *mockEscrow) VerifyWithdrawn(txHash string, seller, token common.Address) (*P2PWithdrawnEvent, error) {
+	if m.verifyWithdrawnErr != nil {
+		return nil, m.verifyWithdrawnErr
+	}
 	if m.withdrawnEvent != nil {
 		return m.withdrawnEvent, nil
 	}
 	return &P2PWithdrawnEvent{Seller: seller, Token: token, Amount: big.NewInt(50)}, nil
 }
 func (m *mockEscrow) VerifyVoucherCancelled(txHash string, hash [32]byte) (*P2PVoucherCancelledEvent, error) {
+	if m.verifyCancelledErr != nil {
+		return nil, m.verifyCancelledErr
+	}
 	if m.cancelledEvent != nil {
 		return m.cancelledEvent, nil
 	}
 	return &P2PVoucherCancelledEvent{VoucherHash: hash}, nil
 }
 func (m *mockEscrow) VerifyTradeOpened(txHash string, tradeId [32]byte) (*P2PTradeOpenedEvent, error) {
+	if m.verifyOpenedErr != nil {
+		return nil, m.verifyOpenedErr
+	}
 	if m.openedEvent != nil {
 		return m.openedEvent, nil
 	}
 	return &P2PTradeOpenedEvent{TradeID: tradeId, Buyer: common.HexToAddress("0xb000"), Amount: big.NewInt(100)}, nil
 }
 func (m *mockEscrow) VerifyTradeReleased(txHash string, tradeId [32]byte) (*P2PTradeReleasedEvent, error) {
+	if m.verifyReleasedErr != nil {
+		return nil, m.verifyReleasedErr
+	}
 	if m.releasedEvent != nil {
 		return m.releasedEvent, nil
 	}
 	return &P2PTradeReleasedEvent{TradeID: tradeId, AmountToBuyer: big.NewInt(99), FeeToSystem: big.NewInt(1)}, nil
 }
 func (m *mockEscrow) VerifyTradeCancelled(txHash string, tradeId [32]byte) (*P2PTradeCancelledEvent, error) {
+	if m.verifyTradeCanErr != nil {
+		return nil, m.verifyTradeCanErr
+	}
 	if m.tradeCancelled != nil {
 		return m.tradeCancelled, nil
 	}
 	return &P2PTradeCancelledEvent{TradeID: tradeId, ReturnedToAvailable: big.NewInt(100)}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PTradeDisputedEvent, error) {
+	if m.verifyDisputedErr != nil {
+		return nil, m.verifyDisputedErr
+	}
 	if m.disputedEvent != nil {
 		return m.disputedEvent, nil
 	}
 	return &P2PTradeDisputedEvent{TradeID: tradeId, By: common.HexToAddress("0xb000")}, nil
 }
 func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PTradeResolvedEvent, error) {
+	if m.verifyResolvedErr != nil {
+		return nil, m.verifyResolvedErr
+	}
 	if m.resolvedEvent != nil {
 		return m.resolvedEvent, nil
 	}
@@ -598,7 +669,7 @@ func TestConfirmDeposit_VerifiesEventAndAudits(t *testing.T) {
 		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
 		Amount: big.NewInt(500),
 	}
-	ev, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "0xabc")
+	ev, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "500", "0xabc")
 	if err != nil {
 		t.Fatalf("ConfirmDeposit: %v", err)
 	}
@@ -713,5 +784,311 @@ func TestPauseResume_OnlySeller(t *testing.T) {
 	}
 	if err := svc.ResumeAd(context.Background(), res.Ad.ID, sellerID); err != nil {
 		t.Errorf("seller resume: %v", err)
+	}
+}
+
+// ─── Money-invariant + idempotency tests ───────────────────────────────────
+
+// helper: full happy-path setup → returns a service, esc, sellerID, sellerAddr,
+// adID for a SIGNED ad with a 100-USDT cap, ready to OpenTrade against.
+func signedAdFixture(t *testing.T) (*P2PTradeService, *mockEscrow, uuid.UUID, string, uuid.UUID, *gorm.DB) {
+	t.Helper()
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	key, sellerAddr := newSellerKey(t)
+	res, err := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
+	if err != nil {
+		t.Fatalf("CreateAd: %v", err)
+	}
+	var hash [32]byte
+	copy(hash[:], common.FromHex(res.Ad.VoucherHash))
+	sig := signVoucherForTest(t, hash, key)
+	if _, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig); err != nil {
+		t.Fatalf("SignAd: %v", err)
+	}
+	return svc, esc, sellerID, sellerAddr, res.Ad.ID, db
+}
+
+func TestConfirmDeposit_RejectsAmountMismatch(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	sellerID := uuid.New()
+	_, sellerAddr := newSellerKey(t)
+	esc.depositedEvent = &P2PDepositedEvent{
+		Seller: common.HexToAddress(sellerAddr),
+		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
+		Amount: big.NewInt(500),
+	}
+	// User intended 1000 but the on-chain event says 500 — the receipt
+	// belongs to a different tx (or was tampered with). Must reject.
+	_, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000", "0xabc")
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestConfirmWithdraw_RejectsAmountMismatch(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	sellerID := uuid.New()
+	_, sellerAddr := newSellerKey(t)
+	esc.withdrawnEvent = &P2PWithdrawnEvent{
+		Seller: common.HexToAddress(sellerAddr),
+		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
+		Amount: big.NewInt(50),
+	}
+	_, err := svc.ConfirmWithdraw(context.Background(), sellerID, sellerAddr, "USDT", "100", "0xabc")
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestSignAd_IdempotentReplay(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	key, sellerAddr := newSellerKey(t)
+	res, _ := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
+	var hash [32]byte
+	copy(hash[:], common.FromHex(res.Ad.VoucherHash))
+	sig := signVoucherForTest(t, hash, key)
+
+	if _, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig); err != nil {
+		t.Fatalf("first SignAd: %v", err)
+	}
+	// Same signature replayed — should return OK (idempotent), not error.
+	ad, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig)
+	if err != nil {
+		t.Fatalf("idempotent SignAd: %v", err)
+	}
+	if ad.Status != models.P2PAdStatusActive {
+		t.Errorf("status flipped on replay: %s", ad.Status)
+	}
+}
+
+func TestSignAd_DifferentSigOnActiveAd_Rejected(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	key, sellerAddr := newSellerKey(t)
+	res, _ := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
+	var hash [32]byte
+	copy(hash[:], common.FromHex(res.Ad.VoucherHash))
+	sig := signVoucherForTest(t, hash, key)
+	if _, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig); err != nil {
+		t.Fatalf("SignAd: %v", err)
+	}
+	// Construct a second valid signature with the same key (varies because
+	// ECDSA nonce is random). Should be rejected since the ad is already
+	// active with a different stored sig.
+	sig2 := signVoucherForTest(t, hash, key)
+	if bytes.Equal(sig, sig2) {
+		t.Skip("deterministic ECDSA: cannot exercise differing-sig replay")
+	}
+	_, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig2)
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition, got %v", err)
+	}
+}
+
+func TestOpenTrade_RejectsExpiredVoucher(t *testing.T) {
+	svc, _, _, _, adID, db := signedAdFixture(t)
+	// Move clock past the 30-day voucher TTL.
+	svc = svc.WithClock(fixedClock{t: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)})
+	// Re-seed an active rate snapshot via the same mock for OpenTrade.
+	buyerID := uuid.New()
+	// Look up the ad's stored seller PM from the ad's payment_method_ids
+	// (CreateAd populated it from makeCreateAdParams).
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	var pmID uuid.UUID
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
+	}
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xb000",
+		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition for expired voucher, got %v", err)
+	}
+}
+
+func TestOpenTrade_RejectsSelfTrade(t *testing.T) {
+	svc, _, sellerID, _, adID, db := signedAdFixture(t)
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	var pmID uuid.UUID
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
+	}
+	_, _, err := svc.OpenTrade(context.Background(), adID, sellerID, "0xseller",
+		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+	if !errors.Is(err, ErrSelfTrade) {
+		t.Fatalf("expected ErrSelfTrade, got %v", err)
+	}
+}
+
+func TestCancelAd_BlockedByOpenTrades(t *testing.T) {
+	svc, _, sellerID, sellerAddr, adID, db := signedAdFixture(t)
+	// Inject an open trade against the ad to simulate the busy state.
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	trade := &models.P2PTrade{
+		ID: uuid.New(), AdID: adID, BuyerID: uuid.New(), SellerID: sellerID,
+		Token: "USDT", ChainID: 146,
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(),
+		Status:          models.P2PTradeStatusPendingPayment,
+		ExpiresAt:       now.Add(30 * time.Minute),
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	_, err := svc.CancelAd(context.Background(), adID, sellerID, sellerAddr)
+	if !errors.Is(err, ErrAdHasOpenTrades) {
+		t.Fatalf("expected ErrAdHasOpenTrades, got %v", err)
+	}
+}
+
+func TestConfirmCancelAd_RejectsCorruptVoucherHash(t *testing.T) {
+	svc, _, sellerID, _, adID, db := signedAdFixture(t)
+	// Corrupt the stored voucher hash (truncate to 30 bytes worth of hex).
+	db.Model(&models.P2PAd{}).Where("id = ?", adID).Update("voucher_hash", "0x1234")
+	_, err := svc.ConfirmCancelAd(context.Background(), adID, sellerID, "0xtx")
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition (corrupt hex), got %v", err)
+	}
+}
+
+func TestOpenTrade_RejectsCorruptStoredSignature(t *testing.T) {
+	svc, _, _, _, adID, db := signedAdFixture(t)
+	db.Model(&models.P2PAd{}).Where("id = ?", adID).Update("voucher_signature", "0xdead")
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	var pmID uuid.UUID
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
+	}
+	buyerID := uuid.New()
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xb000",
+		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition (corrupt sig), got %v", err)
+	}
+}
+
+func TestRecoverEIP712Signer_RejectsHighS(t *testing.T) {
+	key, addr := newSellerKey(t)
+	var hash [32]byte
+	copy(hash[:], common.FromHex("0x"+strings.Repeat("ab", 32)))
+	sig := signVoucherForTest(t, hash, key)
+
+	// Sanity: canonical sig recovers correctly.
+	got, err := recoverEIP712Signer(hash, sig)
+	if err != nil {
+		t.Fatalf("canonical recovery failed: %v", err)
+	}
+	if got.Hex() != addr {
+		t.Fatalf("addr mismatch: got %s want %s", got.Hex(), addr)
+	}
+
+	// Flip the signature to its high-S complement and the recovery must reject.
+	// secp256k1 N
+	n, _ := new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+	sLow := new(big.Int).SetBytes(sig[32:64])
+	sHigh := new(big.Int).Sub(n, sLow)
+	bad := make([]byte, 65)
+	copy(bad, sig[:32])
+	sHighBytes := sHigh.Bytes()
+	copy(bad[64-len(sHighBytes):64], sHighBytes)
+	v := sig[64]
+	if v == 27 {
+		bad[64] = 28
+	} else {
+		bad[64] = 27
+	}
+	_, err = recoverEIP712Signer(hash, bad)
+	if err == nil || !strings.Contains(err.Error(), "non-canonical") {
+		t.Fatalf("expected high-S rejection, got %v", err)
+	}
+}
+
+func TestRecoverEIP712Signer_VNormalisation(t *testing.T) {
+	key, addr := newSellerKey(t)
+	var hash [32]byte
+	copy(hash[:], common.FromHex("0x"+strings.Repeat("cd", 32)))
+	sig := signVoucherForTest(t, hash, key)
+	// Sig was bumped to 27/28 by signVoucherForTest. Flip back to 0/1 to
+	// confirm normalisation still recovers the same address.
+	sig[64] -= 27
+	got, err := recoverEIP712Signer(hash, sig)
+	if err != nil {
+		t.Fatalf("v=0/1 normalisation: %v", err)
+	}
+	if got.Hex() != addr {
+		t.Errorf("addr mismatch on normalised v: got %s want %s", got.Hex(), addr)
+	}
+}
+
+func TestRecoverEIP712Signer_RejectsBadLength(t *testing.T) {
+	var hash [32]byte
+	if _, err := recoverEIP712Signer(hash, []byte{0x01, 0x02}); err == nil {
+		t.Fatal("expected error on 2-byte sig")
+	}
+}
+
+func TestPrepareCancelVoucher_CapturesCorrectVoucher(t *testing.T) {
+	svc, esc, sellerID, sellerAddr, adID, _ := signedAdFixture(t)
+	if _, err := svc.CancelAd(context.Background(), adID, sellerID, sellerAddr); err != nil {
+		t.Fatalf("CancelAd: %v", err)
+	}
+	// The mock should have captured the voucher tuple. Verify the seller
+	// matches and the nonce was non-zero.
+	if !strings.EqualFold(esc.lastCancelVoucherArgs.Seller, sellerAddr) {
+		t.Errorf("seller mismatch in cancelVoucher call: got %s", esc.lastCancelVoucherArgs.Seller)
+	}
+	if esc.lastCancelVoucherArgs.Voucher.Nonce == ([32]byte{}) {
+		t.Error("zero nonce in cancelVoucher voucher")
+	}
+}
+
+func TestPrepareOpenTrade_PassesVoucherAndSigToAdapter(t *testing.T) {
+	svc, esc, _, _, adID, db := signedAdFixture(t)
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	var pmID uuid.UUID
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
+	}
+	if _, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xb000",
+		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID}); err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	// The adapter must have received: matching voucher hash + 65-byte sig.
+	gotHash := defaultHashVoucher(esc.lastOpenTradeArgs.Voucher)
+	wantHash, _ := decodeHex32(ad.VoucherHash)
+	if gotHash != wantHash {
+		t.Errorf("voucher hash mismatch: passed-through voucher digests differently than the stored ad")
+	}
+	if len(esc.lastOpenTradeArgs.Sig) != 65 {
+		t.Errorf("expected 65-byte sig forwarded, got %d", len(esc.lastOpenTradeArgs.Sig))
+	}
+}
+
+func TestCreateAd_RPCFailureNoLongerSilent(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	esc.balanceErr = errors.New("rpc dial failed")
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	_, sellerAddr := newSellerKey(t)
+	_, err := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams when ReadBalance errors, got %v", err)
 	}
 }

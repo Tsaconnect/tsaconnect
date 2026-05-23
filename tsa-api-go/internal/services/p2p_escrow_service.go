@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -234,10 +235,11 @@ func HashIDHex(id uuid.UUID) string {
 // ─── Prepare* (unsigned-tx builders) ────────────────────────────────────────
 
 // ErrPhase2Migration is returned by legacy lock-on-publish methods that no
-// longer have a corresponding on-chain function. The trade service still
-// names them in its adapter interface; replacing the call sites with the
-// voucher flow is Phase 2B work.
-var ErrPhase2Migration = fmt.Errorf("p2p: legacy method removed by pool-model upgrade (Phase 2B migration pending)")
+// longer have a corresponding on-chain function. All adapter call sites
+// were migrated in Phase 2B; the stubs persist only so the interface still
+// references the legacy method names should anything outside the trade
+// service have a stale binding.
+var ErrPhase2Migration = errors.New("p2p: legacy method removed by pool-model upgrade")
 
 // PrepareCreateAd is no longer supported — ads are off-chain vouchers under
 // the pool model. The trade service's ad-creation path must be refactored
