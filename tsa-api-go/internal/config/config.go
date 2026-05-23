@@ -1,10 +1,49 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
 )
+
+// sonicPreset bundles every value that has to flip together when switching
+// the P2P stack between Sonic mainnet and Sonic testnet. Flipping these
+// piecemeal (e.g. mainnet RPC but testnet chainID) makes the EIP-712 voucher
+// domain mismatch what the contract recovers, so every signature gets
+// rejected — keep them together.
+type sonicPreset struct {
+	rpcURL          string
+	chainID         int64
+	usdcAddress     string
+	usdtAddress     string
+	mcgpAddress     string
+	p2pEscrow       string
+}
+
+// sonicPresets holds the canonical contract deployment for each network.
+// To flip the server between testnet and mainnet, set SONIC_NETWORK and
+// restart — no other env vars need to change. Individual addresses can
+// still be overridden via the legacy SONIC_RPC_URL / *_TOKEN_ADDRESS /
+// P2P_ESCROW_ADDRESS env vars (escape hatch for hot-fixes).
+var sonicPresets = map[string]sonicPreset{
+	"mainnet": {
+		rpcURL:      "https://rpc.soniclabs.com",
+		chainID:     146,
+		usdcAddress: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+		usdtAddress: "0x6047828dc181963ba44974801ff68e538da5eaf9",
+		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
+		p2pEscrow:   "0x1Dc47600C713B216686dd20c349fDCd2575D3cE1",
+	},
+	"testnet": {
+		rpcURL:      "https://rpc.testnet.soniclabs.com",
+		chainID:     14601,
+		usdcAddress: "0x685CD180e603A15507f575E7A347610b83d36d41",
+		usdtAddress: "0xb5617cD43dcd27C9E0be8c0FF82F9406Cb1123ad",
+		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
+		p2pEscrow:   "0xadB543F2AD95ad38243d36E46530fE1c80c70Fe5",
+	},
+}
 
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
 type ChainConfig struct {
@@ -101,6 +140,19 @@ type Config struct {
 }
 
 func Load() *Config {
+	// Pick the Sonic deployment preset first; individual env vars layered on
+	// top can override any single field. Default is "mainnet" so a production
+	// server with no SONIC_NETWORK set keeps its current behaviour.
+	sonicNetwork := strings.ToLower(strings.TrimSpace(getEnv("SONIC_NETWORK", "mainnet")))
+	preset, ok := sonicPresets[sonicNetwork]
+	if !ok {
+		log.Printf("[config] SONIC_NETWORK=%q is unknown; falling back to 'mainnet'", sonicNetwork)
+		sonicNetwork = "mainnet"
+		preset = sonicPresets["mainnet"]
+	}
+	log.Printf("[config] Sonic network = %s (chain %d, P2PEscrow %s)",
+		sonicNetwork, preset.chainID, preset.p2pEscrow)
+
 	cfg := &Config{
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
@@ -113,12 +165,12 @@ func Load() *Config {
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),
 
-		// Sonic blockchain (env vars override testnet defaults)
-		SonicRPCURL:         getEnv("SONIC_RPC_URL", "https://rpc.testnet.soniclabs.com"),
-		SonicChainID:        getEnvInt64("SONIC_CHAIN_ID", 14601),
-		MCGPTokenAddress:    getEnv("MCGP_TOKEN_ADDRESS", "0x517600323e5E2938207fA2e2e915B9D80e5B2b21"),
-		USDTTokenAddress:    getEnv("USDT_TOKEN_ADDRESS", ""),
-		USDCTokenAddress:    getEnv("USDC_TOKEN_ADDRESS", ""),
+		// Sonic blockchain — preset by SONIC_NETWORK, overridable per-field.
+		SonicRPCURL:         getEnv("SONIC_RPC_URL", preset.rpcURL),
+		SonicChainID:        getEnvInt64("SONIC_CHAIN_ID", preset.chainID),
+		MCGPTokenAddress:    getEnv("MCGP_TOKEN_ADDRESS", preset.mcgpAddress),
+		USDTTokenAddress:    getEnv("USDT_TOKEN_ADDRESS", preset.usdtAddress),
+		USDCTokenAddress:    getEnv("USDC_TOKEN_ADDRESS", preset.usdcAddress),
 		SystemWalletAddress: getEnv("SYSTEM_WALLET_ADDRESS", "0xaF326D5D242C9A55590540f14658adDDd3586A8d"),
 
 		// BSC blockchain
@@ -130,11 +182,9 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
-	// P2PEscrow proxy address; deployed via scripts/deploy-p2p-escrow.js.
-	// Empty default means the P2P feature is dormant — the service still
-	// constructs, but Prepare/Read calls return a configuration error so
-	// handlers can surface a clear "not deployed yet" response.
-	cfg.P2PEscrowAddress = getEnv("P2P_ESCROW_ADDRESS", "")
+	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
+	// you need to point at a hot-fix deployment.
+	cfg.P2PEscrowAddress = getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow)
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
