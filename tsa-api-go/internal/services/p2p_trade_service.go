@@ -493,7 +493,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	return &ad, nil
 }
 
-// CancelAd returns the unsigned cancelVoucher tx for an active or paused ad.
+// PrepareCancelAd returns the unsigned cancelVoucher tx for an active or paused ad.
 // Cancellation is on-chain because the contract is the source of truth for
 // voucher revocation — a DB-only flag would still leave the signature valid
 // for buyers who fetched it before the flag was set.
@@ -982,7 +982,7 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	return &trade, nil
 }
 
-// Cancel prepares an unsigned `cancelByTimeout` tx for a trade whose
+// PrepareCancel prepares an unsigned `cancelByTimeout` tx for a trade whose
 // pending-payment window has elapsed. The contract makes this permissionless
 // on-chain (anyone may call after 30 minutes), but the service restricts the
 // API to participants — seller or buyer — so the surface stays predictable.
@@ -1094,7 +1094,7 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 
 // ─── Dispute lifecycle (Step 8) ─────────────────────────────────────────────
 
-// RaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
+// PrepareRaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
 // row tied to the trade. The trade itself isn't transitioned until
 // ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
 // state in the interim so the UI can surface "dispute pending broadcast".
@@ -1232,7 +1232,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	return &trade, nil
 }
 
-// AdminResolveDispute prepares the on-chain adminResolve tx. Admin can side
+// PrepareAdminResolveDispute prepares the on-chain adminResolve tx. Admin can side
 // with the buyer (release fee-split to buyer) or seller (refund to ad pool).
 // The off-chain note is persisted with the dispute row on confirm.
 func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeID, adminID uuid.UUID, adminAddress string, refundBuyer bool, note string) ([]byte, error) {
