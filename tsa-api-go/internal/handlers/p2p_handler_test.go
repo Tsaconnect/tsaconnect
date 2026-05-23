@@ -480,6 +480,15 @@ func TestPrepareDeposit_RejectsMissingFields(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
+	// gin's binding error includes the missing field name in the message; a
+	// generic "Bad Request" with no field reference would mean the binding
+	// layer was bypassed (e.g. someone added a manual unmarshal that doesn't
+	// validate required tags).
+	decoded := decode(t, rec)
+	msg, _ := decoded["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "amount") {
+		t.Errorf("expected 'amount' field name in error message, got %q", msg)
+	}
 }
 
 func TestConfirmDeposit_RejectsAmountMismatch(t *testing.T) {
@@ -540,7 +549,7 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
 	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
 	body := makeCreateAdBody(pmID)
-	body["sellerAddress"] = r.user.WalletAddress // use the rig's wallet so SignAd can sign
+	body["sellerAddress"] = r.user.WalletAddress
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -549,11 +558,80 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 	data := decoded["data"].(map[string]any)
 	ad := data["ad"].(map[string]any)
 	if ad["status"] != "pending" {
-		t.Errorf("status: %v", ad["status"])
+		t.Errorf("ad.status = %v, want pending", ad["status"])
 	}
+	if ad["voucherHash"] == nil || ad["voucherHash"] == "" {
+		t.Errorf("ad.voucherHash missing or empty: %v", ad["voucherHash"])
+	}
+
+	// EIP-712 typed data: a wagmi/ethers signer will reject any structural
+	// drift (missing domain field, reordered AdVoucher fields, etc.), so the
+	// shape is part of the wire contract.
 	td := data["typedData"].(map[string]any)
 	if td["primaryType"] != "AdVoucher" {
-		t.Errorf("primaryType: %v", td["primaryType"])
+		t.Errorf("primaryType = %v, want AdVoucher", td["primaryType"])
+	}
+	domain := td["domain"].(map[string]any)
+	if domain["name"] != "TSAConnectP2PEscrow" {
+		t.Errorf("domain.name = %v", domain["name"])
+	}
+	if domain["version"] != "1" {
+		t.Errorf("domain.version = %v", domain["version"])
+	}
+	// JSON numbers decode as float64 — the chainId field is an int64 in Go.
+	if cid, ok := domain["chainId"].(float64); !ok || int64(cid) <= 0 {
+		t.Errorf("domain.chainId missing or non-positive: %v", domain["chainId"])
+	}
+	if vc, _ := domain["verifyingContract"].(string); !strings.HasPrefix(vc, "0x") || len(vc) != 42 {
+		t.Errorf("domain.verifyingContract not a 20-byte hex address: %v", domain["verifyingContract"])
+	}
+
+	// AdVoucher type definition — field order must match AD_VOUCHER_TYPEHASH
+	// in the contract; otherwise the EIP-712 digest differs and the contract
+	// rejects the signature. Asserting the exact ordering here catches any
+	// accidental rearrangement at the test boundary.
+	types := td["types"].(map[string]any)
+	voucherFields, ok := types["AdVoucher"].([]any)
+	if !ok {
+		t.Fatalf("types.AdVoucher missing or wrong shape: %v", types["AdVoucher"])
+	}
+	wantFields := []struct{ name, typ string }{
+		{"seller", "address"},
+		{"token", "address"},
+		{"maxAmount", "uint256"},
+		{"minPerTrade", "uint256"},
+		{"maxPerTrade", "uint256"},
+		{"deadline", "uint256"},
+		{"nonce", "bytes32"},
+	}
+	if len(voucherFields) != len(wantFields) {
+		t.Fatalf("types.AdVoucher has %d fields, want %d: %v", len(voucherFields), len(wantFields), voucherFields)
+	}
+	for i, want := range wantFields {
+		f := voucherFields[i].(map[string]any)
+		if f["name"] != want.name || f["type"] != want.typ {
+			t.Errorf("types.AdVoucher[%d] = {%v,%v}, want {%s,%s}", i, f["name"], f["type"], want.name, want.typ)
+		}
+	}
+	// EIP712Domain must also be present so wagmi can hash the domain
+	// separator. (ethers strips it on the client side, but the server must
+	// supply it as part of the canonical typed-data payload.)
+	if _, ok := types["EIP712Domain"].([]any); !ok {
+		t.Errorf("types.EIP712Domain missing")
+	}
+
+	// Message echoes the AdVoucher payload — the seller wallet must match the
+	// requesting user (case-insensitive: contract emits checksummed, request
+	// may be lowercase). nonce must be 0x-prefixed bytes32.
+	msg := td["message"].(map[string]any)
+	if !strings.EqualFold(msg["seller"].(string), r.user.WalletAddress) {
+		t.Errorf("message.seller = %v, want %s", msg["seller"], r.user.WalletAddress)
+	}
+	if nonce, _ := msg["nonce"].(string); !strings.HasPrefix(nonce, "0x") || len(nonce) != 66 {
+		t.Errorf("message.nonce not 0x-prefixed 32-byte hex: %v", msg["nonce"])
+	}
+	if msg["maxAmount"] != "100000000" {
+		t.Errorf("message.maxAmount = %v, want 100000000", msg["maxAmount"])
 	}
 }
 
@@ -566,6 +644,14 @@ func TestCreateAd_InsufficientBalance_400(t *testing.T) {
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	// The service wraps ErrInvalidParams with "insufficient available balance"
+	// so the FE can show a tailored message instead of a generic "bad
+	// request". Asserting the substring guards against the wrap being lost.
+	decoded := decode(t, rec)
+	msg, _ := decoded["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "insufficient") {
+		t.Errorf("expected 'insufficient' in error message, got %q", msg)
 	}
 }
 
@@ -631,6 +717,91 @@ func TestSignAd_HappyPath(t *testing.T) {
 	}
 }
 
+// TestSignAd_RejectsWrongSigner covers the security-critical path: an
+// attacker who learns an ad id must not be able to publish it by signing
+// the voucher hash with a key they control. The recovered signer address
+// is compared against the stored seller address; mismatch -> 403.
+func TestSignAd_RejectsWrongSigner(t *testing.T) {
+	r := newRig(t)
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	createBody := makeCreateAdBody(pmID)
+	createBody["sellerAddress"] = r.user.WalletAddress
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", createBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	adData := body["data"].(map[string]any)["ad"].(map[string]any)
+	adID := adData["id"].(string)
+	voucherHashHex := adData["voucherHash"].(string)
+
+	// Sign with a *different* key than the seller registered.
+	attackerPK, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	var hash [32]byte
+	copy(hash[:], common.FromHex(voucherHashHex))
+	sig, err := crypto.Sign(hash[:], attackerPK)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if sig[64] < 27 {
+		sig[64] += 27
+	}
+	sigHex := "0x" + hex.EncodeToString(sig)
+
+	rec = doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/sign", map[string]any{
+		"signature":     sigHex,
+		"sellerAddress": r.user.WalletAddress,
+	})
+	// SignAd wraps ErrInvalidParams when the recovered signer differs from
+	// the declared seller, so this surfaces as 400 — the request is
+	// structurally valid but cryptographically wrong. The body must mention
+	// the recovery mismatch so the FE can tell the user their wallet doesn't
+	// match the ad's declared seller.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	decoded := decode(t, rec)
+	msg, _ := decoded["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "signature") {
+		t.Errorf("expected 'signature' in error message, got %q", msg)
+	}
+	// Confirm the attacker's key wasn't accepted: the stored ad must still be
+	// pending (i.e. not transitioned to active).
+	var ad models.P2PAd
+	if err := r.db.First(&ad, "id = ?", adID).Error; err != nil {
+		t.Fatalf("reload ad: %v", err)
+	}
+	if string(ad.Status) != "pending" {
+		t.Errorf("ad.status = %q after wrong-signer sign, want pending", ad.Status)
+	}
+}
+
+// TestPrepareDeposit_RejectsMalformedJSON covers the request-parsing seam:
+// a malformed body must not panic or 500, it must produce a structured 400.
+// (Catches anyone replacing gin's ShouldBindJSON with a raw json.Decoder
+// that doesn't trap UnmarshalTypeError.)
+func TestPrepareDeposit_RejectsMalformedJSON(t *testing.T) {
+	r := newRig(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/p2p/deposits", bytes.NewReader([]byte(`{"token": "USDT", "amount":`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not JSON: %v; raw=%s", err, rec.Body.String())
+	}
+	if body["success"] != false {
+		t.Errorf("success not false; body=%v", body)
+	}
+}
+
 func TestPauseAd_ResponseShape(t *testing.T) {
 	r := newRig(t)
 	signed := createSignedAd(t, r)
@@ -651,19 +822,62 @@ func TestPauseAd_ResponseShape(t *testing.T) {
 
 // ─── Error mapping ──────────────────────────────────────────────────────────
 
-// stubErrTrade lets us drive mapServiceError directly by replacing the
-// trade service with one that always returns a chosen sentinel.
-type stubErrTradeAdapter struct{ mockEscrow }
-
+// TestMapServiceError_StatusCodes drives mapServiceError directly with each
+// sentinel so a missed case (e.g. someone adds a new ErrFoo to the service
+// without wiring it into the switch) is caught at the test level instead of
+// silently degrading to 500 in prod.
 func TestMapServiceError_StatusCodes(t *testing.T) {
-	// Drive a handler that always errors through mapServiceError.
-	// Easier than a per-sentinel stub trade service: hit GetPoolBalance with
-	// an invalid wallet address (forces ErrInvalidParams via the service).
-	r := newRig(t)
-	r.user.WalletAddress = "not-an-address"
-	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance?token=USDT", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid wallet, got %d; body=%s", rec.Code, rec.Body.String())
+	cases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"AdNotFound", services.ErrAdNotFound, http.StatusNotFound},
+		{"TradeNotFound", services.ErrTradeNotFound, http.StatusNotFound},
+		{"PaymentMethodMissing", services.ErrPaymentMethodMissing, http.StatusNotFound},
+		{"DisputeNotFound", services.ErrDisputeNotFound, http.StatusNotFound},
+		{"Forbidden", services.ErrForbidden, http.StatusForbidden},
+		{"InvalidParams", services.ErrInvalidParams, http.StatusBadRequest},
+		{"AmountOutOfRange", services.ErrAmountOutOfRange, http.StatusBadRequest},
+		{"AmountOverflow", services.ErrAmountOverflow, http.StatusBadRequest},
+		{"UnsupportedToken", services.ErrUnsupportedToken, http.StatusBadRequest},
+		{"SelfTrade", services.ErrSelfTrade, http.StatusBadRequest},
+		{"AdNotActive", services.ErrAdNotActive, http.StatusConflict},
+		{"InsufficientRemaining", services.ErrInsufficientRemaining, http.StatusConflict},
+		{"InvalidTransition", services.ErrInvalidTransition, http.StatusConflict},
+		{"AdHasOpenTrades", services.ErrAdHasOpenTrades, http.StatusConflict},
+		{"DisputeAlreadyOpen", services.ErrDisputeAlreadyOpen, http.StatusConflict},
+		{"RateStale", services.ErrRateStale, http.StatusServiceUnavailable},
+		{"Phase2Migration", services.ErrPhase2Migration, http.StatusGone},
+		{"unmapped defaults to 500", errors.New("untyped internal failure"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			if !mapServiceError(c, tc.err) {
+				t.Fatalf("mapServiceError(%v) should have aborted", tc.err)
+			}
+			if rec.Code != tc.status {
+				t.Errorf("status = %d, want %d (err=%v)", rec.Code, tc.status, tc.err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body not JSON: %v; raw=%s", err, rec.Body.String())
+			}
+			if body["success"] != false {
+				t.Errorf("success not false; body=%v", body)
+			}
+			if _, ok := body["message"].(string); !ok {
+				t.Errorf("message missing or non-string; body=%v", body)
+			}
+		})
+	}
+	// nil error -> no abort, no response.
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	if mapServiceError(c, nil) {
+		t.Errorf("mapServiceError(nil) should not abort")
 	}
 }
 
@@ -732,9 +946,6 @@ func createSignedAd(t *testing.T, r *rig) string {
 	return adID
 }
 
-// Compile-time guard: the stub above implements P2PEscrowAdapter so we
-// catch interface drift if the adapter surface ever changes.
+// Compile-time guard: mockEscrow implements P2PEscrowAdapter so we catch
+// interface drift if the adapter surface ever changes.
 var _ services.P2PEscrowAdapter = (*mockEscrow)(nil)
-
-// errors-package import is referenced by some negative-path tests below.
-var _ = errors.New
