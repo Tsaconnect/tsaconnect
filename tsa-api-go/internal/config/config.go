@@ -294,13 +294,19 @@ func Load() *Config {
 		"linea":     {Name: "Linea Sepolia", RPCURL: getEnv("LINEA_TESTNET_RPC_URL", "https://rpc.sepolia.linea.build"), ChainID: getEnvInt64("LINEA_TESTNET_CHAIN_ID", 59141), NativeCurrency: "ETH"},
 	}
 	testnetTokens := map[string]string{}
-	if addr := getEnv("TESTNET_MCGP_ADDRESS", ""); addr != "" {
+	// Sonic testnet token defaults come from the testnet preset (the same
+	// source the P2P stack uses when SONIC_NETWORK=testnet). This keeps the
+	// wallet's token-discovery surface in sync with what the P2P escrow has
+	// whitelisted — without it, the wallet looks up sonic:USDT against
+	// mainnet addresses on the testnet RPC and shows nothing.
+	testnetSonic := sonicPresets["testnet"]
+	if addr := getEnv("TESTNET_MCGP_ADDRESS", testnetSonic.mcgpAddress); addr != "" {
 		testnetTokens["sonic:MCGP"] = addr
 	}
-	if addr := getEnv("TESTNET_USDT_ADDRESS", ""); addr != "" {
+	if addr := getEnv("TESTNET_USDT_ADDRESS", testnetSonic.usdtAddress); addr != "" {
 		testnetTokens["sonic:USDT"] = addr
 	}
-	if addr := getEnv("TESTNET_USDC_ADDRESS", "0x0BA304580ee7c9a980CF72e55f5Ed2E9fd30Bc51"); addr != "" {
+	if addr := getEnv("TESTNET_USDC_ADDRESS", testnetSonic.usdcAddress); addr != "" {
 		testnetTokens["sonic:USDC"] = addr
 	}
 	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "")); addr != "" {
