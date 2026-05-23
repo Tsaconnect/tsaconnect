@@ -207,6 +207,46 @@ const P2PPoolScreen: React.FC = () => {
     );
   };
 
+  // runApproveIfNeeded: deposit's first stage. Reads the current allowance,
+  // and if it's short of `amountBaseUnits`, broadcasts an approve tx so the
+  // subsequent deposit's transferFrom succeeds. Withdrawals skip this
+  // entirely (no allowance needed for the seller's own withdrawal).
+  const runApproveIfNeeded = async (amountBaseUnits: string): Promise<void> => {
+    if (mode !== 'deposit') return;
+    setStage('Checking allowance…');
+    const aRes = await poolApi.allowance(token);
+    if (aRes.success && aRes.data) {
+      try {
+        if (BigInt(aRes.data.allowance) >= BigInt(amountBaseUnits)) {
+          return; // Allowance already covers the deposit; skip approve.
+        }
+      } catch {
+        // Allowance read returned a non-numeric — fall through to the
+        // approve flow rather than silently skipping it.
+      }
+    }
+    setStage('Preparing approve…');
+    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits);
+    if (!aPrep.success || !aPrep.data) {
+      throw new Error(statusAwareError(aPrep.status, aPrep.message) || 'Prepare approve failed');
+    }
+    // Server may have observed a sufficient allowance between the read
+    // above and the prepare call — skip if it now reports we're covered.
+    try {
+      if (BigInt(aPrep.data.currentAllowance) >= BigInt(amountBaseUnits)) {
+        return;
+      }
+    } catch {}
+    setStage('Signing approve…');
+    const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx));
+    setStage('Broadcasting approve…');
+    await broadcastTransaction('sonic' as ChainKey, signed);
+    // No backend confirm step for approve — it's a token-contract allowance
+    // bump. The subsequent deposit's transferFrom is what actually moves
+    // funds; if approve hasn't mined by the time deposit broadcasts, the
+    // deposit will revert on chain and we surface that in the catch below.
+  };
+
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
@@ -217,6 +257,10 @@ const P2PPoolScreen: React.FC = () => {
       if (!wallet) throw new Error('No active wallet. Set one up from the wallet screen first.');
       amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
       if (amountBaseUnits === '0') throw new Error('Amount must be greater than zero.');
+
+      // For deposits, ensure the seller has approved the escrow first.
+      // Withdrawals don't need an allowance.
+      await runApproveIfNeeded(amountBaseUnits);
 
       setStage('Preparing transaction…');
       const prep =
@@ -417,8 +461,8 @@ const P2PPoolScreen: React.FC = () => {
           )}
           {mode === 'deposit' ? (
             <Text style={styles.hint}>
-              Make sure you have approved the P2P escrow contract to spend {token}
-              from your wallet before depositing.
+              You'll sign two transactions: an ERC-20 approve (skipped if your
+              existing allowance is sufficient) followed by the deposit itself.
             </Text>
           ) : (
             available !== '—' && (

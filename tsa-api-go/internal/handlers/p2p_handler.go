@@ -325,6 +325,69 @@ type confirmPoolMoveRequest struct {
 	Amount string `json:"amount" binding:"required"`
 }
 
+// PrepareApprove returns the unsigned ERC-20 approve tx the seller must
+// submit before their first deposit (or whenever the current allowance is
+// short). Response carries the current allowance so the frontend can skip
+// this step when it already exceeds the intended deposit.
+func (h *P2PHandler) PrepareApprove(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	if user.WalletAddress == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
+		return
+	}
+	var req poolMoveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount)
+	if mapServiceError(c, err) {
+		return
+	}
+	allowance, allowanceErr := h.trade.GetAllowance(c.Request.Context(), user.WalletAddress, req.Token)
+	allowanceStr := "0"
+	if allowanceErr == nil && allowance != nil {
+		allowanceStr = allowance.String()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"unsignedTx":       unsignedTxJSON(raw),
+			"currentAllowance": allowanceStr,
+		},
+	})
+}
+
+// GetAllowance is the lightweight view counterpart — exposed so the FE
+// can check allowance state without preparing an approve tx (e.g. on
+// pool-screen mount, or after the user broadcasts an approve to refresh).
+func (h *P2PHandler) GetAllowance(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	if user.WalletAddress == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
+		return
+	}
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token query param is required"})
+		return
+	}
+	allowance, err := h.trade.GetAllowance(c.Request.Context(), user.WalletAddress, token)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"allowance": allowance.String()},
+	})
+}
+
 func (h *P2PHandler) PrepareDeposit(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
