@@ -57,6 +57,16 @@ export interface P2PAd {
   maxLimit?: string;
   paymentMethodIds: string[];
   terms?: string;
+  // ── Pool/voucher fields (post-Phase-2B). Populated by the backend after
+  //    CreateAd; SellerAddress / VoucherSignature are the seller wallet that
+  //    signed the AdVoucher EIP-712 payload returned alongside the ad.
+  sellerAddress?: string;
+  voucherNonce?: string;
+  voucherDeadline?: string;
+  voucherHash?: string;
+  voucherSignature?: string;
+  // ── Legacy lock-on-publish fields (kept on the wire for any rows that
+  //    pre-date the migration; new ads do not populate these).
   onChainAdId?: string;
   escrowTxHash?: string;
   status: 'pending' | 'active' | 'paused' | 'exhausted' | 'cancelled';
@@ -322,6 +332,29 @@ export interface ListAdsFilter {
   offset?: number;
 }
 
+// VoucherTypedData mirrors the EIP-712 payload returned by POST /p2p/ads.
+// The seller's wallet signs it via signTypedData; the signature goes back
+// via adsApi.sign(). No on-chain transaction at publish time.
+export interface VoucherTypedData {
+  types: Record<string, Array<{ name: string; type: string }>>;
+  primaryType: string;
+  domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: string;
+  };
+  message: {
+    seller: string;
+    token: string;
+    maxAmount: string;
+    minPerTrade: string;
+    maxPerTrade: string;
+    deadline: string;
+    nonce: string;
+  };
+}
+
 export const adsApi = {
   list: (filter: ListAdsFilter = {}) =>
     request<P2PAd[]>('GET', '/p2p/ads', undefined, { query: filter as any }),
@@ -331,12 +364,22 @@ export const adsApi = {
 
   get: (id: string) => request<P2PAd>('GET', `/p2p/ads/${encodeURIComponent(id)}`),
 
+  /**
+   * Publish a new ad. Returns the persisted ad (status `pending`) plus the
+   * EIP-712 typed-data payload the seller's wallet must sign. Call
+   * `adsApi.sign(ad.id, signature)` next to flip the ad to `active`.
+   */
   create: (input: CreateAdInput) =>
-    request<{ ad: P2PAd; unsignedTx: UnsignedTx }>('POST', '/p2p/ads', input),
+    request<{ ad: P2PAd; typedData: VoucherTypedData }>('POST', '/p2p/ads', input),
 
-  confirm: (id: string, txHash: string, sellerAddress?: string) =>
-    request<P2PAd>('POST', `/p2p/ads/${encodeURIComponent(id)}/confirm`, {
-      txHash,
+  /**
+   * Submit the seller's EIP-712 signature over the voucher returned by
+   * `create()`. Backend verifies the signature recovers to `sellerAddress`
+   * and flips the ad to `active`.
+   */
+  sign: (id: string, signature: string, sellerAddress: string) =>
+    request<P2PAd>('POST', `/p2p/ads/${encodeURIComponent(id)}/sign`, {
+      signature,
       sellerAddress,
     }),
 
@@ -346,15 +389,55 @@ export const adsApi = {
   resume: (id: string) =>
     request<void>('POST', `/p2p/ads/${encodeURIComponent(id)}/resume`),
 
-  prepareClose: (id: string, sellerAddress: string) =>
+  /**
+   * Prepare the on-chain cancelVoucher tx. Cancellation is on-chain because
+   * the contract is the source of truth for voucher revocation — a DB-only
+   * flag would still leave the signature presentable by buyers.
+   */
+  prepareCancel: (id: string, sellerAddress: string) =>
     request<{ unsignedTx: UnsignedTx }>(
       'POST',
-      `/p2p/ads/${encodeURIComponent(id)}/close`,
+      `/p2p/ads/${encodeURIComponent(id)}/cancel`,
       { sellerAddress }
     ),
 
-  confirmClose: (id: string, txHash: string) =>
-    request<P2PAd>('POST', `/p2p/ads/${encodeURIComponent(id)}/close/confirm`, {
+  confirmCancel: (id: string, txHash: string) =>
+    request<P2PAd>('POST', `/p2p/ads/${encodeURIComponent(id)}/cancel/confirm`, {
+      txHash,
+    }),
+};
+
+// ─── Pool capital (deposit / withdraw / balance) ────────────────────────────
+
+export interface PoolBalance {
+  available: string;
+  locked: string;
+}
+
+export const poolApi = {
+  /** Read the authenticated seller's on-chain (available, locked) balance. */
+  balance: (token: string) =>
+    request<PoolBalance>('GET', '/p2p/balance', undefined, { query: { token } }),
+
+  prepareDeposit: (token: string, amount: string) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', { token, amount }),
+
+  /** Confirm a deposit tx. The backend cross-checks that the on-chain event
+   *  amount matches `amount` — submit the same number you prepared with. */
+  confirmDeposit: (token: string, amount: string, txHash: string) =>
+    request<{ token: string; amount: string }>('POST', '/p2p/deposits/confirm', {
+      token,
+      amount,
+      txHash,
+    }),
+
+  prepareWithdraw: (token: string, amount: string) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/withdrawals', { token, amount }),
+
+  confirmWithdraw: (token: string, amount: string, txHash: string) =>
+    request<{ token: string; amount: string }>('POST', '/p2p/withdrawals/confirm', {
+      token,
+      amount,
       txHash,
     }),
 };

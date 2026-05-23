@@ -194,6 +194,36 @@ export async function getMnemonic(address?: string): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Sign an EIP-712 typed-data payload with the stored private key.
+ *
+ * Used by the P2P pool/voucher flow: the backend returns a `VoucherTypedData`
+ * payload at ad-create time, the wallet signs it off-chain (no gas, no
+ * broadcast), and the signature is submitted back via `adsApi.sign`.
+ *
+ * `domain`, `types`, and `message` accept the same shapes as ethers'
+ * `Wallet.signTypedData`. The EIP712Domain entry in `types` is consumed by
+ * the JSON wire format the backend sends but ethers doesn't want it in its
+ * `types` arg — we strip it here so callers can hand the payload through
+ * unchanged.
+ */
+export async function signTypedData(
+  domain: ethers.TypedDataDomain,
+  types: Record<string, ethers.TypedDataField[]>,
+  message: Record<string, any>
+): Promise<string> {
+  const privateKey = await getPrivateKey();
+  if (!privateKey) {
+    throw new Error('No private key found. Please set up your wallet first.');
+  }
+  const wallet = new ethers.Wallet(privateKey);
+  const cleaned: Record<string, ethers.TypedDataField[]> = {};
+  for (const k of Object.keys(types)) {
+    if (k !== 'EIP712Domain') cleaned[k] = types[k];
+  }
+  return wallet.signTypedData(domain, cleaned, message);
+}
+
+/**
  * Sign a transaction with the stored private key
  */
 export async function signTransaction(unsignedTx: ethers.TransactionLike): Promise<string> {
