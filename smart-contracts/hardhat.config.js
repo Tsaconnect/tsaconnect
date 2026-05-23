@@ -5,12 +5,16 @@ require("dotenv").config();
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.22",
+    version: "0.8.24",
     settings: {
       optimizer: {
         enabled: true,
         runs: 200,
       },
+      // OpenZeppelin v5 deps (used by P2PEscrowPool) emit Cancun opcodes
+      // (mcopy/tstore). Sonic's EVM supports Cancun on both mainnet and
+      // testnet, so this is safe.
+      evmVersion: "cancun",
     },
   },
   networks: {
