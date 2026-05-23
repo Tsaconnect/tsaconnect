@@ -635,8 +635,60 @@ describe("P2PEscrow (pool model)", function () {
     });
 
     it("cannot dispute already-resolved trade", async function () {
+      const { escrow, seller, operator, tradeId } = await disputedTrade();
+      await escrow.connect(operator).adminResolve(tradeId, true);
+      await expect(
+        escrow.connect(seller).raiseDispute(tradeId)
+      ).to.be.revertedWith("Not disputable");
+    });
+
+    it("cannot re-dispute an already-disputed trade", async function () {
       const { escrow, seller, tradeId } = await disputedTrade();
-      await escrow.connect(seller).raiseDispute; // sanity (does not call)
+      await expect(
+        escrow.connect(seller).raiseDispute(tradeId)
+      ).to.be.revertedWith("Not disputable");
+    });
+
+    it("adminResolve is single-shot (cannot resolve twice)", async function () {
+      const { escrow, operator, tradeId } = await disputedTrade();
+      await escrow.connect(operator).adminResolve(tradeId, true);
+      await expect(
+        escrow.connect(operator).adminResolve(tradeId, true)
+      ).to.be.revertedWith("Not disputed");
+      await expect(
+        escrow.connect(operator).adminResolve(tradeId, false)
+      ).to.be.revertedWith("Not disputed");
+    });
+
+    it("cancelByTimeout rejects Disputed trades", async function () {
+      const { escrow, tradeId } = await disputedTrade();
+      await time.increase(THIRTY_MIN + 1);
+      await expect(escrow.cancelByTimeout(tradeId)).to.be.revertedWith("Not pending");
+    });
+
+    it("cannot dispute Released trade", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: await usdt.getAddress() });
+      const tradeId = ethers.id("t-disp-released");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+      await escrow.connect(seller).release(tradeId);
+      await expect(
+        escrow.connect(seller).raiseDispute(tradeId)
+      ).to.be.revertedWith("Not disputable");
+    });
+
+    it("cannot dispute Cancelled trade", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: await usdt.getAddress() });
+      const tradeId = ethers.id("t-disp-cancelled");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+      await time.increase(THIRTY_MIN + 1);
+      await escrow.cancelByTimeout(tradeId);
+      await expect(
+        escrow.connect(seller).raiseDispute(tradeId)
+      ).to.be.revertedWith("Not disputable");
     });
   });
 
@@ -673,6 +725,520 @@ describe("P2PEscrow (pool model)", function () {
       const [avail, locked] = await escrow.balanceOf(seller.address, await usdt.getAddress());
       const contractBal = await usdt.balanceOf(await escrow.getAddress());
       expect(avail + locked).to.equal(contractBal);
+    });
+
+    it("accountedBalance equals sum of available + locked across the lifecycle", async function () {
+      const { escrow, usdt, seller, buyer, operator } = await loadFixture(deployFixture);
+      const tok = await usdt.getAddress();
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      expect(await escrow.accountedBalance(tok)).to.equal(5000_000000n);
+
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: tok });
+      const t1 = ethers.id("a-1");
+      await escrow.connect(buyer).openTrade(t1, voucher, sig, 1000_000000n);
+      // openTrade is an internal move — accountedBalance unchanged
+      expect(await escrow.accountedBalance(tok)).to.equal(5000_000000n);
+
+      await escrow.connect(seller).release(t1);
+      // release sends funds OUT — accountedBalance -= 1000
+      expect(await escrow.accountedBalance(tok)).to.equal(4000_000000n);
+
+      await escrow.connect(seller).withdraw(tok, 500_000000n);
+      expect(await escrow.accountedBalance(tok)).to.equal(3500_000000n);
+
+      // Timeout cancel: accounted unchanged (funds stayed in contract)
+      const t2 = ethers.id("a-2");
+      await escrow.connect(buyer).openTrade(t2, voucher, sig, 100_000000n);
+      await time.increase(THIRTY_MIN + 1);
+      await escrow.cancelByTimeout(t2);
+      expect(await escrow.accountedBalance(tok)).to.equal(3500_000000n);
+    });
+  });
+
+  // --- sweepExcess fence -----------------------------------------------------
+
+  describe("sweepExcess fence", function () {
+    it("refuses to drain user deposits", async function () {
+      const { escrow, usdt, seller, owner } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await expect(
+        escrow.connect(owner).sweepExcess(await usdt.getAddress(), 1)
+      ).to.be.revertedWith("Exceeds excess");
+    });
+
+    it("allows sweeping only excess (tokens sent directly)", async function () {
+      const { escrow, usdt, seller, owner } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await usdt.mint(await escrow.getAddress(), 123_000000n);
+
+      const ownerBefore = await usdt.balanceOf(owner.address);
+      await escrow.connect(owner).sweepExcess(await usdt.getAddress(), 123_000000n);
+      expect(await usdt.balanceOf(owner.address)).to.equal(ownerBefore + 123_000000n);
+
+      // Now any further sweep should hit the fence
+      await expect(
+        escrow.connect(owner).sweepExcess(await usdt.getAddress(), 1)
+      ).to.be.revertedWith("Exceeds excess");
+    });
+  });
+
+  // --- Voucher capacity refund on cancel/dispute ------------------------------
+
+  describe("voucherFilled refund", function () {
+    it("decrements on cancelByTimeout so seller can re-fill the slot", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig, voucherHash } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+      });
+      await escrow.connect(buyer).openTrade(ethers.id("vf-1"), voucher, sig, 1000_000000n);
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(1000_000000n);
+
+      await time.increase(THIRTY_MIN + 1);
+      await escrow.cancelByTimeout(ethers.id("vf-1"));
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(0n);
+
+      // Seller's full voucher capacity is restored — a new buyer can take it.
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("vf-2"), voucher, sig, 1000_000000n)
+      ).to.not.be.reverted;
+    });
+
+    it("decrements on adminResolve(false) (void trade)", async function () {
+      const { escrow, usdt, seller, buyer, operator } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig, voucherHash } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+      });
+      const tradeId = ethers.id("vf-resolve-false");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 800_000000n);
+      await escrow.connect(buyer).raiseDispute(tradeId);
+      await escrow.connect(operator).adminResolve(tradeId, false);
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(0n);
+    });
+
+    it("does NOT decrement on adminResolve(true) — the fill was real", async function () {
+      const { escrow, usdt, seller, buyer, operator } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig, voucherHash } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+      });
+      const tradeId = ethers.id("vf-resolve-true");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 700_000000n);
+      await escrow.connect(buyer).raiseDispute(tradeId);
+      await escrow.connect(operator).adminResolve(tradeId, true);
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(700_000000n);
+    });
+
+    it("does NOT decrement on release — the fill was real", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig, voucherHash } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+      });
+      const tradeId = ethers.id("vf-release");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 600_000000n);
+      await escrow.connect(seller).release(tradeId);
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(600_000000n);
+    });
+  });
+
+  // --- Reentrancy ------------------------------------------------------------
+
+  describe("Reentrancy", function () {
+    async function deployWithReentrant() {
+      const [owner, seller, buyer, operator, system] = await ethers.getSigners();
+      const Reentrant = await ethers.getContractFactory("ReentrantERC20");
+      const tok = await Reentrant.deploy("Reentrant USDT", "rUSDT", 6);
+
+      const P2PEscrow = await ethers.getContractFactory("P2PEscrow");
+      const escrow = await upgrades.deployProxy(
+        P2PEscrow, [owner.address, [operator.address]],
+        { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+      );
+      await escrow.setTokenAcceptance(await tok.getAddress(), true);
+      await escrow.setSystemWallet(system.address);
+      await tok.mint(seller.address, 100_000_000000n);
+      await tok.connect(seller).approve(await escrow.getAddress(), 100_000_000000n);
+      await escrow.connect(seller).deposit(await tok.getAddress(), 50_000_000000n);
+      return { escrow, tok, owner, seller, buyer, operator, system };
+    }
+
+    it("guard prevents re-entry into release via malicious ERC20", async function () {
+      const { escrow, tok, seller, buyer } = await deployWithReentrant();
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: await tok.getAddress() });
+      const tradeId = ethers.id("re-release");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+
+      // Arm: when escrow transfers to buyer, try to call release(tradeId) again.
+      const data = escrow.interface.encodeFunctionData("release", [tradeId]);
+      await tok.armAttack(await escrow.getAddress(), data);
+
+      await expect(escrow.connect(seller).release(tradeId)).to.be.reverted;
+    });
+
+    it("guard prevents re-entry into withdraw via malicious ERC20", async function () {
+      const { escrow, tok, seller } = await deployWithReentrant();
+      const tokAddr = await tok.getAddress();
+      const data = escrow.interface.encodeFunctionData("withdraw", [tokAddr, 1_000000n]);
+      await tok.armAttack(await escrow.getAddress(), data);
+
+      await expect(
+        escrow.connect(seller).withdraw(tokAddr, 1_000000n)
+      ).to.be.reverted;
+    });
+
+    it("guard prevents re-entry into adminResolve via malicious ERC20", async function () {
+      const { escrow, tok, seller, buyer, operator } = await deployWithReentrant();
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: await tok.getAddress() });
+      const tradeId = ethers.id("re-resolve");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+      await escrow.connect(buyer).raiseDispute(tradeId);
+
+      const data = escrow.interface.encodeFunctionData("adminResolve", [tradeId, true]);
+      await tok.armAttack(await escrow.getAddress(), data);
+
+      await expect(escrow.connect(operator).adminResolve(tradeId, true)).to.be.reverted;
+    });
+  });
+
+  // --- EIP-712 domain + signature edge cases --------------------------------
+
+  describe("EIP-712 domain & malleability", function () {
+    it("rejects signature from a different chainId", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const v = {
+        seller: seller.address,
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+        minPerTrade: 0n,
+        maxPerTrade: 0n,
+        deadline: (await time.latest()) + ONE_DAY,
+        nonce: ethers.id("evil-chain"),
+      };
+      const wrongChainDomain = {
+        name: "TSAConnectP2PEscrow",
+        version: "1",
+        chainId: 99999n, // not the live chain
+        verifyingContract: await escrow.getAddress(),
+      };
+      const types = {
+        AdVoucher: [
+          { name: "seller", type: "address" },
+          { name: "token", type: "address" },
+          { name: "maxAmount", type: "uint256" },
+          { name: "minPerTrade", type: "uint256" },
+          { name: "maxPerTrade", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      };
+      const sig = await seller.signTypedData(wrongChainDomain, types, v);
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("t-chain"), v, sig, 100_000000n)
+      ).to.be.revertedWith("Bad voucher signature");
+    });
+
+    it("rejects signature for a different verifyingContract", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const v = {
+        seller: seller.address,
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+        minPerTrade: 0n,
+        maxPerTrade: 0n,
+        deadline: (await time.latest()) + ONE_DAY,
+        nonce: ethers.id("evil-contract"),
+      };
+      const wrongContractDomain = {
+        name: "TSAConnectP2PEscrow",
+        version: "1",
+        chainId: (await ethers.provider.getNetwork()).chainId,
+        verifyingContract: ethers.Wallet.createRandom().address,
+      };
+      const types = {
+        AdVoucher: [
+          { name: "seller", type: "address" },
+          { name: "token", type: "address" },
+          { name: "maxAmount", type: "uint256" },
+          { name: "minPerTrade", type: "uint256" },
+          { name: "maxPerTrade", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      };
+      const sig = await seller.signTypedData(wrongContractDomain, types, v);
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("t-contract"), v, sig, 100_000000n)
+      ).to.be.revertedWith("Bad voucher signature");
+    });
+
+    it("rejects high-S (malleable) signature variant", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: await usdt.getAddress() });
+
+      // Flip a canonical signature to its high-S complement.
+      const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+      const sigBytes = ethers.getBytes(sig);
+      const r = sigBytes.slice(0, 32);
+      const sLow = BigInt("0x" + Buffer.from(sigBytes.slice(32, 64)).toString("hex"));
+      const v = sigBytes[64];
+      const sHigh = SECP256K1_N - sLow;
+      const vFlipped = v === 27 ? 28 : 27;
+      const malleable = ethers.concat([
+        r,
+        ethers.zeroPadValue("0x" + sHigh.toString(16), 32),
+        new Uint8Array([vFlipped]),
+      ]);
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("t-mal"), voucher, malleable, 100_000000n)
+      ).to.be.reverted;
+    });
+
+    it("hashVoucher matches ethers.TypedDataEncoder.hash", async function () {
+      const { escrow, usdt, seller } = await loadFixture(deployFixture);
+      const v = {
+        seller: seller.address,
+        token: await usdt.getAddress(),
+        maxAmount: 1234n,
+        minPerTrade: 10n,
+        maxPerTrade: 100n,
+        deadline: 1900000000n,
+        nonce: ethers.id("parity"),
+      };
+      const domain = {
+        name: "TSAConnectP2PEscrow",
+        version: "1",
+        chainId: (await ethers.provider.getNetwork()).chainId,
+        verifyingContract: await escrow.getAddress(),
+      };
+      const types = {
+        AdVoucher: [
+          { name: "seller", type: "address" },
+          { name: "token", type: "address" },
+          { name: "maxAmount", type: "uint256" },
+          { name: "minPerTrade", type: "uint256" },
+          { name: "maxPerTrade", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      };
+      const jsHash = ethers.TypedDataEncoder.hash(domain, types, v);
+      const contractHash = await escrow.hashVoucher(v);
+      expect(contractHash).to.equal(jsHash);
+    });
+  });
+
+  // --- Voucher invariants ---------------------------------------------------
+
+  describe("Voucher self-inconsistency", function () {
+    async function attempt(escrow, seller, buyer, overrides) {
+      const { voucher, sig } = await signVoucher(escrow, seller, overrides);
+      return escrow.connect(buyer).openTrade(ethers.id(`inv-${Math.random()}`), voucher, sig, 100_000000n);
+    }
+
+    it("rejects maxAmount == 0", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await expect(
+        attempt(escrow, seller, buyer, { token: await usdt.getAddress(), maxAmount: 0n })
+      ).to.be.revertedWith("Voucher maxAmount=0");
+    });
+
+    it("rejects maxPerTrade > maxAmount", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await expect(
+        attempt(escrow, seller, buyer, {
+          token: await usdt.getAddress(),
+          maxAmount: 100n,
+          maxPerTrade: 200n,
+        })
+      ).to.be.revertedWith("Voucher: maxPerTrade > maxAmount");
+    });
+
+    it("rejects minPerTrade > maxPerTrade", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await expect(
+        attempt(escrow, seller, buyer, {
+          token: await usdt.getAddress(),
+          maxAmount: 1000_000000n,
+          minPerTrade: 500_000000n,
+          maxPerTrade: 100_000000n,
+        })
+      ).to.be.revertedWith("Voucher: minPerTrade > maxPerTrade");
+    });
+
+    it("accepts sentinel-zero bounds (min=0 or max=0 disables that bound)", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      await expect(
+        attempt(escrow, seller, buyer, {
+          token: await usdt.getAddress(),
+          maxAmount: 1000_000000n,
+          minPerTrade: 0n,
+          maxPerTrade: 0n,
+        })
+      ).to.not.be.reverted;
+    });
+  });
+
+  // --- Amount overflow guard -------------------------------------------------
+
+  describe("uint96 amount overflow guard", function () {
+    it("rejects amount > type(uint96).max", async function () {
+      const { escrow, usdt, seller, buyer } = await loadFixture(deployFixture);
+      const big = 1n << 96n; // 2**96
+      await depositUsdt(escrow, usdt, seller, 100_000000n); // small deposit; guard runs before balance check
+      const { voucher, sig } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: big + 1n,
+      });
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("t-of"), voucher, sig, big)
+      ).to.be.revertedWith("Amount overflow");
+    });
+  });
+
+  // --- Pause matrix ----------------------------------------------------------
+
+  describe("Pause matrix", function () {
+    async function setupForPause() {
+      const fx = await loadFixture(deployFixture);
+      await depositUsdt(fx.escrow, fx.usdt, fx.seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(fx.escrow, fx.seller, {
+        token: await fx.usdt.getAddress(),
+      });
+      const tradeId = ethers.id(`pm-${Math.random()}`);
+      await fx.escrow.connect(fx.buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+      return { ...fx, tradeId, voucher, sig };
+    }
+
+    it("paused: deposit / openTrade / markPaid / release / adminRelease / raiseDispute revert", async function () {
+      const { escrow, usdt, owner, seller, buyer, operator, tradeId, voucher, sig } =
+        await setupForPause();
+      await escrow.connect(owner).pause();
+
+      await expect(
+        escrow.connect(seller).deposit(await usdt.getAddress(), 1n)
+      ).to.be.reverted;
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("pm-blocked"), voucher, sig, 1n)
+      ).to.be.reverted;
+      await expect(escrow.connect(buyer).markPaid(tradeId)).to.be.reverted;
+      await expect(escrow.connect(seller).release(tradeId)).to.be.reverted;
+      await expect(escrow.connect(operator).adminRelease(tradeId)).to.be.reverted;
+      await expect(escrow.connect(buyer).raiseDispute(tradeId)).to.be.reverted;
+    });
+
+    it("paused recovery paths still work: withdraw / cancelByTimeout / adminResolve / cancelVoucher", async function () {
+      const { escrow, usdt, owner, seller, buyer, operator, tradeId, voucher } = await setupForPause();
+      await escrow.connect(buyer).raiseDispute(tradeId); // dispute BEFORE pause
+      await escrow.connect(owner).pause();
+
+      // adminResolve allowed while paused
+      await expect(
+        escrow.connect(operator).adminResolve(tradeId, false)
+      ).to.not.be.reverted;
+      // withdraw allowed while paused
+      await expect(
+        escrow.connect(seller).withdraw(await usdt.getAddress(), 1_000000n)
+      ).to.not.be.reverted;
+      // cancelVoucher allowed while paused (off-chain housekeeping)
+      await expect(escrow.connect(seller).cancelVoucher(voucher)).to.not.be.reverted;
+    });
+
+    it("cancelByTimeout works while paused (recovery)", async function () {
+      const { escrow, owner, buyer, tradeId } = await setupForPause();
+      // tradeId is Pending; advance past timeout and pause
+      await time.increase(THIRTY_MIN + 1);
+      await escrow.connect(owner).pause();
+      await expect(escrow.cancelByTimeout(tradeId)).to.not.be.reverted;
+    });
+  });
+
+  // --- Token delisting -------------------------------------------------------
+
+  describe("Token delisted mid-flight", function () {
+    it("settles existing trades but blocks new deposits/openTrade", async function () {
+      const { escrow, usdt, owner, seller, buyer } = await loadFixture(deployFixture);
+      const tok = await usdt.getAddress();
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: tok });
+      const tradeId = ethers.id("delist-1");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+
+      // Delist after trade is in-flight
+      await escrow.connect(owner).setTokenAcceptance(tok, false);
+
+      // Existing trade can still settle
+      await expect(escrow.connect(seller).release(tradeId)).to.not.be.reverted;
+      // Seller can still withdraw remaining available
+      await expect(escrow.connect(seller).withdraw(tok, 1n)).to.not.be.reverted;
+      // But new deposit / openTrade are blocked
+      await usdt.connect(seller).approve(await escrow.getAddress(), 1n);
+      await expect(escrow.connect(seller).deposit(tok, 1n)).to.be.revertedWith("Token not accepted");
+      const { voucher: v2, sig: sig2 } = await signVoucher(escrow, seller, { token: tok });
+      await expect(
+        escrow.connect(buyer).openTrade(ethers.id("delist-2"), v2, sig2, 100_000000n)
+      ).to.be.revertedWith("Token not accepted");
+    });
+  });
+
+  // --- Zero/dust fee math ----------------------------------------------------
+
+  describe("Fee rounding", function () {
+    it("amount=199 yields fee=0 and pays buyer the full amount", async function () {
+      const { escrow, usdt, seller, buyer, system } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000n,
+        minPerTrade: 0n,
+        maxPerTrade: 0n,
+      });
+      const tradeId = ethers.id("dust");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 199n);
+
+      const buyerBefore = await usdt.balanceOf(buyer.address);
+      const systemBefore = await usdt.balanceOf(system.address);
+      await expect(escrow.connect(seller).release(tradeId))
+        .to.emit(escrow, "TradeReleased").withArgs(tradeId, buyer.address, 199n, 0n);
+      expect(await usdt.balanceOf(buyer.address)).to.equal(buyerBefore + 199n);
+      expect(await usdt.balanceOf(system.address)).to.equal(systemBefore); // no fee
+    });
+  });
+
+  // --- Admin config edge cases ----------------------------------------------
+
+  describe("Admin config edge cases", function () {
+    it("setSystemWallet rejects zero address", async function () {
+      const { escrow, owner } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(owner).setSystemWallet(ethers.ZeroAddress)
+      ).to.be.revertedWith("Invalid system wallet");
+    });
+
+    it("removeAdmin rejects non-admin", async function () {
+      const { escrow, owner, other } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(owner).removeAdmin(other.address)
+      ).to.be.revertedWith("Not admin");
+    });
+
+    it("setMcgpToken rejects zero address", async function () {
+      const { escrow, owner } = await loadFixture(deployFixture);
+      await expect(
+        escrow.connect(owner).setMcgpToken(ethers.ZeroAddress)
+      ).to.be.revertedWith("Invalid MCGP address");
     });
   });
 });

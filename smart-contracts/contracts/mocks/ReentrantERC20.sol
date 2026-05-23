@@ -1,24 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-interface IP2PEscrow {
-    function release(bytes32 tradeId) external;
-    function cancelByTimeout(bytes32 tradeId) external;
-}
-
-/// @dev Mock token that attempts to re-enter a P2PEscrow function on every
-///      transfer. Used solely to verify ReentrancyGuard prevents double-spend.
+/// @dev Mock token that attempts to re-enter a configurable function on every
+///      outgoing transfer from the configured target. Used solely to verify
+///      that ReentrancyGuard prevents double-spend.
 ///
-///      Set `target` and `tradeId` via configureAttack, then trigger any flow
-///      that ends in a transfer (release / adminResolve(true)) — the token
-///      will attempt to call `target.release(tradeId)` from inside `transfer`,
-///      which must revert with the ReentrancyGuard error.
+///      Configure via `armAttack(target, callData)`, then trigger any flow
+///      that ends in a transfer FROM the target (e.g. escrow.release pays
+///      buyer). On the first such transfer the mock calls `target.call(callData)`
+///      and disarms itself, so a properly-guarded function reverts the original
+///      tx (since the inner call reverts and SafeERC20 propagates).
 contract ReentrantERC20 is ERC20 {
     uint8 private _decimals;
     address public target;
-    bytes32 public tradeId;
+    bytes   public attackCallData;
     bool    public attackArmed;
 
     constructor(string memory name, string memory symbol, uint8 decimals_)
@@ -35,19 +32,27 @@ contract ReentrantERC20 is ERC20 {
         _mint(to, amount);
     }
 
-    function configureAttack(address _target, bytes32 _tradeId) external {
+    /// @notice Arm a one-shot re-entry attack. The next outgoing transfer
+    /// from `_target` will call `_target.call(_callData)`.
+    function armAttack(address _target, bytes calldata _callData) external {
         target = _target;
-        tradeId = _tradeId;
+        attackCallData = _callData;
         attackArmed = true;
     }
 
     function _update(address from, address to, uint256 value) internal override {
         super._update(from, to, value);
-        // Only attempt re-entry on outgoing transfers from the escrow (i.e. when
-        // the escrow is paying somebody) — not on the initial inbound transferFrom.
+        // Only attempt re-entry on transfers OUT of the configured target —
+        // not on incoming transferFrom during a deposit.
         if (attackArmed && from == target && from != address(0) && to != address(0)) {
-            attackArmed = false; // one-shot to avoid infinite recursion if guard absent
-            IP2PEscrow(target).release(tradeId);
+            attackArmed = false; // one-shot so the test fails loud if the guard is absent
+            (bool ok, bytes memory ret) = target.call(attackCallData);
+            // Bubble up the inner revert reason so the test can match it.
+            if (!ok) {
+                assembly {
+                    revert(add(ret, 0x20), mload(ret))
+                }
+            }
         }
     }
 }

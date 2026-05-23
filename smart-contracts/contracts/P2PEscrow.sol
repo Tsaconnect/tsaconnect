@@ -108,6 +108,11 @@ contract P2PEscrow is
 
     mapping(bytes32 tradeId => Trade) public trades;
 
+    /// @dev Running sum of `available + locked` per token. Used by
+    /// `sweepExcess` to refuse to touch user deposits. Maintained by every
+    /// path that moves tokens in or out of the contract.
+    mapping(address token => uint256) public accountedBalance;
+
     // ─── Events ───────────────────────────────────────────────────────────
 
     event Deposited(address indexed seller, address indexed token, uint256 amount);
@@ -203,10 +208,18 @@ contract P2PEscrow is
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    /// @notice Sweep tokens accidentally sent or rounding dust. Cannot touch
-    /// `available` / `locked` because every move is per-(seller,token) accounted.
+    /// @notice Sweep tokens accidentally sent to the contract or rounding
+    /// dust. Refuses to touch user deposits — the live balance minus the
+    /// running `accountedBalance` is the maximum sweepable.
+    /// @dev Owner-only. The fence makes admin-key compromise far less
+    ///      catastrophic: a stolen owner key cannot drain `available` /
+    ///      `locked` even if every other admin check passes.
     function sweepExcess(address token, uint256 amount) external onlyOwner {
         require(token != address(0), "Invalid token");
+        uint256 contractBal = IERC20(token).balanceOf(address(this));
+        uint256 accounted = accountedBalance[token];
+        require(contractBal >= accounted, "Accounting corrupt");
+        require(amount <= contractBal - accounted, "Exceeds excess");
         IERC20(token).safeTransfer(owner(), amount);
         emit ExcessSwept(token, amount);
     }
@@ -222,6 +235,7 @@ contract P2PEscrow is
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         available[msg.sender][token] += amount;
+        accountedBalance[token] += amount;
 
         emit Deposited(msg.sender, token, amount);
     }
@@ -235,6 +249,7 @@ contract P2PEscrow is
         uint256 avail = available[msg.sender][token];
         require(avail >= amount, "Insufficient available");
         available[msg.sender][token] = avail - amount;
+        accountedBalance[token] -= amount;
 
         IERC20(token).safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, token, amount);
@@ -288,6 +303,15 @@ contract P2PEscrow is
         require(v.seller != msg.sender, "Seller cannot self-buy");
         require(acceptedTokens[v.token], "Token not accepted");
         require(block.timestamp <= v.deadline, "Voucher expired");
+        // Reject self-inconsistent vouchers up front so buyers don't waste
+        // gas on a voucher the seller can never satisfy. Sentinel 0 disables
+        // the corresponding bound.
+        require(v.maxAmount > 0, "Voucher maxAmount=0");
+        require(v.maxPerTrade == 0 || v.maxPerTrade <= v.maxAmount, "Voucher: maxPerTrade > maxAmount");
+        require(
+            v.minPerTrade == 0 || v.maxPerTrade == 0 || v.minPerTrade <= v.maxPerTrade,
+            "Voucher: minPerTrade > maxPerTrade"
+        );
         require(v.minPerTrade == 0 || amount >= v.minPerTrade, "Below voucher min");
         require(v.maxPerTrade == 0 || amount <= v.maxPerTrade, "Above voucher max");
 
@@ -361,11 +385,16 @@ contract P2PEscrow is
         require(block.timestamp >= uint256(t.createdAt) + TIMEOUT, "Timeout not elapsed");
 
         uint96 amt = t.amount;
-        require(locked[t.seller][t.token] >= amt, "Locked underflow");
+        require(amt > 0, "Empty trade");
+        require(locked[t.seller][t.token] >= amt, "Locked invariant");
 
         t.status = Status.Cancelled;
         locked[t.seller][t.token]    -= amt;
         available[t.seller][t.token] += amt;
+        // accountedBalance unchanged — funds remained in the contract.
+        // Refund the voucher's filled count so the seller can re-list this
+        // capacity; otherwise buyers could grief by opening + abandoning.
+        voucherFilled[t.voucherHash] -= amt;
 
         emit TradeCancelled(tradeId, amt);
     }
@@ -390,11 +419,13 @@ contract P2PEscrow is
         require(t.status == Status.Disputed, "Not disputed");
 
         uint96 amt = t.amount;
-        require(locked[t.seller][t.token] >= amt, "Locked underflow");
+        require(amt > 0, "Empty trade");
+        require(locked[t.seller][t.token] >= amt, "Locked invariant");
 
         if (releaseToBuyer) {
             (uint256 toBuyer, uint256 fee) = _splitFee(amt, t.token);
             locked[t.seller][t.token] -= amt;
+            accountedBalance[t.token] -= amt;
             t.status = Status.Resolved;
 
             IERC20(t.token).safeTransfer(t.buyer, toBuyer);
@@ -405,6 +436,9 @@ contract P2PEscrow is
         } else {
             locked[t.seller][t.token]    -= amt;
             available[t.seller][t.token] += amt;
+            // accountedBalance unchanged — funds stay with seller.
+            // Refund voucher capacity (the fill never actually completed).
+            voucherFilled[t.voucherHash] -= amt;
             t.status = Status.Resolved;
             emit TradeResolved(tradeId, false, 0, 0);
         }
@@ -441,11 +475,13 @@ contract P2PEscrow is
 
     function _settleRelease(bytes32 tradeId, Trade storage t) internal {
         uint96 amt = t.amount;
-        require(locked[t.seller][t.token] >= amt, "Locked underflow");
+        require(amt > 0, "Empty trade");
+        require(locked[t.seller][t.token] >= amt, "Locked invariant");
 
         (uint256 toBuyer, uint256 fee) = _splitFee(amt, t.token);
 
         locked[t.seller][t.token] -= amt;
+        accountedBalance[t.token] -= amt;
         t.status = Status.Released;
 
         IERC20(t.token).safeTransfer(t.buyer, toBuyer);
