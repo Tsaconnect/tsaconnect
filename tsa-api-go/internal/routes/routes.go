@@ -350,15 +350,25 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/payment-methods", idem, p2p.CreatePaymentMethod)
 			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
 
+			// Seller deposit / withdraw — pool-model capital movement.
+			p2pGroup.GET("/balance", p2p.GetPoolBalance)
+			p2pGroup.POST("/deposits", idem, p2p.PrepareDeposit)
+			p2pGroup.POST("/deposits/confirm", idem, p2p.ConfirmDeposit)
+			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
+			p2pGroup.POST("/withdrawals/confirm", idem, p2p.ConfirmWithdraw)
+
 			p2pGroup.GET("/ads", p2p.ListAds)
 			p2pGroup.GET("/ads/my", p2p.ListMyAds)
 			p2pGroup.GET("/ads/:id", p2p.GetAd)
 			p2pGroup.POST("/ads", idem, p2p.CreateAd)
-			p2pGroup.POST("/ads/:id/confirm", idem, p2p.ConfirmAd)
+			// Replaces the old /confirm tx-hash flow. Seller signs the EIP-712
+			// voucher returned by CreateAd off-chain and submits the signature.
+			p2pGroup.POST("/ads/:id/sign", idem, p2p.SignAd)
 			p2pGroup.POST("/ads/:id/pause", p2p.PauseAd)
 			p2pGroup.POST("/ads/:id/resume", p2p.ResumeAd)
-			p2pGroup.POST("/ads/:id/close", idem, p2p.PrepareCloseAd)
-			p2pGroup.POST("/ads/:id/close/confirm", idem, p2p.ConfirmCloseAd)
+			// Cancel replaces close — on-chain voucher revocation.
+			p2pGroup.POST("/ads/:id/cancel", idem, p2p.PrepareCancelAd)
+			p2pGroup.POST("/ads/:id/cancel/confirm", idem, p2p.ConfirmCancelAd)
 			p2pGroup.POST("/ads/:id/trades", idem, p2p.OpenTrade)
 
 			p2pGroup.GET("/trades", p2p.ListTrades)

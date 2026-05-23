@@ -53,4 +53,8 @@ const (
 	P2PAuditTradeResolved     = "trade.resolved"
 	P2PAuditReconcilerDrift   = "reconciler.drift"
 	P2PAuditOperatorBroadcast = "operator.broadcast"
+	P2PAuditDepositPrepared   = "deposit.prepared"
+	P2PAuditDepositConfirmed  = "deposit.confirmed"
+	P2PAuditWithdrawPrepared  = "withdraw.prepared"
+	P2PAuditWithdrawConfirmed = "withdraw.confirmed"
 )

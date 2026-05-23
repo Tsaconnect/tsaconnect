@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -290,6 +291,135 @@ func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
 }
 
+// ─── Deposit / withdraw / balance ──────────────────────────────────────────
+
+type depositRequest struct {
+	SellerAddress string `json:"sellerAddress" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+	Amount        string `json:"amount" binding:"required"`
+}
+
+type confirmDepositRequest struct {
+	TxHash        string `json:"txHash" binding:"required"`
+	SellerAddress string `json:"sellerAddress" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+}
+
+func (h *P2PHandler) PrepareDeposit(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req depositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, req.SellerAddress, req.Token, req.Amount)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw)},
+	})
+}
+
+func (h *P2PHandler) ConfirmDeposit(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req confirmDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	ev, err := h.trade.ConfirmDeposit(c.Request.Context(), user.ID, req.SellerAddress, req.Token, req.TxHash)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"token":  req.Token,
+			"amount": ev.Amount.String(),
+		},
+	})
+}
+
+func (h *P2PHandler) PrepareWithdraw(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req depositRequest // same shape: seller + token + amount
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	raw, err := h.trade.PrepareWithdraw(c.Request.Context(), user.ID, req.SellerAddress, req.Token, req.Amount)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw)},
+	})
+}
+
+func (h *P2PHandler) ConfirmWithdraw(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req confirmDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	ev, err := h.trade.ConfirmWithdraw(c.Request.Context(), user.ID, req.SellerAddress, req.Token, req.TxHash)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"token":  req.Token,
+			"amount": ev.Amount.String(),
+		},
+	})
+}
+
+// GetPoolBalance reads the seller's (available, locked) pool balance for a
+// given (wallet, token). Query params: ?address=0x...&token=USDT
+func (h *P2PHandler) GetPoolBalance(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	address := c.Query("address")
+	if address == "" {
+		address = user.WalletAddress
+	}
+	token := c.Query("token")
+	if address == "" || token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "address and token are required"})
+		return
+	}
+	bal, err := h.trade.GetPoolBalance(c.Request.Context(), address, token)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"available": bal.Available.String(),
+			"locked":    bal.Locked.String(),
+		},
+	})
+}
+
 // ─── Ads ───────────────────────────────────────────────────────────────────
 
 type createAdRequest struct {
@@ -345,8 +475,8 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"success": true,
 		"data": gin.H{
-			"ad":         result.Ad,
-			"unsignedTx": unsignedTxJSON(result.UnsignedTx),
+			"ad":        result.Ad,
+			"typedData": result.TypedData,
 		},
 	})
 }
@@ -355,16 +485,16 @@ type confirmTxRequest struct {
 	TxHash string `json:"txHash" binding:"required"`
 }
 
-// confirmAdRequest is confirmTxRequest plus an optional SellerAddress override.
-// In Phase 1 the seller's wallet address comes from User.WalletAddress; the
-// override lets the frontend pass the active wallet explicitly so a
-// multi-wallet user can confirm against the wallet that signed the tx.
-type confirmAdRequest struct {
-	TxHash        string `json:"txHash" binding:"required"`
+// signAdRequest carries the seller's EIP-712 signature over the AdVoucher
+// payload returned by CreateAd. Signature is a 65-byte 0x-prefixed hex
+// string. SellerAddress lets a multi-wallet user pin the active wallet
+// (must match the wallet that signed).
+type signAdRequest struct {
+	Signature     string `json:"signature" binding:"required"`
 	SellerAddress string `json:"sellerAddress"`
 }
 
-func (h *P2PHandler) ConfirmAd(c *gin.Context) {
+func (h *P2PHandler) SignAd(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
 		return
@@ -373,7 +503,7 @@ func (h *P2PHandler) ConfirmAd(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req confirmAdRequest
+	var req signAdRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
@@ -382,7 +512,8 @@ func (h *P2PHandler) ConfirmAd(c *gin.Context) {
 	if sellerAddr == "" {
 		sellerAddr = user.WalletAddress
 	}
-	ad, err := h.trade.ConfirmAd(c.Request.Context(), id, user.ID, sellerAddr, req.TxHash)
+	sig := ethcommon.FromHex(req.Signature)
+	ad, err := h.trade.SignAd(c.Request.Context(), id, user.ID, sellerAddr, sig)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -518,11 +649,15 @@ func (h *P2PHandler) ResumeAd(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
-type closeAdRequest struct {
+type cancelAdRequest struct {
 	SellerAddress string `json:"sellerAddress" binding:"required"`
 }
 
-func (h *P2PHandler) PrepareCloseAd(c *gin.Context) {
+// PrepareCancelAd returns the unsigned cancelVoucher tx for an active or
+// paused ad. Renamed from PrepareCloseAd in the pool-model migration —
+// cancellation is on-chain because the contract is the source of truth for
+// voucher revocation.
+func (h *P2PHandler) PrepareCancelAd(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
 		return
@@ -531,12 +666,12 @@ func (h *P2PHandler) PrepareCloseAd(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req closeAdRequest
+	var req cancelAdRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.CloseAd(c.Request.Context(), id, user.ID, req.SellerAddress)
+	raw, err := h.trade.CancelAd(c.Request.Context(), id, user.ID, req.SellerAddress)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -546,7 +681,7 @@ func (h *P2PHandler) PrepareCloseAd(c *gin.Context) {
 	})
 }
 
-func (h *P2PHandler) ConfirmCloseAd(c *gin.Context) {
+func (h *P2PHandler) ConfirmCancelAd(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
 		return
@@ -560,7 +695,7 @@ func (h *P2PHandler) ConfirmCloseAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ad, err := h.trade.ConfirmCloseAd(c.Request.Context(), id, user.ID, req.TxHash)
+	ad, err := h.trade.ConfirmCancelAd(c.Request.Context(), id, user.ID, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}
