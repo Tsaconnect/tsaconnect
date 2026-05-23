@@ -771,7 +771,7 @@ func (h *P2PHandler) PrepareCancelAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.CancelAd(c.Request.Context(), id, user.ID, req.SellerAddress)
+	raw, err := h.trade.PrepareCancelAd(c.Request.Context(), id, user.ID, req.SellerAddress)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -920,7 +920,7 @@ func (h *P2PHandler) PrepareRelease(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	result, err := h.trade.Release(c.Request.Context(), id, user.ID, req.SellerAddress)
+	result, err := h.trade.PrepareRelease(c.Request.Context(), id, user.ID, req.SellerAddress)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -957,7 +957,7 @@ func (h *P2PHandler) PrepareCancel(c *gin.Context) {
 	if callerAddr == "" {
 		callerAddr = user.WalletAddress
 	}
-	raw, err := h.trade.Cancel(c.Request.Context(), id, user.ID, callerAddr)
+	raw, err := h.trade.PrepareCancel(c.Request.Context(), id, user.ID, callerAddr)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -990,7 +990,7 @@ func (h *P2PHandler) RaiseDispute(c *gin.Context) {
 	if caller == "" {
 		caller = user.WalletAddress
 	}
-	raw, err := h.trade.RaiseDispute(c.Request.Context(), id, user.ID, caller, req.Reason)
+	raw, err := h.trade.PrepareRaiseDispute(c.Request.Context(), id, user.ID, caller, req.Reason)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -1198,7 +1198,7 @@ func (h *P2PHandler) AdminResolveDispute(c *gin.Context) {
 	if addr == "" {
 		addr = admin.WalletAddress
 	}
-	raw, err := h.trade.AdminResolveDispute(c.Request.Context(), id, admin.ID, addr, req.RefundBuyer, req.Note)
+	raw, err := h.trade.PrepareAdminResolveDispute(c.Request.Context(), id, admin.ID, addr, req.RefundBuyer, req.Note)
 	if mapServiceError(c, err) {
 		return
 	}

@@ -497,7 +497,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 // Cancellation is on-chain because the contract is the source of truth for
 // voucher revocation — a DB-only flag would still leave the signature valid
 // for buyers who fetched it before the flag was set.
-func (s *P2PTradeService) CancelAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress string) ([]byte, error) {
+func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress string) ([]byte, error) {
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -843,7 +843,7 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 	return &trade, nil
 }
 
-func (s *P2PTradeService) Release(ctx context.Context, tradeID, sellerID uuid.UUID, sellerAddress string) (*ReleaseResult, error) {
+func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID uuid.UUID, sellerAddress string) (*ReleaseResult, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -987,7 +987,7 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 // on-chain (anyone may call after 30 minutes), but the service restricts the
 // API to participants — seller or buyer — so the surface stays predictable.
 // Funds return to ad.remaining on confirm.
-func (s *P2PTradeService) Cancel(ctx context.Context, tradeID, userID uuid.UUID, callerAddress string) ([]byte, error) {
+func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uuid.UUID, callerAddress string) ([]byte, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1099,7 +1099,7 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 // ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
 // state in the interim so the UI can surface "dispute pending broadcast".
 // Either buyer or seller (in Paid state only) may dispute.
-func (s *P2PTradeService) RaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string) ([]byte, error) {
+func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string) ([]byte, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("%w: reason required", ErrInvalidParams)
 	}
@@ -1235,7 +1235,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 // AdminResolveDispute prepares the on-chain adminResolve tx. Admin can side
 // with the buyer (release fee-split to buyer) or seller (refund to ad pool).
 // The off-chain note is persisted with the dispute row on confirm.
-func (s *P2PTradeService) AdminResolveDispute(ctx context.Context, tradeID, adminID uuid.UUID, adminAddress string, refundBuyer bool, note string) ([]byte, error) {
+func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeID, adminID uuid.UUID, adminAddress string, refundBuyer bool, note string) ([]byte, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

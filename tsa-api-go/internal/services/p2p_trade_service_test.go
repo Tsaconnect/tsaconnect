@@ -595,7 +595,7 @@ func TestCancelAd_PreparesUnsignedTx(t *testing.T) {
 		t.Fatalf("SignAd: %v", err)
 	}
 
-	raw, err := svc.CancelAd(context.Background(), res.Ad.ID, sellerID, sellerAddr)
+	raw, err := svc.PrepareCancelAd(context.Background(), res.Ad.ID, sellerID, sellerAddr)
 	if err != nil {
 		t.Fatalf("CancelAd: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestCancelAd_RejectsForeignSeller(t *testing.T) {
 	res, _ := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
 
 	otherSeller := uuid.New()
-	_, err := svc.CancelAd(context.Background(), res.Ad.ID, otherSeller, sellerAddr)
+	_, err := svc.PrepareCancelAd(context.Background(), res.Ad.ID, otherSeller, sellerAddr)
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -957,7 +957,7 @@ func TestCancelAd_BlockedByOpenTrades(t *testing.T) {
 	if err := db.Create(trade).Error; err != nil {
 		t.Fatalf("seed trade: %v", err)
 	}
-	_, err := svc.CancelAd(context.Background(), adID, sellerID, sellerAddr)
+	_, err := svc.PrepareCancelAd(context.Background(), adID, sellerID, sellerAddr)
 	if !errors.Is(err, ErrAdHasOpenTrades) {
 		t.Fatalf("expected ErrAdHasOpenTrades, got %v", err)
 	}
@@ -1052,7 +1052,7 @@ func TestRecoverEIP712Signer_RejectsBadLength(t *testing.T) {
 
 func TestPrepareCancelVoucher_CapturesCorrectVoucher(t *testing.T) {
 	svc, esc, sellerID, sellerAddr, adID, _ := signedAdFixture(t)
-	if _, err := svc.CancelAd(context.Background(), adID, sellerID, sellerAddr); err != nil {
+	if _, err := svc.PrepareCancelAd(context.Background(), adID, sellerID, sellerAddr); err != nil {
 		t.Fatalf("CancelAd: %v", err)
 	}
 	// The mock should have captured the voucher tuple. Verify the seller
