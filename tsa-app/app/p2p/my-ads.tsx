@@ -18,20 +18,17 @@ import {
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChainKey } from '../../constants/chains';
-import { adsApi, formatTokenAmount, type P2PAd, type UnsignedTx } from '../../services/p2p';
+import { P2P_GOLD } from '../../constants/p2p';
+import {
+  adsApi,
+  formatTokenAmount,
+  TOKEN_DECIMALS,
+  unsignedTxToTxLike,
+  type P2PAd,
+} from '../../services/p2p';
 import { broadcastTransaction, getActiveWallet, signTransaction } from '../../services/wallet';
 
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#28A745',
-};
-
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
+const GOLD = P2P_GOLD;
 
 type StatusFilter = 'all' | P2PAd['status'];
 
@@ -49,11 +46,19 @@ const MyAdsScreen: React.FC = () => {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
 
   const load = useCallback(async () => {
     const res = await adsApi.listMine(filter === 'all' ? {} : { status: filter });
-    if (res.success && res.data) setAds(res.data);
+    if (res.success && res.data) {
+      setAds(res.data);
+      setLoadError(null);
+    } else {
+      // Keep the existing list visible (don't clobber on a transient fail)
+      // but surface a retry banner so the user knows their view is stale.
+      setLoadError(res.message || 'Could not refresh ads');
+    }
     setLoading(false);
     setRefreshing(false);
   }, [filter]);
@@ -106,7 +111,7 @@ const MyAdsScreen: React.FC = () => {
       if (!sellerAddress) throw new Error('No wallet found');
       const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);
       broadcastHash = resp.hash;
       const conf = await adsApi.confirmCancel(ad.id, resp.hash);
@@ -174,6 +179,24 @@ const MyAdsScreen: React.FC = () => {
           ))}
         </ScrollView>
 
+        {loadError && (
+          <View style={styles.errorBanner}>
+            <Icon name="error-outline" size={18} color={GOLD.error} />
+            <Text style={styles.errorBannerText} numberOfLines={2}>
+              {loadError}
+            </Text>
+            <TouchableOpacity
+              onPress={() => {
+                setLoading(true);
+                load();
+              }}
+              hitSlop={8}
+            >
+              <Text style={styles.errorBannerRetry}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {loading ? (
           <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 60 }} />
         ) : ads.length === 0 ? (
@@ -222,7 +245,11 @@ const AdCard: React.FC<{
     >
       <View style={styles.cardTop}>
         <Text style={styles.cardRate}>
-          ₦{ad.rate} <Text style={styles.cardRateUnit}>/ {ad.token}</Text>
+          {ad.rate && ad.rate !== '0' ? `₦${ad.rate}` : '—'}{' '}
+          <Text style={styles.cardRateUnit}>/ {ad.token}</Text>
+          {ad.rateType === 'float' && (
+            <Text style={styles.cardRateBadge}>{ad.rateStale ? ' • stale feed' : ' • auto'}</Text>
+          )}
         </Text>
         <View style={[styles.statusBadge, statusBadgeColor(ad.status)]}>
           <Text style={styles.statusBadgeText}>{ad.status}</Text>
@@ -286,19 +313,6 @@ function statusBadgeColor(status: P2PAd['status']) {
   }
 }
 
-function toTxLike(tx: UnsignedTx) {
-  const ensure0x = (v?: string) => (!v ? undefined : v.startsWith('0x') ? v : `0x${v}`);
-  return {
-    to: tx.to,
-    value: tx.value || '0',
-    data: ensure0x(tx.data),
-    nonce: tx.nonce,
-    gasLimit: tx.gasLimit,
-    gasPrice: tx.gasPrice,
-    chainId: tx.chainId ? Number(tx.chainId) : undefined,
-  };
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },
   scroll: { padding: 20, paddingBottom: 60 },
@@ -320,6 +334,18 @@ const styles = StyleSheet.create({
   },
   ctaText: { fontWeight: '700', color: '#000' },
   tabRow: { marginBottom: 14 },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF1F0',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: GOLD.error,
+  },
+  errorBannerText: { flex: 1, marginLeft: 8, color: '#7A1F1F', fontSize: 13 },
+  errorBannerRetry: { color: GOLD.dark, fontWeight: '700' },
   tab: {
     paddingVertical: 6,
     paddingHorizontal: 12,
@@ -347,6 +373,7 @@ const styles = StyleSheet.create({
   cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   cardRate: { fontSize: 20, fontWeight: '800', color: '#000' },
   cardRateUnit: { fontSize: 13, color: '#666', fontWeight: '600' },
+  cardRateBadge: { fontSize: 11, color: '#888', fontWeight: '500' },
   statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
   statusBadgeText: { fontSize: 11, color: '#000', fontWeight: '700', textTransform: 'capitalize' },
   cardMetaRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },

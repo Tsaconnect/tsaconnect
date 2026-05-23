@@ -231,25 +231,36 @@ async function request<T>(
   body?: unknown,
   opts: RequestOptions = {}
 ): Promise<ApiResponse<T>> {
+  // qs is computed up front so the catch block can include it in the log
+  // breadcrumb without re-running the (potentially expensive) Object.entries.
+  const qs = opts.query
+    ? '?' +
+      Object.entries(opts.query)
+        .filter(([, v]) => v !== undefined && v !== '')
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join('&')
+    : '';
   try {
     const headers = await getAuthHeaders();
     if (opts.idempotent ?? method !== 'GET') {
       headers['Idempotency-Key'] = opts.idempotencyKey ?? makeIdempotencyKey();
     }
-    const qs = opts.query
-      ? '?' +
-        Object.entries(opts.query)
-          .filter(([, v]) => v !== undefined && v !== '')
-          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
     const response = await fetch(`${API_BASE_URL}${path}${qs}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
-    return await safeJson<T>(response);
+    const parsed = await safeJson<T>(response);
+    // Non-success responses (>= 400 OR success:false) get a single console
+    // line so debugging a "why did the UI show nothing" report has a
+    // breadcrumb. Sensitive bodies are not logged — the helper only
+    // surfaces method + path + status + server-provided message.
+    if (!parsed.success) {
+      console.warn(`[p2p] ${method} ${path}${qs} → ${parsed.status ?? 'no-status'}: ${parsed.message ?? '<empty>'}`);
+    }
+    return parsed;
   } catch (err: any) {
+    console.warn(`[p2p] ${method} ${path}${qs} threw: ${err?.message || err}`);
     return { success: false, message: err?.message || 'Network error' };
   }
 }
@@ -633,15 +644,55 @@ export function formatTokenAmount(
  * base units. Truncates anything beyond `decimals` fractional digits —
  * matches the backend's rate-scaling truncation policy so display and
  * server math agree to the last unit.
+ *
+ * Throws on inputs the contract would reject: scientific notation,
+ * multiple decimal points, non-numeric junk. An empty string returns
+ * "0" (callers test for > 0 before submitting anyway).
  */
 export function parseTokenAmount(input: string, decimals: number): string {
   const trimmed = input.trim();
   if (!trimmed) return '0';
   const negative = trimmed.startsWith('-');
   const cleaned = negative ? trimmed.slice(1) : trimmed;
-  const [intPart = '0', fracPart = ''] = cleaned.split('.');
+  // Strict: digits, optionally followed by a single dot + digits. Rejects
+  // "1e2", "1.2.3", "abc", "0x10", and similar malformed shapes early so
+  // the backend doesn't have to reject them after a round-trip.
+  if (!/^\d+(\.\d+)?$/.test(cleaned)) {
+    throw new Error(`Invalid decimal amount: ${JSON.stringify(input)}`);
+  }
+  const [intPart, fracPart = ''] = cleaned.split('.');
   const frac = (fracPart + '0'.repeat(decimals)).slice(0, decimals);
   const combined = `${intPart}${frac}`.replace(/^0+(?=\d)/, '');
   const base = combined || '0';
   return negative ? `-${base}` : base;
+}
+
+// ─── Shared FE helpers (extracted to deduplicate across P2P screens) ────────
+
+/**
+ * Token decimals lookup for the small whitelist of P2P-supported tokens.
+ * Falls back to 18 (ERC-20 default) for anything unknown.
+ */
+export const TOKEN_DECIMALS: Record<string, number> = {
+  USDT: 6,
+  USDC: 6,
+  MCGP: 18,
+};
+
+/**
+ * Adapt the backend's UnsignedTx (hex without 0x prefix; chainId as string)
+ * to the shape ethers' Transaction.from() expects. Centralised so every
+ * P2P screen's broadcast path produces the same wire format.
+ */
+export function unsignedTxToTxLike(tx: UnsignedTx) {
+  const ensure0x = (v?: string) => (!v ? undefined : v.startsWith('0x') ? v : `0x${v}`);
+  return {
+    to: tx.to,
+    value: tx.value || '0',
+    data: ensure0x(tx.data),
+    nonce: tx.nonce,
+    gasLimit: tx.gasLimit,
+    gasPrice: tx.gasPrice,
+    chainId: tx.chainId ? Number(tx.chainId) : undefined,
+  };
 }

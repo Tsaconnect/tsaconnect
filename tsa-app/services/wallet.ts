@@ -201,10 +201,12 @@ export async function getMnemonic(address?: string): Promise<string | null> {
  * broadcast), and the signature is submitted back via `adsApi.sign`.
  *
  * `domain`, `types`, and `message` accept the same shapes as ethers'
- * `Wallet.signTypedData`. The EIP712Domain entry in `types` is consumed by
- * the JSON wire format the backend sends but ethers doesn't want it in its
- * `types` arg — we strip it here so callers can hand the payload through
- * unchanged.
+ * `Wallet.signTypedData`. The EIP712Domain entry must be stripped from
+ * `types` before passing to ethers — its `_TypedDataEncoder.from()`
+ * throws with "ambiguous primary types or unused types" when both the
+ * domain entry and the primary type are present. The backend's JSON wire
+ * payload includes EIP712Domain (per the EIP-712 spec) so we accept it
+ * and remove it here, letting callers forward the server payload as-is.
  */
 export async function signTypedData(
   domain: ethers.TypedDataDomain,

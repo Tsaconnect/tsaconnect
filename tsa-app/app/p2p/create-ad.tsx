@@ -34,17 +34,9 @@ import {
 } from '../../services/p2p';
 import { getActiveWallet, signTypedData } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
-import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
+import { MAX_FLOAT_OFFSET_PCT, P2P_GOLD, pctToBps } from '../../constants/p2p';
 
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#28A745',
-};
+const GOLD = P2P_GOLD;
 
 const SUPPORTED_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
@@ -73,23 +65,35 @@ const CreateAdScreen: React.FC = () => {
   const [submitStage, setSubmitStage] = useState<string>('');
 
   // Load payment methods + suggested Bybit rate concurrently on mount.
+  // Both promises always clear their loading flag — a network reject must
+  // not leave the PM picker spinning forever or the rate panel stuck.
   useEffect(() => {
-    paymentMethodsApi.list().then((res) => {
-      if (res.success && res.data) {
-        setPaymentMethods(res.data.filter((m) => m.currency === 'NGN'));
+    (async () => {
+      try {
+        const res = await paymentMethodsApi.list();
+        if (res.success && res.data) {
+          setPaymentMethods(res.data.filter((m) => m.currency === 'NGN'));
+        }
+      } catch (err) {
+        console.warn('[create-ad] paymentMethodsApi.list failed', err);
+      } finally {
+        setLoadingPms(false);
       }
-      setLoadingPms(false);
-    });
-    exchangeRateService
-      .getRates()
-      .then((res) => {
+    })();
+    (async () => {
+      try {
+        const res = await exchangeRateService.getRates();
         const ngn = res.rates?.NGN;
         if (ngn) {
           setSuggestedRate(ngn.binanceSell); // rate for sellers (user sells USDT → buyer pays NGN)
           setRateStale(!!ngn.stale);
         }
-      })
-      .catch(() => {});
+      } catch (err) {
+        // Float-mode users will see "Live rate unavailable" — that's fine
+        // for a feed outage; just log so post-mortem has a breadcrumb.
+        console.warn('[create-ad] exchangeRateService.getRates failed', err);
+      }
+    })();
   }, []);
 
   const togglePm = (id: string) => {
@@ -177,7 +181,7 @@ const CreateAdScreen: React.FC = () => {
             }
       );
       if (!createRes.success || !createRes.data) {
-        throw new Error(createRes.message || 'Server rejected the ad');
+        throw new Error(createAdStatusError(createRes.status, createRes.message));
       }
       const { ad, typedData } = createRes.data;
 
@@ -193,8 +197,17 @@ const CreateAdScreen: React.FC = () => {
       // signer matches `sellerAddress` and flips the ad to `active`.
       setSubmitStage('Activating ad…');
       const signRes = await adsApi.sign(ad.id, signature, sellerAddress);
-      if (!signRes.success) {
-        throw new Error(signRes.message || 'Sign failed');
+      if (!signRes.success || !signRes.data) {
+        throw new Error(createAdStatusError(signRes.status, signRes.message));
+      }
+      // The success alert was firing on any 2xx — but a server-side regression
+      // could return {success:true, data:{...status: 'pending'}} if signature
+      // verification silently no-op'd. Confirm the ad actually went live before
+      // telling the user it did.
+      if (signRes.data.status !== 'active') {
+        throw new Error(
+          `Server returned ad status "${signRes.data.status}" — refresh My Ads and contact support if it stays this way.`
+        );
       }
 
       Alert.alert('Ad published', `Your ad is now live in the marketplace.`, [
@@ -208,6 +221,20 @@ const CreateAdScreen: React.FC = () => {
     }
   };
 
+  // createAdStatusError turns the backend's HTTP status into actionable user
+  // guidance. 410 (Gone) is the Phase 2B migration sentinel for stale clients
+  // calling removed legacy endpoints; 503 fires when the rate feed is stale
+  // mid-publish (float ads need a fresh feed). Anything else passes through.
+  function createAdStatusError(status: number | undefined, message: string | undefined): string {
+    if (status === 410) {
+      return 'Your app version is out of date — please update and retry.';
+    }
+    if (status === 503) {
+      return 'Live rate just expired. Refresh the screen and try again.';
+    }
+    return message || 'Server rejected the request';
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
@@ -217,8 +244,9 @@ const CreateAdScreen: React.FC = () => {
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <Text style={styles.heading}>Create sell ad</Text>
           <Text style={styles.subheading}>
-            You're offering {token.symbol} for NGN. Funds lock on chain when you publish;
-            they unlock to buyers per trade or back to you on cancel.
+            You're offering {token.symbol} for NGN. Publishing is off-chain — you'll
+            sign a voucher to authorise trades. Funds are drawn from your pool
+            balance (deposit first via the Pool screen).
           </Text>
 
           <Text style={styles.label}>Token</Text>

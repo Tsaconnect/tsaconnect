@@ -20,14 +20,9 @@ import {
   formatTokenAmount,
   type P2PAd,
 } from '../../services/p2p';
+import { P2P_GOLD } from '../../constants/p2p';
 
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-};
+const GOLD = P2P_GOLD;
 
 const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 

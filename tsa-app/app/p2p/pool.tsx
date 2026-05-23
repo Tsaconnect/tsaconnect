@@ -9,12 +9,18 @@
 //   3. Backend builds an unsigned tx; we sign locally + broadcast on Sonic.
 //   4. POST /p2p/{deposits|withdrawals}/confirm with the txHash → audit row.
 //
+// Recovery: if broadcast lands but the server-side confirm POST fails, the
+// txHash is stashed in AsyncStorage so the user can retry the confirm step
+// without re-broadcasting (the on-chain tx already happened). Confirms are
+// idempotent server-side (same txHash → same result).
+//
 // ERC20 allowance: deposit calls `transferFrom` inside the escrow contract,
 // so the seller must approve the escrow for `amount` first. This screen
 // only handles the deposit / withdraw step; the approve flow lives in the
 // wallet manager (or the seller approves manually via their wallet UI).
 
-import { Stack, router } from 'expo-router';
+import { router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -31,11 +37,13 @@ import {
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChainKey } from '../../constants/chains';
+import { P2P_GOLD } from '../../constants/p2p';
 import {
   formatTokenAmount,
   parseTokenAmount,
   poolApi,
-  type UnsignedTx,
+  TOKEN_DECIMALS,
+  unsignedTxToTxLike,
 } from '../../services/p2p';
 import {
   broadcastTransaction,
@@ -43,21 +51,26 @@ import {
   signTransaction,
 } from '../../services/wallet';
 
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#2E8B57',
-};
+const GOLD = P2P_GOLD;
 
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 const TOKENS = ['USDT', 'USDC', 'MCGP'] as const;
 type Token = typeof TOKENS[number];
 
 type Mode = 'deposit' | 'withdraw';
+
+// AsyncStorage key for stashing a tx that broadcast successfully but whose
+// server-side confirm failed. One record per (mode, token); a new broadcast
+// for the same pair overwrites it (the previous tx already happened on
+// chain, so the user can manually retry the confirm at any time).
+const PENDING_KEY = 'p2p_pool_pending_v1';
+
+interface PendingConfirm {
+  mode: Mode;
+  token: Token;
+  amount: string; // base units
+  txHash: string;
+  createdAt: number;
+}
 
 const P2PPoolScreen: React.FC = () => {
   const [mode, setMode] = useState<Mode>('deposit');
@@ -66,41 +79,144 @@ const P2PPoolScreen: React.FC = () => {
   const [available, setAvailable] = useState<string>('0');
   const [locked, setLocked] = useState<string>('0');
   const [loadingBal, setLoadingBal] = useState(true);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [stage, setStage] = useState('');
+  const [pending, setPending] = useState<PendingConfirm | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   const decimals = TOKEN_DECIMALS[token] ?? 18;
 
   const loadBalance = useCallback(async () => {
     setLoadingBal(true);
+    setBalanceError(null);
     const res = await poolApi.balance(token);
     if (res.success && res.data) {
       setAvailable(res.data.available);
       setLocked(res.data.locked);
     } else {
-      setAvailable('0');
-      setLocked('0');
+      // Treat as unknown — do NOT show falsy zeros, which would lead a
+      // seller with locked funds to assume their money is gone.
+      setAvailable('—');
+      setLocked('—');
+      setBalanceError(res.message || 'Could not read pool balance');
     }
     setLoadingBal(false);
   }, [token]);
 
+  // Restore any pending confirm for the current (mode, token) so the
+  // recovery banner re-appears if the user navigated away mid-failure.
+  const loadPending = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(PENDING_KEY);
+      if (!raw) {
+        setPending(null);
+        return;
+      }
+      const p: PendingConfirm = JSON.parse(raw);
+      setPending(p.mode === mode && p.token === token ? p : null);
+    } catch {
+      setPending(null);
+    }
+  }, [mode, token]);
+
   useEffect(() => {
     loadBalance();
-  }, [loadBalance]);
+    loadPending();
+  }, [loadBalance, loadPending]);
+
+  // Switching mode is a user intent change — clear the typed amount so a
+  // deposit-side value isn't silently submitted as a withdraw.
+  const handleModeChange = (next: Mode) => {
+    if (next === mode) return;
+    setMode(next);
+    setAmountInput('');
+  };
 
   const amountValid = useMemo(() => {
-    const v = parseFloat(amountInput.trim());
-    return isFinite(v) && v > 0;
+    const trimmed = amountInput.trim();
+    if (!trimmed) return false;
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) return false;
+    return parseFloat(trimmed) > 0;
   }, [amountInput]);
 
+  // Pre-check: withdraw exceeding the on-chain available balance is the
+  // most common cause of a confusing post-broadcast revert. Catch it here.
+  const exceedsAvailable = useMemo(() => {
+    if (mode !== 'withdraw' || !amountValid) return false;
+    if (available === '—') return false; // unknown balance — let the server gate it
+    try {
+      const want = BigInt(parseTokenAmount(amountInput.trim(), decimals));
+      const have = BigInt(available);
+      return want > have;
+    } catch {
+      return false;
+    }
+  }, [mode, amountValid, amountInput, decimals, available]);
+
+  const canSubmit = amountValid && !submitting && !exceedsAvailable;
+
+  const persistPending = async (p: PendingConfirm | null) => {
+    if (p) {
+      await AsyncStorage.setItem(PENDING_KEY, JSON.stringify(p));
+    } else {
+      await AsyncStorage.removeItem(PENDING_KEY);
+    }
+    setPending(p);
+  };
+
+  const runConfirm = async (p: PendingConfirm): Promise<void> => {
+    const conf =
+      p.mode === 'deposit'
+        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash)
+        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash);
+    if (!conf.success) {
+      throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
+    }
+  };
+
+  const handleRetryConfirm = async () => {
+    if (!pending || retrying) return;
+    setRetrying(true);
+    try {
+      await runConfirm(pending);
+      await persistPending(null);
+      Alert.alert('Confirmed', 'Your previous transaction has been recorded.');
+      loadBalance();
+    } catch (err: any) {
+      Alert.alert('Retry failed', err?.message || 'Server still cannot record this tx.');
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const handleDiscardPending = async () => {
+    Alert.alert(
+      'Discard pending confirmation?',
+      'The on-chain transaction still happened. Keep the tx hash; you may need it for support.',
+      [
+        { text: 'Keep', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          onPress: async () => {
+            await persistPending(null);
+          },
+        },
+      ],
+    );
+  };
+
   const handleSubmit = async () => {
-    if (!amountValid || submitting) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     let broadcastHash: string | null = null;
+    let amountBaseUnits = '';
     try {
       const wallet = await getActiveWallet();
-      if (!wallet) throw new Error('No wallet found');
-      const amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
+      if (!wallet) throw new Error('No active wallet. Set one up from the wallet screen first.');
+      amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
+      if (amountBaseUnits === '0') throw new Error('Amount must be greater than zero.');
 
       setStage('Preparing transaction…');
       const prep =
@@ -108,36 +224,49 @@ const P2PPoolScreen: React.FC = () => {
           ? await poolApi.prepareDeposit(token, amountBaseUnits)
           : await poolApi.prepareWithdraw(token, amountBaseUnits);
       if (!prep.success || !prep.data) {
-        throw new Error(prep.message || 'Prepare failed');
+        throw new Error(statusAwareError(prep.status, prep.message) || 'Prepare failed');
       }
 
       setStage('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
 
       setStage('Broadcasting…');
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);
       broadcastHash = resp.hash;
 
       setStage('Confirming…');
-      const conf =
-        mode === 'deposit'
-          ? await poolApi.confirmDeposit(token, amountBaseUnits, resp.hash)
-          : await poolApi.confirmWithdraw(token, amountBaseUnits, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
+      await runConfirm({
+        mode,
+        token,
+        amount: amountBaseUnits,
+        txHash: resp.hash,
+        createdAt: Date.now(),
+      });
 
       Alert.alert(
         mode === 'deposit' ? 'Deposit confirmed' : 'Withdrawal confirmed',
         `${amountInput} ${token} ${mode === 'deposit' ? 'added to' : 'removed from'} your pool.`,
       );
       setAmountInput('');
+      await persistPending(null);
       loadBalance();
     } catch (err: any) {
       const detail = err?.message || String(err);
       if (broadcastHash) {
+        // The on-chain side happened. Stash so the user can retry the
+        // confirm without re-broadcasting. There's no automatic deposit
+        // reconciler on the backend — only trades are reconciled — so
+        // recovery is user-initiated via the banner at the top of the screen.
+        await persistPending({
+          mode,
+          token,
+          amount: amountBaseUnits,
+          txHash: broadcastHash,
+          createdAt: Date.now(),
+        });
         Alert.alert(
-          'Submitted, server confirm failed',
-          `Tx ${broadcastHash} was broadcast on chain but the server couldn't record it ` +
-            `(${detail}). Wait a minute and refresh your balance; contact support if it stays off.`,
+          'On-chain succeeded, server confirm failed',
+          `Tx ${broadcastHash}\n\n${detail}\n\nUse the "Retry confirm" button on this screen to record it. Funds are safe in the contract.`,
         );
       } else {
         Alert.alert(mode === 'deposit' ? 'Deposit failed' : 'Withdrawal failed', detail);
@@ -150,7 +279,6 @@ const P2PPoolScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Stack.Screen options={{ title: 'P2P Pool' }} />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
@@ -161,6 +289,42 @@ const P2PPoolScreen: React.FC = () => {
             Funds you deposit here back your published ads. Available balance is
             withdrawable any time; locked balance is reserved against open trades.
           </Text>
+
+          {pending && (
+            <View style={styles.pendingCard}>
+              <View style={styles.pendingRow}>
+                <Icon name="warning" size={18} color={GOLD.error} />
+                <Text style={styles.pendingTitle}>Pending confirmation</Text>
+              </View>
+              <Text style={styles.pendingBody}>
+                Your last {pending.mode} broadcast on chain but the server
+                couldn't record it. The funds moved correctly; retry to
+                update your pool balance.
+              </Text>
+              <Text style={styles.pendingHash} numberOfLines={1}>
+                tx {pending.txHash}
+              </Text>
+              <View style={styles.pendingActions}>
+                <TouchableOpacity
+                  style={[styles.pendingBtn, retrying && styles.btnDisabled]}
+                  onPress={handleRetryConfirm}
+                  disabled={retrying}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.pendingBtnText}>
+                    {retrying ? 'Retrying…' : 'Retry confirm'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.pendingDiscard}
+                  onPress={handleDiscardPending}
+                  disabled={retrying}
+                >
+                  <Text style={styles.pendingDiscardText}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
           <View style={styles.tokenRow}>
             {TOKENS.map((t) => (
@@ -184,7 +348,9 @@ const P2PPoolScreen: React.FC = () => {
                 <ActivityIndicator size="small" color={GOLD.dark} />
               ) : (
                 <Text style={styles.balanceValue}>
-                  {formatTokenAmount(available, decimals, 4)} {token}
+                  {available === '—'
+                    ? '—'
+                    : `${formatTokenAmount(available, decimals, 4)} ${token}`}
                 </Text>
               )}
             </View>
@@ -192,10 +358,20 @@ const P2PPoolScreen: React.FC = () => {
               <Text style={styles.balanceLabel}>Locked</Text>
               {loadingBal ? null : (
                 <Text style={styles.balanceLocked}>
-                  {formatTokenAmount(locked, decimals, 4)} {token}
+                  {locked === '—' ? '—' : `${formatTokenAmount(locked, decimals, 4)} ${token}`}
                 </Text>
               )}
             </View>
+            {balanceError && !loadingBal && (
+              <View style={styles.balanceErrorRow}>
+                <Text style={styles.balanceErrorText} numberOfLines={2}>
+                  {balanceError}
+                </Text>
+                <TouchableOpacity onPress={loadBalance} hitSlop={8}>
+                  <Text style={styles.balanceRetry}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
 
           <View style={styles.modeRow}>
@@ -203,7 +379,7 @@ const P2PPoolScreen: React.FC = () => {
               <TouchableOpacity
                 key={m}
                 style={[styles.modeChip, mode === m && styles.modeChipActive]}
-                onPress={() => setMode(m)}
+                onPress={() => handleModeChange(m)}
                 activeOpacity={0.85}
               >
                 <Icon
@@ -221,7 +397,9 @@ const P2PPoolScreen: React.FC = () => {
           </View>
 
           <Text style={styles.label}>Amount ({token})</Text>
-          <View style={styles.input}>
+          <View
+            style={[styles.input, exceedsAvailable && styles.inputError]}
+          >
             <TextInput
               style={styles.inputField}
               keyboardType="decimal-pad"
@@ -232,24 +410,31 @@ const P2PPoolScreen: React.FC = () => {
             />
             <Text style={styles.inputUnit}>{token}</Text>
           </View>
+          {exceedsAvailable && (
+            <Text style={styles.fieldError}>
+              Exceeds available ({formatTokenAmount(available, decimals, 4)} {token}).
+            </Text>
+          )}
           {mode === 'deposit' ? (
             <Text style={styles.hint}>
               Make sure you have approved the P2P escrow contract to spend {token}
               from your wallet before depositing.
             </Text>
           ) : (
-            <TouchableOpacity
-              onPress={() => setAmountInput(formatTokenAmount(available, decimals, 6))}
-              hitSlop={8}
-            >
-              <Text style={styles.maxLink}>Use full available balance</Text>
-            </TouchableOpacity>
+            available !== '—' && (
+              <TouchableOpacity
+                onPress={() => setAmountInput(formatTokenAmount(available, decimals, decimals))}
+                hitSlop={8}
+              >
+                <Text style={styles.maxLink}>Use full available balance</Text>
+              </TouchableOpacity>
+            )
           )}
 
           <TouchableOpacity
-            style={[styles.submit, (!amountValid || submitting) && styles.submitDisabled]}
+            style={[styles.submit, !canSubmit && styles.submitDisabled]}
             onPress={handleSubmit}
-            disabled={!amountValid || submitting}
+            disabled={!canSubmit}
             activeOpacity={0.85}
           >
             <Text style={styles.submitText}>
@@ -271,17 +456,14 @@ const P2PPoolScreen: React.FC = () => {
   );
 };
 
-function toTxLike(tx: UnsignedTx) {
-  const ensure0x = (v?: string) => (!v ? undefined : v.startsWith('0x') ? v : `0x${v}`);
-  return {
-    to: tx.to,
-    value: tx.value || '0',
-    data: ensure0x(tx.data),
-    nonce: tx.nonce,
-    gasLimit: tx.gasLimit,
-    gasPrice: tx.gasPrice,
-    chainId: tx.chainId ? Number(tx.chainId) : undefined,
-  };
+// statusAwareError turns a status code + raw server message into an
+// actionable phrase. The backend returns 410 Gone for legacy migration
+// paths a stale client hits; 503 for stale rate feeds; everything else
+// passes through unchanged.
+function statusAwareError(status: number | undefined, message: string | undefined): string | undefined {
+  if (status === 410) return 'Your app version is out of date — please update and retry.';
+  if (status === 503) return 'Live rate temporarily unavailable. Refresh and try again.';
+  return message;
 }
 
 const styles = StyleSheet.create({
@@ -289,6 +471,28 @@ const styles = StyleSheet.create({
   scroll: { padding: 20, paddingBottom: 60 },
   heading: { fontSize: 24, fontWeight: '800', color: '#000', marginBottom: 6 },
   subheading: { fontSize: 13, color: '#666', marginBottom: 18, lineHeight: 19 },
+  pendingCard: {
+    backgroundColor: '#FFF6E5',
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: GOLD.error,
+  },
+  pendingRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  pendingTitle: { marginLeft: 6, fontSize: 14, fontWeight: '700', color: GOLD.error },
+  pendingBody: { fontSize: 13, color: '#444', lineHeight: 18, marginBottom: 4 },
+  pendingHash: { fontSize: 11, color: '#777', marginBottom: 10, fontFamily: 'monospace' },
+  pendingActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  pendingBtn: {
+    backgroundColor: GOLD.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  pendingBtnText: { fontWeight: '700', color: '#000' },
+  pendingDiscard: { paddingVertical: 8 },
+  pendingDiscardText: { color: '#666', fontWeight: '600' },
   tokenRow: { flexDirection: 'row', gap: 8, marginBottom: 16 },
   tokenChip: {
     flex: 1,
@@ -322,6 +526,17 @@ const styles = StyleSheet.create({
   balanceLabel: { fontSize: 14, color: '#666', fontWeight: '600' },
   balanceValue: { fontSize: 18, color: '#000', fontWeight: '800' },
   balanceLocked: { fontSize: 14, color: '#999', fontWeight: '600' },
+  balanceErrorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F0F0F0',
+  },
+  balanceErrorText: { flex: 1, fontSize: 12, color: GOLD.error, marginRight: 8 },
+  balanceRetry: { color: GOLD.dark, fontWeight: '700', fontSize: 13 },
   modeRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
   modeChip: {
     flex: 1,
@@ -351,8 +566,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: GOLD.muted,
   },
+  inputError: { borderColor: GOLD.error },
   inputField: { flex: 1, fontSize: 16, color: '#000', paddingVertical: 0 },
   inputUnit: { fontSize: 14, color: GOLD.dark, fontWeight: '700', marginLeft: 8 },
+  fieldError: { color: GOLD.error, fontSize: 12, marginTop: 6 },
   hint: { fontSize: 12, color: '#888', marginTop: 6, lineHeight: 16 },
   maxLink: { fontSize: 13, color: GOLD.dark, fontWeight: '600', marginTop: 6 },
   submit: {
@@ -369,6 +586,7 @@ const styles = StyleSheet.create({
   },
   submitDisabled: { opacity: 0.55 },
   submitText: { fontWeight: '800', color: '#000', fontSize: 16 },
+  btnDisabled: { opacity: 0.55 },
   adsLink: {
     flexDirection: 'row',
     alignItems: 'center',
