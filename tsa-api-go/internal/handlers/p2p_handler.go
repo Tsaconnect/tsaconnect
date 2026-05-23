@@ -305,24 +305,32 @@ func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
 
 // ─── Deposit / withdraw / balance ──────────────────────────────────────────
 
-// poolMoveRequest is the shared shape for prepare-deposit / prepare-withdraw.
-// SellerAddress is omitted intentionally — the seller wallet is always the
-// authenticated user's wallet (User.WalletAddress); accepting a separate
-// sellerAddress would let any user prepare/confirm against another seller's
-// wallet, surfacing fake "deposit confirmed" audit rows under the wrong actor.
+// poolMoveRequest is the shared shape for prepare-approve / prepare-deposit /
+// prepare-withdraw. WalletAddress is the wallet the seller is operating from —
+// the app's currently-active wallet, which may not match the user's primary
+// User.WalletAddress (the in-app HD wallet lets users hold several derived
+// accounts). The address is purely informational on prepare endpoints (used
+// for gas estimation against the right balance); on confirm endpoints the
+// service cross-checks it against the on-chain event's `seller` field, so a
+// caller can't credit themselves with someone else's deposit by claiming a
+// different address.
 type poolMoveRequest struct {
-	Token  string `json:"token" binding:"required"`
-	Amount string `json:"amount" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+	Amount        string `json:"amount" binding:"required"`
+	WalletAddress string `json:"walletAddress" binding:"required"`
 }
 
-// confirmPoolMoveRequest carries the tx hash plus the original amount the
-// user intended to move. The service verifies the on-chain event amount
-// matches `Amount` — without this check, an attacker who learned a victim's
-// txHash could submit it under their own (different-amount) deposit.
+// confirmPoolMoveRequest carries the tx hash plus the original amount and
+// wallet the user intended to move from. The service verifies the on-chain
+// event's `seller` matches WalletAddress and amount matches Amount — without
+// these checks, an attacker who learned a victim's txHash could submit it
+// under their own (different-amount) deposit or credit themselves with the
+// victim's deposit by claiming a different address.
 type confirmPoolMoveRequest struct {
-	TxHash string `json:"txHash" binding:"required"`
-	Token  string `json:"token" binding:"required"`
-	Amount string `json:"amount" binding:"required"`
+	TxHash        string `json:"txHash" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+	Amount        string `json:"amount" binding:"required"`
+	WalletAddress string `json:"walletAddress" binding:"required"`
 }
 
 // PrepareApprove returns the unsigned ERC-20 approve tx the seller must
@@ -334,20 +342,16 @@ func (h *P2PHandler) PrepareApprove(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
-		return
-	}
 	var req poolMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
 	if mapServiceError(c, err) {
 		return
 	}
-	allowance, allowanceErr := h.trade.GetAllowance(c.Request.Context(), user.WalletAddress, req.Token)
+	allowance, allowanceErr := h.trade.GetAllowance(c.Request.Context(), req.WalletAddress, req.Token)
 	allowanceStr := "0"
 	if allowanceErr == nil && allowance != nil {
 		allowanceStr = allowance.String()
@@ -364,21 +368,18 @@ func (h *P2PHandler) PrepareApprove(c *gin.Context) {
 // GetAllowance is the lightweight view counterpart — exposed so the FE
 // can check allowance state without preparing an approve tx (e.g. on
 // pool-screen mount, or after the user broadcasts an approve to refresh).
+// Query params: ?token=USDT&address=0x...  (address is the active wallet).
 func (h *P2PHandler) GetAllowance(c *gin.Context) {
-	user, ok := h.require(c)
-	if !ok {
-		return
-	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
+	if _, ok := h.require(c); !ok {
 		return
 	}
 	token := c.Query("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token query param is required"})
+	address := c.Query("address")
+	if token == "" || address == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token and address query params are required"})
 		return
 	}
-	allowance, err := h.trade.GetAllowance(c.Request.Context(), user.WalletAddress, token)
+	allowance, err := h.trade.GetAllowance(c.Request.Context(), address, token)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -393,16 +394,12 @@ func (h *P2PHandler) PrepareDeposit(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
-		return
-	}
 	var req poolMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -417,16 +414,12 @@ func (h *P2PHandler) ConfirmDeposit(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
-		return
-	}
 	var req confirmPoolMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ev, err := h.trade.ConfirmDeposit(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount, req.TxHash)
+	ev, err := h.trade.ConfirmDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -444,16 +437,12 @@ func (h *P2PHandler) PrepareWithdraw(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
-		return
-	}
 	var req poolMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.PrepareWithdraw(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -468,16 +457,12 @@ func (h *P2PHandler) ConfirmWithdraw(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
-		return
-	}
 	var req confirmPoolMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ev, err := h.trade.ConfirmWithdraw(c.Request.Context(), user.ID, user.WalletAddress, req.Token, req.Amount, req.TxHash)
+	ev, err := h.trade.ConfirmWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -490,26 +475,21 @@ func (h *P2PHandler) ConfirmWithdraw(c *gin.Context) {
 	})
 }
 
-// GetPoolBalance reads the seller's own (available, locked) pool balance.
-// Restricted to the authenticated wallet — pool balances are on-chain public
-// data, but the endpoint scope follows the same invariant as deposit/withdraw
-// so a buyer can't trivially enumerate other sellers' balances through this
-// surface. Query params: ?token=USDT
+// GetPoolBalance reads (available, locked) pool balance for a given wallet
+// on a given token. Pool balances are on-chain public data, so we don't
+// gate by owner — any authenticated user may read any wallet's balances
+// (same as Sonicscan would show). Query params: ?token=USDT&address=0x...
 func (h *P2PHandler) GetPoolBalance(c *gin.Context) {
-	user, ok := h.require(c)
-	if !ok {
-		return
-	}
-	if user.WalletAddress == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "User has no wallet address"})
+	if _, ok := h.require(c); !ok {
 		return
 	}
 	token := c.Query("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token query param is required"})
+	address := c.Query("address")
+	if token == "" || address == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token and address query params are required"})
 		return
 	}
-	bal, err := h.trade.GetPoolBalance(c.Request.Context(), user.WalletAddress, token)
+	bal, err := h.trade.GetPoolBalance(c.Request.Context(), address, token)
 	if mapServiceError(c, err) {
 		return
 	}

@@ -401,7 +401,7 @@ func seedPaymentMethod(t *testing.T, db *gorm.DB, userID uuid.UUID, currency str
 
 func TestGetPoolBalance_RequiresToken(t *testing.T) {
 	r := newRig(t)
-	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance", nil)
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance?address="+r.user.WalletAddress, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -409,7 +409,6 @@ func TestGetPoolBalance_RequiresToken(t *testing.T) {
 
 func TestGetPoolBalance_RequiresWalletAddress(t *testing.T) {
 	r := newRig(t)
-	r.user.WalletAddress = ""
 	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance?token=USDT", nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -419,7 +418,7 @@ func TestGetPoolBalance_RequiresWalletAddress(t *testing.T) {
 func TestGetPoolBalance_HappyPath(t *testing.T) {
 	r := newRig(t)
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(123), Locked: big.NewInt(45)}
-	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance?token=USDT", nil)
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/balance?token=USDT&address="+r.user.WalletAddress, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -433,7 +432,7 @@ func TestGetPoolBalance_HappyPath(t *testing.T) {
 func TestGetAllowance_HappyPath(t *testing.T) {
 	r := newRig(t)
 	r.escrow.allowance = big.NewInt(999)
-	rec := doJSON(t, r, http.MethodGet, "/api/p2p/allowance?token=USDT", nil)
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/allowance?token=USDT&address="+r.user.WalletAddress, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -447,7 +446,7 @@ func TestPrepareApprove_ReturnsCurrentAllowance(t *testing.T) {
 	r := newRig(t)
 	r.escrow.allowance = big.NewInt(500)
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits/approve", map[string]any{
-		"token": "USDT", "amount": "1000",
+		"token": "USDT", "amount": "1000", "walletAddress": r.user.WalletAddress,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -467,7 +466,7 @@ func TestPrepareApprove_ReturnsCurrentAllowance(t *testing.T) {
 func TestPrepareDeposit_RejectsBadAmount(t *testing.T) {
 	r := newRig(t)
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits", map[string]any{
-		"token": "USDT", "amount": "0",
+		"token": "USDT", "amount": "0", "walletAddress": r.user.WalletAddress,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (ErrInvalidParams); body=%s", rec.Code, rec.Body.String())
@@ -476,7 +475,7 @@ func TestPrepareDeposit_RejectsBadAmount(t *testing.T) {
 
 func TestPrepareDeposit_RejectsMissingFields(t *testing.T) {
 	r := newRig(t)
-	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits", map[string]any{"token": "USDT"})
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits", map[string]any{"token": "USDT", "walletAddress": r.user.WalletAddress})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
@@ -496,7 +495,7 @@ func TestConfirmDeposit_RejectsAmountMismatch(t *testing.T) {
 	// The escrow event reports 100; the user claims they sent 1000.
 	// The service-layer ConfirmDeposit cross-checks and rejects.
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits/confirm", map[string]any{
-		"token": "USDT", "amount": "1000", "txHash": "0xabc",
+		"token": "USDT", "amount": "1000", "txHash": "0xabc", "walletAddress": r.user.WalletAddress,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -506,7 +505,7 @@ func TestConfirmDeposit_RejectsAmountMismatch(t *testing.T) {
 func TestConfirmDeposit_HappyPath(t *testing.T) {
 	r := newRig(t)
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/deposits/confirm", map[string]any{
-		"token": "USDT", "amount": "100", "txHash": "0xabc",
+		"token": "USDT", "amount": "100", "txHash": "0xabc", "walletAddress": r.user.WalletAddress,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -521,7 +520,7 @@ func TestPrepareWithdraw_RejectsExceedingAvailable(t *testing.T) {
 	r := newRig(t)
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(50), Locked: big.NewInt(0)}
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/withdrawals", map[string]any{
-		"token": "USDT", "amount": "100",
+		"token": "USDT", "amount": "100", "walletAddress": r.user.WalletAddress,
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)

@@ -70,6 +70,9 @@ interface PendingConfirm {
   amount: string; // base units
   txHash: string;
   createdAt: number;
+  /** Wallet that signed the broadcast. Confirm must reference this same
+   *  wallet so the backend's on-chain `seller` cross-check passes. */
+  walletAddress?: string;
 }
 
 const P2PPoolScreen: React.FC = () => {
@@ -84,13 +87,26 @@ const P2PPoolScreen: React.FC = () => {
   const [stage, setStage] = useState('');
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Active wallet — read once on mount + whenever token/mode changes; all
+  // poolApi calls thread this through so the backend gas-estimates against
+  // the right balance even if the user has multiple in-app HD wallets.
+  const [wallet, setWallet] = useState<string>('');
 
   const decimals = TOKEN_DECIMALS[token] ?? 18;
 
   const loadBalance = useCallback(async () => {
     setLoadingBal(true);
     setBalanceError(null);
-    const res = await poolApi.balance(token);
+    const w = wallet || (await getActiveWallet());
+    if (!w) {
+      setAvailable('—');
+      setLocked('—');
+      setBalanceError('No active wallet. Set one up from the wallet screen first.');
+      setLoadingBal(false);
+      return;
+    }
+    if (!wallet) setWallet(w);
+    const res = await poolApi.balance(token, w);
     if (res.success && res.data) {
       setAvailable(res.data.available);
       setLocked(res.data.locked);
@@ -102,7 +118,7 @@ const P2PPoolScreen: React.FC = () => {
       setBalanceError(res.message || 'Could not read pool balance');
     }
     setLoadingBal(false);
-  }, [token]);
+  }, [token, wallet]);
 
   // Restore any pending confirm for the current (mode, token) so the
   // recovery banner re-appears if the user navigated away mid-failure.
@@ -166,10 +182,15 @@ const P2PPoolScreen: React.FC = () => {
   };
 
   const runConfirm = async (p: PendingConfirm): Promise<void> => {
+    // Confirm must reference the wallet that signed the original tx — the
+    // backend cross-checks against the on-chain event's `seller` field, so a
+    // mismatch here means "you're trying to confirm someone else's deposit".
+    const w = p.walletAddress || wallet || (await getActiveWallet());
+    if (!w) throw new Error('No active wallet to confirm against.');
     const conf =
       p.mode === 'deposit'
-        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash)
-        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash);
+        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w)
+        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w);
     if (!conf.success) {
       throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
     }
@@ -211,10 +232,10 @@ const P2PPoolScreen: React.FC = () => {
   // and if it's short of `amountBaseUnits`, broadcasts an approve tx so the
   // subsequent deposit's transferFrom succeeds. Withdrawals skip this
   // entirely (no allowance needed for the seller's own withdrawal).
-  const runApproveIfNeeded = async (amountBaseUnits: string): Promise<void> => {
+  const runApproveIfNeeded = async (amountBaseUnits: string, walletAddress: string): Promise<void> => {
     if (mode !== 'deposit') return;
     setStage('Checking allowance…');
-    const aRes = await poolApi.allowance(token);
+    const aRes = await poolApi.allowance(token, walletAddress);
     if (aRes.success && aRes.data) {
       try {
         if (BigInt(aRes.data.allowance) >= BigInt(amountBaseUnits)) {
@@ -226,7 +247,7 @@ const P2PPoolScreen: React.FC = () => {
       }
     }
     setStage('Preparing approve…');
-    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits);
+    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits, walletAddress);
     if (!aPrep.success || !aPrep.data) {
       throw new Error(statusAwareError(aPrep.status, aPrep.message) || 'Prepare approve failed');
     }
@@ -253,20 +274,23 @@ const P2PPoolScreen: React.FC = () => {
     let broadcastHash: string | null = null;
     let amountBaseUnits = '';
     try {
-      const wallet = await getActiveWallet();
-      if (!wallet) throw new Error('No active wallet. Set one up from the wallet screen first.');
+      const w = await getActiveWallet();
+      if (!w) throw new Error('No active wallet. Set one up from the wallet screen first.');
+      // Keep the screen-level wallet state in sync with the signer we're
+      // actually about to use, so a subsequent loadBalance() reflects this.
+      if (w !== wallet) setWallet(w);
       amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
       if (amountBaseUnits === '0') throw new Error('Amount must be greater than zero.');
 
       // For deposits, ensure the seller has approved the escrow first.
       // Withdrawals don't need an allowance.
-      await runApproveIfNeeded(amountBaseUnits);
+      await runApproveIfNeeded(amountBaseUnits, w);
 
       setStage('Preparing transaction…');
       const prep =
         mode === 'deposit'
-          ? await poolApi.prepareDeposit(token, amountBaseUnits)
-          : await poolApi.prepareWithdraw(token, amountBaseUnits);
+          ? await poolApi.prepareDeposit(token, amountBaseUnits, w)
+          : await poolApi.prepareWithdraw(token, amountBaseUnits, w);
       if (!prep.success || !prep.data) {
         throw new Error(statusAwareError(prep.status, prep.message) || 'Prepare failed');
       }
@@ -285,6 +309,7 @@ const P2PPoolScreen: React.FC = () => {
         amount: amountBaseUnits,
         txHash: resp.hash,
         createdAt: Date.now(),
+        walletAddress: w,
       });
 
       Alert.alert(
@@ -307,6 +332,7 @@ const P2PPoolScreen: React.FC = () => {
           amount: amountBaseUnits,
           txHash: broadcastHash,
           createdAt: Date.now(),
+          walletAddress: wallet || undefined,
         });
         Alert.alert(
           'On-chain succeeded, server confirm failed',
