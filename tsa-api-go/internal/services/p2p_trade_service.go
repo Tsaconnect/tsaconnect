@@ -849,11 +849,14 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
-	// Sanity check: on-chain returnedToAd matches our recorded amount.
+	// Sanity check: on-chain returnedToAvailable matches our recorded amount.
+	// (Field renamed from ReturnedToAd in the pool-model upgrade — under the
+	// new contract the funds return to the seller's `available` pool, not to
+	// a specific ad's remaining.)
 	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-	if expected != nil && ev.ReturnedToAd.Cmp(expected) != 0 {
-		return nil, fmt.Errorf("on-chain returnedToAd %s does not match trade amount %s",
-			ev.ReturnedToAd, trade.TokenAmount)
+	if expected != nil && ev.ReturnedToAvailable.Cmp(expected) != 0 {
+		return nil, fmt.Errorf("on-chain returnedToAvailable %s does not match trade amount %s",
+			ev.ReturnedToAvailable, trade.TokenAmount)
 	}
 
 	now := s.clock.Now()
@@ -888,7 +891,7 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 
 	s.audit(ctx, models.P2PAuditTradeCancelled, &userID, &trade.AdID, &trade.ID, map[string]any{
 		"txHash":       txHash,
-		"returnedToAd": ev.ReturnedToAd.String(),
+		"returnedToAvailable": ev.ReturnedToAvailable.String(),
 	})
 	// Notify both participants.
 	s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — funds returned to your ad",

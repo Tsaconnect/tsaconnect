@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -54,61 +55,88 @@ func TestHashIDHex_FormatAndLength(t *testing.T) {
 	}
 }
 
-func TestPrepareCreateAd_EmitsExpectedSelectorAndArgs(t *testing.T) {
+// Legacy Prepare* methods are retained on the adapter for source-level
+// compatibility while the trade service is migrated (Phase 2B). They must
+// fail loudly so any remaining call site is caught at runtime.
+func TestPrepareCreateAd_NowReturnsMigrationError(t *testing.T) {
 	svc := makeTestSvc(t)
-	adID := HashID(uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
-	token := "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
-	amount := big.NewInt(1_000_000) // 1 USDT
-	seller := "0x000000000000000000000000000000000000beef"
-
-	raw, err := svc.PrepareCreateAd(adID, seller, token, amount)
-	if err != nil {
-		t.Fatalf("PrepareCreateAd: %v", err)
-	}
-	tx := decodeUnsignedTx(t, raw)
-
-	// Function selector for createAd(bytes32,address,uint256) — first 4 bytes
-	// of keccak256("createAd(bytes32,address,uint256)").
-	wantSelector := selectorFor(t, "createAd(bytes32,address,uint256)")
-	gotData := mustDecodeHex(t, tx.Data)
-	if !bytesEqual(gotData[:4], wantSelector) {
-		t.Fatalf("createAd selector mismatch: want %x got %x", wantSelector, gotData[:4])
-	}
-	// adId is the next 32 bytes after the selector.
-	if !bytesEqual(gotData[4:36], adID[:]) {
-		t.Fatalf("createAd adId not encoded as first arg")
+	_, err := svc.PrepareCreateAd(HashID(uuid.New()), "0xa", "0xb", big.NewInt(1))
+	if !errors.Is(err, ErrPhase2Migration) {
+		t.Fatalf("expected ErrPhase2Migration, got %v", err)
 	}
 }
 
-func TestPrepareOpenTrade_EncodesAllThreeArgs(t *testing.T) {
+func TestPrepareCloseAd_NowReturnsMigrationError(t *testing.T) {
+	svc := makeTestSvc(t)
+	_, err := svc.PrepareCloseAd(HashID(uuid.New()), "0xa")
+	if !errors.Is(err, ErrPhase2Migration) {
+		t.Fatalf("expected ErrPhase2Migration, got %v", err)
+	}
+}
+
+func TestPrepareOpenTrade_LegacySignature_NowReturnsMigrationError(t *testing.T) {
+	svc := makeTestSvc(t)
+	_, err := svc.PrepareOpenTrade(HashID(uuid.New()), HashID(uuid.New()), "0xd00d", big.NewInt(1))
+	if !errors.Is(err, ErrPhase2Migration) {
+		t.Fatalf("expected ErrPhase2Migration, got %v", err)
+	}
+}
+
+// PrepareOpenTradeWithVoucher is the pool-model replacement. Verify it packs
+// the (tradeId, voucher tuple, sig, amount) selector correctly.
+func TestPrepareOpenTradeWithVoucher_PacksCorrectSelector(t *testing.T) {
 	svc := makeTestSvc(t)
 	tradeID := HashID(uuid.New())
-	adID := HashID(uuid.New())
-	amount := big.NewInt(500_000_000) // 500 USDT
+	voucher := AdVoucher{
+		Seller:      common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		Token:       common.HexToAddress("0x000000000000000000000000000000000000feed"),
+		MaxAmount:   big.NewInt(1000),
+		MinPerTrade: big.NewInt(0),
+		MaxPerTrade: big.NewInt(0),
+		Deadline:    big.NewInt(1900000000),
+		Nonce:       HashID(uuid.New()),
+	}
+	sig := make([]byte, 65) // junk sig — on-chain ECDSA.recover will reject; selector is what we're testing
+	amount := big.NewInt(500)
 	buyer := "0x000000000000000000000000000000000000d00d"
 
-	raw, err := svc.PrepareOpenTrade(tradeID, adID, buyer, amount)
+	raw, err := svc.PrepareOpenTradeWithVoucher(tradeID, voucher, sig, buyer, amount)
 	if err != nil {
-		t.Fatalf("PrepareOpenTrade: %v", err)
+		t.Fatalf("PrepareOpenTradeWithVoucher: %v", err)
 	}
-	tx := decodeUnsignedTx(t, raw)
-	data := mustDecodeHex(t, tx.Data)
-
-	wantSelector := selectorFor(t, "openTrade(bytes32,bytes32,uint256)")
+	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
+	wantSelector := selectorFor(t, "openTrade(bytes32,(address,address,uint256,uint256,uint256,uint256,bytes32),bytes,uint256)")
 	if !bytesEqual(data[:4], wantSelector) {
-		t.Fatalf("openTrade selector mismatch")
+		t.Fatalf("openTrade(voucher) selector mismatch: want %x got %x", wantSelector, data[:4])
 	}
+	// tradeId is the next 32 bytes after the selector.
 	if !bytesEqual(data[4:36], tradeID[:]) {
-		t.Fatalf("openTrade tradeId not in slot 0")
+		t.Fatalf("tradeId not in first arg slot")
 	}
-	if !bytesEqual(data[36:68], adID[:]) {
-		t.Fatalf("openTrade adId not in slot 1")
+}
+
+// PrepareDeposit / PrepareWithdraw: verify selector for the new pool flow.
+func TestPrepareDeposit_PacksCorrectSelector(t *testing.T) {
+	svc := makeTestSvc(t)
+	raw, err := svc.PrepareDeposit("0xbeef", "0xfeed", big.NewInt(1_000_000))
+	if err != nil {
+		t.Fatalf("PrepareDeposit: %v", err)
 	}
-	// Amount in slot 2 should ABI-encode to 32 bytes big-endian.
-	want := make([]byte, 32)
-	amount.FillBytes(want)
-	if !bytesEqual(data[68:100], want) {
-		t.Fatalf("openTrade amount not in slot 2")
+	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
+	if !bytesEqual(data[:4], selectorFor(t, "deposit(address,uint256)")) {
+		t.Fatalf("deposit selector mismatch")
+	}
+}
+
+func TestPrepareWithdraw_PacksCorrectSelector(t *testing.T) {
+	svc := makeTestSvc(t)
+	raw, err := svc.PrepareWithdraw("0xbeef", "0xfeed", big.NewInt(1_000_000))
+	if err != nil {
+		t.Fatalf("PrepareWithdraw: %v", err)
+	}
+	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
+	if !bytesEqual(data[:4], selectorFor(t, "withdraw(address,uint256)")) {
+		t.Fatalf("withdraw selector mismatch")
 	}
 }
 
@@ -137,16 +165,18 @@ func TestPrepareAdminResolve_EncodesBoolArg(t *testing.T) {
 func TestPrepare_RequiresContractAddress(t *testing.T) {
 	cfg := &config.Config{Env: "development", P2PEscrowAddress: ""}
 	svc := NewP2PEscrowService(nil, cfg)
-	_, err := svc.PrepareCreateAd(HashID(uuid.New()), "0xa", "0xb", big.NewInt(1))
+	// PrepareMarkPaid is the simplest still-functional Prepare* — exercise
+	// the contract-address guard via it.
+	_, err := svc.PrepareMarkPaid(HashID(uuid.New()), "0xbeef")
 	if err == nil {
 		t.Fatalf("expected error when P2PEscrowAddress empty")
 	}
 }
 
-// TestBuildUnsignedTx_NonDevEnvFailsClosed pins the positive-allowlist policy
-// added by M1: any env string other than the literal "development" must fail
-// closed when the RPC client is nil. Catches the common typo `"dev"` and the
-// case where Env is empty / unset.
+// TestBuildUnsignedTx_NonDevEnvFailsClosed pins the positive-allowlist policy:
+// any env string other than the literal "development" must fail closed when
+// the RPC client is nil. Catches the common typo `"dev"` and the case where
+// Env is empty / unset.
 func TestBuildUnsignedTx_NonDevEnvFailsClosed(t *testing.T) {
 	for _, env := range []string{"", "dev", "staging", "production", "Development"} {
 		cfg := &config.Config{
@@ -154,11 +184,9 @@ func TestBuildUnsignedTx_NonDevEnvFailsClosed(t *testing.T) {
 			P2PEscrowAddress: "0xb5B073BF578fE24311ED50e540D9d632f1679261",
 		}
 		svc := NewP2PEscrowService(nil, cfg) // nil client
-		_, err := svc.PrepareCreateAd(
+		_, err := svc.PrepareMarkPaid(
 			HashID(uuid.New()),
 			"0x000000000000000000000000000000000000beef",
-			"0x000000000000000000000000000000000000feed",
-			big.NewInt(1),
 		)
 		if err == nil {
 			t.Errorf("env=%q: expected fail-closed when client is nil", env)
@@ -166,11 +194,13 @@ func TestBuildUnsignedTx_NonDevEnvFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReadAd_RequiresClient(t *testing.T) {
+// ReadBalance / ReadVoucherFilled / ReadVoucherCancelled / ReadTrade /
+// HashVoucher all need a live RPC client; verify the requireConfigured guard.
+func TestReadBalance_RequiresClient(t *testing.T) {
 	svc := makeTestSvc(t)
-	_, err := svc.ReadAd(HashID(uuid.New()))
+	_, err := svc.ReadBalance("0xbeef", "0xfeed")
 	if err == nil {
-		t.Fatalf("expected error: ReadAd without RPC client")
+		t.Fatalf("expected error: ReadBalance without RPC client")
 	}
 }
 
@@ -179,13 +209,15 @@ func TestABIEventsHaveExpectedTopicIDs(t *testing.T) {
 	// canonical keccak256(signature). If a signature drifts, on-chain events
 	// won't decode — this test catches it at unit-test time.
 	cases := map[string]string{
-		"AdCreated":     "AdCreated(bytes32,address,address,uint256)",
-		"TradeOpened":   "TradeOpened(bytes32,bytes32,address,uint256)",
-		"TradePaid":     "TradePaid(bytes32)",
-		"TradeReleased": "TradeReleased(bytes32,address,uint256,uint256)",
-		"TradeCancelled": "TradeCancelled(bytes32,uint256)",
-		"TradeDisputed":  "TradeDisputed(bytes32,address)",
-		"TradeResolved":  "TradeResolved(bytes32,bool,uint256,uint256)",
+		"Deposited":        "Deposited(address,address,uint256)",
+		"Withdrawn":        "Withdrawn(address,address,uint256)",
+		"VoucherCancelled": "VoucherCancelled(bytes32,address)",
+		"TradeOpened":      "TradeOpened(bytes32,bytes32,address,address,address,uint256)",
+		"TradePaid":        "TradePaid(bytes32)",
+		"TradeReleased":    "TradeReleased(bytes32,address,uint256,uint256)",
+		"TradeCancelled":   "TradeCancelled(bytes32,uint256)",
+		"TradeDisputed":    "TradeDisputed(bytes32,address)",
+		"TradeResolved":    "TradeResolved(bytes32,bool,uint256,uint256)",
 	}
 	for name, sig := range cases {
 		ev, ok := parsedP2PEscrowABI.Events[name]
@@ -244,10 +276,11 @@ func bytesEqual(a, b []byte) bool {
 
 // ─── Gate-2 review additions ────────────────────────────────────────────────
 
-// TestPrepare_SingleArgFns_AllSelectorsCorrect covers the six Prepare* methods
+// TestPrepare_SingleArgFns_AllSelectorsCorrect covers the Prepare* methods
 // that pass only a tradeId. A typo in the ABI string ("releas") or a
 // function-name rename in Solidity would slip past compilation; this test
-// pins the wire format.
+// pins the wire format. Note: closeAd was removed in the pool-model upgrade
+// — its replacement is cancelVoucher (covered separately).
 func TestPrepare_SingleArgFns_AllSelectorsCorrect(t *testing.T) {
 	svc := makeTestSvc(t)
 	tradeID := HashID(uuid.New())
@@ -258,7 +291,6 @@ func TestPrepare_SingleArgFns_AllSelectorsCorrect(t *testing.T) {
 		sig     string
 		prepare func() ([]byte, error)
 	}{
-		{"closeAd", "closeAd(bytes32)", func() ([]byte, error) { return svc.PrepareCloseAd(tradeID, caller) }},
 		{"markPaid", "markPaid(bytes32)", func() ([]byte, error) { return svc.PrepareMarkPaid(tradeID, caller) }},
 		{"release", "release(bytes32)", func() ([]byte, error) { return svc.PrepareRelease(tradeID, caller) }},
 		{"adminRelease", "adminRelease(bytes32)", func() ([]byte, error) { return svc.PrepareAdminRelease(tradeID, caller) }},
@@ -310,65 +342,55 @@ func TestOnChainP2PTradeStatus_MatchesContractEnum(t *testing.T) {
 	}
 }
 
-// TestParseAdCreatedFromReceipt_HappyPath ensures the receipt parser decodes
-// indexed (adId, seller, token) and non-indexed (amount) correctly. Built
-// from a synthetic types.Receipt so no chain is required.
-func TestParseAdCreatedFromReceipt_HappyPath(t *testing.T) {
+func TestParseDepositedFromReceipt_HappyPath(t *testing.T) {
 	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
-	adID := HashID(uuid.New())
 	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
 	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
-	amount := big.NewInt(1_500_000_000) // 1500 USDT
+	amount := big.NewInt(2_000_000)
 
-	logEntry := mustBuildAdCreatedLog(t, contractAddr, adID, seller, token, amount)
-	receipt := &types.Receipt{
-		Status: 1,
-		Logs:   []*types.Log{logEntry},
-	}
-
-	ev, err := parseAdCreatedFromReceipt(receipt, contractAddr, adID)
+	logEntry := mustBuildSimpleSellerTokenAmountLog(t, "Deposited", contractAddr, seller, token, amount)
+	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
+	ev, err := parseDepositedFromReceipt(receipt, contractAddr, seller, token)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if ev.AdID != adID {
-		t.Errorf("adId mismatch")
-	}
-	if ev.Seller != seller {
-		t.Errorf("seller mismatch: want %s got %s", seller.Hex(), ev.Seller.Hex())
-	}
-	if ev.Token != token {
-		t.Errorf("token mismatch")
-	}
-	if ev.Amount.Cmp(amount) != 0 {
-		t.Errorf("amount mismatch: want %s got %s", amount, ev.Amount)
+	if ev.Seller != seller || ev.Token != token || ev.Amount.Cmp(amount) != 0 {
+		t.Errorf("decoded fields mismatch: %+v", ev)
 	}
 }
 
-func TestParseAdCreatedFromReceipt_IgnoresOtherContracts(t *testing.T) {
+func TestParseDepositedFromReceipt_IgnoresOtherContracts(t *testing.T) {
 	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
 	imposter := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	adID := HashID(uuid.New())
-
-	logEntry := mustBuildAdCreatedLog(t, imposter, adID,
-		common.HexToAddress("0xaaaa"), common.HexToAddress("0xbbbb"), big.NewInt(1))
+	seller := common.HexToAddress("0xbeef")
+	token := common.HexToAddress("0xfeed")
+	logEntry := mustBuildSimpleSellerTokenAmountLog(t, "Deposited", imposter, seller, token, big.NewInt(1))
 	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
-
-	if _, err := parseAdCreatedFromReceipt(receipt, contractAddr, adID); err == nil {
+	if _, err := parseDepositedFromReceipt(receipt, contractAddr, seller, token); err == nil {
 		t.Fatalf("expected error: log from foreign contract must be ignored")
 	}
 }
 
-func TestParseAdCreatedFromReceipt_IgnoresWrongAdId(t *testing.T) {
+func TestParseVoucherCancelledFromReceipt_HappyPath(t *testing.T) {
 	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
-	mine := HashID(uuid.New())
-	other := HashID(uuid.New())
-
-	logEntry := mustBuildAdCreatedLog(t, contractAddr, other,
-		common.HexToAddress("0xa"), common.HexToAddress("0xb"), big.NewInt(1))
+	voucherHash := HashID(uuid.New())
+	seller := common.HexToAddress("0xbeef")
+	ev := parsedP2PEscrowABI.Events["VoucherCancelled"]
+	logEntry := &types.Log{
+		Address: contractAddr,
+		Topics: []common.Hash{
+			ev.ID,
+			voucherHash,
+			common.BytesToHash(seller.Bytes()),
+		},
+	}
 	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
-
-	if _, err := parseAdCreatedFromReceipt(receipt, contractAddr, mine); err == nil {
-		t.Fatalf("expected error: AdCreated with different adId must not match")
+	got, err := parseVoucherCancelledFromReceipt(receipt, contractAddr, voucherHash)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got.VoucherHash != voucherHash || got.Seller != seller {
+		t.Errorf("decoded fields mismatch: %+v", got)
 	}
 }
 
@@ -400,74 +422,60 @@ func TestParseTradeReleasedFromReceipt_DecodesPaymentSplit(t *testing.T) {
 func TestParseTradeOpenedFromReceipt_HappyPath(t *testing.T) {
 	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
 	tradeID := HashID(uuid.New())
-	adID := HashID(uuid.New())
+	voucherHash := HashID(uuid.New())
+	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
+	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
 	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
 	amount := big.NewInt(500_000_000)
 
-	logEntry := mustBuildTradeOpenedLog(t, contractAddr, tradeID, adID, buyer, amount)
+	logEntry := mustBuildTradeOpenedLog(t, contractAddr, tradeID, voucherHash, buyer, seller, token, amount)
 	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
 
 	ev, err := parseTradeOpenedFromReceipt(receipt, contractAddr, tradeID)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if ev.AdID != adID || ev.Buyer != buyer || ev.Amount.Cmp(amount) != 0 {
+	if ev.VoucherHash != voucherHash || ev.Buyer != buyer ||
+		ev.Seller != seller || ev.Token != token || ev.Amount.Cmp(amount) != 0 {
 		t.Errorf("decoded fields mismatch: %+v", ev)
 	}
 }
 
-// TestGetAd_OutputUnpackOrder pins the (seller, token, remaining, reserved,
-// createdAt, open) field order. A wrong-order ABI string would unpack
-// `remaining` into `reserved` and silently corrupt cap-tracking — pack a
-// known tuple through the same ABI definition, then unpack it, and assert
-// each field round-trips. This catches field-order drift without a chain.
-func TestGetAd_OutputUnpackOrder(t *testing.T) {
-	wantSeller := common.HexToAddress("0x000000000000000000000000000000000000beef")
-	wantToken := common.HexToAddress("0x000000000000000000000000000000000000feed")
-	wantRemaining := big.NewInt(700)
-	wantReserved := big.NewInt(300)
-	wantCreatedAt := big.NewInt(1715000000)
-	wantOpen := true
+// TestBalanceOf_OutputUnpackOrder pins the (available, locked) tuple ordering
+// of the new view. A wrong-order ABI string would swap them and silently
+// invert the seller's withdrawable amount.
+func TestBalanceOf_OutputUnpackOrder(t *testing.T) {
+	wantAvailable := big.NewInt(700)
+	wantLocked := big.NewInt(300)
 
-	method, ok := parsedP2PEscrowABI.Methods["getAd"]
+	method, ok := parsedP2PEscrowABI.Methods["balanceOf"]
 	if !ok {
-		t.Fatalf("getAd not in parsed ABI")
+		t.Fatalf("balanceOf not in parsed ABI")
 	}
-	packed, err := method.Outputs.Pack(wantSeller, wantToken, wantRemaining, wantReserved, wantCreatedAt, wantOpen)
+	packed, err := method.Outputs.Pack(wantAvailable, wantLocked)
 	if err != nil {
 		t.Fatalf("pack: %v", err)
 	}
 	vals, err := method.Outputs.Unpack(packed)
-	if err != nil || len(vals) != 6 {
+	if err != nil || len(vals) != 2 {
 		t.Fatalf("unpack: %v vals=%d", err, len(vals))
 	}
-	// Mirror P2PEscrowService.ReadAd field assignments exactly.
-	if vals[0].(common.Address) != wantSeller {
-		t.Errorf("slot 0 not seller")
+	if vals[0].(*big.Int).Cmp(wantAvailable) != 0 {
+		t.Errorf("slot 0 not available")
 	}
-	if vals[1].(common.Address) != wantToken {
-		t.Errorf("slot 1 not token")
-	}
-	if vals[2].(*big.Int).Cmp(wantRemaining) != 0 {
-		t.Errorf("slot 2 not remaining (would swap with reserved)")
-	}
-	if vals[3].(*big.Int).Cmp(wantReserved) != 0 {
-		t.Errorf("slot 3 not reserved")
-	}
-	if vals[4].(*big.Int).Cmp(wantCreatedAt) != 0 {
-		t.Errorf("slot 4 not createdAt")
-	}
-	if vals[5].(bool) != wantOpen {
-		t.Errorf("slot 5 not open")
+	if vals[1].(*big.Int).Cmp(wantLocked) != 0 {
+		t.Errorf("slot 1 not locked")
 	}
 }
 
 // ─── synthetic-log builders ─────────────────────────────────────────────────
 
-func mustBuildAdCreatedLog(t *testing.T, contractAddr common.Address, adID [32]byte,
+// mustBuildSimpleSellerTokenAmountLog builds a Deposited / Withdrawn log
+// (same shape: two indexed addresses + non-indexed amount).
+func mustBuildSimpleSellerTokenAmountLog(t *testing.T, eventName string, contractAddr,
 	seller, token common.Address, amount *big.Int) *types.Log {
 	t.Helper()
-	ev := parsedP2PEscrowABI.Events["AdCreated"]
+	ev := parsedP2PEscrowABI.Events[eventName]
 	data, err := ev.Inputs.NonIndexed().Pack(amount)
 	if err != nil {
 		t.Fatalf("pack non-indexed: %v", err)
@@ -476,7 +484,6 @@ func mustBuildAdCreatedLog(t *testing.T, contractAddr common.Address, adID [32]b
 		Address: contractAddr,
 		Topics: []common.Hash{
 			ev.ID,
-			adID,
 			common.BytesToHash(seller.Bytes()),
 			common.BytesToHash(token.Bytes()),
 		},
@@ -485,10 +492,11 @@ func mustBuildAdCreatedLog(t *testing.T, contractAddr common.Address, adID [32]b
 }
 
 func mustBuildTradeOpenedLog(t *testing.T, contractAddr common.Address,
-	tradeID, adID [32]byte, buyer common.Address, amount *big.Int) *types.Log {
+	tradeID, voucherHash [32]byte, buyer, seller, token common.Address, amount *big.Int) *types.Log {
 	t.Helper()
 	ev := parsedP2PEscrowABI.Events["TradeOpened"]
-	data, err := ev.Inputs.NonIndexed().Pack(amount)
+	// Non-indexed: seller, token, amount (in declared order).
+	data, err := ev.Inputs.NonIndexed().Pack(seller, token, amount)
 	if err != nil {
 		t.Fatalf("pack non-indexed: %v", err)
 	}
@@ -497,7 +505,7 @@ func mustBuildTradeOpenedLog(t *testing.T, contractAddr common.Address,
 		Topics: []common.Hash{
 			ev.ID,
 			tradeID,
-			adID,
+			voucherHash,
 			common.BytesToHash(buyer.Bytes()),
 		},
 		Data: data,

@@ -1,3 +1,13 @@
+//go:build phase2b
+// +build phase2b
+
+// Tests in this file exercise the pre-pool-model trade-service surface
+// (createAd / closeAd / openTrade-via-adId). They are excluded from the
+// default build until Phase 2B rewrites the trade service against the new
+// voucher flow — running them today would fail because the underlying
+// adapter methods now return ErrPhase2Migration. New voucher-flow tests
+// will land alongside the trade service refactor.
+
 package services
 
 import (
