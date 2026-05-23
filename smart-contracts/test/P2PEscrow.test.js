@@ -497,7 +497,10 @@ describe("P2PEscrow (pool model)", function () {
       await b.escrow.connect(b.seller).release(b.tradeId);
     });
 
-    it("falls back to owner for system recipient when systemWallet is zero", async function () {
+    it("non-MCGP release reverts loudly when systemWallet is unset", async function () {
+      // Refusing to silently route fees to owner() is the safer default —
+      // a forgotten setSystemWallet at deploy time would otherwise quietly
+      // send every fee to the deployer EOA. This test pins that behaviour.
       const [owner, seller, buyer] = await ethers.getSigners();
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const usdt = await MockERC20.deploy("Tether USD", "USDT", 6);
@@ -519,10 +522,38 @@ describe("P2PEscrow (pool model)", function () {
       });
       const tradeId = ethers.id("t-zero-sw");
       await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 10_000000n);
-      const fee = (10_000000n * 50n) / 10000n;
-      const ownerBefore = await usdt.balanceOf(owner.address);
-      await escrow.connect(seller).release(tradeId);
-      expect(await usdt.balanceOf(owner.address)).to.equal(ownerBefore + fee);
+      await expect(
+        escrow.connect(seller).release(tradeId)
+      ).to.be.revertedWith("System wallet not set");
+
+      // Once set, release succeeds and the fee lands on the configured wallet.
+      await escrow.connect(owner).setSystemWallet(buyer.address); // any non-zero
+      await expect(escrow.connect(seller).release(tradeId)).to.not.be.reverted;
+    });
+
+    it("MCGP release still works without a systemWallet (fee=0, no recipient call)", async function () {
+      const [owner, seller, buyer] = await ethers.getSigners();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const mcgp = await MockERC20.deploy("MCGP", "MCGP", 18);
+      const P2PEscrow = await ethers.getContractFactory("P2PEscrow");
+      const escrow = await upgrades.deployProxy(
+        P2PEscrow,
+        [owner.address, []],
+        { kind: "uups", initializer: "initialize", unsafeAllow: ["constructor"] }
+      );
+      const mcgpAddr = await mcgp.getAddress();
+      await escrow.setTokenAcceptance(mcgpAddr, true);
+      await escrow.setMcgpToken(mcgpAddr);
+      // systemWallet intentionally unset — for MCGP the fee is 0 so the
+      // _systemRecipient check is never reached.
+      const amount = ethers.parseEther("10");
+      await mcgp.mint(seller.address, amount);
+      await mcgp.connect(seller).approve(await escrow.getAddress(), amount);
+      await escrow.connect(seller).deposit(mcgpAddr, amount);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: mcgpAddr, maxAmount: amount });
+      const tradeId = ethers.id("t-mcgp-no-sw");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, amount);
+      await expect(escrow.connect(seller).release(tradeId)).to.not.be.reverted;
     });
   });
 
@@ -753,6 +784,24 @@ describe("P2PEscrow (pool model)", function () {
       await escrow.cancelByTimeout(t2);
       expect(await escrow.accountedBalance(tok)).to.equal(3500_000000n);
     });
+
+    it("accountedBalance debits correctly through dispute → adminResolve(true)", async function () {
+      const { escrow, usdt, seller, buyer, operator } = await loadFixture(deployFixture);
+      const tok = await usdt.getAddress();
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig } = await signVoucher(escrow, seller, { token: tok });
+      const tradeId = ethers.id("a-disp");
+      await escrow.connect(buyer).openTrade(tradeId, voucher, sig, 1000_000000n);
+      expect(await escrow.accountedBalance(tok)).to.equal(5000_000000n);
+
+      await escrow.connect(buyer).raiseDispute(tradeId);
+      // raiseDispute is state-only — accounted unchanged
+      expect(await escrow.accountedBalance(tok)).to.equal(5000_000000n);
+
+      await escrow.connect(operator).adminResolve(tradeId, true);
+      // Funds left the contract → accounted -= 1000
+      expect(await escrow.accountedBalance(tok)).to.equal(4000_000000n);
+    });
   });
 
   // --- sweepExcess fence -----------------------------------------------------
@@ -831,6 +880,33 @@ describe("P2PEscrow (pool model)", function () {
       await escrow.connect(buyer).raiseDispute(tradeId);
       await escrow.connect(operator).adminResolve(tradeId, true);
       expect(await escrow.voucherFilled(voucherHash)).to.equal(700_000000n);
+    });
+
+    it("multi-fill voucher: cancelling one trade refunds only that trade's slice", async function () {
+      const { escrow, usdt, seller, buyer, buyer2 } = await loadFixture(deployFixture);
+      await depositUsdt(escrow, usdt, seller, 5000_000000n);
+      const { voucher, sig, voucherHash } = await signVoucher(escrow, seller, {
+        token: await usdt.getAddress(),
+        maxAmount: 1000_000000n,
+      });
+      const t1 = ethers.id("vf-multi-1");
+      const t2 = ethers.id("vf-multi-2");
+      await escrow.connect(buyer).openTrade(t1, voucher, sig, 600_000000n);
+      await escrow.connect(buyer2).openTrade(t2, voucher, sig, 400_000000n);
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(1000_000000n);
+
+      // Time out only the first trade.
+      await time.increase(THIRTY_MIN + 1);
+      await escrow.cancelByTimeout(t1);
+      // Voucher fill drops back to just t2's slice.
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(400_000000n);
+
+      // The 600 slice is now re-fillable by a new buyer.
+      const t3 = ethers.id("vf-multi-3");
+      await expect(
+        escrow.connect(buyer).openTrade(t3, voucher, sig, 600_000000n)
+      ).to.not.be.reverted;
+      expect(await escrow.voucherFilled(voucherHash)).to.equal(1000_000000n);
     });
 
     it("does NOT decrement on release — the fill was real", async function () {

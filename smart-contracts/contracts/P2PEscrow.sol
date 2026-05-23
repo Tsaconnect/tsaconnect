@@ -41,6 +41,19 @@ contract P2PEscrow is
 {
     using SafeERC20 for IERC20;
 
+    /// @notice Trade lifecycle states.
+    ///
+    /// Legal transitions:
+    ///   None      → Pending             (via openTrade)
+    ///   Pending   → Paid                (via markPaid)
+    ///   Pending   → Cancelled           (via cancelByTimeout)
+    ///   Pending   → Disputed            (via raiseDispute)
+    ///   Paid      → Disputed            (via raiseDispute)
+    ///   Pending   → Released            (via release / adminRelease)
+    ///   Paid      → Released            (via release / adminRelease)
+    ///   Disputed  → Resolved            (via adminResolve)
+    ///
+    /// Terminal states: Released, Cancelled, Resolved.
     enum Status { None, Pending, Paid, Released, Cancelled, Disputed, Resolved }
 
     /// @notice Off-chain voucher signed by the seller authorising buyers to
@@ -199,6 +212,12 @@ contract P2PEscrow is
         emit SystemWalletUpdated(old, _systemWallet);
     }
 
+    /// @notice Whitelist or delist a token for P2P trading.
+    /// @dev IMPORTANT: only whitelist standard ERC20s. Rebasing tokens, fee-on-
+    ///      transfer tokens, and any non-conformant ERC20s WILL break the
+    ///      `accountedBalance` invariant (`balanceOf(this) == accountedBalance[token]`)
+    ///      because the balance can drift independently of our bookkeeping.
+    ///      That would make the `sweepExcess` fence either over- or under-permissive.
     function setTokenAcceptance(address token, bool accepted) external onlyOwner {
         require(token != address(0), "Invalid token");
         acceptedTokens[token] = accepted;
@@ -301,6 +320,10 @@ contract P2PEscrow is
         require(amount <= type(uint96).max, "Amount overflow");
         require(v.seller != address(0), "Invalid voucher seller");
         require(v.seller != msg.sender, "Seller cannot self-buy");
+        // Defense-in-depth: acceptedTokens[address(0)] is false today, but an
+        // explicit check makes the invariant robust to future admin mistakes
+        // (e.g. setTokenAcceptance(address(0), true)).
+        require(v.token != address(0), "Voucher: token=0");
         require(acceptedTokens[v.token], "Token not accepted");
         require(block.timestamp <= v.deadline, "Voucher expired");
         // Reject self-inconsistent vouchers up front so buyers don't waste
@@ -312,6 +335,9 @@ contract P2PEscrow is
             v.minPerTrade == 0 || v.maxPerTrade == 0 || v.minPerTrade <= v.maxPerTrade,
             "Voucher: minPerTrade > maxPerTrade"
         );
+        // Also catch the case where maxPerTrade is disabled — minPerTrade
+        // alone could still exceed maxAmount, producing an unfulfillable voucher.
+        require(v.minPerTrade <= v.maxAmount, "Voucher: minPerTrade > maxAmount");
         require(v.minPerTrade == 0 || amount >= v.minPerTrade, "Below voucher min");
         require(v.maxPerTrade == 0 || amount <= v.maxPerTrade, "Above voucher max");
 
@@ -499,8 +525,14 @@ contract P2PEscrow is
         toBuyer = uint256(amount) - fee;
     }
 
+    /// @dev Returns the fee recipient. Reverts if systemWallet has not been
+    /// set — refusing to release rather than silently routing fees to owner()
+    /// is the safer default (a forgotten setSystemWallet during deploy would
+    /// otherwise silently send every fee to the deployer EOA). Owners must
+    /// call setSystemWallet before any non-MCGP trade can release.
     function _systemRecipient() internal view returns (address) {
         address sw = systemWallet;
-        return sw == address(0) ? owner() : sw;
+        require(sw != address(0), "System wallet not set");
+        return sw;
     }
 }
