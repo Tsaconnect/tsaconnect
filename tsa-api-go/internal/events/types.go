@@ -72,6 +72,9 @@ const (
 	// trade past its expiry. The buyer never marked paid; the seller should
 	// reclaim their escrow via the cancelByTimeout flow.
 	P2PTradeExpired = "p2p.trade.expired"
+	// Pool-model capital movement.
+	P2PDepositConfirmed  = "p2p.deposit.confirmed"
+	P2PWithdrawConfirmed = "p2p.withdraw.confirmed"
 )
 
 // Event is the payload passed through the event bus.

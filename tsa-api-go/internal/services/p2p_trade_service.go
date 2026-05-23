@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -46,26 +48,44 @@ var uint96Max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 96), big.NewInt
 
 // P2PEscrowAdapter is the contract-binding surface the trade service depends
 // on. P2PEscrowService satisfies it; tests inject a fake.
+//
+// The pool model splits ad lifecycle into off-chain voucher signing (no
+// adapter call) and on-chain settlement. Methods that move funds — deposit,
+// withdraw, openTrade(voucher), markPaid, release, cancelByTimeout,
+// raiseDispute, adminResolve — are prepared as unsigned txs the caller signs
+// and broadcasts via their wallet.
 type P2PEscrowAdapter interface {
 	ContractAddress() string
-	PrepareCreateAd(adId [32]byte, seller, token string, amount *big.Int) ([]byte, error)
-	PrepareOpenTrade(tradeId, adId [32]byte, buyer string, amount *big.Int) ([]byte, error)
+
+	// Pool capital movement.
+	PrepareDeposit(seller, token string, amount *big.Int) ([]byte, error)
+	PrepareWithdraw(seller, token string, amount *big.Int) ([]byte, error)
+
+	// Voucher / trade lifecycle.
+	PrepareCancelVoucher(seller string, voucher AdVoucher) ([]byte, error)
+	PrepareOpenTradeWithVoucher(tradeId [32]byte, voucher AdVoucher, sig []byte, buyer string, amount *big.Int) ([]byte, error)
 	PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error)
 	PrepareRelease(tradeId [32]byte, seller string) ([]byte, error)
 	PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error)
-	PrepareCloseAd(adId [32]byte, seller string) ([]byte, error)
 	PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error)
 	PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error)
-	VerifyAdCreated(txHash string, expectedAdId [32]byte) (*P2PAdCreatedEvent, error)
+
+	// Receipt verification.
+	VerifyDeposited(txHash string, expectedSeller, expectedToken common.Address) (*P2PDepositedEvent, error)
+	VerifyWithdrawn(txHash string, expectedSeller, expectedToken common.Address) (*P2PWithdrawnEvent, error)
+	VerifyVoucherCancelled(txHash string, expectedVoucherHash [32]byte) (*P2PVoucherCancelledEvent, error)
 	VerifyTradeOpened(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedEvent, error)
 	VerifyTradeReleased(txHash string, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error)
 	VerifyTradeCancelled(txHash string, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error)
 	VerifyTradeDisputed(txHash string, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error)
 	VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error)
-	// ReadTrade is the chain-side getter the reconciler uses to detect DB
-	// drift. Status mirrors P2PEscrow.sol's Status enum (see
-	// OnChainP2PTradeStatus constants).
+
+	// Views — used by reconciler + voucher-state checks.
 	ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
+	ReadBalance(seller, token string) (*OnChainBalance, error)
+	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
+	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)
+	HashVoucher(v AdVoucher) ([32]byte, error)
 }
 
 // RateProvider gives the trade service a freshness signal so it can refuse
@@ -204,9 +224,45 @@ type OpenTradeParams struct {
 	PaymentMethodID uuid.UUID
 }
 
+// CreateAdResult carries the persisted ad plus the EIP-712 typed-data
+// payload the seller must sign off-chain. The signature is submitted back
+// via SignAd; no on-chain transaction is needed to publish an ad.
 type CreateAdResult struct {
-	Ad         *models.P2PAd
-	UnsignedTx []byte
+	Ad        *models.P2PAd
+	TypedData *VoucherTypedData
+}
+
+// VoucherTypedData is an EIP-712 typed-data payload in the shape wagmi /
+// ethers / RainbowKit consume via signTypedData. Fields mirror the contract's
+// AdVoucher tuple; values are stringified for JSON safety on amounts /
+// timestamps.
+type VoucherTypedData struct {
+	Types       map[string][]VoucherTypedField `json:"types"`
+	PrimaryType string                         `json:"primaryType"`
+	Domain      VoucherTypedDomain             `json:"domain"`
+	Message     VoucherTypedMessage            `json:"message"`
+}
+
+type VoucherTypedField struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+type VoucherTypedDomain struct {
+	Name              string `json:"name"`
+	Version           string `json:"version"`
+	ChainID           int64  `json:"chainId"`
+	VerifyingContract string `json:"verifyingContract"`
+}
+
+type VoucherTypedMessage struct {
+	Seller      string `json:"seller"`
+	Token       string `json:"token"`
+	MaxAmount   string `json:"maxAmount"`
+	MinPerTrade string `json:"minPerTrade"`
+	MaxPerTrade string `json:"maxPerTrade"`
+	Deadline    string `json:"deadline"`
+	Nonce       string `json:"nonce"` // hex with 0x prefix
 }
 
 type ReleaseResult struct {
@@ -215,9 +271,21 @@ type ReleaseResult struct {
 
 // ─── Ad lifecycle ───────────────────────────────────────────────────────────
 
+// Default voucher TTL — sellers can re-publish after this expires.
+const defaultVoucherTTL = 30 * 24 * time.Hour
+
+// CreateAd builds an AdVoucher, persists the ad in `pending` (awaiting
+// signature) state, and returns the EIP-712 typed-data payload for the
+// seller to sign off-chain. No on-chain transaction is required to publish.
+//
+// The seller must call SignAd next, presenting their signature over the
+// returned typed data. Until then the ad is invisible to buyers.
 func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sellerAddress string, params CreateAdParams) (*CreateAdResult, error) {
 	if err := s.validateCreateAd(params); err != nil {
 		return nil, err
+	}
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
 
 	amount, _ := new(big.Int).SetString(params.TokenAmount, 10)
@@ -248,6 +316,25 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		anchor = models.P2PAdFloatAnchorBybitSell
 	}
 
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(params.Token))
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify the seller actually holds enough deposited capital before we
+	// publish a voucher promising it. The contract will reject openTrade if
+	// the seller's available balance is short, but failing here gives the
+	// seller a clean message at publish time instead of a confusing buyer-
+	// side revert later.
+	if bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr); err == nil {
+		if bal.Available.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("%w: insufficient available balance (have %s, need %s)",
+				ErrInvalidParams, bal.Available, amount)
+		}
+	}
+	// If ReadBalance fails (RPC down), let it slide — the contract is still
+	// the authoritative gate and the seller can re-try sign/trade later.
+
 	ad := &models.P2PAd{
 		ID:               uuid.New(),
 		SellerID:         sellerID,
@@ -269,10 +356,6 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		Status:           models.P2PAdStatusPending,
 	}
 
-	// Float ads compute their initial cache value from the live feed so the
-	// browse list shows a real number from the moment the ad is published.
-	// requireFreshRate above already guaranteed the feed is fresh; failing
-	// here means a race we can't recover from cleanly, so bubble ErrRateStale.
 	if rateType == models.P2PAdRateTypeFloat {
 		effective, err := s.ComputeEffectiveRate(ad)
 		if err != nil {
@@ -280,34 +363,71 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		}
 		ad.Rate = effective
 	}
-	ad.OnChainAdID = HashIDHex(ad.ID)
-	onChainAdID := HashID(ad.ID)
 
-	tokenAddr, err := s.resolveTokenAddress(ad.Token)
-	if err != nil {
-		return nil, err
+	// Build the voucher. Nonce is server-generated; doubles as the ad's
+	// off-chain id for indexing. Deadline defaults to 30 days; sellers
+	// re-publish after that to keep the rate fresh.
+	nonce := HashID(uuid.New())
+	deadline := s.clock.Now().Add(defaultVoucherTTL)
+
+	// Per-trade limits in the voucher are TOKEN amounts (the contract checks
+	// `amount` against them, where amount is in token base units). MinLimit /
+	// MaxLimit on the ad are FIAT amounts though, so we don't push them into
+	// the voucher — the fiat-side floor/ceiling is enforced off-chain in
+	// OpenTrade via checkFiatLimits. The voucher carries only the total cap.
+	voucher := AdVoucher{
+		Seller:      common.HexToAddress(sellerAddress),
+		Token:       common.HexToAddress(tokenAddr),
+		MaxAmount:   new(big.Int).Set(amount),
+		MinPerTrade: big.NewInt(0),
+		MaxPerTrade: big.NewInt(0),
+		Deadline:    big.NewInt(deadline.Unix()),
+		Nonce:       nonce,
 	}
 
-	unsignedTx, err := s.escrow.PrepareCreateAd(onChainAdID, sellerAddress, tokenAddr, amount)
+	// Ask the contract for the canonical EIP-712 digest. We could compute
+	// it locally but delegating to the contract guarantees parity with the
+	// on-chain check and surfaces any RPC misconfiguration early.
+	hash, err := s.escrow.HashVoucher(voucher)
 	if err != nil {
-		return nil, fmt.Errorf("prepare createAd: %w", err)
+		return nil, fmt.Errorf("hash voucher: %w", err)
 	}
+
+	ad.SellerAddress = common.HexToAddress(sellerAddress).Hex() // checksummed
+	ad.VoucherNonce = "0x" + common.Bytes2Hex(nonce[:])
+	dt := deadline
+	ad.VoucherDeadline = &dt
+	ad.VoucherHash = "0x" + common.Bytes2Hex(hash[:])
 
 	if err := s.db.WithContext(ctx).Create(ad).Error; err != nil {
 		return nil, fmt.Errorf("persist ad: %w", err)
 	}
 
+	typedData := s.buildVoucherTypedData(voucher)
+
 	s.audit(ctx, models.P2PAuditAdCreated, &sellerID, &ad.ID, nil, map[string]any{
-		"token":  ad.Token,
-		"amount": ad.Amount,
-		"rate":   ad.Rate,
+		"token":       ad.Token,
+		"amount":      ad.Amount,
+		"rate":        ad.Rate,
+		"voucherHash": ad.VoucherHash,
 	})
 	s.emit(events.P2PAdCreated, sellerID, "P2P ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 
-	return &CreateAdResult{Ad: ad, UnsignedTx: unsignedTx}, nil
+	return &CreateAdResult{Ad: ad, TypedData: typedData}, nil
 }
 
-func (s *P2PTradeService) ConfirmAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress, txHash string) (*models.P2PAd, error) {
+// SignAd stores the seller's EIP-712 signature for a pending ad and flips
+// it to active. The signature is verified against the canonical voucher
+// hash recovered from the contract — a wrong-domain, wrong-key, or
+// wrong-fields sig is rejected here, before any buyer sees the ad.
+func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress string, signature []byte) (*models.P2PAd, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	if len(signature) != 65 {
+		return nil, fmt.Errorf("%w: signature must be 65 bytes", ErrInvalidParams)
+	}
+
 	var ad models.P2PAd
 	if err := s.db.WithContext(ctx).First(&ad, "id = ?", adID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -318,35 +438,37 @@ func (s *P2PTradeService) ConfirmAd(ctx context.Context, adID, sellerID uuid.UUI
 	if ad.SellerID != sellerID {
 		return nil, ErrForbidden
 	}
-	if ad.Status == models.P2PAdStatusActive && ad.EscrowTxHash == txHash {
+	// Idempotent replay: identical sig on an already-active ad returns OK.
+	sigHex := "0x" + common.Bytes2Hex(signature)
+	if ad.Status == models.P2PAdStatusActive && ad.VoucherSignature == sigHex {
 		return &ad, nil
 	}
 	if ad.Status != models.P2PAdStatusPending {
 		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
 
-	ev, err := s.escrow.VerifyAdCreated(txHash, HashID(ad.ID))
+	voucher, err := s.adVoucher(&ad, sellerAddress)
 	if err != nil {
-		return nil, fmt.Errorf("verify on-chain ad: %w", err)
+		return nil, err
 	}
-	expectedAmount, _ := new(big.Int).SetString(ad.Amount, 10)
-	if ev.Amount.Cmp(expectedAmount) != 0 {
-		return nil, fmt.Errorf("on-chain amount %s does not match db amount %s", ev.Amount, ad.Amount)
+
+	hash, err := s.escrow.HashVoucher(voucher)
+	if err != nil {
+		return nil, fmt.Errorf("hash voucher: %w", err)
 	}
-	// Defence-in-depth: confirm the on-chain seller matches the wallet the
-	// authenticated caller is using. The adId is keccak-derived from a
-	// server-owned UUID so collision is implausible, but the cross-check
-	// turns a silent-attribution bug into an explicit reject.
-	if sellerAddress != "" && !strings.EqualFold(ev.Seller.Hex(), sellerAddress) {
-		return nil, fmt.Errorf("on-chain seller %s does not match expected %s", ev.Seller.Hex(), sellerAddress)
+	if recovered, err := recoverEIP712Signer(hash, signature); err != nil {
+		return nil, fmt.Errorf("%w: invalid signature (%v)", ErrInvalidParams, err)
+	} else if !strings.EqualFold(recovered.Hex(), sellerAddress) {
+		return nil, fmt.Errorf("%w: signature recovered to %s, expected %s",
+			ErrInvalidParams, recovered.Hex(), sellerAddress)
 	}
 
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
 		Where("id = ? AND status = ?", ad.ID, models.P2PAdStatusPending).
 		Updates(map[string]any{
-			"status":         models.P2PAdStatusActive,
-			"escrow_tx_hash": txHash,
-			"updated_at":     s.clock.Now(),
+			"status":            models.P2PAdStatusActive,
+			"voucher_signature": sigHex,
+			"updated_at":        s.clock.Now(),
 		})
 	if res.Error != nil {
 		return nil, res.Error
@@ -355,14 +477,23 @@ func (s *P2PTradeService) ConfirmAd(ctx context.Context, adID, sellerID uuid.UUI
 		return nil, ErrInvalidTransition
 	}
 	ad.Status = models.P2PAdStatusActive
-	ad.EscrowTxHash = txHash
+	ad.VoucherSignature = sigHex
 
-	s.audit(ctx, models.P2PAuditAdCreated+".confirmed", &sellerID, &ad.ID, nil, map[string]any{"txHash": txHash})
+	s.audit(ctx, models.P2PAuditAdCreated+".signed", &sellerID, &ad.ID, nil, map[string]any{
+		"voucherHash": ad.VoucherHash,
+	})
 	s.emit(events.P2PAdCreated, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
 	return &ad, nil
 }
 
-func (s *P2PTradeService) CloseAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress string) ([]byte, error) {
+// CancelAd returns the unsigned cancelVoucher tx for an active or paused ad.
+// Cancellation is on-chain because the contract is the source of truth for
+// voucher revocation — a DB-only flag would still leave the signature valid
+// for buyers who fetched it before the flag was set.
+func (s *P2PTradeService) CancelAd(ctx context.Context, adID, sellerID uuid.UUID, sellerAddress string) ([]byte, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
 	var ad models.P2PAd
 	if err := s.db.WithContext(ctx).First(&ad, "id = ?", adID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -385,10 +516,16 @@ func (s *P2PTradeService) CloseAd(ctx context.Context, adID, sellerID uuid.UUID,
 	if openCount > 0 {
 		return nil, ErrAdHasOpenTrades
 	}
-	return s.escrow.PrepareCloseAd(HashID(ad.ID), sellerAddress)
+	voucher, err := s.adVoucher(&ad, sellerAddress)
+	if err != nil {
+		return nil, err
+	}
+	return s.escrow.PrepareCancelVoucher(sellerAddress, voucher)
 }
 
-func (s *P2PTradeService) ConfirmCloseAd(ctx context.Context, adID, sellerID uuid.UUID, txHash string) (*models.P2PAd, error) {
+// ConfirmCancelAd verifies the on-chain VoucherCancelled receipt and marks
+// the ad cancelled in DB.
+func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uuid.UUID, txHash string) (*models.P2PAd, error) {
 	var ad models.P2PAd
 	if err := s.db.WithContext(ctx).First(&ad, "id = ?", adID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -399,6 +536,19 @@ func (s *P2PTradeService) ConfirmCloseAd(ctx context.Context, adID, sellerID uui
 	if ad.SellerID != sellerID {
 		return nil, ErrForbidden
 	}
+	if ad.Status == models.P2PAdStatusCancelled {
+		return &ad, nil
+	}
+	if ad.VoucherHash == "" {
+		return nil, fmt.Errorf("%w: ad has no voucher hash", ErrInvalidTransition)
+	}
+	var hash [32]byte
+	copy(hash[:], common.FromHex(ad.VoucherHash))
+
+	if _, err := s.escrow.VerifyVoucherCancelled(txHash, hash); err != nil {
+		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
+	}
+
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
 		Where("id = ? AND status IN ?", ad.ID,
 			[]string{models.P2PAdStatusActive, models.P2PAdStatusPaused}).
@@ -517,7 +667,20 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	trade.OnChainTradeID = HashIDHex(trade.ID)
 	onChainTradeID := HashID(trade.ID)
 
-	unsignedTx, err := s.escrow.PrepareOpenTrade(onChainTradeID, HashID(ad.ID), buyerAddress, tokenAmount)
+	// Build the voucher from the ad's stored fields + the seller wallet
+	// implied by the on-chain voucher signature. The voucher hash recomputed
+	// here must match ad.VoucherHash — a mismatch means the DB row drifted
+	// from the signed payload, and openTrade would revert with
+	// "Bad voucher signature" on chain. Catch it loud here instead.
+	if ad.VoucherSignature == "" || ad.SellerAddress == "" {
+		return nil, nil, fmt.Errorf("%w: ad not yet signed", ErrInvalidTransition)
+	}
+	voucher, err := s.adVoucher(&ad, ad.SellerAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+	sig := common.FromHex(ad.VoucherSignature)
+	unsignedTx, err := s.escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
 	if err != nil {
 		return nil, nil, fmt.Errorf("prepare openTrade: %w", err)
 	}
@@ -1945,6 +2108,245 @@ func (s *P2PTradeService) resolveTokenAddress(symbol string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: %s", ErrUnsupportedToken, symbol)
+}
+
+// ─── Deposit / withdraw ─────────────────────────────────────────────────────
+
+// PrepareDeposit builds the unsigned tx for `deposit(token, amount)`. The
+// seller is expected to ERC20-approve the escrow contract for `amount`
+// before broadcasting; without the approval the on-chain transferFrom
+// reverts and gas estimation fails.
+//
+// Server-side accounting is post-broadcast: balances are read on-chain via
+// ReadBalance rather than tracked separately, so a confirm step exists only
+// to verify the receipt + emit an audit log.
+func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	amt, ok := new(big.Int).SetString(amount, 10)
+	if !ok || amt.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{
+		"token":  strings.ToUpper(tokenSymbol),
+		"amount": amount,
+	})
+	return s.escrow.PrepareDeposit(sellerAddress, tokenAddr, amt)
+}
+
+// ConfirmDeposit verifies the Deposited event for the supplied tx hash and
+// emits an audit log + notification. Returns the parsed event so callers
+// can surface the actual on-chain amount back to the UI.
+func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, txHash string) (*P2PDepositedEvent, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	ev, err := s.escrow.VerifyDeposited(txHash,
+		common.HexToAddress(sellerAddress),
+		common.HexToAddress(tokenAddr))
+	if err != nil {
+		return nil, fmt.Errorf("verify deposit: %w", err)
+	}
+	s.audit(ctx, models.P2PAuditDepositConfirmed, &sellerID, nil, nil, map[string]any{
+		"token":  strings.ToUpper(tokenSymbol),
+		"amount": ev.Amount.String(),
+		"txHash": txHash,
+	})
+	s.emit(events.P2PDepositConfirmed, sellerID, "Deposit confirmed", "",
+		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
+	return ev, nil
+}
+
+// PrepareWithdraw builds the unsigned tx for `withdraw(token, amount)`.
+// Reverts on chain if amount exceeds the seller's available balance.
+func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	amt, ok := new(big.Int).SetString(amount, 10)
+	if !ok || amt.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	// Soft pre-check — fast-fail with a useful message if the seller is
+	// trying to withdraw more than they have. The contract will reject
+	// regardless; this just turns a tx revert into a friendly 400.
+	if bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr); err == nil {
+		if bal.Available.Cmp(amt) < 0 {
+			return nil, fmt.Errorf("%w: insufficient available balance (have %s)", ErrInvalidParams, bal.Available)
+		}
+	}
+	s.audit(ctx, models.P2PAuditWithdrawPrepared, &sellerID, nil, nil, map[string]any{
+		"token":  strings.ToUpper(tokenSymbol),
+		"amount": amount,
+	})
+	return s.escrow.PrepareWithdraw(sellerAddress, tokenAddr, amt)
+}
+
+// ConfirmWithdraw verifies the Withdrawn event for the supplied tx hash.
+func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, txHash string) (*P2PWithdrawnEvent, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	ev, err := s.escrow.VerifyWithdrawn(txHash,
+		common.HexToAddress(sellerAddress),
+		common.HexToAddress(tokenAddr))
+	if err != nil {
+		return nil, fmt.Errorf("verify withdraw: %w", err)
+	}
+	s.audit(ctx, models.P2PAuditWithdrawConfirmed, &sellerID, nil, nil, map[string]any{
+		"token":  strings.ToUpper(tokenSymbol),
+		"amount": ev.Amount.String(),
+		"txHash": txHash,
+	})
+	s.emit(events.P2PWithdrawConfirmed, sellerID, "Withdrawal confirmed", "",
+		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
+	return ev, nil
+}
+
+// GetPoolBalance returns the (available, locked) balance for a (seller, token).
+// Read straight from chain — server doesn't maintain a shadow copy of the
+// per-(seller, token) ledger since the contract's accountedBalance is the
+// source of truth.
+func (s *P2PTradeService) GetPoolBalance(ctx context.Context, sellerAddress, tokenSymbol string) (*OnChainBalance, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	return s.escrow.ReadBalance(sellerAddress, tokenAddr)
+}
+
+// ─── Voucher helpers ────────────────────────────────────────────────────────
+
+// adVoucher reconstructs the EIP-712 voucher from an ad row. The ad must
+// have non-empty SellerAddress + VoucherNonce + VoucherDeadline (set during
+// CreateAd). `sellerAddrOverride`, when non-empty, replaces the stored
+// SellerAddress — used by SignAd to bind the voucher to the caller's wallet
+// in case the ad's SellerAddress wasn't pre-populated (legacy rows).
+func (s *P2PTradeService) adVoucher(ad *models.P2PAd, sellerAddrOverride string) (AdVoucher, error) {
+	if ad.VoucherNonce == "" || ad.VoucherDeadline == nil {
+		return AdVoucher{}, fmt.Errorf("%w: ad has no voucher data", ErrInvalidTransition)
+	}
+	sellerAddr := ad.SellerAddress
+	if sellerAddrOverride != "" {
+		sellerAddr = sellerAddrOverride
+	}
+	if !common.IsHexAddress(sellerAddr) {
+		return AdVoucher{}, fmt.Errorf("%w: ad seller address", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(ad.Token)
+	if err != nil {
+		return AdVoucher{}, err
+	}
+	amount, _ := new(big.Int).SetString(ad.Amount, 10)
+	if amount == nil {
+		return AdVoucher{}, fmt.Errorf("%w: ad amount", ErrInvalidParams)
+	}
+	var nonce [32]byte
+	copy(nonce[:], common.FromHex(ad.VoucherNonce))
+	return AdVoucher{
+		Seller:      common.HexToAddress(sellerAddr),
+		Token:       common.HexToAddress(tokenAddr),
+		MaxAmount:   amount,
+		MinPerTrade: big.NewInt(0),
+		MaxPerTrade: big.NewInt(0),
+		Deadline:    big.NewInt(ad.VoucherDeadline.Unix()),
+		Nonce:       nonce,
+	}, nil
+}
+
+// buildVoucherTypedData formats the voucher as an EIP-712 typed-data payload
+// the seller's wallet (wagmi/ethers/RainbowKit) signs via signTypedData.
+// Field order MUST match AD_VOUCHER_TYPEHASH in the contract — otherwise the
+// digest will differ and the contract will reject the signature.
+func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher) *VoucherTypedData {
+	return &VoucherTypedData{
+		Types: map[string][]VoucherTypedField{
+			"EIP712Domain": {
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"AdVoucher": {
+				{Name: "seller", Type: "address"},
+				{Name: "token", Type: "address"},
+				{Name: "maxAmount", Type: "uint256"},
+				{Name: "minPerTrade", Type: "uint256"},
+				{Name: "maxPerTrade", Type: "uint256"},
+				{Name: "deadline", Type: "uint256"},
+				{Name: "nonce", Type: "bytes32"},
+			},
+		},
+		PrimaryType: "AdVoucher",
+		Domain: VoucherTypedDomain{
+			Name:              "TSAConnectP2PEscrow",
+			Version:           "1",
+			ChainID:           s.chainID,
+			VerifyingContract: s.escrow.ContractAddress(),
+		},
+		Message: VoucherTypedMessage{
+			Seller:      v.Seller.Hex(),
+			Token:       v.Token.Hex(),
+			MaxAmount:   v.MaxAmount.String(),
+			MinPerTrade: v.MinPerTrade.String(),
+			MaxPerTrade: v.MaxPerTrade.String(),
+			Deadline:    v.Deadline.String(),
+			Nonce:       "0x" + common.Bytes2Hex(v.Nonce[:]),
+		},
+	}
+}
+
+// recoverEIP712Signer recovers the signer address from a 65-byte signature
+// over an EIP-712 digest. Accepts both 0/1 and 27/28 conventions for v.
+// Normalises high-S signatures by rejecting them — go-ethereum's
+// SigToPub does not reject malleable sigs, so we mirror the on-chain
+// ECDSA.recover behavior here.
+func recoverEIP712Signer(digest [32]byte, sig []byte) (common.Address, error) {
+	if len(sig) != 65 {
+		return common.Address{}, fmt.Errorf("signature must be 65 bytes, got %d", len(sig))
+	}
+	// secp256k1n / 2 — sigs with s > this are rejected on chain.
+	halfN := new(big.Int).Rsh(crypto.S256().Params().N, 1)
+	s := new(big.Int).SetBytes(sig[32:64])
+	if s.Cmp(halfN) > 0 {
+		return common.Address{}, fmt.Errorf("non-canonical signature s value")
+	}
+	// Normalise v from 27/28 → 0/1 for crypto.SigToPub.
+	v := sig[64]
+	if v >= 27 {
+		v -= 27
+	}
+	if v != 0 && v != 1 {
+		return common.Address{}, fmt.Errorf("invalid v: %d", sig[64])
+	}
+	normalised := make([]byte, 65)
+	copy(normalised, sig[:64])
+	normalised[64] = v
+	pub, err := crypto.SigToPub(digest[:], normalised)
+	if err != nil {
+		return common.Address{}, err
+	}
+	return crypto.PubkeyToAddress(*pub), nil
 }
 
 // ─── Audit + events helpers ─────────────────────────────────────────────────
