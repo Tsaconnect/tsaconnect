@@ -81,46 +81,46 @@ const MyAdsScreen: React.FC = () => {
     load();
   };
 
-  const onClose = (ad: P2PAd) => {
+  const onCancel = (ad: P2PAd) => {
     if (acting) return;
     // Hold the action lock for the duration of the confirm dialog so a
     // concurrent pause/resume on the same card can't sneak in and starve
-    // the close flow with a silent `if (acting) return` no-op.
+    // the cancel flow with a silent `if (acting) return` no-op.
     setActing(ad.id);
     Alert.alert(
-      'Close this ad?',
-      'Closing the ad refunds the unsold portion to your wallet and stops new trades. ' +
-        'Trades already in progress will continue until they finish.',
+      'Cancel this ad?',
+      'Cancelling revokes your voucher on-chain. The locked portion stays in your pool ' +
+        'balance and any trades already in progress will continue until they finish.',
       [
-        { text: 'Cancel', style: 'cancel', onPress: () => setActing('') },
-        { text: 'Close ad', style: 'destructive', onPress: () => doClose(ad) },
+        { text: 'Keep ad', style: 'cancel', onPress: () => setActing('') },
+        { text: 'Cancel ad', style: 'destructive', onPress: () => doCancel(ad) },
       ],
       { onDismiss: () => setActing((cur) => (cur === ad.id ? '' : cur)) },
     );
   };
 
-  const doClose = async (ad: P2PAd) => {
+  const doCancel = async (ad: P2PAd) => {
     let broadcastHash: string | null = null;
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
-      const prep = await adsApi.prepareClose(ad.id, sellerAddress);
+      const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
       const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);
       broadcastHash = resp.hash;
-      const conf = await adsApi.confirmClose(ad.id, resp.hash);
+      const conf = await adsApi.confirmCancel(ad.id, resp.hash);
       if (!conf.success) throw new Error(conf.message || 'Confirm failed');
     } catch (err: any) {
       const detail = err?.message || String(err);
       if (broadcastHash) {
         Alert.alert(
-          'Close submitted, server confirm failed',
+          'Cancel submitted, server confirm failed',
           `Tx ${broadcastHash} was broadcast on chain but the server couldn't record it ` +
             `(${detail}). Wait a minute for the reconciler to catch up; contact support if not.`,
         );
       } else {
-        Alert.alert('Close failed', detail);
+        Alert.alert('Cancel failed', detail);
       }
     } finally {
       setActing('');
@@ -192,7 +192,7 @@ const MyAdsScreen: React.FC = () => {
               ad={ad}
               busy={acting === ad.id}
               onTogglePause={onTogglePause}
-              onClose={onClose}
+              onCancel={onCancel}
             />
           ))
         )}
@@ -205,14 +205,14 @@ const AdCard: React.FC<{
   ad: P2PAd;
   busy: boolean;
   onTogglePause: (ad: P2PAd) => void;
-  onClose: (ad: P2PAd) => void;
-}> = ({ ad, busy, onTogglePause, onClose }) => {
+  onCancel: (ad: P2PAd) => void;
+}> = ({ ad, busy, onTogglePause, onCancel }) => {
   const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const reserved = formatTokenAmount(ad.reserved, decimals, 2);
   const total = formatTokenAmount(ad.amount, decimals, 2);
   const canPauseResume = ad.status === 'active' || ad.status === 'paused';
-  const canClose = ad.status === 'active' || ad.status === 'paused' || ad.status === 'pending';
+  const canCancel = ad.status === 'active' || ad.status === 'paused' || ad.status === 'pending';
 
   return (
     <TouchableOpacity
@@ -241,7 +241,7 @@ const AdCard: React.FC<{
         <Text style={styles.cardMetaValue}>{total} {ad.token}</Text>
       </View>
 
-      {(canPauseResume || canClose) && (
+      {(canPauseResume || canCancel) && (
         <View style={styles.cardActions}>
           {canPauseResume && (
             <TouchableOpacity
@@ -259,14 +259,14 @@ const AdCard: React.FC<{
               </Text>
             </TouchableOpacity>
           )}
-          {canClose && (
+          {canCancel && (
             <TouchableOpacity
               style={[styles.dangerBtn, busy && styles.btnDisabled]}
-              onPress={() => onClose(ad)}
+              onPress={() => onCancel(ad)}
               disabled={busy}
             >
               <Icon name="close" size={16} color={GOLD.error} />
-              <Text style={styles.dangerBtnText}>Close ad</Text>
+              <Text style={styles.dangerBtnText}>Cancel ad</Text>
             </TouchableOpacity>
           )}
         </View>

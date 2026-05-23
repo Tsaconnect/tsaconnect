@@ -1,16 +1,14 @@
 // app/p2p/create-ad.tsx
 //
-// Refactor of the legacy screens/buyP2P.tsx / sellP2P.tsx stubs. Wires the
-// real backend:
+// Pool/voucher publish flow:
 //
-//   1. POST /p2p/ads → returns { ad, unsignedTx }
-//   2. signTransaction(unsignedTx) using the user's local wallet
-//   3. broadcastTransaction → txHash
-//   4. POST /p2p/ads/:id/confirm with txHash → ad goes active
+//   1. POST /p2p/ads → returns { ad (pending), typedData }
+//   2. signTypedData(typedData) using the user's local wallet — off-chain,
+//      no gas, no broadcast
+//   3. POST /p2p/ads/:id/sign with the signature → ad goes active
 //
-// The unsigned tx is the seller's `createAd(adId, token, amount)` call;
-// gas is pre-estimated server-side so the seller only needs to sign +
-// broadcast.
+// Capital is locked at the user-balance level via a separate deposit flow
+// (see app/p2p/deposit.tsx). Publishing an ad never moves on-chain funds.
 
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -28,15 +26,13 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { ChainKey } from '../../constants/chains';
 import {
   adsApi,
   paymentMethodsApi,
   parseTokenAmount,
   type P2PPaymentMethod,
-  type UnsignedTx,
 } from '../../services/p2p';
-import { getActiveWallet, signTransaction, broadcastTransaction } from '../../services/wallet';
+import { getActiveWallet, signTypedData } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 
@@ -157,9 +153,11 @@ const CreateAdScreen: React.FC = () => {
       const maxLimit = maxLimitInput.trim() ? maxLimitInput.trim() : undefined;
 
       // 3. Create ad (prepare phase). Fixed mode sends rate; float mode
-      // sends rateType + floatOffsetBps and the server computes the cached
-      // rate from the live feed.
-      setSubmitStage('Preparing escrow transaction…');
+      // Step 1: ask the backend to create the ad in `pending` state. The
+      // server stamps the voucher fields and returns an EIP-712 typed-data
+      // payload for the seller to sign. No on-chain tx at publish time —
+      // the only gas the seller pays is a one-off deposit (separate flow).
+      setSubmitStage('Building voucher…');
       const basePayload = {
         token: token.symbol,
         tokenAmount,
@@ -181,35 +179,25 @@ const CreateAdScreen: React.FC = () => {
       if (!createRes.success || !createRes.data) {
         throw new Error(createRes.message || 'Server rejected the ad');
       }
-      const { ad, unsignedTx } = createRes.data;
+      const { ad, typedData } = createRes.data;
 
-      // 4. Sign the unsigned tx with the local wallet.
-      setSubmitStage('Signing transaction…');
-      const signed = await signTransaction(unsignedTxToTxLike(unsignedTx));
+      // Step 2: sign the voucher off-chain via EIP-712. No gas, no broadcast.
+      setSubmitStage('Signing voucher…');
+      const signature = await signTypedData(
+        typedData.domain,
+        typedData.types,
+        typedData.message
+      );
 
-      // 5. Broadcast via the Sonic RPC.
-      setSubmitStage('Broadcasting to Sonic…');
-      const sonicChain = pickSonicChainKey(unsignedTx.chainId);
-      const txResponse = await broadcastTransaction(sonicChain, signed);
-      const txHash = txResponse.hash;
-
-      // 6. Confirm with the backend — moves the ad pending → active.
-      setSubmitStage('Confirming on-chain settlement…');
-      const confirmRes = await adsApi.confirm(ad.id, txHash, sellerAddress);
-      if (!confirmRes.success) {
-        // The ad row exists (pending) and the tx broadcast happened. The
-        // chain reconciler will eventually flip the ad to active. Surface
-        // the error so the user understands they don't need to retry the
-        // broadcast.
-        throw new Error(
-          (confirmRes.message || 'Confirm failed') +
-            ' — the chain reconciler will catch up automatically.'
-        );
+      // Step 3: submit the signature back. Server verifies the recovered
+      // signer matches `sellerAddress` and flips the ad to `active`.
+      setSubmitStage('Activating ad…');
+      const signRes = await adsApi.sign(ad.id, signature, sellerAddress);
+      if (!signRes.success) {
+        throw new Error(signRes.message || 'Sign failed');
       }
 
       Alert.alert('Ad published', `Your ad is now live in the marketplace.`, [
-        // my-ads route lands in Step 16; until then bounce back to the
-        // P2P landing.
         { text: 'OK', onPress: () => router.back() },
       ]);
     } catch (err: any) {
@@ -486,32 +474,6 @@ const CreateAdScreen: React.FC = () => {
     </SafeAreaView>
   );
 };
-
-// pickSonicChainKey resolves the chain to use for broadcast. The frontend's
-// chain config uses a single `sonic` key with the network (mainnet vs
-// testnet) determined by useNetwork() — the RPC URLs swap accordingly, so
-// we always return 'sonic' and let the wallet layer pick the right URL.
-function pickSonicChainKey(_chainId: string | undefined): ChainKey {
-  return 'sonic';
-}
-
-// unsignedTxToTxLike adapts the server's UnsignedTx (hex without 0x prefix)
-// to ethers's TransactionLike shape (expects 0x prefixes on hex fields).
-function unsignedTxToTxLike(tx: UnsignedTx) {
-  const ensure0x = (v: string | undefined) => {
-    if (!v) return undefined;
-    return v.startsWith('0x') ? v : `0x${v}`;
-  };
-  return {
-    to: tx.to,
-    value: tx.value || '0',
-    data: ensure0x(tx.data),
-    nonce: tx.nonce,
-    gasLimit: tx.gasLimit,
-    gasPrice: tx.gasPrice,
-    chainId: tx.chainId ? Number(tx.chainId) : undefined,
-  };
-}
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },

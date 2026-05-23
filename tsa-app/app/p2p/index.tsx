@@ -99,6 +99,14 @@ const P2PMarketScreen: React.FC = () => {
               <Icon name="account-balance" size={22} color={GOLD.dark} />
               <Text style={styles.iconBtnText}>Banks</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => router.push('/p2p/pool')}
+              activeOpacity={0.8}
+            >
+              <Icon name="savings" size={22} color={GOLD.dark} />
+              <Text style={styles.iconBtnText}>Pool</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
