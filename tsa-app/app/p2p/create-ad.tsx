@@ -28,7 +28,9 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  formatTokenAmount,
   paymentMethodsApi,
+  poolApi,
   parseTokenAmount,
   type P2PPaymentMethod,
 } from '../../services/p2p';
@@ -63,6 +65,11 @@ const CreateAdScreen: React.FC = () => {
   const [rateStale, setRateStale] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState<string>('');
+  // Pool available balance for the selected token. Surfaced inline so the
+  // seller can see whether their pool can back the ad before they sign.
+  // `null` = not yet loaded; `'-'` = load failed (we don't block submit on
+  // a transient pool-balance read failure — the backend re-checks).
+  const [poolAvailable, setPoolAvailable] = useState<string | null>(null);
 
   // Load payment methods + suggested Bybit rate concurrently on mount.
   // Both promises always clear their loading flag — a network reject must
@@ -95,6 +102,26 @@ const CreateAdScreen: React.FC = () => {
       }
     })();
   }, []);
+
+  // Refresh the pool balance whenever the token selection changes. Doesn't
+  // block submit on failure — the backend's CreateAd does an authoritative
+  // ReadBalance check anyway. This is a UX hint.
+  useEffect(() => {
+    let cancelled = false;
+    setPoolAvailable(null);
+    (async () => {
+      const res = await poolApi.balance(token.symbol);
+      if (cancelled) return;
+      if (res.success && res.data) {
+        setPoolAvailable(res.data.available);
+      } else {
+        setPoolAvailable('-');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token.symbol]);
 
   const togglePm = (id: string) => {
     setSelectedPmIds((prev) =>
@@ -133,8 +160,26 @@ const CreateAdScreen: React.FC = () => {
     return Math.abs(pct) <= MAX_FLOAT_OFFSET_PCT;
   }, [rateType, floatOffsetPctInput]);
 
+  // Block submit when the requested ad amount exceeds the seller's pool —
+  // the backend would reject anyway with ErrInvalidParams. This is a
+  // UX-side gate so we don't ask the user to sign a voucher we know is
+  // going to fail. Unknown pool balance ("-") doesn't block (let the
+  // server be authoritative).
+  const exceedsPool = useMemo(() => {
+    if (!poolAvailable || poolAvailable === '-') return false;
+    if (!/^\d+(\.\d+)?$/.test(amountInput.trim())) return false;
+    try {
+      const want = BigInt(parseTokenAmount(amountInput.trim(), token.decimals));
+      const have = BigInt(poolAvailable);
+      return want > have;
+    } catch {
+      return false;
+    }
+  }, [amountInput, poolAvailable, token.decimals]);
+
   const valid =
     parseFloat(amountInput || '0') > 0 &&
+    !exceedsPool &&
     selectedPmIds.length > 0 &&
     (rateType === 'fixed'
       ? parseFloat(rateInput || '0') > 0
@@ -270,8 +315,28 @@ const CreateAdScreen: React.FC = () => {
             ))}
           </View>
 
-          <Text style={styles.label}>Amount ({token.symbol})</Text>
-          <View style={styles.inputCard}>
+          <View style={styles.amountHeaderRow}>
+            <Text style={styles.labelInline}>Amount ({token.symbol})</Text>
+            {poolAvailable && poolAvailable !== '-' && (
+              <TouchableOpacity
+                onPress={() =>
+                  setAmountInput(
+                    formatTokenAmount(poolAvailable!, token.decimals, token.decimals),
+                  )
+                }
+                hitSlop={6}
+              >
+                <Text style={styles.balanceHint}>
+                  Pool: {formatTokenAmount(poolAvailable, token.decimals, 4)}{' '}
+                  {token.symbol}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {poolAvailable === '-' && (
+              <Text style={styles.balanceHintMuted}>Pool unavailable</Text>
+            )}
+          </View>
+          <View style={[styles.inputCard, exceedsPool && styles.inputCardError]}>
             <TextInput
               style={styles.inputField}
               placeholder="0.00"
@@ -282,6 +347,11 @@ const CreateAdScreen: React.FC = () => {
             />
             <Text style={styles.inputSuffix}>{token.symbol}</Text>
           </View>
+          {exceedsPool && (
+            <Text style={styles.amountError}>
+              Exceeds your pool balance. Deposit more {token.symbol} via the Pool screen.
+            </Text>
+          )}
 
           <Text style={styles.label}>Rate type</Text>
           <View style={styles.segmentedRow}>
@@ -531,9 +601,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: GOLD.muted,
   },
+  inputCardError: { borderColor: GOLD.error },
   inputField: { flex: 1, fontSize: 16, color: '#000', paddingVertical: 0 },
   inputPrefix: { fontSize: 16, fontWeight: '700', color: GOLD.dark, marginRight: 6 },
   inputSuffix: { fontSize: 14, fontWeight: '700', color: GOLD.dark, marginLeft: 6 },
+  amountHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginTop: 14,
+    marginBottom: 6,
+  },
+  // Inline label sized to match `label` but without its outer marginTop —
+  // the parent amountHeaderRow already supplies the spacing.
+  labelInline: { fontSize: 14, fontWeight: '700', color: '#333' },
+  balanceHint: { fontSize: 12, color: GOLD.dark, fontWeight: '600' },
+  balanceHintMuted: { fontSize: 12, color: '#999', fontWeight: '500' },
+  amountError: { color: GOLD.error, fontSize: 12, marginTop: 6 },
   rateHint: {
     flexDirection: 'row',
     alignItems: 'center',
