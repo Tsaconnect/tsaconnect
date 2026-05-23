@@ -1,86 +1,129 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @title P2PEscrow
-/// @notice Holds seller-deposited tokens for P2P trades. Seller locks the full
-///         ad amount in one transaction (createAd). Buyers individually open
-///         trades against the ad (openTrade); seller releases per-trade after
-///         off-chain fiat receipt. Admin can resolve disputes and webhook-driven
-///         release (Phase 2+) reuses `adminRelease`.
+/// @title  P2PEscrow
+/// @notice Pool-based P2P escrow. Sellers deposit once into a per-(seller,token)
+///         `available` balance, publish unlimited ads off-chain by signing
+///         EIP-712 vouchers (no gas, instant, editable), and funds only move
+///         to `locked` when a buyer actually opens a trade.
+///
+/// @dev    Fresh deploy required — replaces the previous lock-on-publish model
+///         in-place rather than via UUPS upgrade. Pre-deploy step: clear the
+///         old proxy entry from .openzeppelin/* (or use --force on deploy)
+///         since the storage layout is incompatible with the prior version.
+///
+/// Lifecycle:
+///   1. Seller `deposit(token, amount)` — top up trading balance.
+///   2. Seller signs an `AdVoucher` off-chain at publish — recorded in
+///      the backend DB. Editing limits/pricing/payment methods is off-chain.
+///   3. Buyer `openTrade(tradeId, voucher, sig, amount)` — contract verifies
+///      the seller's signature and moves `amount` from `available` → `locked`.
+///   4. Buyer `markPaid` → seller `release` → contract pays buyer minus fee.
+///   5. Failure paths (`cancelByTimeout`, `raiseDispute`, `adminResolve`)
+///      return the locked amount to `available` or release per dispute.
 contract P2PEscrow is
     Initializable,
     UUPSUpgradeable,
     OwnableUpgradeable,
     ReentrancyGuard,
-    PausableUpgradeable
+    PausableUpgradeable,
+    EIP712Upgradeable
 {
     using SafeERC20 for IERC20;
 
     enum Status { None, Pending, Paid, Released, Cancelled, Disputed, Resolved }
 
-    /// @dev `remaining` is the unallocated amount available for new openTrade calls.
-    ///      `reserved` is the sum of currently-open trade amounts.
-    ///      Invariant: contract balance of `token` for this ad == remaining + reserved
-    ///      (released and timed-out portions have left the contract or returned to remaining).
-    struct Ad {
+    /// @notice Off-chain voucher signed by the seller authorising buyers to
+    /// open trades against their on-chain `available` balance. Identified
+    /// uniquely by `nonce` (server-generated; one nonce per published ad).
+    struct AdVoucher {
         address seller;
         address token;
-        uint96  remaining;
-        uint96  reserved;
-        uint40  createdAt;
-        bool    open;
+        uint256 maxAmount;     // total fillable across all trades on this voucher
+        uint256 minPerTrade;   // 0 disables the floor
+        uint256 maxPerTrade;   // 0 disables the ceiling
+        uint256 deadline;      // unix seconds; voucher invalid after this
+        bytes32 nonce;         // server-generated, doubles as the off-chain adId
     }
 
+    bytes32 private constant AD_VOUCHER_TYPEHASH = keccak256(
+        "AdVoucher(address seller,address token,uint256 maxAmount,uint256 minPerTrade,uint256 maxPerTrade,uint256 deadline,bytes32 nonce)"
+    );
+
+    /// @notice Trade record. Self-contained — no ad pointer because ads
+    /// live entirely off-chain as signed vouchers.
     struct Trade {
-        bytes32 adId;
+        address seller;
         address buyer;
+        address token;
         uint96  amount;
         uint40  createdAt;
         Status  status;
+        bytes32 voucherHash; // links the trade back to its voucher
     }
 
-    /// @notice 30-minute window for buyer to mark paid. After this, anyone may
-    /// cancel pending trades (returning funds to ad.remaining).
+    /// @notice 30-minute window for buyer to mark paid; after this anyone
+    /// may cancel pending trades (locked → available).
     uint256 public constant TIMEOUT = 30 minutes;
 
-    /// @notice P2P platform fee in basis points (0.5%). Charged on release out
-    /// of the seller's locked amount; buyer receives `amount - fee`, system
-    /// wallet receives `fee`. MCGP trades are fee-free. Maker-pays model:
-    /// P2P is a liquidity-builder, not a revenue centre — see fiat-swap (2%)
-    /// and instant-transfer (1%) for premium-convenience pricing.
+    /// @notice Platform fee on release, basis points (0.5%). MCGP fee-free.
     uint256 public constant FEE_BPS = 50;
 
-    /// @dev MCGP token address. When `trade.token == mcgpToken`, fee is zero.
-    address public mcgpToken;
+    // ─── Storage ──────────────────────────────────────────────────────────
 
-    /// @dev System wallet — receives platform fees on release. Defaults to
-    /// owner() if unset. Set via setSystemWallet.
+    address public mcgpToken;
     address public systemWallet;
 
-    /// @dev Token whitelist. Only whitelisted tokens may be used in createAd.
-    mapping(address => bool) public acceptedTokens;
+    mapping(address token => bool) public acceptedTokens;
+    mapping(address account => bool) public admins;
 
-    /// @dev Admins. Owner is implicitly admin (see isAdmin). Operator EOA
-    /// (Phase 2+ webhook signer) is added here.
-    mapping(address => bool) public admins;
+    /// @dev Per-(seller,token) free balance; debited at openTrade, credited
+    /// at deposit, cancelByTimeout, and adminResolve(false). Withdrawable.
+    mapping(address seller => mapping(address token => uint256)) public available;
 
-    mapping(bytes32 => Ad)    public ads;
-    mapping(bytes32 => Trade) public trades;
+    /// @dev Per-(seller,token) reserved-against-open-trades balance. Only
+    /// `release` / `adminResolve(true)` move funds out of `locked` to the
+    /// buyer; cancellations return locked → available.
+    mapping(address seller => mapping(address token => uint256)) public locked;
 
-    event AdCreated(bytes32 indexed adId, address indexed seller, address indexed token, uint256 amount);
-    event AdClosed(bytes32 indexed adId, uint256 refundedToSeller);
-    event TradeOpened(bytes32 indexed tradeId, bytes32 indexed adId, address indexed buyer, uint256 amount);
+    /// @dev Per-voucher cumulative fill amount across all trades. The
+    /// voucher hash is the EIP-712 digest, so any field change produces an
+    /// independent hash → independent fill counter.
+    mapping(bytes32 voucherHash => uint256) public voucherFilled;
+
+    /// @dev Seller-side voucher revocation. A voucher is invalid when
+    /// either `block.timestamp > deadline` or `voucherCancelled` is true.
+    /// Open trades against a cancelled voucher still settle normally.
+    mapping(bytes32 voucherHash => bool) public voucherCancelled;
+
+    mapping(bytes32 tradeId => Trade) public trades;
+
+    // ─── Events ───────────────────────────────────────────────────────────
+
+    event Deposited(address indexed seller, address indexed token, uint256 amount);
+    event Withdrawn(address indexed seller, address indexed token, uint256 amount);
+    event VoucherCancelled(bytes32 indexed voucherHash, address indexed seller);
+    event TradeOpened(
+        bytes32 indexed tradeId,
+        bytes32 indexed voucherHash,
+        address indexed buyer,
+        address seller,
+        address token,
+        uint256 amount
+    );
     event TradePaid(bytes32 indexed tradeId);
     event TradeReleased(bytes32 indexed tradeId, address indexed buyer, uint256 amountToBuyer, uint256 feeToSystem);
-    event TradeCancelled(bytes32 indexed tradeId, uint256 returnedToAd);
+    event TradeCancelled(bytes32 indexed tradeId, uint256 returnedToAvailable);
     event TradeDisputed(bytes32 indexed tradeId, address indexed by);
     event TradeResolved(bytes32 indexed tradeId, bool releasedToBuyer, uint256 amountMoved, uint256 feeToSystem);
 
@@ -104,6 +147,7 @@ contract P2PEscrow is
     function initialize(address initialOwner, address[] calldata initialAdmins) external initializer {
         __Ownable_init(initialOwner);
         __Pausable_init();
+        __EIP712_init("TSAConnectP2PEscrow", "1");
 
         for (uint256 i = 0; i < initialAdmins.length; i++) {
             address a = initialAdmins[i];
@@ -114,10 +158,9 @@ contract P2PEscrow is
         }
     }
 
-    /// @dev Restricts upgrade authority to owner. Admin role does not grant upgrade rights.
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    // --- Admin functions ---
+    // ─── Admin / config ───────────────────────────────────────────────────
 
     function addAdmin(address account) external onlyOwner {
         require(account != address(0), "Zero address");
@@ -136,12 +179,6 @@ contract P2PEscrow is
         return admins[account] || account == owner();
     }
 
-    /// @notice Sets the MCGP-token address that receives the 0% fee discount.
-    /// @dev    Requires the token to be already whitelisted via setTokenAcceptance.
-    ///         Coupling these two settings prevents an admin from accidentally
-    ///         (or maliciously) granting the fee discount to a token that
-    ///         cannot actually be traded — or from quietly handing the discount
-    ///         to an arbitrary contract.
     function setMcgpToken(address _mcgpToken) external onlyOwner {
         require(_mcgpToken != address(0), "Invalid MCGP address");
         require(acceptedTokens[_mcgpToken], "MCGP must be accepted first");
@@ -166,110 +203,127 @@ contract P2PEscrow is
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    /// @notice Sweep tokens accidentally sent to the contract (or rounding dust).
-    /// @dev Owner-only. Does not touch funds tracked in `ads` or `trades` because
-    ///      those are enforced by per-ad/per-trade accounting on every transfer.
+    /// @notice Sweep tokens accidentally sent or rounding dust. Cannot touch
+    /// `available` / `locked` because every move is per-(seller,token) accounted.
     function sweepExcess(address token, uint256 amount) external onlyOwner {
         require(token != address(0), "Invalid token");
         IERC20(token).safeTransfer(owner(), amount);
         emit ExcessSwept(token, amount);
     }
 
-    // --- Ad lifecycle ---
+    // ─── Deposit / withdraw ────────────────────────────────────────────────
 
-    /// @notice Seller posts a sell ad and locks `amount` of `token` in the contract.
-    /// @param  adId    Server-generated unique id (keccak256 of off-chain UUID).
-    /// @param  token   Whitelisted token contract.
-    /// @param  amount  Total amount being offered for sale.
-    function createAd(bytes32 adId, address token, uint256 amount)
-        external
-        nonReentrant
-        whenNotPaused
-    {
-        require(adId != bytes32(0), "Invalid ad id");
-        require(ads[adId].seller == address(0), "Ad already exists");
+    /// @notice Seller tops up their P2P-trading balance for `token`. Caller
+    /// must have ERC20-approved this contract for `amount`.
+    function deposit(address token, uint256 amount) external nonReentrant whenNotPaused {
         require(token != address(0), "Invalid token");
         require(acceptedTokens[token], "Token not accepted");
         require(amount > 0, "Amount must be > 0");
-        require(amount <= type(uint96).max, "Amount overflow");
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        available[msg.sender][token] += amount;
 
-        ads[adId] = Ad({
-            seller:    msg.sender,
-            token:     token,
-            remaining: uint96(amount),
-            reserved:  0,
-            createdAt: uint40(block.timestamp),
-            open:      true
-        });
-
-        emit AdCreated(adId, msg.sender, token, amount);
+        emit Deposited(msg.sender, token, amount);
     }
 
-    /// @notice Seller closes the ad. Refunds `remaining` to seller. Reverts if
-    /// any open trades exist (`reserved > 0`) — seller must wait for trades to
-    /// release or cancel first.
-    function closeAd(bytes32 adId) external nonReentrant whenNotPaused {
-        Ad storage ad = ads[adId];
-        require(ad.seller != address(0), "Ad does not exist");
-        require(ad.open, "Ad not open");
-        require(msg.sender == ad.seller, "Only seller can close");
-        require(ad.reserved == 0, "Open trades exist");
+    /// @notice Seller pulls funds back out of their available balance.
+    /// @dev    Not pause-guarded — sellers must always be able to recover
+    ///         unused capital during a pause-for-incident-response. Locked
+    ///         balance (against open trades) is untouchable until settled.
+    function withdraw(address token, uint256 amount) external nonReentrant {
+        require(amount > 0, "Amount must be > 0");
+        uint256 avail = available[msg.sender][token];
+        require(avail >= amount, "Insufficient available");
+        available[msg.sender][token] = avail - amount;
 
-        uint256 refund = ad.remaining;
-        ad.remaining = 0;
-        ad.open = false;
+        IERC20(token).safeTransfer(msg.sender, amount);
+        emit Withdrawn(msg.sender, token, amount);
+    }
 
-        if (refund > 0) {
-            IERC20(ad.token).safeTransfer(ad.seller, refund);
+    // ─── Voucher management ────────────────────────────────────────────────
+
+    /// @notice EIP-712 digest the seller signs for a given voucher. Exposed
+    /// so the frontend/backend can compute the same hash for indexing and
+    /// revocation.
+    function hashVoucher(AdVoucher calldata v) public view returns (bytes32) {
+        return _hashTypedDataV4(keccak256(abi.encode(
+            AD_VOUCHER_TYPEHASH,
+            v.seller, v.token, v.maxAmount, v.minPerTrade, v.maxPerTrade, v.deadline, v.nonce
+        )));
+    }
+
+    /// @notice Seller invalidates a previously-published voucher. New trades
+    /// against it will revert; in-flight trades still settle. Idempotent.
+    function cancelVoucher(AdVoucher calldata v) external {
+        require(msg.sender == v.seller, "Only voucher seller");
+        bytes32 h = hashVoucher(v);
+        if (!voucherCancelled[h]) {
+            voucherCancelled[h] = true;
+            emit VoucherCancelled(h, v.seller);
         }
-        emit AdClosed(adId, refund);
     }
 
-    // --- Trade lifecycle ---
+    // ─── Trade lifecycle ───────────────────────────────────────────────────
 
-    /// @notice Buyer opens a trade against an open ad. Decrements ad.remaining,
-    /// increments ad.reserved. Funds remain in the contract until release.
-    /// @param tradeId Server-generated unique id.
-    /// @param adId    Existing open ad.
-    /// @param amount  Portion of the ad the buyer is taking.
-    function openTrade(bytes32 tradeId, bytes32 adId, uint256 amount)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    /// @notice Buyer opens a trade against a seller's published voucher.
+    /// Verifies the seller's signature, that the voucher is live and not
+    /// over-filled, and reserves `amount` of the seller's `available` into
+    /// `locked`.
+    ///
+    /// @param tradeId Server-generated unique id (keccak256 of off-chain UUID).
+    /// @param v       The signed voucher.
+    /// @param sig     The seller's EIP-712 signature over `v`.
+    /// @param amount  Portion of the voucher the buyer is taking.
+    function openTrade(
+        bytes32 tradeId,
+        AdVoucher calldata v,
+        bytes calldata sig,
+        uint256 amount
+    ) external nonReentrant whenNotPaused {
         require(tradeId != bytes32(0), "Invalid trade id");
         require(trades[tradeId].status == Status.None, "Trade already exists");
-
-        Ad storage ad = ads[adId];
-        require(ad.seller != address(0), "Ad does not exist");
-        require(ad.open, "Ad not open");
-        require(msg.sender != ad.seller, "Seller cannot self-buy");
         require(amount > 0, "Amount must be > 0");
-        require(amount <= ad.remaining, "Exceeds remaining");
+        require(amount <= type(uint96).max, "Amount overflow");
+        require(v.seller != address(0), "Invalid voucher seller");
+        require(v.seller != msg.sender, "Seller cannot self-buy");
+        require(acceptedTokens[v.token], "Token not accepted");
+        require(block.timestamp <= v.deadline, "Voucher expired");
+        require(v.minPerTrade == 0 || amount >= v.minPerTrade, "Below voucher min");
+        require(v.maxPerTrade == 0 || amount <= v.maxPerTrade, "Above voucher max");
 
-        ad.remaining -= uint96(amount);
-        ad.reserved  += uint96(amount);
+        bytes32 voucherHash = hashVoucher(v);
+        require(!voucherCancelled[voucherHash], "Voucher cancelled");
+
+        uint256 filled = voucherFilled[voucherHash];
+        require(filled + amount <= v.maxAmount, "Exceeds voucher capacity");
+
+        address recovered = ECDSA.recover(voucherHash, sig);
+        require(recovered == v.seller, "Bad voucher signature");
+
+        uint256 sellerAvailable = available[v.seller][v.token];
+        require(sellerAvailable >= amount, "Seller balance insufficient");
+
+        available[v.seller][v.token] = sellerAvailable - amount;
+        locked[v.seller][v.token] += amount;
+        voucherFilled[voucherHash] = filled + amount;
 
         trades[tradeId] = Trade({
-            adId:      adId,
-            buyer:     msg.sender,
-            amount:    uint96(amount),
-            createdAt: uint40(block.timestamp),
-            status:    Status.Pending
+            seller:      v.seller,
+            buyer:       msg.sender,
+            token:       v.token,
+            amount:      uint96(amount),
+            createdAt:   uint40(block.timestamp),
+            status:      Status.Pending,
+            voucherHash: voucherHash
         });
 
-        emit TradeOpened(tradeId, adId, msg.sender, amount);
+        emit TradeOpened(tradeId, voucherHash, msg.sender, v.seller, v.token, amount);
     }
 
-    /// @notice Buyer marks the off-chain fiat payment as sent. State only;
-    /// no funds move. Proof is captured off-chain.
-    /// @dev    WARNING: this is an UNVERIFIED buyer claim. A malicious buyer
-    ///         can openTrade → markPaid → raiseDispute in a single transaction
-    ///         to lock seller funds without ever sending fiat. The system
-    ///         relies on off-chain proof requirements and admin arbitration
-    ///         (adminResolve) to handle bad-faith claims.
+    /// @notice Buyer marks the off-chain fiat payment as sent. State only —
+    /// no funds move. As before, this is an UNVERIFIED claim; the seller's
+    /// release signature is the real authorisation gate. Bad-faith claims
+    /// route through `raiseDispute` / `adminResolve`.
     function markPaid(bytes32 tradeId) external whenNotPaused {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Pending, "Not pending");
@@ -279,148 +333,128 @@ contract P2PEscrow is
         emit TradePaid(tradeId);
     }
 
-    /// @notice Seller releases the trade after off-chain fiat receipt.
-    /// Sends `amount - fee` to buyer and `fee` to systemWallet. Decrements
-    /// ad.reserved (does NOT return to ad.remaining — funds have left).
-    /// @dev    Callable from Pending or Paid status. In P2P the buyer's
-    ///         markPaid is an unverifiable off-chain claim; the seller's
-    ///         signature on `release` is the real authorization gate. Gating
-    ///         release on Paid would force a useless on-chain markPaid step
-    ///         that doesn't add security but costs gas.
+    /// @notice Seller releases the trade after fiat receipt. Pays buyer
+    /// `amount - fee` and `fee` to systemWallet. Callable from Pending or
+    /// Paid (seller's signature is the gate, not the buyer's markPaid).
     function release(bytes32 tradeId) external nonReentrant whenNotPaused {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Pending || t.status == Status.Paid, "Not releasable");
-        Ad storage ad = ads[t.adId];
-        require(msg.sender == ad.seller, "Only seller");
-
-        _settleRelease(tradeId, t, ad);
+        require(msg.sender == t.seller, "Only seller");
+        _settleRelease(tradeId, t);
     }
 
-    /// @notice Admin-driven release. Used by Phase 2+ Flutterwave webhook
-    /// (operator EOA registered as admin). Same semantics as `release` but
-    /// callable by any admin. Trade must be Pending or Paid.
+    /// @notice Admin-driven release (Phase 2+ webhook signer). Same semantics
+    /// as `release` but callable by any admin.
     function adminRelease(bytes32 tradeId) external onlyAdmin nonReentrant whenNotPaused {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Pending || t.status == Status.Paid, "Not releasable");
-        Ad storage ad = ads[t.adId];
-
-        _settleRelease(tradeId, t, ad);
+        _settleRelease(tradeId, t);
     }
 
-    /// @notice After TIMEOUT, anyone can cancel a trade still in Pending state
-    /// (buyer never marked paid). Returns funds to ad.remaining so the ad
-    /// remains usable. No fee charged.
-    /// @dev    Intentionally NOT pause-guarded — this is pure internal accounting
-    ///         (no external token transfer). Sellers must always be able to
-    ///         recover funds from expired-pending trades, including during a
-    ///         pause-for-incident-response.
+    /// @notice After TIMEOUT, anyone can cancel a Pending trade whose buyer
+    /// never marked paid. Returns locked → available. No fee.
+    /// @dev    Not pause-guarded — pure internal accounting; sellers must
+    ///         always be able to recover from expired pendings.
     function cancelByTimeout(bytes32 tradeId) external nonReentrant {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Pending, "Not pending");
         require(block.timestamp >= uint256(t.createdAt) + TIMEOUT, "Timeout not elapsed");
 
-        Ad storage ad = ads[t.adId];
         uint96 amt = t.amount;
-        require(ad.reserved >= amt, "Reserved underflow");
+        require(locked[t.seller][t.token] >= amt, "Locked underflow");
 
         t.status = Status.Cancelled;
-        ad.reserved  -= amt;
-        ad.remaining += amt;
+        locked[t.seller][t.token]    -= amt;
+        available[t.seller][t.token] += amt;
 
         emit TradeCancelled(tradeId, amt);
     }
 
     /// @notice Either party can escalate a Pending or Paid trade to Disputed.
-    /// Funds are frozen until adminResolve is called.
-    /// @dev    Callable from Pending or Paid — symmetric with release. A
-    ///         buyer who paid but didn't (or couldn't) call markPaid still
-    ///         needs a dispute path. There is no on-chain dispute timeout in
-    ///         v1; once raised, the dispute can only be resolved by an
-    ///         admin. Funds are locked indefinitely on chain; the off-chain
-    ///         SLA governs resolution time. Phase 1.5 may add a force-resolve
-    ///         path after a deadline.
+    /// Funds are frozen until adminResolve.
     function raiseDispute(bytes32 tradeId) external whenNotPaused {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Pending || t.status == Status.Paid, "Not disputable");
-        Ad storage ad = ads[t.adId];
-        require(msg.sender == t.buyer || msg.sender == ad.seller, "Not a party");
+        require(msg.sender == t.buyer || msg.sender == t.seller, "Not a party");
 
         t.status = Status.Disputed;
         emit TradeDisputed(tradeId, msg.sender);
     }
 
-    /// @notice Admin resolves a disputed trade. If `releaseToBuyer` is true,
-    /// behaves like release (buyer gets `amount - fee`, system gets `fee`).
-    /// Otherwise refunds to the ad pool (treated as a void trade — seller
-    /// keeps everything, the ad can continue).
-    /// @dev Admin operations are allowed while paused so disputes can still resolve.
+    /// @notice Admin resolves a disputed trade. `releaseToBuyer=true` →
+    /// buyer gets `amount-fee`, system gets `fee`. Otherwise refund to
+    /// seller's `available` (void trade).
+    /// @dev    Admin operations allowed while paused so disputes can resolve.
     function adminResolve(bytes32 tradeId, bool releaseToBuyer) external onlyAdmin nonReentrant {
         Trade storage t = trades[tradeId];
         require(t.status == Status.Disputed, "Not disputed");
-        Ad storage ad = ads[t.adId];
 
         uint96 amt = t.amount;
-        require(ad.reserved >= amt, "Reserved underflow");
+        require(locked[t.seller][t.token] >= amt, "Locked underflow");
 
         if (releaseToBuyer) {
-            (uint256 toBuyer, uint256 fee) = _splitFee(amt, ad.token);
-            ad.reserved -= amt;
+            (uint256 toBuyer, uint256 fee) = _splitFee(amt, t.token);
+            locked[t.seller][t.token] -= amt;
             t.status = Status.Resolved;
 
-            IERC20(ad.token).safeTransfer(t.buyer, toBuyer);
+            IERC20(t.token).safeTransfer(t.buyer, toBuyer);
             if (fee > 0) {
-                IERC20(ad.token).safeTransfer(_systemRecipient(), fee);
+                IERC20(t.token).safeTransfer(_systemRecipient(), fee);
             }
             emit TradeResolved(tradeId, true, toBuyer, fee);
         } else {
-            ad.reserved  -= amt;
-            ad.remaining += amt;
+            locked[t.seller][t.token]    -= amt;
+            available[t.seller][t.token] += amt;
             t.status = Status.Resolved;
             emit TradeResolved(tradeId, false, 0, 0);
         }
     }
 
-    // --- Views ---
+    // ─── Views ─────────────────────────────────────────────────────────────
 
-    /// @notice Convenience read for off-chain reconciliation.
     function getTrade(bytes32 tradeId)
         external
         view
-        returns (bytes32 adId, address buyer, uint256 amount, uint256 createdAt, uint8 status)
+        returns (
+            address seller,
+            address buyer,
+            address token,
+            uint256 amount,
+            uint256 createdAt,
+            uint8   status,
+            bytes32 voucherHash
+        )
     {
         Trade storage t = trades[tradeId];
-        return (t.adId, t.buyer, t.amount, t.createdAt, uint8(t.status));
+        return (t.seller, t.buyer, t.token, t.amount, t.createdAt, uint8(t.status), t.voucherHash);
     }
 
-    function getAd(bytes32 adId)
+    function balanceOf(address seller, address token)
         external
         view
-        returns (address seller, address token, uint256 remaining, uint256 reserved, uint256 createdAt, bool open)
+        returns (uint256 _available, uint256 _locked)
     {
-        Ad storage ad = ads[adId];
-        return (ad.seller, ad.token, ad.remaining, ad.reserved, ad.createdAt, ad.open);
+        return (available[seller][token], locked[seller][token]);
     }
 
-    // --- Internals ---
+    // ─── Internals ─────────────────────────────────────────────────────────
 
-    function _settleRelease(bytes32 tradeId, Trade storage t, Ad storage ad) internal {
+    function _settleRelease(bytes32 tradeId, Trade storage t) internal {
         uint96 amt = t.amount;
-        require(ad.reserved >= amt, "Reserved underflow");
+        require(locked[t.seller][t.token] >= amt, "Locked underflow");
 
-        (uint256 toBuyer, uint256 fee) = _splitFee(amt, ad.token);
+        (uint256 toBuyer, uint256 fee) = _splitFee(amt, t.token);
 
-        ad.reserved -= amt;
+        locked[t.seller][t.token] -= amt;
         t.status = Status.Released;
 
-        IERC20(ad.token).safeTransfer(t.buyer, toBuyer);
+        IERC20(t.token).safeTransfer(t.buyer, toBuyer);
         if (fee > 0) {
-            IERC20(ad.token).safeTransfer(_systemRecipient(), fee);
+            IERC20(t.token).safeTransfer(_systemRecipient(), fee);
         }
         emit TradeReleased(tradeId, t.buyer, toBuyer, fee);
     }
 
-    /// @dev Fee is 0 for MCGP, FEE_BPS otherwise. Computed at release time
-    /// against the current policy — keep policy immutable per deployment.
     function _splitFee(uint96 amount, address token) internal view returns (uint256 toBuyer, uint256 fee) {
         if (mcgpToken != address(0) && token == mcgpToken) {
             return (amount, 0);
@@ -430,13 +464,7 @@ contract P2PEscrow is
     }
 
     function _systemRecipient() internal view returns (address) {
-        return systemWallet == address(0) ? owner() : systemWallet;
+        address sw = systemWallet;
+        return sw == address(0) ? owner() : sw;
     }
-
-    /// @dev Reserved slots for future state variables. When adding a new state
-    ///      variable, place it above this gap and shrink the gap by the same
-    ///      number of slots. Total storage budget is 51 slots (6 state vars +
-    ///      45 gap), matching the ProductEscrow convention so sibling contracts
-    ///      share the same upgrade-reasoning model.
-    uint256[45] private __gap;
 }
