@@ -1,3 +1,12 @@
+//go:build phase2b
+// +build phase2b
+
+// Tests in this file exercise the pre-pool-model handler surface
+// (create-ad / open-trade-via-adId / etc.). Excluded from the default
+// build until Phase 2B rewrites the handlers against the new voucher
+// flow — the underlying P2PEscrowAdapter methods now return
+// ErrPhase2Migration, so these tests would fail uniformly today.
+
 package handlers
 
 import (

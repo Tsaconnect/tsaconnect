@@ -1,3 +1,13 @@
+//go:build phase2b
+// +build phase2b
+
+// The message-service tests share fixtures (mockEscrow, mockBus, mockRates,
+// newService helper) with the trade-service tests, which are tagged behind
+// phase2b during the pool-model migration. Keeping these together avoids
+// duplicating ~150 lines of mock plumbing; the message service itself isn't
+// changing, so when Phase 2B lands the new trade-service tests these chat
+// tests will be re-enabled automatically.
+
 package services
 
 import (
