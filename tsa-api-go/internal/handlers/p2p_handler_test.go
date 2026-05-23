@@ -766,8 +766,11 @@ func TestSignAd_RejectsWrongSigner(t *testing.T) {
 	}
 	decoded := decode(t, rec)
 	msg, _ := decoded["message"].(string)
-	if !strings.Contains(strings.ToLower(msg), "signature") {
-		t.Errorf("expected 'signature' in error message, got %q", msg)
+	// Pin the assertion to the recovery-mismatch branch specifically, not
+	// the "wrong length" branch that also wraps ErrInvalidParams with
+	// "signature ...". "recovered" only appears in the mismatch path.
+	if !strings.Contains(strings.ToLower(msg), "recovered") {
+		t.Errorf("expected 'recovered' in error message (recovery-mismatch path), got %q", msg)
 	}
 	// Confirm the attacker's key wasn't accepted: the stored ad must still be
 	// pending (i.e. not transitioned to active).
@@ -799,6 +802,15 @@ func TestPrepareDeposit_RejectsMalformedJSON(t *testing.T) {
 	}
 	if body["success"] != false {
 		t.Errorf("success not false; body=%v", body)
+	}
+	// The 400 must come from gin's JSON binding layer specifically — if a
+	// future pre-handler check (auth, content-length, etc.) returned 400
+	// first, the binding-bypass guard this test promises would be moot.
+	// gin/encoding-json surface this as "unexpected EOF" / "unexpected end".
+	msg, _ := body["message"].(string)
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "unexpected") && !strings.Contains(lower, "eof") && !strings.Contains(lower, "json") {
+		t.Errorf("expected JSON-parse hint (unexpected/eof/json) in message, got %q", msg)
 	}
 }
 
