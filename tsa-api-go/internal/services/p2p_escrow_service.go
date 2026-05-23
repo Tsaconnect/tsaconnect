@@ -262,6 +262,33 @@ func (s *P2PEscrowService) PrepareOpenTrade(tradeId, adId [32]byte, buyer string
 	return nil, ErrPhase2Migration
 }
 
+// PrepareApprove builds the unsigned ERC-20 approve(spender=escrow, amount)
+// tx so the seller can grant the escrow the right to pull `amount` of
+// `token` during a subsequent deposit. The token contract is the `to` of
+// this tx (not the escrow); the escrow is just the spender argument.
+func (s *P2PEscrowService) PrepareApprove(seller, token string, amount *big.Int) ([]byte, error) {
+	if err := s.requireConfigured(); err != nil {
+		return nil, err
+	}
+	if s.client == nil {
+		return nil, fmt.Errorf("p2p escrow: no chain client (dev fallback not supported for approve)")
+	}
+	return s.client.PrepareERC20Approve(token, seller, s.contractAddress, amount)
+}
+
+// ReadAllowance returns the seller's current ERC-20 allowance to the escrow
+// for `token`. Used by the frontend to decide whether an additional
+// approve tx is needed before a deposit can succeed.
+func (s *P2PEscrowService) ReadAllowance(seller, token string) (*big.Int, error) {
+	if err := s.requireConfigured(); err != nil {
+		return nil, err
+	}
+	if s.client == nil {
+		return nil, fmt.Errorf("p2p escrow: no chain client")
+	}
+	return s.client.GetTokenAllowance(token, seller, s.contractAddress)
+}
+
 // PrepareDeposit builds the unsigned tx for `deposit(token, amount)`. The
 // seller must have ERC20-approved this contract for `amount` first;
 // without the approval, gas estimation reverts (which is the desired failure).

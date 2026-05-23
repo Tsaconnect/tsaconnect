@@ -58,6 +58,8 @@ type P2PEscrowAdapter interface {
 	ContractAddress() string
 
 	// Pool capital movement.
+	PrepareApprove(seller, token string, amount *big.Int) ([]byte, error)
+	ReadAllowance(seller, token string) (*big.Int, error)
 	PrepareDeposit(seller, token string, amount *big.Int) ([]byte, error)
 	PrepareWithdraw(seller, token string, amount *big.Int) ([]byte, error)
 
@@ -2156,6 +2158,39 @@ func (s *P2PTradeService) resolveTokenAddress(symbol string) (string, error) {
 }
 
 // ─── Deposit / withdraw ─────────────────────────────────────────────────────
+
+// PrepareApprove builds the unsigned ERC-20 approve tx so the seller can
+// grant the escrow contract permission to pull `amount` of `token` on
+// their behalf. Step 1 of deposit (when current allowance < amount);
+// step 2 is PrepareDeposit.
+func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	amt, ok := new(big.Int).SetString(amount, 10)
+	if !ok || amt.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	return s.escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
+}
+
+// GetAllowance returns the seller's current ERC-20 allowance to the escrow
+// for `token`. Frontend uses it to skip the approve step when the existing
+// allowance already covers the intended deposit.
+func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, tokenSymbol string) (*big.Int, error) {
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
+	}
+	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	if err != nil {
+		return nil, err
+	}
+	return s.escrow.ReadAllowance(sellerAddress, tokenAddr)
+}
 
 // PrepareDeposit builds the unsigned tx for `deposit(token, amount)`. The
 // seller is expected to ERC20-approve the escrow contract for `amount`

@@ -112,6 +112,14 @@ func (m *mockEscrow) PrepareDeposit(seller, token string, amount *big.Int) ([]by
 	m.lastDepositArgs = depositArgs{Seller: seller, Token: token, Amount: new(big.Int).Set(amount)}
 	return []byte(`{"tx":"deposit"}`), nil
 }
+func (m *mockEscrow) PrepareApprove(seller, token string, amount *big.Int) ([]byte, error) {
+	m.preparedTxs = append(m.preparedTxs, "approve")
+	return []byte(`{"tx":"approve"}`), nil
+}
+func (m *mockEscrow) ReadAllowance(seller, token string) (*big.Int, error) {
+	// Default: zero allowance. Tests can override via a field if needed.
+	return big.NewInt(0), nil
+}
 func (m *mockEscrow) PrepareWithdraw(seller, token string, amount *big.Int) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "withdraw")
 	m.lastWithdrawArgs = depositArgs{Seller: seller, Token: token, Amount: new(big.Int).Set(amount)}

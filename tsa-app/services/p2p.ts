@@ -430,6 +430,22 @@ export const poolApi = {
   balance: (token: string) =>
     request<PoolBalance>('GET', '/p2p/balance', undefined, { query: { token } }),
 
+  /** Read the seller's current ERC-20 allowance to the escrow contract.
+   *  Used to skip the approve step when an existing allowance covers the
+   *  intended deposit. */
+  allowance: (token: string) =>
+    request<{ allowance: string }>('GET', '/p2p/allowance', undefined, { query: { token } }),
+
+  /** Prepare the unsigned ERC-20 approve(escrow, amount) tx. Returns the
+   *  current allowance alongside so the frontend can decide whether to
+   *  broadcast the approve or skip straight to deposit. */
+  prepareApprove: (token: string, amount: string) =>
+    request<{ unsignedTx: UnsignedTx; currentAllowance: string }>(
+      'POST',
+      '/p2p/deposits/approve',
+      { token, amount },
+    ),
+
   prepareDeposit: (token: string, amount: string) =>
     request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', { token, amount }),
 

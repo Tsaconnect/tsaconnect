@@ -352,6 +352,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 
 			// Seller deposit / withdraw — pool-model capital movement.
 			p2pGroup.GET("/balance", p2p.GetPoolBalance)
+			p2pGroup.GET("/allowance", p2p.GetAllowance)
+			p2pGroup.POST("/deposits/approve", idem, p2p.PrepareApprove)
 			p2pGroup.POST("/deposits", idem, p2p.PrepareDeposit)
 			p2pGroup.POST("/deposits/confirm", idem, p2p.ConfirmDeposit)
 			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
