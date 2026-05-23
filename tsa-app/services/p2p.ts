@@ -425,47 +425,56 @@ export interface PoolBalance {
   locked: string;
 }
 
+// Every pool op requires the active wallet address — the in-app HD wallet
+// lets users hold multiple derived accounts, and the backend's gas
+// estimation must run against the wallet actually doing the deposit, not
+// the user's registered primary. On confirm endpoints the backend cross-
+// checks the address against the on-chain event's `seller` so a caller
+// can't credit themselves with another wallet's deposit.
 export const poolApi = {
-  /** Read the authenticated seller's on-chain (available, locked) balance. */
-  balance: (token: string) =>
-    request<PoolBalance>('GET', '/p2p/balance', undefined, { query: { token } }),
+  /** Read (available, locked) pool balance for a wallet. */
+  balance: (token: string, walletAddress: string) =>
+    request<PoolBalance>('GET', '/p2p/balance', undefined, { query: { token, address: walletAddress } }),
 
-  /** Read the seller's current ERC-20 allowance to the escrow contract.
+  /** Read the wallet's current ERC-20 allowance to the escrow contract.
    *  Used to skip the approve step when an existing allowance covers the
    *  intended deposit. */
-  allowance: (token: string) =>
-    request<{ allowance: string }>('GET', '/p2p/allowance', undefined, { query: { token } }),
+  allowance: (token: string, walletAddress: string) =>
+    request<{ allowance: string }>('GET', '/p2p/allowance', undefined, { query: { token, address: walletAddress } }),
 
   /** Prepare the unsigned ERC-20 approve(escrow, amount) tx. Returns the
    *  current allowance alongside so the frontend can decide whether to
    *  broadcast the approve or skip straight to deposit. */
-  prepareApprove: (token: string, amount: string) =>
+  prepareApprove: (token: string, amount: string, walletAddress: string) =>
     request<{ unsignedTx: UnsignedTx; currentAllowance: string }>(
       'POST',
       '/p2p/deposits/approve',
-      { token, amount },
+      { token, amount, walletAddress },
     ),
 
-  prepareDeposit: (token: string, amount: string) =>
-    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', { token, amount }),
+  prepareDeposit: (token: string, amount: string, walletAddress: string) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', { token, amount, walletAddress }),
 
   /** Confirm a deposit tx. The backend cross-checks that the on-chain event
-   *  amount matches `amount` — submit the same number you prepared with. */
-  confirmDeposit: (token: string, amount: string, txHash: string) =>
+   *  amount matches `amount` and seller matches `walletAddress` — submit the
+   *  same values you prepared with. */
+  confirmDeposit: (token: string, amount: string, txHash: string, walletAddress: string) =>
     request<{ token: string; amount: string }>('POST', '/p2p/deposits/confirm', {
       token,
       amount,
       txHash,
+      walletAddress,
     }),
 
-  prepareWithdraw: (token: string, amount: string) =>
-    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/withdrawals', { token, amount }),
+  prepareWithdraw: (token: string, amount: string, walletAddress: string) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/withdrawals', { token, amount, walletAddress }),
 
-  confirmWithdraw: (token: string, amount: string, txHash: string) =>
+  confirmWithdraw: (token: string, amount: string, txHash: string, walletAddress: string) =>
     request<{ token: string; amount: string }>('POST', '/p2p/withdrawals/confirm', {
       token,
       amount,
       txHash,
+      walletAddress,
     }),
 };
 

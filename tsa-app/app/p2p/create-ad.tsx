@@ -110,7 +110,13 @@ const CreateAdScreen: React.FC = () => {
     let cancelled = false;
     setPoolAvailable(null);
     (async () => {
-      const res = await poolApi.balance(token.symbol);
+      const walletAddr = await getActiveWallet();
+      if (cancelled) return;
+      if (!walletAddr) {
+        setPoolAvailable('-');
+        return;
+      }
+      const res = await poolApi.balance(token.symbol, walletAddr);
       if (cancelled) return;
       if (res.success && res.data) {
         setPoolAvailable(res.data.available);
