@@ -89,6 +89,12 @@ type Config struct {
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
 
+	// SonicNetwork records which preset was active for this boot
+	// ("mainnet" or "testnet"). Downstream code that needs to query the
+	// right Networks[…] map for sonic-side lookups reads this rather than
+	// re-parsing the SONIC_NETWORK env var.
+	SonicNetwork string
+
 	// Mailjet email service
 	MailjetAPIKey    string
 	MailjetSecretKey string
@@ -154,6 +160,7 @@ func Load() *Config {
 		sonicNetwork, preset.chainID, preset.p2pEscrow)
 
 	cfg := &Config{
+		SonicNetwork:        sonicNetwork,
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
