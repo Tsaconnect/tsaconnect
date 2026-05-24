@@ -63,13 +63,23 @@ func main() {
 
 	// Initialize escrow service (sonic chain client)
 	sonicClient := blockchainService.ClientForChain("sonic")
+	// P2P talks to whichever Sonic network SONIC_NETWORK selected. The
+	// other Sonic-side services (product escrow, service-contact, OTC)
+	// use mainnet-fixed addresses and stay on the mainnet client.
+	p2pSonicClient := blockchainService.ClientForNetwork(cfg.SonicNetwork, "sonic")
+	if p2pSonicClient == nil {
+		p2pSonicClient = sonicClient
+	}
+	if p2pSonicClient != nil {
+		log.Printf("[config] P2P sonic client: network=%s chainID=%d", cfg.SonicNetwork, p2pSonicClient.ChainID())
+	}
 	escrowService := services.NewEscrowService(sonicClient, cfg)
 
 	verifyEscrowAdmin(escrowService)
 
 	// Initialize the P2P escrow adapter (separate contract; safe to no-op
 	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
-	p2pEscrowService := services.NewP2PEscrowService(sonicClient, cfg)
+	p2pEscrowService := services.NewP2PEscrowService(p2pSonicClient, cfg)
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -127,10 +137,22 @@ func main() {
 		p2pTradeSvc   *services.P2PTradeService
 		p2pMessageSvc *services.P2PMessageService
 	)
-	if cfg.P2PEscrowAddress != "" && sonicClient != nil {
+	if cfg.P2PEscrowAddress != "" && p2pSonicClient != nil {
 		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, cfg.SonicChainID)
+		// Resolve token symbols against the active Sonic network so a
+		// SONIC_NETWORK=testnet boot looks up testnet token addresses
+		// instead of falling back to the mainnet defaults (which would
+		// build a deposit() call against the wrong contract — the user's
+		// testnet wallet has zero balance there, surfacing as a confusing
+		// "ERC20: transfer amount exceeds balance" gas-estimate revert).
+		network := cfg.SonicNetwork
+		if network == "" {
+			network = "mainnet"
+		}
 		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
-			return blockchainService.TokenAddress("sonic", symbol)
+			addr := blockchainService.TokenAddressForNetwork(network, "sonic", symbol)
+			log.Printf("[p2p tokenResolver] symbol=%s network=%s -> %s", symbol, network, addr)
+			return addr
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		// Chat service — system messages auto-emitted on every trade
