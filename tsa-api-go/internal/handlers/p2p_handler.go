@@ -347,6 +347,11 @@ func (h *P2PHandler) PrepareApprove(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	// TEMP diagnostic: log the wallet address being used vs the user's
+	// registered primary, so we can confirm the FE is actually sending the
+	// active-wallet field after the multi-wallet refactor.
+	log.Printf("[p2p PrepareApprove] user=%s registeredWallet=%s requestWallet=%q token=%s amount=%s",
+		user.ID, user.WalletAddress, req.WalletAddress, req.Token, req.Amount)
 	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
 	if mapServiceError(c, err) {
 		return
@@ -399,6 +404,11 @@ func (h *P2PHandler) PrepareDeposit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	// TEMP diagnostic: log the wallet address being used vs the user's
+	// registered primary, so we can confirm the FE is sending the active-
+	// wallet field and that the address matches what was funded on chain.
+	log.Printf("[p2p PrepareDeposit] user=%s registeredWallet=%s requestWallet=%q token=%s amount=%s",
+		user.ID, user.WalletAddress, req.WalletAddress, req.Token, req.Amount)
 	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
 	if mapServiceError(c, err) {
 		return
