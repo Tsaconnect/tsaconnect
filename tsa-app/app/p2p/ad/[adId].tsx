@@ -128,7 +128,7 @@ const AdDetailScreen: React.FC = () => {
       const { trade, unsignedTx } = openRes.data;
 
       setSubmitStage('Signing transaction…');
-      const signed = await signTransaction(toTxLike(unsignedTx));
+      const signed = await signTransaction(toTxLike(unsignedTx), buyerAddress);
 
       setSubmitStage('Broadcasting to Sonic…');
       const txResp = await broadcastTransaction('sonic' as ChainKey, signed);

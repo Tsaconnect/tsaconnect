@@ -211,13 +211,37 @@ export async function getMnemonic(address?: string): Promise<string | null> {
 export async function signTypedData(
   domain: ethers.TypedDataDomain,
   types: Record<string, ethers.TypedDataField[]>,
-  message: Record<string, any>
+  message: Record<string, any>,
+  /**
+   * Wallet address to sign with. Pass the same address the caller used
+   * to populate the payload (e.g. the ad's `sellerAddress`) so the
+   * signature is guaranteed to recover to that wallet. Omit only when
+   * you're sure no other code path can flip the active wallet between
+   * the caller's read and this call.
+   */
+  expectedAddress?: string,
 ): Promise<string> {
-  const privateKey = await getPrivateKey();
+  const addr = expectedAddress || (await getActiveWallet()) || undefined;
+  const privateKey = await getPrivateKey(addr);
   if (!privateKey) {
-    throw new Error('No private key found. Please set up your wallet first.');
+    throw new Error(
+      addr
+        ? `No private key stored for wallet ${addr}.`
+        : 'No private key found. Please set up your wallet first.',
+    );
   }
   const wallet = new ethers.Wallet(privateKey);
+  // Defensive: SecureStore can hold a mismatched (address, key) pair if a
+  // legacy migration or stale storage corrupted the wallet list. Catch it
+  // here instead of letting the backend reject the signature with the
+  // generic "recovered != expected" error, which doesn't hint at the
+  // local-storage corruption.
+  if (addr && wallet.address.toLowerCase() !== addr.toLowerCase()) {
+    throw new Error(
+      `Wallet key mismatch — stored key for ${addr} derives to ${wallet.address}. ` +
+        `The wallet list is corrupt; remove and re-import this wallet from its seed phrase.`,
+    );
+  }
   const cleaned: Record<string, ethers.TypedDataField[]> = {};
   for (const k of Object.keys(types)) {
     if (k !== 'EIP712Domain') cleaned[k] = types[k];
@@ -226,12 +250,36 @@ export async function signTypedData(
 }
 
 /**
- * Sign a transaction with the stored private key
+ * Sign a transaction with the stored private key.
+ *
+ * Pass `expectedAddress` to pin signing to a specific wallet (e.g. the
+ * one whose `from` is encoded in the unsigned tx). Without it we sign
+ * with whatever the active wallet happens to be at call time, which
+ * can race against a user switching wallets mid-flow.
  */
-export async function signTransaction(unsignedTx: ethers.TransactionLike): Promise<string> {
-  const privateKey = await getPrivateKey();
+export async function signTransaction(
+  unsignedTx: ethers.TransactionLike,
+  expectedAddress?: string,
+): Promise<string> {
+  const addr = expectedAddress || (await getActiveWallet()) || undefined;
+  const privateKey = await getPrivateKey(addr);
   if (!privateKey) {
-    throw new Error('No private key found. Please set up your wallet first.');
+    throw new Error(
+      addr
+        ? `No private key stored for wallet ${addr}.`
+        : 'No private key found. Please set up your wallet first.',
+    );
+  }
+  // Defensive: detect (address, key) mismatch in storage before the chain
+  // rejects the tx with a generic signature error.
+  if (addr) {
+    const derived = ethers.computeAddress(privateKey);
+    if (derived.toLowerCase() !== addr.toLowerCase()) {
+      throw new Error(
+        `Wallet key mismatch — stored key for ${addr} derives to ${derived}. ` +
+          `Remove and re-import this wallet from its seed phrase.`,
+      );
+    }
   }
 
   // Build a Transaction object and sign with SigningKey for proper EIP-155
