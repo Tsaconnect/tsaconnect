@@ -220,7 +220,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), sellerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);
@@ -251,7 +251,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);
@@ -282,7 +282,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
 
       startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
 
       startActing('Broadcasting…');
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);

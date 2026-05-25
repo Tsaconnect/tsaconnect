@@ -259,7 +259,7 @@ const P2PPoolScreen: React.FC = () => {
       }
     } catch {}
     setStage('Signing approve…');
-    const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx));
+    const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
     setStage('Broadcasting approve…');
     await broadcastTransaction('sonic' as ChainKey, signed);
     // No backend confirm step for approve — it's a token-contract allowance
@@ -296,7 +296,7 @@ const P2PPoolScreen: React.FC = () => {
       }
 
       setStage('Signing…');
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
+      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), w);
 
       setStage('Broadcasting…');
       const resp = await broadcastTransaction('sonic' as ChainKey, signed);

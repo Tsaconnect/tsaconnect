@@ -237,11 +237,16 @@ const CreateAdScreen: React.FC = () => {
       const { ad, typedData } = createRes.data;
 
       // Step 2: sign the voucher off-chain via EIP-712. No gas, no broadcast.
+      // Pin signing to sellerAddress so the signature is guaranteed to
+      // recover to the wallet the ad declares — otherwise a stale active
+      // wallet (or a switch between create + sign) makes the backend reject
+      // the signature with the cryptic "recovered != expected" error.
       setSubmitStage('Signing voucher…');
       const signature = await signTypedData(
         typedData.domain,
         typedData.types,
-        typedData.message
+        typedData.message,
+        sellerAddress,
       );
 
       // Step 3: submit the signature back. Server verifies the recovered
