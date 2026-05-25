@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -853,7 +854,18 @@ func (s *P2PEscrowService) callContract(data []byte) ([]byte, error) {
 	addr := common.HexToAddress(s.contractAddress)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	// TEMP diagnostic: callContract should return non-empty bytes when the
+	// view function exists on the contract. Empty bytes means either we
+	// hit a non-contract address (wrong network) or the selector doesn't
+	// match. Log chain id + return length so we can tell at a glance.
+	chainID := "(nil client)"
+	if s.client != nil && s.client.ChainID() != nil {
+		chainID = s.client.ChainID().String()
+	}
+	log.Printf("[p2p callContract] chainID=%s to=%s dataLen=%d retLen=%d err=%v",
+		chainID, s.contractAddress, len(data), len(out), err)
+	return out, err
 }
 
 func (s *P2PEscrowService) fetchReceiptAndCheckOK(txHash string) (*types.Receipt, error) {
