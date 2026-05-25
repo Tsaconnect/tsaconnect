@@ -538,6 +538,19 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Only merchants (and admin tiers, who are implicitly trusted) may
+	// publish ads. The pool-model rewrite makes ad creation cheap (off-chain
+	// voucher signing, no per-ad gas), but we still want a verified
+	// counterparty behind every ad to keep the marketplace clean of spam /
+	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
+	// stay open to all authenticated users.
+	if user.Role != models.RoleMerchant && user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "Merchant account required to publish P2P ads.",
+		})
+		return
+	}
 	var req createAdRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})

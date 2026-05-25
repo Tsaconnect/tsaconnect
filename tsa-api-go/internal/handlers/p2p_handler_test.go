@@ -317,6 +317,9 @@ func newRig(t *testing.T) *rig {
 		ID:                 sellerID,
 		WalletAddress:      addr,
 		VerificationStatus: "verified",
+		// Default rig user is a merchant — most ad-creation tests need it.
+		// Tests that exercise the non-merchant path override this field.
+		Role: models.RoleMerchant,
 	}
 
 	router := gin.New()
@@ -631,6 +634,28 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 	}
 	if msg["maxAmount"] != "100000000" {
 		t.Errorf("message.maxAmount = %v, want 100000000", msg["maxAmount"])
+	}
+}
+
+// TestCreateAd_RejectsNonMerchant: only merchant/admin tiers can publish
+// ads. A regular 'user' role gets 403 before the request body is even
+// validated, so any downstream resource (payment method, on-chain balance
+// check) is untouched.
+func TestCreateAd_RejectsNonMerchant(t *testing.T) {
+	r := newRig(t)
+	r.user.Role = models.RoleUser
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	decoded := decode(t, rec)
+	msg, _ := decoded["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "merchant") {
+		t.Errorf("expected 'merchant' in error message, got %q", msg)
 	}
 }
 
