@@ -1,11 +1,48 @@
 package models
 
 import (
+	"database/sql/driver"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 )
+
+// OptionalNumeric is a string-backed value for Postgres `numeric` columns
+// that are semantically optional. A plain `string` Go field can't represent
+// "absent" — an empty string serializes as the SQL literal `''`, which the
+// numeric type rejects with `invalid input syntax for type numeric: ""`.
+// This Valuer maps `""` → NULL on write, and the Scanner maps NULL → `""`
+// on read, so the rest of the codebase keeps treating the value as a plain
+// (possibly empty) decimal string.
+type OptionalNumeric string
+
+// Value implements driver.Valuer.
+func (n OptionalNumeric) Value() (driver.Value, error) {
+	if n == "" {
+		return nil, nil
+	}
+	return string(n), nil
+}
+
+// Scan implements sql.Scanner. NULL becomes the empty string so call sites
+// can keep using `if val != "" {…}` to mean "limit set".
+func (n *OptionalNumeric) Scan(value any) error {
+	if value == nil {
+		*n = ""
+		return nil
+	}
+	switch v := value.(type) {
+	case string:
+		*n = OptionalNumeric(v)
+	case []byte:
+		*n = OptionalNumeric(string(v))
+	default:
+		return fmt.Errorf("OptionalNumeric: unsupported scan type %T", value)
+	}
+	return nil
+}
 
 // P2PAd represents a seller's offer to sell `Amount` of `Token` (Phase 1: sell
 // ads only). Under the deposit-once / EIP-712 voucher model the ad lives
@@ -52,8 +89,8 @@ type P2PAd struct {
 	RateType         string         `gorm:"size:8;not null;default:'fixed';index" json:"rateType"`
 	FloatOffsetBps   *int           `json:"floatOffsetBps,omitempty"`
 	FloatAnchor      string         `gorm:"size:16;not null;default:'bybit_sell'" json:"floatAnchor"`
-	MinLimit         string         `gorm:"type:numeric(78,0)" json:"minLimit,omitempty"`
-	MaxLimit         string         `gorm:"type:numeric(78,0)" json:"maxLimit,omitempty"`
+	MinLimit         OptionalNumeric `gorm:"type:numeric(78,0)" json:"minLimit,omitempty"`
+	MaxLimit         OptionalNumeric `gorm:"type:numeric(78,0)" json:"maxLimit,omitempty"`
 	PaymentMethodIDs datatypes.JSONSlice[string] `gorm:"type:jsonb;not null" json:"paymentMethodIds"`
 	Terms            string         `gorm:"type:text" json:"terms,omitempty"`
 	// ── On-chain identity (post-upgrade: voucher-based) ────────────────────

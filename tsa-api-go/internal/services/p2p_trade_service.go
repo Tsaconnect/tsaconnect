@@ -356,8 +356,8 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		RateType:         rateType,
 		FloatOffsetBps:   params.FloatOffsetBps,
 		FloatAnchor:      anchor,
-		MinLimit:         params.MinLimit,
-		MaxLimit:         params.MaxLimit,
+		MinLimit:         models.OptionalNumeric(params.MinLimit),
+		MaxLimit:         models.OptionalNumeric(params.MaxLimit),
 		PaymentMethodIDs: stringifyUUIDs(params.PaymentMethodIDs),
 		Terms:            params.Terms,
 		Status:           models.P2PAdStatusPending,
@@ -666,7 +666,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := checkFiatLimits(fiatAmount, ad.MinLimit, ad.MaxLimit); err != nil {
+	if err := checkFiatLimits(fiatAmount, string(ad.MinLimit), string(ad.MaxLimit)); err != nil {
 		return nil, nil, err
 	}
 	remaining, _ := new(big.Int).SetString(ad.Remaining, 10)
