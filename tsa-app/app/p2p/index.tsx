@@ -21,6 +21,7 @@ import {
   type P2PAd,
 } from '../../services/p2p';
 import { P2P_GOLD } from '../../constants/p2p';
+import { useUserRole } from '../../hooks/useUserRole';
 
 const GOLD = P2P_GOLD;
 
@@ -31,6 +32,11 @@ const P2PMarketScreen: React.FC = () => {
   const [token, setToken] = useState<string>('USDT');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Backend gates ad creation behind merchant role (p2p_handler.go: CreateAd
+  // returns 403 for non-merchants). Surface that gate in the UI so a regular
+  // user gets a clear "become a merchant" prompt instead of filling the form
+  // only to hit a 403 at publish time.
+  const { isMerchant, loading: roleLoading } = useUserRole();
 
   const load = useCallback(async () => {
     const res = await adsApi.list({ side: 'sell', token, fiatCurrency: 'NGN' });
@@ -64,7 +70,9 @@ const P2PMarketScreen: React.FC = () => {
           <View style={styles.actions}>
             <TouchableOpacity
               style={styles.iconBtn}
-              onPress={() => router.push('/p2p/create-ad')}
+              onPress={() =>
+                router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
+              }
               activeOpacity={0.8}
             >
               <Icon name="add-circle" size={22} color={GOLD.dark} />
@@ -109,6 +117,26 @@ const P2PMarketScreen: React.FC = () => {
           Buy {token} for NGN with bank transfer. Funds are escrowed on chain
           until the seller releases.
         </Text>
+
+        {/* Render the become-merchant CTA only once the role check has
+            resolved — flashing the banner for a frame before hiding it on a
+            confirmed-merchant user looks like a bug. */}
+        {!roleLoading && !isMerchant && (
+          <TouchableOpacity
+            style={styles.merchantBanner}
+            onPress={() => router.push('/merchants/merchant-request')}
+            activeOpacity={0.85}
+          >
+            <Icon name="storefront" size={24} color={GOLD.dark} />
+            <View style={styles.merchantBannerText}>
+              <Text style={styles.merchantBannerTitle}>Want to sell?</Text>
+              <Text style={styles.merchantBannerDesc}>
+                Become a merchant to publish P2P ads.
+              </Text>
+            </View>
+            <Icon name="chevron-right" size={22} color={GOLD.dark} />
+          </TouchableOpacity>
+        )}
 
         <View style={styles.tokenRow}>
           {['USDT', 'USDC', 'MCGP'].map((t) => (
@@ -212,6 +240,21 @@ const styles = StyleSheet.create({
   iconBtn: { alignItems: 'center' },
   iconBtnText: { fontSize: 11, color: GOLD.dark, marginTop: 2, fontWeight: '600' },
   subheading: { fontSize: 14, color: '#666', marginTop: 6, marginBottom: 16, lineHeight: 20 },
+  merchantBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  merchantBannerText: { flex: 1 },
+  merchantBannerTitle: { fontSize: 14, fontWeight: '800', color: '#000' },
+  merchantBannerDesc: { fontSize: 12, color: '#666', marginTop: 2 },
   tokenRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
   tokenChip: {
     paddingVertical: 8,
