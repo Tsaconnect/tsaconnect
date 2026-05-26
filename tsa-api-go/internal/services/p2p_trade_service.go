@@ -1952,6 +1952,35 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	return out, nil
 }
 
+// LoadAdPaymentMethods returns the seller's payment-method rows that this
+// ad accepts. Joining ad.payment_method_ids ⨝ p2p_payment_methods so the
+// buyer can see WHERE to send NGN — they otherwise can't know without
+// opening a trade. Scoped to the ad's seller_id + non-deleted rows so a
+// stale or malicious PM id in the ad's array can't surface someone else's
+// account.
+func (s *P2PTradeService) LoadAdPaymentMethods(ctx context.Context, ad *models.P2PAd) ([]models.P2PPaymentMethod, error) {
+	if ad == nil || len(ad.PaymentMethodIDs) == 0 {
+		return nil, nil
+	}
+	ids := make([]uuid.UUID, 0, len(ad.PaymentMethodIDs))
+	for _, raw := range ad.PaymentMethodIDs {
+		if id, err := uuid.Parse(raw); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []models.P2PPaymentMethod
+	if err := s.db.WithContext(ctx).
+		Where("id IN ? AND user_id = ? AND deleted_at IS NULL", ids, ad.SellerID).
+		Order("is_default DESC, created_at ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // LookupUsernames returns a map seller-id → username for the given IDs in a
 // single query. Used by the ad-list/detail handlers to decorate the wire
 // response with a display name without an N+1 lookup. Missing IDs are

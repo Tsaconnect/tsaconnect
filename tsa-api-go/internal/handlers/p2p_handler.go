@@ -639,7 +639,20 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	// Detail page benefits from the same effective-rate / staleness signal
 	// as the browse list — let the FE disable Open Trade when the feed is stale.
 	decorated := h.decorateAdsWithEffectiveRate(c.Request.Context(), []models.P2PAd{*ad})[0]
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": decorated})
+	// Embed the seller's payment-method rows the buyer should send NGN to.
+	// Without this the FE had to call /payment-methods (which returns the
+	// CALLER's methods) and filter — guaranteed empty for any buyer who
+	// doesn't happen to share PM IDs with the seller, i.e. always.
+	detail := adDetailItem{adListItem: decorated}
+	if pms, err := h.trade.LoadAdPaymentMethods(c.Request.Context(), ad); err != nil {
+		// Non-fatal — render the ad without PMs and let the FE surface a
+		// "seller has no payment methods" message instead of 5xx'ing the
+		// whole detail view.
+		log.Printf("[p2p GetAd] LoadAdPaymentMethods failed for ad=%s: %v", ad.ID, err)
+	} else {
+		detail.PaymentMethods = pms
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
 }
 
 // adListItem wraps a P2PAd with the transient rateStale flag computed at
@@ -654,6 +667,14 @@ type adListItem struct {
 	models.P2PAd
 	RateStale      bool   `json:"rateStale,omitempty"`
 	SellerUsername string `json:"sellerUsername,omitempty"`
+}
+
+// adDetailItem extends adListItem with the seller's payment-method rows the
+// ad accepts. Detail-only — the marketplace list never embeds bank account
+// numbers (avoids broadcasting account info to anyone scraping the feed).
+type adDetailItem struct {
+	adListItem
+	PaymentMethods []models.P2PPaymentMethod `json:"paymentMethods,omitempty"`
 }
 
 // decorateAdsWithEffectiveRate computes effective rate per row for the list
