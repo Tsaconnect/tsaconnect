@@ -34,7 +34,7 @@ import {
   parseTokenAmount,
   type P2PPaymentMethod,
 } from '../../services/p2p';
-import { getActiveWallet, signTypedData } from '../../services/wallet';
+import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, P2P_GOLD, pctToBps } from '../../constants/p2p';
 
@@ -202,6 +202,28 @@ const CreateAdScreen: React.FC = () => {
         throw new Error('No wallet found. Please set up a wallet first.');
       }
 
+      // Pre-flight integrity check: the stored private key must actually
+      // derive to sellerAddress. Catches SecureStore corruption (legacy
+      // migration crossed-wires, re-import under wrong slot) *before* the
+      // backend creates a pending ad row — without this guard the same
+      // mismatch surfaces later as a cryptic "signature recovered to X,
+      // expected Y" 400 from SignAd, and we'd leave an orphan pending ad
+      // in the DB on every retry.
+      const integrity = await verifyWalletKey(sellerAddress);
+      if (!integrity.ok) {
+        if (integrity.reason === 'missing') {
+          throw new Error(
+            `No private key stored for wallet ${sellerAddress}. ` +
+              'Remove this wallet and re-import it from its seed phrase.'
+          );
+        }
+        throw new Error(
+          `Wallet ${sellerAddress} is corrupt — its stored key actually ` +
+            `derives to ${integrity.derived}. Remove this wallet from the ` +
+            'wallet list and re-import it from its seed phrase, then retry.'
+        );
+      }
+
       // 2. Convert human inputs to base units / canonical strings.
       const tokenAmount = parseTokenAmount(amountInput, token.decimals);
       const minLimit = minLimitInput.trim() ? minLimitInput.trim() : undefined;
@@ -287,6 +309,19 @@ const CreateAdScreen: React.FC = () => {
     }
     if (status === 503) {
       return 'Live rate just expired. Refresh the screen and try again.';
+    }
+    // Server-side EIP-712 recovery mismatch — the wallet that produced the
+    // signature derives to a different address than the one we declared as
+    // sellerAddress. The pre-flight in handleSubmit catches the common
+    // SecureStore-corruption case, but if a stale build slips through (or
+    // the active wallet flips mid-flow) we still want a useful message
+    // instead of the raw "signature recovered to 0x… expected 0x…" alert.
+    if (message && /signature recovered to /i.test(message)) {
+      return (
+        'Your wallet did not sign the ad correctly — its key does not match ' +
+        'the address on the ad. Remove this wallet and re-import it from its ' +
+        'seed phrase, then retry. (Server message: ' + message + ')'
+      );
     }
     return message || 'Server rejected the request';
   }
