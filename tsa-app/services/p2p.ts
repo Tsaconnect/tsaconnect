@@ -60,6 +60,10 @@ export interface P2PAd {
   minLimit?: string;
   maxLimit?: string;
   paymentMethodIds: string[];
+  /** Seller's payment-method rows the buyer should send NGN to. Populated
+   *  by the ad-detail endpoint only — the marketplace list omits it so
+   *  bank account numbers aren't broadcast in the feed. */
+  paymentMethods?: P2PPaymentMethod[];
   terms?: string;
   // ── Pool/voucher fields (post-Phase-2B). Populated by the backend after
   //    CreateAd; SellerAddress / VoucherSignature are the seller wallet that

@@ -21,12 +21,10 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
-  paymentMethodsApi,
   tradesApi,
   formatFiat,
   formatTokenAmount,
   type P2PAd,
-  type P2PPaymentMethod,
   type UnsignedTx,
 } from '../../../services/p2p';
 import {
@@ -50,29 +48,27 @@ const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 const AdDetailScreen: React.FC = () => {
   const { adId } = useLocalSearchParams<{ adId: string }>();
   const [ad, setAd] = useState<P2PAd | null>(null);
-  const [paymentMethods, setPaymentMethods] = useState<P2PPaymentMethod[]>([]);
   const [selectedPmId, setSelectedPmId] = useState<string>('');
   const [fiatInput, setFiatInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
 
+  // The seller's payment-method rows come embedded in the ad-detail
+  // response (BE: adDetailItem.paymentMethods) — buyers need to see the
+  // seller's account to know where to send NGN. The previous flow asked
+  // /payment-methods (the CALLER's methods) and filtered, which was
+  // guaranteed empty for any buyer not sharing PM IDs with the seller.
+  const paymentMethods = ad?.paymentMethods ?? [];
+
   const load = useCallback(async () => {
     if (!adId) return;
-    const [adRes, pmRes] = await Promise.all([
-      adsApi.get(String(adId)),
-      paymentMethodsApi.list(),
-    ]);
-    if (adRes.success && adRes.data) setAd(adRes.data);
-    if (pmRes.success && pmRes.data) {
-      // Filter to methods that the AD allows. The seller picks which of
-      // their methods can receive payments per ad.
-      const allowed = pmRes.data.filter((m) =>
-        adRes.data?.paymentMethodIds.includes(m.id)
-      );
-      setPaymentMethods(allowed);
+    const adRes = await adsApi.get(String(adId));
+    if (adRes.success && adRes.data) {
+      setAd(adRes.data);
+      const pms = adRes.data.paymentMethods ?? [];
       // Auto-select first if only one option.
-      if (allowed.length === 1) setSelectedPmId(allowed[0].id);
+      if (pms.length === 1) setSelectedPmId(pms[0].id);
     }
     setLoading(false);
   }, [adId]);
@@ -278,7 +274,7 @@ const AdDetailScreen: React.FC = () => {
 
           <Text style={styles.label}>Pay via</Text>
           {paymentMethods.length === 0 ? (
-            <Text style={styles.placeholder}>Seller has no compatible payment methods configured.</Text>
+            <Text style={styles.placeholder}>Seller has no payment methods configured on this ad.</Text>
           ) : (
             paymentMethods.map((m) => (
               <TouchableOpacity
