@@ -27,6 +27,7 @@ import {
   type P2PAd,
 } from '../../services/p2p';
 import { broadcastTransaction, getActiveWallet, signTransaction } from '../../services/wallet';
+import { useUserRole } from '../../hooks/useUserRole';
 
 const GOLD = P2P_GOLD;
 
@@ -48,6 +49,7 @@ const MyAdsScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
+  const { isMerchant, loading: roleLoading } = useUserRole();
 
   const load = useCallback(async () => {
     const res = await adsApi.listMine(filter === 'all' ? {} : { status: filter });
@@ -151,13 +153,35 @@ const MyAdsScreen: React.FC = () => {
           <Text style={styles.heading}>My Ads</Text>
           <TouchableOpacity
             style={styles.cta}
-            onPress={() => router.push('/p2p/create-ad')}
+            onPress={() =>
+              router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
+            }
             activeOpacity={0.85}
           >
             <Icon name="add" size={18} color="#000" />
-            <Text style={styles.ctaText}>New ad</Text>
+            <Text style={styles.ctaText}>{isMerchant ? 'New ad' : 'Become merchant'}</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Mirrors the marketplace-side banner: non-merchants reading their
+            (empty) My Ads list get a one-tap path to onboarding instead of
+            hitting a 403 inside the create-ad flow. */}
+        {!roleLoading && !isMerchant && (
+          <TouchableOpacity
+            style={styles.merchantBanner}
+            onPress={() => router.push('/merchants/merchant-request')}
+            activeOpacity={0.85}
+          >
+            <Icon name="storefront" size={24} color={GOLD.dark} />
+            <View style={styles.merchantBannerText}>
+              <Text style={styles.merchantBannerTitle}>Become a merchant</Text>
+              <Text style={styles.merchantBannerDesc}>
+                Required to publish P2P ads. Apply in a minute.
+              </Text>
+            </View>
+            <Icon name="chevron-right" size={22} color={GOLD.dark} />
+          </TouchableOpacity>
+        )}
 
         <ScrollView
           horizontal
@@ -333,6 +357,21 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   ctaText: { fontWeight: '700', color: '#000' },
+  merchantBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 14,
+  },
+  merchantBannerText: { flex: 1 },
+  merchantBannerTitle: { fontSize: 14, fontWeight: '800', color: '#000' },
+  merchantBannerDesc: { fontSize: 12, color: '#666', marginTop: 2 },
   tabRow: { marginBottom: 14 },
   errorBanner: {
     flexDirection: 'row',
