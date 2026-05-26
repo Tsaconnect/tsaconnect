@@ -53,6 +53,10 @@ export interface P2PAd {
   floatOffsetBps?: number | null;
   floatAnchor?: string;
   rateStale?: boolean;
+  /** Username of the seller, decorated by the list/detail endpoints so the
+   *  FE can render "@ojay" instead of a truncated UUID. Optional — missing
+   *  when the user lookup failed transiently. */
+  sellerUsername?: string;
   minLimit?: string;
   maxLimit?: string;
   paymentMethodIds: string[];
@@ -662,6 +666,26 @@ export function formatTokenAmount(
   frac = frac.replace(/0+$/, '');
   const out = frac ? `${intPart}.${frac}` : intPart;
   return negative ? `-${out}` : out;
+}
+
+/**
+ * Format a fiat-side numeric string for display. The server stores rates at
+ * up to 10 fractional digits ("1378.9900000000") for headroom; humans want
+ * grouped thousands and at most two decimals with no trailing zeros
+ * ("1,378.99"). Use this anywhere a `rate`, `minLimit`, or `maxLimit` is
+ * rendered to the user; the raw string stays on the wire.
+ *
+ * `maxFractionDigits` defaults to 2 (NGN-like). Pass 0 for whole-fiat
+ * limits where decimals just add noise.
+ */
+export function formatFiat(value: string | undefined, maxFractionDigits = 2): string {
+  if (!value) return '0';
+  const n = Number(value);
+  if (!isFinite(n)) return value;
+  return n.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: maxFractionDigits,
+  });
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   adsApi,
   paymentMethodsApi,
   tradesApi,
+  formatFiat,
   formatTokenAmount,
   type P2PAd,
   type P2PPaymentMethod,
@@ -172,17 +173,42 @@ const AdDetailScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <View style={styles.summary}>
-            <Text style={styles.summaryRate}>
-              ₦{ad.rate} <Text style={styles.summaryRateUnit}>/ {ad.token}</Text>
-            </Text>
-            {ad.rateType === 'float' && (
-              <View style={styles.floatChipRow}>
-                <Icon name="trending-up" size={13} color={GOLD.dark} />
-                <Text style={styles.floatChipText}>
-                  Float rate — auto-updates from market
-                </Text>
+          {(() => {
+            const sellerLabel =
+              ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
+            const sellerInitial = sellerLabel.charAt(0).toUpperCase();
+            return (
+              <View style={styles.sellerHeader}>
+                <View style={styles.sellerAvatar}>
+                  <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sellerName} numberOfLines={1}>
+                    @{sellerLabel}
+                  </Text>
+                  <Text style={styles.sellerSub}>Selling {ad.token} for NGN</Text>
+                </View>
+                {ad.rateType === 'float' && (
+                  <View style={styles.floatChipRow}>
+                    <Icon name="trending-up" size={11} color={GOLD.dark} />
+                    <Text style={styles.floatChipText}>Float</Text>
+                  </View>
+                )}
               </View>
+            );
+          })()}
+
+          <View style={styles.summary}>
+            <Text style={styles.summaryLabel}>Price</Text>
+            <View style={styles.summaryRateRow}>
+              <Text style={styles.summaryCurrency}>NGN</Text>
+              <Text style={styles.summaryRate}>{formatFiat(ad.rate)}</Text>
+              <Text style={styles.summaryRateUnit}>/ {ad.token}</Text>
+            </View>
+            {ad.rateType === 'float' && (
+              <Text style={styles.floatHint}>
+                Float rate — recomputes from the live market when you open a trade.
+              </Text>
             )}
             {ad.rateStale && (
               <View style={styles.staleBanner}>
@@ -193,19 +219,33 @@ const AdDetailScreen: React.FC = () => {
                 </Text>
               </View>
             )}
-            <Text style={styles.summaryAvail}>
-              Available: {formatTokenAmount(ad.remaining, tokenDecimals, 4)} {ad.token}
-            </Text>
-            {ad.minLimit && ad.maxLimit && (
-              <Text style={styles.summaryLimits}>
-                Order range: ₦{ad.minLimit} – ₦{ad.maxLimit}
-              </Text>
-            )}
+
+            <View style={styles.summaryDivider} />
+
+            <View style={styles.summaryMetaGrid}>
+              <View style={styles.summaryMetaCol}>
+                <Text style={styles.summaryMetaLabel}>Available</Text>
+                <Text style={styles.summaryMetaValue}>
+                  {formatTokenAmount(ad.remaining, tokenDecimals, 4)} {ad.token}
+                </Text>
+              </View>
+              {ad.minLimit && ad.maxLimit && (
+                <View style={[styles.summaryMetaCol, styles.summaryMetaColRight]}>
+                  <Text style={styles.summaryMetaLabel}>Order range</Text>
+                  <Text style={styles.summaryMetaValue}>
+                    ₦{formatFiat(ad.minLimit, 0)} – ₦{formatFiat(ad.maxLimit, 0)}
+                  </Text>
+                </View>
+              )}
+            </View>
           </View>
 
           {ad.terms && (
             <View style={styles.terms}>
-              <Text style={styles.termsLabel}>Seller's terms</Text>
+              <View style={styles.termsHeader}>
+                <Icon name="info-outline" size={14} color={GOLD.dark} />
+                <Text style={styles.termsLabel}>Seller's terms</Text>
+              </View>
               <Text style={styles.termsBody}>{ad.terms}</Text>
             </View>
           )}
@@ -308,6 +348,30 @@ function toTxLike(tx: UnsignedTx) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },
   scroll: { padding: 20, paddingBottom: 80 },
+  sellerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#FFF',
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    marginBottom: 12,
+  },
+  sellerAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sellerAvatarText: { fontSize: 17, fontWeight: '800', color: GOLD.dark },
+  sellerName: { fontSize: 15, fontWeight: '800', color: '#1A1A1A' },
+  sellerSub: { fontSize: 12, color: '#888', marginTop: 2, fontWeight: '500' },
   summary: {
     backgroundColor: '#FFF',
     padding: 18,
@@ -316,39 +380,60 @@ const styles = StyleSheet.create({
     borderColor: GOLD.muted,
     marginBottom: 16,
   },
-  summaryRate: { fontSize: 28, fontWeight: '800', color: '#000' },
+  summaryLabel: {
+    fontSize: 11,
+    color: '#999',
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  summaryRateRow: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
+  summaryCurrency: { fontSize: 13, fontWeight: '800', color: GOLD.dark, letterSpacing: 0.5 },
+  summaryRate: { fontSize: 30, fontWeight: '800', color: '#000', letterSpacing: -0.4 },
+  summaryRateUnit: { fontSize: 14, color: '#666', fontWeight: '600' },
+  floatHint: { fontSize: 12, color: '#777', marginTop: 8, lineHeight: 17 },
   floatChipRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    marginTop: 6,
+    gap: 3,
     backgroundColor: GOLD.light,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 6,
-    alignSelf: 'flex-start',
   },
-  floatChipText: { fontSize: 12, color: GOLD.dark, fontWeight: '700' },
+  floatChipText: { fontSize: 11, color: GOLD.dark, fontWeight: '700' },
   staleBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 6,
-    marginTop: 8,
+    marginTop: 10,
     backgroundColor: '#FDECEF',
     padding: 10,
     borderRadius: 8,
   },
   staleBannerText: { flex: 1, fontSize: 12, color: GOLD.error, lineHeight: 17 },
-  summaryRateUnit: { fontSize: 14, color: '#666', fontWeight: '600' },
-  summaryAvail: { fontSize: 13, color: '#444', marginTop: 8 },
-  summaryLimits: { fontSize: 12, color: '#666', marginTop: 4 },
+  summaryDivider: { height: 1, backgroundColor: '#F1ECDE', marginTop: 14, marginBottom: 12 },
+  summaryMetaGrid: { flexDirection: 'row', justifyContent: 'space-between' },
+  summaryMetaCol: { flex: 1 },
+  summaryMetaColRight: { alignItems: 'flex-end' },
+  summaryMetaLabel: {
+    fontSize: 11,
+    color: '#999',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginBottom: 3,
+  },
+  summaryMetaValue: { fontSize: 13, color: '#1A1A1A', fontWeight: '700' },
   terms: {
     backgroundColor: GOLD.light,
     padding: 14,
     borderRadius: 10,
     marginBottom: 16,
   },
-  termsLabel: { fontSize: 12, fontWeight: '700', color: GOLD.dark, marginBottom: 6 },
+  termsHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  termsLabel: { fontSize: 12, fontWeight: '700', color: GOLD.dark, letterSpacing: 0.3 },
   termsBody: { fontSize: 13, color: '#333', lineHeight: 18 },
   label: { fontSize: 14, fontWeight: '700', color: '#333', marginTop: 8, marginBottom: 6 },
   inputCard: {
