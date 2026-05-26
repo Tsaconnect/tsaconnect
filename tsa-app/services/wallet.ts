@@ -112,6 +112,45 @@ export async function markWalletBackedUp(address: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Wallet integrity
+// ---------------------------------------------------------------------------
+
+export type WalletIntegrityResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing' }
+  | { ok: false; reason: 'mismatch'; derived: string };
+
+/**
+ * Check that the private key stored under `address` actually derives to that
+ * address. Used as a pre-flight before flows that ask the wallet to sign on
+ * behalf of `address` — running this *before* creating server-side state
+ * (e.g. a pending P2P ad row) means the user sees actionable guidance instead
+ * of a cryptic server-side "signature recovered to X, expected Y" error after
+ * the row is already in the DB.
+ *
+ * Corruption modes this catches:
+ *   - SecureStore key missing entirely (deleted, never written)
+ *   - Stored key derives to a different address (legacy migration crossed
+ *     wires, or a re-import wrote under the wrong slot)
+ *
+ * The same defensive check also lives inside `signTypedData` /
+ * `signTransaction`, but those run *after* the API call that submits the ad.
+ * Keeping a parallel check at the entry point lets the caller short-circuit
+ * with the same error message before any network I/O.
+ */
+export async function verifyWalletKey(address: string): Promise<WalletIntegrityResult> {
+  const privateKey = await getPrivateKey(address);
+  if (!privateKey) {
+    return { ok: false, reason: 'missing' };
+  }
+  const derived = ethers.computeAddress(privateKey);
+  if (derived.toLowerCase() !== address.toLowerCase()) {
+    return { ok: false, reason: 'mismatch', derived };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Wallet generation & import
 // ---------------------------------------------------------------------------
 
