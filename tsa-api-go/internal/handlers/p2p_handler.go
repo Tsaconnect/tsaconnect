@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -637,7 +638,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	}
 	// Detail page benefits from the same effective-rate / staleness signal
 	// as the browse list — let the FE disable Open Trade when the feed is stale.
-	decorated := h.decorateAdsWithEffectiveRate([]models.P2PAd{*ad})[0]
+	decorated := h.decorateAdsWithEffectiveRate(c.Request.Context(), []models.P2PAd{*ad})[0]
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": decorated})
 }
 
@@ -645,18 +646,37 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 // response time. For float ads, ad.Rate is overwritten with the freshly
 // computed effective rate when the feed is fresh; on a stale feed the cached
 // ad.Rate is left as-is and rateStale is set so the FE can disable the card.
+//
+// SellerUsername is also attached here (looked up in a single batched query)
+// so the FE can render "@ojay" instead of "Seller •14a0c0" without a per-row
+// extra request.
 type adListItem struct {
 	models.P2PAd
-	RateStale bool `json:"rateStale,omitempty"`
+	RateStale      bool   `json:"rateStale,omitempty"`
+	SellerUsername string `json:"sellerUsername,omitempty"`
 }
 
 // decorateAdsWithEffectiveRate computes effective rate per row for the list
 // endpoints. Mutates the local copy of each ad (not the DB row).
-func (h *P2PHandler) decorateAdsWithEffectiveRate(rows []models.P2PAd) []adListItem {
+func (h *P2PHandler) decorateAdsWithEffectiveRate(ctx context.Context, rows []models.P2PAd) []adListItem {
 	out := make([]adListItem, len(rows))
+	// Single batched username lookup keyed by seller_id. Failure is
+	// non-fatal — the FE falls back to a truncated UUID.
+	ids := make([]uuid.UUID, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].SellerID)
+	}
+	usernames, err := h.trade.LookupUsernames(ctx, ids)
+	if err != nil {
+		log.Printf("[p2p] LookupUsernames failed: %v — list response will fall back to seller IDs", err)
+		usernames = map[uuid.UUID]string{}
+	}
 	for i := range rows {
 		ad := rows[i] // local copy — do NOT persist mutations
 		item := adListItem{P2PAd: ad}
+		if u, ok := usernames[ad.SellerID]; ok {
+			item.SellerUsername = u
+		}
 		rate, err := h.trade.ComputeEffectiveRate(&ad)
 		if err != nil {
 			if errors.Is(err, services.ErrRateStale) {
@@ -700,7 +720,7 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(rows)})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
 func (h *P2PHandler) ListMyAds(c *gin.Context) {
@@ -719,7 +739,7 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(rows)})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
 func (h *P2PHandler) PauseAd(c *gin.Context) {

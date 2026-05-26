@@ -1952,6 +1952,48 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	return out, nil
 }
 
+// LookupUsernames returns a map seller-id → username for the given IDs in a
+// single query. Used by the ad-list/detail handlers to decorate the wire
+// response with a display name without an N+1 lookup. Missing IDs are
+// silently omitted from the map; callers fall back to a truncated UUID.
+func (s *P2PTradeService) LookupUsernames(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	// Dedup so the IN list stays small even when many ads share a seller.
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	uniq := ids[:0:0]
+	for _, id := range ids {
+		if id == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out, nil
+	}
+	type row struct {
+		ID       uuid.UUID
+		Username string
+	}
+	var rows []row
+	if err := s.db.WithContext(ctx).Table("users").
+		Select("id, username").
+		Where("id IN ?", uniq).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Username
+	}
+	return out, nil
+}
+
 type TradeFilter struct {
 	Role   string // "buyer", "seller", or empty for either
 	UserID uuid.UUID
