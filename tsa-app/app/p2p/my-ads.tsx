@@ -21,6 +21,7 @@ import type { ChainKey } from '../../constants/chains';
 import { P2P_GOLD } from '../../constants/p2p';
 import {
   adsApi,
+  formatFiat,
   formatTokenAmount,
   TOKEN_DECIMALS,
   unsignedTxToTxLike,
@@ -269,7 +270,7 @@ const AdCard: React.FC<{
     >
       <View style={styles.cardTop}>
         <Text style={styles.cardRate}>
-          {ad.rate && ad.rate !== '0' ? `₦${ad.rate}` : '—'}{' '}
+          {ad.rate && ad.rate !== '0' ? `₦${formatFiat(ad.rate)}` : '—'}{' '}
           <Text style={styles.cardRateUnit}>/ {ad.token}</Text>
           {ad.rateType === 'float' && (
             <Text style={styles.cardRateBadge}>{ad.rateStale ? ' • stale feed' : ' • auto'}</Text>

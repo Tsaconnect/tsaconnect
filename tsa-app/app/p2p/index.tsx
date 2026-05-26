@@ -17,6 +17,7 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  formatFiat,
   formatTokenAmount,
   type P2PAd,
 } from '../../services/p2p';
@@ -177,6 +178,12 @@ const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const isFloat = ad.rateType === 'float';
   const isStale = !!ad.rateStale;
+  // sellerUsername is decorated server-side; fall back to a short ID for
+  // legacy ads that pre-date the decoration.
+  const sellerLabel = ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
+  const sellerInitial = sellerLabel.charAt(0).toUpperCase();
+  const minLimit = ad.minLimit ? formatFiat(ad.minLimit, 0) : null;
+  const maxLimit = ad.maxLimit ? formatFiat(ad.maxLimit, 0) : null;
   return (
     <TouchableOpacity
       style={[styles.card, isStale && styles.cardDisabled]}
@@ -187,40 +194,57 @@ const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
       activeOpacity={isStale ? 1 : 0.85}
       disabled={isStale}
     >
-      <View style={styles.cardTop}>
-        <View style={styles.cardSellerRow}>
-          <Text style={styles.cardSeller}>
-            Seller •{ad.sellerId.slice(0, 6)}
-          </Text>
-          {isFloat && (
-            <View style={styles.floatChip}>
-              <Icon name="trending-up" size={11} color={GOLD.dark} />
-              <Text style={styles.floatChipText}>Float</Text>
-            </View>
-          )}
+      <View style={styles.cardHeader}>
+        <View style={styles.sellerBlock}>
+          <View style={styles.sellerAvatar}>
+            <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
+          </View>
+          <View style={styles.sellerText}>
+            <Text style={styles.sellerName} numberOfLines={1}>
+              @{sellerLabel}
+            </Text>
+            <Text style={styles.sellerSub} numberOfLines={1}>
+              Sells {ad.token}
+            </Text>
+          </View>
         </View>
-        <View style={styles.statusBadge}>
-          <Text style={styles.statusBadgeText}>{ad.status}</Text>
-        </View>
+        {isFloat ? (
+          <View style={styles.floatChip}>
+            <Icon name="trending-up" size={11} color={GOLD.dark} />
+            <Text style={styles.floatChipText}>Float</Text>
+          </View>
+        ) : null}
       </View>
-      <View style={styles.cardRow}>
-        <Text style={styles.cardRate}>₦{ad.rate}</Text>
-        <Text style={styles.cardRateUnit}> / {ad.token}</Text>
+
+      <View style={styles.priceBlock}>
+        <Text style={styles.priceCurrency}>NGN</Text>
+        <Text style={styles.priceValue}>{formatFiat(ad.rate)}</Text>
+        <Text style={styles.priceUnit}>/ {ad.token}</Text>
       </View>
+
       {isStale && (
         <View style={styles.staleBadge}>
           <Icon name="error-outline" size={13} color="#DC3545" />
           <Text style={styles.staleBadgeText}>Live rate unavailable</Text>
         </View>
       )}
-      <View style={styles.cardMeta}>
-        <Text style={styles.cardMetaText}>
-          Available: {remaining} {ad.token}
-        </Text>
-        {ad.minLimit && ad.maxLimit && (
-          <Text style={styles.cardMetaText}>
-            ₦{ad.minLimit} – ₦{ad.maxLimit}
+
+      <View style={styles.divider} />
+
+      <View style={styles.metaGrid}>
+        <View style={styles.metaCol}>
+          <Text style={styles.metaLabel}>Available</Text>
+          <Text style={styles.metaValue}>
+            {remaining} {ad.token}
           </Text>
+        </View>
+        {minLimit && maxLimit && (
+          <View style={[styles.metaCol, styles.metaColRight]}>
+            <Text style={styles.metaLabel}>Limit</Text>
+            <Text style={styles.metaValue}>
+              ₦{minLimit} – ₦{maxLimit}
+            </Text>
+          </View>
         )}
       </View>
     </TouchableOpacity>
@@ -277,39 +301,58 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: '#FFF',
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 16,
     marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#F0EAD6',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
     elevation: 2,
   },
-  cardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
   cardDisabled: { opacity: 0.55 },
-  cardSellerRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  cardSeller: { fontSize: 12, color: '#888', fontWeight: '600' },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  sellerBlock: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10 },
+  sellerAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sellerAvatarText: { fontSize: 15, fontWeight: '800', color: GOLD.dark },
+  sellerText: { flex: 1 },
+  sellerName: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
+  sellerSub: { fontSize: 11, color: '#888', marginTop: 1, fontWeight: '500' },
   floatChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
     backgroundColor: GOLD.light,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 5,
   },
   floatChipText: { fontSize: 10, color: GOLD.dark, fontWeight: '700' },
+  priceBlock: { flexDirection: 'row', alignItems: 'baseline', gap: 4 },
+  priceCurrency: { fontSize: 12, fontWeight: '700', color: GOLD.dark, letterSpacing: 0.5 },
+  priceValue: { fontSize: 26, fontWeight: '800', color: '#000', letterSpacing: -0.3 },
+  priceUnit: { fontSize: 13, color: '#777', fontWeight: '600', marginLeft: 2 },
   staleBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    marginTop: 4,
+    marginTop: 8,
     backgroundColor: '#FDECEF',
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -317,13 +360,17 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   staleBadgeText: { fontSize: 11, color: '#DC3545', fontWeight: '700' },
-  statusBadge: { backgroundColor: GOLD.light, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  statusBadgeText: { fontSize: 11, color: GOLD.dark, fontWeight: '700' },
-  cardRow: { flexDirection: 'row', alignItems: 'baseline' },
-  cardRate: { fontSize: 22, fontWeight: '800', color: '#000' },
-  cardRateUnit: { fontSize: 13, color: '#666', fontWeight: '600' },
-  cardMeta: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
-  cardMetaText: { fontSize: 12, color: '#666' },
+  divider: {
+    height: 1,
+    backgroundColor: '#F1ECDE',
+    marginTop: 14,
+    marginBottom: 12,
+  },
+  metaGrid: { flexDirection: 'row', justifyContent: 'space-between' },
+  metaCol: { flex: 1 },
+  metaColRight: { alignItems: 'flex-end' },
+  metaLabel: { fontSize: 11, color: '#999', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 },
+  metaValue: { fontSize: 13, color: '#1A1A1A', fontWeight: '700' },
 });
 
 export default P2PMarketScreen;
