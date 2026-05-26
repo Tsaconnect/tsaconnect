@@ -466,6 +466,22 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	if recovered, err := recoverEIP712Signer(hash, signature); err != nil {
 		return nil, fmt.Errorf("%w: invalid signature (%v)", ErrInvalidParams, err)
 	} else if !strings.EqualFold(recovered.Hex(), sellerAddress) {
+		// Recovery mismatches are almost always a domain-separator drift
+		// (chainID or verifyingContract on the BE != what the contract
+		// hashed with) or a voucher-field drift between CreateAd and SignAd
+		// (token resolver changed, deadline/nonce corruption). Logging the
+		// inputs the BE used to recompute the hash gives the operator
+		// everything needed to spot which side disagrees — without this,
+		// the only signal is the recovered (fake) address which carries no
+		// useful information on its own.
+		log.Printf(
+			"[p2p SignAd] signature recovery mismatch: recovered=%s expected=%s "+
+				"adID=%s voucherHash=0x%x chainID=%d verifyingContract=%s "+
+				"seller=%s token=%s maxAmount=%s deadline=%d nonce=0x%x",
+			recovered.Hex(), sellerAddress, ad.ID, hash, s.chainID, s.escrow.ContractAddress(),
+			voucher.Seller.Hex(), voucher.Token.Hex(), voucher.MaxAmount.String(),
+			voucher.Deadline.Int64(), voucher.Nonce,
+		)
 		return nil, fmt.Errorf("%w: signature recovered to %s, expected %s",
 			ErrInvalidParams, recovered.Hex(), sellerAddress)
 	}
