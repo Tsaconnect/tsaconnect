@@ -212,7 +212,8 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 	stmts := []string{
 		`CREATE TABLE p2p_payment_methods (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
-			type TEXT, country TEXT, currency TEXT,
+			type TEXT, provider TEXT DEFAULT 'bank_transfer',
+			country TEXT, currency TEXT,
 			bank_name TEXT, bank_code TEXT,
 			account_number TEXT, account_name TEXT,
 			verified INTEGER DEFAULT 0, is_default INTEGER DEFAULT 0,

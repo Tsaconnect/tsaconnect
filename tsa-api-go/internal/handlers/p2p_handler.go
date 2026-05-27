@@ -147,7 +147,8 @@ func unsignedTxJSON(raw []byte) any {
 // ─── Payment methods ───────────────────────────────────────────────────────
 
 type createPaymentMethodRequest struct {
-	Type          string `json:"type" binding:"required"`
+	Provider      string `json:"provider" binding:"required"`
+	Type          string `json:"type"` // optional; derived from provider when present
 	Country       string `json:"country" binding:"required"`
 	Currency      string `json:"currency" binding:"required"`
 	BankName      string `json:"bankName" binding:"required"`
@@ -167,14 +168,17 @@ func (h *P2PHandler) CreatePaymentMethod(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	if req.Type != models.P2PPaymentTypeBank && req.Type != models.P2PPaymentTypeMobileMoney {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid payment method type"})
+	if !services.IsValidProvider(req.Provider) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid payment provider"})
 		return
 	}
+	// Type is derived from the provider catalog so the two never disagree.
+	pmType := services.ProviderType(req.Provider)
 	pm := &models.P2PPaymentMethod{
 		ID:            uuid.New(),
 		UserID:        user.ID,
-		Type:          req.Type,
+		Type:          pmType,
+		Provider:      req.Provider,
 		Country:       strings.ToUpper(req.Country),
 		Currency:      strings.ToUpper(req.Currency),
 		BankName:      req.BankName,
