@@ -51,3 +51,16 @@ func TestPaymentProviderBySlug(t *testing.T) {
 		t.Fatal("expected unknown slug to return ok=false")
 	}
 }
+
+func TestPaymentSummaryFromProviders(t *testing.T) {
+	got := PaymentSummaryFromProviders([]string{"bank_transfer", "opay", "bank_transfer"})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 deduped summaries, got %d", len(got))
+	}
+	if got[0].Provider != "bank_transfer" || got[0].Label != "Bank Transfer" {
+		t.Fatalf("unexpected first summary: %+v", got[0])
+	}
+	if got[1].Provider != "opay" || got[1].Label != "OPay" {
+		t.Fatalf("unexpected second summary: %+v", got[1])
+	}
+}

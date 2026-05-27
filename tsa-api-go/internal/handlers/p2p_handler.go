@@ -679,8 +679,9 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 // extra request.
 type adListItem struct {
 	models.P2PAd
-	RateStale      bool   `json:"rateStale,omitempty"`
-	SellerUsername string `json:"sellerUsername,omitempty"`
+	RateStale            bool                            `json:"rateStale,omitempty"`
+	SellerUsername       string                          `json:"sellerUsername,omitempty"`
+	PaymentMethodSummary []services.PaymentMethodSummary `json:"paymentMethodSummary,omitempty"`
 }
 
 // adDetailItem extends adListItem with the seller's payment-method rows the
@@ -706,12 +707,40 @@ func (h *P2PHandler) decorateAdsWithEffectiveRate(ctx context.Context, rows []mo
 		log.Printf("[p2p] LookupUsernames failed: %v — list response will fall back to seller IDs", err)
 		usernames = map[uuid.UUID]string{}
 	}
+	// Gather every payment-method id referenced across all ads, resolve their
+	// providers in one query, then attach a privacy-safe summary per ad.
+	pmIDSet := map[uuid.UUID]struct{}{}
+	for i := range rows {
+		for _, raw := range rows[i].PaymentMethodIDs {
+			if id, perr := uuid.Parse(raw); perr == nil {
+				pmIDSet[id] = struct{}{}
+			}
+		}
+	}
+	pmIDs := make([]uuid.UUID, 0, len(pmIDSet))
+	for id := range pmIDSet {
+		pmIDs = append(pmIDs, id)
+	}
+	providerByID, perr := h.trade.LoadProvidersByMethodIDs(ctx, pmIDs)
+	if perr != nil {
+		log.Printf("[p2p] LoadProvidersByMethodIDs failed: %v — list will omit payment summaries", perr)
+		providerByID = map[uuid.UUID]string{}
+	}
 	for i := range rows {
 		ad := rows[i] // local copy — do NOT persist mutations
 		item := adListItem{P2PAd: ad}
 		if u, ok := usernames[ad.SellerID]; ok {
 			item.SellerUsername = u
 		}
+		slugs := make([]string, 0, len(ad.PaymentMethodIDs))
+		for _, raw := range ad.PaymentMethodIDs {
+			if id, perr := uuid.Parse(raw); perr == nil {
+				if prov, ok := providerByID[id]; ok {
+					slugs = append(slugs, prov)
+				}
+			}
+		}
+		item.PaymentMethodSummary = services.PaymentSummaryFromProviders(slugs)
 		rate, err := h.trade.ComputeEffectiveRate(&ad)
 		if err != nil {
 			if errors.Is(err, services.ErrRateStale) {

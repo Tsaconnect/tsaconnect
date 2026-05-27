@@ -1981,6 +1981,32 @@ func (s *P2PTradeService) LoadAdPaymentMethods(ctx context.Context, ad *models.P
 	return rows, nil
 }
 
+// LoadProvidersByMethodIDs returns a map payment-method-id → provider slug for
+// the given ids in a single query. Used by the ad-list decorator to build the
+// privacy-safe payment summary without an N+1 per-ad load. Deleted rows are
+// excluded. Account fields are deliberately NOT selected.
+func (s *P2PTradeService) LoadProvidersByMethodIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		ID       uuid.UUID
+		Provider string
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&models.P2PPaymentMethod{}).
+		Select("id", "provider").
+		Where("id IN ? AND deleted_at IS NULL", ids).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Provider
+	}
+	return out, nil
+}
+
 // LookupUsernames returns a map seller-id → username for the given IDs in a
 // single query. Used by the ad-list/detail handlers to decorate the wire
 // response with a display name without an N+1 lookup. Missing IDs are
