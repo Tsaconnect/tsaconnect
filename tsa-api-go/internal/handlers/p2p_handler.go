@@ -712,7 +712,7 @@ func (h *P2PHandler) decorateAdsWithEffectiveRate(ctx context.Context, rows []mo
 	pmIDSet := map[uuid.UUID]struct{}{}
 	for i := range rows {
 		for _, raw := range rows[i].PaymentMethodIDs {
-			if id, perr := uuid.Parse(raw); perr == nil {
+			if id, err := uuid.Parse(raw); err == nil {
 				pmIDSet[id] = struct{}{}
 			}
 		}
@@ -734,7 +734,7 @@ func (h *P2PHandler) decorateAdsWithEffectiveRate(ctx context.Context, rows []mo
 		}
 		slugs := make([]string, 0, len(ad.PaymentMethodIDs))
 		for _, raw := range ad.PaymentMethodIDs {
-			if id, perr := uuid.Parse(raw); perr == nil {
+			if id, err := uuid.Parse(raw); err == nil {
 				if prov, ok := providerByID[id]; ok {
 					slugs = append(slugs, prov)
 				}

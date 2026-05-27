@@ -1089,6 +1089,65 @@ func TestPrepareOpenTrade_PassesVoucherAndSigToAdapter(t *testing.T) {
 	}
 }
 
+// ─── LoadProvidersByMethodIDs ──────────────────────────────────────────────
+
+// seedPaymentMethodWithProvider seeds a payment method with an explicit
+// provider slug so LoadProvidersByMethodIDs has distinct rows to resolve.
+func seedPaymentMethodWithProvider(t *testing.T, db *gorm.DB, userID uuid.UUID, provider string) uuid.UUID {
+	t.Helper()
+	pm := &models.P2PPaymentMethod{
+		ID:            uuid.New(),
+		UserID:        userID,
+		Type:          models.P2PPaymentTypeBank,
+		Provider:      provider,
+		Country:       "NG",
+		Currency:      "NGN",
+		BankName:      "Test Bank",
+		AccountNumber: "1234567890",
+		AccountName:   "Test User",
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatalf("seed pm (%s): %v", provider, err)
+	}
+	return pm.ID
+}
+
+func TestLoadProvidersByMethodIDs_ResolvesLiveAndExcludesDeleted(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	userID := uuid.New()
+
+	bankID := seedPaymentMethodWithProvider(t, db, userID, "bank_transfer")
+	opayID := seedPaymentMethodWithProvider(t, db, userID, "opay")
+	deletedID := seedPaymentMethodWithProvider(t, db, userID, "palmpay")
+
+	// Soft-delete the third method directly so the loader must exclude it.
+	if err := db.Model(&models.P2PPaymentMethod{}).
+		Where("id = ?", deletedID).
+		Update("deleted_at", time.Now().UTC()).Error; err != nil {
+		t.Fatalf("soft-delete pm: %v", err)
+	}
+
+	got, err := svc.LoadProvidersByMethodIDs(context.Background(),
+		[]uuid.UUID{bankID, opayID, deletedID})
+	if err != nil {
+		t.Fatalf("LoadProvidersByMethodIDs: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 live providers, got %d: %+v", len(got), got)
+	}
+	if got[bankID] != "bank_transfer" {
+		t.Errorf("bank method = %q, want bank_transfer", got[bankID])
+	}
+	if got[opayID] != "opay" {
+		t.Errorf("opay method = %q, want opay", got[opayID])
+	}
+	if _, ok := got[deletedID]; ok {
+		t.Errorf("soft-deleted method %s should be excluded, got %q", deletedID, got[deletedID])
+	}
+}
+
 func TestCreateAd_RPCFailureNoLongerSilent(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, esc, _ := newService(t, db)
