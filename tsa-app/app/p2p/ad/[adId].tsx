@@ -33,6 +33,7 @@ import {
   signTransaction,
 } from '../../../services/wallet';
 import type { ChainKey } from '../../../constants/chains';
+import { useCurrency } from '../../../contexts/CurrencyContext';
 
 const GOLD = {
   primary: '#FFD700',
@@ -53,10 +54,11 @@ const AdDetailScreen: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
+  const { supportedCurrencies } = useCurrency();
 
   // The seller's payment-method rows come embedded in the ad-detail
   // response (BE: adDetailItem.paymentMethods) — buyers need to see the
-  // seller's account to know where to send NGN. The previous flow asked
+  // seller's account to know where to send fiat. The previous flow asked
   // /payment-methods (the CALLER's methods) and filtered, which was
   // guaranteed empty for any buyer not sharing PM IDs with the seller.
   const paymentMethods = ad?.paymentMethods ?? [];
@@ -157,6 +159,8 @@ const AdDetailScreen: React.FC = () => {
     );
   }
 
+  const fiatSymbol =
+    supportedCurrencies.find((c) => c.code === ad.fiatCurrency)?.symbol ?? ad.fiatCurrency;
   const minOk =
     !ad.minLimit || parseFloat(fiatInput || '0') >= parseFloat(ad.minLimit || '0');
   const maxOk =
@@ -182,7 +186,7 @@ const AdDetailScreen: React.FC = () => {
                   <Text style={styles.sellerName} numberOfLines={1}>
                     @{sellerLabel}
                   </Text>
-                  <Text style={styles.sellerSub}>Selling {ad.token} for NGN</Text>
+                  <Text style={styles.sellerSub}>Selling {ad.token} for {ad.fiatCurrency}</Text>
                 </View>
                 {ad.rateType === 'float' && (
                   <View style={styles.floatChipRow}>
@@ -197,7 +201,7 @@ const AdDetailScreen: React.FC = () => {
           <View style={styles.summary}>
             <Text style={styles.summaryLabel}>Price</Text>
             <View style={styles.summaryRateRow}>
-              <Text style={styles.summaryCurrency}>NGN</Text>
+              <Text style={styles.summaryCurrency}>{ad.fiatCurrency}</Text>
               <Text style={styles.summaryRate}>{formatFiat(ad.rate)}</Text>
               <Text style={styles.summaryRateUnit}>/ {ad.token}</Text>
             </View>
@@ -229,7 +233,7 @@ const AdDetailScreen: React.FC = () => {
                 <View style={[styles.summaryMetaCol, styles.summaryMetaColRight]}>
                   <Text style={styles.summaryMetaLabel}>Order range</Text>
                   <Text style={styles.summaryMetaValue}>
-                    ₦{formatFiat(ad.minLimit, 0)} – ₦{formatFiat(ad.maxLimit, 0)}
+                    {fiatSymbol}{formatFiat(ad.minLimit, 0)} – {fiatSymbol}{formatFiat(ad.maxLimit, 0)}
                   </Text>
                 </View>
               )}
@@ -246,9 +250,9 @@ const AdDetailScreen: React.FC = () => {
             </View>
           )}
 
-          <Text style={styles.label}>You pay (NGN)</Text>
+          <Text style={styles.label}>You pay ({ad.fiatCurrency})</Text>
           <View style={styles.inputCard}>
-            <Text style={styles.inputPrefix}>₦</Text>
+            <Text style={styles.inputPrefix}>{fiatSymbol}</Text>
             <TextInput
               style={styles.inputField}
               placeholder="0"
@@ -259,10 +263,10 @@ const AdDetailScreen: React.FC = () => {
             />
           </View>
           {!minOk && fiatInput && (
-            <Text style={styles.errorText}>Below seller's minimum (₦{ad.minLimit})</Text>
+            <Text style={styles.errorText}>Below seller's minimum ({fiatSymbol}{ad.minLimit})</Text>
           )}
           {!maxOk && fiatInput && (
-            <Text style={styles.errorText}>Above seller's maximum (₦{ad.maxLimit})</Text>
+            <Text style={styles.errorText}>Above seller's maximum ({fiatSymbol}{ad.maxLimit})</Text>
           )}
 
           <View style={styles.preview}>
