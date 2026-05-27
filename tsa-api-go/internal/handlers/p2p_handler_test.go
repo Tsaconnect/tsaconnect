@@ -342,6 +342,7 @@ func newRig(t *testing.T) *rig {
 // route shape change is caught by the tests below.
 func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g := r.Group("/api/p2p")
+	g.POST("/payment-methods", h.CreatePaymentMethod)
 	g.GET("/balance", h.GetPoolBalance)
 	g.GET("/allowance", h.GetAllowance)
 	g.POST("/deposits/approve", h.PrepareApprove)
@@ -940,6 +941,29 @@ func TestPrepareCancelAd_BlockedByOpenTrades(t *testing.T) {
 	// ErrAdHasOpenTrades → 409 Conflict.
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 (ErrAdHasOpenTrades), got %d; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreatePaymentMethod_InvalidProvider: provider is the required input and
+// is validated against the catalog. A slug not in the catalog is rejected with
+// 400 before any row is written, so type can never be derived from a bogus
+// provider.
+func TestCreatePaymentMethod_InvalidProvider(t *testing.T) {
+	r := newRig(t)
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/payment-methods", map[string]any{
+		"provider":      "not_a_real_provider",
+		"country":       "NG",
+		"currency":      "NGN",
+		"bankName":      "Test Bank",
+		"accountNumber": "1234567890",
+		"accountName":   "Test User",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	decoded := decode(t, rec)
+	if msg, _ := decoded["message"].(string); msg != "Invalid payment provider" {
+		t.Errorf("message = %q, want %q", msg, "Invalid payment provider")
 	}
 }
 

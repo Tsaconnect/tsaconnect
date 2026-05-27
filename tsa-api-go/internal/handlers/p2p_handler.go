@@ -148,7 +148,7 @@ func unsignedTxJSON(raw []byte) any {
 
 type createPaymentMethodRequest struct {
 	Provider      string `json:"provider" binding:"required"`
-	Type          string `json:"type"` // optional; derived from provider when present
+	Type          string `json:"type"` // ignored; type is always derived from the provider catalog
 	Country       string `json:"country" binding:"required"`
 	Currency      string `json:"currency" binding:"required"`
 	BankName      string `json:"bankName" binding:"required"`
