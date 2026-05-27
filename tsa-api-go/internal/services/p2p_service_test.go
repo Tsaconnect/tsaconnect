@@ -918,3 +918,18 @@ func TestFetchAndCache_StaleServeWritesBackShortTTL(t *testing.T) {
 		t.Errorf("expected post-stale call to short-circuit on cache, but OER was called %d more time(s)", delta)
 	}
 }
+
+func TestApplyFloatAnchors(t *testing.T) {
+	rates := map[string]P2PRate{
+		"NGN": {Currency: "NGN", MidRate: 1500},
+		"CAD": {Currency: "CAD", MidRate: 1.4},
+	}
+	bybit := map[string]bool{"NGN": true}
+	out := applyFloatAnchors(rates, bybit)
+	if !out["NGN"].FloatAnchor {
+		t.Fatal("expected NGN to be float-anchor eligible")
+	}
+	if out["CAD"].FloatAnchor {
+		t.Fatal("expected CAD to NOT be float-anchor eligible")
+	}
+}
