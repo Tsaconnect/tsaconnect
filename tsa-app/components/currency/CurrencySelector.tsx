@@ -25,18 +25,38 @@ interface CurrencySelectorProps {
   onChange?: (currency: CurrencyConfig) => void;
   /** Show the rate info next to each currency */
   showRates?: boolean;
+  /** Controlled mode: reflect this code and report changes via onSelectCode
+   *  instead of mutating the global app currency. Used by the P2P market
+   *  selector so switching trading currency doesn't change global display. */
+  selectedCode?: string;
+  onSelectCode?: (code: string) => void;
 }
 
 export default function CurrencySelector({
   variant = "header",
   onChange,
   showRates = false,
+  selectedCode,
+  onSelectCode,
 }: CurrencySelectorProps) {
   const { currency, setCurrency, allRates, supportedCurrencies, loading } = useCurrency();
   const [visible, setVisible] = useState(false);
 
+  const display =
+    selectedCode != null
+      ? supportedCurrencies.find((c) => c.code === selectedCode) ?? {
+          code: selectedCode,
+          symbol: selectedCode,
+          name: selectedCode,
+        }
+      : currency;
+
   const handleSelect = async (code: string) => {
-    await setCurrency(code);
+    if (onSelectCode) {
+      onSelectCode(code);
+    } else {
+      await setCurrency(code);
+    }
     const selected = supportedCurrencies.find((c) => c.code === code);
     if (selected && onChange) onChange(selected);
     setVisible(false);
@@ -52,8 +72,8 @@ export default function CurrencySelector({
           activeOpacity={0.7}
         >
           <Text style={styles.cardButtonText}>
-            {currency.flag ? `${currency.flag} ` : ""}
-            {currency.symbol} {currency.code} — {currency.name}
+            {display.flag ? `${display.flag} ` : ""}
+            {display.symbol} {display.code} — {display.name}
           </Text>
           <Ionicons name="chevron-down" size={18} color="#666" />
         </TouchableOpacity>
@@ -62,7 +82,7 @@ export default function CurrencySelector({
           visible={visible}
           onClose={() => setVisible(false)}
           onSelect={handleSelect}
-          selectedCode={currency.code}
+          selectedCode={selectedCode ?? currency.code}
           allRates={allRates}
           showRates={showRates}
           currencies={supportedCurrencies}
@@ -83,7 +103,7 @@ export default function CurrencySelector({
           <ActivityIndicator size="small" color="#D4AF37" style={{ marginRight: 4 }} />
         )}
         <Text style={styles.headerButtonText}>
-          {currency.symbol} {currency.code}
+          {display.symbol} {display.code}
         </Text>
         <Ionicons name="chevron-down" size={14} color="#D4AF37" />
       </TouchableOpacity>
@@ -92,7 +112,7 @@ export default function CurrencySelector({
         visible={visible}
         onClose={() => setVisible(false)}
         onSelect={handleSelect}
-        selectedCode={currency.code}
+        selectedCode={selectedCode ?? currency.code}
         allRates={allRates}
         showRates={showRates}
         currencies={supportedCurrencies}

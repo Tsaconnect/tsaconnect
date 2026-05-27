@@ -17,12 +17,16 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  distinctAdProviders,
   formatFiat,
   formatTokenAmount,
   type P2PAd,
 } from '../../services/p2p';
 import { P2P_GOLD } from '../../constants/p2p';
 import { useUserRole } from '../../hooks/useUserRole';
+import { useP2pCurrency } from '../../hooks/useP2pCurrency';
+import CurrencySelector from '../../components/currency/CurrencySelector';
+import PaymentMethodFilter from '../../components/p2p/PaymentMethodFilter';
 
 const GOLD = P2P_GOLD;
 
@@ -38,19 +42,33 @@ const P2PMarketScreen: React.FC = () => {
   // user gets a clear "become a merchant" prompt instead of filling the form
   // only to hit a 403 at publish time.
   const { isMerchant, loading: roleLoading } = useUserRole();
+  const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
+  const [providerFilter, setProviderFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await adsApi.list({ side: 'sell', token, fiatCurrency: 'NGN' });
+    const res = await adsApi.list({ side: 'sell', token, fiatCurrency: currency.code });
     if (res.success && res.data) {
       setAds(res.data);
     }
     setLoading(false);
     setRefreshing(false);
-  }, [token]);
+  }, [token, currency.code]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Clear any stale provider filter when the market currency or token changes,
+  // so it can't hide every ad after switching.
+  useEffect(() => {
+    setProviderFilter(null);
+  }, [currency.code, token]);
+
+  const visibleAds = providerFilter
+    ? ads.filter((a) =>
+        (a.paymentMethodSummary ?? []).some((s) => s.provider === providerFilter),
+      )
+    : ads;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -68,55 +86,60 @@ const P2PMarketScreen: React.FC = () => {
       >
         <View style={styles.headerRow}>
           <Text style={styles.heading}>Buy {token}</Text>
-          <View style={styles.actions}>
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() =>
-                router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
-              }
-              activeOpacity={0.8}
-            >
-              <Icon name="add-circle" size={22} color={GOLD.dark} />
-              <Text style={styles.iconBtnText}>Sell</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => router.push('/p2p/my-ads')}
-              activeOpacity={0.8}
-            >
-              <Icon name="list-alt" size={22} color={GOLD.dark} />
-              <Text style={styles.iconBtnText}>My ads</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => router.push('/p2p/my-trades')}
-              activeOpacity={0.8}
-            >
-              <Icon name="swap-horiz" size={22} color={GOLD.dark} />
-              <Text style={styles.iconBtnText}>My trades</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => router.push('/p2p/payment-methods')}
-              activeOpacity={0.8}
-            >
-              <Icon name="account-balance" size={22} color={GOLD.dark} />
-              <Text style={styles.iconBtnText}>Banks</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => router.push('/p2p/pool')}
-              activeOpacity={0.8}
-            >
-              <Icon name="savings" size={22} color={GOLD.dark} />
-              <Text style={styles.iconBtnText}>Pool</Text>
-            </TouchableOpacity>
-          </View>
+          <CurrencySelector
+            variant="header"
+            selectedCode={currency.code}
+            onSelectCode={setMarketCurrency}
+          />
+        </View>
+        <View style={styles.actions}>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() =>
+              router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
+            }
+            activeOpacity={0.8}
+          >
+            <Icon name="add-circle" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>Sell</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => router.push('/p2p/my-ads')}
+            activeOpacity={0.8}
+          >
+            <Icon name="list-alt" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>My ads</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => router.push('/p2p/my-trades')}
+            activeOpacity={0.8}
+          >
+            <Icon name="swap-horiz" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>My trades</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => router.push('/p2p/payment-methods')}
+            activeOpacity={0.8}
+          >
+            <Icon name="account-balance" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>Banks</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => router.push('/p2p/pool')}
+            activeOpacity={0.8}
+          >
+            <Icon name="savings" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>Pool</Text>
+          </TouchableOpacity>
         </View>
 
         <Text style={styles.subheading}>
-          Buy {token} for NGN with bank transfer. Funds are escrowed on chain
-          until the seller releases.
+          Buy {token} with {currency.code}. Funds are escrowed on chain until the
+          seller releases.
         </Text>
 
         {/* Render the become-merchant CTA only once the role check has
@@ -156,24 +179,54 @@ const P2PMarketScreen: React.FC = () => {
           ))}
         </View>
 
+        {!loading && ads.length > 0 && (
+          <View style={styles.filterRow}>
+            <PaymentMethodFilter
+              options={distinctAdProviders(ads)}
+              selected={providerFilter}
+              onChange={setProviderFilter}
+            />
+          </View>
+        )}
+
         {loading ? (
           <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 60 }} />
         ) : ads.length === 0 ? (
           <View style={styles.empty}>
             <Icon name="storefront" size={48} color={GOLD.muted} />
             <Text style={styles.emptyText}>
-              No {token} ads available right now. Pull to refresh or try a different token.
+              No {token} sellers for {currency.code} yet. Pull to refresh, try
+              another currency, or post an ad.
             </Text>
+            <TouchableOpacity
+              style={styles.postAdsBtn}
+              onPress={() =>
+                router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
+              }
+              activeOpacity={0.85}
+            >
+              <Icon name="add-circle" size={18} color="#000" />
+              <Text style={styles.postAdsBtnText}>Post Ads</Text>
+            </TouchableOpacity>
+          </View>
+        ) : visibleAds.length === 0 ? (
+          <View style={styles.noMatch}>
+            <Text style={styles.noMatchText}>
+              No ads match this payment method.
+            </Text>
+            <TouchableOpacity onPress={() => setProviderFilter(null)} activeOpacity={0.7}>
+              <Text style={styles.clearFilterLink}>Clear filter</Text>
+            </TouchableOpacity>
           </View>
         ) : (
-          ads.map((ad) => <AdCard key={ad.id} ad={ad} />)
+          visibleAds.map((ad) => <AdCard key={ad.id} ad={ad} symbol={currency.symbol} />)
         )}
       </ScrollView>
     </SafeAreaView>
   );
 };
 
-const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
+const AdCard: React.FC<{ ad: P2PAd; symbol: string }> = ({ ad, symbol }) => {
   const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const isFloat = ad.rateType === 'float';
@@ -217,7 +270,7 @@ const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
       </View>
 
       <View style={styles.priceBlock}>
-        <Text style={styles.priceCurrency}>NGN</Text>
+        <Text style={styles.priceCurrency}>{ad.fiatCurrency}</Text>
         <Text style={styles.priceValue}>{formatFiat(ad.rate)}</Text>
         <Text style={styles.priceUnit}>/ {ad.token}</Text>
       </View>
@@ -242,11 +295,21 @@ const AdCard: React.FC<{ ad: P2PAd }> = ({ ad }) => {
           <View style={[styles.metaCol, styles.metaColRight]}>
             <Text style={styles.metaLabel}>Limit</Text>
             <Text style={styles.metaValue}>
-              ₦{minLimit} – ₦{maxLimit}
+              {symbol}{minLimit} – {symbol}{maxLimit}
             </Text>
           </View>
         )}
       </View>
+
+      {ad.paymentMethodSummary && ad.paymentMethodSummary.length > 0 && (
+        <View style={styles.pmChips}>
+          {ad.paymentMethodSummary.slice(0, 4).map((s) => (
+            <View key={s.provider} style={styles.pmChip}>
+              <Text style={styles.pmChipText}>{s.label}</Text>
+            </View>
+          ))}
+        </View>
+      )}
     </TouchableOpacity>
   );
 };
@@ -260,7 +323,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   heading: { fontSize: 24, fontWeight: '800', color: '#000' },
-  actions: { flexDirection: 'row', gap: 12 },
+  actions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 16,
+  },
   iconBtn: { alignItems: 'center' },
   iconBtnText: { fontSize: 11, color: GOLD.dark, marginTop: 2, fontWeight: '600' },
   subheading: { fontSize: 14, color: '#666', marginTop: 6, marginBottom: 16, lineHeight: 20 },
@@ -291,6 +358,7 @@ const styles = StyleSheet.create({
   tokenChipActive: { backgroundColor: GOLD.primary, borderColor: GOLD.dark },
   tokenChipText: { fontWeight: '700', color: GOLD.dark, fontSize: 13 },
   tokenChipTextActive: { color: '#000' },
+  filterRow: { flexDirection: 'row', marginBottom: 16 },
   empty: { alignItems: 'center', paddingVertical: 60 },
   emptyText: {
     marginTop: 12,
@@ -298,6 +366,27 @@ const styles = StyleSheet.create({
     color: '#888',
     textAlign: 'center',
     maxWidth: 260,
+  },
+  postAdsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: GOLD.primary,
+    borderWidth: 1,
+    borderColor: GOLD.dark,
+  },
+  postAdsBtnText: { fontSize: 14, fontWeight: '800', color: '#000' },
+  noMatch: { alignItems: 'center', paddingVertical: 48 },
+  noMatchText: { fontSize: 14, color: '#888', textAlign: 'center' },
+  clearFilterLink: {
+    marginTop: 8,
+    fontSize: 14,
+    fontWeight: '700',
+    color: GOLD.dark,
   },
   card: {
     backgroundColor: '#FFF',
@@ -371,6 +460,21 @@ const styles = StyleSheet.create({
   metaColRight: { alignItems: 'flex-end' },
   metaLabel: { fontSize: 11, color: '#999', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 },
   metaValue: { fontSize: 13, color: '#1A1A1A', fontWeight: '700' },
+  pmChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 12,
+  },
+  pmChip: {
+    backgroundColor: GOLD.light,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  pmChipText: { fontSize: 11, color: GOLD.dark, fontWeight: '600' },
 });
 
 export default P2PMarketScreen;
