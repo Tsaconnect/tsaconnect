@@ -196,9 +196,12 @@ const NewPaymentMethodScreen: React.FC = () => {
             selectedCode={currencyCode}
             onSelectCode={(code) => {
               setPickedCurrency(code);
-              // Switching currency can change which path applies; clear any
-              // NG-bank-specific state so we don't carry a stale bank across.
+              // Switching currency can change which path applies; clear the
+              // entered identifier/name and NG-bank-specific state so we don't
+              // carry stale digits across into the generic field (or vice versa).
               setBank(null);
+              setAccountNumber('');
+              setAccountName('');
               setResolved(false);
               setResolveError(null);
             }}
@@ -305,14 +308,17 @@ const NewPaymentMethodScreen: React.FC = () => {
               )}
             </>
           ) : (
+            (() => {
+              const identifierLabel = provider.identifierLabel || 'Identifier';
+              return (
             <>
-              <Text style={styles.label}>{provider.identifierLabel}</Text>
+              <Text style={styles.label}>{identifierLabel}</Text>
               <View style={styles.input}>
                 <TextInput
                   style={styles.inputField}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  placeholder={`Your ${provider.identifierLabel.toLowerCase()}`}
+                  placeholder={`Your ${identifierLabel.toLowerCase()}`}
                   placeholderTextColor="#999"
                   value={accountNumber}
                   onChangeText={setAccountNumber}
@@ -331,6 +337,8 @@ const NewPaymentMethodScreen: React.FC = () => {
                 />
               </View>
             </>
+              );
+            })()
           )}
 
           <View style={styles.switchRow}>
