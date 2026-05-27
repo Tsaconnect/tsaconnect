@@ -101,5 +101,22 @@ func AutoMigrate() error {
 	DB.Exec("DROP INDEX IF EXISTS idx_users_wallet_address")
 	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wallet_address ON users (wallet_address) WHERE wallet_address != ''")
 
+	// Backfill P2P payment-method providers for rows created before the
+	// `provider` column existed. AutoMigrate defaults new/legacy rows to
+	// 'bank_transfer'; refine known mobile-money providers by bank name.
+	// Idempotent — only touches rows still on the default.
+	DB.Exec(`UPDATE p2p_payment_methods
+	         SET provider = 'opay'
+	         WHERE provider = 'bank_transfer' AND type = 'mobile_money'
+	           AND lower(bank_name) LIKE '%opay%'`)
+	DB.Exec(`UPDATE p2p_payment_methods
+	         SET provider = 'palmpay'
+	         WHERE provider = 'bank_transfer' AND type = 'mobile_money'
+	           AND lower(bank_name) LIKE '%palmpay%'`)
+	DB.Exec(`UPDATE p2p_payment_methods
+	         SET provider = 'kuda'
+	         WHERE provider = 'bank_transfer'
+	           AND lower(bank_name) LIKE '%kuda%'`)
+
 	return nil
 }
