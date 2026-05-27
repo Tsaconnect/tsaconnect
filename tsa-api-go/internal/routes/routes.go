@@ -349,6 +349,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.GET("/payment-methods", p2p.ListPaymentMethods)
 			p2pGroup.POST("/payment-methods", idem, p2p.CreatePaymentMethod)
 			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
+			p2pGroup.GET("/payment-providers", p2p.ListPaymentProviders)
 
 			// Seller deposit / withdraw — pool-model capital movement.
 			p2pGroup.GET("/balance", p2p.GetPoolBalance)

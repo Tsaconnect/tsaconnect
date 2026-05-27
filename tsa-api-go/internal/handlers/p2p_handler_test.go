@@ -356,6 +356,7 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.POST("/ads/:id/resume", h.ResumeAd)
 	g.POST("/ads/:id/cancel", h.PrepareCancelAd)
 	g.POST("/ads/:id/cancel/confirm", h.ConfirmCancelAd)
+	g.GET("/payment-providers", h.ListPaymentProviders)
 }
 
 // ─── HTTP helpers ──────────────────────────────────────────────────────────
@@ -400,6 +401,24 @@ func seedPaymentMethod(t *testing.T, db *gorm.DB, userID uuid.UUID, currency str
 		t.Fatalf("seed pm: %v", err)
 	}
 	return pm.ID
+}
+
+// ─── Payment provider catalog ───────────────────────────────────────────────
+
+func TestListPaymentProviders_ReturnsNonEmptyData(t *testing.T) {
+	r := newRig(t)
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/payment-providers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if s, _ := body["success"].(bool); !s {
+		t.Fatalf("expected success=true, got %v", body)
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) == 0 {
+		t.Fatalf("expected non-empty data array, got %v", body["data"])
+	}
 }
 
 // ─── Pool balance / allowance / approve ─────────────────────────────────────
