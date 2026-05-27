@@ -33,7 +33,21 @@ func TestProviderTypeDerivation(t *testing.T) {
 }
 
 func TestAllPaymentProvidersNonEmpty(t *testing.T) {
-	if len(AllPaymentProviders()) == 0 {
-		t.Fatal("expected a non-empty provider catalog")
+	providers := AllPaymentProviders()
+	if len(providers) != 9 {
+		t.Fatalf("expected 9 providers, got %d", len(providers))
+	}
+}
+
+func TestPaymentProviderBySlug(t *testing.T) {
+	p, ok := PaymentProviderBySlug("paypal")
+	if !ok {
+		t.Fatal("expected paypal to be found")
+	}
+	if p.Label != "PayPal" || p.Type != "wallet" {
+		t.Fatalf("unexpected provider for paypal: %+v", p)
+	}
+	if _, ok := PaymentProviderBySlug("nope_not_real"); ok {
+		t.Fatal("expected unknown slug to return ok=false")
 	}
 }
