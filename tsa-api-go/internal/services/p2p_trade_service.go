@@ -1996,7 +1996,7 @@ func (s *P2PTradeService) LoadProvidersByMethodIDs(ctx context.Context, ids []uu
 	}
 	if err := s.db.WithContext(ctx).
 		Model(&models.P2PPaymentMethod{}).
-		Select("id", "provider").
+		Select("id, provider").
 		Where("id IN ? AND deleted_at IS NULL", ids).
 		Find(&rows).Error; err != nil {
 		return nil, err
