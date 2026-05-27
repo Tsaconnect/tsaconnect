@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '../contexts/CurrencyContext';
 import { CurrencyConfig } from '../constants/currencies';
@@ -34,7 +34,6 @@ export function resolveP2pCurrency(
 export function useP2pCurrency() {
   const { currency: appCurrency, supportedCurrencies } = useCurrency();
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
-  const hydrated = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,8 +43,6 @@ export function useP2pCurrency() {
         if (!cancelled && saved) setSelectedCode(saved.toUpperCase());
       } catch (e) {
         console.warn('[useP2pCurrency] AsyncStorage read failed', e);
-      } finally {
-        hydrated.current = true;
       }
     })();
     return () => {
