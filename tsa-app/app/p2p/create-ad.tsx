@@ -37,6 +37,9 @@ import {
 import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, P2P_GOLD, pctToBps } from '../../constants/p2p';
+import { useP2pCurrency } from '../../hooks/useP2pCurrency';
+import { useCurrency } from '../../contexts/CurrencyContext';
+import CurrencySelector from '../../components/currency/CurrencySelector';
 
 const GOLD = P2P_GOLD;
 
@@ -49,6 +52,17 @@ const SUPPORTED_TOKENS = [
 type RateType = 'fixed' | 'float';
 
 const CreateAdScreen: React.FC = () => {
+  // Currency for THIS ad is a local form field. We seed it from the P2P market
+  // currency (do not mutate the hook's setCurrency here), then resolve the full
+  // config off supportedCurrencies so we have the right symbol for display.
+  const { currency: marketCurrency } = useP2pCurrency();
+  const { supportedCurrencies } = useCurrency();
+  const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
+  const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
+  const currencyConfig =
+    supportedCurrencies.find((c) => c.code === currencyCode) ?? marketCurrency;
+  const symbol = currencyConfig.symbol;
+
   const [token, setToken] = useState<(typeof SUPPORTED_TOKENS)[number]>(SUPPORTED_TOKENS[0]);
   const [amountInput, setAmountInput] = useState(''); // human decimal
   const [rateType, setRateType] = useState<RateType>('fixed');
@@ -58,11 +72,14 @@ const CreateAdScreen: React.FC = () => {
   const [floatOffsetPctInput, setFloatOffsetPctInput] = useState('');
   const [minLimitInput, setMinLimitInput] = useState('');
   const [maxLimitInput, setMaxLimitInput] = useState('');
-  const [paymentMethods, setPaymentMethods] = useState<P2PPaymentMethod[]>([]);
+  // Keep the full fetched list; the visible list is derived by currency below.
+  const [allPaymentMethods, setAllPaymentMethods] = useState<P2PPaymentMethod[]>([]);
   const [selectedPmIds, setSelectedPmIds] = useState<string[]>([]);
   const [loadingPms, setLoadingPms] = useState(true);
   const [suggestedRate, setSuggestedRate] = useState<number | null>(null);
   const [rateStale, setRateStale] = useState(false);
+  // Whether the selected currency has a Bybit P2P anchor — float ads require one.
+  const [floatSupported, setFloatSupported] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState<string>('');
   // Pool available balance for the selected token. Surfaced inline so the
@@ -71,15 +88,15 @@ const CreateAdScreen: React.FC = () => {
   // a transient pool-balance read failure — the backend re-checks).
   const [poolAvailable, setPoolAvailable] = useState<string | null>(null);
 
-  // Load payment methods + suggested Bybit rate concurrently on mount.
-  // Both promises always clear their loading flag — a network reject must
-  // not leave the PM picker spinning forever or the rate panel stuck.
+  // Load all payment methods once on mount; the visible subset is filtered by
+  // the selected currency below. Always clears the loading flag — a network
+  // reject must not leave the PM picker spinning forever.
   useEffect(() => {
     (async () => {
       try {
         const res = await paymentMethodsApi.list();
         if (res.success && res.data) {
-          setPaymentMethods(res.data.filter((m) => m.currency === 'NGN'));
+          setAllPaymentMethods(res.data);
         }
       } catch (err) {
         console.warn('[create-ad] paymentMethodsApi.list failed', err);
@@ -87,21 +104,39 @@ const CreateAdScreen: React.FC = () => {
         setLoadingPms(false);
       }
     })();
+  }, []);
+
+  // Suggested Bybit rate + float eligibility for the SELECTED currency.
+  // Re-runs whenever the ad currency changes.
+  useEffect(() => {
     (async () => {
       try {
         const res = await exchangeRateService.getRates();
-        const ngn = res.rates?.NGN;
-        if (ngn) {
-          setSuggestedRate(ngn.binanceSell); // rate for sellers (user sells USDT → buyer pays NGN)
-          setRateStale(!!ngn.stale);
-        }
+        const row = res.rates?.[currencyCode];
+        setSuggestedRate(row?.binanceSell ?? null); // seller rate (sells token → buyer pays fiat)
+        setRateStale(!!row?.stale);
+        setFloatSupported(!!row?.floatAnchor);
       } catch (err) {
         // Float-mode users will see "Live rate unavailable" — that's fine
         // for a feed outage; just log so post-mortem has a breadcrumb.
-        console.warn('[create-ad] exchangeRateService.getRates failed', err);
+        console.warn('[create-ad] getRates failed', err);
+        setSuggestedRate(null);
+        setFloatSupported(false);
       }
     })();
-  }, []);
+  }, [currencyCode]);
+
+  // A payment method for one currency must not stay selected when the ad
+  // currency changes (e.g. an NGN method on a CAD ad).
+  useEffect(() => {
+    setSelectedPmIds([]);
+  }, [currencyCode]);
+
+  // If float becomes unsupported for the chosen currency, force fixed so we
+  // never leave the form in an unpublishable float state.
+  useEffect(() => {
+    if (!floatSupported && rateType === 'float') setRateType('fixed');
+  }, [floatSupported, rateType]);
 
   // Refresh the pool balance whenever the token selection changes. Doesn't
   // block submit on failure — the backend's CreateAd does an authoritative
@@ -128,6 +163,12 @@ const CreateAdScreen: React.FC = () => {
       cancelled = true;
     };
   }, [token.symbol]);
+
+  // Payment methods visible for the selected currency.
+  const paymentMethods = useMemo(
+    () => allPaymentMethods.filter((m) => m.currency === currencyCode),
+    [allPaymentMethods, currencyCode],
+  );
 
   const togglePm = (id: string) => {
     setSelectedPmIds((prev) =>
@@ -189,7 +230,7 @@ const CreateAdScreen: React.FC = () => {
     selectedPmIds.length > 0 &&
     (rateType === 'fixed'
       ? parseFloat(rateInput || '0') > 0
-      : floatOffsetPctValid && suggestedRate != null && !rateStale);
+      : floatOffsetPctValid && floatSupported && suggestedRate != null && !rateStale);
 
   const handleSubmit = async () => {
     if (!valid || submitting) return;
@@ -238,7 +279,7 @@ const CreateAdScreen: React.FC = () => {
       const basePayload = {
         token: token.symbol,
         tokenAmount,
-        fiatCurrency: 'NGN',
+        fiatCurrency: currencyCode,
         minLimit,
         maxLimit,
         paymentMethodIds: selectedPmIds,
@@ -335,10 +376,17 @@ const CreateAdScreen: React.FC = () => {
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <Text style={styles.heading}>Create sell ad</Text>
           <Text style={styles.subheading}>
-            You're offering {token.symbol} for NGN. Publishing is off-chain — you'll
+            You're offering {token.symbol} for {currencyCode}. Publishing is off-chain — you'll
             sign a voucher to authorise trades. Funds are drawn from your pool
             balance (deposit first via the Pool screen).
           </Text>
+
+          <Text style={styles.label}>Currency</Text>
+          <CurrencySelector
+            variant="card"
+            selectedCode={currencyCode}
+            onSelectCode={(code) => setAdCurrencyCode(code)}
+          />
 
           <Text style={styles.label}>Token</Text>
           <View style={styles.tokenRow}>
@@ -411,21 +459,37 @@ const CreateAdScreen: React.FC = () => {
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.segmentBtn, rateType === 'float' && styles.segmentBtnActive]}
+              style={[
+                styles.segmentBtn,
+                rateType === 'float' && styles.segmentBtnActive,
+                !floatSupported && styles.segmentBtnDisabled,
+              ]}
               onPress={() => setRateType('float')}
+              disabled={!floatSupported}
               activeOpacity={0.8}
             >
-              <Text style={[styles.segmentText, rateType === 'float' && styles.segmentTextActive]}>
+              <Text
+                style={[
+                  styles.segmentText,
+                  rateType === 'float' && styles.segmentTextActive,
+                  !floatSupported && styles.segmentTextDisabled,
+                ]}
+              >
                 Float (auto-update)
               </Text>
             </TouchableOpacity>
           </View>
+          {!floatSupported && (
+            <Text style={styles.helperText}>
+              Float rate isn't available for {currencyCode} — use a fixed rate.
+            </Text>
+          )}
 
           {rateType === 'fixed' ? (
             <>
-              <Text style={styles.label}>Rate (NGN per 1 {token.symbol})</Text>
+              <Text style={styles.label}>Rate ({currencyCode} per 1 {token.symbol})</Text>
               <View style={styles.inputCard}>
-                <Text style={styles.inputPrefix}>₦</Text>
+                <Text style={styles.inputPrefix}>{symbol}</Text>
                 <TextInput
                   style={styles.inputField}
                   placeholder={suggestedRate ? String(suggestedRate) : '1500'}
@@ -441,7 +505,7 @@ const CreateAdScreen: React.FC = () => {
                   <Text style={[styles.rateHintText, rateStale && { color: GOLD.error }]}>
                     {rateStale
                       ? `Bybit rate stale — verify before publishing`
-                      : `Current Bybit P2P sell rate: ₦${suggestedRate.toFixed(2)}`}
+                      : `Current Bybit P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
                   </Text>
                   <TouchableOpacity onPress={() => setRateInput(String(suggestedRate))}>
                     <Text style={styles.rateApply}>Use</Text>
@@ -477,9 +541,9 @@ const CreateAdScreen: React.FC = () => {
                 <View style={[styles.rateHint, { marginTop: 8 }]}>
                   <Icon name="info-outline" size={14} color={GOLD.dark} />
                   <Text style={styles.rateHintText}>
-                    Anchor: Bybit P2P sell · Market: ₦{suggestedRate.toFixed(2)}
+                    Anchor: Bybit P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
                     {effectiveRate != null && (
-                      <Text> · Your rate: ₦{effectiveRate.toFixed(2)}</Text>
+                      <Text> · Your rate: {symbol}{effectiveRate.toFixed(2)}</Text>
                     )}
                   </Text>
                 </View>
@@ -497,7 +561,7 @@ const CreateAdScreen: React.FC = () => {
 
           <View style={styles.limitsRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Min order (NGN)</Text>
+              <Text style={styles.label}>Min order ({currencyCode})</Text>
               <View style={styles.inputCard}>
                 <TextInput
                   style={styles.inputField}
@@ -511,7 +575,7 @@ const CreateAdScreen: React.FC = () => {
             </View>
             <View style={{ width: 12 }} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Max order (NGN)</Text>
+              <Text style={styles.label}>Max order ({currencyCode})</Text>
               <View style={styles.inputCard}>
                 <TextInput
                   style={styles.inputField}
@@ -580,14 +644,14 @@ const CreateAdScreen: React.FC = () => {
             <View style={styles.previewRow}>
               <Text style={styles.previewLabel}>At</Text>
               <Text style={styles.previewValue}>
-                ₦{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
+                {symbol}{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
                 {rateType === 'float' && <Text style={styles.previewMeta}> (auto)</Text>}
               </Text>
             </View>
             <View style={styles.previewRow}>
               <Text style={styles.previewLabel}>Total value</Text>
               <Text style={styles.previewValue}>
-                ₦{previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                {symbol}{previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </Text>
             </View>
             <View style={styles.previewRow}>
@@ -728,8 +792,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF',
   },
   segmentBtnActive: { backgroundColor: GOLD.primary },
+  segmentBtnDisabled: { opacity: 0.4 },
   segmentText: { fontSize: 14, fontWeight: '700', color: GOLD.dark },
   segmentTextActive: { color: '#000' },
+  segmentTextDisabled: { color: '#999' },
   helperText: { marginTop: 6, fontSize: 12, color: '#666', paddingHorizontal: 4 },
   submit: {
     marginTop: 24,
