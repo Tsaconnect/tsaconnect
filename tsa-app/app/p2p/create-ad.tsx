@@ -166,7 +166,7 @@ const CreateAdScreen: React.FC = () => {
 
   // Payment methods visible for the selected currency.
   const paymentMethods = useMemo(
-    () => allPaymentMethods.filter((m) => m.currency === currencyCode),
+    () => allPaymentMethods.filter((m) => m.currency?.toUpperCase() === currencyCode),
     [allPaymentMethods, currencyCode],
   );
 
@@ -176,8 +176,8 @@ const CreateAdScreen: React.FC = () => {
     );
   };
 
-  // Effective rate previewed to the seller. Fixed mode: the literal NGN
-  // input. Float mode: anchor × (1 + offset%/100), null if the feed is
+  // Effective rate previewed to the seller. Fixed mode: the literal fiat
+  // rate the seller typed. Float mode: anchor × (1 + offset%/100), null if the feed is
   // missing or stale. Floats here are display-only; the server recomputes
   // at trade open with big.Rat precision.
   const effectiveRate = useMemo(() => {
@@ -492,7 +492,7 @@ const CreateAdScreen: React.FC = () => {
                 <Text style={styles.inputPrefix}>{symbol}</Text>
                 <TextInput
                   style={styles.inputField}
-                  placeholder={suggestedRate ? String(suggestedRate) : '1500'}
+                  placeholder={suggestedRate ? String(suggestedRate) : '0.00'}
                   placeholderTextColor="#999"
                   keyboardType="decimal-pad"
                   value={rateInput}
