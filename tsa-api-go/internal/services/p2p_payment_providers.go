@@ -79,3 +79,28 @@ func titleCaseSlug(slug string) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// PaymentMethodSummary is the privacy-safe per-ad payment descriptor exposed
+// in the marketplace list — provider + display label only, never account data.
+type PaymentMethodSummary struct {
+	Provider string `json:"provider"`
+	Label    string `json:"label"`
+}
+
+// PaymentSummaryFromProviders maps a list of provider slugs to deduped,
+// order-stable summaries. Unknown slugs fall back to a title-cased label.
+func PaymentSummaryFromProviders(slugs []string) []PaymentMethodSummary {
+	seen := make(map[string]struct{}, len(slugs))
+	out := make([]PaymentMethodSummary, 0, len(slugs))
+	for _, s := range slugs {
+		if s == "" {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, PaymentMethodSummary{Provider: s, Label: ProviderLabel(s)})
+	}
+	return out
+}
