@@ -21,6 +21,7 @@ type P2PPaymentMethod struct {
 	ID            uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	UserID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"userId"`
 	Type          string     `gorm:"size:16;not null" json:"type"`
+	Provider      string     `gorm:"size:32;not null;default:bank_transfer" json:"provider"`
 	Country       string     `gorm:"size:2;not null;index" json:"country"`
 	Currency      string     `gorm:"size:3;not null;index" json:"currency"`
 	BankName      string     `gorm:"size:128;not null" json:"bankName"`
@@ -41,4 +42,5 @@ func (P2PPaymentMethod) TableName() string {
 const (
 	P2PPaymentTypeBank        = "bank"
 	P2PPaymentTypeMobileMoney = "mobile_money"
+	P2PPaymentTypeWallet      = "wallet"
 )
