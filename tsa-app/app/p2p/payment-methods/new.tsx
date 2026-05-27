@@ -1,9 +1,17 @@
 // app/p2p/payment-methods/new.tsx
 //
-// Form to add a bank or mobile-money account. Phase 1 has no Flutterwave
-// account-name resolution — the user types the account name themselves.
-// Server side persists `verified: false` and a later Phase-2 onboarding
-// flow will flip it after FW verifies the account.
+// Form to add a payment method, driven by a selected provider + currency.
+//
+// Two paths:
+//   • NG bank (provider.type === 'bank' AND currency === 'NGN'): keeps the
+//     rich Nigerian-bank dropdown + NUBAN name enquiry (Nomba) auto-fill.
+//   • Generic (everything else): a single identifier field (labelled by the
+//     provider, e.g. "Email" / "Tag/phone") + a manual account-name field.
+//
+// The method currency is a LOCAL form field (seeded from the P2P market
+// currency); traders can add methods in other currencies so they can post
+// ads in those currencies. Server persists `verified: false` until a later
+// onboarding flow verifies it.
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -24,12 +32,14 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { paymentMethodsApi } from '../../../services/p2p';
+import { paymentMethodsApi, PaymentProvider } from '../../../services/p2p';
 import {
   getNigerianBanks,
   NgBank,
   resolveAccountName,
 } from '../../../services/ngBanks';
+import { useP2pCurrency } from '../../../hooks/useP2pCurrency';
+import CurrencySelector from '../../../components/currency/CurrencySelector';
 
 const GOLD = {
   primary: '#FFD700',
@@ -41,7 +51,21 @@ const GOLD = {
 };
 
 const NewPaymentMethodScreen: React.FC = () => {
-  const [type, setType] = useState<'bank' | 'mobile_money'>('bank');
+  // Currency for THIS method is a local form field. Seed it from the P2P
+  // market currency (do NOT mutate the hook's setCurrency here). The first
+  // two letters of an ISO-4217 currency code are almost always the ISO-3166
+  // country code — good enough; the backend just needs a non-empty country.
+  const { currency: marketCurrency } = useP2pCurrency();
+  const [pickedCurrency, setPickedCurrency] = useState<string | null>(null);
+  const currencyCode = (pickedCurrency ?? marketCurrency.code).toUpperCase();
+  const country = currencyCode.slice(0, 2);
+
+  // Provider catalog + the selected provider drives which inputs we show.
+  const [providers, setProviders] = useState<PaymentProvider[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [provider, setProvider] = useState<PaymentProvider | null>(null);
+  const [showProviderPicker, setShowProviderPicker] = useState(false);
+
   const [bank, setBank] = useState<NgBank | null>(null);
   const [showBankPicker, setShowBankPicker] = useState(false);
   const [banks, setBanks] = useState<NgBank[]>([]);
@@ -51,6 +75,11 @@ const NewPaymentMethodScreen: React.FC = () => {
   const [isDefault, setIsDefault] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  // The rich NG-bank experience (bank directory + NUBAN name enquiry) only
+  // applies to bank providers settling in NGN. Everything else uses a simple
+  // manual-entry path.
+  const isNgBankPath = provider?.type === 'bank' && currencyCode === 'NGN';
+
   // Name-enquiry state. `resolved` flags an auto-fill from Nomba so we can
   // lock the input + show a check; `resolveError` lets the user know to
   // either fix the digits or fall back to manual entry on outage.
@@ -59,6 +88,23 @@ const NewPaymentMethodScreen: React.FC = () => {
   const [resolveError, setResolveError] = useState<
     null | 'not_found' | 'unavailable'
   >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await paymentMethodsApi.providers();
+      if (cancelled) return;
+      if (res.success && res.data) {
+        setProviders(res.data);
+      } else {
+        console.warn('[new-payment-method] provider catalog load failed', res.message);
+      }
+      setProvidersLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,13 +120,11 @@ const NewPaymentMethodScreen: React.FC = () => {
     };
   }, []);
 
-  // Debounced account-name resolution. Fires when the user has both a
-  // bank selected and a 10-digit account number. Re-firing on either
-  // change cancels the in-flight call via the captured `cancelled` flag.
-  // For mobile-money entries we skip the lookup — those aren't bank
-  // accounts and Nomba won't resolve them.
+  // Debounced account-name resolution. Fires only on the NG-bank path when
+  // the user has both a bank selected and a 10-digit account number. Re-firing
+  // on any dependency change cancels the in-flight call via `cancelled`.
   useEffect(() => {
-    if (type !== 'bank' || !bank || accountNumber.length !== 10) {
+    if (!isNgBankPath || !bank || accountNumber.length !== 10) {
       setResolving(false);
       setResolved(false);
       setResolveError(null);
@@ -106,22 +150,27 @@ const NewPaymentMethodScreen: React.FC = () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [type, bank, accountNumber]);
+  }, [isNgBankPath, bank, accountNumber]);
 
   const valid =
-    !!bank &&
-    accountNumber.trim().length >= 10 &&
-    accountName.trim().length >= 2;
+    !!provider &&
+    accountNumber.trim().length > 0 &&
+    accountName.trim().length >= 2 &&
+    // NG-bank path keeps the 10-digit NUBAN expectation + a selected bank;
+    // the generic path just needs a non-empty identifier.
+    (!isNgBankPath || (!!bank && accountNumber.trim().length >= 10));
 
   const handleSubmit = async () => {
-    if (!valid || submitting || !bank) return;
+    if (!valid || submitting || !provider) return;
     setSubmitting(true);
+    const bankName = isNgBankPath && bank ? bank.name : provider.label;
+    const bankCode = isNgBankPath && bank ? bank.code : undefined;
     const res = await paymentMethodsApi.create({
-      type,
-      country: 'NG',
-      currency: 'NGN',
-      bankName: bank.name,
-      bankCode: bank.code,
+      provider: provider.slug,
+      country,
+      currency: currencyCode,
+      bankName,
+      bankCode,
       accountNumber: accountNumber.trim(),
       accountName: accountName.trim(),
       isDefault,
@@ -141,105 +190,147 @@ const NewPaymentMethodScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <View style={styles.typeRow}>
-            {(['bank', 'mobile_money'] as const).map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[styles.typeChip, type === t && styles.typeChipActive]}
-                onPress={() => setType(t)}
-                activeOpacity={0.8}
-              >
-                <Icon
-                  name={t === 'bank' ? 'account-balance' : 'phone-iphone'}
-                  size={18}
-                  color={type === t ? '#000' : GOLD.dark}
-                />
-                <Text
-                  style={[styles.typeChipText, type === t && styles.typeChipTextActive]}
-                >
-                  {t === 'bank' ? 'Bank' : 'Mobile money'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          <Text style={styles.label}>Currency</Text>
+          <CurrencySelector
+            variant="card"
+            selectedCode={currencyCode}
+            onSelectCode={(code) => {
+              setPickedCurrency(code);
+              // Switching currency can change which path applies; clear any
+              // NG-bank-specific state so we don't carry a stale bank across.
+              setBank(null);
+              setResolved(false);
+              setResolveError(null);
+            }}
+          />
 
-          <Text style={styles.label}>Bank</Text>
+          <Text style={styles.label}>Provider</Text>
           <TouchableOpacity
             style={styles.input}
-            onPress={() => setShowBankPicker(true)}
+            onPress={() => setShowProviderPicker(true)}
             activeOpacity={0.7}
           >
-            <Text style={[styles.inputText, !bank && styles.placeholder]}>
-              {bank?.name || 'Choose a bank'}
+            <Text style={[styles.inputText, !provider && styles.placeholder]}>
+              {provider?.label || 'Choose a provider'}
             </Text>
-            {banksLoading ? (
+            {providersLoading ? (
               <ActivityIndicator size="small" color={GOLD.dark} />
             ) : (
               <Icon name="arrow-drop-down" size={24} color={GOLD.dark} />
             )}
           </TouchableOpacity>
 
-          <Text style={styles.label}>Account number</Text>
-          <View style={styles.input}>
-            <TextInput
-              style={styles.inputField}
-              keyboardType="number-pad"
-              maxLength={20}
-              placeholder="0123456789"
-              placeholderTextColor="#999"
-              value={accountNumber}
-              onChangeText={(v) => setAccountNumber(v.replace(/\D/g, ''))}
-            />
-          </View>
-
-          <Text style={styles.label}>Account name</Text>
-          <View
-            style={[
-              styles.input,
-              resolved && styles.inputVerified,
-              resolveError === 'not_found' && styles.inputError,
-            ]}
-          >
-            <TextInput
-              style={styles.inputField}
-              autoCapitalize="words"
-              placeholder={
-                type === 'bank'
-                  ? 'Auto-fills when you enter the account number'
-                  : 'As registered with the provider'
-              }
-              placeholderTextColor="#999"
-              value={accountName}
-              onChangeText={(v) => {
-                setAccountName(v);
-                if (resolved) setResolved(false);
-              }}
-              editable={!resolving && !resolved}
-            />
-            {resolving && <ActivityIndicator size="small" color={GOLD.dark} />}
-            {resolved && (
+          {!provider ? (
+            <View style={styles.note}>
+              <Icon name="info" size={16} color={GOLD.dark} />
+              <Text style={styles.noteText}>
+                Choose a provider to continue.
+              </Text>
+            </View>
+          ) : isNgBankPath ? (
+            <>
+              <Text style={styles.label}>Bank</Text>
               <TouchableOpacity
-                onPress={() => {
-                  setResolved(false);
-                  setAccountName('');
-                }}
-                hitSlop={10}
-                style={styles.inputAction}
+                style={styles.input}
+                onPress={() => setShowBankPicker(true)}
+                activeOpacity={0.7}
               >
-                <Icon name="check-circle" size={20} color="#2E8B57" />
+                <Text style={[styles.inputText, !bank && styles.placeholder]}>
+                  {bank?.name || 'Choose a bank'}
+                </Text>
+                {banksLoading ? (
+                  <ActivityIndicator size="small" color={GOLD.dark} />
+                ) : (
+                  <Icon name="arrow-drop-down" size={24} color={GOLD.dark} />
+                )}
               </TouchableOpacity>
-            )}
-          </View>
-          {resolveError === 'not_found' && (
-            <Text style={styles.fieldError}>
-              We couldn’t find this account at the selected bank. Check the
-              digits or bank.
-            </Text>
-          )}
-          {resolveError === 'unavailable' && (
-            <Text style={styles.fieldHint}>
-              Account verification is offline. You can type the name manually.
-            </Text>
+
+              <Text style={styles.label}>Account number</Text>
+              <View style={styles.input}>
+                <TextInput
+                  style={styles.inputField}
+                  keyboardType="number-pad"
+                  maxLength={20}
+                  placeholder="0123456789"
+                  placeholderTextColor="#999"
+                  value={accountNumber}
+                  onChangeText={(v) => setAccountNumber(v.replace(/\D/g, ''))}
+                />
+              </View>
+
+              <Text style={styles.label}>Account name</Text>
+              <View
+                style={[
+                  styles.input,
+                  resolved && styles.inputVerified,
+                  resolveError === 'not_found' && styles.inputError,
+                ]}
+              >
+                <TextInput
+                  style={styles.inputField}
+                  autoCapitalize="words"
+                  placeholder="Auto-fills when you enter the account number"
+                  placeholderTextColor="#999"
+                  value={accountName}
+                  onChangeText={(v) => {
+                    setAccountName(v);
+                    if (resolved) setResolved(false);
+                  }}
+                  editable={!resolving && !resolved}
+                />
+                {resolving && <ActivityIndicator size="small" color={GOLD.dark} />}
+                {resolved && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setResolved(false);
+                      setAccountName('');
+                    }}
+                    hitSlop={10}
+                    style={styles.inputAction}
+                  >
+                    <Icon name="check-circle" size={20} color="#2E8B57" />
+                  </TouchableOpacity>
+                )}
+              </View>
+              {resolveError === 'not_found' && (
+                <Text style={styles.fieldError}>
+                  We couldn’t find this account at the selected bank. Check the
+                  digits or bank.
+                </Text>
+              )}
+              {resolveError === 'unavailable' && (
+                <Text style={styles.fieldHint}>
+                  Account verification is offline. You can type the name manually.
+                </Text>
+              )}
+            </>
+          ) : (
+            <>
+              <Text style={styles.label}>{provider.identifierLabel}</Text>
+              <View style={styles.input}>
+                <TextInput
+                  style={styles.inputField}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder={`Your ${provider.identifierLabel.toLowerCase()}`}
+                  placeholderTextColor="#999"
+                  value={accountNumber}
+                  onChangeText={setAccountNumber}
+                />
+              </View>
+
+              <Text style={styles.label}>Account name</Text>
+              <View style={styles.input}>
+                <TextInput
+                  style={styles.inputField}
+                  autoCapitalize="words"
+                  placeholder="As registered with the provider"
+                  placeholderTextColor="#999"
+                  value={accountName}
+                  onChangeText={setAccountName}
+                />
+              </View>
+            </>
           )}
 
           <View style={styles.switchRow}>
@@ -261,7 +352,7 @@ const NewPaymentMethodScreen: React.FC = () => {
             <Icon name="info" size={16} color={GOLD.dark} />
             <Text style={styles.noteText}>
               Buyers will see this account when they open a trade. Double-check the
-              account number before saving.
+              details before saving.
             </Text>
           </View>
 
@@ -278,6 +369,25 @@ const NewPaymentMethodScreen: React.FC = () => {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      <ProviderPickerModal
+        visible={showProviderPicker}
+        providers={providers}
+        loading={providersLoading}
+        selectedSlug={provider?.slug}
+        onSelect={(p) => {
+          setProvider(p);
+          setShowProviderPicker(false);
+          // Reset path-specific fields when the provider changes so we don't
+          // carry a bank/identifier across an incompatible switch.
+          setBank(null);
+          setAccountNumber('');
+          setAccountName('');
+          setResolved(false);
+          setResolveError(null);
+        }}
+        onClose={() => setShowProviderPicker(false)}
+      />
+
       <BankPickerModal
         visible={showBankPicker}
         banks={banks}
@@ -290,6 +400,117 @@ const NewPaymentMethodScreen: React.FC = () => {
         onClose={() => setShowBankPicker(false)}
       />
     </SafeAreaView>
+  );
+};
+
+interface ProviderPickerModalProps {
+  visible: boolean;
+  providers: PaymentProvider[];
+  loading: boolean;
+  selectedSlug?: string;
+  onSelect: (provider: PaymentProvider) => void;
+  onClose: () => void;
+}
+
+const ProviderPickerModal: React.FC<ProviderPickerModalProps> = ({
+  visible,
+  providers,
+  loading,
+  selectedSlug,
+  onSelect,
+  onClose,
+}) => {
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (!visible) setQuery('');
+  }, [visible]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return providers;
+    return providers.filter((p) => p.label.toLowerCase().includes(q));
+  }, [providers, query]);
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+    >
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={styles.modalSheet} onPress={() => {}}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Choose a provider</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <Icon name="close" size={24} color="#333" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.searchRow}>
+            <Icon name="search" size={20} color="#888" />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search provider"
+              placeholderTextColor="#999"
+              value={query}
+              onChangeText={setQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {query.length > 0 && (
+              <TouchableOpacity onPress={() => setQuery('')} hitSlop={8}>
+                <Icon name="cancel" size={18} color="#aaa" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {loading && providers.length === 0 ? (
+            <View style={styles.modalEmpty}>
+              <ActivityIndicator color={GOLD.dark} />
+              <Text style={styles.modalEmptyText}>Loading providers…</Text>
+            </View>
+          ) : filtered.length === 0 ? (
+            <View style={styles.modalEmpty}>
+              <Text style={styles.modalEmptyText}>
+                {providers.length === 0
+                  ? 'No providers available right now.'
+                  : `No providers match “${query}”.`}
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filtered}
+              keyExtractor={(p) => p.slug}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item }) => {
+                const selected = item.slug === selectedSlug;
+                return (
+                  <TouchableOpacity
+                    style={[styles.pickerRow, selected && styles.pickerRowSelected]}
+                    onPress={() => onSelect(item)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.pickerText}>{item.label}</Text>
+                      <Text style={styles.pickerSubText}>
+                        {item.type === 'bank'
+                          ? 'Bank'
+                          : item.type === 'mobile_money'
+                          ? 'Mobile money'
+                          : 'Wallet'}
+                      </Text>
+                    </View>
+                    {selected && <Icon name="check" size={20} color={GOLD.dark} />}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 };
 
@@ -396,24 +617,6 @@ const BankPickerModal: React.FC<BankPickerModalProps> = ({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },
   scroll: { padding: 20, paddingBottom: 60 },
-  typeRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
-  typeChip: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  typeChipActive: {
-    backgroundColor: GOLD.primary,
-    borderColor: GOLD.dark,
-  },
-  typeChipText: { marginLeft: 6, fontWeight: '600', color: GOLD.dark },
-  typeChipTextActive: { color: '#000' },
   label: {
     fontSize: 14,
     fontWeight: '700',
@@ -450,6 +653,7 @@ const styles = StyleSheet.create({
   },
   pickerRowSelected: { backgroundColor: GOLD.light },
   pickerText: { fontSize: 15, color: '#000' },
+  pickerSubText: { fontSize: 12, color: '#888', marginTop: 2 },
   switchRow: {
     flexDirection: 'row',
     alignItems: 'center',
