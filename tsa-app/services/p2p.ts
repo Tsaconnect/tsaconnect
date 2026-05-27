@@ -60,6 +60,9 @@ export interface P2PAd {
   minLimit?: string;
   maxLimit?: string;
   paymentMethodIds: string[];
+  /** Privacy-safe payment descriptor for the marketplace list — provider +
+   *  label only, never account numbers. Populated by the list endpoint. */
+  paymentMethodSummary?: { provider: string; label: string }[];
   /** Seller's payment-method rows the buyer should send NGN to. Populated
    *  by the ad-detail endpoint only — the marketplace list omits it so
    *  bank account numbers aren't broadcast in the feed. */
@@ -124,7 +127,8 @@ export interface P2PTrade {
 export interface P2PPaymentMethod {
   id: string;
   userId: string;
-  type: 'bank' | 'mobile_money';
+  type: 'bank' | 'mobile_money' | 'wallet';
+  provider: string;
   country: string;
   currency: string;
   bankName: string;
@@ -160,6 +164,13 @@ export interface P2PDispute {
   resolveTxHash?: string;
   createdAt: string;
   resolvedAt?: string;
+}
+
+export interface PaymentProvider {
+  slug: string;
+  label: string;
+  type: 'bank' | 'mobile_money' | 'wallet';
+  identifierLabel: string;
 }
 
 /**
@@ -306,8 +317,10 @@ export const banksApi = {
 export const paymentMethodsApi = {
   list: () => request<P2PPaymentMethod[]>('GET', '/p2p/payment-methods'),
 
+  providers: () => request<PaymentProvider[]>('GET', '/p2p/payment-providers'),
+
   create: (input: {
-    type: 'bank' | 'mobile_money';
+    provider: string;
     country: string;
     currency: string;
     bankName: string;
@@ -748,4 +761,24 @@ export function unsignedTxToTxLike(tx: UnsignedTx) {
     gasPrice: tx.gasPrice,
     chainId: tx.chainId ? Number(tx.chainId) : undefined,
   };
+}
+
+/**
+ * Distinct, order-stable list of payment providers present across the given
+ * ads' privacy-safe summaries. Used to populate the "All Payment Methods"
+ * filter from already-loaded ads (no extra request).
+ */
+export function distinctAdProviders(
+  ads: P2PAd[],
+): { provider: string; label: string }[] {
+  const seen = new Set<string>();
+  const out: { provider: string; label: string }[] = [];
+  for (const ad of ads) {
+    for (const s of ad.paymentMethodSummary ?? []) {
+      if (!s || seen.has(s.provider)) continue;
+      seen.add(s.provider);
+      out.push({ provider: s.provider, label: s.label });
+    }
+  }
+  return out;
 }
