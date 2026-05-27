@@ -64,3 +64,23 @@ func TestPaymentSummaryFromProviders(t *testing.T) {
 		t.Fatalf("unexpected second summary: %+v", got[1])
 	}
 }
+
+// TestPaymentSummaryFromProvidersWithUnknownAndEmpty verifies that empty strings
+// are skipped, duplicates are deduplicated, and unknown slugs fall back to a
+// title-cased label.
+func TestPaymentSummaryFromProvidersWithUnknownAndEmpty(t *testing.T) {
+	got := PaymentSummaryFromProviders([]string{"opay", "opay", "", "paypal", "weird_slug"})
+	want := []PaymentMethodSummary{
+		{Provider: "opay", Label: "OPay"},
+		{Provider: "paypal", Label: "PayPal"},
+		{Provider: "weird_slug", Label: "Weird Slug"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d items, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("item %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
