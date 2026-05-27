@@ -49,8 +49,13 @@ type P2PRate struct {
 	// Stale is true when this row was served from a fallback path (Bybit failure
 	// → OER mid-market, or expired cache served because upstream is down).
 	// Frontends MUST refuse to quote money against Stale=true rows.
-	Stale     bool  `json:"stale"`
-	UpdatedAt int64 `json:"updatedAt"`
+	Stale bool `json:"stale"`
+	// FloatAnchor reports whether this currency is eligible for a float-rate
+	// anchor (it has a Bybit P2P feed), independent of whether the latest
+	// Bybit fetch succeeded. The create-ad screen uses it to gate the float
+	// rate option.
+	FloatAnchor bool  `json:"floatAnchor"`
+	UpdatedAt   int64 `json:"updatedAt"`
 }
 
 // P2PRatesResponse is the API response shape.
@@ -278,6 +283,9 @@ func (ps *P2PService) fetchAndCache() (*RatesSnapshot, error) {
 		rates[cur] = bybitRate
 	}
 
+	// Stamp float-anchor eligibility on every row before caching.
+	rates = applyFloatAnchors(rates, ps.bybitCurrencies)
+
 	ttl := ps.cacheTTL
 	if degraded {
 		ttl = ps.degradedTTL
@@ -309,6 +317,18 @@ func markAllStale(in map[string]P2PRate) map[string]P2PRate {
 		out[k] = v
 	}
 	return out
+}
+
+// applyFloatAnchors stamps FloatAnchor on each row from the set of
+// Bybit-feed-eligible currencies. Eligibility is membership in bybitCurrencies,
+// not per-fetch success — a transient Bybit outage marks a row Stale but the
+// currency remains float-eligible. Mutates and returns the same map.
+func applyFloatAnchors(rates map[string]P2PRate, bybitCurrencies map[string]bool) map[string]P2PRate {
+	for code, row := range rates {
+		row.FloatAnchor = bybitCurrencies[code]
+		rates[code] = row
+	}
+	return rates
 }
 
 // GetRate returns the rate for a single currency.
