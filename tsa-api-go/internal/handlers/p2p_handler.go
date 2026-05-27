@@ -208,6 +208,16 @@ func (h *P2PHandler) ListPaymentMethods(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
 }
 
+// ListPaymentProviders returns the curated payment-provider catalog used by
+// the create-ad / add-payment-method pickers. Static data — no auth-scoped
+// rows — but kept under the authed group for consistency.
+func (h *P2PHandler) ListPaymentProviders(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": services.AllPaymentProviders()})
+}
+
 func (h *P2PHandler) DeletePaymentMethod(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
