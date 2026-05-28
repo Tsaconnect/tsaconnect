@@ -50,6 +50,11 @@ func (s *MerchantStatsService) handleEvent(ev events.Event) {
 		log.Printf("[merchant-stats] load trade %s: %v", tid, err)
 		return
 	}
+	// These events are emitted to BOTH parties; process only the seller-addressed
+	// copy so Apply* (which credits both parties) runs exactly once per trade.
+	if ev.UserID != trade.SellerID {
+		return
+	}
 	var err error
 	switch ev.Type {
 	case events.P2PTradeReleased:
@@ -57,9 +62,6 @@ func (s *MerchantStatsService) handleEvent(ev events.Event) {
 	case events.P2PTradeCancelled:
 		err = s.ApplyCancelled(ctx, &trade)
 	case events.P2PTradeResolved:
-		if ev.UserID != trade.SellerID { // resolved fires to BOTH parties — process once
-			return
-		}
 		releasedToBuyer, _ := ev.Data["releasedToBuyer"].(bool)
 		err = s.ApplyResolved(ctx, &trade, releasedToBuyer)
 	}
