@@ -1421,6 +1421,10 @@ func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if h.stats == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "reputation service unavailable"})
+		return
+	}
 	profile, err := h.stats.GetProfile(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
@@ -1473,7 +1477,14 @@ func (h *P2PHandler) RateTrade(c *gin.Context) {
 	}
 	rating := &models.P2PRating{ID: uuid.New(), TradeID: tradeID, RaterID: user.ID, RateeID: ratee, Value: req.Value}
 	if err := h.db.Create(rating).Error; err != nil {
-		c.JSON(http.StatusConflict, gin.H{"success": false, "message": "already rated this trade"})
+		var existing int64
+		h.db.Model(&models.P2PRating{}).
+			Where("trade_id = ? AND rater_id = ?", tradeID, user.ID).Count(&existing)
+		if existing > 0 {
+			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "already rated this trade"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "could not save rating"})
+		}
 		return
 	}
 	_ = h.stats.RecordRating(c.Request.Context(), rating)
