@@ -34,6 +34,7 @@ import {
 } from '../../../services/wallet';
 import type { ChainKey } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
+import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
 
 const GOLD = {
   primary: '#FFD700',
@@ -179,21 +180,28 @@ const AdDetailScreen: React.FC = () => {
             const sellerInitial = sellerLabel.charAt(0).toUpperCase();
             return (
               <View style={styles.sellerHeader}>
-                <View style={styles.sellerAvatar}>
-                  <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.sellerName} numberOfLines={1}>
-                    @{sellerLabel}
-                  </Text>
-                  <Text style={styles.sellerSub}>Selling {ad.token} for {ad.fiatCurrency}</Text>
-                </View>
-                {ad.rateType === 'float' && (
-                  <View style={styles.floatChipRow}>
-                    <Icon name="trending-up" size={11} color={GOLD.dark} />
-                    <Text style={styles.floatChipText}>Float</Text>
+                <TouchableOpacity
+                  style={styles.sellerAvatarNameRow}
+                  onPress={() => router.push(('/p2p/seller/' + ad.sellerId) as any)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.sellerAvatar}>
+                    <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
                   </View>
-                )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sellerName} numberOfLines={1}>
+                      @{sellerLabel}
+                    </Text>
+                    <Text style={styles.sellerSub}>Selling {ad.token} for {ad.fiatCurrency}</Text>
+                  </View>
+                  {ad.rateType === 'float' && (
+                    <View style={styles.floatChipRow}>
+                      <Icon name="trending-up" size={11} color={GOLD.dark} />
+                      <Text style={styles.floatChipText}>Float</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <SellerTrustBadges stats={ad.sellerStats} />
               </View>
             );
           })()}
@@ -349,15 +357,18 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: GOLD.background },
   scroll: { padding: 20, paddingBottom: 80 },
   sellerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+    flexDirection: 'column',
     backgroundColor: '#FFF',
     padding: 14,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: GOLD.muted,
     marginBottom: 12,
+  },
+  sellerAvatarNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
   sellerAvatar: {
     width: 42,

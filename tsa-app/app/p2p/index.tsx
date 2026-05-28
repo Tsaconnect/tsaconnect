@@ -27,6 +27,7 @@ import { useUserRole } from '../../hooks/useUserRole';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import PaymentMethodFilter from '../../components/p2p/PaymentMethodFilter';
+import SellerTrustBadges from '../../components/p2p/SellerTrustBadges';
 
 const GOLD = P2P_GOLD;
 
@@ -249,17 +250,24 @@ const AdCard: React.FC<{ ad: P2PAd; symbol: string }> = ({ ad, symbol }) => {
     >
       <View style={styles.cardHeader}>
         <View style={styles.sellerBlock}>
-          <View style={styles.sellerAvatar}>
-            <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
-          </View>
-          <View style={styles.sellerText}>
-            <Text style={styles.sellerName} numberOfLines={1}>
-              @{sellerLabel}
-            </Text>
-            <Text style={styles.sellerSub} numberOfLines={1}>
-              Sells {ad.token}
-            </Text>
-          </View>
+          <TouchableOpacity
+            style={styles.sellerAvatarNameRow}
+            onPress={() => router.push(('/p2p/seller/' + ad.sellerId) as any)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.sellerAvatar}>
+              <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
+            </View>
+            <View style={styles.sellerText}>
+              <Text style={styles.sellerName} numberOfLines={1}>
+                @{sellerLabel}
+              </Text>
+              <Text style={styles.sellerSub} numberOfLines={1}>
+                Sells {ad.token}
+              </Text>
+            </View>
+          </TouchableOpacity>
+          <SellerTrustBadges stats={ad.sellerStats} />
         </View>
         {isFloat ? (
           <View style={styles.floatChip}>
@@ -408,7 +416,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 14,
   },
-  sellerBlock: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10 },
+  sellerBlock: { flexDirection: 'column', flex: 1 },
+  sellerAvatarNameRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   sellerAvatar: {
     width: 36,
     height: 36,
