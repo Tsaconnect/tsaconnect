@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"log"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -165,6 +166,125 @@ func (s *MerchantStatsService) accountAgeDays(ctx context.Context, userID uuid.U
 		return 0
 	}
 	return int(time.Since(u.CreatedAt).Hours() / 24)
+}
+
+// MerchantProfile is the seller profile payload (stats + recent feedback). Active
+// ads are added by the handler, which already has the ad query.
+type MerchantProfile struct {
+	UserID        uuid.UUID          `json:"userId"`
+	Stats         SellerStats        `json:"stats"`
+	RecentRatings []models.P2PRating `json:"recentRatings"`
+}
+
+// GetProfile returns a merchant's stats + up to 20 recent ratings.
+func (s *MerchantStatsService) GetProfile(ctx context.Context, userID uuid.UUID) (*MerchantProfile, error) {
+	statsMap, err := s.GetStats(ctx, []uuid.UUID{userID})
+	if err != nil {
+		return nil, err
+	}
+	var recent []models.P2PRating
+	if err := s.db.WithContext(ctx).Where("ratee_id = ?", userID).
+		Order("created_at DESC").Limit(20).Find(&recent).Error; err != nil {
+		return nil, err
+	}
+	return &MerchantProfile{UserID: userID, Stats: statsMap[userID], RecentRatings: recent}, nil
+}
+
+// dateDiffSecsExpr returns a SQL expression for (a - b) in seconds, dialect-aware
+// (SQLite for tests, PostgreSQL for prod).
+func (s *MerchantStatsService) dateDiffSecsExpr(a, b string) string {
+	if s.db.Dialector.Name() == "sqlite" {
+		return "AVG(CAST((julianday(" + a + ") - julianday(" + b + ")) * 86400 AS REAL))"
+	}
+	return "AVG(EXTRACT(EPOCH FROM (" + a + " - " + b + ")))"
+}
+
+// ReconcileAllMerchants recomputes lifetime counts + 30-day avg times from the
+// source-of-truth trades/ratings, and refreshes verified/trusted. Idempotent;
+// the correctness backstop for the incremental path.
+func (s *MerchantStatsService) ReconcileAllMerchants(ctx context.Context) error {
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+
+	type countRow struct {
+		UserID uuid.UUID
+		N      int64
+	}
+	upsertCount := func(rows []countRow, col string) error {
+		now := time.Now().UTC()
+		for _, r := range rows {
+			// Use raw SQL so the insert and conflict-update paths both write r.N.
+			// GORM's Create+OnConflict only updates the DoUpdates columns on conflict;
+			// the insert path would write the zero value from the struct.
+			sql := `INSERT INTO p2p_merchant_stats (user_id, ` + col + `, updated_at)
+				VALUES (?, ?, ?)
+				ON CONFLICT(user_id) DO UPDATE SET ` + col + ` = excluded.` + col + `, updated_at = excluded.updated_at`
+			if err := s.db.WithContext(ctx).Exec(sql, r.UserID.String(), r.N, now).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// 1) lifetime released_count per user (either role) from released trades.
+	var released []countRow
+	if err := s.db.WithContext(ctx).Raw(`
+		SELECT user_id, COUNT(*) AS n FROM (
+			SELECT seller_id AS user_id FROM p2p_trades WHERE status = ?
+			UNION ALL
+			SELECT buyer_id AS user_id FROM p2p_trades WHERE status = ?
+		) t GROUP BY user_id`,
+		models.P2PTradeStatusReleased, models.P2PTradeStatusReleased).Scan(&released).Error; err != nil {
+		return err
+	}
+	if err := upsertCount(released, "released_count"); err != nil {
+		return err
+	}
+
+	// 2) 30-day avg release secs (seller) + avg pay secs (buyer).
+	type avgRow struct {
+		UserID uuid.UUID
+		Avg    float64
+	}
+	var relAvg []avgRow
+	s.db.WithContext(ctx).Raw(`
+		SELECT seller_id AS user_id, `+s.dateDiffSecsExpr("released_at", "marked_paid_at")+` AS avg
+		FROM p2p_trades
+		WHERE status = ? AND released_at IS NOT NULL AND marked_paid_at IS NOT NULL AND released_at >= ?
+		GROUP BY seller_id`, models.P2PTradeStatusReleased, cutoff).Scan(&relAvg)
+	for _, r := range relAvg {
+		secs := int(math.Round(r.Avg))
+		s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
+			Where("user_id = ?", r.UserID).Update("avg_release_secs_30d", secs)
+	}
+	var payAvg []avgRow
+	s.db.WithContext(ctx).Raw(`
+		SELECT buyer_id AS user_id, `+s.dateDiffSecsExpr("marked_paid_at", "created_at")+` AS avg
+		FROM p2p_trades
+		WHERE status = ? AND marked_paid_at IS NOT NULL AND marked_paid_at >= ?
+		GROUP BY buyer_id`, models.P2PTradeStatusReleased, cutoff).Scan(&payAvg)
+	for _, r := range payAvg {
+		secs := int(math.Round(r.Avg))
+		s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
+			Where("user_id = ?", r.UserID).Update("avg_pay_secs_30d", secs)
+	}
+
+	// 3) refresh verified + trusted for all known merchants.
+	var ids []uuid.UUID
+	s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).Pluck("user_id", &ids)
+	for _, id := range ids {
+		s.refreshVerified(ctx, id)
+		s.refreshTrusted(ctx, id)
+	}
+	return nil
+}
+
+func (s *MerchantStatsService) refreshVerified(ctx context.Context, userID uuid.UUID) {
+	var u models.User
+	if err := s.db.WithContext(ctx).Select("verification_status", "role").First(&u, "id = ?", userID).Error; err != nil {
+		return
+	}
+	verified := u.VerificationStatus == "verified" && u.Role == models.RoleMerchant
+	s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).Where("user_id = ?", userID).Update("verified", verified)
 }
 
 // GetStats returns batched SellerStats for the given users; missing rows are IsNew.
