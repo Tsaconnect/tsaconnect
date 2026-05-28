@@ -54,6 +54,8 @@ func AutoMigrate() error {
 		&models.P2PMessage{},
 		&models.P2PDispute{},
 		&models.P2PAuditLog{},
+		&models.P2PMerchantStats{},
+		&models.P2PRating{},
 	); err != nil {
 		return err
 	}
@@ -87,6 +89,14 @@ func AutoMigrate() error {
 	// the query is a full-table scan once we have thousands of trades.
 	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_p2p_trades_status_expires
 		ON p2p_trades (status, expires_at) WHERE status = 'pending_payment'`)
+
+	// P2P rating value + one-rating-per-(trade,rater)
+	DB.Exec(`ALTER TABLE p2p_ratings
+	         DROP CONSTRAINT IF EXISTS p2p_ratings_value_chk`)
+	DB.Exec(`ALTER TABLE p2p_ratings
+	         ADD CONSTRAINT p2p_ratings_value_chk CHECK (value IN (-1, 1))`)
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS p2p_ratings_trade_rater_uq
+	         ON p2p_ratings (trade_id, rater_id)`)
 
 	// Rename smile_job_id → persona_inquiry_id (Persona KYC migration)
 	DB.Exec("ALTER TABLE users RENAME COLUMN smile_job_id TO persona_inquiry_id")
