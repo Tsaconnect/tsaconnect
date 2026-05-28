@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -141,5 +142,30 @@ func TestReconcileRecomputesCountsAndAvgRelease(t *testing.T) {
 	db.First(&s, "user_id = ?", seller)
 	if s.ReleasedCount != 1 {
 		t.Fatalf("after 2nd reconcile releasedCount = %d, want 1 (idempotent)", s.ReleasedCount)
+	}
+}
+
+func TestHandleEventDedupsDoubleFire(t *testing.T) {
+	svc, db := newStatsSvc(t)
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS p2p_trades (
+		id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT,
+		marked_paid_at DATETIME, released_at DATETIME, created_at DATETIME)`).Error; err != nil {
+		t.Fatalf("create trades: %v", err)
+	}
+	tradeID, seller, buyer := uuid.New(), uuid.New(), uuid.New()
+	if err := db.Exec(`INSERT INTO p2p_trades (id, buyer_id, seller_id, status) VALUES (?,?,?,?)`,
+		tradeID.String(), buyer.String(), seller.String(), models.P2PTradeStatusReleased).Error; err != nil {
+		t.Fatalf("insert trade: %v", err)
+	}
+	data := map[string]any{"tradeId": tradeID}
+	// Released emitted to BOTH parties — must apply once.
+	svc.handleEvent(events.Event{Type: events.P2PTradeReleased, UserID: seller, Data: data})
+	svc.handleEvent(events.Event{Type: events.P2PTradeReleased, UserID: buyer, Data: data})
+	for _, id := range []uuid.UUID{seller, buyer} {
+		var s models.P2PMerchantStats
+		db.First(&s, "user_id = ?", id)
+		if s.ReleasedCount != 1 {
+			t.Fatalf("user %s releasedCount = %d, want 1 (double-fire must dedup)", id, s.ReleasedCount)
+		}
 	}
 }
