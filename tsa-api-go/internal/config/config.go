@@ -137,6 +137,11 @@ type Config struct {
 	NombaClientSecret string
 	NombaAccountID    string
 
+	// P2P merchant-reputation thresholds for the "Trusted" badge.
+	P2PTrustedMinReleased    int64
+	P2PTrustedMinCompletion  float64
+	P2PTrustedMinAgeDays     int
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -235,6 +240,11 @@ func Load() *Config {
 	cfg.NombaClientID = os.Getenv("NOMBA_CLIENT_ID")
 	cfg.NombaClientSecret = os.Getenv("NOMBA_CLIENT_SECRET")
 	cfg.NombaAccountID = os.Getenv("NOMBA_ACCOUNT_ID")
+
+	// P2P merchant-reputation thresholds.
+	cfg.P2PTrustedMinReleased = getEnvInt64("P2P_TRUSTED_MIN_RELEASED", 50)
+	cfg.P2PTrustedMinCompletion = getEnvFloat64("P2P_TRUSTED_MIN_COMPLETION", 0.95)
+	cfg.P2PTrustedMinAgeDays = int(getEnvInt64("P2P_TRUSTED_MIN_AGE_DAYS", 30))
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
@@ -356,6 +366,15 @@ func Load() *Config {
 	cfg.TokenAddresses = mainnetTokens
 
 	return cfg
+}
+
+func getEnvFloat64(key string, fallback float64) float64 {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func getEnvInt64(key string, fallback int64) int64 {
