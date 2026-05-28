@@ -32,13 +32,14 @@ type P2PHandler struct {
 	// return a 503-ish "feature unavailable" response. The trade routes
 	// themselves don't depend on it.
 	nomba *services.NombaClient
+	stats *services.MerchantStatsService
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
 // P2P routes — handlers will return a configuration-error response so the
 // frontend can show "feature unavailable" cleanly instead of a 500.
-func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService, nomba *services.NombaClient) *P2PHandler {
-	return &P2PHandler{db: db, trade: trade, messages: messages, nomba: nomba}
+func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService, nomba *services.NombaClient, stats *services.MerchantStatsService) *P2PHandler {
+	return &P2PHandler{db: db, trade: trade, messages: messages, nomba: nomba, stats: stats}
 }
 
 // IsConfigured reports whether the handler has its trade service wired up.

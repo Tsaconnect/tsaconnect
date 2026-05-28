@@ -155,6 +155,7 @@ func main() {
 	var (
 		p2pTradeSvc   *services.P2PTradeService
 		p2pMessageSvc *services.P2PMessageService
+		merchantStats *services.MerchantStatsService
 	)
 	if cfg.P2PEscrowAddress != "" && p2pSonicClient != nil {
 		// Trust the RPC for the chainID we put into the EIP-712 domain.
@@ -209,13 +210,21 @@ func main() {
 		// trades and corrects DB drift against on-chain truth. Safety net
 		// for dropped-response failures in the prepare/confirm flow.
 		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc))
+		// Register the merchant-reputation reconciler — recomputes windowed
+		// stats nightly as a correctness backstop for the incremental path.
+		merchantStats = services.NewMerchantStatsService(config.DB, eventBus, services.TrustedThresholds{
+			MinReleased:   cfg.P2PTrustedMinReleased,
+			MinCompletion: cfg.P2PTrustedMinCompletion,
+			MinAgeDays:    cfg.P2PTrustedMinAgeDays,
+		})
+		scheduler.Register(jobs.NewMerchantReputationReconciler(merchantStats))
 		if owner, err := p2pEscrowService.Owner(); err == nil {
 			log.Printf("P2PEscrow contract owner (on-chain): %s", owner)
 		}
 	} else {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
-	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient)
+	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient, merchantStats)
 
 	// Backfill any pending transactions that already have a txHash.
 	// These were submitted before the receipt-polling goroutine was added.
