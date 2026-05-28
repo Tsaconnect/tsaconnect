@@ -390,6 +390,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// `since` query param.
 			p2pGroup.GET("/trades/:id/messages", p2p.ListMessages)
 			p2pGroup.POST("/trades/:id/messages", idem, p2p.SendMessage)
+
+			p2pGroup.GET("/sellers/:id", p2p.GetSellerProfile)
+			p2pGroup.POST("/trades/:id/rate", idem, p2p.RateTrade)
 		}
 
 		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
