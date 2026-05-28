@@ -24,3 +24,7 @@ type P2PMerchantStats struct {
 	TrustedManual     bool       `gorm:"not null;default:false" json:"trustedManual"` // admin override
 	UpdatedAt         time.Time  `json:"updatedAt"`
 }
+
+// TableName pins the table name (the app uses explicit names for all P2P models;
+// GORM's default would yield p2_p_merchant_stats).
+func (P2PMerchantStats) TableName() string { return "p2p_merchant_stats" }

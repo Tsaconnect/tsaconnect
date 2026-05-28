@@ -16,3 +16,5 @@ type P2PRating struct {
 	Value     int16     `gorm:"not null" json:"value"` // +1 or -1
 	CreatedAt time.Time `json:"createdAt"`
 }
+
+func (P2PRating) TableName() string { return "p2p_ratings" }
