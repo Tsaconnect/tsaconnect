@@ -97,3 +97,33 @@ func TestGetStatsMissingIsNew(t *testing.T) {
 		t.Fatalf("missing merchant should be IsNew=true")
 	}
 }
+
+func TestReconcileRecomputesCountsAndAvgRelease(t *testing.T) {
+	svc, db := newStatsSvc(t)
+	// trades table via raw SQLite DDL (AutoMigrate(P2PTrade) fails on SQLite due to gen_random_uuid default).
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS p2p_trades (
+		id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT,
+		marked_paid_at DATETIME, released_at DATETIME, created_at DATETIME)`).Error; err != nil {
+		t.Fatalf("create trades table: %v", err)
+	}
+	seller, buyer := uuid.New(), uuid.New()
+	mp := time.Now().Add(-10 * time.Minute).UTC()
+	rel := mp.Add(2 * time.Minute) // 120s release time
+	if err := db.Exec(`INSERT INTO p2p_trades (id, buyer_id, seller_id, status, marked_paid_at, released_at, created_at)
+	         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		uuid.New().String(), buyer.String(), seller.String(), models.P2PTradeStatusReleased,
+		mp, rel, mp.Add(-1*time.Minute)).Error; err != nil {
+		t.Fatalf("insert trade: %v", err)
+	}
+	if err := svc.ReconcileAllMerchants(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var s models.P2PMerchantStats
+	db.First(&s, "user_id = ?", seller)
+	if s.ReleasedCount != 1 {
+		t.Fatalf("reconciled releasedCount = %d, want 1", s.ReleasedCount)
+	}
+	if s.AvgReleaseSecs30d == nil || *s.AvgReleaseSecs30d != 120 {
+		t.Fatalf("avgReleaseSecs30d = %v, want 120", s.AvgReleaseSecs30d)
+	}
+}
