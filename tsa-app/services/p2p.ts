@@ -22,6 +22,17 @@ import { getAuthHeaders } from './walletApi';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export interface SellerStats {
+  completionRate?: number;
+  avgReleaseSecs?: number;
+  totalOrders: number;
+  positivePct?: number;
+  online: boolean;
+  verified: boolean;
+  trusted: boolean;
+  isNew: boolean;
+}
+
 /**
  * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
  * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
@@ -63,6 +74,8 @@ export interface P2PAd {
   /** Privacy-safe payment descriptor for the marketplace list — provider +
    *  label only, never account numbers. Populated by the list endpoint. */
   paymentMethodSummary?: { provider: string; label: string }[];
+  /** Seller reputation snapshot decorated by the list/detail endpoints. */
+  sellerStats?: SellerStats;
   /** Seller's payment-method rows the buyer should send NGN to. Populated
    *  by the ad-detail endpoint only — the marketplace list omits it so
    *  bank account numbers aren't broadcast in the feed. */
@@ -84,6 +97,22 @@ export interface P2PAd {
   expiresAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface P2PRating {
+  id: string;
+  tradeId: string;
+  raterId: string;
+  rateeId: string;
+  value: 1 | -1;
+  createdAt: string;
+}
+
+export interface MerchantProfile {
+  userId: string;
+  stats: SellerStats;
+  recentRatings: P2PRating[];
+  activeAds: P2PAd[];
 }
 
 /**
@@ -653,6 +682,19 @@ export const adminP2pApi = {
       `/admin/p2p/disputes/${encodeURIComponent(tradeId)}/resolve/confirm`,
       { txHash }
     ),
+};
+
+// ─── Sellers ────────────────────────────────────────────────────────────────
+
+export const sellersApi = {
+  profile: (id: string) => request<MerchantProfile>('GET', `/p2p/sellers/${encodeURIComponent(id)}`),
+};
+
+// ─── Ratings ────────────────────────────────────────────────────────────────
+
+export const ratingsApi = {
+  rate: (tradeId: string, value: 1 | -1) =>
+    request<P2PRating>('POST', `/p2p/trades/${encodeURIComponent(tradeId)}/rate`, { value }),
 };
 
 // ─── Convenience: stateful flow helpers ────────────────────────────────────
