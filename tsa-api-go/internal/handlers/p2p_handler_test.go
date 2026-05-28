@@ -1075,6 +1075,20 @@ func TestRateTrade_HappyAndDuplicate(t *testing.T) {
 	}
 }
 
+func TestRateTrade_RejectsNonParty(t *testing.T) {
+	r := newRig(t)
+	tradeID := uuid.New()
+	// rig.user (r.sellerID) is neither buyer nor seller here.
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, BuyerID: uuid.New(), SellerID: uuid.New(),
+		Status: models.P2PTradeStatusReleased}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetSellerProfile_OK(t *testing.T) {
 	r := newRig(t)
 	rec := doJSON(t, r, http.MethodGet, "/api/p2p/sellers/"+uuid.New().String(), nil)
