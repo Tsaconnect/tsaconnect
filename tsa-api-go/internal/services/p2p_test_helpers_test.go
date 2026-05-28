@@ -19,7 +19,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	stmts := []string{
-		`CREATE TABLE p2_p_merchant_stats (
+		`CREATE TABLE p2p_merchant_stats (
 			user_id TEXT PRIMARY KEY,
 			released_count INTEGER NOT NULL DEFAULT 0,
 			cancelled_count INTEGER NOT NULL DEFAULT 0,
@@ -33,7 +33,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			trusted_manual INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME
 		)`,
-		`CREATE TABLE p2_p_ratings (
+		`CREATE TABLE p2p_ratings (
 			id TEXT PRIMARY KEY,
 			trade_id TEXT NOT NULL,
 			rater_id TEXT NOT NULL,
