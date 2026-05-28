@@ -181,6 +181,16 @@ const TradeCard: React.FC<{ trade: P2PTrade; role: Role }> = ({ trade, role }) =
         <Text style={styles.cardMetaLabel}>Updated</Text>
         <Text style={styles.cardMetaValue}>{formatRelative(trade.updatedAt)}</Text>
       </View>
+      {trade.status === 'released' && (
+        <TouchableOpacity
+          style={styles.rateNudge}
+          onPress={() => router.push(`/p2p/trade/${trade.id}`)}
+          activeOpacity={0.75}
+        >
+          <Icon name="star-rate" size={14} color={GOLD.dark} />
+          <Text style={styles.rateNudgeText}>Rate this trade</Text>
+        </TouchableOpacity>
+      )}
     </TouchableOpacity>
   );
 };
@@ -260,6 +270,16 @@ const styles = StyleSheet.create({
   cardMetaRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   cardMetaLabel: { fontSize: 13, color: '#666' },
   cardMetaValue: { fontSize: 13, color: '#000', fontWeight: '600' },
+  rateNudge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F0F0F0',
+    gap: 6,
+  },
+  rateNudgeText: { fontSize: 12, color: GOLD.dark, fontWeight: '700' },
 });
 
 export default MyTradesScreen;

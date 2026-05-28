@@ -36,9 +36,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import type { ChainKey } from '../../../constants/chains';
+import { useCountdown } from '../../../hooks/useCountdown';
 import {
   formatTokenAmount,
   messagesApi,
+  ratingsApi,
   tradesApi,
   type P2PMessage,
   type P2PTrade,
@@ -79,7 +81,15 @@ const TradeDetailScreen: React.FC = () => {
   const [disputeReason, setDisputeReason] = useState('');
   const [composerText, setComposerText] = useState('');
   const [composerImage, setComposerImage] = useState<string | null>(null);
+  const [rated, setRated] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+
+  const countdown = useCountdown(trade?.status === 'pending_payment' ? trade?.expiresAt : undefined);
+
+  const rate = async (value: 1 | -1) => {
+    const res = await ratingsApi.rate(String(tradeId), value);
+    if (res.success || res.status === 409) setRated(true);
+  };
 
   // Stable role detection — buyer or seller. Admin views go through the
   // admin disputes screen, not this one.
@@ -386,7 +396,13 @@ const TradeDetailScreen: React.FC = () => {
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Expires</Text>
-              <Text style={styles.summaryValue}>{formatRelative(trade.expiresAt)}</Text>
+              {trade.status === 'pending_payment' ? (
+                <Text style={styles.countdown}>
+                  {countdown.expired ? 'Expired' : `${countdown.label} left to pay`}
+                </Text>
+              ) : (
+                <Text style={styles.summaryValue}>{formatRelative(trade.expiresAt)}</Text>
+              )}
             </View>
           </View>
 
@@ -400,6 +416,23 @@ const TradeDetailScreen: React.FC = () => {
               onCancel={handleCancel}
               onDispute={() => setShowDispute(true)}
             />
+          )}
+
+          {trade.status === 'released' && !rated && (
+            <View style={styles.ratePrompt}>
+              <Text style={styles.rateText}>Rate this trade</Text>
+              <View style={{ flexDirection: 'row', gap: 24 }}>
+                <TouchableOpacity onPress={() => rate(1)} hitSlop={8}>
+                  <Icon name="thumb-up" size={28} color="#2E8B57" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => rate(-1)} hitSlop={8}>
+                  <Icon name="thumb-down" size={28} color={GOLD.error} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+          {trade.status === 'released' && rated && (
+            <Text style={styles.rateThanks}>Thanks for your feedback.</Text>
           )}
 
           <Text style={styles.chatHeading}>Chat</Text>
@@ -975,6 +1008,28 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   modalSubmitText: { color: '#FFF', fontWeight: '800' },
+
+  countdown: { fontSize: 14, color: GOLD.dark, fontWeight: '800' },
+  ratePrompt: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: GOLD.muted,
+    marginBottom: 14,
+  },
+  rateText: { fontSize: 14, fontWeight: '700', color: '#000' },
+  rateThanks: {
+    fontSize: 13,
+    color: GOLD.dark,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingVertical: 10,
+    marginBottom: 14,
+  },
 });
 
 export default TradeDetailScreen;
