@@ -73,6 +73,9 @@ func (h *P2PHandler) require(c *gin.Context) (*models.User, bool) {
 		})
 		return nil, false
 	}
+	if h.stats != nil {
+		go func(uid uuid.UUID) { _ = h.stats.Touch(context.Background(), uid) }(user.ID)
+	}
 	return user, true
 }
 
@@ -683,6 +686,7 @@ type adListItem struct {
 	RateStale            bool                            `json:"rateStale,omitempty"`
 	SellerUsername       string                          `json:"sellerUsername,omitempty"`
 	PaymentMethodSummary []services.PaymentMethodSummary `json:"paymentMethodSummary,omitempty"`
+	SellerStats          *services.SellerStats           `json:"sellerStats,omitempty"`
 }
 
 // adDetailItem extends adListItem with the seller's payment-method rows the
@@ -727,11 +731,23 @@ func (h *P2PHandler) decorateAdsWithEffectiveRate(ctx context.Context, rows []mo
 		log.Printf("[p2p] LoadProvidersByMethodIDs failed: %v — list will omit payment summaries", perr)
 		providerByID = map[uuid.UUID]string{}
 	}
+	statsByID := map[uuid.UUID]services.SellerStats{}
+	if h.stats != nil {
+		if m, serr := h.stats.GetStats(ctx, ids); serr != nil {
+			log.Printf("[p2p] GetStats failed: %v — list omits sellerStats", serr)
+		} else {
+			statsByID = m
+		}
+	}
 	for i := range rows {
 		ad := rows[i] // local copy — do NOT persist mutations
 		item := adListItem{P2PAd: ad}
 		if u, ok := usernames[ad.SellerID]; ok {
 			item.SellerUsername = u
+		}
+		if st, ok := statsByID[ad.SellerID]; ok {
+			stCopy := st
+			item.SellerStats = &stCopy
 		}
 		slugs := make([]string, 0, len(ad.PaymentMethodIDs))
 		for _, raw := range ad.PaymentMethodIDs {
@@ -1393,6 +1409,75 @@ func (h *P2PHandler) ListTrades(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": rows})
+}
+
+// ─── Seller profile & ratings ─────────────────────────────────────────────
+
+func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	profile, err := h.stats.GetProfile(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive})
+	if err != nil {
+		ads = nil // non-fatal
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"userId": profile.UserID, "stats": profile.Stats,
+		"recentRatings": profile.RecentRatings, "activeAds": ads,
+	}})
+}
+
+type rateTradeRequest struct {
+	Value int16 `json:"value"`
+}
+
+func (h *P2PHandler) RateTrade(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	tradeID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req rateTradeRequest
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Value != 1 && req.Value != -1) {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "value must be 1 or -1"})
+		return
+	}
+	var trade models.P2PTrade
+	if err := h.db.First(&trade, "id = ?", tradeID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "trade not found"})
+		return
+	}
+	if user.ID != trade.BuyerID && user.ID != trade.SellerID {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "not a party to this trade"})
+		return
+	}
+	if trade.Status != models.P2PTradeStatusReleased {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"success": false, "message": "can only rate a released trade"})
+		return
+	}
+	ratee := trade.SellerID
+	if user.ID == trade.SellerID {
+		ratee = trade.BuyerID
+	}
+	rating := &models.P2PRating{ID: uuid.New(), TradeID: tradeID, RaterID: user.ID, RateeID: ratee, Value: req.Value}
+	if err := h.db.Create(rating).Error; err != nil {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "message": "already rated this trade"})
+		return
+	}
+	_ = h.stats.RecordRating(c.Request.Context(), rating)
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": rating})
 }
 
 // ─── pure helpers ──────────────────────────────────────────────────────────

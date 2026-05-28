@@ -209,6 +209,13 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	// SQLite in-memory: each pool connection is an independent DB.
+	// Pin to one connection so all queries share the same database.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	stmts := []string{
 		`CREATE TABLE p2p_payment_methods (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
@@ -272,6 +279,13 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			sender_id TEXT, type TEXT NOT NULL,
 			body TEXT, image_url TEXT, created_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS p2p_merchant_stats (
+			user_id TEXT PRIMARY KEY, released_count INTEGER DEFAULT 0, cancelled_count INTEGER DEFAULT 0,
+			avg_release_secs_30d INTEGER, avg_pay_secs_30d INTEGER, thumbs_up INTEGER DEFAULT 0, thumbs_down INTEGER DEFAULT 0,
+			last_seen_at DATETIME, verified BOOLEAN DEFAULT 0, trusted BOOLEAN DEFAULT 0, trusted_manual BOOLEAN DEFAULT 0, updated_at DATETIME)`,
+		`CREATE TABLE IF NOT EXISTS p2p_ratings (
+			id TEXT PRIMARY KEY, trade_id TEXT, rater_id TEXT, ratee_id TEXT, value INTEGER, created_at DATETIME,
+			UNIQUE (trade_id, rater_id))`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
@@ -306,7 +320,8 @@ func newRig(t *testing.T) *rig {
 		}
 		return ""
 	})
-	h := NewP2PHandler(db, trade, nil, nil)
+	stats := services.NewMerchantStatsServiceNoBus(db)
+	h := NewP2PHandler(db, trade, nil, nil, stats)
 
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -357,6 +372,8 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.POST("/ads/:id/cancel", h.PrepareCancelAd)
 	g.POST("/ads/:id/cancel/confirm", h.ConfirmCancelAd)
 	g.GET("/payment-providers", h.ListPaymentProviders)
+	g.GET("/sellers/:id", h.GetSellerProfile)
+	g.POST("/trades/:id/rate", h.RateTrade)
 }
 
 // ─── HTTP helpers ──────────────────────────────────────────────────────────
@@ -1024,6 +1041,46 @@ func createSignedAd(t *testing.T, r *rig) string {
 		t.Fatalf("sign: status %d body %s", rec.Code, rec.Body.String())
 	}
 	return adID
+}
+
+// ─── Seller profile & rate-trade tests ────────────────────────────────────
+
+func TestRateTrade_RejectsNonReleased(t *testing.T) {
+	r := newRig(t)
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Status: models.P2PTradeStatusPaid}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRateTrade_HappyAndDuplicate(t *testing.T) {
+	r := newRig(t)
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Status: models.P2PTradeStatusReleased}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first rate status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	rec2 := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("dup rate status = %d, want 409; body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestGetSellerProfile_OK(t *testing.T) {
+	r := newRig(t)
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/sellers/"+uuid.New().String(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 // Compile-time guard: mockEscrow implements P2PEscrowAdapter so we catch
