@@ -246,26 +246,34 @@ func (s *MerchantStatsService) ReconcileAllMerchants(ctx context.Context) error 
 		Avg    float64
 	}
 	var relAvg []avgRow
-	s.db.WithContext(ctx).Raw(`
+	if err := s.db.WithContext(ctx).Raw(`
 		SELECT seller_id AS user_id, `+s.dateDiffSecsExpr("released_at", "marked_paid_at")+` AS avg
 		FROM p2p_trades
 		WHERE status = ? AND released_at IS NOT NULL AND marked_paid_at IS NOT NULL AND released_at >= ?
-		GROUP BY seller_id`, models.P2PTradeStatusReleased, cutoff).Scan(&relAvg)
+		GROUP BY seller_id`, models.P2PTradeStatusReleased, cutoff).Scan(&relAvg).Error; err != nil {
+		log.Printf("[merchant-stats] reconcile avg-release scan: %v", err)
+	}
 	for _, r := range relAvg {
 		secs := int(math.Round(r.Avg))
-		s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
-			Where("user_id = ?", r.UserID).Update("avg_release_secs_30d", secs)
+		if err := s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
+			Where("user_id = ?", r.UserID).Update("avg_release_secs_30d", secs).Error; err != nil {
+			log.Printf("[merchant-stats] reconcile update avg_release for %s: %v", r.UserID, err)
+		}
 	}
 	var payAvg []avgRow
-	s.db.WithContext(ctx).Raw(`
+	if err := s.db.WithContext(ctx).Raw(`
 		SELECT buyer_id AS user_id, `+s.dateDiffSecsExpr("marked_paid_at", "created_at")+` AS avg
 		FROM p2p_trades
 		WHERE status = ? AND marked_paid_at IS NOT NULL AND marked_paid_at >= ?
-		GROUP BY buyer_id`, models.P2PTradeStatusReleased, cutoff).Scan(&payAvg)
+		GROUP BY buyer_id`, models.P2PTradeStatusReleased, cutoff).Scan(&payAvg).Error; err != nil {
+		log.Printf("[merchant-stats] reconcile avg-pay scan: %v", err)
+	}
 	for _, r := range payAvg {
 		secs := int(math.Round(r.Avg))
-		s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
-			Where("user_id = ?", r.UserID).Update("avg_pay_secs_30d", secs)
+		if err := s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).
+			Where("user_id = ?", r.UserID).Update("avg_pay_secs_30d", secs).Error; err != nil {
+			log.Printf("[merchant-stats] reconcile update avg_pay for %s: %v", r.UserID, err)
+		}
 	}
 
 	// 3) refresh verified + trusted for all known merchants.
@@ -283,7 +291,7 @@ func (s *MerchantStatsService) refreshVerified(ctx context.Context, userID uuid.
 	if err := s.db.WithContext(ctx).Select("verification_status", "role").First(&u, "id = ?", userID).Error; err != nil {
 		return
 	}
-	verified := u.VerificationStatus == "verified" && u.Role == models.RoleMerchant
+	verified := u.VerificationStatus == models.VerificationStatusVerified && u.Role == models.RoleMerchant
 	s.db.WithContext(ctx).Model(&models.P2PMerchantStats{}).Where("user_id = ?", userID).Update("verified", verified)
 }
 

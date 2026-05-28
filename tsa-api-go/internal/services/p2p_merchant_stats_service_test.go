@@ -126,4 +126,20 @@ func TestReconcileRecomputesCountsAndAvgRelease(t *testing.T) {
 	if s.AvgReleaseSecs30d == nil || *s.AvgReleaseSecs30d != 120 {
 		t.Fatalf("avgReleaseSecs30d = %v, want 120", s.AvgReleaseSecs30d)
 	}
+
+	// Buyer paid 60s after created_at -> avg_pay_secs_30d should be 60.
+	var b models.P2PMerchantStats
+	db.First(&b, "user_id = ?", buyer)
+	if b.AvgPaySecs30d == nil || *b.AvgPaySecs30d != 60 {
+		t.Fatalf("avgPaySecs30d = %v, want 60", b.AvgPaySecs30d)
+	}
+
+	// Idempotency: a second reconcile must not double the lifetime count.
+	if err := svc.ReconcileAllMerchants(context.Background()); err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+	db.First(&s, "user_id = ?", seller)
+	if s.ReleasedCount != 1 {
+		t.Fatalf("after 2nd reconcile releasedCount = %d, want 1 (idempotent)", s.ReleasedCount)
+	}
 }
