@@ -1178,6 +1178,304 @@ func TestLoadProvidersByMethodIDs_ResolvesLiveAndExcludesDeleted(t *testing.T) {
 	}
 }
 
+// ─── Buy-ad (two-sided / JIT) ──────────────────────────────────────────────
+
+// makeBuyAdParams returns CreateAdParams for a 100 USDT buy-ad in NGN.
+func makeBuyAdParams(pmID uuid.UUID) CreateAdParams {
+	p := makeCreateAdParams(pmID)
+	p.Side = "buy"
+	return p
+}
+
+func TestCreateBuyAd_ActiveImmediately_NoVoucher_NoPoolCheck(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	merchantID := uuid.New()
+	pmID := seedPaymentMethod(t, db, merchantID, "NGN")
+	// Crucially: merchant has ZERO deposited balance — a buy-ad must not
+	// require one (no pool precheck).
+	esc.balance = OnChainBalance{Available: big.NewInt(0), Locked: big.NewInt(0)}
+	_, merchantAddr := newSellerKey(t)
+
+	res, err := svc.CreateAd(context.Background(), merchantID, merchantAddr, makeBuyAdParams(pmID))
+	if err != nil {
+		t.Fatalf("CreateAd(buy): %v", err)
+	}
+	if res.Ad.Side != models.P2PAdSideBuy {
+		t.Errorf("side = %q, want buy", res.Ad.Side)
+	}
+	if res.Ad.Status != models.P2PAdStatusActive {
+		t.Errorf("status = %q, want active (buy-ads skip signing)", res.Ad.Status)
+	}
+	if res.TypedData != nil {
+		t.Errorf("buy-ad should have no typed data, got %+v", res.TypedData)
+	}
+	if res.Ad.VoucherHash != "" || res.Ad.VoucherSignature != "" {
+		t.Errorf("buy-ad should have no voucher fields: %+v", res.Ad)
+	}
+	if res.Ad.Remaining != res.Ad.Amount || res.Ad.Reserved != "0" {
+		t.Errorf("buy-ad capacity init wrong: remaining=%s reserved=%s amount=%s",
+			res.Ad.Remaining, res.Ad.Reserved, res.Ad.Amount)
+	}
+	if !strings.EqualFold(res.Ad.SellerAddress, merchantAddr) {
+		t.Errorf("buy-ad SellerAddress must store merchant wallet: got %s want %s",
+			res.Ad.SellerAddress, merchantAddr)
+	}
+}
+
+// buyAdFixture creates an active buy-ad and returns the pieces a JIT-open test
+// needs.
+func buyAdFixture(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, merchantID uuid.UUID, merchantAddr string, adID, pmID uuid.UUID, db *gorm.DB) {
+	t.Helper()
+	db = setupTradeDB(t)
+	svc, esc, _ = newService(t, db)
+	merchantID = uuid.New()
+	pmID = seedPaymentMethod(t, db, merchantID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(0)}
+	_, merchantAddr = newSellerKey(t)
+	res, err := svc.CreateAd(context.Background(), merchantID, merchantAddr, makeBuyAdParams(pmID))
+	if err != nil {
+		t.Fatalf("createBuyAd: %v", err)
+	}
+	return svc, esc, merchantID, merchantAddr, res.Ad.ID, pmID, db
+}
+
+func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
+	svc, esc, merchantID, merchantAddr, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New() // the user selling crypto
+	userAddr := "0x000000000000000000000000000000000000beef"
+
+	trade, raw, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade(buy): %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("expected unsigned tx")
+	}
+	// Roles invert on a buy-ad: user is the SELLER (depositor), merchant is the
+	// BUYER (recipient).
+	if trade.SellerID != userID {
+		t.Errorf("SellerID = %s, want opener/user %s", trade.SellerID, userID)
+	}
+	if trade.BuyerID != merchantID {
+		t.Errorf("BuyerID = %s, want merchant %s", trade.BuyerID, merchantID)
+	}
+	if trade.Funding != models.P2PTradeFundingDepositedByTaker {
+		t.Errorf("funding = %d, want DepositedByTaker(1)", trade.Funding)
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("status = %q", trade.Status)
+	}
+	// Adapter must have been called with the JIT deposit builder: from=user,
+	// merchant=merchant wallet.
+	if !strings.EqualFold(esc.lastOpenTradeDepositArgs.From, userAddr) {
+		t.Errorf("deposit from = %s, want user %s", esc.lastOpenTradeDepositArgs.From, userAddr)
+	}
+	if !strings.EqualFold(esc.lastOpenTradeDepositArgs.Merchant, merchantAddr) {
+		t.Errorf("deposit merchant = %s, want %s", esc.lastOpenTradeDepositArgs.Merchant, merchantAddr)
+	}
+	if esc.lastOpenTradeDepositArgs.Amount.String() != trade.TokenAmount {
+		t.Errorf("deposit amount = %s, want %s", esc.lastOpenTradeDepositArgs.Amount, trade.TokenAmount)
+	}
+	// Off-chain capacity decremented.
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	wantRemaining := new(big.Int)
+	amt, _ := new(big.Int).SetString("100000000", 10)
+	tradeAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	wantRemaining.Sub(amt, tradeAmt)
+	if ad.Remaining != wantRemaining.String() {
+		t.Errorf("remaining = %s, want %s", ad.Remaining, wantRemaining)
+	}
+	if ad.Reserved != trade.TokenAmount {
+		t.Errorf("reserved = %s, want %s", ad.Reserved, trade.TokenAmount)
+	}
+}
+
+func TestOpenBuyAdTrade_RejectsMerchantSelfTake(t *testing.T) {
+	svc, _, merchantID, _, adID, pmID, _ := buyAdFixture(t)
+	// The merchant cannot take their own buy-ad.
+	_, _, err := svc.OpenTrade(context.Background(), adID, merchantID, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if !errors.Is(err, ErrSelfTrade) {
+		t.Fatalf("expected ErrSelfTrade, got %v", err)
+	}
+}
+
+func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
+	svc, _, _, _, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	// 100 USDT @ 1300 = 130000 NGN cap; ask for way more fiat than capacity.
+	_, _, err := svc.OpenTrade(context.Background(), adID, userID, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1000000", PaymentMethodID: pmID})
+	if err == nil {
+		t.Fatalf("expected capacity/limit rejection, got nil")
+	}
+}
+
+func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
+	svc, esc, merchantID, merchantAddr, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	esc.openedDepositEvent = &P2PTradeOpenedWithDepositEvent{
+		TradeID: HashID(trade.ID),
+		Seller:  common.HexToAddress(userAddr),
+		Buyer:   common.HexToAddress(merchantAddr),
+		Amount:  tokenAmt,
+	}
+	// The opener (user/seller) confirms — not the merchant.
+	got, err := svc.ConfirmOpenTrade(context.Background(), trade.ID, userID, userAddr, "0xopen")
+	if err != nil {
+		t.Fatalf("ConfirmOpenTrade(buy): %v", err)
+	}
+	if got.OpenTxHash != "0xopen" {
+		t.Errorf("open tx hash not stored")
+	}
+	// The merchant (buyer) must NOT be able to confirm the open.
+	_, err = svc.ConfirmOpenTrade(context.Background(), trade.ID, merchantID, merchantAddr, "0xopen2")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("merchant confirm expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
+	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	// MarkPaid is by the BuyerID = merchant (the fiat sender).
+	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
+		t.Fatalf("MarkPaid(merchant): %v", err)
+	}
+	// Release is by the SellerID = user (crypto provider). Set the released
+	// event to split the trade amount.
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
+	toBuyer := new(big.Int).Sub(tokenAmt, fee)
+	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID), AmountToBuyer: toBuyer, FeeToSystem: fee}
+
+	if _, err := svc.PrepareRelease(context.Background(), trade.ID, userID, userAddr); err != nil {
+		t.Fatalf("PrepareRelease(user): %v", err)
+	}
+	got, err := svc.ConfirmRelease(context.Background(), trade.ID, userID, "0xrel")
+	if err != nil {
+		t.Fatalf("ConfirmRelease(user): %v", err)
+	}
+	if got.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released", got.Status)
+	}
+	// Released buy-ad: reserved decremented, remaining NOT re-credited.
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	if ad.Reserved != "0" {
+		t.Errorf("reserved = %s, want 0 after release", ad.Reserved)
+	}
+	amt, _ := new(big.Int).SetString("100000000", 10)
+	wantRemaining := new(big.Int).Sub(amt, tokenAmt)
+	if ad.Remaining != wantRemaining.String() {
+		t.Errorf("remaining = %s, want %s (no re-credit on release)", ad.Remaining, wantRemaining)
+	}
+}
+
+func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
+	svc, esc, _, _, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	// Buy-ad cancel: on-chain crypto returned to the user's wallet, so
+	// ReturnedToPool=false.
+	esc.tradeCancelled = &P2PTradeCancelledEvent{TradeID: HashID(trade.ID), Amount: tokenAmt, ReturnedToPool: false}
+
+	got, err := svc.ConfirmCancel(context.Background(), trade.ID, userID, "0xcancel")
+	if err != nil {
+		t.Fatalf("ConfirmCancel(buy): %v", err)
+	}
+	if got.Status != models.P2PTradeStatusCancelled {
+		t.Errorf("status = %q, want cancelled", got.Status)
+	}
+	// Capacity fully restored (reserved=0, remaining=full amount). No double-credit.
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	if ad.Reserved != "0" {
+		t.Errorf("reserved = %s, want 0", ad.Reserved)
+	}
+	if ad.Remaining != "100000000" {
+		t.Errorf("remaining = %s, want 100000000 (capacity restored)", ad.Remaining)
+	}
+}
+
+func TestConfirmCancelBuyAdTrade_RejectsPoolFlagMismatch(t *testing.T) {
+	svc, esc, _, _, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	// Wrong flag: a buy-ad cancel claiming ReturnedToPool=true must be rejected.
+	esc.tradeCancelled = &P2PTradeCancelledEvent{TradeID: HashID(trade.ID), Amount: tokenAmt, ReturnedToPool: true}
+	if _, err := svc.ConfirmCancel(context.Background(), trade.ID, userID, "0xcancel"); err == nil {
+		t.Fatalf("expected rejection on pool-flag mismatch, got nil")
+	}
+}
+
+func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
+	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	// Drive trade → disputed (merchant raises).
+	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto"); err != nil {
+		t.Fatalf("PrepareRaiseDispute: %v", err)
+	}
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), trade.ID, merchantID, "0xdisp"); err != nil {
+		t.Fatalf("ConfirmRaiseDispute: %v", err)
+	}
+	adminID := uuid.New()
+	if _, err := svc.PrepareAdminResolveDispute(context.Background(), trade.ID, adminID, "0xadmin", false, "refund seller"); err != nil {
+		t.Fatalf("PrepareAdminResolveDispute: %v", err)
+	}
+	// refundBuyer=false: crypto returns to the seller (user) on-chain; off-chain
+	// capacity restored.
+	esc.resolvedEvent = &P2PTradeResolvedEvent{TradeID: HashID(trade.ID), ReleasedToBuyer: false,
+		AmountMoved: big.NewInt(0), FeeToSystem: big.NewInt(0)}
+	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, adminID, "0xresolve"); err != nil {
+		t.Fatalf("ConfirmAdminResolveDispute: %v", err)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	if ad.Reserved != "0" {
+		t.Errorf("reserved = %s, want 0", ad.Reserved)
+	}
+	if ad.Remaining != "100000000" {
+		t.Errorf("remaining = %s, want 100000000 (capacity restored)", ad.Remaining)
+	}
+	_ = tokenAmt
+}
+
 func TestCreateAd_RPCFailureNoLongerSilent(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, esc, _ := newService(t, db)
