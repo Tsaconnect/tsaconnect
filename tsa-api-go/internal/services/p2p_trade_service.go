@@ -66,6 +66,10 @@ type P2PEscrowAdapter interface {
 	// Voucher / trade lifecycle.
 	PrepareCancelVoucher(seller string, voucher AdVoucher) ([]byte, error)
 	PrepareOpenTradeWithVoucher(tradeId [32]byte, voucher AdVoucher, sig []byte, buyer string, amount *big.Int) ([]byte, error)
+	// PrepareOpenTradeWithDeposit is the v2 buy-ad / JIT-funded path: the user
+	// deposits crypto at open time. `from` is the depositing user (on-chain
+	// seller), `merchant` is the ad poster (on-chain buyer/recipient).
+	PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error)
 	PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error)
 	PrepareRelease(tradeId [32]byte, seller string) ([]byte, error)
 	PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error)
@@ -77,6 +81,7 @@ type P2PEscrowAdapter interface {
 	VerifyWithdrawn(txHash string, expectedSeller, expectedToken common.Address) (*P2PWithdrawnEvent, error)
 	VerifyVoucherCancelled(txHash string, expectedVoucherHash [32]byte) (*P2PVoucherCancelledEvent, error)
 	VerifyTradeOpened(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedEvent, error)
+	VerifyTradeOpenedWithDeposit(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedWithDepositEvent, error)
 	VerifyTradeReleased(txHash string, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error)
 	VerifyTradeCancelled(txHash string, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error)
 	VerifyTradeDisputed(txHash string, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error)
@@ -1053,14 +1058,14 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
-	// Sanity check: on-chain returnedToAvailable matches our recorded amount.
-	// (Field renamed from ReturnedToAd in the pool-model upgrade — under the
-	// new contract the funds return to the seller's `available` pool, not to
-	// a specific ad's remaining.)
+	// Sanity check: on-chain cancelled amount matches our recorded amount.
+	// (v2 TradeCancelled carries `Amount` + a `ReturnedToPool` flag — pooled
+	// sell-ads return funds to the seller's `available` pool in-contract;
+	// deposited-by-taker buy-ads transfer the crypto back to the user's wallet.)
 	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-	if expected != nil && ev.ReturnedToAvailable.Cmp(expected) != 0 {
-		return nil, fmt.Errorf("on-chain returnedToAvailable %s does not match trade amount %s",
-			ev.ReturnedToAvailable, trade.TokenAmount)
+	if expected != nil && ev.Amount.Cmp(expected) != 0 {
+		return nil, fmt.Errorf("on-chain cancelled amount %s does not match trade amount %s",
+			ev.Amount, trade.TokenAmount)
 	}
 
 	now := s.clock.Now()
@@ -1094,8 +1099,9 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	trade.CancelReason = "timed_out"
 
 	s.audit(ctx, models.P2PAuditTradeCancelled, &userID, &trade.AdID, &trade.ID, map[string]any{
-		"txHash":       txHash,
-		"returnedToAvailable": ev.ReturnedToAvailable.String(),
+		"txHash":         txHash,
+		"amount":         ev.Amount.String(),
+		"returnedToPool": ev.ReturnedToPool,
 	})
 	// Notify both participants.
 	s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — funds returned to your ad",

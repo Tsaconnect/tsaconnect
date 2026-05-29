@@ -58,10 +58,15 @@ type mockEscrow struct {
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
 	// was prepared).
-	lastDepositArgs       depositArgs
-	lastWithdrawArgs      depositArgs
-	lastOpenTradeArgs     openTradeArgs
-	lastCancelVoucherArgs cancelVoucherArgs
+	lastDepositArgs          depositArgs
+	lastWithdrawArgs         depositArgs
+	lastOpenTradeArgs        openTradeArgs
+	lastCancelVoucherArgs    cancelVoucherArgs
+	lastOpenTradeDepositArgs openTradeDepositArgs
+
+	// Buy-ad / JIT verify fixtures + error injection.
+	verifyOpenedDepositErr error
+	openedDepositEvent     *P2PTradeOpenedWithDepositEvent
 }
 
 type depositArgs struct {
@@ -79,6 +84,13 @@ type openTradeArgs struct {
 type cancelVoucherArgs struct {
 	Seller  string
 	Voucher AdVoucher
+}
+type openTradeDepositArgs struct {
+	TradeID  [32]byte
+	Token    string
+	Amount   *big.Int
+	Merchant string
+	From     string
 }
 
 func newMockEscrow() *mockEscrow {
@@ -140,6 +152,14 @@ func (m *mockEscrow) PrepareOpenTradeWithVoucher(tradeId [32]byte, v AdVoucher, 
 	}
 	return []byte(`{"tx":"openTrade"}`), nil
 }
+func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+	m.preparedTxs = append(m.preparedTxs, "openTradeWithDeposit")
+	m.lastOpenTradeDepositArgs = openTradeDepositArgs{
+		TradeID: tradeId, Token: token, Amount: new(big.Int).Set(amount),
+		Merchant: merchant, From: from,
+	}
+	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
+}
 func (m *mockEscrow) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error) {
 	return []byte(`{"tx":"markPaid"}`), nil
 }
@@ -192,6 +212,15 @@ func (m *mockEscrow) VerifyTradeOpened(txHash string, tradeId [32]byte) (*P2PTra
 	}
 	return &P2PTradeOpenedEvent{TradeID: tradeId, Buyer: common.HexToAddress("0xb000"), Amount: big.NewInt(100)}, nil
 }
+func (m *mockEscrow) VerifyTradeOpenedWithDeposit(txHash string, tradeId [32]byte) (*P2PTradeOpenedWithDepositEvent, error) {
+	if m.verifyOpenedDepositErr != nil {
+		return nil, m.verifyOpenedDepositErr
+	}
+	if m.openedDepositEvent != nil {
+		return m.openedDepositEvent, nil
+	}
+	return &P2PTradeOpenedWithDepositEvent{TradeID: tradeId, Amount: big.NewInt(100)}, nil
+}
 func (m *mockEscrow) VerifyTradeReleased(txHash string, tradeId [32]byte) (*P2PTradeReleasedEvent, error) {
 	if m.verifyReleasedErr != nil {
 		return nil, m.verifyReleasedErr
@@ -208,7 +237,7 @@ func (m *mockEscrow) VerifyTradeCancelled(txHash string, tradeId [32]byte) (*P2P
 	if m.tradeCancelled != nil {
 		return m.tradeCancelled, nil
 	}
-	return &P2PTradeCancelledEvent{TradeID: tradeId, ReturnedToAvailable: big.NewInt(100)}, nil
+	return &P2PTradeCancelledEvent{TradeID: tradeId, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PTradeDisputedEvent, error) {
 	if m.verifyDisputedErr != nil {
