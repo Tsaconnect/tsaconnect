@@ -70,11 +70,20 @@ func (w *P2PTimeoutWatchdog) Run(ctx context.Context) error {
 	log.Printf("[p2p-timeout-watchdog] %d expired pending trades nudged", len(expired))
 	for _, t := range expired {
 		// Notify the seller first — they're the one whose escrow is locked.
+		// Message wording is side-aware (cosmetic): on a pooled sell-ad the
+		// crypto is locked from the seller's pool; on a deposited-by-taker
+		// buy-ad the SellerID is the depositing user whose JIT deposit is
+		// locked. No accounting happens here — the on-chain cancel + the
+		// ConfirmCancel/reconciler restore capacity.
+		sellerMsg := "Buyer did not mark payment within 30 minutes. Reclaim your crypto via cancel."
+		if t.Funding == models.P2PTradeFundingPooled {
+			sellerMsg = "Buyer did not mark payment within 30 minutes. Reclaim your USDT via cancel."
+		}
 		w.bus.Publish(events.Event{
 			Type:    events.P2PTradeExpired,
 			UserID:  t.SellerID,
 			Title:   "P2P trade expired",
-			Message: "Buyer did not mark payment within 30 minutes. Reclaim your USDT via cancel.",
+			Message: sellerMsg,
 			Data: map[string]interface{}{
 				"tradeId": t.ID.String(),
 				"adId":    t.AdID.String(),

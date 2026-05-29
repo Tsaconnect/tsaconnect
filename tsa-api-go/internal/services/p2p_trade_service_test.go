@@ -1476,6 +1476,145 @@ func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) 
 	_ = tokenAmt
 }
 
+// ─── Reconciler funding-awareness ──────────────────────────────────────────
+
+// seedBuyAdWithTrade creates an active buy-ad and a pending_payment JIT trade
+// against it, decrementing the ad's off-chain capacity as a real open would.
+// Returns the trade + ad ids so reconcile tests can assert capacity handling.
+func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTradeService, esc *mockEscrow, tradeID, adID uuid.UUID) {
+	t.Helper()
+	svc, esc, _ = newService(t, db)
+	merchantID := uuid.New()
+	userID := uuid.New()
+	adID = uuid.New()
+	tradeID = uuid.New()
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	// Capacity already partially consumed by the open: amount 100, reserved 30, remaining 70.
+	ad := &models.P2PAd{
+		ID: adID, SellerID: merchantID, Side: models.P2PAdSideBuy,
+		Token: "USDT", ChainID: 146, Amount: "100", Remaining: "70", Reserved: "30",
+		FiatCurrency: "NGN", Rate: "1300", RateType: "fixed",
+		PaymentMethodIDs: stringifyUUIDs([]uuid.UUID{uuid.New()}),
+		Status:           models.P2PAdStatusActive,
+		SellerAddress:    "0x000000000000000000000000000000000000d00d",
+	}
+	if err := db.Create(ad).Error; err != nil {
+		t.Fatalf("seed buy-ad: %v", err)
+	}
+	trade := &models.P2PTrade{
+		ID: tradeID, AdID: adID, SellerID: userID, BuyerID: merchantID,
+		Token: "USDT", ChainID: 146, Funding: models.P2PTradeFundingDepositedByTaker,
+		TokenAmount: "30", FiatAmount: "39000", FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(), Status: status,
+		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed buy-ad trade: %v", err)
+	}
+	return svc, esc, tradeID, adID
+}
+
+func TestReconcileBuyAdTrade_Cancelled_RestoresCapacity(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPendingPayment)
+	esc.onChainTrade = &OnChainP2PTrade{
+		Status: OnChainP2PStatusCancelled, Funding: models.P2PTradeFundingDepositedByTaker,
+		Amount: big.NewInt(30), Exists: true,
+	}
+	out, err := svc.ReconcileTrade(context.Background(), tradeID)
+	if err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	if !out.Changed || out.ToStatus != models.P2PTradeStatusCancelled {
+		t.Fatalf("expected cancelled drift, got %+v", out)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	// reserved 30->0, remaining 70->100 (capacity restored, no on-chain pool credit).
+	if ad.Reserved != "0" || ad.Remaining != "100" {
+		t.Errorf("buy-ad cancel reconcile: reserved=%s remaining=%s, want 0/100", ad.Reserved, ad.Remaining)
+	}
+}
+
+func TestReconcileBuyAdTrade_Released_DecrementsReservedOnly(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	esc.onChainTrade = &OnChainP2PTrade{
+		Status: OnChainP2PStatusReleased, Funding: models.P2PTradeFundingDepositedByTaker,
+		Amount: big.NewInt(30), Exists: true,
+	}
+	out, err := svc.ReconcileTrade(context.Background(), tradeID)
+	if err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	if !out.Changed || out.ToStatus != models.P2PTradeStatusReleased {
+		t.Fatalf("expected released drift, got %+v", out)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	// reserved 30->0; remaining unchanged at 70 (consumed permanently on release).
+	if ad.Reserved != "0" || ad.Remaining != "70" {
+		t.Errorf("buy-ad release reconcile: reserved=%s remaining=%s, want 0/70", ad.Reserved, ad.Remaining)
+	}
+}
+
+func TestReconcileBuyAdTrade_Resolved_RefundSeller_RestoresCapacity(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusDisputed)
+	// Seed a dispute row with refundedToBuyer=false so reconcile knows the branch.
+	refundBuyer := false
+	if err := db.Create(&models.P2PDispute{
+		ID: uuid.New(), TradeID: tradeID, RaisedBy: uuid.New(),
+		RaisedRole: models.P2PDisputeRoleBuyer, Reason: "x",
+		Status: models.P2PDisputeStatusOpen, RefundedToBuyer: &refundBuyer,
+	}).Error; err != nil {
+		t.Fatalf("seed dispute: %v", err)
+	}
+	esc.onChainTrade = &OnChainP2PTrade{
+		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
+		Amount: big.NewInt(30), Exists: true,
+	}
+	out, err := svc.ReconcileTrade(context.Background(), tradeID)
+	if err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	if !out.Changed || out.ToStatus != models.P2PTradeStatusResolved {
+		t.Fatalf("expected resolved drift, got %+v", out)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	// refundBuyer=false → reserved 30->0, remaining 70->100 (capacity restored).
+	if ad.Reserved != "0" || ad.Remaining != "100" {
+		t.Errorf("buy-ad resolve(refund seller) reconcile: reserved=%s remaining=%s, want 0/100", ad.Reserved, ad.Remaining)
+	}
+}
+
+func TestReconcileBuyAdTrade_Resolved_RefundBuyer_NoRemainingCredit(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusDisputed)
+	refundBuyer := true // crypto went to the merchant (buyer)
+	if err := db.Create(&models.P2PDispute{
+		ID: uuid.New(), TradeID: tradeID, RaisedBy: uuid.New(),
+		RaisedRole: models.P2PDisputeRoleSeller, Reason: "x",
+		Status: models.P2PDisputeStatusOpen, RefundedToBuyer: &refundBuyer,
+	}).Error; err != nil {
+		t.Fatalf("seed dispute: %v", err)
+	}
+	esc.onChainTrade = &OnChainP2PTrade{
+		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
+		Amount: big.NewInt(30), Exists: true,
+	}
+	if _, err := svc.ReconcileTrade(context.Background(), tradeID); err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	// refundBuyer=true → reserved 30->0; remaining stays 70 (no re-credit).
+	if ad.Reserved != "0" || ad.Remaining != "70" {
+		t.Errorf("buy-ad resolve(refund buyer) reconcile: reserved=%s remaining=%s, want 0/70", ad.Reserved, ad.Remaining)
+	}
+}
+
 func TestCreateAd_RPCFailureNoLongerSilent(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, esc, _ := newService(t, db)
