@@ -1388,6 +1388,71 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	}
 }
 
+// TestConfirmRelease_BuyAd_DoesNotCreditRemaining locks the invariant that
+// releasing a buy-ad trade permanently consumes capacity: reserved is
+// decremented to zero but remaining is NOT re-credited. This guards against
+// regressions where a refactoring accidentally credits remaining on release.
+func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
+	svc, esc, merchantID, merchantAddr, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+
+	// Open a JIT trade — reserved incremented, remaining decremented at open.
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+
+	// Snapshot ad state immediately after open to derive expected values.
+	var adAfterOpen models.P2PAd
+	db.First(&adAfterOpen, "id = ?", adID)
+	remainingAfterOpen := adAfterOpen.Remaining
+	if adAfterOpen.Reserved == "0" {
+		t.Fatalf("expected non-zero reserved after open, got 0")
+	}
+
+	// Merchant (BuyerID) marks fiat paid.
+	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
+		t.Fatalf("MarkPaid(merchant): %v", err)
+	}
+
+	// Set up mock release event — escrow releases to the merchant.
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
+	toBuyer := new(big.Int).Sub(tokenAmt, fee)
+	esc.releasedEvent = &P2PTradeReleasedEvent{
+		TradeID:       HashID(trade.ID),
+		Buyer:         common.HexToAddress(merchantAddr),
+		AmountToBuyer: toBuyer,
+		FeeToSystem:   fee,
+	}
+
+	// PrepareRelease is by the SellerID = user (crypto provider).
+	if _, err := svc.PrepareRelease(context.Background(), trade.ID, userID, userAddr); err != nil {
+		t.Fatalf("PrepareRelease(user): %v", err)
+	}
+	got, err := svc.ConfirmRelease(context.Background(), trade.ID, userID, "0xrel-invariant")
+	if err != nil {
+		t.Fatalf("ConfirmRelease(user): %v", err)
+	}
+	if got.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released", got.Status)
+	}
+
+	// Invariant assertions: reserved must reach zero; remaining must be UNCHANGED
+	// from after-open snapshot — capacity is consumed permanently, not re-credited.
+	var adAfterRelease models.P2PAd
+	db.First(&adAfterRelease, "id = ?", adID)
+	if adAfterRelease.Reserved != "0" {
+		t.Errorf("reserved = %s after release, want 0 (reserved must clear)", adAfterRelease.Reserved)
+	}
+	if adAfterRelease.Remaining != remainingAfterOpen {
+		t.Errorf("remaining = %s after release, want %s (must NOT be re-credited on buy-ad release)",
+			adAfterRelease.Remaining, remainingAfterOpen)
+	}
+}
+
 func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 	svc, esc, _, _, adID, pmID, db := buyAdFixture(t)
 	userID := uuid.New()
