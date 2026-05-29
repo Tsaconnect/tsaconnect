@@ -13,6 +13,7 @@ const P2PLayout = () => {
       <Stack.Screen name="my-ads" options={{ title: 'My Ads' }} />
       <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
       <Stack.Screen name="create-ad" options={{ title: 'Create Sell Ad' }} />
+      <Stack.Screen name="create-buy-ad" options={{ title: 'Post Buy Ad' }} />
       <Stack.Screen name="pool" options={{ title: 'P2P Pool' }} />
       <Stack.Screen name="ad/[adId]" options={{ title: 'Ad Detail' }} />
       <Stack.Screen name="trade/[tradeId]" options={{ title: 'Trade' }} />
