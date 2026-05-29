@@ -129,6 +129,9 @@ type P2PTradeService struct {
 	bus           EventPublisher
 	clock         Clock
 	chainID       int64
+	// eip712Version is the voucher domain `version` stamped into the typed-data
+	// the app signs; must match the deployed contract. Empty falls back to "1".
+	eip712Version string
 	tokenResolver func(symbol string) string
 	// messages is optional. When set, every state transition also writes a
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
@@ -146,14 +149,18 @@ type P2PTradeService struct {
 // and dev environments.
 const defaultFloatOffsetMaxBps = 1000
 
-func NewP2PTradeService(db *gorm.DB, escrow P2PEscrowAdapter, rates RateProvider, bus EventPublisher, chainID int64) *P2PTradeService {
+func NewP2PTradeService(db *gorm.DB, escrow P2PEscrowAdapter, rates RateProvider, bus EventPublisher, chainID int64, eip712Version string) *P2PTradeService {
+	if eip712Version == "" {
+		eip712Version = "1"
+	}
 	return &P2PTradeService{
-		db:      db,
-		escrow:  escrow,
-		rates:   rates,
-		bus:     bus,
-		clock:   SystemClock,
-		chainID: chainID,
+		db:            db,
+		escrow:        escrow,
+		rates:         rates,
+		bus:           bus,
+		clock:         SystemClock,
+		chainID:       chainID,
+		eip712Version: eip712Version,
 	}
 }
 
@@ -2969,7 +2976,7 @@ func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher) *VoucherTypedData {
 		PrimaryType: "AdVoucher",
 		Domain: VoucherTypedDomain{
 			Name:              "TSAConnectP2PEscrow",
-			Version:           "1",
+			Version:           s.eip712Version,
 			ChainID:           s.chainID,
 			VerifyingContract: s.escrow.ContractAddress(),
 		},
