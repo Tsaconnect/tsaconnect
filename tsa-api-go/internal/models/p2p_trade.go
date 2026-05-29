@@ -47,6 +47,13 @@ type P2PTrade struct {
 	SellerID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"sellerId"`
 	Token           string     `gorm:"size:16;not null" json:"token"`
 	ChainID         int64      `gorm:"not null" json:"chainId"`
+	// Funding discriminates the two-sided escrow flow. Pooled (0) = sell-ad:
+	// the crypto comes from the merchant's deposited on-chain pool. Deposited-
+	// by-taker (1) = buy-ad: the user deposits crypto just-in-time at
+	// openTradeWithDeposit and there is no on-chain pool to credit on refund —
+	// the crypto returns to the user's wallet. Mirrors P2PEscrowV2.sol's
+	// `Funding` enum { PooledFromMaker, DepositedByTaker }.
+	Funding         uint8      `gorm:"not null;default:0" json:"funding"`
 	TokenAmount     string     `gorm:"type:numeric(78,0);not null" json:"tokenAmount"`
 	FiatAmount      string     `gorm:"type:numeric(38,2);not null" json:"fiatAmount"`
 	FiatCurrency    string     `gorm:"size:3;not null" json:"fiatCurrency"`
@@ -73,6 +80,13 @@ type P2PTrade struct {
 func (P2PTrade) TableName() string {
 	return "p2p_trades"
 }
+
+// Funding discriminator values — keep in lock-step with P2PEscrowV2.sol's
+// `enum Funding { PooledFromMaker, DepositedByTaker }`.
+const (
+	P2PTradeFundingPooled           uint8 = 0 // sell-ad: crypto from merchant's pool
+	P2PTradeFundingDepositedByTaker uint8 = 1 // buy-ad: crypto deposited JIT by the user
+)
 
 const (
 	P2PTradeStatusPendingPayment = "pending_payment"

@@ -42,16 +42,28 @@ type mockEscrow struct {
 	contractAddress string
 	balance         services.OnChainBalance
 	allowance       *big.Int
-	depositedEvent  *services.P2PDepositedEvent
-	withdrawnEvent  *services.P2PWithdrawnEvent
-	cancelledEvent  *services.P2PVoucherCancelledEvent
-	openedEvent     *services.P2PTradeOpenedEvent
-	releasedEvent   *services.P2PTradeReleasedEvent
-	tradeCancelled  *services.P2PTradeCancelledEvent
-	disputedEvent   *services.P2PTradeDisputedEvent
-	resolvedEvent   *services.P2PTradeResolvedEvent
-	onChainTrade    *services.OnChainP2PTrade
-	hashFn          func(services.AdVoucher) [32]byte
+	depositedEvent     *services.P2PDepositedEvent
+	withdrawnEvent     *services.P2PWithdrawnEvent
+	cancelledEvent     *services.P2PVoucherCancelledEvent
+	openedEvent        *services.P2PTradeOpenedEvent
+	openedDepositEvent *services.P2PTradeOpenedWithDepositEvent
+	releasedEvent      *services.P2PTradeReleasedEvent
+	tradeCancelled     *services.P2PTradeCancelledEvent
+	disputedEvent      *services.P2PTradeDisputedEvent
+	resolvedEvent      *services.P2PTradeResolvedEvent
+	onChainTrade       *services.OnChainP2PTrade
+	hashFn             func(services.AdVoucher) [32]byte
+	// Captured args so handler tests can assert the deposit path was taken
+	// with the right roles/addresses.
+	lastOpenTradeDepositArgs *handlerOpenTradeDepositArgs
+}
+
+type handlerOpenTradeDepositArgs struct {
+	TradeID  [32]byte
+	Token    string
+	Amount   *big.Int
+	Merchant string
+	From     string
 }
 
 func newMockEscrow() *mockEscrow {
@@ -90,6 +102,13 @@ func (m *mockEscrow) PrepareCancelVoucher(_ string, _ services.AdVoucher) ([]byt
 }
 func (m *mockEscrow) PrepareOpenTradeWithVoucher(_ [32]byte, _ services.AdVoucher, _ []byte, _ string, _ *big.Int) ([]byte, error) {
 	return []byte(`{"tx":"openTrade"}`), nil
+}
+func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+	m.lastOpenTradeDepositArgs = &handlerOpenTradeDepositArgs{
+		TradeID: tradeId, Token: token, Amount: new(big.Int).Set(amount),
+		Merchant: merchant, From: from,
+	}
+	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(_ [32]byte, _ string) ([]byte, error) {
 	return []byte(`{"tx":"markPaid"}`), nil
@@ -130,6 +149,12 @@ func (m *mockEscrow) VerifyTradeOpened(_ string, id [32]byte) (*services.P2PTrad
 	}
 	return &services.P2PTradeOpenedEvent{TradeID: id, Amount: big.NewInt(100)}, nil
 }
+func (m *mockEscrow) VerifyTradeOpenedWithDeposit(_ string, id [32]byte) (*services.P2PTradeOpenedWithDepositEvent, error) {
+	if m.openedDepositEvent != nil {
+		return m.openedDepositEvent, nil
+	}
+	return &services.P2PTradeOpenedWithDepositEvent{TradeID: id, Amount: big.NewInt(100)}, nil
+}
 func (m *mockEscrow) VerifyTradeReleased(_ string, id [32]byte) (*services.P2PTradeReleasedEvent, error) {
 	if m.releasedEvent != nil {
 		return m.releasedEvent, nil
@@ -140,7 +165,7 @@ func (m *mockEscrow) VerifyTradeCancelled(_ string, id [32]byte) (*services.P2PT
 	if m.tradeCancelled != nil {
 		return m.tradeCancelled, nil
 	}
-	return &services.P2PTradeCancelledEvent{TradeID: id, ReturnedToAvailable: big.NewInt(100)}, nil
+	return &services.P2PTradeCancelledEvent{TradeID: id, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(_ string, id [32]byte) (*services.P2PTradeDisputedEvent, error) {
 	if m.disputedEvent != nil {
@@ -247,6 +272,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, ad_id TEXT NOT NULL,
 			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL,
 			token TEXT, chain_id INTEGER,
+			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
 			fiat_currency TEXT, rate TEXT,
 			payment_method_id TEXT,
@@ -366,6 +392,7 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.POST("/withdrawals", h.PrepareWithdraw)
 	g.POST("/withdrawals/confirm", h.ConfirmWithdraw)
 	g.POST("/ads", h.CreateAd)
+	g.POST("/ads/:id/trades", h.OpenTrade)
 	g.POST("/ads/:id/sign", h.SignAd)
 	g.POST("/ads/:id/pause", h.PauseAd)
 	g.POST("/ads/:id/resume", h.ResumeAd)
@@ -1000,6 +1027,149 @@ func TestCreatePaymentMethod_InvalidProvider(t *testing.T) {
 	decoded := decode(t, rec)
 	if msg, _ := decoded["message"].(string); msg != "Invalid payment provider" {
 		t.Errorf("message = %q, want %q", msg, "Invalid payment provider")
+	}
+}
+
+// ─── Buy-ad (two-sided) handler tests ──────────────────────────────────────
+
+func makeBuyAdBody(pmID uuid.UUID) map[string]any {
+	b := makeCreateAdBody(pmID)
+	b["side"] = "buy"
+	return b
+}
+
+// TestCreateBuyAd_OK: a merchant posts a buy-ad. It comes back active (no
+// signing step) with no typed-data and side=buy.
+func TestCreateBuyAd_OK(t *testing.T) {
+	r := newRig(t)
+	// No deposited balance needed for a buy-ad.
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(0)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeBuyAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	decoded := decode(t, rec)
+	data := decoded["data"].(map[string]any)
+	ad := data["ad"].(map[string]any)
+	if ad["side"] != "buy" {
+		t.Errorf("ad.side = %v, want buy", ad["side"])
+	}
+	if ad["status"] != "active" {
+		t.Errorf("ad.status = %v, want active", ad["status"])
+	}
+	if td := data["typedData"]; td != nil {
+		t.Errorf("buy-ad should have no typedData, got %v", td)
+	}
+}
+
+func TestCreateAd_RejectsInvalidSide(t *testing.T) {
+	r := newRig(t)
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	body["side"] = "sideways"
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// createBuyAd posts a buy-ad as the rig merchant and returns its id.
+func createBuyAd(t *testing.T, r *rig) string {
+	t.Helper()
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(0)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeBuyAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create buy-ad: status %d body %s", rec.Code, rec.Body.String())
+	}
+	return decode(t, rec)["data"].(map[string]any)["ad"].(map[string]any)["id"].(string)
+}
+
+// TestOpenBuyAdTrade_DepositPath: a (different) user opens the merchant's
+// buy-ad. The handler must drive the service down the JIT deposit path with
+// the right roles + wallets.
+func TestOpenBuyAdTrade_DepositPath(t *testing.T) {
+	r := newRig(t)
+	adID := createBuyAd(t, r)
+
+	// Switch the request user to the opener (a regular user selling crypto).
+	opener := &models.User{
+		ID:                 uuid.New(),
+		WalletAddress:      "0x000000000000000000000000000000000000beef",
+		VerificationStatus: "verified",
+		Role:               models.RoleUser,
+	}
+	*r.user = *opener
+
+	// The PM must be one of the ad's allowlist (the merchant's PM).
+	var ad models.P2PAd
+	if err := r.db.First(&ad, "id = ?", adID).Error; err != nil {
+		t.Fatalf("reload ad: %v", err)
+	}
+	var pmID string
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID = string(ad.PaymentMethodIDs[0])
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/trades", map[string]any{
+		"fiatAmount":      "1300",
+		"paymentMethodId": pmID,
+		"sellerAddress":   opener.WalletAddress,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("open buy-ad trade status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	// The adapter must have been driven down the JIT deposit path with
+	// from=opener wallet and merchant=ad poster wallet.
+	if r.escrow.lastOpenTradeDepositArgs == nil {
+		t.Fatalf("deposit path not taken — PrepareOpenTradeWithDeposit not called")
+	}
+	if !strings.EqualFold(r.escrow.lastOpenTradeDepositArgs.From, opener.WalletAddress) {
+		t.Errorf("deposit from = %s, want opener %s", r.escrow.lastOpenTradeDepositArgs.From, opener.WalletAddress)
+	}
+	// Persisted trade: SellerID = opener (depositor), BuyerID = merchant.
+	var trade models.P2PTrade
+	if err := r.db.First(&trade, "ad_id = ?", adID).Error; err != nil {
+		t.Fatalf("reload trade: %v", err)
+	}
+	if trade.SellerID != opener.ID {
+		t.Errorf("trade.SellerID = %s, want opener %s", trade.SellerID, opener.ID)
+	}
+	if trade.BuyerID != r.sellerID {
+		t.Errorf("trade.BuyerID = %s, want merchant %s", trade.BuyerID, r.sellerID)
+	}
+	if trade.Funding != models.P2PTradeFundingDepositedByTaker {
+		t.Errorf("trade.Funding = %d, want DepositedByTaker", trade.Funding)
+	}
+}
+
+// TestOpenBuyAdTrade_RejectsMerchantSelfTake: the merchant cannot take their
+// own buy-ad → 400 (ErrSelfTrade).
+func TestOpenBuyAdTrade_RejectsMerchantSelfTake(t *testing.T) {
+	r := newRig(t)
+	adID := createBuyAd(t, r)
+	// r.user is still the merchant (ad poster).
+	var ad models.P2PAd
+	if err := r.db.First(&ad, "id = ?", adID).Error; err != nil {
+		t.Fatalf("reload ad: %v", err)
+	}
+	var pmID string
+	if len(ad.PaymentMethodIDs) > 0 {
+		pmID = string(ad.PaymentMethodIDs[0])
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/trades", map[string]any{
+		"fiatAmount":      "1300",
+		"paymentMethodId": pmID,
+		"sellerAddress":   r.user.WalletAddress,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (ErrSelfTrade); body=%s", rec.Code, rec.Body.String())
 	}
 }
 

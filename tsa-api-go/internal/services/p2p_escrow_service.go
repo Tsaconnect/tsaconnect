@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -30,6 +29,7 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"token","type":"address"},{"name":"amount","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"cancelVoucher","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"tradeId","type":"bytes32"},{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"},{"name":"sig","type":"bytes"},{"name":"amount","type":"uint256"}],"name":"openTrade","outputs":[],"stateMutability":"nonpayable","type":"function"},
+	{"inputs":[{"name":"tradeId","type":"bytes32"},{"name":"token","type":"address"},{"name":"amount","type":"uint256"},{"name":"merchant","type":"address"}],"name":"openTradeWithDeposit","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"markPaid","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"release","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"adminRelease","outputs":[],"stateMutability":"nonpayable","type":"function"},
@@ -39,7 +39,7 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"seller","type":"address"},{"name":"token","type":"address"}],"name":"balanceOf","outputs":[{"name":"_available","type":"uint256"},{"name":"_locked","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"","type":"bytes32"}],"name":"voucherFilled","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"","type":"bytes32"}],"name":"voucherCancelled","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
-	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"getTrade","outputs":[{"name":"seller","type":"address"},{"name":"buyer","type":"address"},{"name":"token","type":"address"},{"name":"amount","type":"uint256"},{"name":"createdAt","type":"uint256"},{"name":"status","type":"uint8"},{"name":"voucherHash","type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"getTrade","outputs":[{"name":"seller","type":"address"},{"name":"buyer","type":"address"},{"name":"token","type":"address"},{"name":"amount","type":"uint256"},{"name":"createdAt","type":"uint256"},{"name":"status","type":"uint8"},{"name":"funding","type":"uint8"},{"name":"feeBps","type":"uint16"},{"name":"autoReleaseAt","type":"uint256"},{"name":"voucherHash","type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
@@ -47,9 +47,11 @@ const p2pEscrowABI = `[
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Withdrawn","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"voucherHash","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"}],"name":"VoucherCancelled","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"voucherHash","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"TradeOpened","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"TradeOpenedWithDeposit","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"}],"name":"TradePaid","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"amountToBuyer","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeReleased","type":"event"},
-	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"returnedToAvailable","type":"uint256"}],"name":"TradeCancelled","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"amountToBuyer","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeAutoReleased","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"returnedToPool","type":"bool"}],"name":"TradeCancelled","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"by","type":"address"}],"name":"TradeDisputed","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"releasedToBuyer","type":"bool"},{"indexed":false,"name":"amountMoved","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeResolved","type":"event"}
 ]`
@@ -100,14 +102,20 @@ type AdVoucher struct {
 // model. Trades are self-contained — no ad pointer because ads live entirely
 // off-chain as signed vouchers.
 type OnChainP2PTrade struct {
-	Seller      common.Address
-	Buyer       common.Address
-	Token       common.Address
-	Amount      *big.Int
-	CreatedAt   *big.Int
-	Status      OnChainP2PTradeStatus
-	VoucherHash [32]byte
-	Exists      bool // false when Status == None
+	Seller        common.Address
+	Buyer         common.Address
+	Token         common.Address
+	Amount        *big.Int
+	CreatedAt     *big.Int
+	Status        OnChainP2PTradeStatus
+	// Funding mirrors P2PEscrowV2's Funding enum (0=PooledFromMaker,
+	// 1=DepositedByTaker). The reconciler reads this off-chain truth to pick
+	// the correct refund branch (pool-credit vs wallet-return).
+	Funding       uint8
+	FeeBps        uint16
+	AutoReleaseAt *big.Int
+	VoucherHash   [32]byte
+	Exists        bool // false when Status == None
 }
 
 // OnChainBalance is the decoded result of balanceOf(seller, token).
@@ -159,11 +167,26 @@ type P2PTradeReleasedEvent struct {
 }
 
 // P2PTradeCancelledEvent captures the TradeCancelled event payload — emitted
-// by `cancelByTimeout`. Under the pool model the funds return to the seller's
-// `available` pool (not to a specific ad's remaining).
+// by `cancelByTimeout` (and adminResolve(false) on chain, which uses
+// TradeResolved). In v2 the event carries the trade `Amount` plus a
+// `ReturnedToPool` flag: true for pooled sell-ads (funds return to the
+// seller's `available` pool, in-contract), false for deposited-by-taker
+// buy-ads (funds are transferred back out to the user's wallet).
 type P2PTradeCancelledEvent struct {
-	TradeID             [32]byte
-	ReturnedToAvailable *big.Int
+	TradeID        [32]byte
+	Amount         *big.Int
+	ReturnedToPool bool
+}
+
+// P2PTradeOpenedWithDepositEvent captures the v2 TradeOpenedWithDeposit event
+// emitted by openTradeWithDeposit (buy-ad / JIT-funded path). Seller is the
+// depositing user; Buyer is the merchant who receives crypto on release.
+type P2PTradeOpenedWithDepositEvent struct {
+	TradeID [32]byte
+	Seller  common.Address
+	Buyer   common.Address
+	Token   common.Address
+	Amount  *big.Int
 }
 
 // P2PTradeDisputedEvent captures TradeDisputed — emitted by raiseDispute.
@@ -332,6 +355,19 @@ func (s *P2PEscrowService) PrepareOpenTradeWithVoucher(tradeId [32]byte, voucher
 	return s.buildUnsignedTx(buyer, data)
 }
 
+// PrepareOpenTradeWithDeposit builds the unsigned tx the user (crypto seller)
+// broadcasts to open a buy-ad trade by depositing tokens just-in-time. `from`
+// is the depositing user's wallet (the on-chain `seller`); `merchant` is the
+// ad poster's wallet (the on-chain `buyer`/crypto recipient). The user must
+// have ERC20-approved the escrow for `amount` first.
+func (s *P2PEscrowService) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+	data, err := parsedP2PEscrowABI.Pack("openTradeWithDeposit", tradeId, common.HexToAddress(token), amount, common.HexToAddress(merchant))
+	if err != nil {
+		return nil, fmt.Errorf("pack openTradeWithDeposit: %w", err)
+	}
+	return s.buildUnsignedTx(from, data)
+}
+
 func (s *P2PEscrowService) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error) {
 	data, err := parsedP2PEscrowABI.Pack("markPaid", tradeId)
 	if err != nil {
@@ -468,17 +504,24 @@ func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
 		return nil, err
 	}
 	vals, err := parsedP2PEscrowABI.Unpack("getTrade", out)
-	if err != nil || len(vals) != 7 {
+	if err != nil || len(vals) != 10 {
 		return nil, fmt.Errorf("decode getTrade: %w", err)
 	}
+	// v2 10-field order: seller, buyer, token, amount, createdAt, status(uint8),
+	// funding(uint8), feeBps(uint16), autoReleaseAt(uint256), voucherHash(bytes32).
+	// NOTE: voucherHash moved from index 6 (v1) to index 9 — a wrong index here
+	// silently mis-decodes; the 10-field decode test guards it.
 	t := &OnChainP2PTrade{
-		Seller:      vals[0].(common.Address),
-		Buyer:       vals[1].(common.Address),
-		Token:       vals[2].(common.Address),
-		Amount:      vals[3].(*big.Int),
-		CreatedAt:   vals[4].(*big.Int),
-		Status:      OnChainP2PTradeStatus(vals[5].(uint8)),
-		VoucherHash: vals[6].([32]byte),
+		Seller:        vals[0].(common.Address),
+		Buyer:         vals[1].(common.Address),
+		Token:         vals[2].(common.Address),
+		Amount:        vals[3].(*big.Int),
+		CreatedAt:     vals[4].(*big.Int),
+		Status:        OnChainP2PTradeStatus(vals[5].(uint8)),
+		Funding:       vals[6].(uint8),
+		FeeBps:        vals[7].(uint16),
+		AutoReleaseAt: vals[8].(*big.Int),
+		VoucherHash:   vals[9].([32]byte),
 	}
 	t.Exists = t.Status != OnChainP2PStatusNone
 	return t, nil
@@ -595,6 +638,17 @@ func (s *P2PEscrowService) VerifyTradeOpened(txHash string, expectedTradeId [32]
 		return nil, err
 	}
 	return parseTradeOpenedFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
+}
+
+// VerifyTradeOpenedWithDeposit confirms a buy-ad / JIT-funded openTradeWithDeposit
+// receipt and returns the parsed event. Used by the open-confirm path to
+// cross-check the on-chain seller (user) + buyer (merchant) against the DB.
+func (s *P2PEscrowService) VerifyTradeOpenedWithDeposit(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedWithDepositEvent, error) {
+	receipt, err := s.fetchReceiptAndCheckOK(txHash)
+	if err != nil {
+		return nil, err
+	}
+	return parseTradeOpenedWithDepositFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
 }
 
 // VerifyTradeReleased confirms a release/adminRelease/adminResolve(true)
@@ -800,20 +854,74 @@ func parseTradeCancelledFromReceipt(receipt *types.Receipt, contractAddr common.
 		if got != expectedTradeId {
 			continue
 		}
+		// v2 TradeCancelled non-indexed fields: amount, returnedToPool.
 		nonIndexed, err := parsedP2PEscrowABI.Events["TradeCancelled"].Inputs.NonIndexed().Unpack(lg.Data)
-		if err != nil || len(nonIndexed) < 1 {
+		if err != nil || len(nonIndexed) < 2 {
 			return nil, fmt.Errorf("decode TradeCancelled data: %w", err)
 		}
 		return &P2PTradeCancelledEvent{
-			TradeID:             got,
-			ReturnedToAvailable: nonIndexed[0].(*big.Int),
+			TradeID:        got,
+			Amount:         nonIndexed[0].(*big.Int),
+			ReturnedToPool: nonIndexed[1].(bool),
 		}, nil
 	}
 	return nil, fmt.Errorf("TradeCancelled event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
 }
 
+// parseTradeOpenedWithDepositFromReceipt scans for the v2 TradeOpenedWithDeposit
+// event. 3 indexed topics (tradeId, seller, buyer) + 2 non-indexed (token,
+// amount).
+func parseTradeOpenedWithDepositFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeOpenedWithDepositEvent, error) {
+	sigID := parsedP2PEscrowABI.Events["TradeOpenedWithDeposit"].ID
+	for _, lg := range receipt.Logs {
+		// 4 topics = sig + indexed(tradeId, seller, buyer)
+		if lg.Address != contractAddr || len(lg.Topics) < 4 || lg.Topics[0] != sigID {
+			continue
+		}
+		var gotTrade [32]byte
+		copy(gotTrade[:], lg.Topics[1].Bytes())
+		if gotTrade != expectedTradeId {
+			continue
+		}
+		seller := common.BytesToAddress(lg.Topics[2].Bytes())
+		buyer := common.BytesToAddress(lg.Topics[3].Bytes())
+		// Non-indexed fields in declared order: token, amount.
+		nonIndexed, err := parsedP2PEscrowABI.Events["TradeOpenedWithDeposit"].Inputs.NonIndexed().Unpack(lg.Data)
+		if err != nil || len(nonIndexed) < 2 {
+			return nil, fmt.Errorf("decode TradeOpenedWithDeposit data: %w", err)
+		}
+		return &P2PTradeOpenedWithDepositEvent{
+			TradeID: gotTrade,
+			Seller:  seller,
+			Buyer:   buyer,
+			Token:   nonIndexed[0].(common.Address),
+			Amount:  nonIndexed[1].(*big.Int),
+		}, nil
+	}
+	return nil, fmt.Errorf("TradeOpenedWithDeposit event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+// parseTradeReleasedFromReceipt accepts either a TradeReleased (manual /
+// admin release) OR a TradeAutoReleased (keeper-driven auto-release) log —
+// they carry an identical field layout (tradeId indexed, buyer indexed,
+// amountToBuyer + feeToSystem non-indexed). A release that settled via
+// auto-release still verifies here, so the release-confirm + reconcile paths
+// recognise both. (Auto-release itself is default-disabled in v2.)
 func parseTradeReleasedFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error) {
-	sigID := parsedP2PEscrowABI.Events["TradeReleased"].ID
+	if ev := tryParseReleaseLike(receipt, contractAddr, expectedTradeId, "TradeReleased"); ev != nil {
+		return ev, nil
+	}
+	if ev := tryParseReleaseLike(receipt, contractAddr, expectedTradeId, "TradeAutoReleased"); ev != nil {
+		return ev, nil
+	}
+	return nil, fmt.Errorf("TradeReleased/TradeAutoReleased event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+// tryParseReleaseLike scans for a release-shaped event (`eventName`) matching
+// the tradeId. Returns nil when no matching log is present so the caller can
+// fall through to the next candidate.
+func tryParseReleaseLike(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte, eventName string) *P2PTradeReleasedEvent {
+	sigID := parsedP2PEscrowABI.Events[eventName].ID
 	for _, lg := range receipt.Logs {
 		if lg.Address != contractAddr || len(lg.Topics) < 3 || lg.Topics[0] != sigID {
 			continue
@@ -824,18 +932,18 @@ func parseTradeReleasedFromReceipt(receipt *types.Receipt, contractAddr common.A
 			continue
 		}
 		buyer := common.BytesToAddress(lg.Topics[2].Bytes())
-		nonIndexed, err := parsedP2PEscrowABI.Events["TradeReleased"].Inputs.NonIndexed().Unpack(lg.Data)
+		nonIndexed, err := parsedP2PEscrowABI.Events[eventName].Inputs.NonIndexed().Unpack(lg.Data)
 		if err != nil || len(nonIndexed) < 2 {
-			return nil, fmt.Errorf("decode TradeReleased data: %w", err)
+			return nil
 		}
 		return &P2PTradeReleasedEvent{
 			TradeID:       got,
 			Buyer:         buyer,
 			AmountToBuyer: nonIndexed[0].(*big.Int),
 			FeeToSystem:   nonIndexed[1].(*big.Int),
-		}, nil
+		}
 	}
-	return nil, fmt.Errorf("TradeReleased event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+	return nil
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────────
@@ -854,18 +962,7 @@ func (s *P2PEscrowService) callContract(data []byte) ([]byte, error) {
 	addr := common.HexToAddress(s.contractAddress)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
-	// TEMP diagnostic: callContract should return non-empty bytes when the
-	// view function exists on the contract. Empty bytes means either we
-	// hit a non-contract address (wrong network) or the selector doesn't
-	// match. Log chain id + return length so we can tell at a glance.
-	chainID := "(nil client)"
-	if s.client != nil && s.client.ChainID() != nil {
-		chainID = s.client.ChainID().String()
-	}
-	log.Printf("[p2p callContract] chainID=%s to=%s dataLen=%d retLen=%d err=%v",
-		chainID, s.contractAddress, len(data), len(out), err)
-	return out, err
+	return s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
 }
 
 func (s *P2PEscrowService) fetchReceiptAndCheckOK(txHash string) (*types.Receipt, error) {
