@@ -415,7 +415,7 @@ func newService(t *testing.T, db *gorm.DB) (*P2PTradeService, *mockEscrow, *mock
 	t.Helper()
 	esc := newMockEscrow()
 	bus := &mockBus{}
-	svc := NewP2PTradeService(db, esc, &mockRates{}, bus, 146)
+	svc := NewP2PTradeService(db, esc, &mockRates{}, bus, 146, "1")
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
 	svc.SetTokenResolver(func(symbol string) string {
 		if symbol == "USDT" {
@@ -512,7 +512,7 @@ func TestCreateAd_RejectsStaleRate(t *testing.T) {
 	esc := newMockEscrow()
 	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)}
 	bus := &mockBus{}
-	svc := NewP2PTradeService(db, esc, &mockRates{stale: true}, bus, 146).
+	svc := NewP2PTradeService(db, esc, &mockRates{stale: true}, bus, 146, "1").
 		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
 	svc.SetTokenResolver(func(s string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
 	sellerID := uuid.New()

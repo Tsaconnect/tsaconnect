@@ -180,7 +180,7 @@ func main() {
 				log.Printf("[config] WARNING: SONIC_CHAIN_ID config=%d disagrees with RPC eth_chainId=%d — using %d (the chain's value) for EIP-712 domain so signatures stay valid", cfg.SonicChainID, domainChainID, domainChainID)
 			}
 		}
-		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, domainChainID)
+		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, domainChainID, cfg.P2PEscrowEIP712Version)
 		// Resolve token symbols against the active Sonic network so a
 		// SONIC_NETWORK=testnet boot looks up testnet token addresses
 		// instead of falling back to the mainnet defaults (which would
