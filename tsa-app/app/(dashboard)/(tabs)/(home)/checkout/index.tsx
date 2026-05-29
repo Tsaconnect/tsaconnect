@@ -270,6 +270,9 @@ const CheckoutScreen = () => {
 
       setSigningPhase('done');
       setStep('success');
+      // Checkout goes through orderApi (not cartService), and the backend marks
+      // the cart converted — nudge the shared count badge so it drops to 0.
+      cartService.notifyChange();
     } catch (err: any) {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');

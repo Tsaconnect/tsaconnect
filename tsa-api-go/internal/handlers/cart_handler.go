@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
 // getActiveCart retrieves the active cart for a user, or returns nil.
@@ -847,6 +849,40 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		"billingAddress":  cart.BillingAddress,
 		"paymentMethod":   cart.PaymentMethod,
 		"shippingMethod":  cart.ShippingMethod,
+	})
+}
+
+// GetCartCount handles GET /api/cart/count - returns just the total item
+// quantity in the user's active cart. Deliberately lightweight: unlike
+// GetCartSummary it skips the product/seller batch lookups and per-seller
+// grouping, so clients can cheaply refresh a cart-count badge.
+//
+// Returns count 0 with HTTP 200 when the user simply has no active cart yet.
+// A genuine DB error is surfaced as 500 (not silently flattened to 0) so the
+// client can keep its last known count instead of zeroing the badge on a
+// transient backend hiccup.
+func (h *Handlers) GetCartCount(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	cart, err := getActiveCart(user.ID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve cart count")
+		return
+	}
+
+	count := 0
+	if cart != nil {
+		for _, item := range cart.GetItems() {
+			count += item.Quantity
+		}
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Cart count retrieved successfully", gin.H{
+		"count": count,
 	})
 }
 

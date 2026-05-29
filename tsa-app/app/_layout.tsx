@@ -7,6 +7,7 @@ import { AppProvider } from "../AuthContext/AuthContext";
 import { TokenProvider } from "../hooks/useTokens";
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { CurrencyProvider } from '../contexts/CurrencyContext';
+import { CartProvider } from '../contexts/CartContext';
 
 const RootLayout = () => {
   useEffect(() => {
@@ -40,11 +41,13 @@ const RootLayout = () => {
       <TokenProvider>
         <NotificationProvider>
           <CurrencyProvider>
-            <StatusBar barStyle="dark-content" backgroundColor="#fff" />
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="index" options={{ headerShown: false }} />
-              <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
-            </Stack>
+            <CartProvider>
+              <StatusBar barStyle="dark-content" backgroundColor="#fff" />
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="index" options={{ headerShown: false }} />
+                <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
+              </Stack>
+            </CartProvider>
           </CurrencyProvider>
         </NotificationProvider>
       </TokenProvider>

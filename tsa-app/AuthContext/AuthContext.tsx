@@ -13,6 +13,7 @@ import {
   register,
 } from "../constants/api/AuthenticationService";
 import { apiClient } from "../constants/api/apiClient";
+import { cartService } from "../components/services/cart";
 import api from "../components/services/api";
 import { router } from "expo-router";
 import * as FileSystem from 'expo-file-system';
@@ -108,6 +109,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     try {
       const response = await addToCart(newItem);
       if (response.status === 201) {
+        // This add bypasses cartService, so refresh the shared count badge.
+        cartService.notifyChange();
         return { success: true, error: false, message: "success" };
       } else {
         return { success: false, error: true, message: "could not create" };
