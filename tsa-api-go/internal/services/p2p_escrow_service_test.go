@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // makeTestSvc returns a P2PEscrowService with no chain client (env=dev) so
@@ -338,6 +339,29 @@ func TestOnChainP2PTradeStatus_MatchesContractEnum(t *testing.T) {
 		if uint8(c.want) != c.val {
 			t.Errorf("Status %s: const = %d, contract enum position = %d (drift)",
 				c.name, uint8(c.want), c.val)
+		}
+	}
+}
+
+// TestP2PTradeFunding_Constants pins the Funding discriminator values to the
+// contract's `enum Funding { PooledFromMaker, DepositedByTaker }` order. The
+// contract source is the authority; a drift here would route buy-ad refunds
+// down the pool-credit branch (double-credit) or vice-versa.
+func TestP2PTradeFunding_Constants(t *testing.T) {
+	// From smart-contracts/contracts/P2PEscrowV2.sol:
+	//   enum Funding { PooledFromMaker, DepositedByTaker }
+	cases := []struct {
+		name string
+		got  uint8
+		want uint8
+	}{
+		{"PooledFromMaker", models.P2PTradeFundingPooled, 0},
+		{"DepositedByTaker", models.P2PTradeFundingDepositedByTaker, 1},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("Funding %s: const = %d, contract enum position = %d (drift)",
+				c.name, c.got, c.want)
 		}
 	}
 }

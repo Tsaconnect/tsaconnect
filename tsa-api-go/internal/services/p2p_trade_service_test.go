@@ -322,6 +322,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, ad_id TEXT NOT NULL,
 			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL,
 			token TEXT, chain_id INTEGER,
+			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
 			fiat_currency TEXT, rate TEXT,
 			payment_method_id TEXT,
