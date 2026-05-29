@@ -4,8 +4,10 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 import {
   distinctAdProviders,
+  exceedsCapacity,
   hasSufficientAllowance,
   previewFiatFromToken,
+  withinFiatLimits,
   type P2PAd,
 } from './p2p';
 
@@ -130,5 +132,93 @@ describe('previewFiatFromToken', () => {
     // 1000 MCGP at rate 2 = 2000.00
     const thousandMcgp = (BigInt(1000) * BigInt(10) ** BigInt(18)).toString();
     expect(previewFiatFromToken(thousandMcgp, '2', 18)).toBe('2000.00');
+  });
+});
+
+describe('exceedsCapacity', () => {
+  it('returns false when amount equals remaining (exactly fills capacity)', () => {
+    expect(exceedsCapacity('1000000', '1000000')).toBe(false);
+  });
+
+  it('returns false when amount is less than remaining', () => {
+    expect(exceedsCapacity('500000', '1000000')).toBe(false);
+  });
+
+  it('returns true when amount is greater than remaining', () => {
+    expect(exceedsCapacity('1000001', '1000000')).toBe(true);
+  });
+
+  it('returns true when remaining is zero and amount is non-zero', () => {
+    expect(exceedsCapacity('1', '0')).toBe(true);
+  });
+
+  it('returns false when both are zero', () => {
+    expect(exceedsCapacity('0', '0')).toBe(false);
+  });
+
+  it('handles large 18-decimal values correctly (BigInt)', () => {
+    const oneAndHalfMcgp = '1500000000000000000';
+    const oneMcgp = '1000000000000000000';
+    const twoMcgp = '2000000000000000000';
+    expect(exceedsCapacity(oneAndHalfMcgp, twoMcgp)).toBe(false);
+    expect(exceedsCapacity(oneAndHalfMcgp, oneMcgp)).toBe(true);
+  });
+
+  it('fails safe (returns true) when values are malformed', () => {
+    expect(exceedsCapacity('abc', '1000000')).toBe(true);
+    expect(exceedsCapacity('1000000', 'xyz')).toBe(true);
+  });
+});
+
+describe('withinFiatLimits', () => {
+  it('returns true when no limits are set', () => {
+    expect(withinFiatLimits('500')).toBe(true);
+    expect(withinFiatLimits('500', undefined, undefined)).toBe(true);
+  });
+
+  it('returns true when fiat equals the min bound (inclusive)', () => {
+    expect(withinFiatLimits('100', '100', '1000')).toBe(true);
+  });
+
+  it('returns true when fiat equals the max bound (inclusive)', () => {
+    expect(withinFiatLimits('1000', '100', '1000')).toBe(true);
+  });
+
+  it('returns false when fiat is below min', () => {
+    expect(withinFiatLimits('99', '100', '1000')).toBe(false);
+  });
+
+  it('returns false when fiat is above max', () => {
+    expect(withinFiatLimits('1001', '100', '1000')).toBe(false);
+  });
+
+  it('returns true with only min set and fiat is above it', () => {
+    expect(withinFiatLimits('200', '100')).toBe(true);
+  });
+
+  it('returns false with only min set and fiat is below it', () => {
+    expect(withinFiatLimits('50', '100')).toBe(false);
+  });
+
+  it('returns true with only max set and fiat is below it', () => {
+    expect(withinFiatLimits('800', undefined, '1000')).toBe(true);
+  });
+
+  it('returns false with only max set and fiat is above it', () => {
+    expect(withinFiatLimits('1200', undefined, '1000')).toBe(false);
+  });
+
+  it('handles empty-string limits as unbounded', () => {
+    expect(withinFiatLimits('500', '', '')).toBe(true);
+  });
+
+  it('handles large fiat values', () => {
+    expect(withinFiatLimits('999999999', '1', '1000000000')).toBe(true);
+    expect(withinFiatLimits('1000000001', '1', '1000000000')).toBe(false);
+  });
+
+  it('returns false for non-finite fiat input', () => {
+    expect(withinFiatLimits('', '100', '1000')).toBe(false);
+    expect(withinFiatLimits('abc', '100', '1000')).toBe(false);
   });
 });

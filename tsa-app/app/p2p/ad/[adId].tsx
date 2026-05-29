@@ -40,6 +40,9 @@ import {
   parseTokenAmount,
   previewFiatFromToken,
   unsignedTxToTxLike,
+  exceedsCapacity,
+  withinFiatLimits,
+  TOKEN_DECIMALS as P2P_TOKEN_DECIMALS,
   type P2PAd,
   type P2PPaymentMethod,
 } from '../../../services/p2p';
@@ -61,7 +64,7 @@ const GOLD = {
   error: '#DC3545',
 };
 
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
+// TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
 const AdDetailScreen: React.FC = () => {
   const { adId } = useLocalSearchParams<{ adId: string }>();
@@ -119,7 +122,16 @@ const AdDetailScreen: React.FC = () => {
     }
   }, [ad?.side, loadUserPms]);
 
-  const tokenDecimals = ad ? TOKEN_DECIMALS[ad.token] ?? 18 : 6;
+  // FIX 1: Fail closed on unknown token decimals.
+  // On the sell/deposit path a wrong decimal count makes parseTokenAmount produce
+  // the wrong on-chain amount — approve/deposit mismatch or massive over-deposit.
+  // tokenSupported gates the sell flow; buy-side (user receives crypto) is unaffected.
+  const tokenSupported = ad ? P2P_TOKEN_DECIMALS[ad.token] !== undefined : false;
+  // For buy-ads (sell path): use ONLY the known map; undefined means unsupported.
+  // For sell-ads (buy path): fall back to 18 for display only — no base-unit math runs.
+  const tokenDecimals = ad
+    ? (P2P_TOKEN_DECIMALS[ad.token] ?? (isBuyAd ? undefined : 18) ?? 18)
+    : 6;
 
   // For sell-ads: preview token amount the buyer receives.
   const tokenPreview = useMemo(() => {
@@ -151,7 +163,8 @@ const AdDetailScreen: React.FC = () => {
     !ad.rateStale &&
     parseFloat(amountInput || '0') > 0 &&
     !!selectedPmId &&
-    (isBuyAd ? true : minOk && maxOk);
+    // FIX 1: sell flow (buy-ad path) requires a known token.
+    (isBuyAd ? tokenSupported : minOk && maxOk);
 
   // ─── Sell-ad submit (buy crypto) ─────────────────────────────────────────
 
@@ -215,6 +228,18 @@ const AdDetailScreen: React.FC = () => {
 
   const handleOpenBuyAd = async () => {
     if (!ad || submitting) return;
+
+    // FIX 1: Fail closed — block immediately if the token isn't in the known
+    // decimals map. A wrong decimal count would produce the wrong on-chain
+    // base-unit amount (approve/deposit mismatch or massive over-deposit).
+    if (!tokenSupported) {
+      Alert.alert(
+        'Unsupported token',
+        `Cannot sell ${ad.token} here — this token is not supported by the app yet.`,
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
       setSubmitStage('Loading wallet…');
@@ -232,6 +257,21 @@ const AdDetailScreen: React.FC = () => {
       }
       if (tokenBaseUnits === '0') {
         throw new Error('Token amount must be greater than zero.');
+      }
+
+      // FIX 2: Client-side capacity + fiat-limit validation — bail out
+      // before any wallet/approve/broadcast calls on bad inputs.
+      if (exceedsCapacity(tokenBaseUnits, ad.remaining)) {
+        throw new Error("Amount exceeds the merchant's remaining capacity.");
+      }
+      if (!withinFiatLimits(fiatPreview, ad.minLimit, ad.maxLimit)) {
+        const minNum = ad.minLimit ? parseFloat(ad.minLimit) : undefined;
+        const maxNum = ad.maxLimit ? parseFloat(ad.maxLimit) : undefined;
+        const fiatNum = parseFloat(fiatPreview);
+        if (minNum !== undefined && isFinite(minNum) && fiatNum < minNum) {
+          throw new Error("Below the merchant's minimum.");
+        }
+        throw new Error("Above the merchant's maximum.");
       }
 
       // Step 1: Check allowance — approve if insufficient.
@@ -276,7 +316,10 @@ const AdDetailScreen: React.FC = () => {
 
       // Step 2: Open the trade (openTradeWithDeposit).
       setSubmitStage('Depositing & opening trade…');
-      // fiatAmount is a display value — compute from preview for the wire.
+      // FIX 3: fiatAmount is a display-only value sent here only to satisfy
+      // the required field in OpenTradeInput. For buy-ads the backend treats
+      // tokenAmount as authoritative and DERIVES fiat from tokenAmount × rate
+      // at trade-open time — this value is ignored server-side for buy-ads.
       const fiatAmount = fiatPreview;
       const openRes = await tradesApi.open(ad.id, {
         sellerAddress,
@@ -435,6 +478,15 @@ const AdDetailScreen: React.FC = () => {
           {/* Amount input — fiat for sell-ads; token for buy-ads */}
           {isBuyAd ? (
             <>
+              {/* FIX 1: show an error banner when the sell token isn't supported */}
+              {!tokenSupported && (
+                <View style={styles.staleBanner}>
+                  <Icon name="error-outline" size={15} color={GOLD.error} />
+                  <Text style={styles.staleBannerText}>
+                    Unsupported token — cannot sell {ad.token} here.
+                  </Text>
+                </View>
+              )}
               <Text style={styles.label}>You send ({ad.token})</Text>
               <View style={styles.inputCard}>
                 <Text style={styles.inputPrefix}>{ad.token}</Text>

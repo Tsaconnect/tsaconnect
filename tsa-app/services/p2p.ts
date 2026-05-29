@@ -851,6 +851,45 @@ export function unsignedTxToTxLike(tx: UnsignedTx) {
 }
 
 /**
+ * Return true iff `tokenBaseUnits` exceeds the ad's remaining capacity.
+ * Both values are base-unit strings (no decimals). Uses BigInt so amounts
+ * beyond Number precision are compared correctly.
+ *
+ * "Exceeds" means strictly greater than — equal-to-remaining is still valid
+ * (the buyer takes the last of what the merchant has available).
+ */
+export function exceedsCapacity(tokenBaseUnits: string, remaining: string): boolean {
+  try {
+    return BigInt(tokenBaseUnits || '0') > BigInt(remaining || '0');
+  } catch {
+    // If either value is not a valid integer string, fail safe by blocking.
+    return true;
+  }
+}
+
+/**
+ * Return true iff `fiat` is within the ad's optional min/max fiat limits.
+ * `fiat`, `min`, and `max` are decimal strings (human-readable, e.g. "500").
+ * Missing min/max are treated as unbounded on that side.
+ *
+ * Uses numeric (float) comparison — the limits are fiat whole-unit values so
+ * floating-point is sufficient and consistent with the display layer.
+ */
+export function withinFiatLimits(fiat: string, min?: string, max?: string): boolean {
+  const fiatNum = parseFloat(fiat || '0');
+  if (!isFinite(fiatNum)) return false;
+  if (min !== undefined && min !== '') {
+    const minNum = parseFloat(min);
+    if (isFinite(minNum) && fiatNum < minNum) return false;
+  }
+  if (max !== undefined && max !== '') {
+    const maxNum = parseFloat(max);
+    if (isFinite(maxNum) && fiatNum > maxNum) return false;
+  }
+  return true;
+}
+
+/**
  * Distinct, order-stable list of payment providers present across the given
  * ads' privacy-safe summaries. Used to populate the "All Payment Methods"
  * filter from already-loaded ads (no extra request).
