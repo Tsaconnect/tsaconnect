@@ -116,6 +116,35 @@ func TestPrepareOpenTradeWithVoucher_PacksCorrectSelector(t *testing.T) {
 	}
 }
 
+// PrepareOpenTradeWithDeposit (v2 buy-ad / JIT path): pin the selector + that
+// the tradeId lands in slot 0 and the merchant address is the 4th arg.
+func TestPrepareOpenTradeWithDeposit_PacksCorrectSelector(t *testing.T) {
+	svc := makeTestSvc(t)
+	tradeID := HashID(uuid.New())
+	token := "0x000000000000000000000000000000000000feed"
+	merchant := "0x000000000000000000000000000000000000d00d"
+	from := "0x000000000000000000000000000000000000beef"
+	amount := big.NewInt(500_000)
+
+	raw, err := svc.PrepareOpenTradeWithDeposit(tradeID, token, amount, merchant, from)
+	if err != nil {
+		t.Fatalf("PrepareOpenTradeWithDeposit: %v", err)
+	}
+	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
+	want := selectorFor(t, "openTradeWithDeposit(bytes32,address,uint256,address)")
+	if !bytesEqual(data[:4], want) {
+		t.Fatalf("openTradeWithDeposit selector mismatch: want %x got %x", want, data[:4])
+	}
+	if !bytesEqual(data[4:36], tradeID[:]) {
+		t.Fatalf("tradeId not in first arg slot")
+	}
+	// merchant is the 4th arg (slot index 3) — address right-aligned in 32 bytes.
+	merchantSlot := data[4+3*32 : 4+4*32]
+	if !bytesEqual(merchantSlot[12:], common.HexToAddress(merchant).Bytes()) {
+		t.Fatalf("merchant address not in 4th arg slot: %x", merchantSlot)
+	}
+}
+
 // PrepareDeposit / PrepareWithdraw: verify selector for the new pool flow.
 func TestPrepareDeposit_PacksCorrectSelector(t *testing.T) {
 	svc := makeTestSvc(t)
@@ -214,9 +243,11 @@ func TestABIEventsHaveExpectedTopicIDs(t *testing.T) {
 		"Withdrawn":        "Withdrawn(address,address,uint256)",
 		"VoucherCancelled": "VoucherCancelled(bytes32,address)",
 		"TradeOpened":      "TradeOpened(bytes32,bytes32,address,address,address,uint256)",
+		"TradeOpenedWithDeposit": "TradeOpenedWithDeposit(bytes32,address,address,address,uint256)",
 		"TradePaid":        "TradePaid(bytes32)",
 		"TradeReleased":    "TradeReleased(bytes32,address,uint256,uint256)",
-		"TradeCancelled":   "TradeCancelled(bytes32,uint256)",
+		"TradeAutoReleased": "TradeAutoReleased(bytes32,address,uint256,uint256)",
+		"TradeCancelled":   "TradeCancelled(bytes32,uint256,bool)",
 		"TradeDisputed":    "TradeDisputed(bytes32,address)",
 		"TradeResolved":    "TradeResolved(bytes32,bool,uint256,uint256)",
 	}
@@ -465,6 +496,150 @@ func TestParseTradeOpenedFromReceipt_HappyPath(t *testing.T) {
 	}
 }
 
+// TestParseTradeOpenedWithDepositFromReceipt_HappyPath pins the v2 buy-ad /
+// JIT-funded open event decode: 3 indexed topics (tradeId, seller=user,
+// buyer=merchant) + 2 non-indexed (token, amount).
+func TestParseTradeOpenedWithDepositFromReceipt_HappyPath(t *testing.T) {
+	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
+	tradeID := HashID(uuid.New())
+	seller := common.HexToAddress("0x000000000000000000000000000000000000beef") // depositing user
+	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")  // merchant
+	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
+	amount := big.NewInt(250_000_000)
+
+	logEntry := mustBuildTradeOpenedWithDepositLog(t, contractAddr, tradeID, seller, buyer, token, amount)
+	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
+
+	ev, err := parseTradeOpenedWithDepositFromReceipt(receipt, contractAddr, tradeID)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ev.Seller != seller || ev.Buyer != buyer || ev.Token != token || ev.Amount.Cmp(amount) != 0 {
+		t.Errorf("decoded fields mismatch: %+v", ev)
+	}
+}
+
+// TestParseTradeCancelledFromReceipt_DecodesAmountAndPoolFlag pins the v2
+// TradeCancelled layout: tradeId indexed + (amount, returnedToPool) non-indexed.
+func TestParseTradeCancelledFromReceipt_DecodesAmountAndPoolFlag(t *testing.T) {
+	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
+	tradeID := HashID(uuid.New())
+	amount := big.NewInt(100_000_000)
+
+	for _, returnedToPool := range []bool{true, false} {
+		logEntry := mustBuildTradeCancelledLog(t, contractAddr, tradeID, amount, returnedToPool)
+		receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
+		ev, err := parseTradeCancelledFromReceipt(receipt, contractAddr, tradeID)
+		if err != nil {
+			t.Fatalf("returnedToPool=%v: parse: %v", returnedToPool, err)
+		}
+		if ev.Amount.Cmp(amount) != 0 {
+			t.Errorf("returnedToPool=%v: amount = %s, want %s", returnedToPool, ev.Amount, amount)
+		}
+		if ev.ReturnedToPool != returnedToPool {
+			t.Errorf("returnedToPool = %v, want %v", ev.ReturnedToPool, returnedToPool)
+		}
+	}
+}
+
+// TestParseTradeReleasedFromReceipt_AcceptsAutoReleased: a release that
+// settled via the keeper-driven auto-release path emits TradeAutoReleased, not
+// TradeReleased. The recognizer must still verify it (same field layout).
+func TestParseTradeReleasedFromReceipt_AcceptsAutoReleased(t *testing.T) {
+	contractAddr := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
+	tradeID := HashID(uuid.New())
+	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
+	amountToBuyer := big.NewInt(99)
+	feeToSystem := big.NewInt(1)
+
+	ev := parsedP2PEscrowABI.Events["TradeAutoReleased"]
+	data, err := ev.Inputs.NonIndexed().Pack(amountToBuyer, feeToSystem)
+	if err != nil {
+		t.Fatalf("pack non-indexed: %v", err)
+	}
+	logEntry := &types.Log{
+		Address: contractAddr,
+		Topics: []common.Hash{
+			ev.ID,
+			tradeID,
+			common.BytesToHash(buyer.Bytes()),
+		},
+		Data: data,
+	}
+	receipt := &types.Receipt{Status: 1, Logs: []*types.Log{logEntry}}
+	got, err := parseTradeReleasedFromReceipt(receipt, contractAddr, tradeID)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got.Buyer != buyer || got.AmountToBuyer.Cmp(amountToBuyer) != 0 || got.FeeToSystem.Cmp(feeToSystem) != 0 {
+		t.Errorf("decoded auto-release fields mismatch: %+v", got)
+	}
+}
+
+// TestReadTrade_Decodes10FieldLayout guards the v2 getTrade field reorder. It
+// ABI-packs a 10-field output and confirms each field lands in the right slot
+// of OnChainP2PTrade — in particular voucherHash at index 9 (was 6 in v1),
+// funding at 6, feeBps(uint16) at 7, autoReleaseAt at 8.
+func TestReadTrade_Decodes10FieldLayout(t *testing.T) {
+	method, ok := parsedP2PEscrowABI.Methods["getTrade"]
+	if !ok {
+		t.Fatalf("getTrade not in parsed ABI")
+	}
+	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
+	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
+	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
+	amount := big.NewInt(123_456)
+	createdAt := big.NewInt(1_700_000_000)
+	status := uint8(OnChainP2PStatusPaid)
+	funding := uint8(1) // DepositedByTaker
+	feeBps := uint16(50)
+	autoReleaseAt := big.NewInt(1_700_000_900)
+	voucherHash := HashID(uuid.New())
+
+	packed, err := method.Outputs.Pack(seller, buyer, token, amount, createdAt, status, funding, feeBps, autoReleaseAt, voucherHash)
+	if err != nil {
+		t.Fatalf("pack outputs: %v", err)
+	}
+	vals, err := method.Outputs.Unpack(packed)
+	if err != nil || len(vals) != 10 {
+		t.Fatalf("unpack: %v len=%d", err, len(vals))
+	}
+	// Decode in the same order ReadTrade does and assert field placement.
+	tr := &OnChainP2PTrade{
+		Seller:        vals[0].(common.Address),
+		Buyer:         vals[1].(common.Address),
+		Token:         vals[2].(common.Address),
+		Amount:        vals[3].(*big.Int),
+		CreatedAt:     vals[4].(*big.Int),
+		Status:        OnChainP2PTradeStatus(vals[5].(uint8)),
+		Funding:       vals[6].(uint8),
+		FeeBps:        vals[7].(uint16),
+		AutoReleaseAt: vals[8].(*big.Int),
+		VoucherHash:   vals[9].([32]byte),
+	}
+	if tr.Seller != seller || tr.Buyer != buyer || tr.Token != token {
+		t.Errorf("address fields mis-decoded: %+v", tr)
+	}
+	if tr.Amount.Cmp(amount) != 0 || tr.CreatedAt.Cmp(createdAt) != 0 {
+		t.Errorf("amount/createdAt mis-decoded: %+v", tr)
+	}
+	if uint8(tr.Status) != status {
+		t.Errorf("status = %d, want %d", tr.Status, status)
+	}
+	if tr.Funding != funding {
+		t.Errorf("funding = %d, want %d (index 6)", tr.Funding, funding)
+	}
+	if tr.FeeBps != feeBps {
+		t.Errorf("feeBps = %d, want %d (index 7, uint16)", tr.FeeBps, feeBps)
+	}
+	if tr.AutoReleaseAt.Cmp(autoReleaseAt) != 0 {
+		t.Errorf("autoReleaseAt = %s, want %s (index 8)", tr.AutoReleaseAt, autoReleaseAt)
+	}
+	if tr.VoucherHash != voucherHash {
+		t.Errorf("voucherHash mis-decoded — index drift (want slot 9): got %x", tr.VoucherHash)
+	}
+}
+
 // TestBalanceOf_OutputUnpackOrder pins the (available, locked) tuple ordering
 // of the new view. A wrong-order ABI string would swap them and silently
 // invert the seller's withdrawable amount.
@@ -533,6 +708,42 @@ func mustBuildTradeOpenedLog(t *testing.T, contractAddr common.Address,
 			common.BytesToHash(buyer.Bytes()),
 		},
 		Data: data,
+	}
+}
+
+func mustBuildTradeOpenedWithDepositLog(t *testing.T, contractAddr common.Address,
+	tradeID [32]byte, seller, buyer, token common.Address, amount *big.Int) *types.Log {
+	t.Helper()
+	ev := parsedP2PEscrowABI.Events["TradeOpenedWithDeposit"]
+	// Non-indexed: token, amount (in declared order).
+	data, err := ev.Inputs.NonIndexed().Pack(token, amount)
+	if err != nil {
+		t.Fatalf("pack non-indexed: %v", err)
+	}
+	return &types.Log{
+		Address: contractAddr,
+		Topics: []common.Hash{
+			ev.ID,
+			tradeID,
+			common.BytesToHash(seller.Bytes()),
+			common.BytesToHash(buyer.Bytes()),
+		},
+		Data: data,
+	}
+}
+
+func mustBuildTradeCancelledLog(t *testing.T, contractAddr common.Address,
+	tradeID [32]byte, amount *big.Int, returnedToPool bool) *types.Log {
+	t.Helper()
+	ev := parsedP2PEscrowABI.Events["TradeCancelled"]
+	data, err := ev.Inputs.NonIndexed().Pack(amount, returnedToPool)
+	if err != nil {
+		t.Fatalf("pack non-indexed: %v", err)
+	}
+	return &types.Log{
+		Address: contractAddr,
+		Topics:  []common.Hash{ev.ID, tradeID},
+		Data:    data,
 	}
 }
 
