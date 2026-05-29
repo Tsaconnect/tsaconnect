@@ -562,6 +562,10 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	if ad.SellerID != sellerID {
 		return nil, ErrForbidden
 	}
+	// Buy-ads have no voucher to sign — they're created active directly.
+	if ad.Side == models.P2PAdSideBuy {
+		return nil, ErrNotApplicableForBuyAd
+	}
 	// Idempotent replay: identical sig on an already-active ad returns OK.
 	sigHex := "0x" + common.Bytes2Hex(signature)
 	if ad.Status == models.P2PAdStatusActive && ad.VoucherSignature == sigHex {
@@ -644,6 +648,12 @@ func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uu
 	if ad.SellerID != sellerID {
 		return nil, ErrForbidden
 	}
+	// Buy-ads have no on-chain voucher to revoke — cancellation is a DB-only
+	// status flip via CancelBuyAd. Surface a clear error so a stale client
+	// doesn't try to broadcast a meaningless tx.
+	if ad.Side == models.P2PAdSideBuy {
+		return nil, ErrNotApplicableForBuyAd
+	}
 	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
 		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
@@ -678,6 +688,11 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 	}
 	if ad.Status == models.P2PAdStatusCancelled {
 		return &ad, nil
+	}
+	// Buy-ads have no on-chain VoucherCancelled receipt to confirm — they
+	// cancel via CancelBuyAd (DB-only). Reject a stale on-chain confirm.
+	if ad.Side == models.P2PAdSideBuy {
+		return nil, ErrNotApplicableForBuyAd
 	}
 	// Status pre-check before the RPC verify call. The DB UPDATE below also
 	// gates on (active|paused) but RPC has cost (and a 500 status response
@@ -716,6 +731,63 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 	ad.Remaining = "0"
 	s.audit(ctx, models.P2PAuditAdClosed, &sellerID, &ad.ID, nil, map[string]any{"txHash": txHash})
 	s.emit(events.P2PAdClosed, sellerID, "P2P ad closed", "", map[string]any{"adId": ad.ID})
+	return &ad, nil
+}
+
+// CancelBuyAd cancels a merchant's buy-ad. Buy-ads have no on-chain voucher,
+// so cancellation is a pure DB status flip (no tx to prepare/confirm). Refuses
+// if the ad has open trades — those depositors must settle first. Idempotent
+// on an already-cancelled ad.
+func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid.UUID) (*models.P2PAd, error) {
+	var ad models.P2PAd
+	if err := s.db.WithContext(ctx).First(&ad, "id = ?", adID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrAdNotFound
+		}
+		return nil, err
+	}
+	if ad.SellerID != merchantID {
+		return nil, ErrForbidden
+	}
+	if ad.Side != models.P2PAdSideBuy {
+		// Sell-ads must cancel on-chain via cancelVoucher (PrepareCancelAd).
+		return nil, fmt.Errorf("%w: sell-ads cancel on-chain", ErrInvalidTransition)
+	}
+	if ad.Status == models.P2PAdStatusCancelled {
+		return &ad, nil
+	}
+	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
+		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
+	}
+	var openCount int64
+	s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		Where("ad_id = ? AND status IN ?", ad.ID,
+			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
+				models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
+		Count(&openCount)
+	if openCount > 0 {
+		return nil, ErrAdHasOpenTrades
+	}
+
+	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
+		Where("id = ? AND status IN ?", ad.ID,
+			[]string{models.P2PAdStatusActive, models.P2PAdStatusPaused}).
+		Updates(map[string]any{
+			"status":     models.P2PAdStatusCancelled,
+			"remaining":  "0",
+			"reserved":   "0",
+			"updated_at": s.clock.Now(),
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrInvalidTransition
+	}
+	ad.Status = models.P2PAdStatusCancelled
+	ad.Remaining = "0"
+	s.audit(ctx, models.P2PAuditAdClosed, &merchantID, &ad.ID, nil, map[string]any{"side": "buy"})
+	s.emit(events.P2PAdClosed, merchantID, "P2P buy ad cancelled", "", map[string]any{"adId": ad.ID})
 	return &ad, nil
 }
 
