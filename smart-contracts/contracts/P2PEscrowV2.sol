@@ -198,7 +198,11 @@ contract P2PEscrowV2 is
     }
 
     function _contextSuffixLength() internal view override returns (uint256) {
-        return (msg.sender == trustedForwarder) ? 20 : super._contextSuffixLength();
+        // Mirror the exact guard used by _msgSender/_msgData so the reported
+        // suffix length can never disagree with what those actually strip.
+        return (msg.sender == trustedForwarder && msg.data.length >= 20)
+            ? 20
+            : super._contextSuffixLength();
     }
 
     // ── Deposit / withdraw ─────────────────────────────────────────────────
@@ -218,6 +222,9 @@ contract P2PEscrowV2 is
         emit Deposited(from, token, amount);
     }
 
+    // No `acceptedTokens` check here BY DESIGN: a token can be delisted while a
+    // seller still holds an `available` balance in it, and they must always be
+    // able to recover it. Also intentionally not pause-guarded (recovery path).
     function withdraw(address token, uint256 amount) external nonReentrant {
         require(amount > 0, "Amount must be > 0");
         address acct = _msgSender();
@@ -359,6 +366,14 @@ contract P2PEscrowV2 is
         require(t.status == Status.Pending, "Not pending");
         require(_msgSender() == t.buyer, "Only buyer");
         t.status = Status.Paid;
+        // Auto-release opt-in is keyed on `t.seller` — the crypto PROVIDER,
+        // who bears the optimistic-release risk (their escrowed crypto is what
+        // auto-releases to the buyer if they neither release nor dispute in the
+        // window). This is the right party for BOTH flows: on a sell-ad the
+        // seller is the merchant; on a buy-ad the seller is the user selling
+        // crypto, who is exactly the party consenting to "no action = release".
+        // (Default-disabled today; the per-merchant "⚡" surfacing of this flag
+        // is finalized in the auto-release sub-project.)
         if (autoReleaseWindow > 0 && autoReleaseOptIn[t.seller]) {
             t.autoReleaseAt = uint40(block.timestamp + autoReleaseWindow);
         }
