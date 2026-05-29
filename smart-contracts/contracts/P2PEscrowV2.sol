@@ -101,6 +101,9 @@ contract P2PEscrowV2 is
 
     // Tunable economic params (replace v1's FEE_BPS / TIMEOUT constants).
     uint16 public feeBps;
+    /// @dev RESERVED — currently has NO effect on fees. The loser-pays dispute fee
+    ///      is deferred to the future dispute-v2 sub-project. adminResolve uses
+    ///      `t.feeBps` (the trade-level snapshot), not this field.
     uint16 public disputeFeeBps;
     uint40 public paymentWindow;
     uint40 public autoReleaseWindow;
@@ -123,7 +126,7 @@ contract P2PEscrowV2 is
     event TradePaid(bytes32 indexed tradeId);
     event TradeReleased(bytes32 indexed tradeId, address indexed buyer, uint256 amountToBuyer, uint256 feeToSystem);
     event TradeAutoReleased(bytes32 indexed tradeId, address indexed buyer, uint256 amountToBuyer, uint256 feeToSystem);
-    event TradeCancelled(bytes32 indexed tradeId, uint256 returnedToAvailable);
+    event TradeCancelled(bytes32 indexed tradeId, uint256 amount, bool returnedToPool);
     event TradeDisputed(bytes32 indexed tradeId, address indexed by);
     event TradeResolved(bytes32 indexed tradeId, bool releasedToBuyer, uint256 amountMoved, uint256 feeToSystem);
     event TokenAcceptanceUpdated(address indexed token, bool accepted);
@@ -422,7 +425,7 @@ contract P2PEscrowV2 is
         require(block.timestamp >= uint256(t.createdAt) + paymentWindow, "Timeout not elapsed");
         t.status = Status.Cancelled;
         _refund(t);
-        emit TradeCancelled(tradeId, t.amount);
+        emit TradeCancelled(tradeId, t.amount, t.funding == Funding.PooledFromMaker);
     }
 
     function raiseDispute(bytes32 tradeId) external whenNotPaused {
@@ -472,6 +475,9 @@ contract P2PEscrowV2 is
         uint16 old = feeBps; feeBps = bps; emit FeeBpsUpdated(old, bps);
     }
 
+    /// @dev RESERVED — setting this value currently has NO effect on fees. The
+    ///      loser-pays dispute fee policy is deferred to the future dispute-v2
+    ///      sub-project. Stored for forward-compatibility only.
     function setDisputeFeeBps(uint16 bps) external onlyOwner {
         require(bps <= MAX_DISPUTE_FEE_BPS, "Fee too high");
         uint16 old = disputeFeeBps; disputeFeeBps = bps; emit DisputeFeeBpsUpdated(old, bps);
@@ -518,6 +524,7 @@ contract P2PEscrowV2 is
     {
         require(permit2 != address(0), "Permit2 not set");
         address token = permit.permitted.token;
+        require(token != address(0), "Invalid token");
         require(acceptedTokens[token], "Token not accepted");
         uint256 amount = permit.permitted.amount;
         require(amount > 0, "Amount must be > 0");
@@ -544,6 +551,7 @@ contract P2PEscrowV2 is
         require(tradeId != bytes32(0), "Invalid trade id");
         require(trades[tradeId].status == Status.None, "Trade already exists");
         address token = permit.permitted.token;
+        require(token != address(0), "Invalid token");
         uint256 amount = permit.permitted.amount;
         require(amount > 0 && amount <= type(uint96).max, "Bad amount");
         require(acceptedTokens[token], "Token not accepted");

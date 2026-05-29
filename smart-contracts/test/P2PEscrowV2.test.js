@@ -121,6 +121,23 @@ describe("P2PEscrowV2 — vouchers", () => {
     const v = makeVoucher(alice.address, await token.getAddress());
     const h = await escrow.hashVoucher(v);
     expect(h.length).to.equal(66); // 0x + 32 bytes
+
+    // FIX G: assert the on-chain hash equals the off-chain EIP-712 hash
+    const domain = {
+      name: "TSAConnectP2PEscrow",
+      version: "2",
+      chainId: (await ethers.provider.getNetwork()).chainId,
+      verifyingContract: await escrow.getAddress(),
+    };
+    const types = { AdVoucher: [
+      { name: "seller", type: "address" }, { name: "token", type: "address" },
+      { name: "maxAmount", type: "uint256" }, { name: "minPerTrade", type: "uint256" },
+      { name: "maxPerTrade", type: "uint256" }, { name: "deadline", type: "uint256" },
+      { name: "nonce", type: "bytes32" },
+    ]};
+    const offChainHash = ethers.TypedDataEncoder.hash(domain, types, v);
+    expect(h).to.equal(offChainHash);
+
     await expect(escrow.connect(alice).cancelVoucher(v)).to.emit(escrow, "VoucherCancelled").withArgs(h, alice.address);
     expect(await escrow.voucherCancelled(h)).to.equal(true);
   });
@@ -311,7 +328,9 @@ describe("P2PEscrowV2 — cancelByTimeout", () => {
     const amt = ethers.parseUnits("100", 18);
     await escrow.connect(bob).openTrade(tradeId, v, sig, amt);
     await time.increase(31 * 60);
-    await expect(escrow.connect(bob).cancelByTimeout(tradeId)).to.emit(escrow, "TradeCancelled");
+    // FIX A: assert event with correct args (returnedToPool == true for pooled)
+    await expect(escrow.connect(bob).cancelByTimeout(tradeId))
+      .to.emit(escrow, "TradeCancelled").withArgs(tradeId, amt, true);
     const [avail, lockd] = await escrow.balanceOf(alice.address, await token.getAddress());
     expect(lockd).to.equal(0);
     expect(avail).to.equal(ethers.parseUnits("1000", 18));
@@ -327,7 +346,9 @@ describe("P2PEscrowV2 — cancelByTimeout", () => {
     await escrow.connect(alice).openTradeWithDeposit(tradeId, await token.getAddress(), amt, carol.address);
     const before = await token.balanceOf(alice.address);
     await time.increase(31 * 60);
-    await escrow.connect(alice).cancelByTimeout(tradeId);
+    // FIX A: assert event with correct args (returnedToPool == false for JIT)
+    await expect(escrow.connect(alice).cancelByTimeout(tradeId))
+      .to.emit(escrow, "TradeCancelled").withArgs(tradeId, amt, false);
     expect(await token.balanceOf(alice.address)).to.equal(before + amt);
     expect(await escrow.accountedBalance(await token.getAddress())).to.equal(0);
     const [, lockd] = await escrow.balanceOf(alice.address, await token.getAddress());
@@ -573,10 +594,11 @@ describe("P2PEscrowV2 — EIP-2771 owner/admin carve-out", () => {
     const fwd = await Fwd.deploy(); await fwd.waitForDeployment();
     await escrow.connect(owner).setTrustedForwarder(await fwd.getAddress());
 
-    // Relay setFeeBps(200) with owner's address appended — must REVERT
+    // Relay setFeeBps(200) with owner's address appended — must revert with OZ custom error.
+    // FIX E: assert the SPECIFIC revert (OwnableUnauthorizedAccount), not just any revert.
     const data = escrow.interface.encodeFunctionData("setFeeBps", [200]);
     await expect(fwd.relay(await escrow.getAddress(), data, owner.address))
-      .to.be.reverted; // owner check uses msg.sender = forwarder ≠ owner
+      .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount");
   });
 
   it("forwarder cannot impersonate admin to call adminResolve", async () => {
@@ -593,10 +615,11 @@ describe("P2PEscrowV2 — EIP-2771 owner/admin carve-out", () => {
     await escrow.connect(bob).markPaid(tradeId);
     await escrow.connect(bob).raiseDispute(tradeId);
 
-    // Relay adminResolve with admin's address appended — must REVERT
+    // Relay adminResolve with admin's address appended — must revert with "Not admin".
+    // FIX E: assert the SPECIFIC revert reason, not just any revert.
     const data = escrow.interface.encodeFunctionData("adminResolve", [tradeId, true]);
     await expect(fwd.relay(await escrow.getAddress(), data, admin.address))
-      .to.be.reverted; // onlyAdmin uses msg.sender = forwarder, which is not admin
+      .to.be.revertedWith("Not admin");
   });
 
   it("direct owner call to setFeeBps still works after forwarder is set", async () => {
@@ -761,7 +784,13 @@ describe("P2PEscrowV2 — MCGP fee-free on JIT (openTradeWithDeposit)", () => {
 // ─── Task 21: Reentrancy smoke test ──────────────────────────────────────────
 
 describe("P2PEscrowV2 — reentrancy guard", () => {
-  it("a token callback attempting reentry into withdraw() is blocked by nonReentrant", async () => {
+  // FIX D: The token's transfer() re-enters deposit() — a DIFFERENT nonReentrant function —
+  // while withdraw() is executing. Without the guard, deposit() would succeed (CEI on
+  // withdraw already cleared the balance, so no double-spend guard would fire).
+  // With the guard, deposit() sees _reentrancyStatus == ENTERED and reverts with
+  // "ReentrancyGuard: reentrant call", which bubbles out and causes the OUTER withdraw()
+  // to revert. This proves the guard fired, not a balance check.
+  it("reentrant call into a different nonReentrant function is blocked with the guard message", async () => {
     const { escrow, owner, alice } = await deployV2();
 
     // Deploy the malicious token
@@ -772,27 +801,85 @@ describe("P2PEscrowV2 — reentrancy guard", () => {
     await escrow.connect(owner).setTokenAcceptance(await malToken.getAddress(), true);
     await malToken.mint(alice.address, ethers.parseUnits("1000", 18));
 
-    // Alice deposits some malicious tokens (transfer in is fine — arm is not set yet)
+    // Alice deposits malicious tokens (transfer in fine — not armed yet)
     const amt = ethers.parseUnits("100", 18);
     await malToken.connect(alice).approve(await escrow.getAddress(), amt);
     await escrow.connect(alice).deposit(await malToken.getAddress(), amt);
 
-    // Now arm the token so its `transfer` will attempt to re-enter withdraw()
+    // Arm: transfer() will now call deposit() on the escrow when triggered by withdraw's payout.
+    // There is no try/catch — the revert bubbles to the caller (withdraw).
     await malToken.arm(await escrow.getAddress());
 
-    // Alice calls withdraw — the token's transfer() tries to re-enter withdraw().
-    // The nonReentrant guard on withdraw() must block the inner call. The outer
-    // call itself should succeed (the inner reentry is swallowed by the try/catch
-    // in MaliciousToken), but alice should have received her tokens.
-    // If the guard were missing, the inner withdraw would double-spend.
-    const balBefore = await malToken.balanceOf(alice.address);
-    await escrow.connect(alice).withdraw(await malToken.getAddress(), amt);
-    const balAfter = await malToken.balanceOf(alice.address);
+    // withdraw() sends tokens to alice → transfer() fires → deposit() re-enters →
+    // "ReentrancyGuard: reentrant call" bubbles → outer withdraw reverts.
+    // This specific message proves the guard fired (not a balance or allowance check).
+    await expect(
+      escrow.connect(alice).withdraw(await malToken.getAddress(), amt)
+    ).to.be.revertedWith("ReentrancyGuard: reentrant call");
+  });
+});
 
-    // Alice received exactly amt — no double-spend from the attempted reentry
-    expect(balAfter - balBefore).to.equal(amt);
-    // The available balance is now 0 (inner reentry was blocked, not double-spent)
-    const [avail] = await escrow.balanceOf(alice.address, await malToken.getAddress());
-    expect(avail).to.equal(0);
+// ─── Task 22: adminRelease ────────────────────────────────────────────────────
+
+describe("P2PEscrowV2 — adminRelease", () => {
+  // FIX F: adminRelease is a high-privilege settlement path with zero prior test coverage.
+
+  it("admin can adminRelease a Paid pooled trade: buyer gets amount-fee, system gets fee, status Released", async () => {
+    const { escrow, admin, alice, bob, token, system } = await setup_pooled();
+    const v = makeVoucher(alice.address, await token.getAddress());
+    const sig = await signVoucher(escrow, alice, v);
+    const tradeId = ethers.id("ar-paid");
+    const amt = ethers.parseUnits("100", 18);
+    await escrow.connect(bob).openTrade(tradeId, v, sig, amt);
+    await escrow.connect(bob).markPaid(tradeId); // → Paid
+    const fee = amt * 50n / 10000n;
+    const beforeBob = await token.balanceOf(bob.address);
+    const beforeSystem = await token.balanceOf(system.address);
+    await expect(escrow.connect(admin).adminRelease(tradeId)).to.emit(escrow, "TradeReleased");
+    expect(await token.balanceOf(bob.address)).to.equal(beforeBob + (amt - fee));
+    expect(await token.balanceOf(system.address)).to.equal(beforeSystem + fee);
+    const t = await escrow.getTrade(tradeId);
+    expect(t.status).to.equal(3); // Released
+    expect(await escrow.accountedBalance(await token.getAddress())).to.equal(
+      ethers.parseUnits("900", 18) // remaining pool (1000 deposited − 100 traded)
+    );
+  });
+
+  it("admin can adminRelease a Pending pooled trade (seller has not yet released)", async () => {
+    const { escrow, admin, alice, bob, token, system } = await setup_pooled();
+    const v = makeVoucher(alice.address, await token.getAddress());
+    const sig = await signVoucher(escrow, alice, v);
+    const tradeId = ethers.id("ar-pending");
+    const amt = ethers.parseUnits("50", 18);
+    await escrow.connect(bob).openTrade(tradeId, v, sig, amt);
+    // Trade is still Pending (buyer has NOT called markPaid)
+    const fee = amt * 50n / 10000n;
+    const beforeBob = await token.balanceOf(bob.address);
+    await expect(escrow.connect(admin).adminRelease(tradeId)).to.emit(escrow, "TradeReleased");
+    expect(await token.balanceOf(bob.address)).to.equal(beforeBob + (amt - fee));
+    const t = await escrow.getTrade(tradeId);
+    expect(t.status).to.equal(3); // Released
+  });
+
+  it("non-admin cannot call adminRelease", async () => {
+    const { escrow, alice, bob, carol, token } = await setup_pooled();
+    const v = makeVoucher(alice.address, await token.getAddress());
+    const sig = await signVoucher(escrow, alice, v);
+    const tradeId = ethers.id("ar-noadmin");
+    await escrow.connect(bob).openTrade(tradeId, v, sig, ethers.parseUnits("100", 18));
+    await escrow.connect(bob).markPaid(tradeId);
+    await expect(escrow.connect(carol).adminRelease(tradeId)).to.be.revertedWith("Not admin");
+  });
+
+  it("adminRelease reverts when the contract is paused", async () => {
+    const { escrow, owner, admin, alice, bob, token } = await setup_pooled();
+    const v = makeVoucher(alice.address, await token.getAddress());
+    const sig = await signVoucher(escrow, alice, v);
+    const tradeId = ethers.id("ar-paused");
+    await escrow.connect(bob).openTrade(tradeId, v, sig, ethers.parseUnits("100", 18));
+    await escrow.connect(bob).markPaid(tradeId);
+    await escrow.connect(owner).pause();
+    await expect(escrow.connect(admin).adminRelease(tradeId))
+      .to.be.revertedWithCustomError(escrow, "EnforcedPause");
   });
 });
