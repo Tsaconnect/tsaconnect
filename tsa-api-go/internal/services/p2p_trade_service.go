@@ -1911,13 +1911,22 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		return ReconcileResult{}, nil
 	}
 
+	// Use the ON-CHAIN funding as the source of truth for the refund branch —
+	// the DB column could be wrong (e.g. a buggy open path), and a wrong-branch
+	// refund either double-credits a pool or skips a wallet return. The DB
+	// accounting below restores only off-chain capacity counters (it never
+	// credits an on-chain pool — that movement happens on chain), so it's safe
+	// for both fundings, but recording the authoritative value matters for
+	// auditing and side-aware messaging.
+	funding := onchain.Funding
+
 	switch onchain.Status {
 	case OnChainP2PStatusReleased:
-		return s.reconcileToReleased(ctx, &trade)
+		return s.reconcileToReleased(ctx, &trade, funding)
 	case OnChainP2PStatusCancelled:
-		return s.reconcileToCancelled(ctx, &trade)
+		return s.reconcileToCancelled(ctx, &trade, funding)
 	case OnChainP2PStatusResolved:
-		return s.reconcileToResolved(ctx, &trade)
+		return s.reconcileToResolved(ctx, &trade, funding)
 	case OnChainP2PStatusDisputed:
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
@@ -1986,7 +1995,13 @@ func isTerminalTradeStatus(s string) bool {
 		s == models.P2PTradeStatusResolved
 }
 
-func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
+// reconcileToReleased applies a chain Released → DB released drift fix. The ad
+// accounting (reserved -= amount; never re-credit remaining) is identical for
+// both fundings: on a pooled sell-ad the locked pool moved to the buyer; on a
+// deposited-by-taker buy-ad the JIT deposit moved to the merchant. `funding`
+// is the on-chain truth, used here only for side-aware messaging/audit — never
+// to credit an on-chain pool (that movement already happened on chain).
+func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
 	now := s.clock.Now()
 	from := trade.Status
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -2027,15 +2042,26 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusReleased,
-		"reason": "chain Released",
+		"funding": funding,
+		"reason":  "chain Released",
 	})
 	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
-	s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if funding == models.P2PTradeFundingDepositedByTaker {
+		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	} else {
+		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusReleased,
 		Reason: "chain Released"}, nil
 }
 
-func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
+// reconcileToCancelled applies a chain Cancelled → DB cancelled drift fix.
+// Restoring off-chain capacity (reserved -= amount; remaining += amount) is the
+// same for both fundings — for a pooled sell-ad the on-chain pool refund is
+// mirrored; for a buy-ad the crypto already returned to the user's wallet on
+// chain and this only restores the off-chain capacity counter. `funding`
+// drives side-aware messaging only.
+func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
 	now := s.clock.Now()
 	from := trade.Status
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -2070,9 +2096,15 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusCancelled,
-		"reason": "chain Cancelled",
+		"funding": funding,
+		"reason":  "chain Cancelled",
 	})
-	s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if funding == models.P2PTradeFundingDepositedByTaker {
+		// SellerID is the depositing user — crypto returned to their wallet.
+		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
+	} else {
+		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
 		Reason: "chain Cancelled"}, nil
 }
@@ -2134,7 +2166,12 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 		Reason: "chain Disputed"}, nil
 }
 
-func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
+// reconcileToResolved applies a chain Resolved → DB resolved drift fix. The ad
+// accounting (reserved -= amount always; remaining += amount only when funds
+// did NOT go to the buyer) is funding-agnostic at the DB level — it restores
+// only off-chain capacity, never an on-chain pool. `funding` is the on-chain
+// truth, recorded for audit.
+func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
 	// Resolved depends on the admin's refundBuyer choice. The off-chain
 	// dispute row records the admin's intent.
 	//
@@ -2153,7 +2190,8 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 			trade.ID, err == nil, dispute.RefundedToBuyer)
 		s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 			"from": trade.Status, "to": models.P2PTradeStatusResolved,
-			"reason": "chain Resolved with unknown refund target — manual review",
+			"funding": funding,
+			"reason":  "chain Resolved with unknown refund target — manual review",
 		})
 		return ReconcileResult{Changed: false}, nil
 	}
@@ -2206,6 +2244,7 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusResolved,
 		"reason":      "chain Resolved",
+		"funding":     funding,
 		"refundBuyer": refundBuyer,
 	})
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusResolved,
