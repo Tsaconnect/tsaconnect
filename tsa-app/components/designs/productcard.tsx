@@ -7,6 +7,7 @@ import { router } from "expo-router";
 import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
+import { cartService } from "../services/cart";
 
 type ProductCardProps = {
   item: {
@@ -145,6 +146,8 @@ const ProductCard: React.FC<ProductCardProps> = ({ item }) => {
                   const newItem = { productId: item.id, quantity: 1 };
                   await addItem(newItem);
                   await getItems();
+                  // This add bypasses cartService, so refresh the shared count badge.
+                  cartService.notifyChange();
                 }
               }}
             />
