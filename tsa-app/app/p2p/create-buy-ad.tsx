@@ -203,7 +203,7 @@ const CreateBuyAdScreen: React.FC = () => {
           <Text style={styles.heading}>Post a Buy Ad</Text>
           <Text style={styles.subheading}>
             Tell users how much crypto you want to buy and at what rate. You pay
-            fiat; the user's crypto is deposited into escrow at trade open.
+            fiat; the user&apos;s crypto is deposited into escrow at trade open.
           </Text>
 
           {/* Token selector */}
@@ -292,7 +292,7 @@ const CreateBuyAdScreen: React.FC = () => {
           </View>
 
           {/* Payment methods — where you'll send fiat FROM */}
-          <Text style={styles.label}>Your payment methods (where you'll pay from)</Text>
+          <Text style={styles.label}>Your payment methods (where you&apos;ll pay from)</Text>
           {loadingPms ? (
             <ActivityIndicator color={GOLD.dark} style={{ marginVertical: 12 }} />
           ) : paymentMethods.length === 0 ? (
@@ -361,7 +361,7 @@ const CreateBuyAdScreen: React.FC = () => {
           </TouchableOpacity>
 
           <Text style={styles.disclaimer}>
-            Users who respond will deposit {token.symbol} into escrow. You'll be
+            Users who respond will deposit {token.symbol} into escrow. You&apos;ll be
             notified to send fiat and mark as paid.
           </Text>
         </ScrollView>
