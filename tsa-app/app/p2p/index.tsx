@@ -1,7 +1,8 @@
 // app/p2p/index.tsx
 //
-// P2P marketplace — browse sell-ads, filter by token / fiat. Phase 1 ships
-// the sell side only; the buy-side UI is a documented Phase-1.5 follow-up.
+// P2P marketplace — browse sell-ads (user buys crypto) and buy-ads (user
+// sells crypto to a merchant). Toggle between the two sides via a Buy/Sell
+// segmented control.
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
@@ -38,6 +39,9 @@ const P2PMarketScreen: React.FC = () => {
   const [token, setToken] = useState<string>('USDT');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // adSide: 'sell' = browsing sell-ads (user buys crypto);
+  //         'buy'  = browsing buy-ads (user sells crypto to a merchant).
+  const [adSide, setAdSide] = useState<'sell' | 'buy'>('sell');
   // Backend gates ad creation behind merchant role (p2p_handler.go: CreateAd
   // returns 403 for non-merchants). Surface that gate in the UI so a regular
   // user gets a clear "become a merchant" prompt instead of filling the form
@@ -47,23 +51,23 @@ const P2PMarketScreen: React.FC = () => {
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await adsApi.list({ side: 'sell', token, fiatCurrency: currency.code });
+    const res = await adsApi.list({ side: adSide, token, fiatCurrency: currency.code });
     if (res.success && res.data) {
       setAds(res.data);
     }
     setLoading(false);
     setRefreshing(false);
-  }, [token, currency.code]);
+  }, [adSide, token, currency.code]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // Clear any stale provider filter when the market currency or token changes,
-  // so it can't hide every ad after switching.
+  // Clear any stale provider filter when the market currency, token, or side
+  // changes, so it can't hide every ad after switching.
   useEffect(() => {
     setProviderFilter(null);
-  }, [currency.code, token]);
+  }, [currency.code, token, adSide]);
 
   const visibleAds = providerFilter
     ? ads.filter((a) =>
@@ -86,14 +90,40 @@ const P2PMarketScreen: React.FC = () => {
         }
       >
         <View style={styles.headerRow}>
-          <Text style={styles.heading}>Buy {token}</Text>
+          <Text style={styles.heading}>
+            {adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`}
+          </Text>
           <CurrencySelector
             variant="header"
             selectedCode={currency.code}
             onSelectCode={setMarketCurrency}
           />
         </View>
+
+        {/* Buy / Sell tab toggle */}
+        <View style={styles.sideToggle}>
+          <TouchableOpacity
+            style={[styles.sideTab, adSide === 'sell' && styles.sideTabActive]}
+            onPress={() => { setAdSide('sell'); setLoading(true); }}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.sideTabText, adSide === 'sell' && styles.sideTabTextActive]}>
+              Buy
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.sideTab, adSide === 'buy' && styles.sideTabActive]}
+            onPress={() => { setAdSide('buy'); setLoading(true); }}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.sideTabText, adSide === 'buy' && styles.sideTabTextActive]}>
+              Sell
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.actions}>
+          {adSide === 'sell' ? (
           <TouchableOpacity
             style={styles.iconBtn}
             onPress={() =>
@@ -104,6 +134,18 @@ const P2PMarketScreen: React.FC = () => {
             <Icon name="add-circle" size={22} color={GOLD.dark} />
             <Text style={styles.iconBtnText}>Sell</Text>
           </TouchableOpacity>
+          ) : (
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() =>
+              router.push(isMerchant ? ('/p2p/create-buy-ad' as any) : '/merchants/merchant-request')
+            }
+            activeOpacity={0.8}
+          >
+            <Icon name="add-circle" size={22} color={GOLD.dark} />
+            <Text style={styles.iconBtnText}>Post</Text>
+          </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={styles.iconBtn}
             onPress={() => router.push('/p2p/my-ads')}
@@ -139,14 +181,15 @@ const P2PMarketScreen: React.FC = () => {
         </View>
 
         <Text style={styles.subheading}>
-          Buy {token} with {currency.code}. Funds are escrowed on chain until the
-          seller releases.
+          {adSide === 'sell'
+            ? `Buy ${token} with ${currency.code}. Funds are escrowed on chain until the seller releases.`
+            : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
 
-        {/* Render the become-merchant CTA only once the role check has
-            resolved — flashing the banner for a frame before hiding it on a
-            confirmed-merchant user looks like a bug. */}
-        {!roleLoading && !isMerchant && (
+        {/* "Want to sell?" banner — only shown on the sell-ad tab (buy crypto
+            flow). On the buy-ad tab (user sells crypto) anyone can respond to
+            an ad, so the merchant-only CTA doesn't apply. */}
+        {adSide === 'sell' && !roleLoading && !isMerchant && (
           <TouchableOpacity
             style={styles.merchantBanner}
             onPress={() => router.push('/merchants/merchant-request')}
@@ -196,9 +239,11 @@ const P2PMarketScreen: React.FC = () => {
           <View style={styles.empty}>
             <Icon name="storefront" size={48} color={GOLD.muted} />
             <Text style={styles.emptyText}>
-              No {token} sellers for {currency.code} yet. Pull to refresh, try
-              another currency, or post an ad.
+              {adSide === 'sell'
+                ? `No ${token} sellers for ${currency.code} yet. Pull to refresh, try another currency, or post an ad.`
+                : `No merchants buying ${token} for ${currency.code} yet. Pull to refresh or try another currency.`}
             </Text>
+            {adSide === 'sell' && (
             <TouchableOpacity
               style={styles.postAdsBtn}
               onPress={() =>
@@ -209,6 +254,7 @@ const P2PMarketScreen: React.FC = () => {
               <Icon name="add-circle" size={18} color="#000" />
               <Text style={styles.postAdsBtnText}>Post Ads</Text>
             </TouchableOpacity>
+            )}
           </View>
         ) : visibleAds.length === 0 ? (
           <View style={styles.noMatch}>
@@ -220,14 +266,14 @@ const P2PMarketScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
         ) : (
-          visibleAds.map((ad) => <AdCard key={ad.id} ad={ad} symbol={currency.symbol} />)
+          visibleAds.map((ad) => <AdCard key={ad.id} ad={ad} symbol={currency.symbol} adSide={adSide} />)
         )}
       </ScrollView>
     </SafeAreaView>
   );
 };
 
-const AdCard: React.FC<{ ad: P2PAd; symbol: string }> = ({ ad, symbol }) => {
+const AdCard: React.FC<{ ad: P2PAd; symbol: string; adSide: 'sell' | 'buy' }> = ({ ad, symbol, adSide }) => {
   const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const isFloat = ad.rateType === 'float';
@@ -263,7 +309,7 @@ const AdCard: React.FC<{ ad: P2PAd; symbol: string }> = ({ ad, symbol }) => {
                 @{sellerLabel}
               </Text>
               <Text style={styles.sellerSub} numberOfLines={1}>
-                Sells {ad.token}
+                {adSide === 'sell' ? `Sells ${ad.token}` : `Buys ${ad.token}`}
               </Text>
             </View>
           </TouchableOpacity>
@@ -331,6 +377,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   heading: { fontSize: 24, fontWeight: '800', color: '#000' },
+  sideToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#F0EAD6',
+    borderRadius: 10,
+    padding: 3,
+    marginTop: 14,
+  },
+  sideTab: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  sideTabActive: { backgroundColor: GOLD.primary },
+  sideTabText: { fontSize: 13, fontWeight: '700', color: GOLD.dark },
+  sideTabTextActive: { color: '#000' },
   actions: {
     flexDirection: 'row',
     justifyContent: 'space-between',

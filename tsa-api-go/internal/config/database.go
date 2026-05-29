@@ -68,6 +68,15 @@ func AutoMigrate() error {
 	DB.Exec(`ALTER TABLE p2p_trades
 		ADD CONSTRAINT p2p_trades_buyer_not_seller CHECK (buyer_id <> seller_id)`)
 
+	// P2P trade funding discriminator: funding ∈ {0 (pooled sell-ad), 1
+	// (deposited-by-taker buy-ad)}. AutoMigrate adds the column (default 0);
+	// existing rows are all sell-ads so the constraint add is safe on a
+	// non-empty table.
+	DB.Exec(`ALTER TABLE p2p_trades
+		DROP CONSTRAINT IF EXISTS chk_p2p_trades_funding`)
+	DB.Exec(`ALTER TABLE p2p_trades
+		ADD CONSTRAINT chk_p2p_trades_funding CHECK (funding IN (0,1))`)
+
 	// P2P ad rate-type constraints: rate_type ∈ {fixed,float}, and
 	// float_offset_bps must be present iff rate_type='float'. Existing rows
 	// default to rate_type='fixed' / float_offset_bps=NULL so the constraint

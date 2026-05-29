@@ -110,7 +110,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrAmountOutOfRange),
 		errors.Is(err, services.ErrAmountOverflow),
 		errors.Is(err, services.ErrUnsupportedToken),
-		errors.Is(err, services.ErrSelfTrade):
+		errors.Is(err, services.ErrSelfTrade),
+		errors.Is(err, services.ErrNotApplicableForBuyAd):
 		status = http.StatusBadRequest
 	case errors.Is(err, services.ErrAdNotActive),
 		errors.Is(err, services.ErrInsufficientRemaining),
@@ -534,6 +535,9 @@ func (h *P2PHandler) GetPoolBalance(c *gin.Context) {
 // ─── Ads ───────────────────────────────────────────────────────────────────
 
 type createAdRequest struct {
+	// Side selects sell-ad (default) or buy-ad. Sell-ads use the off-chain
+	// voucher/pool flow; buy-ads are JIT-funded by the user at trade-open.
+	Side             string   `json:"side"`
 	Token            string   `json:"token" binding:"required"`
 	TokenAmount      string   `json:"tokenAmount" binding:"required"`
 	FiatCurrency     string   `json:"fiatCurrency" binding:"required"`
@@ -575,12 +579,23 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	// Validate side up-front so a typo doesn't silently fall through to the
+	// sell-ad path. Empty defaults to "sell".
+	side := strings.ToLower(strings.TrimSpace(req.Side))
+	if side == "" {
+		side = models.P2PAdSideSell
+	}
+	if side != models.P2PAdSideSell && side != models.P2PAdSideBuy {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "side must be 'sell' or 'buy'"})
+		return
+	}
 	pmIDs, err := parseUUIDList(req.PaymentMethodIDs)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
 	result, err := h.trade.CreateAd(c.Request.Context(), user.ID, req.SellerAddress, services.CreateAdParams{
+		Side:             side,
 		Token:            req.Token,
 		TokenAmount:      req.TokenAmount,
 		FiatCurrency:     req.FiatCurrency,
@@ -875,6 +890,20 @@ func (h *P2PHandler) PrepareCancelAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	// Buy-ads have no on-chain voucher — cancellation is a DB-only flip with no
+	// unsigned tx to broadcast. Detect the side and short-circuit so the FE
+	// doesn't have to know which cancel flavour to call.
+	if ad, err := h.trade.GetAd(c.Request.Context(), id); err == nil && ad.Side == models.P2PAdSideBuy {
+		cancelled, err := h.trade.CancelBuyAd(c.Request.Context(), id, user.ID)
+		if mapServiceError(c, err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"data":    gin.H{"ad": cancelled, "unsignedTx": nil},
+		})
+		return
+	}
 	raw, err := h.trade.PrepareCancelAd(c.Request.Context(), id, user.ID, req.SellerAddress)
 	if mapServiceError(c, err) {
 		return
@@ -908,10 +937,20 @@ func (h *P2PHandler) ConfirmCancelAd(c *gin.Context) {
 
 // ─── Trades ────────────────────────────────────────────────────────────────
 
+// openTradeRequest carries the opener's wallet. For a sell-ad the opener is
+// the BUYER (BuyerAddress); for a buy-ad the opener is the SELLER/depositor
+// (SellerAddress). Both are optional at the binding layer — the handler picks
+// the non-empty one (falling back to the user's primary wallet) and the
+// service branches on the ad's side. On the buy-ad/JIT sell path TokenAmount
+// (base units) is the authoritative crypto amount the user is selling — the
+// app approves exactly this, and the service derives fiat from it; on the
+// sell-ad path TokenAmount is empty and the amount is derived from fiat.
 type openTradeRequest struct {
-	FiatAmount      string `json:"fiatAmount" binding:"required"`
+	FiatAmount      string `json:"fiatAmount"`
 	PaymentMethodID string `json:"paymentMethodId" binding:"required"`
-	BuyerAddress    string `json:"buyerAddress" binding:"required"`
+	BuyerAddress    string `json:"buyerAddress"`
+	SellerAddress   string `json:"sellerAddress"`
+	TokenAmount     string `json:"tokenAmount"`
 }
 
 func (h *P2PHandler) OpenTrade(c *gin.Context) {
@@ -933,9 +972,27 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid paymentMethodId"})
 		return
 	}
-	trade, raw, err := h.trade.OpenTrade(c.Request.Context(), adID, user.ID, req.BuyerAddress, services.OpenTradeParams{
+	// One of fiatAmount / tokenAmount must be present: sell-ad takes are
+	// fiat-driven; buy-ad (JIT sell) opens are tokenAmount-authoritative. The
+	// service derives the other from the ad's rate.
+	if strings.TrimSpace(req.FiatAmount) == "" && strings.TrimSpace(req.TokenAmount) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "fiatAmount or tokenAmount is required"})
+		return
+	}
+	// Opener wallet: BuyerAddress (sell-ad take) or SellerAddress (buy-ad/JIT
+	// take). The service branches on ad.Side; we just thread the wallet the
+	// user is operating from. Fall back to the user's primary wallet.
+	openerAddr := req.BuyerAddress
+	if openerAddr == "" {
+		openerAddr = req.SellerAddress
+	}
+	if openerAddr == "" {
+		openerAddr = user.WalletAddress
+	}
+	trade, raw, err := h.trade.OpenTrade(c.Request.Context(), adID, user.ID, openerAddr, services.OpenTradeParams{
 		FiatAmount:      req.FiatAmount,
 		PaymentMethodID: pmID,
+		TokenAmount:     req.TokenAmount,
 	})
 	if mapServiceError(c, err) {
 		return
