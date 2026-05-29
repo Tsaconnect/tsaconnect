@@ -127,11 +127,11 @@ const AdDetailScreen: React.FC = () => {
   // the wrong on-chain amount — approve/deposit mismatch or massive over-deposit.
   // tokenSupported gates the sell flow; buy-side (user receives crypto) is unaffected.
   const tokenSupported = ad ? P2P_TOKEN_DECIMALS[ad.token] !== undefined : false;
-  // For buy-ads (sell path): use ONLY the known map; undefined means unsupported.
-  // For sell-ads (buy path): fall back to 18 for display only — no base-unit math runs.
-  const tokenDecimals = ad
-    ? (P2P_TOKEN_DECIMALS[ad.token] ?? (isBuyAd ? undefined : 18) ?? 18)
-    : 6;
+  // The sell/deposit path NEVER uses this fallback: it's gated by `tokenSupported`
+  // (an unknown token blocks the sell flow entirely), so base-unit math always
+  // uses a known decimals value. The 18 fallback is display-only for the sell-ad
+  // (buy) path, where no base-unit deposit math runs.
+  const tokenDecimals = ad ? (P2P_TOKEN_DECIMALS[ad.token] ?? 18) : 6;
 
   // For sell-ads: preview token amount the buyer receives.
   const tokenPreview = useMemo(() => {
@@ -281,6 +281,9 @@ const AdDetailScreen: React.FC = () => {
 
       if (!hasSufficientAllowance(currentAllowance, tokenBaseUnits)) {
         setSubmitStage('Approving…');
+        // Exact-amount approve (not unlimited) — intentional: leaves no lingering
+        // allowance to the escrow after the trade, at the cost of a per-trade
+        // approve tx. Matches the pool-deposit flow's safety posture.
         const approveRes = await poolApi.prepareApprove(ad.token, tokenBaseUnits, sellerAddress);
         if (!approveRes.success || !approveRes.data) {
           throw new Error(approveRes.message || 'Could not prepare approve transaction');
