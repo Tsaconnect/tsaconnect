@@ -381,6 +381,8 @@ export interface CreateAdInput {
   paymentMethodIds: string[];
   terms?: string;
   sellerAddress: string;
+  /** 'sell' (default) = user sells crypto; 'buy' = merchant posts a buy-ad and will pay fiat. */
+  side?: 'sell' | 'buy';
 }
 
 export interface ListAdsFilter {
@@ -533,7 +535,14 @@ export const poolApi = {
 export interface OpenTradeInput {
   fiatAmount: string;
   paymentMethodId: string;
-  buyerAddress: string;
+  /** Present when the user is the buyer (sell-ad path). */
+  buyerAddress?: string;
+  /** Present when the user is the seller responding to a buy-ad.
+   *  The backend treats tokenAmount as authoritative and derives fiat from
+   *  tokenAmount × rate. sellerAddress is used for on-chain escrow. */
+  sellerAddress?: string;
+  /** Base-unit crypto amount the user will sell (buy-ad path only). */
+  tokenAmount?: string;
 }
 
 export interface ListTradesFilter {
@@ -773,6 +782,42 @@ export function parseTokenAmount(input: string, decimals: number): string {
   const combined = `${intPart}${frac}`.replace(/^0+(?=\d)/, '');
   const base = combined || '0';
   return negative ? `-${base}` : base;
+}
+
+// ─── Sell-side pure helpers ──────────────────────────────────────────────────
+
+/**
+ * Return true iff the current ERC-20 allowance is enough to cover `needed`.
+ * Both values are base-unit strings (no decimals). Uses BigInt so amounts
+ * beyond Number precision (e.g. 18-decimal tokens at large face values) are
+ * compared correctly.
+ */
+export function hasSufficientAllowance(allowance: string, needed: string): boolean {
+  try {
+    return BigInt(allowance || '0') >= BigInt(needed || '0');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Preview the fiat the user will receive when selling `tokenAmount` base units
+ * at `rate` fiat-per-token. `decimals` is the token's decimal precision (e.g.
+ * 6 for USDT). Returns a human-readable string rounded to 2 decimal places.
+ *
+ * All arithmetic is done in floating-point — this is a display-only preview,
+ * not a binding quote. The backend recomputes the authoritative fiat amount at
+ * trade-open time from the same formula.
+ */
+export function previewFiatFromToken(
+  tokenAmount: string,
+  rate: string,
+  decimals: number,
+): string {
+  const humanAmount = Number(tokenAmount || '0') / Math.pow(10, decimals);
+  const rateNum = Number(rate || '0');
+  if (!isFinite(humanAmount) || !isFinite(rateNum) || rateNum <= 0) return '0.00';
+  return (humanAmount * rateNum).toFixed(2);
 }
 
 // ─── Shared FE helpers (extracted to deduplicate across P2P screens) ────────
