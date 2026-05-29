@@ -42,16 +42,28 @@ type mockEscrow struct {
 	contractAddress string
 	balance         services.OnChainBalance
 	allowance       *big.Int
-	depositedEvent  *services.P2PDepositedEvent
-	withdrawnEvent  *services.P2PWithdrawnEvent
-	cancelledEvent  *services.P2PVoucherCancelledEvent
-	openedEvent     *services.P2PTradeOpenedEvent
-	releasedEvent   *services.P2PTradeReleasedEvent
-	tradeCancelled  *services.P2PTradeCancelledEvent
-	disputedEvent   *services.P2PTradeDisputedEvent
-	resolvedEvent   *services.P2PTradeResolvedEvent
-	onChainTrade    *services.OnChainP2PTrade
-	hashFn          func(services.AdVoucher) [32]byte
+	depositedEvent     *services.P2PDepositedEvent
+	withdrawnEvent     *services.P2PWithdrawnEvent
+	cancelledEvent     *services.P2PVoucherCancelledEvent
+	openedEvent        *services.P2PTradeOpenedEvent
+	openedDepositEvent *services.P2PTradeOpenedWithDepositEvent
+	releasedEvent      *services.P2PTradeReleasedEvent
+	tradeCancelled     *services.P2PTradeCancelledEvent
+	disputedEvent      *services.P2PTradeDisputedEvent
+	resolvedEvent      *services.P2PTradeResolvedEvent
+	onChainTrade       *services.OnChainP2PTrade
+	hashFn             func(services.AdVoucher) [32]byte
+	// Captured args so handler tests can assert the deposit path was taken
+	// with the right roles/addresses.
+	lastOpenTradeDepositArgs *handlerOpenTradeDepositArgs
+}
+
+type handlerOpenTradeDepositArgs struct {
+	TradeID  [32]byte
+	Token    string
+	Amount   *big.Int
+	Merchant string
+	From     string
 }
 
 func newMockEscrow() *mockEscrow {
@@ -90,6 +102,13 @@ func (m *mockEscrow) PrepareCancelVoucher(_ string, _ services.AdVoucher) ([]byt
 }
 func (m *mockEscrow) PrepareOpenTradeWithVoucher(_ [32]byte, _ services.AdVoucher, _ []byte, _ string, _ *big.Int) ([]byte, error) {
 	return []byte(`{"tx":"openTrade"}`), nil
+}
+func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+	m.lastOpenTradeDepositArgs = &handlerOpenTradeDepositArgs{
+		TradeID: tradeId, Token: token, Amount: new(big.Int).Set(amount),
+		Merchant: merchant, From: from,
+	}
+	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(_ [32]byte, _ string) ([]byte, error) {
 	return []byte(`{"tx":"markPaid"}`), nil
@@ -130,6 +149,12 @@ func (m *mockEscrow) VerifyTradeOpened(_ string, id [32]byte) (*services.P2PTrad
 	}
 	return &services.P2PTradeOpenedEvent{TradeID: id, Amount: big.NewInt(100)}, nil
 }
+func (m *mockEscrow) VerifyTradeOpenedWithDeposit(_ string, id [32]byte) (*services.P2PTradeOpenedWithDepositEvent, error) {
+	if m.openedDepositEvent != nil {
+		return m.openedDepositEvent, nil
+	}
+	return &services.P2PTradeOpenedWithDepositEvent{TradeID: id, Amount: big.NewInt(100)}, nil
+}
 func (m *mockEscrow) VerifyTradeReleased(_ string, id [32]byte) (*services.P2PTradeReleasedEvent, error) {
 	if m.releasedEvent != nil {
 		return m.releasedEvent, nil
@@ -140,7 +165,7 @@ func (m *mockEscrow) VerifyTradeCancelled(_ string, id [32]byte) (*services.P2PT
 	if m.tradeCancelled != nil {
 		return m.tradeCancelled, nil
 	}
-	return &services.P2PTradeCancelledEvent{TradeID: id, ReturnedToAvailable: big.NewInt(100)}, nil
+	return &services.P2PTradeCancelledEvent{TradeID: id, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(_ string, id [32]byte) (*services.P2PTradeDisputedEvent, error) {
 	if m.disputedEvent != nil {
