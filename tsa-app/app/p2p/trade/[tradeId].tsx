@@ -38,6 +38,7 @@ import { API_BASE_URL } from '../../../constants/api/config';
 import type { ChainKey } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import {
+  formatFiat,
   formatTokenAmount,
   messagesApi,
   ratingsApi,
@@ -381,12 +382,14 @@ const TradeDetailScreen: React.FC = () => {
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Fiat</Text>
               <Text style={styles.summaryValue}>
-                ₦{Number(trade.fiatAmount).toLocaleString()}
+                {trade.fiatCurrency} {formatFiat(trade.fiatAmount)}
               </Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Rate</Text>
-              <Text style={styles.summaryValue}>₦{trade.rate} / {trade.token}</Text>
+              <Text style={styles.summaryValue}>
+                {trade.fiatCurrency} {formatFiat(trade.rate)} / {trade.token}
+              </Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Your role</Text>
@@ -485,6 +488,7 @@ const TradeDetailScreen: React.FC = () => {
         <DisputeModal
           visible={showDispute}
           token={trade.token}
+          role={role}
           reason={disputeReason}
           onChange={setDisputeReason}
           onClose={() => setShowDispute(false)}
@@ -571,6 +575,13 @@ const ActionPanel: React.FC<{
   onDispute: () => void;
 }> = ({ role, trade, acting, onMarkPaid, onRelease, onCancel, onDispute }) => {
   const expired = new Date(trade.expiresAt).getTime() < Date.now();
+  // Role-awareness for both sell-ad and buy-ad trades:
+  //   sell-ad trade: user is buyer (buys crypto), merchant is seller
+  //     → buyer marks paid, seller (merchant) releases
+  //   buy-ad trade:  user is seller (sells crypto), merchant is buyer
+  //     → buyer (merchant) marks paid after sending fiat, seller (user) releases
+  // The role field already resolves correctly from buyerId/sellerId vs user.id,
+  // so canMarkPaid and canRelease gate correctly in both cases with no changes.
   const canMarkPaid = role === 'buyer' && trade.status === 'pending_payment';
   const canRelease =
     role === 'seller' && (trade.status === 'pending_payment' || trade.status === 'paid');
@@ -658,20 +669,27 @@ const MessageBubble: React.FC<{ message: P2PMessage; isMine: boolean }> = ({
 const DisputeModal: React.FC<{
   visible: boolean;
   token: string;
+  role: 'buyer' | 'seller' | null;
   reason: string;
   onChange: (s: string) => void;
   onClose: () => void;
   onSubmit: () => void;
   busy: boolean;
-}> = ({ visible, token, reason, onChange, onClose, onSubmit, busy }) => (
+}> = ({ visible, token, role, reason, onChange, onClose, onSubmit, busy }) => {
+  // Role-aware body copy:
+  //   buyer  → "…seller releases your {token} or you get a refund"
+  //   seller → "…funds are released to the buyer or returned to you"
+  const bodyText = role === 'seller'
+    ? `Explain what went wrong. Admins use this to decide whether funds are released to the buyer or returned to you. Funds stay locked on chain until resolution.`
+    : `Explain what went wrong. Admins use this to decide whether the seller releases your ${token} or you get a refund. Funds stay locked on chain until resolution.`;
+
+  return (
   <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
     <View style={styles.modalOverlay}>
       <View style={styles.modalCard}>
         <Text style={styles.modalTitle}>Open a dispute</Text>
         <Text style={styles.modalBody}>
-          Explain what went wrong. Admins use this to decide whether the seller
-          releases your {token} or you get a refund. Funds stay locked on chain
-          until resolution.
+          {bodyText}
         </Text>
         <TextInput
           style={styles.modalInput}
@@ -698,7 +716,8 @@ const DisputeModal: React.FC<{
       </View>
     </View>
   </Modal>
-);
+  );
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
