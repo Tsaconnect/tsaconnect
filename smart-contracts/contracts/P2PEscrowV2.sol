@@ -140,7 +140,16 @@ contract P2PEscrowV2 is
     event Permit2Updated(address indexed oldP, address indexed newP);
     event AutoReleaseOptInUpdated(address indexed seller, bool optedIn);
 
-    modifier onlyAdmin() { require(isAdmin(_msgSender()), "Not admin"); _; }
+    /// @dev Owner authorization must NOT honor the EIP-2771 forwarder — a trusted
+    /// forwarder must never be able to impersonate the owner. Override to use the
+    /// real msg.sender instead of _msgSender().
+    function _checkOwner() internal view override {
+        if (owner() != msg.sender) {
+            revert OwnableUnauthorizedAccount(msg.sender);
+        }
+    }
+
+    modifier onlyAdmin() { require(isAdmin(msg.sender), "Not admin"); _; }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() { _disableInitializers(); }
@@ -191,6 +200,10 @@ contract P2PEscrowV2 is
 
     // ── Deposit / withdraw ─────────────────────────────────────────────────
 
+    /// @notice Deposit tokens into the seller's available pool.
+    /// @dev ONLY standard ERC-20s may be whitelisted. `accountedBalance` is credited
+    ///      with the nominal `amount`; fee-on-transfer or rebasing tokens would cause
+    ///      `balanceOf(this) < accountedBalance` and break the sweepExcess invariant.
     function deposit(address token, uint256 amount) external nonReentrant whenNotPaused {
         require(token != address(0), "Invalid token");
         require(acceptedTokens[token], "Token not accepted");
@@ -297,6 +310,10 @@ contract P2PEscrowV2 is
         emit TradeOpened(tradeId, voucherHash, buyer, v.seller, v.token, amount);
     }
 
+    /// @notice Open a buy-ad trade by depositing tokens JIT (taker supplies funds).
+    /// @dev ONLY standard ERC-20s may be whitelisted. `accountedBalance` is credited
+    ///      with the nominal `amount`; fee-on-transfer or rebasing tokens would cause
+    ///      `balanceOf(this) < accountedBalance` and break the sweepExcess invariant.
     function openTradeWithDeposit(bytes32 tradeId, address token, uint256 amount, address merchant)
         external nonReentrant whenNotPaused
     {
@@ -492,6 +509,10 @@ contract P2PEscrowV2 is
 
     // ── Permit2 variants ───────────────────────────────────────────────────
 
+    /// @notice Deposit tokens via Permit2 signature-transfer into the seller's available pool.
+    /// @dev ONLY standard ERC-20s may be whitelisted. `accountedBalance` is credited
+    ///      with the nominal `amount`; fee-on-transfer or rebasing tokens would cause
+    ///      `balanceOf(this) < accountedBalance` and break the sweepExcess invariant.
     function depositWithPermit2(IPermit2.PermitTransferFrom calldata permit, bytes calldata signature)
         external nonReentrant whenNotPaused
     {
@@ -511,6 +532,10 @@ contract P2PEscrowV2 is
         emit Deposited(from, token, amount);
     }
 
+    /// @notice Open a buy-ad trade with JIT funding via Permit2 signature-transfer.
+    /// @dev ONLY standard ERC-20s may be whitelisted. `accountedBalance` is credited
+    ///      with the nominal `amount`; fee-on-transfer or rebasing tokens would cause
+    ///      `balanceOf(this) < accountedBalance` and break the sweepExcess invariant.
     function openTradeWithDepositPermit2(
         bytes32 tradeId, address merchant,
         IPermit2.PermitTransferFrom calldata permit, bytes calldata signature
