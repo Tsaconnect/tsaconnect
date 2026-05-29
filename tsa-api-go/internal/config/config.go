@@ -19,6 +19,13 @@ type sonicPreset struct {
 	usdtAddress     string
 	mcgpAddress     string
 	p2pEscrow       string
+	// eip712Version is the EIP-712 domain `version` string the deployed
+	// P2PEscrow at p2pEscrow was initialized with. It MUST move in lockstep
+	// with p2pEscrow: v1 deployed "1", the two-sided v2 deployed "2". The
+	// backend stamps this into the voucher typed-data the app signs; a value
+	// that disagrees with the on-chain contract makes ecrecover resolve to a
+	// wrong address and rejects every sell-ad signature.
+	eip712Version   string
 }
 
 // sonicPresets holds the canonical contract deployment for each network.
@@ -33,7 +40,10 @@ var sonicPresets = map[string]sonicPreset{
 		usdcAddress: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
 		usdtAddress: "0x6047828dc181963ba44974801ff68e538da5eaf9",
 		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
-		p2pEscrow:   "0x1Dc47600C713B216686dd20c349fDCd2575D3cE1",
+		// Still the v1 (sell-only) escrow — mainnet v2 awaits the external
+		// re-audit. Domain version stays "1" to match it.
+		p2pEscrow:     "0x1Dc47600C713B216686dd20c349fDCd2575D3cE1",
+		eip712Version: "1",
 	},
 	"testnet": {
 		rpcURL:      "https://rpc.testnet.soniclabs.com",
@@ -41,7 +51,10 @@ var sonicPresets = map[string]sonicPreset{
 		usdcAddress: "0x685CD180e603A15507f575E7A347610b83d36d41",
 		usdtAddress: "0xb5617cD43dcd27C9E0be8c0FF82F9406Cb1123ad",
 		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
-		p2pEscrow:   "0xadB543F2AD95ad38243d36E46530fE1c80c70Fe5",
+		// P2PEscrowV2 (two-sided) — deployed 2026-05-29, UUPS proxy,
+		// initialized with EIP-712 domain version "2".
+		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
+		eip712Version: "2",
 	},
 }
 
@@ -88,6 +101,10 @@ type Config struct {
 	ServiceContractAddress string
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
+	// P2PEscrowEIP712Version is the voucher domain `version` matching the
+	// deployed P2PEscrow (see sonicPreset.eip712Version). Stamped into the
+	// typed-data the app signs.
+	P2PEscrowEIP712Version string
 
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
@@ -197,6 +214,9 @@ func Load() *Config {
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
 	// you need to point at a hot-fix deployment.
 	cfg.P2PEscrowAddress = getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow)
+	// Must match the deployed contract's EIP-712 domain version (moves in
+	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
+	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
