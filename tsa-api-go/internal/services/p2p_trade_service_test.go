@@ -1293,6 +1293,30 @@ func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 	}
 }
 
+// On the sell side the user names the exact crypto amount to sell; the escrow
+// must escrow EXACTLY that (so the app's prior approve matches the deposit),
+// and fiat is derived from it (50 USDT × 1300 = 65000 NGN).
+func TestOpenBuyAdTrade_TokenAmountIsAuthoritative(t *testing.T) {
+	svc, esc, _, _, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	userAddr := "0x000000000000000000000000000000000000beef"
+
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
+		OpenTradeParams{TokenAmount: "50000000", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade(buy, tokenAmount): %v", err)
+	}
+	if trade.TokenAmount != "50000000" {
+		t.Errorf("TokenAmount = %s, want exactly 50000000 (authoritative)", trade.TokenAmount)
+	}
+	if trade.FiatAmount != "65000" {
+		t.Errorf("FiatAmount = %s, want 65000 (50 USDT × 1300)", trade.FiatAmount)
+	}
+	if esc.lastOpenTradeDepositArgs.Amount.String() != "50000000" {
+		t.Errorf("deposit amount = %s, want exactly the approved 50000000", esc.lastOpenTradeDepositArgs.Amount)
+	}
+}
+
 func TestOpenBuyAdTrade_RejectsMerchantSelfTake(t *testing.T) {
 	svc, _, merchantID, _, adID, pmID, _ := buyAdFixture(t)
 	// The merchant cannot take their own buy-ad.
