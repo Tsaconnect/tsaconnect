@@ -946,7 +946,7 @@ func (h *P2PHandler) ConfirmCancelAd(c *gin.Context) {
 // app approves exactly this, and the service derives fiat from it; on the
 // sell-ad path TokenAmount is empty and the amount is derived from fiat.
 type openTradeRequest struct {
-	FiatAmount      string `json:"fiatAmount" binding:"required"`
+	FiatAmount      string `json:"fiatAmount"`
 	PaymentMethodID string `json:"paymentMethodId" binding:"required"`
 	BuyerAddress    string `json:"buyerAddress"`
 	SellerAddress   string `json:"sellerAddress"`
@@ -970,6 +970,13 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 	pmID, err := uuid.Parse(req.PaymentMethodID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid paymentMethodId"})
+		return
+	}
+	// One of fiatAmount / tokenAmount must be present: sell-ad takes are
+	// fiat-driven; buy-ad (JIT sell) opens are tokenAmount-authoritative. The
+	// service derives the other from the ad's rate.
+	if strings.TrimSpace(req.FiatAmount) == "" && strings.TrimSpace(req.TokenAmount) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "fiatAmount or tokenAmount is required"})
 		return
 	}
 	// Opener wallet: BuyerAddress (sell-ad take) or SellerAddress (buy-ad/JIT
