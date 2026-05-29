@@ -670,6 +670,48 @@ describe("P2PEscrowV2 — finalizeRelease requires opt-in", () => {
   });
 });
 
+// ─── Auto-release on a buy-ad (JIT): opt-in is keyed on the crypto-provider ───
+// Pins the semantics that `autoReleaseOptIn` is the SELLER's (crypto-provider's)
+// flag for BOTH flows: on a buy-ad the seller is the depositing USER, and their
+// opt-in arms auto-release of THEIR crypto to the merchant (buyer).
+describe("P2PEscrowV2 — finalizeRelease on a buy-ad (JIT)", () => {
+  it("the depositing user (seller) opts in; auto-releases to the merchant (buyer)", async () => {
+    const { escrow, owner, alice, carol, system } = await deployV2(); // alice=user/seller, carol=merchant/buyer
+    const token = await deployToken(escrow, owner, [alice]);
+    const amt = ethers.parseUnits("100", 18);
+    await escrow.connect(owner).setAutoReleaseWindow(2 * 3600);
+    await escrow.connect(alice).setAutoReleaseOptIn(true); // the SELLER (user) opts in
+    await token.connect(alice).approve(await escrow.getAddress(), amt);
+    const tradeId = ethers.id("buy-auto");
+    await escrow.connect(alice).openTradeWithDeposit(tradeId, await token.getAddress(), amt, carol.address);
+    // Merchant (buyer) marks fiat paid → arms autoReleaseAt from the seller's opt-in.
+    await escrow.connect(carol).markPaid(tradeId);
+    expect((await escrow.getTrade(tradeId)).autoReleaseAt).to.be.greaterThan(0);
+    // A merchant opt-in would NOT arm it (proves it keys on seller, not buyer):
+    // carol never opted in, yet it armed — because alice (seller) did.
+    await time.increase(2 * 3600 + 1);
+    const fee = amt * 50n / 10000n;
+    await expect(escrow.connect(carol).finalizeRelease(tradeId)).to.emit(escrow, "TradeAutoReleased");
+    expect(await token.balanceOf(carol.address)).to.equal(amt - fee); // crypto to the merchant
+    expect(await token.balanceOf(system.address)).to.equal(fee);
+  });
+
+  it("does NOT arm when only the merchant (buyer) opted in, not the seller", async () => {
+    const { escrow, owner, alice, carol } = await deployV2();
+    const token = await deployToken(escrow, owner, [alice]);
+    const amt = ethers.parseUnits("100", 18);
+    await escrow.connect(owner).setAutoReleaseWindow(2 * 3600);
+    await escrow.connect(carol).setAutoReleaseOptIn(true); // merchant/buyer opts in — wrong party
+    await token.connect(alice).approve(await escrow.getAddress(), amt);
+    const tradeId = ethers.id("buy-noarm");
+    await escrow.connect(alice).openTradeWithDeposit(tradeId, await token.getAddress(), amt, carol.address);
+    await escrow.connect(carol).markPaid(tradeId);
+    expect((await escrow.getTrade(tradeId)).autoReleaseAt).to.equal(0); // not armed
+    await time.increase(2 * 3600 + 1);
+    await expect(escrow.connect(carol).finalizeRelease(tradeId)).to.be.revertedWith("Auto-release not armed");
+  });
+});
+
 // ─── Task 17: openTradeWithDepositPermit2 happy path ─────────────────────────
 
 describe("P2PEscrowV2 — openTradeWithDepositPermit2", () => {
