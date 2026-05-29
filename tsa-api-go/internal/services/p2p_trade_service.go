@@ -231,6 +231,12 @@ type CreateAdParams struct {
 type OpenTradeParams struct {
 	FiatAmount      string
 	PaymentMethodID uuid.UUID
+	// TokenAmount (base units) is the authoritative crypto amount for the
+	// buy-ad / JIT sell path: the user specifies exactly how much crypto to
+	// sell, the app approves that amount, and the contract escrows it. When
+	// set (buy-ads), fiat is derived as tokenAmount × rate; when empty
+	// (sell-ads, or a fiat-first buy-ad), the amount is derived from fiat.
+	TokenAmount string
 }
 
 // CreateAdResult carries the persisted ad plus the EIP-712 typed-data
@@ -997,7 +1003,16 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	if err != nil {
 		return nil, nil, err
 	}
-	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+	// Authoritative-amount selection: on the sell side the user specifies the
+	// exact crypto amount to sell (TokenAmount) so the app can approve that
+	// precise allowance before the deposit. Fall back to fiat-derived when a
+	// caller only supplies fiat (keeps the path usable fiat-first).
+	var tokenAmount, fiatAmount *big.Int
+	if strings.TrimSpace(params.TokenAmount) != "" {
+		tokenAmount, fiatAmount, err = computeFiatFromToken(params.TokenAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+	} else {
+		tokenAmount, fiatAmount, err = computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3144,6 +3159,38 @@ func computeTokenFromFiat(fiatStr, rateStr string, decimals int) (token, fiat *b
 	scale := big.NewInt(int64(decimals + rateScale))
 	numerator := new(big.Int).Mul(fiat, new(big.Int).Exp(big.NewInt(10), scale, nil))
 	token = new(big.Int).Quo(numerator, scaledRate)
+	return token, fiat, nil
+}
+
+// computeFiatFromToken is the inverse of computeTokenFromFiat: given an exact
+// crypto amount (base units), it returns that same token amount plus the fiat
+// it's worth at `rate` (floored to whole fiat units). Used by the buy-ad / JIT
+// sell path so the on-chain escrowed amount is exactly what the user chose to
+// sell (and exactly what they approved), with fiat derived for display/record.
+func computeFiatFromToken(tokenStr, rateStr string, decimals int) (token, fiat *big.Int, err error) {
+	const rateScale = 10
+	token, ok := new(big.Int).SetString(strings.TrimSpace(tokenStr), 10)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: token_amount", ErrInvalidParams)
+	}
+	if token.Sign() <= 0 {
+		return nil, nil, fmt.Errorf("%w: token_amount must be > 0", ErrInvalidParams)
+	}
+	scaledRate, err := scaleDecimal(rateStr, rateScale)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: rate", ErrInvalidParams)
+	}
+	if scaledRate.Sign() <= 0 {
+		return nil, nil, fmt.Errorf("%w: rate must be > 0", ErrInvalidParams)
+	}
+	// fiat = token * scaledRate / 10^(decimals+rateScale)
+	scale := big.NewInt(int64(decimals + rateScale))
+	denom := new(big.Int).Exp(big.NewInt(10), scale, nil)
+	num := new(big.Int).Mul(token, scaledRate)
+	fiat = new(big.Int).Quo(num, denom)
+	if fiat.Sign() <= 0 {
+		return nil, nil, fmt.Errorf("%w: token_amount too small for rate (fiat=0)", ErrInvalidParams)
+	}
 	return token, fiat, nil
 }
 

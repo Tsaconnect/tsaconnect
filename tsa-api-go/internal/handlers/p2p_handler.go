@@ -941,8 +941,10 @@ func (h *P2PHandler) ConfirmCancelAd(c *gin.Context) {
 // the BUYER (BuyerAddress); for a buy-ad the opener is the SELLER/depositor
 // (SellerAddress). Both are optional at the binding layer — the handler picks
 // the non-empty one (falling back to the user's primary wallet) and the
-// service branches on the ad's side. TokenAmount is accepted for the JIT path
-// but the service derives the authoritative amount from fiat/rate.
+// service branches on the ad's side. On the buy-ad/JIT sell path TokenAmount
+// (base units) is the authoritative crypto amount the user is selling — the
+// app approves exactly this, and the service derives fiat from it; on the
+// sell-ad path TokenAmount is empty and the amount is derived from fiat.
 type openTradeRequest struct {
 	FiatAmount      string `json:"fiatAmount" binding:"required"`
 	PaymentMethodID string `json:"paymentMethodId" binding:"required"`
@@ -983,6 +985,7 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 	trade, raw, err := h.trade.OpenTrade(c.Request.Context(), adID, user.ID, openerAddr, services.OpenTradeParams{
 		FiatAmount:      req.FiatAmount,
 		PaymentMethodID: pmID,
+		TokenAmount:     req.TokenAmount,
 	})
 	if mapServiceError(c, err) {
 		return
