@@ -39,6 +39,7 @@ var (
 	ErrDisputeAlreadyOpen    = errors.New("p2p: trade already has an open dispute")
 	ErrDisputeNotFound       = errors.New("p2p: dispute not found")
 	ErrNotApplicableForBuyAd = errors.New("p2p: action not applicable for buy-ads")
+	ErrActiveTradeExists     = errors.New("p2p: you already have an active trade on this ad")
 )
 
 // uint96Max is the largest amount the contract can hold for a single ad/trade
@@ -123,12 +124,12 @@ var SystemClock Clock = realClock{}
 // ─── Service ───────────────────────────────────────────────────────────────
 
 type P2PTradeService struct {
-	db            *gorm.DB
-	escrow        P2PEscrowAdapter
-	rates         RateProvider
-	bus           EventPublisher
-	clock         Clock
-	chainID       int64
+	db      *gorm.DB
+	escrow  P2PEscrowAdapter
+	rates   RateProvider
+	bus     EventPublisher
+	clock   Clock
+	chainID int64
 	// eip712Version is the voucher domain `version` stamped into the typed-data
 	// the app signs; must match the deployed contract. Empty falls back to "1".
 	eip712Version string
@@ -936,6 +937,14 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// One active trade per (ad, buyer): a repeated/double-tapped open would
+		// otherwise double-debit ad.remaining and strand reserved capacity on a
+		// second phantom trade. (Sell-ad opener is the buyer.)
+		if active, e := s.countActiveTradesForOpener(tx, ad.ID, "buyer_id", buyerID); e != nil {
+			return e
+		} else if active > 0 {
+			return ErrActiveTradeExists
+		}
 		res := tx.Model(&models.P2PAd{}).
 			Where("id = ? AND status = ? AND CAST(remaining AS NUMERIC) >= CAST(? AS NUMERIC)",
 				ad.ID, models.P2PAdStatusActive, tokenAmount.String()).
@@ -1075,6 +1084,13 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// One active trade per (ad, opener): on a buy-ad the opener (crypto seller)
+		// is stored as SellerID. Blocks a double-open from double-debiting capacity.
+		if active, e := s.countActiveTradesForOpener(tx, ad.ID, "seller_id", openerID); e != nil {
+			return e
+		} else if active > 0 {
+			return ErrActiveTradeExists
+		}
 		// Decrement off-chain capacity (not an on-chain pool).
 		res := tx.Model(&models.P2PAd{}).
 			Where("id = ? AND status = ? AND CAST(remaining AS NUMERIC) >= CAST(? AS NUMERIC)",
@@ -1208,6 +1224,13 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 	if trade.Status != models.P2PTradeStatusPendingPayment {
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
+	// The escrow is only funded once the open is confirmed on-chain (OpenTxHash is
+	// set solely by ConfirmOpenTrade). Refuse mark-paid on a never-broadcast open
+	// so a phantom trade can't be flipped to `paid` — a state the watchdog and
+	// reconciler can't clear and which blocks the seller from cancelling the ad.
+	if strings.TrimSpace(trade.OpenTxHash) == "" {
+		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
+	}
 	now := s.clock.Now()
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
@@ -1243,6 +1266,9 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 	}
 	if trade.SellerID != sellerID {
 		return nil, ErrForbidden
+	}
+	if !common.IsHexAddress(sellerAddress) {
+		return nil, fmt.Errorf("%w: invalid sellerAddress", ErrInvalidParams)
 	}
 	// Allow Release from pending_payment OR paid OR releasing (retry).
 	// Symmetric with the contract relax: seller's signature is the gate,
@@ -1284,6 +1310,15 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 
 	unsignedTx, err := s.escrow.PrepareRelease(HashID(trade.ID), sellerAddress)
 	if err != nil {
+		// We flipped (Pending|Paid) → Releasing above; roll it back so a failed
+		// prepare doesn't strand the trade in `releasing` for the reconciler's
+		// 10-min stale window. Guarded on status=releasing so we never clobber a
+		// trade that legitimately advanced in the meantime.
+		if trade.Status == models.P2PTradeStatusPaid || trade.Status == models.P2PTradeStatusPendingPayment {
+			s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+				Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusReleasing).
+				Update("status", trade.Status)
+		}
 		return nil, fmt.Errorf("prepare release: %w", err)
 	}
 	return &ReleaseResult{UnsignedTx: unsignedTx}, nil
@@ -1554,6 +1589,11 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusPendingPayment {
 		return nil, fmt.Errorf("%w: trade status=%s (only pending or paid trades can dispute)",
 			ErrInvalidTransition, trade.Status)
+	}
+	// A never-opened-on-chain trade has no escrowed funds to dispute; refuse so a
+	// phantom trade can't be escalated to `disputed` and pull in an admin.
+	if strings.TrimSpace(trade.OpenTxHash) == "" {
+		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
 	// Reject duplicate open dispute. Unique constraint on TradeID makes the
 	// race unlikely; this is the friendly-error path.
@@ -2559,6 +2599,24 @@ func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]mode
 
 // ─── Validation helpers ─────────────────────────────────────────────────────
 
+// countActiveTradesForOpener counts non-terminal trades the given opener already
+// holds on an ad, so a repeated open can be rejected (ErrActiveTradeExists) before
+// it double-debits capacity. openerCol is a fixed internal literal ("buyer_id" for
+// sell-ads, "seller_id" for buy-ads) — never user input.
+func (s *P2PTradeService) countActiveTradesForOpener(tx *gorm.DB, adID uuid.UUID, openerCol string, openerID uuid.UUID) (int64, error) {
+	var n int64
+	err := tx.Model(&models.P2PTrade{}).
+		Where("ad_id = ? AND "+openerCol+" = ? AND status IN ?", adID, openerID,
+			[]string{
+				models.P2PTradeStatusPendingPayment,
+				models.P2PTradeStatusPaid,
+				models.P2PTradeStatusReleasing,
+				models.P2PTradeStatusDisputed,
+			}).
+		Count(&n).Error
+	return n, err
+}
+
 func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
 	if strings.TrimSpace(p.Token) == "" {
 		return fmt.Errorf("%w: token", ErrInvalidParams)
@@ -2573,6 +2631,32 @@ func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
 		return fmt.Errorf("%w: at least one payment_method_id required", ErrInvalidParams)
 	}
 
+	// TokenAmount is a numeric(78,0) base-unit integer. Reject non-numeric here so
+	// a bad string is a clean 400, not a Postgres INSERT-time 500 (numeric column).
+	if n, ok := new(big.Int).SetString(strings.TrimSpace(p.TokenAmount), 10); !ok || n.Sign() <= 0 {
+		return fmt.Errorf("%w: token_amount must be a positive integer (base units)", ErrInvalidParams)
+	}
+
+	// MinLimit/MaxLimit are optional whole-unit fiat amounts (numeric(78,0)).
+	var minL, maxL *big.Int
+	if t := strings.TrimSpace(p.MinLimit); t != "" {
+		n, ok := new(big.Int).SetString(t, 10)
+		if !ok || n.Sign() < 0 {
+			return fmt.Errorf("%w: min_limit must be a non-negative whole number", ErrInvalidParams)
+		}
+		minL = n
+	}
+	if t := strings.TrimSpace(p.MaxLimit); t != "" {
+		n, ok := new(big.Int).SetString(t, 10)
+		if !ok || n.Sign() < 0 {
+			return fmt.Errorf("%w: max_limit must be a non-negative whole number", ErrInvalidParams)
+		}
+		maxL = n
+	}
+	if minL != nil && maxL != nil && minL.Cmp(maxL) > 0 {
+		return fmt.Errorf("%w: min_limit must be <= max_limit", ErrInvalidParams)
+	}
+
 	// Rate-type validation: fixed ads need a literal rate; float ads need an
 	// offset within the configured cap. Anchor key must be in the allowlist.
 	rateType := strings.ToLower(strings.TrimSpace(p.RateType))
@@ -2583,6 +2667,11 @@ func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
 	case models.P2PAdRateTypeFixed:
 		if strings.TrimSpace(p.Rate) == "" {
 			return fmt.Errorf("%w: rate", ErrInvalidParams)
+		}
+		// Rate is written to a numeric column; reject non-numeric / non-positive
+		// here so it can't 500 the INSERT on Postgres.
+		if v, err := scaleDecimal(strings.TrimSpace(p.Rate), 10); err != nil || v.Sign() <= 0 {
+			return fmt.Errorf("%w: rate must be a positive decimal", ErrInvalidParams)
 		}
 		if p.FloatOffsetBps != nil {
 			return fmt.Errorf("%w: float_offset_bps must not be set for fixed-rate ads", ErrInvalidParams)
