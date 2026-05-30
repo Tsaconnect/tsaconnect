@@ -373,7 +373,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE p2p_disputes (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL UNIQUE,
 			raised_by TEXT NOT NULL, raised_role TEXT NOT NULL,
-			reason TEXT NOT NULL,
+			reason TEXT NOT NULL, evidence_urls TEXT,
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
@@ -1593,6 +1593,44 @@ func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
 	}
 }
 
+// TestPrepareRaiseDispute_StoresEvidence locks the dispute-wizard backend (#25):
+// evidence image URLs submitted with a dispute are stored + decoded on load, and
+// the count/URL validation rejects bad input.
+func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
+	svc, _, _, _, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
+		"0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+
+	urls := []string{"https://cdn.test/ev1.jpg", "https://cdn.test/ev2.jpg"}
+	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, userID, "0xuser", "no crypto released", urls); err != nil {
+		t.Fatalf("PrepareRaiseDispute with evidence: %v", err)
+	}
+	var d models.P2PDispute
+	if err := db.First(&d, "trade_id = ?", trade.ID).Error; err != nil {
+		t.Fatalf("load dispute: %v", err)
+	}
+	if len(d.Evidence) != 2 || d.Evidence[0] != urls[0] {
+		t.Errorf("evidence = %v, want %v", d.Evidence, urls)
+	}
+
+	tooMany := make([]string, 7)
+	for i := range tooMany {
+		tooMany[i] = "https://cdn.test/x.jpg"
+	}
+	if _, err := svc.PrepareRaiseDispute(context.Background(), uuid.New(), uuid.New(), "0xz", "r", tooMany); err == nil {
+		t.Errorf("expected rejection for >6 evidence images")
+	}
+	if _, err := svc.PrepareRaiseDispute(context.Background(), uuid.New(), uuid.New(), "0xz", "r", []string{"not-a-url"}); err == nil {
+		t.Errorf("expected rejection for non-URL evidence")
+	}
+}
+
 func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
 	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
 	userID := uuid.New()
@@ -1605,7 +1643,7 @@ func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) 
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	// Drive trade → disputed (merchant raises).
-	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto"); err != nil {
+	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
 		t.Fatalf("PrepareRaiseDispute: %v", err)
 	}
 	if _, err := svc.ConfirmRaiseDispute(context.Background(), trade.ID, merchantID, "0xdisp"); err != nil {
