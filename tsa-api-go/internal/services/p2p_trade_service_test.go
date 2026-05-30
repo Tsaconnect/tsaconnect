@@ -1378,6 +1378,9 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
+	// Simulate ConfirmOpenTrade recording the on-chain open (sets OpenTxHash);
+	// MarkPaid now requires the open to be confirmed on-chain.
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	// MarkPaid is by the BuyerID = merchant (the fiat sender).
 	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
 		t.Fatalf("MarkPaid(merchant): %v", err)
@@ -1427,6 +1430,7 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 
 	// Snapshot ad state immediately after open to derive expected values.
 	var adAfterOpen models.P2PAd
@@ -1526,6 +1530,69 @@ func TestConfirmCancelBuyAdTrade_RejectsPoolFlagMismatch(t *testing.T) {
 	}
 }
 
+// TestValidateCreateAd_RejectsNonNumeric locks the numeric-input validation
+// (audit #5/#6): rate/token_amount/limits that can't be stored in their numeric
+// columns must be a clean 400 (ErrInvalidParams), not a Postgres INSERT-time 500.
+func TestValidateCreateAd_RejectsNonNumeric(t *testing.T) {
+	svc, _, _, _, _, pmID, _ := buyAdFixture(t)
+	base := CreateAdParams{
+		Token: "USDT", TokenAmount: "1000000", FiatCurrency: "NGN",
+		RateType: "fixed", Rate: "1500", MinLimit: "100", MaxLimit: "5000",
+		PaymentMethodIDs: []uuid.UUID{pmID},
+	}
+	if err := svc.validateCreateAd(base); err != nil {
+		t.Fatalf("valid params rejected: %v", err)
+	}
+	bad := func(mut func(*CreateAdParams)) error { p := base; mut(&p); return svc.validateCreateAd(p) }
+	cases := map[string]func(*CreateAdParams){
+		"non-numeric rate":     func(p *CreateAdParams) { p.Rate = "abc" },
+		"non-positive rate":    func(p *CreateAdParams) { p.Rate = "0" },
+		"non-integer tokenAmt": func(p *CreateAdParams) { p.TokenAmount = "12.5" },
+		"non-numeric minLimit": func(p *CreateAdParams) { p.MinLimit = "ten" },
+		"negative maxLimit":    func(p *CreateAdParams) { p.MaxLimit = "-5" },
+		"min greater than max": func(p *CreateAdParams) { p.MinLimit = "5000"; p.MaxLimit = "100" },
+	}
+	for name, mut := range cases {
+		if err := bad(mut); err == nil {
+			t.Errorf("%s: expected validation error, got nil", name)
+		}
+	}
+}
+
+// TestMarkPaid_RequiresConfirmedOpen locks audit #1: mark-paid is refused until the
+// open is confirmed on-chain (OpenTxHash set), so a never-broadcast trade can't be
+// flipped to `paid`.
+func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
+	svc, _, merchantID, _, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
+		"0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	// No ConfirmOpenTrade → OpenTxHash empty → mark-paid must be rejected.
+	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err == nil {
+		t.Fatalf("MarkPaid on an unconfirmed open should be rejected")
+	}
+}
+
+// TestOpenTrade_RejectsDuplicateActiveTrade locks audit #2: a second open by the
+// same opener on the same ad is rejected (would otherwise double-debit capacity).
+func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
+	svc, _, _, _, adID, pmID, _ := buyAdFixture(t)
+	userID := uuid.New()
+	addr := "0x000000000000000000000000000000000000beef"
+	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID}); err != nil {
+		t.Fatalf("first OpenTrade: %v", err)
+	}
+	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID}); err == nil {
+		t.Fatalf("second concurrent open should be rejected (ErrActiveTradeExists)")
+	}
+}
+
 func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
 	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
 	userID := uuid.New()
@@ -1535,6 +1602,7 @@ func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) 
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	// Drive trade → disputed (merchant raises).
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto"); err != nil {
