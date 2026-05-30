@@ -26,6 +26,8 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
   activeScale = 0.97,
   disabled,
   children,
+  onPressIn,
+  onPressOut,
   ...rest
 }) => {
   const { motion } = useTheme();
@@ -40,16 +42,18 @@ export const PressableScale: React.FC<PressableScaleProps> = ({
     <AnimatedPressable
       accessibilityRole="button"
       disabled={disabled}
+      // Spread rest first so the wrapper's press handlers (which also invoke the
+      // caller's) are never overridden by a spread onPressIn/onPressOut.
+      {...rest}
       onPressIn={(e) => {
         if (!reduced && !disabled) scale.value = withSpring(activeScale, motion.spring.press);
-        rest.onPressIn?.(e);
+        onPressIn?.(e);
       }}
       onPressOut={(e) => {
         if (!reduced) scale.value = withSpring(1, motion.spring.press);
-        rest.onPressOut?.(e);
+        onPressOut?.(e);
       }}
       style={[animatedStyle, style]}
-      {...rest}
     >
       {children}
     </AnimatedPressable>

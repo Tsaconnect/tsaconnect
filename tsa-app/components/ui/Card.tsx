@@ -30,13 +30,10 @@ export const AccentCard: React.FC<AccentCardProps> = ({
   ...rest
 }) => {
   const { colors, spacing } = useTheme();
+  // Render Surface directly with NO padding so the rail can sit flush at the
+  // start edge; the inner View owns the content padding (+ rail offset).
   return (
-    <Card
-      elevation={elevation}
-      padding={undefined}
-      style={[{ overflow: 'hidden' }, style]}
-      {...rest}
-    >
+    <Surface elevation={elevation} style={[{ overflow: 'hidden' }, style]} {...rest}>
       <View
         style={{
           position: 'absolute',
@@ -48,6 +45,6 @@ export const AccentCard: React.FC<AccentCardProps> = ({
         }}
       />
       <View style={{ padding: spacing[padding], paddingStart: spacing[padding] + railWidth }}>{children}</View>
-    </Card>
+    </Surface>
   );
 };

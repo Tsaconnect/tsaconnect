@@ -70,7 +70,9 @@ export function formatFiat(
     locale: opts.locale,
     maximumFractionDigits: maxFrac,
   });
-  const prefix = symbol !== undefined && symbol !== '' ? symbol : '';
-  const codeSuffix = opts.withCode || symbol === undefined ? ` ${code}` : '';
+  const hasSymbol = symbol !== undefined && symbol !== '';
+  const prefix = hasSymbol ? symbol : '';
+  // No symbol (unknown currency or symbol-less codes like USDT/USDC) -> suffix the code.
+  const codeSuffix = opts.withCode || !hasSymbol ? ` ${code}` : '';
   return `${prefix}${num}${codeSuffix}`.trim();
 }
