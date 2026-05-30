@@ -90,6 +90,7 @@ export const PickerSheet: React.FC<PickerSheetProps> = ({
       ) : (
         <FlatList
           data={rows}
+          style={{ flexShrink: 1 }}
           keyboardShouldPersistTaps="handled"
           keyExtractor={(r, i) => (r.type === 'header' ? `h-${r.group}` : `i-${r.item.id}-${i}`)}
           contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }}

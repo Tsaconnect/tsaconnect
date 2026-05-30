@@ -30,7 +30,7 @@ export function useElevationStyle(elevation: Elevation): ViewStyle {
 
 export const Surface: React.FC<SurfaceProps> = ({
   radius = 'lg',
-  padding,
+  padding, // no default: undefined => no padding (Card supplies its own default)
   elevation = 'none',
   background = 'surface',
   bordered,

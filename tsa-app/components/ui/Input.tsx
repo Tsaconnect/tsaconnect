@@ -54,10 +54,11 @@ export const Input: React.FC<InputProps> = ({
           minHeight: 48,
           paddingHorizontal: spacing.md,
           borderRadius: radius.md,
-          borderWidth: 1.5,
+          // Focus is signalled cross-platform by the accent border (iOS-only
+          // shadow rings were dropped to avoid an Android/iOS inconsistency).
+          borderWidth: focused && !error ? 2 : 1.5,
           borderColor,
           backgroundColor: colors.surface,
-          ...(focused && !error ? { shadowColor: colors.focusRing, shadowOpacity: 1, shadowRadius: 4, shadowOffset: { width: 0, height: 0 } } : null),
         }}
       >
         {leftAdornment}

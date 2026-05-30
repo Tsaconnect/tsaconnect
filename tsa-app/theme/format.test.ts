@@ -28,6 +28,9 @@ describe('formatFiat', () => {
   it('falls back to ISO code for unknown currencies', () => {
     expect(formatFiat(1000, 'XOF', { locale: 'en-US' })).toBe('1,000 XOF');
   });
+  it('suffixes the code for symbol-less stablecoins (USDT/USDC)', () => {
+    expect(formatFiat(9.95, 'USDT', { locale: 'en-US' })).toBe('9.95 USDT');
+  });
   it('is case-insensitive on the currency code', () => {
     expect(formatFiat(1500, 'ngn', { locale: 'en-US' })).toBe('₦1,500');
   });
