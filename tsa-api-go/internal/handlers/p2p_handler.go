@@ -1130,8 +1130,9 @@ func (h *P2PHandler) PrepareCancel(c *gin.Context) {
 }
 
 type raiseDisputeRequest struct {
-	Reason        string `json:"reason" binding:"required"`
-	CallerAddress string `json:"callerAddress"`
+	Reason        string   `json:"reason" binding:"required"`
+	CallerAddress string   `json:"callerAddress"`
+	EvidenceUrls  []string `json:"evidenceUrls"`
 }
 
 func (h *P2PHandler) RaiseDispute(c *gin.Context) {
@@ -1152,7 +1153,7 @@ func (h *P2PHandler) RaiseDispute(c *gin.Context) {
 	if caller == "" {
 		caller = user.WalletAddress
 	}
-	raw, err := h.trade.PrepareRaiseDispute(c.Request.Context(), id, user.ID, caller, req.Reason)
+	raw, err := h.trade.PrepareRaiseDispute(c.Request.Context(), id, user.ID, caller, req.Reason, req.EvidenceUrls)
 	if mapServiceError(c, err) {
 		return
 	}
