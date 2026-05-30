@@ -1,9 +1,11 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // P2PDispute is the off-chain audit row for a disputed trade. Exactly one
@@ -16,22 +18,35 @@ import (
 // the dispute baseless and chose not to override — the trade returns to its
 // pre-dispute state via the contract's adminResolve(false) path.
 type P2PDispute struct {
-	ID               uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TradeID          uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex" json:"tradeId"`
-	RaisedBy         uuid.UUID  `gorm:"type:uuid;not null" json:"raisedBy"`
-	RaisedRole       string     `gorm:"size:8;not null" json:"raisedRole"`
-	Reason           string     `gorm:"type:text;not null" json:"reason"`
-	Status           string     `gorm:"size:16;not null;default:'open';index" json:"status"`
-	ResolvedBy       *uuid.UUID `gorm:"type:uuid" json:"resolvedBy,omitempty"`
-	Resolution       string     `gorm:"type:text" json:"resolution,omitempty"`
-	RefundedToBuyer  *bool      `json:"refundedToBuyer,omitempty"`
-	ResolveTxHash    string     `gorm:"size:66" json:"resolveTxHash,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	ResolvedAt       *time.Time `json:"resolvedAt,omitempty"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TradeID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"tradeId"`
+	RaisedBy   uuid.UUID `gorm:"type:uuid;not null" json:"raisedBy"`
+	RaisedRole string    `gorm:"size:8;not null" json:"raisedRole"`
+	Reason     string    `gorm:"type:text;not null" json:"reason"`
+	// EvidenceURLs is a JSON-encoded []string of Cloudinary image URLs submitted
+	// with the dispute. Stored as text; decoded into Evidence on load (AfterFind).
+	EvidenceURLs    string     `gorm:"type:text" json:"-"`
+	Evidence        []string   `gorm:"-" json:"evidenceUrls,omitempty"`
+	Status          string     `gorm:"size:16;not null;default:'open';index" json:"status"`
+	ResolvedBy      *uuid.UUID `gorm:"type:uuid" json:"resolvedBy,omitempty"`
+	Resolution      string     `gorm:"type:text" json:"resolution,omitempty"`
+	RefundedToBuyer *bool      `json:"refundedToBuyer,omitempty"`
+	ResolveTxHash   string     `gorm:"size:66" json:"resolveTxHash,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
 }
 
 func (P2PDispute) TableName() string {
 	return "p2p_disputes"
+}
+
+// AfterFind decodes the stored EvidenceURLs JSON into the transient Evidence
+// slice so API responses expose `evidenceUrls` as an array.
+func (d *P2PDispute) AfterFind(*gorm.DB) error {
+	if d.EvidenceURLs != "" {
+		_ = json.Unmarshal([]byte(d.EvidenceURLs), &d.Evidence)
+	}
+	return nil
 }
 
 const (
