@@ -940,8 +940,8 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 			Where("id = ? AND status = ? AND CAST(remaining AS NUMERIC) >= CAST(? AS NUMERIC)",
 				ad.ID, models.P2PAdStatusActive, tokenAmount.String()).
 			Updates(map[string]any{
-				"remaining":  gorm.Expr("CAST((CAST(remaining AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", tokenAmount.String()),
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)", tokenAmount.String()),
+				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) - CAST(? AS NUMERIC)", tokenAmount.String()),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) + CAST(? AS NUMERIC)", tokenAmount.String()),
 				"updated_at": s.clock.Now(),
 			})
 		if res.Error != nil {
@@ -1080,8 +1080,8 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 			Where("id = ? AND status = ? AND CAST(remaining AS NUMERIC) >= CAST(? AS NUMERIC)",
 				ad.ID, models.P2PAdStatusActive, tokenAmount.String()).
 			Updates(map[string]any{
-				"remaining":  gorm.Expr("CAST((CAST(remaining AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", tokenAmount.String()),
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)", tokenAmount.String()),
+				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) - CAST(? AS NUMERIC)", tokenAmount.String()),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) + CAST(? AS NUMERIC)", tokenAmount.String()),
 				"updated_at": s.clock.Now(),
 			})
 		if res.Error != nil {
@@ -1341,7 +1341,7 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
 			}).Error; err != nil {
 			return err
@@ -1478,8 +1478,8 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		return tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
-				"remaining":  gorm.Expr("CAST((CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
+				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
 			}).Error
 	})
@@ -1793,12 +1793,12 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		// and this only restores the off-chain capacity counter — no on-chain
 		// pool is touched. For a sell-ad it mirrors the on-chain pool credit.
 		updates := map[string]any{
-			"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+			"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 			"updated_at": now,
 		}
 		if !ev.ReleasedToBuyer {
 			updates["remaining"] = gorm.Expr(
-				"CAST((CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)",
+				"CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)",
 				trade.TokenAmount)
 		}
 		return tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error
@@ -2049,7 +2049,7 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
 			}).Error; err != nil {
 			return err
@@ -2108,8 +2108,8 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		return tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
-				"remaining":  gorm.Expr("CAST((CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
+				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
 			}).Error
 	})
@@ -2250,12 +2250,12 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 				})
 		}
 		updates := map[string]any{
-			"reserved":   gorm.Expr("CAST((CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)) AS TEXT)", trade.TokenAmount),
+			"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 			"updated_at": now,
 		}
 		if !refundBuyer {
 			updates["remaining"] = gorm.Expr(
-				"CAST((CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)) AS TEXT)",
+				"CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)",
 				trade.TokenAmount)
 		}
 		return tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error
