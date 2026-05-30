@@ -16,6 +16,7 @@
 // a Phase-1.5 follow-up; polling keeps the wire shape simple.
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -116,7 +117,26 @@ const TradeDetailScreen: React.FC = () => {
     setLoading(false);
   }, [tradeId]);
 
+  // A terminal trade (released/cancelled/resolved) won't change again.
+  const isTerminal =
+    trade?.status === 'released' ||
+    trade?.status === 'cancelled' ||
+    trade?.status === 'resolved';
+
+  // Only poll while the screen is focused and the trade can still change.
+  // An unfocused screen (one pushed over, or a backgrounded tab) the user
+  // isn't watching, or a terminal trade, means polling /trades + /messages
+  // every 5s is wasted traffic.
+  const isFocused = useIsFocused();
+  const pollingActive = isFocused && !isTerminal;
+
   useEffect(() => {
+    // Only fetch when the trade can still change and the user is looking at it.
+    // We deliberately don't load on the way *out* of polling: action handlers
+    // call load() themselves, so a trade that just went terminal is already
+    // current, and there's no point fetching for a screen being left. On (re)
+    // focus of a live trade this fires an immediate load, then resumes polling.
+    if (!pollingActive) return;
     load();
     // Skip polls while a sign/broadcast/confirm flow is in flight, so an
     // intermediate server fetch doesn't clobber optimistic local state.
@@ -124,7 +144,7 @@ const TradeDetailScreen: React.FC = () => {
       if (!actingRef.current) load();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, pollingActive]);
 
   const startActing = useCallback((stage: string) => {
     actingRef.current = stage;
@@ -176,10 +196,6 @@ const TradeDetailScreen: React.FC = () => {
   }
 
   const tokenDecimals = TOKEN_DECIMALS[trade.token] ?? 18;
-  const isTerminal =
-    trade.status === 'released' ||
-    trade.status === 'cancelled' ||
-    trade.status === 'resolved';
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 

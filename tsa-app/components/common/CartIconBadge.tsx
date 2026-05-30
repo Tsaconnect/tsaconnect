@@ -1,45 +1,17 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useAuth } from '@/AuthContext/AuthContext';
-import { cartService } from '@/components/services/cart';
+import { useCartCount } from '@/contexts/CartContext';
+
+// Re-exported for backward compatibility. The count now lives in CartContext so
+// every badge shares one value and one (event-driven) refresh instead of each
+// running its own poll. Requires <CartProvider> to be mounted (see app/_layout).
+export { useCartCount };
 
 interface CartIconBadgeProps {
   color?: string;
   size?: number;
-}
-
-export function useCartCount() {
-  const [cartCount, setCartCount] = useState(0);
-  const { token } = useAuth();
-
-  const refresh = useCallback(async () => {
-    if (!token) {
-      setCartCount(0);
-      return;
-    }
-    try {
-      cartService.setToken(token);
-      const count = await cartService.getCartItemCount();
-      setCartCount(count);
-    } catch {
-      // silent
-    }
-  }, [token]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  // Refresh on a short interval so badge stays current across screens
-  useEffect(() => {
-    if (!token) return;
-    const interval = setInterval(refresh, 10000);
-    return () => clearInterval(interval);
-  }, [token, refresh]);
-
-  return { cartCount, refreshCartCount: refresh };
 }
 
 export default function CartIconBadge({

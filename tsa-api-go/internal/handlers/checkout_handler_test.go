@@ -61,6 +61,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 				mute_notifications INTEGER DEFAULT 0,
 				mute_email INTEGER DEFAULT 0,
 				tp_balance REAL DEFAULT 0,
+				cashback_balance REAL DEFAULT 0,
 				email_verified INTEGER DEFAULT 0,
 				deleted_at DATETIME,
 				submitted_for_verification_at DATETIME,
@@ -117,6 +118,9 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			platform_fee TEXT DEFAULT '0',
 			total_amount TEXT NOT NULL,
 			shipping_zone TEXT,
+			shipping_city TEXT,
+			shipping_state TEXT,
+			shipping_country TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
 			escrow_tx_hash TEXT,
@@ -124,10 +128,20 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			release_tx_hash TEXT,
 			buyer_upline TEXT,
 			delivery_proof_url TEXT,
+			tracking_number TEXT,
+			merchant_approved_refund INTEGER DEFAULT 0,
+			cancel_reason TEXT,
+			cancel_requested_at DATETIME,
+			merchant_approved_cancel INTEGER DEFAULT 0,
+			disputed_at DATETIME,
+			dispute_reason TEXT,
+			dispute_raised_by TEXT,
 			status TEXT DEFAULT 'pending_payment',
 			buyer_confirmed_at DATETIME,
+			seller_shipped_at DATETIME,
 			seller_delivered_at DATETIME,
 			escrow_expires_at DATETIME,
+			tp_distributed_at DATETIME,
 			notes TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
@@ -597,6 +611,67 @@ func TestGetCartSummary_IncludesMerchantShippingMetadata(t *testing.T) {
 	}
 	if sellerData["country"] != "Nigeria" {
 		t.Errorf("expected seller country Nigeria, got %v", sellerData["country"])
+	}
+}
+
+func TestGetCartCount_SumsItemQuantities(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 10.0)
+
+	items := []models.CartItem{
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 2, Price: 10.0, AddedAt: time.Now()},
+		{ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 3, Price: 10.0, AddedAt: time.Now()},
+	}
+	createTestCart(t, db, buyer.ID, items)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Request, _ = http.NewRequest("GET", "/count", nil)
+
+	h.GetCartCount(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["count"] != float64(5) {
+		t.Errorf("expected count 5 (2+3), got %v", data["count"])
+	}
+}
+
+func TestGetCartCount_NoActiveCartReturnsZero(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Request, _ = http.NewRequest("GET", "/count", nil)
+
+	h.GetCartCount(c)
+
+	// No active cart must be 0/200, not 404 — the badge endpoint degrades gracefully.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d (no cart -> 0, not 404), got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["count"] != float64(0) {
+		t.Errorf("expected count 0, got %v", data["count"])
 	}
 }
 
