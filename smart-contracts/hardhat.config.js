@@ -2,6 +2,10 @@ require("@nomicfoundation/hardhat-toolbox");
 require("@openzeppelin/hardhat-upgrades");
 require("dotenv").config();
 
+// Accept the deployer key with or without a leading 0x (hardhat needs 0x-prefixed).
+const RAW_PK = process.env.DEPLOYER_PRIVATE_KEY;
+const ACCOUNTS = RAW_PK ? [RAW_PK.startsWith("0x") ? RAW_PK : "0x" + RAW_PK] : [];
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
@@ -21,22 +25,22 @@ module.exports = {
     sonicTestnet: {
       url: process.env.SONIC_TESTNET_RPC || "https://rpc.testnet.soniclabs.com",
       chainId: 14601,
-      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+      accounts: ACCOUNTS,
     },
     sonicMainnet: {
       url: process.env.SONIC_MAINNET_RPC || "https://rpc.soniclabs.com",
       chainId: 146,
-      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+      accounts: ACCOUNTS,
     },
     bscTestnet: {
       url: process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545",
       chainId: 97,
-      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+      accounts: ACCOUNTS,
     },
     bscMainnet: {
       url: process.env.BSC_MAINNET_RPC || "https://bsc-dataseed.binance.org",
       chainId: 56,
-      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+      accounts: ACCOUNTS,
     },
   },
   etherscan: {
