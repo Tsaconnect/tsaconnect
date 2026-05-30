@@ -896,6 +896,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		AdID:            ad.ID,
 		BuyerID:         buyerID,
 		SellerID:        ad.SellerID,
+		OpenerID:        &buyerID, // sell-ad: the buyer opens
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		TokenAmount:     tokenAmount.String(),
@@ -904,7 +905,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		Rate:            effectiveRate,
 		PaymentMethodID: params.PaymentMethodID,
 		Status:          models.P2PTradeStatusPendingPayment,
-		ExpiresAt:       s.clock.Now().Add(30 * time.Minute),
+		ExpiresAt:       s.clock.Now().Add(p2pPaymentWindow),
 	}
 	trade.OnChainTradeID = HashIDHex(trade.ID)
 	onChainTradeID := HashID(trade.ID)
@@ -1062,6 +1063,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		AdID:            ad.ID,
 		SellerID:        openerID,    // user deposits + releases crypto
 		BuyerID:         ad.SellerID, // merchant receives crypto
+		OpenerID:        &openerID,   // buy-ad: the depositing user opens
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		Funding:         models.P2PTradeFundingDepositedByTaker,
@@ -1071,7 +1073,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		Rate:            effectiveRate,
 		PaymentMethodID: params.PaymentMethodID,
 		Status:          models.P2PTradeStatusPendingPayment,
-		ExpiresAt:       s.clock.Now().Add(30 * time.Minute),
+		ExpiresAt:       s.clock.Now().Add(p2pPaymentWindow),
 	}
 	trade.OnChainTradeID = HashIDHex(trade.ID)
 	onChainTradeID := HashID(trade.ID)
@@ -1198,9 +1200,17 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		}
 	}
 
+	openUpdates := map[string]any{"open_tx_hash": txHash, "updated_at": s.clock.Now()}
+	// Re-anchor the off-chain deadline to the ON-CHAIN createdAt: the contract
+	// enforces cancelByTimeout at createdAt+paymentWindow, but expires_at was set
+	// at intent time and drifts earlier if the open mined late — which would nudge
+	// a timeout-cancel the contract reverts. Best-effort: keep intent-time on read failure.
+	if onchain, rerr := s.escrow.ReadTrade(HashID(trade.ID)); rerr == nil && onchain.CreatedAt != nil && onchain.CreatedAt.Sign() > 0 {
+		openUpdates["expires_at"] = time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow)
+	}
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ?", trade.ID).
-		Updates(map[string]any{"open_tx_hash": txHash, "updated_at": s.clock.Now()}).Error; err != nil {
+		Updates(openUpdates).Error; err != nil {
 		return nil, err
 	}
 	trade.OpenTxHash = txHash
@@ -1632,19 +1642,13 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		"role":   role,
 		"reason": reason,
 	})
-	// Notify both participants — the counter-party is the one who needs to
-	// know they're now in a dispute window.
-	s.emit(events.P2PTradeDisputed, userID, "Dispute opened", "", map[string]any{
+	// Notify only the raiser at prepare time. The counter-party notice and the
+	// "funds frozen" chat message fire in ConfirmRaiseDispute — after the dispute
+	// is actually on chain — so a never-broadcast prepare can't signal the
+	// counter-party or freeze the trade chat.
+	s.emit(events.P2PTradeDisputed, userID, "Dispute prepared — sign to submit", "", map[string]any{
 		"tradeId": trade.ID, "role": role,
 	})
-	other := trade.SellerID
-	if userID == trade.SellerID {
-		other = trade.BuyerID
-	}
-	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade",
-		"", map[string]any{"tradeId": trade.ID})
-	s.systemMsg(ctx, trade.ID, fmt.Sprintf("%s opened a dispute. Funds frozen pending admin review. Reason: %s",
-		capitalize(role), reason))
 
 	return unsignedTx, nil
 }
@@ -1696,6 +1700,15 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		map[string]any{"txHash": txHash})
 	s.emit(events.P2PTradeDisputed, userID, "Dispute confirmed on chain", "",
 		map[string]any{"tradeId": trade.ID})
+	// Now that the dispute is on chain, notify the counter-party and freeze the
+	// trade chat (deferred from PrepareRaiseDispute).
+	other := trade.SellerID
+	if userID == trade.SellerID {
+		other = trade.BuyerID
+	}
+	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade", "",
+		map[string]any{"tradeId": trade.ID})
+	s.systemMsg(ctx, trade.ID, "A dispute has been opened. Funds are frozen pending admin review.")
 	return &trade, nil
 }
 
@@ -1729,14 +1742,15 @@ func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeI
 		return nil, fmt.Errorf("prepare adminResolve: %w", err)
 	}
 
-	// Stash pending resolution on the dispute row so ConfirmAdminResolve
-	// can apply it consistently. Note may be empty. NB: chain is the
-	// authoritative source — see ConfirmAdminResolveDispute, which reads
-	// the on-chain event regardless of what's stored here.
+	// Stash the resolution note + resolver as intent. Deliberately do NOT persist
+	// refunded_to_buyer here: it is the authoritative refund branch and is written
+	// ONLY by ConfirmAdminResolveDispute from the on-chain TradeResolved event. If
+	// it were set pre-broadcast, the reconciler (reconcileToResolved keys ad-capacity
+	// on RefundedToBuyer != nil) would treat a stale/never-broadcast intent as
+	// settled truth and could credit the wrong branch.
 	updates := map[string]any{
-		"resolved_by":       adminID,
-		"resolution":        note,
-		"refunded_to_buyer": refundBuyer,
+		"resolved_by": adminID,
+		"resolution":  note,
 	}
 	if err := s.db.WithContext(ctx).Model(&dispute).
 		Where("id = ? AND status = ?", dispute.ID, models.P2PDisputeStatusOpen).
@@ -1968,8 +1982,17 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("read on-chain trade: %w", err)
 	}
-	// Trade not on chain yet (still in our DB intent). No drift, just waiting.
+	// Trade not on chain. Either the open tx is still in flight (just wait), or
+	// it's a stale orphan: a pending_payment trade whose open was never confirmed
+	// on-chain (OpenTxHash empty) and whose payment window has elapsed will never
+	// appear on chain. Such a row permanently holds reserved/remaining capacity,
+	// so reclaim it — cancel + restore the ad's off-chain counters.
 	if !onchain.Exists {
+		if trade.Status == models.P2PTradeStatusPendingPayment &&
+			trade.OpenTxHash == "" &&
+			s.clock.Now().After(trade.ExpiresAt) {
+			return s.reconcileOrphanOpen(ctx, &trade)
+		}
 		return ReconcileResult{}, nil
 	}
 
@@ -2050,6 +2073,11 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 // lost and roll the DB back to "paid". The seller can then retry. 10 minutes
 // gives the user time to sign + chain time to confirm before we intervene.
 const releasingStaleAfter = 10 * time.Minute
+
+// p2pPaymentWindow is the buyer's payment deadline. MUST match the contract's
+// paymentWindow (30m) — the contract enforces cancelByTimeout at createdAt+window,
+// so the DB expires_at is re-anchored to on-chain createdAt in ConfirmOpenTrade.
+const p2pPaymentWindow = 30 * time.Minute
 
 func isTerminalTradeStatus(s string) bool {
 	return s == models.P2PTradeStatusReleased ||
@@ -2169,6 +2197,47 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
 		Reason: "chain Cancelled"}, nil
+}
+
+// reconcileOrphanOpen reclaims a pending_payment trade whose on-chain open never
+// landed (OpenTxHash empty, not on chain, past its payment window). Such a row
+// permanently held the ad's reserved/remaining capacity; this cancels it and
+// restores the off-chain counters. There is nothing on chain to settle.
+func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
+	now := s.clock.Now()
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Guard on status + empty open_tx_hash: if ConfirmOpenTrade landed between
+		// our read and here, RowsAffected==0 and we restore nothing (no double-credit).
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND status = ? AND open_tx_hash = ''", trade.ID, models.P2PTradeStatusPendingPayment).
+			Updates(map[string]any{
+				"status":        models.P2PTradeStatusCancelled,
+				"cancel_reason": "reconciled_orphan",
+				"updated_at":    now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		return tx.Model(&models.P2PAd{}).
+			Where("id = ?", trade.AdID).
+			Updates(map[string]any{
+				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
+				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
+				"updated_at": now,
+			}).Error
+	})
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
+		"from": models.P2PTradeStatusPendingPayment, "to": models.P2PTradeStatusCancelled,
+		"reason": "orphan open never confirmed on-chain past expiry",
+	})
+	return ReconcileResult{Changed: true, FromStatus: models.P2PTradeStatusPendingPayment,
+		ToStatus: models.P2PTradeStatusCancelled, Reason: "orphan open reclaimed"}, nil
 }
 
 func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
