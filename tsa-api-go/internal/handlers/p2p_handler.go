@@ -117,7 +117,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrInsufficientRemaining),
 		errors.Is(err, services.ErrInvalidTransition),
 		errors.Is(err, services.ErrAdHasOpenTrades),
-		errors.Is(err, services.ErrDisputeAlreadyOpen):
+		errors.Is(err, services.ErrDisputeAlreadyOpen),
+		errors.Is(err, services.ErrActiveTradeExists):
 		status = http.StatusConflict
 	case errors.Is(err, services.ErrRateStale):
 		status = http.StatusServiceUnavailable
@@ -537,10 +538,10 @@ func (h *P2PHandler) GetPoolBalance(c *gin.Context) {
 type createAdRequest struct {
 	// Side selects sell-ad (default) or buy-ad. Sell-ads use the off-chain
 	// voucher/pool flow; buy-ads are JIT-funded by the user at trade-open.
-	Side             string   `json:"side"`
-	Token            string   `json:"token" binding:"required"`
-	TokenAmount      string   `json:"tokenAmount" binding:"required"`
-	FiatCurrency     string   `json:"fiatCurrency" binding:"required"`
+	Side         string `json:"side"`
+	Token        string `json:"token" binding:"required"`
+	TokenAmount  string `json:"tokenAmount" binding:"required"`
+	FiatCurrency string `json:"fiatCurrency" binding:"required"`
 	// Rate is required for fixed-rate ads (the default) but must be omitted
 	// for float-rate ads. The service-layer validator enforces this; we
 	// can't use `binding:"required"` here because Gin would reject float
