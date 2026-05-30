@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -2536,6 +2537,81 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 		return nil, err
 	}
 	return out, nil
+}
+
+// ExpressMatchParams is a one-shot best-match request (the Express buyer flow).
+type ExpressMatchParams struct {
+	Side         string // 'buy' = user buys crypto (match sell-ads); 'sell' = user sells (match buy-ads)
+	Token        string
+	FiatCurrency string
+	Amount       string // token base units the user wants to trade
+}
+
+// ExpressMatch returns active ads matching the request, ranked best-first: best
+// price for the user (lowest rate when buying crypto, highest when selling). Only
+// ads with enough remaining capacity whose implied fiat is within the ad's limits
+// are returned. MVP ranks on price; the caller decorates seller stats for display
+// (reputation as a tiebreak is a planned follow-on). Opening reuses OpenTrade.
+func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams) ([]models.P2PAd, error) {
+	side := strings.ToLower(strings.TrimSpace(p.Side))
+	var adSide string
+	switch side {
+	case "buy":
+		adSide = models.P2PAdSideSell // user buys crypto → match sell-ads
+	case "sell":
+		adSide = models.P2PAdSideBuy // user sells crypto → match buy-ads
+	default:
+		return nil, fmt.Errorf("%w: side must be 'buy' or 'sell'", ErrInvalidParams)
+	}
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(p.Amount), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: amount must be a positive integer (base units)", ErrInvalidParams)
+	}
+
+	cands, err := s.ListAds(ctx, AdFilter{
+		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency,
+		Status: models.P2PAdStatusActive, Limit: 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	eligible := make([]models.P2PAd, 0, len(cands))
+	for _, ad := range cands {
+		rem, okR := new(big.Int).SetString(ad.Remaining, 10)
+		if !okR || rem.Cmp(amount) < 0 {
+			continue // not enough capacity
+		}
+		_, fiat, err := computeFiatFromToken(p.Amount, ad.Rate, tokenDecimalsFor(ad.Token))
+		if err != nil {
+			continue
+		}
+		if checkFiatLimits(fiat, string(ad.MinLimit), string(ad.MaxLimit)) != nil {
+			continue // implied fiat outside the ad's per-trade limits
+		}
+		eligible = append(eligible, ad)
+	}
+	rankExpressAds(eligible, side)
+	return eligible, nil
+}
+
+// rankExpressAds sorts ads best-first for the user (stable): buying crypto → lowest
+// rate; selling crypto → highest rate. Unparseable rates sink to the end.
+func rankExpressAds(ads []models.P2PAd, side string) {
+	sort.SliceStable(ads, func(i, j int) bool {
+		ri, ei := scaleDecimal(ads[i].Rate, 10)
+		rj, ej := scaleDecimal(ads[j].Rate, 10)
+		if ei != nil {
+			return false
+		}
+		if ej != nil {
+			return true
+		}
+		if side == "sell" { // user sells crypto → wants the highest rate
+			return ri.Cmp(rj) > 0
+		}
+		return ri.Cmp(rj) < 0 // user buys crypto → wants the lowest rate
+	})
 }
 
 // LoadAdPaymentMethods returns the seller's payment-method rows that this

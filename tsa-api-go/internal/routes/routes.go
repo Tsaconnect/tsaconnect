@@ -352,6 +352,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
 			p2pGroup.GET("/payment-providers", p2p.ListPaymentProviders)
 
+			// Express auto-match: one-shot best-price quote (open via /ads/:id/trades).
+			p2pGroup.POST("/express/quote", p2p.ExpressQuote)
+
 			// Seller deposit / withdraw — pool-model capital movement.
 			p2pGroup.GET("/balance", p2p.GetPoolBalance)
 			p2pGroup.GET("/allowance", p2p.GetAllowance)

@@ -692,6 +692,46 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
 }
 
+type expressQuoteRequest struct {
+	Side         string `json:"side" binding:"required"` // 'buy' = user buys crypto; 'sell' = user sells
+	Token        string `json:"token" binding:"required"`
+	FiatCurrency string `json:"fiatCurrency" binding:"required"`
+	Amount       string `json:"amount" binding:"required"` // token base units
+}
+
+// ExpressQuote returns the best-matching active ad (+ up to 3 alternatives) for a
+// one-shot Express buy/sell, ranked by price. The match is decorated with the same
+// effective-rate / seller-stats signals as the browse list; opening it is the
+// normal POST /p2p/ads/:id/trades flow.
+func (h *P2PHandler) ExpressQuote(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	var req expressQuoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	matches, err := h.trade.ExpressMatch(c.Request.Context(), services.ExpressMatchParams{
+		Side: req.Side, Token: req.Token, FiatCurrency: req.FiatCurrency, Amount: req.Amount,
+	})
+	if mapServiceError(c, err) {
+		return
+	}
+	decorated := h.decorateAdsWithEffectiveRate(c.Request.Context(), matches)
+	var best any
+	alternatives := []adListItem{}
+	if len(decorated) > 0 {
+		best = decorated[0]
+		end := len(decorated)
+		if end > 4 {
+			end = 4
+		}
+		alternatives = decorated[1:end]
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"best": best, "alternatives": alternatives}})
+}
+
 // adListItem wraps a P2PAd with the transient rateStale flag computed at
 // response time. For float ads, ad.Rate is overwritten with the freshly
 // computed effective rate when the feed is fresh; on a stale feed the cached

@@ -1594,6 +1594,67 @@ func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
 }
 
 // TestPrepareRaiseDispute_StoresEvidence locks the dispute-wizard backend (#25):
+// TestRankExpressAds locks the Express ranking (#22): buying crypto → lowest rate
+// first; selling crypto → highest rate first.
+func TestRankExpressAds(t *testing.T) {
+	base := []models.P2PAd{{Rate: "1500"}, {Rate: "1490"}, {Rate: "1510"}}
+	buy := append([]models.P2PAd(nil), base...)
+	rankExpressAds(buy, "buy")
+	if buy[0].Rate != "1490" || buy[2].Rate != "1510" {
+		t.Errorf("buy rank wrong: %s,%s,%s", buy[0].Rate, buy[1].Rate, buy[2].Rate)
+	}
+	sell := append([]models.P2PAd(nil), base...)
+	rankExpressAds(sell, "sell")
+	if sell[0].Rate != "1510" || sell[2].Rate != "1490" {
+		t.Errorf("sell rank wrong: %s,%s,%s", sell[0].Rate, sell[1].Rate, sell[2].Rate)
+	}
+}
+
+// TestExpressMatch_RanksAndFilters locks the Express matcher (#22): best price first,
+// with insufficient-capacity / out-of-limit ads excluded.
+func TestExpressMatch_RanksAndFilters(t *testing.T) {
+	svc, _, _, _, _, _, db := buyAdFixture(t)
+	mk := func(rate, remaining, minL, maxL string) uuid.UUID {
+		id := uuid.New()
+		if err := db.Create(&models.P2PAd{
+			ID: id, SellerID: uuid.New(), Side: models.P2PAdSideSell, Token: "USDT", ChainID: 14601,
+			FiatCurrency: "NGN", Rate: rate, RateType: models.P2PAdRateTypeFixed,
+			FloatAnchor: models.P2PAdFloatAnchorBybitSell,
+			Amount:      remaining, Remaining: remaining, Reserved: "0",
+			MinLimit: models.OptionalNumeric(minL), MaxLimit: models.OptionalNumeric(maxL),
+			Status: models.P2PAdStatusActive,
+		}).Error; err != nil {
+			t.Fatalf("create ad: %v", err)
+		}
+		return id
+	}
+	cheap := mk("1490", "100000000", "0", "100000")
+	mid := mk("1500", "100000000", "0", "100000")
+	lowCap := mk("1480", "500000", "0", "100000") // cheapest but only 0.5 USDT → excluded
+
+	matches, err := svc.ExpressMatch(context.Background(), ExpressMatchParams{
+		Side: "buy", Token: "USDT", FiatCurrency: "NGN", Amount: "1000000",
+	})
+	if err != nil {
+		t.Fatalf("ExpressMatch: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 eligible (lowCap excluded), got %d", len(matches))
+	}
+	if matches[0].ID != cheap {
+		t.Errorf("best should be the cheapest eligible (1490), got %s", matches[0].Rate)
+	}
+	if matches[1].ID != mid {
+		t.Errorf("second should be 1500, got %s", matches[1].Rate)
+	}
+	for _, m := range matches {
+		if m.ID == lowCap {
+			t.Errorf("insufficient-remaining ad should be excluded")
+		}
+	}
+}
+
+// TestPrepareRaiseDispute_StoresEvidence locks the dispute-wizard backend (#25):
 // evidence image URLs submitted with a dispute are stored + decoded on load, and
 // the count/URL validation rejects bad input.
 func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
