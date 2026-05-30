@@ -51,6 +51,11 @@ const REGISTRY = {
   play: { set: 'ion', glyph: 'play' },
   empty: { set: 'mci', glyph: 'inbox-outline' },
   swapVertical: { set: 'ion', glyph: 'swap-vertical' },
+  list: { set: 'ion', glyph: 'list' },
+  storefront: { set: 'ion', glyph: 'storefront' },
+  trendingUp: { set: 'ion', glyph: 'trending-up' },
+  trendingDown: { set: 'ion', glyph: 'trending-down' },
+  pool: { set: 'mci', glyph: 'safe' },
 } as const satisfies Record<string, IconEntry>;
 
 export type IconName = keyof typeof REGISTRY;
