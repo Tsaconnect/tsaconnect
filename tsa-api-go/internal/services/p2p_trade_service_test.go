@@ -349,7 +349,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, ad_id TEXT NOT NULL,
-			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL,
+			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL, opener_id TEXT,
 			token TEXT, chain_id INTEGER,
 			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
@@ -1669,6 +1669,47 @@ func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTrade
 		t.Fatalf("seed buy-ad trade: %v", err)
 	}
 	return svc, esc, tradeID, adID
+}
+
+// TestReconcile_OrphanOpen_ReclaimsCapacity locks audit #4: a pending_payment trade
+// whose on-chain open never landed (OpenTxHash empty, not on chain) and whose window
+// has elapsed is reclaimed by the reconciler — cancelled + ad capacity restored.
+func TestReconcile_OrphanOpen_ReclaimsCapacity(t *testing.T) {
+	svc, esc, _, _, adID, pmID, db := buyAdFixture(t)
+	userID := uuid.New()
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
+		"0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	var afterOpen models.P2PAd
+	db.First(&afterOpen, "id = ?", adID)
+	if afterOpen.Reserved == "0" {
+		t.Fatalf("expected reserved>0 after open")
+	}
+	// Make it an expired orphan: never confirmed (OpenTxHash empty) + past expiry.
+	// Expire it relative to the fixture's fixed clock (2026-05-23 12:00 UTC).
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("expires_at", time.Date(2026, 5, 23, 11, 0, 0, 0, time.UTC))
+	// esc.onChainTrade left nil → ReadTrade returns Status=None, Exists=false.
+	res, err := svc.ReconcileTrade(context.Background(), trade.ID)
+	if err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	if !res.Changed || res.ToStatus != models.P2PTradeStatusCancelled {
+		t.Errorf("expected orphan reclaim → cancelled, got %+v", res)
+	}
+	var t2 models.P2PTrade
+	db.First(&t2, "id = ?", trade.ID)
+	if t2.Status != models.P2PTradeStatusCancelled {
+		t.Errorf("trade status = %s, want cancelled", t2.Status)
+	}
+	var adAfter models.P2PAd
+	db.First(&adAfter, "id = ?", adID)
+	if adAfter.Reserved != "0" {
+		t.Errorf("reserved = %s, want 0 (capacity reclaimed)", adAfter.Reserved)
+	}
+	_ = esc
 }
 
 func TestReconcileBuyAdTrade_Cancelled_RestoresCapacity(t *testing.T) {
