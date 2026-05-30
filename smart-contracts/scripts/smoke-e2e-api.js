@@ -25,8 +25,10 @@ const jwt = (id) => {
   const p = b64(JSON.stringify({ userId: id, exp: 4102444800 }));
   return `${h}.${p}.${b64(crypto.createHmac('sha256', SECRET).update(`${h}.${p}`).digest())}`;
 };
+const ADMIN_ID = '33333333-3333-3333-3333-333333333333';
 const MERCHANT_JWT = jwt(MERCHANT_ID);
 const USER_JWT = jwt(USER_ID);
+const ADMIN_JWT = jwt(ADMIN_ID);
 
 const erc20 = ['function mint(address,uint256) external'];
 
@@ -149,7 +151,38 @@ async function main() {
   if ((t2.trade?.status ?? t2.status) !== 'released') throw new Error('buy: final status ' + JSON.stringify(t2).slice(0, 200));
   ok('BUY-AD released ✓ (full stack: API+chain+DB)');
 
-  console.log('\n✓✓✓ FULL-STACK E2E PASSED — both flows work through the real API + chain + DB.');
+  // ───────────────── DISPUTE FLOW (sell-ad, resolve to seller / refund) ─────────────────
+  console.log('\n══ DISPUTE → ADMIN RESOLVE (refund to seller) ══');
+  // Reuse merchant's leftover pool (1 USDT still available after the sell flow).
+  const adD = await api('POST', '/p2p/ads', MERCHANT_JWT, {
+    side: 'sell', token: 'USDT', tokenAmount: '1000000', fiatCurrency: 'NGN', rate: '1500', rateType: 'fixed',
+    minLimit: '100', maxLimit: '5000', paymentMethodIds: [PM], terms: 'E2E dispute', sellerAddress: merchantW.address,
+  });
+  const adv = adD.typedData;
+  const sigD = await merchantW.signTypedData(
+    { name: adv.domain.name, version: adv.domain.version, chainId: adv.domain.chainId, verifyingContract: adv.domain.verifyingContract },
+    { AdVoucher: adv.types.AdVoucher }, adv.message,
+  );
+  await api('POST', `/p2p/ads/${adD.ad.id}/sign`, MERCHANT_JWT, { signature: sigD, sellerAddress: merchantW.address });
+  const openD = await api('POST', `/p2p/ads/${adD.ad.id}/trades`, USER_JWT, { fiatAmount: '1500', paymentMethodId: PM, buyerAddress: userW.address });
+  const tradeD = openD.trade;
+  const openDTx = await broadcast(userW, openD.unsignedTx, 'dispute.openTrade');
+  await api('POST', `/p2p/trades/${tradeD.id}/open/confirm`, USER_JWT, { txHash: openDTx, callerAddress: userW.address });
+  ok('trade ' + tradeD.id + ' opened');
+  // buyer raises a dispute
+  const disp = await api('POST', `/p2p/trades/${tradeD.id}/dispute`, USER_JWT, { reason: 'Paid but seller unresponsive', callerAddress: userW.address });
+  const dispTx = await broadcast(userW, disp.unsignedTx, 'raiseDispute');
+  await api('POST', `/p2p/trades/${tradeD.id}/dispute/confirm`, USER_JWT, { txHash: dispTx });
+  ok('dispute raised + confirmed (disputed)');
+  // admin (owner EOA) resolves -> refund to seller (re-pools to available)
+  const resolve = await api('POST', `/admin/p2p/disputes/${tradeD.id}/resolve`, ADMIN_JWT, { refundBuyer: false, note: 'Insufficient evidence', adminAddress: deployer.address });
+  const resolveTx = await broadcast(deployer, resolve.unsignedTx, 'adminResolve');
+  await api('POST', `/admin/p2p/disputes/${tradeD.id}/resolve/confirm`, ADMIN_JWT, { txHash: resolveTx });
+  const tD = await api('GET', `/p2p/trades/${tradeD.id}`, MERCHANT_JWT);
+  if ((tD.trade?.status ?? tD.status) !== 'resolved') throw new Error('dispute: final status ' + JSON.stringify(tD).slice(0, 200));
+  ok('DISPUTE resolved ✓ (raiseDispute + adminResolve, full stack)');
+
+  console.log('\n✓✓✓ FULL-STACK E2E PASSED — sell, buy, and dispute flows work through the real API + chain + DB.');
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error('\n✗ E2E FAILED:', e.message); process.exit(1); });
