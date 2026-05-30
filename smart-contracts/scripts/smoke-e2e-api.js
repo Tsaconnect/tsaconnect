@@ -170,10 +170,16 @@ async function main() {
   await api('POST', `/p2p/trades/${tradeD.id}/open/confirm`, USER_JWT, { txHash: openDTx, callerAddress: userW.address });
   ok('trade ' + tradeD.id + ' opened');
   // buyer raises a dispute
-  const disp = await api('POST', `/p2p/trades/${tradeD.id}/dispute`, USER_JWT, { reason: 'Paid but seller unresponsive', callerAddress: userW.address });
+  const disp = await api('POST', `/p2p/trades/${tradeD.id}/dispute`, USER_JWT, { reason: 'Paid but seller unresponsive', callerAddress: userW.address, evidenceUrls: ['https://example.test/proof-a.jpg', 'https://example.test/proof-b.jpg'] });
   const dispTx = await broadcast(userW, disp.unsignedTx, 'raiseDispute');
   await api('POST', `/p2p/trades/${tradeD.id}/dispute/confirm`, USER_JWT, { txHash: dispTx });
   ok('dispute raised + confirmed (disputed)');
+  // Verify evidence (PR #17) round-trips through the live API.
+  const disputeRow = await api('GET', `/p2p/trades/${tradeD.id}/dispute`, USER_JWT);
+  if (!Array.isArray(disputeRow.evidenceUrls) || disputeRow.evidenceUrls.length !== 2) {
+    throw new Error('evidence not stored/returned: ' + JSON.stringify(disputeRow).slice(0, 200));
+  }
+  ok('dispute evidence stored + returned (' + disputeRow.evidenceUrls.length + ' images)');
   // admin (owner EOA) resolves -> refund to seller (re-pools to available)
   const resolve = await api('POST', `/admin/p2p/disputes/${tradeD.id}/resolve`, ADMIN_JWT, { refundBuyer: false, note: 'Insufficient evidence', adminAddress: deployer.address });
   const resolveTx = await broadcast(deployer, resolve.unsignedTx, 'adminResolve');
