@@ -12,6 +12,7 @@ import { COLORS } from "../../constants";
 import { RectButton } from "../designs";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
+import { cartService } from "../services/cart";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
 //@ts-ignore
@@ -210,6 +211,8 @@ const ProductDetail = ({ item }) => {
                       };
                       const response = await addItem(newItem);
                       await getItems();
+                      // This add bypasses cartService, so refresh the shared count badge.
+                      cartService.notifyChange();
                     }
                   }}
                 />
