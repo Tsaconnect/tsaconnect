@@ -1,32 +1,41 @@
 // app/p2p/_layout.tsx
 //
 // Stack layout for the P2P trading subsection. Screens registered here
-// share consistent navigation chrome via `defaultScreenOptions`.
+// share consistent navigation chrome via `defaultScreenOptions`. A persistent
+// bottom nav (P2PTabBar) is rendered below the Stack — it stays mounted across
+// P2P screens and self-hides on detail/flow screens.
 import React from 'react';
+import { View } from 'react-native';
 import { Stack } from 'expo-router';
 import { defaultScreenOptions } from '../../constants/navigation';
+import { P2PTabBar } from '../../components/p2p/P2PTabBar';
 
 const P2PLayout = () => {
   return (
-    <Stack screenOptions={defaultScreenOptions}>
-      <Stack.Screen name="index" options={{ title: 'P2P Marketplace' }} />
-      <Stack.Screen name="my-ads" options={{ title: 'My Ads' }} />
-      <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
-      <Stack.Screen name="create-ad" options={{ title: 'Create Sell Ad' }} />
-      <Stack.Screen name="create-buy-ad" options={{ title: 'Post Buy Ad' }} />
-      <Stack.Screen name="pool" options={{ title: 'P2P Pool' }} />
-      <Stack.Screen name="ad/[adId]" options={{ title: 'Ad Detail' }} />
-      <Stack.Screen name="trade/[tradeId]" options={{ title: 'Trade' }} />
-      <Stack.Screen name="seller/[sellerId]" options={{ title: 'Merchant Profile' }} />
-      <Stack.Screen
-        name="payment-methods/index"
-        options={{ title: 'Payment Methods' }}
-      />
-      <Stack.Screen
-        name="payment-methods/new"
-        options={{ title: 'Add Payment Method' }}
-      />
-    </Stack>
+    <View style={{ flex: 1 }}>
+      <View style={{ flex: 1 }}>
+        <Stack screenOptions={defaultScreenOptions}>
+          <Stack.Screen name="index" options={{ title: 'P2P Marketplace' }} />
+          <Stack.Screen name="my-ads" options={{ title: 'My Ads' }} />
+          <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
+          <Stack.Screen name="create-ad" options={{ title: 'Create Sell Ad' }} />
+          <Stack.Screen name="create-buy-ad" options={{ title: 'Post Buy Ad' }} />
+          <Stack.Screen name="pool" options={{ title: 'P2P Pool' }} />
+          <Stack.Screen name="ad/[adId]" options={{ title: 'Ad Detail' }} />
+          <Stack.Screen name="trade/[tradeId]" options={{ title: 'Trade' }} />
+          <Stack.Screen name="seller/[sellerId]" options={{ title: 'Merchant Profile' }} />
+          <Stack.Screen
+            name="payment-methods/index"
+            options={{ title: 'Payment Methods' }}
+          />
+          <Stack.Screen
+            name="payment-methods/new"
+            options={{ title: 'Add Payment Method' }}
+          />
+        </Stack>
+      </View>
+      <P2PTabBar />
+    </View>
   );
 };
 
