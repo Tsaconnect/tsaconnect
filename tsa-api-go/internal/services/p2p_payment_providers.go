@@ -12,20 +12,26 @@ type PaymentProvider struct {
 	Label           string `json:"label"`
 	Type            string `json:"type"`            // bank | mobile_money | wallet
 	IdentifierLabel string `json:"identifierLabel"` // UI label for the account-id field
+	Speed           string `json:"speed"`           // instant | fast | standard | slow
+	SpeedLabel      string `json:"speedLabel"`      // human label, e.g. "Instant", "~10 min"
+	// Currencies this provider serves (ISO codes). Empty = universal (e.g. bank
+	// transfer works in any currency). Used to scope the picker to the active fiat.
+	Currencies []string `json:"currencies,omitempty"`
 }
 
 // paymentProviders is the ordered catalog. Add a provider by appending one
 // line — no other code needs to change.
 var paymentProviders = []PaymentProvider{
-	{Slug: "bank_transfer", Label: "Bank Transfer", Type: "bank", IdentifierLabel: "Account number"},
-	{Slug: "opay", Label: "OPay", Type: "mobile_money", IdentifierLabel: "Account/phone"},
-	{Slug: "palmpay", Label: "PalmPay", Type: "mobile_money", IdentifierLabel: "Account/phone"},
-	{Slug: "kuda", Label: "Kuda", Type: "bank", IdentifierLabel: "Account number"},
-	{Slug: "interac", Label: "Interac e-Transfer", Type: "bank", IdentifierLabel: "Email"},
-	{Slug: "paypal", Label: "PayPal", Type: "wallet", IdentifierLabel: "Email"},
-	{Slug: "revolut", Label: "Revolut", Type: "wallet", IdentifierLabel: "Tag/phone"},
-	{Slug: "wise", Label: "Wise", Type: "wallet", IdentifierLabel: "Email"},
-	{Slug: "skrill", Label: "Skrill", Type: "wallet", IdentifierLabel: "Email"},
+	{Slug: "bank_transfer", Label: "Bank Transfer", Type: "bank", IdentifierLabel: "Account number", Speed: "standard", SpeedLabel: "~30 min"},
+	{Slug: "opay", Label: "OPay", Type: "mobile_money", IdentifierLabel: "Account/phone", Speed: "instant", SpeedLabel: "Instant", Currencies: []string{"NGN"}},
+	{Slug: "palmpay", Label: "PalmPay", Type: "mobile_money", IdentifierLabel: "Account/phone", Speed: "instant", SpeedLabel: "Instant", Currencies: []string{"NGN"}},
+	{Slug: "kuda", Label: "Kuda", Type: "bank", IdentifierLabel: "Account number", Speed: "fast", SpeedLabel: "~10 min", Currencies: []string{"NGN"}},
+	{Slug: "interac", Label: "Interac e-Transfer", Type: "bank", IdentifierLabel: "Email", Speed: "fast", SpeedLabel: "~10 min", Currencies: []string{"CAD"}},
+	{Slug: "sepa", Label: "SEPA Transfer", Type: "bank", IdentifierLabel: "IBAN", Speed: "slow", SpeedLabel: "1–2 days", Currencies: []string{"EUR"}},
+	{Slug: "paypal", Label: "PayPal", Type: "wallet", IdentifierLabel: "Email", Speed: "instant", SpeedLabel: "Instant", Currencies: []string{"USD", "EUR", "GBP", "CAD", "AUD"}},
+	{Slug: "revolut", Label: "Revolut", Type: "wallet", IdentifierLabel: "Tag/phone", Speed: "instant", SpeedLabel: "Instant", Currencies: []string{"GBP", "EUR", "USD"}},
+	{Slug: "wise", Label: "Wise", Type: "wallet", IdentifierLabel: "Email", Speed: "fast", SpeedLabel: "~10 min", Currencies: []string{"USD", "EUR", "GBP", "CAD", "AUD"}},
+	{Slug: "skrill", Label: "Skrill", Type: "wallet", IdentifierLabel: "Email", Speed: "instant", SpeedLabel: "Instant", Currencies: []string{"USD", "EUR", "GBP"}},
 }
 
 var providerBySlug = func() map[string]PaymentProvider {
@@ -38,6 +44,32 @@ var providerBySlug = func() map[string]PaymentProvider {
 
 // AllPaymentProviders returns the full catalog (ordered) for the create-ad picker.
 func AllPaymentProviders() []PaymentProvider { return paymentProviders }
+
+// ProvidersForCurrency returns the catalog scoped to a fiat currency: universal
+// providers (empty Currencies, e.g. bank transfer) plus those serving the currency.
+// Case-insensitive. An empty currency returns the full catalog (back-compat).
+func ProvidersForCurrency(currency string) []PaymentProvider {
+	c := strings.ToUpper(strings.TrimSpace(currency))
+	if c == "" {
+		return paymentProviders
+	}
+	out := make([]PaymentProvider, 0, len(paymentProviders))
+	for _, p := range paymentProviders {
+		if len(p.Currencies) == 0 || containsFold(p.Currencies, c) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func containsFold(xs []string, target string) bool {
+	for _, x := range xs {
+		if strings.EqualFold(x, target) {
+			return true
+		}
+	}
+	return false
+}
 
 // PaymentProviderBySlug looks up a catalog entry. ok is false for unknown slugs.
 func PaymentProviderBySlug(slug string) (PaymentProvider, bool) {

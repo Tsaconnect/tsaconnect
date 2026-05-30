@@ -221,7 +221,10 @@ func (h *P2PHandler) ListPaymentProviders(c *gin.Context) {
 	if _, ok := h.require(c); !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": services.AllPaymentProviders()})
+	// Optional ?currency= scopes the catalog to providers serving that fiat
+	// (plus universal ones). Omitted → full catalog (back-compat).
+	providers := services.ProvidersForCurrency(c.Query("currency"))
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": providers})
 }
 
 func (h *P2PHandler) DeletePaymentMethod(c *gin.Context) {
