@@ -1571,9 +1571,24 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 // ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
 // state in the interim so the UI can surface "dispute pending broadcast".
 // Either buyer or seller (in Paid state only) may dispute.
-func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string) ([]byte, error) {
+func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string, evidenceURLs []string) ([]byte, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("%w: reason required", ErrInvalidParams)
+	}
+	// Evidence is optional: image URLs uploaded client-side (Cloudinary). Cap the
+	// count and require http(s) URLs; store as JSON on the dispute row.
+	evidenceJSON := ""
+	if len(evidenceURLs) > 0 {
+		if len(evidenceURLs) > 6 {
+			return nil, fmt.Errorf("%w: at most 6 evidence images", ErrInvalidParams)
+		}
+		for _, u := range evidenceURLs {
+			if t := strings.TrimSpace(u); t == "" || !strings.HasPrefix(t, "http") {
+				return nil, fmt.Errorf("%w: evidence must be http(s) image URLs", ErrInvalidParams)
+			}
+		}
+		b, _ := json.Marshal(evidenceURLs)
+		evidenceJSON = string(b)
 	}
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
@@ -1619,12 +1634,13 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	}
 
 	dispute := &models.P2PDispute{
-		ID:         uuid.New(),
-		TradeID:    trade.ID,
-		RaisedBy:   userID,
-		RaisedRole: role,
-		Reason:     reason,
-		Status:     models.P2PDisputeStatusOpen,
+		ID:           uuid.New(),
+		TradeID:      trade.ID,
+		RaisedBy:     userID,
+		RaisedRole:   role,
+		Reason:       reason,
+		EvidenceURLs: evidenceJSON,
+		Status:       models.P2PDisputeStatusOpen,
 	}
 	if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
 		return nil, fmt.Errorf("persist dispute: %w", err)
