@@ -11,7 +11,8 @@ import (
 // off-chain-only transitional states that have no contract analogue.
 //
 // On-chain enum (P2PEscrow.sol Status):
-//   None, Pending, Paid, Released, Cancelled, Disputed, Resolved
+//
+//	None, Pending, Paid, Released, Cancelled, Disputed, Resolved
 //
 // DB lifecycle (this model), with on-chain counterpart noted:
 //
@@ -41,12 +42,18 @@ import (
 // PaymentMethodID is the bank/mobile-money account the buyer is paying to —
 // chosen at openTrade time from the ad's PaymentMethodIDs list.
 type P2PTrade struct {
-	ID              uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	AdID            uuid.UUID  `gorm:"type:uuid;not null;index" json:"adId"`
-	BuyerID         uuid.UUID  `gorm:"type:uuid;not null;index" json:"buyerId"`
-	SellerID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"sellerId"`
-	Token           string     `gorm:"size:16;not null" json:"token"`
-	ChainID         int64      `gorm:"not null" json:"chainId"`
+	ID       uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	AdID     uuid.UUID `gorm:"type:uuid;not null;index" json:"adId"`
+	BuyerID  uuid.UUID `gorm:"type:uuid;not null;index" json:"buyerId"`
+	SellerID uuid.UUID `gorm:"type:uuid;not null;index" json:"sellerId"`
+	// OpenerID is the user who funds + broadcasts the open (buyer on a sell-ad,
+	// seller/depositor on a buy-ad). Backs a partial unique index that stops a
+	// single opener from holding >1 active trade on the same ad (capacity-drain
+	// guard, the concurrent backstop for the service-layer check). Nullable so
+	// pre-existing rows don't collide on the partial unique index.
+	OpenerID *uuid.UUID `gorm:"type:uuid;index" json:"openerId,omitempty"`
+	Token    string     `gorm:"size:16;not null" json:"token"`
+	ChainID  int64      `gorm:"not null" json:"chainId"`
 	// Funding discriminates the two-sided escrow flow. Pooled (0) = sell-ad:
 	// the crypto comes from the merchant's deposited on-chain pool. Deposited-
 	// by-taker (1) = buy-ad: the user deposits crypto just-in-time at

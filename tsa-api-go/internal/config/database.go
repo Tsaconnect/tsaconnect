@@ -99,6 +99,14 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_p2p_trades_status_expires
 		ON p2p_trades (status, expires_at) WHERE status = 'pending_payment'`)
 
+	// One active trade per (ad, opener) — the concurrent-race backstop for the
+	// service-layer dedup guard (a double-submit that slips past the SELECT check
+	// fails the second INSERT here, rolling back its capacity debit). opener_id is
+	// nullable, so pre-existing rows (NULL) are excluded and don't collide.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_p2p_active_trade_per_ad_opener
+		ON p2p_trades (ad_id, opener_id)
+		WHERE opener_id IS NOT NULL AND status IN ('pending_payment','paid','releasing','disputed')`)
+
 	// P2P rating value + one-rating-per-(trade,rater)
 	DB.Exec(`ALTER TABLE p2p_ratings
 	         DROP CONSTRAINT IF EXISTS p2p_ratings_value_chk`)
