@@ -34,8 +34,8 @@ func TestProviderTypeDerivation(t *testing.T) {
 
 func TestAllPaymentProvidersNonEmpty(t *testing.T) {
 	providers := AllPaymentProviders()
-	if len(providers) != 9 {
-		t.Fatalf("expected 9 providers, got %d", len(providers))
+	if len(providers) != 10 {
+		t.Fatalf("expected 10 providers, got %d", len(providers))
 	}
 }
 
@@ -81,6 +81,61 @@ func TestPaymentSummaryFromProvidersWithUnknownAndEmpty(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("item %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func hasProvider(ps []PaymentProvider, slug string) bool {
+	for _, p := range ps {
+		if p.Slug == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// TestProvidersForCurrency locks the region-scoped picker (#24): the catalog is
+// filtered to providers serving the active fiat (plus universal ones), and every
+// provider carries a speed label.
+func TestProvidersForCurrency(t *testing.T) {
+	ng := ProvidersForCurrency("NGN")
+	for _, s := range []string{"bank_transfer", "opay", "palmpay", "kuda"} {
+		if !hasProvider(ng, s) {
+			t.Errorf("NGN scope missing %q", s)
+		}
+	}
+	if hasProvider(ng, "interac") || hasProvider(ng, "sepa") {
+		t.Errorf("NGN scope should not include interac/sepa")
+	}
+
+	ca := ProvidersForCurrency("cad") // case-insensitive
+	if !hasProvider(ca, "interac") || !hasProvider(ca, "bank_transfer") {
+		t.Errorf("CAD scope missing interac/bank_transfer")
+	}
+	if hasProvider(ca, "opay") {
+		t.Errorf("CAD scope should not include opay")
+	}
+
+	eur := ProvidersForCurrency("EUR")
+	if !hasProvider(eur, "sepa") || !hasProvider(eur, "revolut") {
+		t.Errorf("EUR scope missing sepa/revolut")
+	}
+
+	xx := ProvidersForCurrency("XYZ")
+	if !hasProvider(xx, "bank_transfer") {
+		t.Errorf("unknown currency should still include universal bank_transfer")
+	}
+	if hasProvider(xx, "opay") || hasProvider(xx, "interac") {
+		t.Errorf("unknown currency should include only universal providers")
+	}
+
+	if len(ProvidersForCurrency("")) != len(AllPaymentProviders()) {
+		t.Errorf("empty currency should return the full catalog")
+	}
+
+	for _, p := range AllPaymentProviders() {
+		if p.Speed == "" || p.SpeedLabel == "" {
+			t.Errorf("provider %q missing speed/speedLabel", p.Slug)
 		}
 	}
 }
