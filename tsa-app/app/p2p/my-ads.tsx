@@ -2,26 +2,15 @@
 //
 // Seller's own ads — list with status filter, pause/resume, and on-chain close.
 // Close flows through the prepare → sign → broadcast → confirm pattern just
-// like create-ad and trade actions.
+// like create-ad and trade actions. Restyled onto the TSA Signature design
+// system; behavior + API calls are unchanged.
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChainKey } from '../../constants/chains';
-import { P2P_GOLD } from '../../constants/p2p';
 import {
   adsApi,
-  formatFiat,
   formatTokenAmount,
   TOKEN_DECIMALS,
   unsignedTxToTxLike,
@@ -29,8 +18,22 @@ import {
 } from '../../services/p2p';
 import { broadcastTransaction, getActiveWallet, signTransaction } from '../../services/wallet';
 import { useUserRole } from '../../hooks/useUserRole';
-
-const GOLD = P2P_GOLD;
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Button,
+  Chip,
+  Divider,
+  EmptyState,
+  ErrorState,
+  Icon,
+  PressableScale,
+  SkeletonGroup,
+  StatusPill,
+  Text,
+  useToast,
+} from '@/components/ui';
 
 type StatusFilter = 'all' | P2PAd['status'];
 
@@ -44,6 +47,8 @@ const STATUS_TABS: { key: StatusFilter; label: string }[] = [
 ];
 
 const MyAdsScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
+  const toast = useToast();
   const [ads, setAds] = useState<P2PAd[]>([]);
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [loading, setLoading] = useState(true);
@@ -83,7 +88,9 @@ const MyAdsScreen: React.FC = () => {
     setActing(ad.id);
     const res = ad.status === 'paused' ? await adsApi.resume(ad.id) : await adsApi.pause(ad.id);
     if (!res.success) {
-      Alert.alert('Action failed', res.message || 'Server rejected the request');
+      toast.error(res.message || 'Server rejected the request');
+    } else {
+      toast.success(ad.status === 'paused' ? 'Ad resumed' : 'Ad paused');
     }
     setActing('');
     load();
@@ -119,6 +126,7 @@ const MyAdsScreen: React.FC = () => {
       broadcastHash = resp.hash;
       const conf = await adsApi.confirmCancel(ad.id, resp.hash);
       if (!conf.success) throw new Error(conf.message || 'Confirm failed');
+      toast.success('Ad cancelled');
     } catch (err: any) {
       const detail = err?.message || String(err);
       if (broadcastHash) {
@@ -128,7 +136,7 @@ const MyAdsScreen: React.FC = () => {
             `(${detail}). Wait a minute for the reconciler to catch up; contact support if not.`,
         );
       } else {
-        Alert.alert('Cancel failed', detail);
+        toast.error(detail);
       }
     } finally {
       setActing('');
@@ -137,12 +145,13 @@ const MyAdsScreen: React.FC = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
+            tintColor={colors.accent}
             onRefresh={() => {
               setRefreshing(true);
               load();
@@ -150,99 +159,100 @@ const MyAdsScreen: React.FC = () => {
           />
         }
       >
-        <View style={styles.headerRow}>
-          <Text style={styles.heading}>My Ads</Text>
-          <TouchableOpacity
-            style={styles.cta}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text variant="title1" weight="800">
+            My Ads
+          </Text>
+          <Button
+            title={isMerchant ? 'New ad' : 'Become merchant'}
+            leftIcon="plus"
+            size="sm"
+            fullWidth={false}
             onPress={() =>
               router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
             }
-            activeOpacity={0.85}
-          >
-            <Icon name="add" size={18} color="#000" />
-            <Text style={styles.ctaText}>{isMerchant ? 'New ad' : 'Become merchant'}</Text>
-          </TouchableOpacity>
+          />
         </View>
 
         {/* Mirrors the marketplace-side banner: non-merchants reading their
             (empty) My Ads list get a one-tap path to onboarding instead of
             hitting a 403 inside the create-ad flow. */}
         {!roleLoading && !isMerchant && (
-          <TouchableOpacity
-            style={styles.merchantBanner}
+          <PressableScale
             onPress={() => router.push('/merchants/merchant-request')}
-            activeOpacity={0.85}
+            style={{ marginTop: spacing.lg }}
           >
-            <Icon name="storefront" size={24} color={GOLD.dark} />
-            <View style={styles.merchantBannerText}>
-              <Text style={styles.merchantBannerTitle}>Become a merchant</Text>
-              <Text style={styles.merchantBannerDesc}>
-                Required to publish P2P ads. Apply in a minute.
-              </Text>
-            </View>
-            <Icon name="chevron-right" size={22} color={GOLD.dark} />
-          </TouchableOpacity>
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="storefront" size={24} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Become a merchant
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Required to publish P2P ads. Apply in a minute.
+                  </Text>
+                </View>
+                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+              </View>
+            </AccentCard>
+          </PressableScale>
         )}
 
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={styles.tabRow}
-          contentContainerStyle={{ gap: 8, paddingHorizontal: 2 }}
+          style={{ marginTop: spacing.lg, marginBottom: spacing.lg }}
+          contentContainerStyle={{ gap: spacing.sm, paddingHorizontal: 2 }}
         >
           {STATUS_TABS.map((t) => (
-            <TouchableOpacity
+            <Chip
               key={t.key}
-              style={[styles.tab, filter === t.key && styles.tabActive]}
+              label={t.label}
+              selected={filter === t.key}
               onPress={() => setFilter(t.key)}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.tabText, filter === t.key && styles.tabTextActive]}>
-                {t.label}
-              </Text>
-            </TouchableOpacity>
+            />
           ))}
         </ScrollView>
 
-        {loadError && (
-          <View style={styles.errorBanner}>
-            <Icon name="error-outline" size={18} color={GOLD.error} />
-            <Text style={styles.errorBannerText} numberOfLines={2}>
-              {loadError}
-            </Text>
-            <TouchableOpacity
-              onPress={() => {
+        {loadError && !loading && (
+          <View style={{ marginBottom: spacing.lg }}>
+            <ErrorState
+              subtitle={loadError}
+              onRetry={() => {
                 setLoading(true);
                 load();
               }}
-              hitSlop={8}
-            >
-              <Text style={styles.errorBannerRetry}>Retry</Text>
-            </TouchableOpacity>
+            />
           </View>
         )}
 
         {loading ? (
-          <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 60 }} />
+          <SkeletonGroup shape="adCard" count={4} />
         ) : ads.length === 0 ? (
-          <View style={styles.empty}>
-            <Icon name="storefront" size={48} color={GOLD.muted} />
-            <Text style={styles.emptyText}>
-              {filter === 'all'
+          <EmptyState
+            icon="storefront"
+            title={filter === 'all' ? 'No ads yet' : `No ${filter} ads`}
+            subtitle={
+              filter === 'all'
                 ? "You haven't posted any ads yet. Tap 'New ad' to start selling."
-                : `No ads in '${filter}' status.`}
-            </Text>
-          </View>
+                : `No ads in '${filter}' status.`
+            }
+            actionLabel={isMerchant ? 'New ad' : undefined}
+            onAction={isMerchant ? () => router.push('/p2p/create-ad') : undefined}
+          />
         ) : (
-          ads.map((ad) => (
-            <AdCard
-              key={ad.id}
-              ad={ad}
-              busy={acting === ad.id}
-              onTogglePause={onTogglePause}
-              onCancel={onCancel}
-            />
-          ))
+          <View style={{ gap: spacing.md }}>
+            {ads.map((ad) => (
+              <AdCard
+                key={ad.id}
+                ad={ad}
+                busy={acting === ad.id}
+                onTogglePause={onTogglePause}
+                onCancel={onCancel}
+              />
+            ))}
+          </View>
         )}
       </ScrollView>
     </SafeAreaView>
@@ -255,194 +265,98 @@ const AdCard: React.FC<{
   onTogglePause: (ad: P2PAd) => void;
   onCancel: (ad: P2PAd) => void;
 }> = ({ ad, busy, onTogglePause, onCancel }) => {
+  const { spacing } = useTheme();
   const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const reserved = formatTokenAmount(ad.reserved, decimals, 2);
   const total = formatTokenAmount(ad.amount, decimals, 2);
   const canPauseResume = ad.status === 'active' || ad.status === 'paused';
   const canCancel = ad.status === 'active' || ad.status === 'paused' || ad.status === 'pending';
+  const hasRate = !!ad.rate && ad.rate !== '0';
 
   return (
-    <TouchableOpacity
-      style={styles.card}
-      onPress={() => router.push(`/p2p/ad/${ad.id}`)}
-      activeOpacity={0.85}
-    >
-      <View style={styles.cardTop}>
-        <Text style={styles.cardRate}>
-          {ad.rate && ad.rate !== '0' ? `₦${formatFiat(ad.rate)}` : '—'}{' '}
-          <Text style={styles.cardRateUnit}>/ {ad.token}</Text>
-          {ad.rateType === 'float' && (
-            <Text style={styles.cardRateBadge}>{ad.rateStale ? ' • stale feed' : ' • auto'}</Text>
-          )}
-        </Text>
-        <View style={[styles.statusBadge, statusBadgeColor(ad.status)]}>
-          <Text style={styles.statusBadgeText}>{ad.status}</Text>
-        </View>
-      </View>
-      <View style={styles.cardMetaRow}>
-        <Text style={styles.cardMetaLabel}>Available</Text>
-        <Text style={styles.cardMetaValue}>{remaining} {ad.token}</Text>
-      </View>
-      <View style={styles.cardMetaRow}>
-        <Text style={styles.cardMetaLabel}>Reserved</Text>
-        <Text style={styles.cardMetaValue}>{reserved} {ad.token}</Text>
-      </View>
-      <View style={styles.cardMetaRow}>
-        <Text style={styles.cardMetaLabel}>Total</Text>
-        <Text style={styles.cardMetaValue}>{total} {ad.token}</Text>
-      </View>
-
-      {(canPauseResume || canCancel) && (
-        <View style={styles.cardActions}>
-          {canPauseResume && (
-            <TouchableOpacity
-              style={[styles.secondaryBtn, busy && styles.btnDisabled]}
-              onPress={() => onTogglePause(ad)}
-              disabled={busy}
-            >
-              <Icon
-                name={ad.status === 'paused' ? 'play-arrow' : 'pause'}
-                size={16}
-                color={GOLD.dark}
-              />
-              <Text style={styles.secondaryBtnText}>
-                {ad.status === 'paused' ? 'Resume' : 'Pause'}
+    <PressableScale onPress={() => router.push(`/p2p/ad/${ad.id}`)}>
+      <AccentCard>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+              {hasRate ? (
+                <AmountText value={ad.rate} currency={ad.fiatCurrency} variant="title2" />
+              ) : (
+                <Text variant="title2" weight="700">
+                  —
+                </Text>
+              )}
+              <Text variant="bodySm" color="textMuted">
+                / {ad.token}
               </Text>
-            </TouchableOpacity>
-          )}
-          {canCancel && (
-            <TouchableOpacity
-              style={[styles.dangerBtn, busy && styles.btnDisabled]}
-              onPress={() => onCancel(ad)}
-              disabled={busy}
-            >
-              <Icon name="close" size={16} color={GOLD.error} />
-              <Text style={styles.dangerBtnText}>Cancel ad</Text>
-            </TouchableOpacity>
-          )}
+            </View>
+            {ad.rateType === 'float' && (
+              <Text variant="caption" color={ad.rateStale ? 'warning' : 'textMuted'}>
+                {ad.rateStale ? 'Float · stale feed' : 'Float · auto'}
+              </Text>
+            )}
+          </View>
+          <StatusPill kind="ad" status={ad.status} size="sm" />
         </View>
-      )}
-    </TouchableOpacity>
+
+        <Divider spacing="md" />
+
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: spacing.xs }}>
+          <Text variant="bodySm" color="textSecondary">
+            Available
+          </Text>
+          <Text variant="bodySm" weight="600" numeric>
+            {remaining} {ad.token}
+          </Text>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: spacing.xs }}>
+          <Text variant="bodySm" color="textSecondary">
+            Reserved
+          </Text>
+          <Text variant="bodySm" weight="600" numeric>
+            {reserved} {ad.token}
+          </Text>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: spacing.xs }}>
+          <Text variant="bodySm" color="textSecondary">
+            Total
+          </Text>
+          <Text variant="bodySm" weight="600" numeric>
+            {total} {ad.token}
+          </Text>
+        </View>
+
+        {(canPauseResume || canCancel) && (
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+            {canPauseResume && (
+              <Button
+                title={ad.status === 'paused' ? 'Resume' : 'Pause'}
+                leftIcon={ad.status === 'paused' ? 'play' : 'pause'}
+                variant="secondary"
+                size="sm"
+                fullWidth={false}
+                disabled={busy}
+                onPress={() => onTogglePause(ad)}
+              />
+            )}
+            {canCancel && (
+              <Button
+                title="Cancel ad"
+                leftIcon="close"
+                variant="danger"
+                size="sm"
+                fullWidth={false}
+                loading={busy}
+                disabled={busy}
+                onPress={() => onCancel(ad)}
+              />
+            )}
+          </View>
+        )}
+      </AccentCard>
+    </PressableScale>
   );
 };
-
-function statusBadgeColor(status: P2PAd['status']) {
-  switch (status) {
-    case 'active': return { backgroundColor: '#E8F5E9', borderColor: GOLD.success };
-    case 'paused': return { backgroundColor: '#FFF3CD', borderColor: GOLD.dark };
-    case 'pending': return { backgroundColor: GOLD.light, borderColor: GOLD.dark };
-    case 'exhausted': return { backgroundColor: '#ECEFF1', borderColor: '#666' };
-    case 'cancelled': return { backgroundColor: '#FBE9E7', borderColor: GOLD.error };
-    default: return { backgroundColor: GOLD.light, borderColor: GOLD.dark };
-  }
-}
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 60 },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  heading: { fontSize: 24, fontWeight: '800', color: '#000' },
-  cta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD.primary,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    gap: 4,
-  },
-  ctaText: { fontWeight: '700', color: '#000' },
-  merchantBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: GOLD.light,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    marginBottom: 14,
-  },
-  merchantBannerText: { flex: 1 },
-  merchantBannerTitle: { fontSize: 14, fontWeight: '800', color: '#000' },
-  merchantBannerDesc: { fontSize: 12, color: '#666', marginTop: 2 },
-  tabRow: { marginBottom: 14 },
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF1F0',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: GOLD.error,
-  },
-  errorBannerText: { flex: 1, marginLeft: 8, color: '#7A1F1F', fontSize: 13 },
-  errorBannerRetry: { color: GOLD.dark, fontWeight: '700' },
-  tab: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  tabActive: { backgroundColor: GOLD.primary, borderColor: GOLD.dark },
-  tabText: { fontSize: 12, color: GOLD.dark, fontWeight: '700' },
-  tabTextActive: { color: '#000' },
-  empty: { alignItems: 'center', paddingVertical: 60 },
-  emptyText: { marginTop: 12, fontSize: 14, color: '#888', textAlign: 'center', maxWidth: 280 },
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  cardRate: { fontSize: 20, fontWeight: '800', color: '#000' },
-  cardRateUnit: { fontSize: 13, color: '#666', fontWeight: '600' },
-  cardRateBadge: { fontSize: 11, color: '#888', fontWeight: '500' },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
-  statusBadgeText: { fontSize: 11, color: '#000', fontWeight: '700', textTransform: 'capitalize' },
-  cardMetaRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
-  cardMetaLabel: { fontSize: 13, color: '#666' },
-  cardMetaValue: { fontSize: 13, color: '#000', fontWeight: '600' },
-  cardActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
-  secondaryBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: GOLD.dark,
-  },
-  secondaryBtnText: { fontSize: 13, color: GOLD.dark, fontWeight: '700' },
-  dangerBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: GOLD.error,
-  },
-  dangerBtnText: { fontSize: 13, color: GOLD.error, fontWeight: '700' },
-  btnDisabled: { opacity: 0.4 },
-});
 
 export default MyAdsScreen;
