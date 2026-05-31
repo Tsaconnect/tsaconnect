@@ -1,16 +1,14 @@
 // screens/dashboard2.tsx
+//
+// Home dashboard — total portfolio balance, quick actions, asset list, recent
+// activity, and trade shortcuts. Migrated onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives). Behavior is unchanged: all
+// balance reads, the portfolio/transaction/TP/cashback fetches, the auth-token
+// bootstrap, the value-hide toggle, navigation routes, and money formatting are
+// preserved verbatim — this was a visual/structural restyle only.
 import React, { useState, useEffect, useCallback } from 'react';
-import {
-  View,
-  Text,
-  ScrollView,
-  StyleSheet,
-  RefreshControl,
-  Pressable,
-  Platform,
-} from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import { Ionicons } from '@expo/vector-icons';
+import { View, ScrollView, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { api, Asset } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
@@ -30,6 +28,16 @@ import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
 import { useNetwork } from '../hooks/useNetwork';
 import { useCurrency } from '@/contexts/CurrencyContext';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Divider,
+  Icon,
+  PressableScale,
+  Skeleton,
+  SkeletonGroup,
+  Text,
+} from '@/components/ui';
 
 // The three transactable assets shown on the dashboard
 const DEFAULT_ASSETS: Asset[] = [
@@ -51,6 +59,7 @@ const DEFAULT_ASSETS: Asset[] = [
 ];
 
 const Dashboard: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { network } = useNetwork();
   const { formatDualPrice } = useCurrency();
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
@@ -164,170 +173,113 @@ const Dashboard: React.FC = () => {
   // ── Skeleton loading ──
   if (isLoading && !isRefreshing) {
     return (
-      <ScrollView style={styles.container} contentContainerStyle={styles.skeletonContent}>
-        <View style={[styles.skeletonCard, { height: 180 }]} />
-        <View style={[styles.skeletonCard, { height: 160, marginTop: 14 }]} />
-        <View style={[styles.skeletonCard, { height: 120, marginTop: 14 }]} />
-      </ScrollView>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+          <Skeleton height={180} radius="lg" />
+          <View style={{ marginTop: spacing.lg }}>
+            <Skeleton height={160} radius="lg" />
+          </View>
+          <View style={{ marginTop: spacing.lg }}>
+            <SkeletonGroup shape="adCard" count={2} />
+          </View>
+        </ScrollView>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={{ paddingBottom: 100 }}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
-      }
-    >
-      {/* Header with cart */}
-      <View style={styles.dashHeader}>
-        <Text style={styles.dashHeaderTitle}>TSA Connect</Text>
-        <View style={styles.dashHeaderActions}>
-          <CurrencySelector variant="header" />
-          <CartIconBadge color="#D4AF37" size={24} />
-        </View>
-      </View>
-
-      <BackupBanner />
-
-      {/* Error banner */}
-      {error && (
-        <Pressable style={styles.errorBanner} onPress={onRefresh}>
-          <Icon name="error-outline" size={16} color="#DC2626" />
-          <Text style={styles.errorText}>{error}</Text>
-          <Text style={styles.errorRetry}>Tap to retry</Text>
-        </Pressable>
-      )}
-
-      <BalanceCard
-        totalUsdValue={totalUsdValue}
-        dailyChange={dailyChange}
-        isValuesHidden={isValuesHidden}
-        onToggleVisibility={() => setIsValuesHidden(v => !v)}
-      />
-
-      {/* TP & Cashback Summary */}
-      {(tpBalance > 0 || cashbackBalance > 0) && (
-        <Pressable
-          style={styles.tpCashbackRow}
-          onPress={() => router.push('/easyswap')}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />
+        }
+      >
+        {/* Header with cart */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: spacing.lg,
+          }}
         >
-          <View style={styles.tpCashbackItem}>
-            <Icon name="stars" size={16} color="#D4AF37" />
-            <Text style={styles.tpCashbackValue}>{tpBalance.toFixed(2)}</Text>
-            <Text style={styles.tpCashbackLabel}>TP</Text>
+          <Text variant="title1" weight="700">
+            TSA Connect
+          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+            <CurrencySelector variant="header" />
+            <CartIconBadge color={colors.accent} size={24} />
           </View>
-          <View style={styles.tpCashbackDivider} />
-          <View style={styles.tpCashbackItem}>
-            <Icon name="payments" size={16} color="#4ADE80" />
-            <Text style={styles.tpCashbackValue}>
-              {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
-            </Text>
-            <Text style={styles.tpCashbackSecondary}>
-              {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
-            </Text>
-            <Text style={styles.tpCashbackLabel}>Cashback</Text>
-          </View>
-        </Pressable>
-      )}
+        </View>
 
-      <AssetList assets={assets} isValuesHidden={isValuesHidden} />
+        <BackupBanner />
 
-      <RecentActivity transactions={transactions} isValuesHidden={isValuesHidden} />
+        {/* Error banner */}
+        {error && (
+          <PressableScale onPress={onRefresh} style={{ marginBottom: spacing.md }}>
+            <AccentCard padding="md" railColor={colors.danger}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="warning" size={18} color={colors.danger} />
+                <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                  {error}
+                </Text>
+                <Text variant="caption" color="danger" weight="700">
+                  Tap to retry
+                </Text>
+              </View>
+            </AccentCard>
+          </PressableScale>
+        )}
 
-      <TradeActions />
+        <BalanceCard
+          totalUsdValue={totalUsdValue}
+          dailyChange={dailyChange}
+          isValuesHidden={isValuesHidden}
+          onToggleVisibility={() => setIsValuesHidden(v => !v)}
+        />
 
-      <View style={{ height: 40 }} />
-    </ScrollView>
+        {/* TP & Cashback Summary */}
+        {(tpBalance > 0 || cashbackBalance > 0) && (
+          <PressableScale onPress={() => router.push('/easyswap')} style={{ marginTop: spacing.md }}>
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
+                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
+                  <Icon name="star" size={16} color={colors.accent} />
+                  <Text variant="bodyMed" weight="700" numeric>
+                    {tpBalance.toFixed(2)}
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    TP
+                  </Text>
+                </View>
+                <Divider vertical spacing="md" />
+                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
+                  <Icon name="wallet" size={16} color={colors.success} />
+                  <Text variant="bodyMed" weight="700" numeric>
+                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    Cashback
+                  </Text>
+                </View>
+              </View>
+            </AccentCard>
+          </PressableScale>
+        )}
+
+        <AssetList assets={assets} isValuesHidden={isValuesHidden} />
+
+        <RecentActivity transactions={transactions} isValuesHidden={isValuesHidden} />
+
+        <TradeActions />
+      </ScrollView>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  dashHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'ios' ? 56 : 16,
-    paddingBottom: 10,
-    backgroundColor: '#FFF',
-  },
-  dashHeaderTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1A1A1A',
-  },
-  dashHeaderActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  skeletonContent: { padding: 16 },
-  skeletonCard: {
-    backgroundColor: '#E5E5E5',
-    borderRadius: 14,
-    marginHorizontal: 16,
-    opacity: 0.5,
-  },
-  // TP & Cashback Summary
-  tpCashbackRow: {
-    flexDirection: 'row',
-    marginHorizontal: 16,
-    marginTop: 12,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  tpCashbackItem: {
-    flex: 1,
-    alignItems: 'center',
-    gap: 4,
-  },
-  tpCashbackDivider: {
-    width: 1,
-    backgroundColor: '#F0F0F0',
-  },
-  tpCashbackValue: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1A1A1A',
-  },
-  tpCashbackSecondary: {
-    fontSize: 11,
-    color: '#666',
-  },
-  tpCashbackLabel: {
-    fontSize: 11,
-    color: '#888',
-  },
-
-  // Error
-  errorBanner: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12,
-    marginHorizontal: 16, marginTop: 8,
-  },
-  errorText: { flex: 1, fontSize: 13, color: '#DC2626' },
-  errorRetry: { fontSize: 12, color: '#DC2626', fontWeight: '600' },
-  // Modals
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 34 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-  modalOption: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FAFAFA', borderRadius: 14, marginBottom: 10 },
-  modalOptionIcon: { width: 48, height: 48, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
-  modalOptionInfo: { flex: 1 },
-  modalOptionTitle: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  modalOptionDesc: { fontSize: 12, color: '#888', marginTop: 2 },
-  modalCancel: { alignItems: 'center', paddingVertical: 14, marginTop: 4 },
-  modalCancelText: { fontSize: 15, color: '#888', fontWeight: '500' },
-});
 
 export default Dashboard;
