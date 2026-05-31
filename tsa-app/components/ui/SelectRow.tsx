@@ -12,6 +12,8 @@ export interface SelectRowProps {
   placeholder?: string;
   onPress: () => void;
   leftIcon?: IconName;
+  /** Custom left node (e.g. a remote image / color dot) — takes precedence over leftIcon. */
+  leftElement?: React.ReactNode;
   error?: string;
   disabled?: boolean;
   style?: ViewStyle;
@@ -23,6 +25,7 @@ export const SelectRow: React.FC<SelectRowProps> = ({
   placeholder = 'Select',
   onPress,
   leftIcon,
+  leftElement,
   error,
   disabled,
   style,
@@ -53,7 +56,7 @@ export const SelectRow: React.FC<SelectRowProps> = ({
           opacity: disabled ? 0.5 : 1,
         }}
       >
-        {leftIcon && <Icon name={leftIcon} size={20} color={colors.textSecondary} />}
+        {leftElement ?? (leftIcon && <Icon name={leftIcon} size={20} color={colors.textSecondary} />)}
         <Text variant="body" color={value ? 'textPrimary' : 'textMuted'} style={{ flex: 1 }} numberOfLines={1}>
           {value || placeholder}
         </Text>

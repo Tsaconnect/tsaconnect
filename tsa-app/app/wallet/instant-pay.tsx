@@ -1,10 +1,22 @@
+// app/wallet/instant-pay.tsx
+//
+// Instant Pay — send crypto to another TSA Connect user by @username. Resolves
+// the username to a wallet address, then runs a review → authorize →
+// prepare → sign → submit (confirm) flow. Restyled onto the TSA Signature
+// design system (@/theme tokens + @/components/ui primitives).
+//
+// FINANCIAL screen: this is a visual/structural restyle ONLY. Every piece of
+// money handling is preserved verbatim — the debounced username resolution
+// (resolveUsername), amount + balance validation, chain/token selection (incl.
+// the per-token supported-chains auto-correct), gas estimation, and the
+// prepareSendTransaction → signTransaction → submitTransaction confirm flow.
+// No recipient, amount, or submit logic was altered.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, TextInput, ScrollView,
-  ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, Modal, FlatList,
+  View, ScrollView, KeyboardAvoidingView, Platform, FlatList,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
@@ -19,25 +31,65 @@ import {
   type ResolvedUser,
 } from '../../services/walletApi';
 import AuthorizationModal from '../../components/common/AuthorizationModal';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Avatar,
+  Button,
+  Card,
+  Divider,
+  Icon,
+  Input,
+  PressableScale,
+  Sheet,
+  Spinner,
+  SummaryCard,
+  SummaryRow,
+  Text,
+} from '@/components/ui';
 
 type BalanceEntry = WalletBalanceWithChain;
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
-const GOLD = '#D4AF37';
 
-const TOKEN_COLORS: Record<string, string> = {
-  MCGP: '#D4AF37', USDC: '#2775CA', USDT: '#26A17B', S: '#5B21B6', BNB: '#F0B90B',
-};
-
-const TokenBadge = ({ symbol, size = 36 }: { symbol: string; size?: number }) => (
-  <View style={[st.badge, { width: size, height: size, borderRadius: size / 2, backgroundColor: TOKEN_COLORS[symbol] || '#888' }]}>
-    <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#FFF' }}>{symbol[0]}</Text>
+// Round token-symbol badge. Color is sourced from the token registry's
+// iconColor (data-driven, like wallet/home & wallet/send) and falls back to a
+// neutral token instead of a hardcoded hex map.
+const TokenBadge = ({
+  symbol,
+  size = 36,
+  bg,
+}: {
+  symbol: string;
+  size?: number;
+  bg: string;
+}) => (
+  <View
+    style={{
+      width: size,
+      height: size,
+      borderRadius: size / 2,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: bg,
+    }}
+  >
+    <Text variant="bodyMed" weight="700" style={{ fontSize: size * 0.38, color: '#FFFFFF' }}>
+      {symbol[0]}
+    </Text>
   </View>
 );
 
 const InstantPay = () => {
+  const { colors, spacing, radius } = useTheme();
   const { tokens, tokenList } = useTokens();
 
+  // Token-color map derived from the registry (matches wallet/home & send), so
+  // badge colors stay data-driven instead of hardcoded hex.
+  const tokenColorFor = useCallback(
+    (symbol: string): string => tokens[symbol]?.iconColor || colors.textMuted,
+    [tokens, colors.textMuted],
+  );
 
   const [username, setUsername] = useState('');
   const [amount, setAmount] = useState('');
@@ -188,94 +240,172 @@ const InstantPay = () => {
   if (screen === 'success' || screen === 'failure') {
     const ok = screen === 'success';
     return (
-      <View style={st.container}>
-        <View style={st.center}>
-          <View style={[st.resIcon, { backgroundColor: ok ? '#D1FAE5' : '#FEE2E2' }]}>
-            <Ionicons name={ok ? 'checkmark-circle' : 'close-circle'} size={48} color={ok ? '#16A34A' : '#DC2626'} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing['2xl'] }}>
+          <View
+            style={{
+              width: 80,
+              height: 80,
+              borderRadius: radius.pill,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: spacing.lg,
+              backgroundColor: ok ? colors.successBg : colors.dangerBg,
+            }}
+          >
+            <Icon name={ok ? 'checkCircle' : 'closeCircle'} size={48} color={ok ? colors.success : colors.danger} />
           </View>
-          <Text style={st.bigTitle}>{ok ? 'Payment Sent!' : 'Payment Failed'}</Text>
-          <Text style={st.resMsg}>
+          <Text variant="title1" weight="700" align="center">
+            {ok ? 'Payment Sent!' : 'Payment Failed'}
+          </Text>
+          <Text
+            variant="bodySm"
+            color="textSecondary"
+            align="center"
+            style={{ marginTop: spacing.xs, marginBottom: spacing.xl, paddingHorizontal: spacing['2xl'] }}
+          >
             {ok ? `${amount} ${selectedToken} sent to @${resolvedUser?.username}` : error}
           </Text>
-          {txHash ? <Text style={st.txH} numberOfLines={1} ellipsizeMode="middle">Tx: {txHash}</Text> : null}
-          <TouchableOpacity style={st.btn} onPress={() => router.replace('/tokenization')}>
-            <Text style={st.btnT}>Back to Wallet</Text>
-          </TouchableOpacity>
+          {txHash ? (
+            <Text
+              variant="caption"
+              color="textMuted"
+              numeric
+              numberOfLines={1}
+              ellipsizeMode="middle"
+              style={{ maxWidth: '80%', marginBottom: spacing['2xl'] }}
+            >
+              Tx: {txHash}
+            </Text>
+          ) : null}
+          <Button
+            title="Back to Wallet"
+            onPress={() => router.replace('/tokenization')}
+            fullWidth={false}
+          />
           {ok && (
-            <TouchableOpacity style={st.btn2} onPress={() => { setScreen('form'); setAmount(''); setUsername(''); setResolvedUser(null); }}>
-              <Text style={st.btn2T}>Send Again</Text>
-            </TouchableOpacity>
+            <Button
+              title="Send Again"
+              variant="ghost"
+              onPress={() => { setScreen('form'); setAmount(''); setUsername(''); setResolvedUser(null); }}
+              style={{ marginTop: spacing.sm }}
+            />
           )}
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // ── Sending ──
   if (screen === 'sending') return (
-    <View style={st.container}>
-      <View style={st.center}>
-        <View style={st.signingIcon}><ActivityIndicator size="large" color={GOLD} /></View>
-        <Text style={st.bigTitle}>Sending Payment</Text>
-        <Text style={st.signingMsg}>Sending {amount} {selectedToken} to @{resolvedUser?.username}</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing['2xl'] }}>
+        <View
+          style={{
+            width: 80,
+            height: 80,
+            borderRadius: radius.pill,
+            backgroundColor: colors.accentMuted,
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: spacing.lg,
+          }}
+        >
+          <Spinner size="large" />
+        </View>
+        <Text variant="title1" weight="700" align="center">
+          Sending Payment
+        </Text>
+        <Text variant="bodySm" weight="600" color="accent" align="center" style={{ marginTop: spacing.xs }}>
+          Sending {amount} {selectedToken} to @{resolvedUser?.username}
+        </Text>
       </View>
-    </View>
+    </SafeAreaView>
   );
 
   // ── Confirm ──
   if (screen === 'confirm') return (
-    <View style={st.container}>
-      <ScrollView contentContainerStyle={st.scroll}>
-        <Pressable onPress={() => setScreen('form')} style={st.backRow}>
-          <Ionicons name="chevron-back" size={22} color={GOLD} />
-          <Text style={st.backT}>Back</Text>
-        </Pressable>
-        <Text style={st.bigTitle}>Confirm Payment</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+        <PressableScale
+          onPress={() => setScreen('form')}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.lg }}
+        >
+          <Icon name="chevronLeft" size={22} color={colors.accent} />
+          <Text variant="bodyMed" weight="600" color="accent">
+            Back
+          </Text>
+        </PressableScale>
+        <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>
+          Confirm Payment
+        </Text>
 
         {/* Recipient */}
-        <View style={st.recipientCard}>
-          <View style={st.recipientAvatar}>
-            <Ionicons name="person" size={24} color={GOLD} />
-          </View>
-          <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={st.recipientName}>{resolvedUser?.name}</Text>
-            <Text style={st.recipientUser}>@{resolvedUser?.username}</Text>
-          </View>
-          {resolvedUser?.verificationStatus === 'verified' && (
-            <View style={st.verifiedChip}>
-              <Ionicons name="checkmark-circle" size={14} color="#16A34A" />
-              <Text style={st.verifiedText}>Verified</Text>
+        <AccentCard padding="md" style={{ marginBottom: spacing.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+            <Avatar name={resolvedUser?.name || resolvedUser?.username} size={44} />
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="700" numberOfLines={1}>
+                {resolvedUser?.name}
+              </Text>
+              <Text variant="caption" color="textMuted">
+                @{resolvedUser?.username}
+              </Text>
             </View>
-          )}
-        </View>
+            {resolvedUser?.verificationStatus === 'verified' && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                  backgroundColor: colors.successBg,
+                  paddingHorizontal: spacing.sm,
+                  paddingVertical: spacing.xs,
+                  borderRadius: radius.pill,
+                }}
+              >
+                <Icon name="checkCircle" size={14} color={colors.success} />
+                <Text variant="caption" weight="600" color="success">
+                  Verified
+                </Text>
+              </View>
+            )}
+          </View>
+        </AccentCard>
 
         {/* Details */}
-        <View style={st.card}>
-          <View style={st.detRow}>
-            <Text style={st.detL}>Amount</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <TokenBadge symbol={selectedToken} size={24} />
-              <Text style={st.detVBold}>{amount} {selectedToken}</Text>
-            </View>
-          </View>
-          <View style={st.divider} />
-          <View style={st.detRow}>
-            <Text style={st.detL}>Network</Text>
-            <Text style={st.detV}>{activeChain?.name || selectedChain}</Text>
-          </View>
-          <View style={st.detRow}>
-            <Text style={st.detL}>Gas Fee</Text>
-            <Text style={st.detV}>{gasEstimate} {activeChain?.nativeCurrency?.symbol || 'S'}</Text>
-          </View>
-        </View>
+        <Card>
+          <SummaryCard>
+            <SummaryRow
+              label="Amount"
+              value={
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                  <TokenBadge symbol={selectedToken} size={24} bg={tokenColorFor(selectedToken)} />
+                  <Text variant="title3" weight="700" numeric>
+                    {amount} {selectedToken}
+                  </Text>
+                </View>
+              }
+            />
+            <Divider spacing="xs" />
+            <SummaryRow label="Network" value={activeChain?.name || selectedChain} />
+            <SummaryRow label="Gas Fee" value={`${gasEstimate} ${activeChain?.nativeCurrency?.symbol || 'S'}`} />
+          </SummaryCard>
+        </Card>
 
-        <TouchableOpacity style={st.btn} onPress={handleSendRequest}>
-          <Ionicons name="flash" size={18} color="#FFF" style={{ marginRight: 8 }} />
-          <Text style={st.btnT}>Confirm & Pay</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={st.btn2} onPress={() => setScreen('form')}>
-          <Text style={st.btn2T}>Cancel</Text>
-        </TouchableOpacity>
+        <Button
+          title="Confirm & Pay"
+          leftIcon="bolt"
+          onPress={handleSendRequest}
+          size="lg"
+          style={{ marginTop: spacing.lg }}
+        />
+        <Button
+          title="Cancel"
+          variant="ghost"
+          onPress={() => setScreen('form')}
+          style={{ marginTop: spacing.sm }}
+        />
       </ScrollView>
 
       <AuthorizationModal
@@ -285,232 +415,214 @@ const InstantPay = () => {
         onAuthorized={handleSend}
         onCancel={() => setShowAuthModal(false)}
       />
-    </View>
+    </SafeAreaView>
   );
 
   // ── Form ──
   return (
-    <KeyboardAvoidingView style={st.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <ScrollView contentContainerStyle={st.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-        {/* Header */}
-        <View style={st.headerIllustration}>
-          <View style={st.headerIconCircle}>
-            <Ionicons name="flash" size={28} color={GOLD} />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Header */}
+          <View style={{ alignItems: 'center', marginBottom: spacing['2xl'], paddingTop: spacing.sm }}>
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accentMuted,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginBottom: spacing.md,
+              }}
+            >
+              <Icon name="bolt" size={28} color={colors.accent} />
+            </View>
+            <Text variant="title1" weight="700" align="center">
+              Instant Pay
+            </Text>
+            <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.xs }}>
+              Send crypto to any TSA Connect user
+            </Text>
           </View>
-          <Text style={st.bigTitle}>Instant Pay</Text>
-          <Text style={st.sub}>Send crypto to any TSA Connect user</Text>
-        </View>
 
-        {/* Recipient */}
-        <View style={st.card}>
-          <Text style={st.cardLabel}>RECIPIENT</Text>
-          <View style={st.usernameRow}>
-            <View style={st.atBadge}><Text style={st.atText}>@</Text></View>
-            <TextInput
-              style={st.usernameInput}
+          {/* Recipient */}
+          <Card style={{ marginBottom: spacing.md }}>
+            <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.md }}>
+              RECIPIENT
+            </Text>
+            <Input
               placeholder="username"
-              placeholderTextColor="#CCC"
               value={username}
               onChangeText={t => { setUsername(t.replace(/\s/g, '')); setError(''); }}
               autoCapitalize="none"
               autoCorrect={false}
+              leftAdornment={
+                <Text variant="bodyMed" weight="700" color="accent">
+                  @
+                </Text>
+              }
+              rightAdornment={resolving ? <Spinner size="small" /> : undefined}
             />
-            {resolving && <ActivityIndicator size="small" color={GOLD} />}
-          </View>
 
-          {resolvedUser && (
-            <View style={st.resolvedRow}>
-              <View style={st.resolvedAvatar}>
-                <Ionicons name="person" size={16} color={GOLD} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={st.resolvedName}>{resolvedUser.name}</Text>
-                <Text style={st.resolvedAddr} numberOfLines={1} ellipsizeMode="middle">{resolvedUser.walletAddress}</Text>
-              </View>
-              {resolvedUser.verificationStatus === 'verified' && (
-                <Ionicons name="checkmark-circle" size={18} color="#16A34A" />
-              )}
-            </View>
-          )}
-        </View>
-
-        {/* Amount + Token */}
-        <View style={st.card}>
-          <View style={st.amountHeader}>
-            <Text style={st.cardLabel}>AMOUNT</Text>
-            <TouchableOpacity onPress={() => setAmount(bal)}>
-              <Text style={st.balText}>Balance: {bal}</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={st.amountRow}>
-            <TouchableOpacity style={st.tokenChip} onPress={() => setShowTokenPicker(true)}>
-              <TokenBadge symbol={selectedToken} size={28} />
-              <Text style={st.tokenChipText}>{selectedToken}</Text>
-              <Ionicons name="chevron-down" size={16} color="#888" />
-            </TouchableOpacity>
-            <TextInput
-              style={st.amountInput}
-              placeholder="0.00"
-              placeholderTextColor="#CCC"
-              value={amount}
-              onChangeText={t => { setAmount(t); setError(''); }}
-              keyboardType="decimal-pad"
-            />
-          </View>
-        </View>
-
-        {/* Error */}
-        {error ? (
-          <View style={st.errorBar}>
-            <Ionicons name="alert-circle" size={16} color="#DC2626" />
-            <Text style={st.errorText}>{error}</Text>
-          </View>
-        ) : null}
-
-        {/* Action */}
-        <TouchableOpacity
-          style={[st.btn, (loading || resolving) && { opacity: 0.4 }]}
-          onPress={handleReview}
-          disabled={loading || resolving}
-        >
-          {loading ? <ActivityIndicator color="#FFF" /> : (
-            <>
-              <Ionicons name="flash" size={18} color="#FFF" style={{ marginRight: 8 }} />
-              <Text style={st.btnT}>Review Payment</Text>
-            </>
-          )}
-        </TouchableOpacity>
-      </ScrollView>
-
-      {/* Token + Chain Picker */}
-      <Modal visible={showTokenPicker} transparent animationType="slide">
-        <Pressable style={st.modalOverlay} onPress={() => setShowTokenPicker(false)}>
-          <View style={st.modalContent}>
-            <Text style={st.modalTitle}>Select Token</Text>
-            <FlatList
-              data={[...(balances as BalanceEntry[])].sort((a, b) => parseFloat(b.balance) - parseFloat(a.balance))}
-              keyExtractor={item => `${item.symbol}-${item.chainKey}`}
-              renderItem={({ item }) => {
-                const active = item.symbol === selectedToken && item.chainKey === selectedChain;
-                const balVal = parseFloat(item.balance);
-                return (
-                  <TouchableOpacity
-                    style={[st.modalItem, active && st.modalItemActive]}
-                    onPress={() => {
-                      setSelectedToken(item.symbol);
-                      setSelectedChain(item.chainKey);
-                      setShowTokenPicker(false);
-                    }}
+            {resolvedUser && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.sm,
+                  marginTop: spacing.md,
+                  backgroundColor: colors.successBg,
+                  borderRadius: radius.md,
+                  padding: spacing.sm,
+                }}
+              >
+                <Avatar name={resolvedUser.name || resolvedUser.username} size={32} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodySm" weight="600">
+                    {resolvedUser.name}
+                  </Text>
+                  <Text
+                    variant="caption"
+                    color="textMuted"
+                    numeric
+                    numberOfLines={1}
+                    ellipsizeMode="middle"
                   >
-                    <TokenBadge symbol={item.symbol} size={36} />
-                    <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={st.modalItemSym}>{item.symbol}</Text>
-                      <Text style={st.modalItemName}>{item.name} · {item.chainName}</Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      <Text style={st.modalItemBal}>
-                        {balVal > 0 ? balVal.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '0'}
+                    {resolvedUser.walletAddress}
+                  </Text>
+                </View>
+                {resolvedUser.verificationStatus === 'verified' && (
+                  <Icon name="checkCircle" size={18} color={colors.success} />
+                )}
+              </View>
+            )}
+          </Card>
+
+          {/* Amount + Token */}
+          <Card style={{ marginBottom: spacing.md }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+              <Text variant="overline" color="textMuted">
+                AMOUNT
+              </Text>
+              <PressableScale onPress={() => setAmount(bal)} hitSlop={6}>
+                <Text variant="caption" weight="600" color="accent" numeric>
+                  Balance: {bal}
+                </Text>
+              </PressableScale>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+              <PressableScale
+                onPress={() => setShowTokenPicker(true)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                  backgroundColor: colors.surfaceAlt,
+                  paddingHorizontal: spacing.sm,
+                  paddingVertical: spacing.sm,
+                  borderRadius: radius.pill,
+                }}
+              >
+                <TokenBadge symbol={selectedToken} size={28} bg={tokenColorFor(selectedToken)} />
+                <Text variant="bodyMed" weight="700">
+                  {selectedToken}
+                </Text>
+                <Icon name="chevronDown" size={16} color={colors.textMuted} />
+              </PressableScale>
+              <View style={{ flex: 1 }}>
+                <Input
+                  placeholder="0.00"
+                  value={amount}
+                  onChangeText={t => { setAmount(t); setError(''); }}
+                  keyboardType="decimal-pad"
+                  inputStyle={{ textAlign: 'right' }}
+                />
+              </View>
+            </View>
+          </Card>
+
+          {/* Error */}
+          {error ? (
+            <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg, marginBottom: spacing.sm }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                <Icon name="warning" size={16} color={colors.danger} />
+                <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                  {error}
+                </Text>
+              </View>
+            </AccentCard>
+          ) : null}
+
+          {/* Action */}
+          <Button
+            title="Review Payment"
+            leftIcon="bolt"
+            onPress={handleReview}
+            loading={loading}
+            disabled={loading || resolving}
+            size="lg"
+            style={{ marginTop: spacing.md }}
+          />
+        </ScrollView>
+
+        {/* Token + Chain Picker */}
+        <Sheet visible={showTokenPicker} onClose={() => setShowTokenPicker(false)} title="Select Token">
+          <FlatList
+            data={[...(balances as BalanceEntry[])].sort((a, b) => parseFloat(b.balance) - parseFloat(a.balance))}
+            keyExtractor={item => `${item.symbol}-${item.chainKey}`}
+            contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg }}
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => {
+              const active = item.symbol === selectedToken && item.chainKey === selectedChain;
+              const balVal = parseFloat(item.balance);
+              return (
+                <PressableScale
+                  onPress={() => {
+                    setSelectedToken(item.symbol);
+                    setSelectedChain(item.chainKey);
+                    setShowTokenPicker(false);
+                  }}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingVertical: spacing.md,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.md,
+                    backgroundColor: active ? colors.accentMuted : 'transparent',
+                  }}
+                >
+                  <TokenBadge symbol={item.symbol} size={36} bg={tokenColorFor(item.symbol)} />
+                  <View style={{ flex: 1, marginLeft: spacing.md }}>
+                    <Text variant="bodyMed" weight="700">
+                      {item.symbol}
+                    </Text>
+                    <Text variant="caption" color="textMuted">
+                      {item.name} · {item.chainName}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text variant="bodySm" weight="600" numeric>
+                      {balVal > 0 ? balVal.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '0'}
+                    </Text>
+                    {parseFloat(item.usdValue) > 0 && (
+                      <Text variant="caption" color="textMuted" numeric>
+                        ${parseFloat(item.usdValue).toFixed(2)}
                       </Text>
-                      {parseFloat(item.usdValue) > 0 && (
-                        <Text style={{ fontSize: 11, color: '#AAA' }}>${parseFloat(item.usdValue).toFixed(2)}</Text>
-                      )}
-                    </View>
-                  </TouchableOpacity>
-                );
-              }}
-            />
-          </View>
-        </Pressable>
-      </Modal>
-    </KeyboardAvoidingView>
+                    )}
+                  </View>
+                </PressableScale>
+              );
+            }}
+          />
+        </Sheet>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 };
 
 export default InstantPay;
-
-const st = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FAFAFA' },
-  scroll: { flexGrow: 1, padding: 20, paddingBottom: 40 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-
-  // Header
-  headerIllustration: { alignItems: 'center', marginBottom: 24, paddingTop: 8 },
-  headerIconCircle: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
-  bigTitle: { fontSize: 26, fontWeight: '700', color: '#1A1A1A' },
-  sub: { fontSize: 13, color: '#888', marginTop: 4 },
-
-  // Cards
-  card: {
-    backgroundColor: '#FFF', borderRadius: 16, padding: 16, marginBottom: 12,
-    borderWidth: 1, borderColor: '#F0F0F0',
-    elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.04, shadowRadius: 8,
-  },
-  cardLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 12 },
-
-  // Username
-  usernameRow: { flexDirection: 'row', alignItems: 'center', gap: 0 },
-  atBadge: { width: 40, height: 48, backgroundColor: '#FFF8E1', borderRadius: 12, borderTopRightRadius: 0, borderBottomRightRadius: 0, justifyContent: 'center', alignItems: 'center' },
-  atText: { fontSize: 18, fontWeight: '700', color: GOLD },
-  usernameInput: { flex: 1, fontSize: 18, fontWeight: '600', color: '#1A1A1A', backgroundColor: '#F9F9F9', height: 48, paddingHorizontal: 12, borderRadius: 12, borderTopLeftRadius: 0, borderBottomLeftRadius: 0 },
-
-  resolvedRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12, backgroundColor: '#F0FDF4', borderRadius: 12, padding: 10, gap: 8 },
-  resolvedAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center' },
-  resolvedName: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-  resolvedAddr: { fontSize: 11, color: '#888', maxWidth: 180 },
-
-  // Amount
-  amountHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  balText: { fontSize: 12, color: GOLD, fontWeight: '500' },
-  amountRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  tokenChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#F5F5F5', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 24 },
-  tokenChipText: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
-  amountInput: { flex: 1, fontSize: 28, fontWeight: '700', color: '#1A1A1A', textAlign: 'right', padding: 0 },
-
-  // Error
-  errorBar: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', borderRadius: 10, padding: 10, marginBottom: 8 },
-  errorText: { fontSize: 12, color: '#DC2626', flex: 1 },
-
-  // Buttons
-  btn: { flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16, paddingHorizontal: 32, borderRadius: 14, alignItems: 'center', justifyContent: 'center', alignSelf: 'stretch', marginTop: 16, marginHorizontal: 20, elevation: 4, shadowColor: GOLD, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8 },
-  btnT: { fontSize: 16, fontWeight: '700', color: '#FFF' },
-  btn2: { paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 10 },
-  btn2T: { fontSize: 15, color: '#888', fontWeight: '600' },
-
-  backRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 4 },
-  backT: { fontSize: 15, color: GOLD, fontWeight: '600' },
-
-  // Badge
-  badge: { justifyContent: 'center', alignItems: 'center' },
-
-  // Confirm
-  recipientCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#F0F0F0', elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.04, shadowRadius: 8 },
-  recipientAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center' },
-  recipientName: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
-  recipientUser: { fontSize: 13, color: '#888' },
-  verifiedChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#F0FDF4', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
-  verifiedText: { fontSize: 11, fontWeight: '600', color: '#16A34A' },
-  detRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
-  detL: { fontSize: 13, color: '#888' },
-  detV: { fontSize: 13, fontWeight: '600', color: '#1A1A1A' },
-  detVBold: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-  divider: { height: 1, backgroundColor: '#F0F0F0', marginVertical: 4 },
-
-  // Signing
-  signingIcon: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#FFF8E1', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-  signingMsg: { fontSize: 15, color: GOLD, fontWeight: '600' },
-
-  // Result
-  resIcon: { width: 80, height: 80, borderRadius: 40, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-  resMsg: { fontSize: 15, color: '#666', textAlign: 'center', marginBottom: 20, paddingHorizontal: 24 },
-  txH: { fontSize: 12, color: '#AAA', marginBottom: 24, maxWidth: '80%' },
-
-  // Token modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '60%' },
-  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 16, textAlign: 'center' },
-  modalItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 8, borderRadius: 12 },
-  modalItemActive: { backgroundColor: '#FFF8E1' },
-  modalItemSym: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
-  modalItemName: { fontSize: 13, color: '#888' },
-  modalItemBal: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-});
