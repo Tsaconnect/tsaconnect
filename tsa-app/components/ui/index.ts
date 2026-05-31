@@ -61,3 +61,7 @@ export { PickerSheet } from './PickerSheet';
 export type { PickerSheetProps, PickerItem } from './PickerSheet';
 export { CopyableField } from './CopyableField';
 export type { CopyableFieldProps } from './CopyableField';
+export { Wizard } from './Wizard';
+export type { WizardProps, WizardStep } from './Wizard';
+export { PhotoPickerTile } from './PhotoPickerTile';
+export type { PhotoPickerTileProps } from './PhotoPickerTile';
