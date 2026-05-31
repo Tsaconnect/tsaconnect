@@ -67,6 +67,7 @@ const REGISTRY = {
   localOffer: { set: 'ion', glyph: 'pricetags' },
   nearMe: { set: 'ion', glyph: 'navigate' },
   construction: { set: 'ion', glyph: 'construct' },
+  edit: { set: 'ion', glyph: 'create-outline' },
 } as const satisfies Record<string, IconEntry>;
 
 export type IconName = keyof typeof REGISTRY;
