@@ -1,20 +1,23 @@
+// components/signup/signupflow.tsx
+//
+// Multi-step signup flow (rendered by app/signup.tsx). Holds the signup form
+// state machine, drives the signup API call, persists the auth token, and routes
+// to /verify on success. Restyled onto the TSA Signature design system — tokens +
+// primitives only; the step state, validation (in SignupScreen1), API call, and
+// navigation are preserved verbatim.
 import React, { useState } from 'react';
-import {
-  View,
-  StyleSheet,
-  Text,
-  Alert,
-  ActivityIndicator,
-} from 'react-native';
+import { Alert, View } from 'react-native';
 import { router } from 'expo-router';
-import { COLORS } from '@/constants/theme';
 import SignupScreen1 from '@/components/signup/SignupScreen1';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../services/api';
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import { Card, Spinner, Text } from '@/components/ui';
 import { SignupData } from './signup';
 
 const SignupFlow = () => {
+  const { colors, spacing, radius } = useTheme();
   const [signupData, setSignupData] = useState<SignupData>({
     name: '',
     username: '',
@@ -91,14 +94,35 @@ const SignupFlow = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       {loading && (
-        <View style={styles.loadingOverlay}>
-          <View style={styles.loadingContent}>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Creating your account...</Text>
-            <Text style={styles.loadingSubtext}>Please don't close the app</Text>
-          </View>
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: colors.overlay,
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <Card
+            elevation="lg"
+            style={{
+              alignItems: 'center',
+              padding: spacing['3xl'],
+              borderRadius: radius.lg,
+              minWidth: 250,
+            }}
+          >
+            <Spinner size="large" label="Creating your account..." />
+            <Text variant="bodySm" color="textMuted" align="center" style={{ marginTop: spacing.sm }}>
+              Please don&apos;t close the app
+            </Text>
+          </Card>
         </View>
       )}
 
@@ -112,48 +136,5 @@ const SignupFlow = () => {
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1000,
-  },
-  loadingContent: {
-    alignItems: 'center',
-    padding: 30,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 5,
-    minWidth: 250,
-  },
-  loadingText: {
-    marginTop: 20,
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.dark,
-    textAlign: 'center',
-  },
-  loadingSubtext: {
-    marginTop: 8,
-    fontSize: 14,
-    color: COLORS.gray,
-    textAlign: 'center',
-  },
-});
 
 export default SignupFlow;
