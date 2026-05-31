@@ -1,7 +1,9 @@
 // app/p2p/pool.tsx
 //
 // Seller's P2P pool management — deposit / withdraw a single token's
-// available + locked balance.
+// available + locked balance. Restyled onto the TSA Signature design system
+// (theme tokens + @/components/ui primitives); behavior, API calls, and the
+// sign → broadcast → confirm flows are unchanged.
 //
 // Flow:
 //   1. GET /p2p/balance — current (available, locked) for the active wallet.
@@ -23,21 +25,14 @@ import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChainKey } from '../../constants/chains';
-import { P2P_GOLD } from '../../constants/p2p';
 import {
   formatTokenAmount,
   parseTokenAmount,
@@ -50,8 +45,20 @@ import {
   getActiveWallet,
   signTransaction,
 } from '../../services/wallet';
-
-const GOLD = P2P_GOLD;
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountInput,
+  Button,
+  Card,
+  Chip,
+  Divider,
+  Icon,
+  PressableScale,
+  SegmentedControl,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const TOKENS = ['USDT', 'USDC', 'MCGP'] as const;
 type Token = typeof TOKENS[number];
@@ -76,6 +83,7 @@ interface PendingConfirm {
 }
 
 const P2PPoolScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const [mode, setMode] = useState<Mode>('deposit');
   const [token, setToken] = useState<Token>('USDT');
   const [amountInput, setAmountInput] = useState('');
@@ -347,179 +355,179 @@ const P2PPoolScreen: React.FC = () => {
     }
   };
 
+  const fmt = (v: string) => (v === '—' ? '—' : `${formatTokenAmount(v, decimals, 4)} ${token}`);
+  const submitLabel = submitting
+    ? stage || 'Working…'
+    : mode === 'deposit'
+      ? 'Deposit'
+      : 'Withdraw';
+
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
       >
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <Text style={styles.heading}>P2P Pool</Text>
-          <Text style={styles.subheading}>
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text variant="title1" weight="800">
+            P2P Pool
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
             Funds you deposit here back your published ads. Available balance is
             withdrawable any time; locked balance is reserved against open trades.
           </Text>
 
           {pending && (
-            <View style={styles.pendingCard}>
-              <View style={styles.pendingRow}>
-                <Icon name="warning" size={18} color={GOLD.error} />
-                <Text style={styles.pendingTitle}>Pending confirmation</Text>
+            <AccentCard railColor={colors.danger} padding="md" style={{ marginBottom: spacing.lg }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="warning" size={18} color={colors.danger} />
+                <Text variant="bodyMed" weight="700" color="danger">
+                  Pending confirmation
+                </Text>
               </View>
-              <Text style={styles.pendingBody}>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
                 Your last {pending.mode} broadcast on chain but the server
-                couldn't record it. The funds moved correctly; retry to
+                couldn&apos;t record it. The funds moved correctly; retry to
                 update your pool balance.
               </Text>
-              <Text style={styles.pendingHash} numberOfLines={1}>
+              <Text variant="caption" color="textMuted" numeric numberOfLines={1} style={{ marginTop: spacing.sm }}>
                 tx {pending.txHash}
               </Text>
-              <View style={styles.pendingActions}>
-                <TouchableOpacity
-                  style={[styles.pendingBtn, retrying && styles.btnDisabled]}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md }}>
+                <Button
+                  title={retrying ? 'Retrying…' : 'Retry confirm'}
+                  size="sm"
+                  fullWidth={false}
+                  loading={retrying}
+                  disabled={retrying}
                   onPress={handleRetryConfirm}
+                />
+                <Button
+                  title="Dismiss"
+                  variant="ghost"
+                  size="sm"
+                  fullWidth={false}
                   disabled={retrying}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.pendingBtnText}>
-                    {retrying ? 'Retrying…' : 'Retry confirm'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.pendingDiscard}
                   onPress={handleDiscardPending}
-                  disabled={retrying}
-                >
-                  <Text style={styles.pendingDiscardText}>Dismiss</Text>
-                </TouchableOpacity>
+                />
               </View>
-            </View>
+            </AccentCard>
           )}
 
-          <View style={styles.tokenRow}>
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg }}>
             {TOKENS.map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[styles.tokenChip, token === t && styles.tokenChipActive]}
-                onPress={() => setToken(t)}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.tokenChipText, token === t && styles.tokenChipTextActive]}>
-                  {t}
-                </Text>
-              </TouchableOpacity>
+              <Chip key={t} label={t} selected={token === t} onPress={() => setToken(t)} />
             ))}
           </View>
 
-          <View style={styles.balanceCard}>
-            <View style={styles.balanceRow}>
-              <Text style={styles.balanceLabel}>Available</Text>
+          <Card style={{ marginBottom: spacing.lg }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodySm" color="textSecondary" weight="600">
+                Available
+              </Text>
               {loadingBal ? (
-                <ActivityIndicator size="small" color={GOLD.dark} />
+                <Spinner size="small" inline />
               ) : (
-                <Text style={styles.balanceValue}>
-                  {available === '—'
-                    ? '—'
-                    : `${formatTokenAmount(available, decimals, 4)} ${token}`}
+                <Text variant="title3" weight="800" numeric>
+                  {fmt(available)}
                 </Text>
               )}
             </View>
-            <View style={styles.balanceRow}>
-              <Text style={styles.balanceLabel}>Locked</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodySm" color="textSecondary" weight="600">
+                Locked
+              </Text>
               {loadingBal ? null : (
-                <Text style={styles.balanceLocked}>
-                  {locked === '—' ? '—' : `${formatTokenAmount(locked, decimals, 4)} ${token}`}
+                <Text variant="bodySm" weight="600" color="textMuted" numeric>
+                  {fmt(locked)}
                 </Text>
               )}
             </View>
             {balanceError && !loadingBal && (
-              <View style={styles.balanceErrorRow}>
-                <Text style={styles.balanceErrorText} numberOfLines={2}>
-                  {balanceError}
-                </Text>
-                <TouchableOpacity onPress={loadBalance} hitSlop={8}>
-                  <Text style={styles.balanceRetry}>Retry</Text>
-                </TouchableOpacity>
-              </View>
+              <>
+                <Divider spacing="sm" />
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm }}>
+                  <Text variant="caption" color="danger" numberOfLines={2} style={{ flex: 1 }}>
+                    {balanceError}
+                  </Text>
+                  <PressableScale onPress={loadBalance} hitSlop={8}>
+                    <Text variant="bodySm" weight="700" color="accent">
+                      Retry
+                    </Text>
+                  </PressableScale>
+                </View>
+              </>
             )}
-          </View>
+          </Card>
 
-          <View style={styles.modeRow}>
-            {(['deposit', 'withdraw'] as const).map((m) => (
-              <TouchableOpacity
-                key={m}
-                style={[styles.modeChip, mode === m && styles.modeChipActive]}
-                onPress={() => handleModeChange(m)}
-                activeOpacity={0.85}
-              >
-                <Icon
-                  name={m === 'deposit' ? 'arrow-downward' : 'arrow-upward'}
-                  size={16}
-                  color={mode === m ? '#000' : GOLD.dark}
-                />
-                <Text
-                  style={[styles.modeChipText, mode === m && styles.modeChipTextActive]}
-                >
-                  {m === 'deposit' ? 'Deposit' : 'Withdraw'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.label}>Amount ({token})</Text>
-          <View
-            style={[styles.input, exceedsAvailable && styles.inputError]}
-          >
-            <TextInput
-              style={styles.inputField}
-              keyboardType="decimal-pad"
-              placeholder="0.00"
-              placeholderTextColor="#999"
-              value={amountInput}
-              onChangeText={(v) => setAmountInput(v.replace(/[^0-9.]/g, ''))}
+          <View style={{ marginBottom: spacing.lg }}>
+            <SegmentedControl
+              segments={[
+                { key: 'deposit', label: 'Deposit' },
+                { key: 'withdraw', label: 'Withdraw' },
+              ]}
+              value={mode}
+              onChange={(k) => handleModeChange(k as Mode)}
             />
-            <Text style={styles.inputUnit}>{token}</Text>
           </View>
-          {exceedsAvailable && (
-            <Text style={styles.fieldError}>
-              Exceeds available ({formatTokenAmount(available, decimals, 4)} {token}).
-            </Text>
-          )}
-          {mode === 'deposit' ? (
-            <Text style={styles.hint}>
-              You'll sign two transactions: an ERC-20 approve (skipped if your
+
+          <AmountInput
+            label={`Amount (${token})`}
+            placeholder="0.00"
+            symbol={token}
+            symbolPosition="suffix"
+            value={amountInput}
+            onChangeText={setAmountInput}
+            error={
+              exceedsAvailable
+                ? `Exceeds available (${formatTokenAmount(available, decimals, 4)} ${token}).`
+                : undefined
+            }
+            onMax={
+              mode === 'withdraw' && available !== '—'
+                ? () => setAmountInput(formatTokenAmount(available, decimals, decimals))
+                : undefined
+            }
+            maxLabel="Use full balance"
+          />
+
+          {mode === 'deposit' && (
+            <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm, lineHeight: 16 }}>
+              You&apos;ll sign two transactions: an ERC-20 approve (skipped if your
               existing allowance is sufficient) followed by the deposit itself.
             </Text>
-          ) : (
-            available !== '—' && (
-              <TouchableOpacity
-                onPress={() => setAmountInput(formatTokenAmount(available, decimals, decimals))}
-                hitSlop={8}
-              >
-                <Text style={styles.maxLink}>Use full available balance</Text>
-              </TouchableOpacity>
-            )
           )}
 
-          <TouchableOpacity
-            style={[styles.submit, !canSubmit && styles.submitDisabled]}
-            onPress={handleSubmit}
+          <Button
+            title={submitLabel}
+            variant={mode === 'deposit' ? 'primary' : 'secondary'}
+            leftIcon={mode === 'deposit' ? 'plus' : 'wallet'}
+            loading={submitting}
             disabled={!canSubmit}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.submitText}>
-              {submitting ? stage || 'Working…' : mode === 'deposit' ? 'Deposit' : 'Withdraw'}
-            </Text>
-          </TouchableOpacity>
+            onPress={handleSubmit}
+            style={{ marginTop: spacing.xl }}
+          />
 
-          <TouchableOpacity
-            style={styles.adsLink}
+          <PressableScale
             onPress={() => router.push('/p2p/my-ads')}
-            activeOpacity={0.7}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: spacing.xs,
+              paddingVertical: spacing.lg,
+              marginTop: spacing.md,
+            }}
           >
-            <Icon name="article" size={16} color={GOLD.dark} />
-            <Text style={styles.adsLinkText}>Go to my ads</Text>
-          </TouchableOpacity>
+            <Icon name="list" size={16} color={colors.accent} />
+            <Text variant="bodySm" weight="600" color="accent">
+              Go to my ads
+            </Text>
+            <Icon name="chevronRight" size={16} color={colors.accent} />
+          </PressableScale>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -535,136 +543,5 @@ function statusAwareError(status: number | undefined, message: string | undefine
   if (status === 503) return 'Live rate temporarily unavailable. Refresh and try again.';
   return message;
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 60 },
-  heading: { fontSize: 24, fontWeight: '800', color: '#000', marginBottom: 6 },
-  subheading: { fontSize: 13, color: '#666', marginBottom: 18, lineHeight: 19 },
-  pendingCard: {
-    backgroundColor: '#FFF6E5',
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: GOLD.error,
-  },
-  pendingRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  pendingTitle: { marginLeft: 6, fontSize: 14, fontWeight: '700', color: GOLD.error },
-  pendingBody: { fontSize: 13, color: '#444', lineHeight: 18, marginBottom: 4 },
-  pendingHash: { fontSize: 11, color: '#777', marginBottom: 10, fontFamily: 'monospace' },
-  pendingActions: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  pendingBtn: {
-    backgroundColor: GOLD.primary,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-  },
-  pendingBtnText: { fontWeight: '700', color: '#000' },
-  pendingDiscard: { paddingVertical: 8 },
-  pendingDiscardText: { color: '#666', fontWeight: '600' },
-  tokenRow: { flexDirection: 'row', gap: 8, marginBottom: 16 },
-  tokenChip: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    alignItems: 'center',
-  },
-  tokenChipActive: {
-    backgroundColor: GOLD.primary,
-    borderColor: GOLD.dark,
-  },
-  tokenChipText: { fontWeight: '700', color: GOLD.dark },
-  tokenChipTextActive: { color: '#000' },
-  balanceCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    marginBottom: 18,
-  },
-  balanceRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 4,
-  },
-  balanceLabel: { fontSize: 14, color: '#666', fontWeight: '600' },
-  balanceValue: { fontSize: 18, color: '#000', fontWeight: '800' },
-  balanceLocked: { fontSize: 14, color: '#999', fontWeight: '600' },
-  balanceErrorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-  },
-  balanceErrorText: { flex: 1, fontSize: 12, color: GOLD.error, marginRight: 8 },
-  balanceRetry: { color: GOLD.dark, fontWeight: '700', fontSize: 13 },
-  modeRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
-  modeChip: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  modeChipActive: {
-    backgroundColor: GOLD.primary,
-    borderColor: GOLD.dark,
-  },
-  modeChipText: { marginLeft: 6, fontWeight: '700', color: GOLD.dark },
-  modeChipTextActive: { color: '#000' },
-  label: { fontSize: 14, fontWeight: '700', color: '#333', marginTop: 6, marginBottom: 6 },
-  input: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  inputError: { borderColor: GOLD.error },
-  inputField: { flex: 1, fontSize: 16, color: '#000', paddingVertical: 0 },
-  inputUnit: { fontSize: 14, color: GOLD.dark, fontWeight: '700', marginLeft: 8 },
-  fieldError: { color: GOLD.error, fontSize: 12, marginTop: 6 },
-  hint: { fontSize: 12, color: '#888', marginTop: 6, lineHeight: 16 },
-  maxLink: { fontSize: 13, color: GOLD.dark, fontWeight: '600', marginTop: 6 },
-  submit: {
-    marginTop: 22,
-    backgroundColor: GOLD.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    shadowColor: GOLD.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  submitDisabled: { opacity: 0.55 },
-  submitText: { fontWeight: '800', color: '#000', fontSize: 16 },
-  btnDisabled: { opacity: 0.55 },
-  adsLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 14,
-    marginTop: 18,
-  },
-  adsLinkText: { marginLeft: 6, color: GOLD.dark, fontWeight: '600' },
-});
 
 export default P2PPoolScreen;
