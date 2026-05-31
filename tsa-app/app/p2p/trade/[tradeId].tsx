@@ -188,7 +188,7 @@ const TradeDetailScreen: React.FC = () => {
           }}
         >
           <Icon name="lock" size={48} color={colors.textMuted} />
-          <Text variant="title2" weight="800" align="center">
+          <Text variant="title2" weight="700" align="center">
             Not your trade
           </Text>
           <Text variant="bodySm" color="textSecondary" align="center">
@@ -395,7 +395,7 @@ const TradeDetailScreen: React.FC = () => {
               {trade.status === 'pending_payment' ? (
                 <Text
                   variant="bodyMed"
-                  weight="800"
+                  weight="700"
                   style={{ color: countdown.expired ? colors.danger : colors.escrow }}
                 >
                   {countdown.expired ? 'Expired' : `${countdown.label} left to pay`}
@@ -461,7 +461,7 @@ const TradeDetailScreen: React.FC = () => {
             </Text>
           )}
 
-          <Text variant="title3" weight="800" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+          <Text variant="title3" weight="700" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
             Chat
           </Text>
           <View style={{ gap: spacing.sm }}>

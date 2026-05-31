@@ -1,8 +1,10 @@
-// TSA Signature theme context. Adaptive light/dark driven by the system color
-// scheme (app.json userInterfaceStyle is "automatic"), with an imperative
-// setScheme() for a future in-app toggle. Mount once at the app root, outermost.
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+// TSA Signature theme context. The active scheme follows a user preference
+// (light / dark / system) that DEFAULTS TO LIGHT and is persisted across
+// launches; 'system' defers to the OS color scheme. An in-app toggle drives
+// setScheme(). Mount once at the app root, outermost.
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { StatusBar, useColorScheme } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ColorTokens, darkColors, lightColors } from './colors';
 import {
   fontFamily,
@@ -53,13 +55,32 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+// Persisted preference key. Defaults to 'light' until a stored value loads.
+const PREFERENCE_KEY = 'tsa.theme.preference';
+
 export const ThemeProvider: React.FC<{
   children: React.ReactNode;
   /** Force a scheme (tests / gallery). Overrides system + preference. */
   forceScheme?: ColorScheme;
 }> = ({ children, forceScheme }) => {
   const system = useColorScheme();
-  const [preference, setPreference] = useState<SchemePreference>('system');
+  // Default to LIGHT (not system) — the app opens light unless the user opts in.
+  const [preference, setPreference] = useState<SchemePreference>('light');
+
+  // Hydrate the persisted preference on mount.
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(PREFERENCE_KEY)
+      .then((stored) => {
+        if (active && (stored === 'light' || stored === 'dark' || stored === 'system')) {
+          setPreference(stored);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const resolved: ColorScheme = forceScheme
     ? forceScheme
@@ -70,7 +91,10 @@ export const ThemeProvider: React.FC<{
       : preference;
 
   const theme = useMemo(() => buildTheme(resolved), [resolved]);
-  const setScheme = useCallback((pref: SchemePreference) => setPreference(pref), []);
+  const setScheme = useCallback((pref: SchemePreference) => {
+    setPreference(pref);
+    AsyncStorage.setItem(PREFERENCE_KEY, pref).catch(() => {});
+  }, []);
 
   const value = useMemo(
     () => ({ theme, preference, setScheme }),

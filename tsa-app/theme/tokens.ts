@@ -86,16 +86,20 @@ export const fontFamily: Record<FontWeightToken, string> = {
   '800': 'Inter_800ExtraBold',
 };
 
+// Weights tuned for a calmer, more professional feel: headings top out at bold
+// (700) rather than extrabold, and large display text uses semibold so it reads
+// as confident, not heavy. Hierarchy now leans on size + spacing + color more
+// than weight. (Numbers stay a touch heavier via AmountText.)
 export const typography = {
-  display: { fontSize: 34, lineHeight: 40, weight: '800', letterSpacing: -0.5 },
-  title1: { fontSize: 28, lineHeight: 34, weight: '700', letterSpacing: -0.3 },
-  title2: { fontSize: 22, lineHeight: 28, weight: '700' },
-  title3: { fontSize: 18, lineHeight: 24, weight: '600' },
-  body: { fontSize: 16, lineHeight: 22, weight: '400' },
-  bodyMed: { fontSize: 16, lineHeight: 22, weight: '600' },
+  display: { fontSize: 32, lineHeight: 40, weight: '700', letterSpacing: -0.5 },
+  title1: { fontSize: 26, lineHeight: 32, weight: '700', letterSpacing: -0.3 },
+  title2: { fontSize: 21, lineHeight: 28, weight: '600', letterSpacing: -0.2 },
+  title3: { fontSize: 17, lineHeight: 24, weight: '600' },
+  body: { fontSize: 16, lineHeight: 23, weight: '400' },
+  bodyMed: { fontSize: 16, lineHeight: 23, weight: '600' },
   bodySm: { fontSize: 14, lineHeight: 20, weight: '400' },
   caption: { fontSize: 12, lineHeight: 16, weight: '500' },
-  overline: { fontSize: 11, lineHeight: 14, weight: '600', letterSpacing: 0.5 },
+  overline: { fontSize: 11, lineHeight: 14, weight: '600', letterSpacing: 0.6 },
 } as const;
 export type TypeVariant = keyof typeof typography;
 

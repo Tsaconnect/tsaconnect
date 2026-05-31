@@ -71,7 +71,7 @@ export default function UIGallery() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
-        <Text variant="title1" weight="800">
+        <Text variant="title1" weight="700">
           TSA Signature
         </Text>
         <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
