@@ -1,22 +1,29 @@
+// app/wallet/manage.tsx
+//
+// Manage Wallets — list/switch/rename/delete wallets, generate a new wallet, import
+// an existing one from a 12-word recovery phrase, and toggle mainnet/testnet.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui).
+//
+// SECURITY screen: all seed generation/import, BIP39 validation, and persistence is
+// preserved VERBATIM — no key material is logged or altered. This is a visual /
+// structural restyle only. The recovery-phrase entry grid intentionally keeps raw
+// TextInputs (ref-based focus jumping, per-cell secureTextEntry, Backspace handling)
+// because those behaviours aren't expressible through the Input primitive.
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
-  Text,
   TouchableOpacity,
-  StyleSheet,
   ActivityIndicator,
   Alert,
   TextInput,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
-  Modal,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import { ethers } from 'ethers';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
-import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
   generateWallet,
   importWalletFromMnemonic,
@@ -33,6 +40,20 @@ import {
 } from '../../services/wallet';
 import { registerWalletAddress } from '../../services/walletApi';
 import { useNetwork } from '../../hooks/useNetwork';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Button,
+  Card,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Sheet,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const SEED_LENGTH = 12;
 const enWordlist = ethers.wordlists.en;
@@ -48,6 +69,7 @@ const isBip39Word = (w: string) => {
 type Mode = 'menu' | 'import';
 
 const WalletManage = () => {
+  const { colors, spacing, radius } = useTheme();
   const { mode: initialMode } = useLocalSearchParams<{ mode?: string }>();
   const navigation = useNavigation();
   const [loading, setLoading] = useState(true);
@@ -299,9 +321,11 @@ const WalletManage = () => {
 
   if (loading) {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" />
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -311,239 +335,318 @@ const WalletManage = () => {
     const canSubmit = allFilled && !hasInvalid && !actionLoading;
 
     return (
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.importIntro}>
-            <View style={styles.importIconCircle}>
-              <Ionicons name="download-outline" size={22} color={COLORS.primary} />
-            </View>
-            <Text style={styles.importIntroTitle}>Restore a wallet</Text>
-            <Text style={styles.importIntroSubtitle}>
-              Enter your 12-word recovery phrase in order. We never store or transmit it.
-            </Text>
-          </View>
-
-          <View style={styles.importCard}>
-            <View style={styles.importCardHeader}>
-              <Text style={styles.importCardTitle}>Recovery phrase</Text>
-              <View style={styles.counterPill}>
-                <Text
-                  style={[
-                    styles.counterPillText,
-                    allFilled && !hasInvalid && styles.counterPillTextDone,
-                  ]}
-                >
-                  {filledCount}/{SEED_LENGTH}
-                </Text>
+          <ScrollView
+            contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={{ alignItems: 'center', marginBottom: spacing.xl }}>
+              <View
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.accentMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: spacing.md,
+                }}
+              >
+                <Icon name="upload" size={24} color={colors.accent} />
               </View>
+              <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.xs }}>
+                Restore a wallet
+              </Text>
+              <Text variant="bodySm" color="textSecondary" align="center" style={{ paddingHorizontal: spacing.sm }}>
+                Enter your 12-word recovery phrase in order. We never store or transmit it.
+              </Text>
             </View>
 
-            <View style={styles.toolbar}>
-              <TouchableOpacity
-                style={styles.toolbarBtn}
-                onPress={handlePasteAll}
-                disabled={actionLoading}
+            <Card padding="lg">
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: spacing.md,
+                }}
               >
-                <Ionicons
-                  name={pasted ? 'checkmark' : 'clipboard-outline'}
-                  size={16}
-                  color={COLORS.primary}
+                <Text variant="title3" weight="700">
+                  Recovery phrase
+                </Text>
+                <Badge
+                  label={`${filledCount}/${SEED_LENGTH}`}
+                  color={allFilled && !hasInvalid ? colors.success : colors.textMuted}
+                  background={allFilled && !hasInvalid ? colors.successBg : colors.surfaceAlt}
                 />
-                <Text style={styles.toolbarBtnText}>{pasted ? 'Pasted' : 'Paste'}</Text>
-              </TouchableOpacity>
+              </View>
 
-              <TouchableOpacity
-                style={styles.toolbarBtn}
-                onPress={() => setShowWords((s) => !s)}
-                disabled={actionLoading}
-              >
-                <Ionicons
-                  name={showWords ? 'eye-off-outline' : 'eye-outline'}
-                  size={16}
-                  color={COLORS.primary}
-                />
-                <Text style={styles.toolbarBtnText}>{showWords ? 'Hide' : 'Show'}</Text>
-              </TouchableOpacity>
-
-              {filledCount > 0 && (
-                <TouchableOpacity
-                  style={styles.toolbarBtn}
-                  onPress={handleClearAll}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.md }}>
+                <PressableScale
+                  onPress={handlePasteAll}
                   disabled={actionLoading}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    paddingVertical: spacing.xs + 2,
+                    paddingHorizontal: spacing.md,
+                    borderRadius: radius.sm,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
                 >
-                  <Ionicons name="close-circle-outline" size={16} color={COLORS.danger} />
-                  <Text style={[styles.toolbarBtnText, { color: COLORS.danger }]}>Clear</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+                  <Icon name={pasted ? 'check' : 'copy'} size={16} color={colors.accent} />
+                  <Text variant="caption" weight="600" color="accent">
+                    {pasted ? 'Pasted' : 'Paste'}
+                  </Text>
+                </PressableScale>
 
-            <View style={styles.wordInputGrid}>
-              {wordInputs.map((word, index) => {
-                const isInvalid = invalidIndices.has(index);
-                return (
-                  <View
-                    key={index}
-                    style={[
-                      styles.wordInputCell,
-                      word && !isInvalid && styles.wordInputCellFilled,
-                      isInvalid && styles.wordInputCellInvalid,
-                    ]}
+                <PressableScale
+                  onPress={() => setShowWords((s) => !s)}
+                  disabled={actionLoading}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    paddingVertical: spacing.xs + 2,
+                    paddingHorizontal: spacing.md,
+                    borderRadius: radius.sm,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
+                >
+                  <Icon name={showWords ? 'eyeOff' : 'eye'} size={16} color={colors.accent} />
+                  <Text variant="caption" weight="600" color="accent">
+                    {showWords ? 'Hide' : 'Show'}
+                  </Text>
+                </PressableScale>
+
+                {filledCount > 0 && (
+                  <PressableScale
+                    onPress={handleClearAll}
+                    disabled={actionLoading}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.xs,
+                      paddingVertical: spacing.xs + 2,
+                      paddingHorizontal: spacing.md,
+                      borderRadius: radius.sm,
+                      backgroundColor: colors.surfaceAlt,
+                    }}
                   >
-                    <Text style={styles.wordInputNumber}>{index + 1}</Text>
-                    <TextInput
-                      ref={(r) => {
-                        inputRefs.current[index] = r;
+                    <Icon name="closeCircle" size={16} color={colors.danger} />
+                    <Text variant="caption" weight="600" color="danger">
+                      Clear
+                    </Text>
+                  </PressableScale>
+                )}
+              </View>
+
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
+                {wordInputs.map((word, index) => {
+                  const isInvalid = invalidIndices.has(index);
+                  const filled = !!word && !isInvalid;
+                  return (
+                    <View
+                      key={index}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        width: '31.5%',
+                        borderWidth: 1,
+                        borderColor: isInvalid
+                          ? colors.danger
+                          : filled
+                            ? colors.accent
+                            : colors.border,
+                        borderRadius: radius.md,
+                        paddingHorizontal: spacing.sm,
+                        paddingVertical: spacing.sm,
+                        backgroundColor: isInvalid
+                          ? colors.dangerBg
+                          : filled
+                            ? colors.surface
+                            : colors.surfaceAlt,
                       }}
-                      style={styles.wordInputField}
-                      value={word}
-                      onChangeText={(t) => handleWordChange(index, t)}
-                      onSubmitEditing={() => handleSubmitEditing(index)}
-                      onKeyPress={(e) => handleKeyPress(index, e)}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="off"
-                      spellCheck={false}
-                      secureTextEntry={!showWords && !!word}
-                      returnKeyType={index === SEED_LENGTH - 1 ? 'done' : 'next'}
-                      blurOnSubmit={index === SEED_LENGTH - 1}
-                      selectTextOnFocus
-                    />
-                  </View>
-                );
-              })}
-            </View>
+                    >
+                      <Text variant="caption" weight="700" color="textMuted" style={{ width: 18 }}>
+                        {index + 1}
+                      </Text>
+                      <TextInput
+                        ref={(r) => {
+                          inputRefs.current[index] = r;
+                        }}
+                        style={{
+                          flex: 1,
+                          fontSize: 14,
+                          color: colors.textPrimary,
+                          paddingVertical: 0,
+                          paddingHorizontal: 4,
+                        }}
+                        value={word}
+                        onChangeText={(t) => handleWordChange(index, t)}
+                        onSubmitEditing={() => handleSubmitEditing(index)}
+                        onKeyPress={(e) => handleKeyPress(index, e)}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        autoComplete="off"
+                        spellCheck={false}
+                        secureTextEntry={!showWords && !!word}
+                        returnKeyType={index === SEED_LENGTH - 1 ? 'done' : 'next'}
+                        blurOnSubmit={index === SEED_LENGTH - 1}
+                        selectTextOnFocus
+                      />
+                    </View>
+                  );
+                })}
+              </View>
 
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+              {error ? (
+                <Text variant="bodySm" color="danger" style={{ marginBottom: spacing.md }}>
+                  {error}
+                </Text>
+              ) : null}
 
-            <TouchableOpacity
-              style={[styles.primaryButton, !canSubmit && styles.disabledButton]}
-              onPress={handleImportWallet}
-              disabled={!canSubmit}
-            >
-              {actionLoading ? (
-                <ActivityIndicator color={COLORS.white} />
-              ) : (
-                <Text style={styles.primaryButtonText}>Import wallet</Text>
-              )}
-            </TouchableOpacity>
+              <Button
+                title="Import wallet"
+                onPress={handleImportWallet}
+                disabled={!canSubmit}
+                loading={actionLoading}
+              />
 
-            <TouchableOpacity
-              style={[styles.ghostButton, actionLoading && styles.disabledButton]}
-              onPress={handleCancelImport}
-              disabled={actionLoading}
-            >
-              <Text style={styles.ghostButtonText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+              <Button
+                title="Cancel"
+                variant="ghost"
+                onPress={handleCancelImport}
+                disabled={actionLoading}
+                style={{ marginTop: spacing.sm }}
+              />
+            </Card>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
-      <View style={styles.header}>
-        <Text style={styles.subtitle}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+        <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.xl }}>
           Manage your wallets, back up seed phrases, or add a new wallet.
         </Text>
-      </View>
 
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {error ? (
+          <Text variant="bodySm" color="danger" style={{ marginBottom: spacing.lg }}>
+            {error}
+          </Text>
+        ) : null}
 
-      {/* Wallet list */}
-      {wallets.length > 0 ? (
-        <View style={styles.walletsSection}>
-          <Text style={styles.walletsSectionTitle}>Your Wallets</Text>
-          {wallets.map((wallet) => {
-            const isActive = wallet.address === activeAddress;
-            return (
-              <TouchableOpacity
-                key={wallet.address}
-                style={[styles.walletCard, isActive && styles.walletCardActive]}
-                onPress={() => handleSwitchWallet(wallet.address)}
-                activeOpacity={0.7}
-              >
-                <View style={styles.walletCardHeader}>
-                  <View style={styles.walletIconCircle}>
-                    <Ionicons name="wallet" size={22} color={COLORS.primary} />
-                  </View>
-                  <View style={styles.walletCardInfo}>
-                    <View style={styles.walletLabelRow}>
-                      <Text style={styles.walletCardLabel}>{wallet.label}</Text>
-                      {isActive && (
-                        <View style={styles.activeBadge}>
-                          <Text style={styles.activeBadgeText}>Active</Text>
+        {/* Wallet list */}
+        {wallets.length > 0 ? (
+          <View style={{ marginBottom: spacing['2xl'] }}>
+            <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+              Your Wallets
+            </Text>
+            {wallets.map((wallet) => {
+              const isActive = wallet.address === activeAddress;
+              return (
+                <PressableScale
+                  key={wallet.address}
+                  onPress={() => handleSwitchWallet(wallet.address)}
+                  style={{ marginBottom: spacing.sm }}
+                >
+                  <Card padding="lg" style={isActive ? { borderWidth: 2, borderColor: colors.accent } : undefined}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.md }}>
+                      <View
+                        style={{
+                          width: 44,
+                          height: 44,
+                          borderRadius: radius.pill,
+                          backgroundColor: colors.accentMuted,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          marginRight: spacing.md,
+                        }}
+                      >
+                        <Icon name="wallet" size={22} color={colors.accent} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: 2 }}>
+                          <Text variant="bodyMed" weight="600">
+                            {wallet.label}
+                          </Text>
+                          {isActive && (
+                            <Badge label="Active" color={colors.accent} background={colors.accentMuted} size="sm" />
+                          )}
                         </View>
+                        <Text
+                          variant="caption"
+                          color="textMuted"
+                          numeric
+                          numberOfLines={1}
+                          ellipsizeMode="middle"
+                        >
+                          {wallet.address}
+                        </Text>
+                      </View>
+                      <IconButton
+                        icon="dots"
+                        accessibilityLabel="Wallet options"
+                        onPress={() => handleWalletMenu(wallet)}
+                        size={20}
+                        color={colors.textMuted}
+                      />
+                    </View>
+                    <View style={{ flexDirection: 'row' }}>
+                      {wallet.backedUp ? (
+                        <Badge label="Backed Up" icon="checkCircle" color={colors.success} background={colors.successBg} />
+                      ) : (
+                        <Button
+                          title="Back Up"
+                          size="sm"
+                          leftIcon="shield"
+                          fullWidth={false}
+                          onPress={() => router.push('/wallet/seedphrase')}
+                        />
                       )}
                     </View>
-                    <Text style={styles.walletCardAddress} numberOfLines={1} ellipsizeMode="middle">
-                      {wallet.address}
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.menuButton}
-                    onPress={() => handleWalletMenu(wallet)}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                  >
-                    <Ionicons name="ellipsis-vertical" size={20} color={COLORS.gray} />
-                  </TouchableOpacity>
-                </View>
-                <View style={styles.walletCardActions}>
-                  {wallet.backedUp ? (
-                    <View style={styles.backedUpBadge}>
-                      <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
-                      <Text style={styles.backedUpText}>Backed Up</Text>
-                    </View>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.backupButton}
-                      onPress={() => router.push('/wallet/seedphrase')}
-                    >
-                      <Ionicons name="shield-checkmark-outline" size={16} color={COLORS.white} />
-                      <Text style={styles.backupButtonText}>Back Up</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      ) : (
-        <View style={styles.noWalletBanner}>
-          <Ionicons name="information-circle-outline" size={20} color="#1E40AF" />
-          <Text style={styles.noWalletBannerText}>
-            No wallet found. Create or import one below.
-          </Text>
-        </View>
-      )}
+                  </Card>
+                </PressableScale>
+              );
+            })}
+          </View>
+        ) : (
+          <AccentCard padding="md" railColor={colors.info} style={{ marginBottom: spacing['2xl'] }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Icon name="info" size={20} color={colors.info} />
+              <Text variant="bodySm" weight="500" color="info" style={{ flex: 1 }}>
+                No wallet found. Create or import one below.
+              </Text>
+            </View>
+          </AccentCard>
+        )}
 
-      {/* Add Wallet */}
-      <View style={styles.walletsSection}>
-        <Text style={styles.walletsSectionTitle}>Add Wallet</Text>
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={[styles.primaryButton, actionLoading && styles.disabledButton]}
+        {/* Add Wallet */}
+        <View style={{ marginBottom: spacing['2xl'] }}>
+          <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+            Add Wallet
+          </Text>
+          <Button
+            title="Generate New Wallet"
+            leftIcon="plus"
             onPress={handleGenerateNewWallet}
             disabled={actionLoading}
-          >
-            {actionLoading ? (
-              <ActivityIndicator color={COLORS.white} />
-            ) : (
-              <>
-                <Ionicons name="add-circle-outline" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
-                <Text style={styles.primaryButtonText}>Generate New Wallet</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.secondaryButton}
+            loading={actionLoading}
+            style={{ marginBottom: spacing.md }}
+          />
+          <Button
+            title="Import Existing Wallet"
+            variant="secondary"
+            leftIcon="upload"
             onPress={() => {
               setError('');
               setWordInputs(Array(SEED_LENGTH).fill(''));
@@ -551,311 +654,57 @@ const WalletManage = () => {
               setMode('import');
             }}
             disabled={actionLoading}
-          >
-            <Ionicons name="download-outline" size={20} color={COLORS.primary} style={{ marginRight: 8 }} />
-            <Text style={styles.secondaryButtonText}>Import Existing Wallet</Text>
-          </TouchableOpacity>
+          />
         </View>
-      </View>
 
-      {/* Network Toggle */}
-      <View style={styles.sectionCard}>
-        <TouchableOpacity style={styles.networkRow} onPress={handleNetworkToggle}>
-          <View style={styles.networkLeft}>
-            <Ionicons name="globe-outline" size={20} color="#D4AF37" />
-            <View>
-              <Text style={styles.networkLabel}>Network</Text>
-              <Text style={styles.networkValue}>
-                {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
-              </Text>
+        {/* Network Toggle */}
+        <Card padding="lg">
+          <PressableScale onPress={handleNetworkToggle}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="bolt" size={20} color={colors.accent} />
+                <View>
+                  <Text variant="bodySm" weight="600">
+                    Network
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+                  </Text>
+                </View>
+              </View>
+              <Badge
+                label={network === 'mainnet' ? 'Live' : 'Test'}
+                color={network === 'mainnet' ? colors.success : colors.warning}
+                background={network === 'mainnet' ? colors.successBg : colors.warningBg}
+              />
             </View>
-          </View>
-          <View style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}>
-            <Text style={[styles.networkBadgeText, network === 'testnet' && styles.networkBadgeTextTestnet]}>
-              {network === 'mainnet' ? 'Live' : 'Test'}
-            </Text>
-          </View>
-        </TouchableOpacity>
-      </View>
+          </PressableScale>
+        </Card>
+      </ScrollView>
 
-      {/* Rename Modal */}
-      <Modal visible={renameModalVisible} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Rename Wallet</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={renameValue}
-              onChangeText={setRenameValue}
-              placeholder="Wallet name"
-              autoFocus
+      {/* Rename Sheet */}
+      <Sheet visible={renameModalVisible} onClose={() => setRenameModalVisible(false)} title="Rename Wallet">
+        <View style={{ padding: spacing.lg }}>
+          <Input
+            value={renameValue}
+            onChangeText={setRenameValue}
+            placeholder="Wallet name"
+            autoFocus
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
+          <View style={{ flexDirection: 'row', gap: spacing.md }}>
+            <Button
+              title="Cancel"
+              variant="ghost"
+              onPress={() => setRenameModalVisible(false)}
+              style={{ flex: 1 }}
             />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={styles.modalCancelButton}
-                onPress={() => setRenameModalVisible(false)}
-              >
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalSaveButton} onPress={handleRenameSave}>
-                <Text style={styles.modalSaveText}>Save</Text>
-              </TouchableOpacity>
-            </View>
+            <Button title="Save" onPress={handleRenameSave} style={{ flex: 1 }} />
           </View>
         </View>
-      </Modal>
-    </ScrollView>
+      </Sheet>
+    </SafeAreaView>
   );
 };
 
 export default WalletManage;
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  scrollContent: { flexGrow: 1, padding: SIZES.padding3 },
-  header: { marginBottom: 24 },
-  subtitle: { ...FONTS.body3, color: COLORS.gray, lineHeight: 22 },
-  walletsSection: { marginBottom: 24 },
-  walletsSectionTitle: { ...FONTS.body3, fontWeight: '700', color: COLORS.dark, marginBottom: 12 },
-  walletCard: {
-    backgroundColor: COLORS.white, borderRadius: 14, padding: 16,
-    marginBottom: 10, ...SHADOWS.light,
-  },
-  walletCardActive: { borderWidth: 2, borderColor: COLORS.primary },
-  walletCardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
-  walletIconCircle: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: `${COLORS.primary}15`, justifyContent: 'center', alignItems: 'center', marginRight: 12,
-  },
-  walletCardInfo: { flex: 1 },
-  walletLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
-  walletCardLabel: { ...FONTS.body3, fontWeight: '600', color: COLORS.dark },
-  walletCardAddress: { ...FONTS.body5, color: COLORS.gray },
-  activeBadge: {
-    backgroundColor: `${COLORS.primary}20`, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6,
-  },
-  activeBadgeText: { ...FONTS.body5, color: COLORS.primary, fontWeight: '600' },
-  menuButton: { padding: 4 },
-  walletCardActions: { flexDirection: 'row', gap: 10 },
-  backupButton: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.primary,
-    paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, gap: 6,
-  },
-  backupButtonText: { ...FONTS.body4, color: COLORS.white, fontWeight: '600' },
-  backedUpBadge: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#D1FAE5',
-    paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, gap: 6,
-  },
-  backedUpText: { ...FONTS.body4, color: COLORS.success, fontWeight: '600' },
-  noWalletBanner: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF',
-    borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#BFDBFE', gap: 10, marginBottom: 24,
-  },
-  noWalletBannerText: { ...FONTS.body4, color: '#1E40AF', fontWeight: '500', flex: 1 },
-  buttonContainer: { gap: 12, marginBottom: 24 },
-  primaryButton: {
-    backgroundColor: COLORS.primary, paddingVertical: 16, borderRadius: 12,
-    alignItems: 'center', flexDirection: 'row', justifyContent: 'center', ...SHADOWS.medium,
-  },
-  primaryButtonText: { ...FONTS.h4, color: COLORS.white, fontWeight: '600' },
-  secondaryButton: {
-    backgroundColor: COLORS.white, paddingVertical: 16, borderRadius: 12,
-    alignItems: 'center', flexDirection: 'row', justifyContent: 'center',
-    borderWidth: 2, borderColor: COLORS.primary,
-  },
-  secondaryButtonText: { ...FONTS.h4, color: COLORS.primary, fontWeight: '600' },
-  disabledButton: { opacity: 0.6 },
-  label: { ...FONTS.body3, fontWeight: '600', color: COLORS.dark, marginBottom: 8 },
-  errorText: { ...FONTS.body4, color: COLORS.danger, marginBottom: 16 },
-  importIntro: {
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  importIconCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: `${COLORS.primary}15`,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  importIntroTitle: {
-    ...FONTS.h2,
-    color: COLORS.dark,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  importIntroSubtitle: {
-    ...FONTS.body4,
-    color: COLORS.gray,
-    textAlign: 'center',
-    lineHeight: 20,
-    paddingHorizontal: 8,
-  },
-  importCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    ...SHADOWS.light,
-  },
-  importCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  importCardTitle: {
-    ...FONTS.h4,
-    color: COLORS.dark,
-    fontWeight: '700',
-  },
-  counterPill: {
-    backgroundColor: '#F3F4F6',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-  counterPillText: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    fontWeight: '700',
-  },
-  counterPillTextDone: {
-    color: COLORS.success,
-  },
-  toolbar: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  toolbarBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-  },
-  toolbarBtnText: {
-    ...FONTS.body5,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  wordInputGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 16,
-  },
-  wordInputCell: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: '31.5%',
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    backgroundColor: '#FAFAFA',
-  },
-  wordInputCellFilled: {
-    backgroundColor: COLORS.white,
-    borderColor: COLORS.primary,
-  },
-  wordInputCellInvalid: {
-    backgroundColor: '#FEF2F2',
-    borderColor: COLORS.danger,
-  },
-  wordInputNumber: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    fontWeight: '700',
-    width: 18,
-  },
-  wordInputField: {
-    flex: 1,
-    ...FONTS.body4,
-    color: COLORS.dark,
-    paddingVertical: 0,
-    paddingHorizontal: 4,
-  },
-  ghostButton: {
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  ghostButtonText: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    fontWeight: '600',
-  },
-  modalOverlay: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: COLORS.white, borderRadius: 16, padding: 24, width: '85%',
-  },
-  modalTitle: { ...FONTS.h4, fontWeight: '600', color: COLORS.dark, marginBottom: 16 },
-  modalInput: {
-    borderWidth: 1, borderColor: COLORS.lightGray, borderRadius: 10,
-    padding: 12, ...FONTS.body3, color: COLORS.dark, marginBottom: 16,
-  },
-  modalButtons: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12 },
-  modalCancelButton: { paddingVertical: 10, paddingHorizontal: 16 },
-  modalCancelText: { ...FONTS.body3, color: COLORS.gray },
-  modalSaveButton: {
-    backgroundColor: COLORS.primary, paddingVertical: 10, paddingHorizontal: 20, borderRadius: 8,
-  },
-  modalSaveText: { ...FONTS.body3, color: COLORS.white, fontWeight: '600' },
-  sectionCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-    overflow: 'hidden',
-  },
-  networkRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-  },
-  networkLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  networkLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1A1A1A',
-  },
-  networkValue: {
-    fontSize: 12,
-    color: '#888',
-    marginTop: 2,
-  },
-  networkBadge: {
-    backgroundColor: '#D1FAE5',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
-  networkBadgeTestnet: {
-    backgroundColor: '#FEF3C7',
-  },
-  networkBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#16A34A',
-  },
-  networkBadgeTextTestnet: {
-    color: '#D97706',
-  },
-});

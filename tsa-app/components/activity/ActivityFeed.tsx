@@ -1,18 +1,63 @@
+// components/activity/ActivityFeed.tsx
+//
+// Shared activity feed — wallet transactions + swaps + TP / cashback / orders /
+// services. Used full-screen (wallet history / global activity) and embedded
+// (wallet home / token detail). Restyled onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives).
+//
+// VISUAL/STRUCTURAL restyle only — all data fetching (`fetchActivityItems`),
+// pagination (page / hasMore / onLoadMore), filter toggling, pull-to-refresh,
+// the embedded "see all" footer, and per-item explorer-link navigation
+// (Linking.openURL) are preserved verbatim. Props interface + default export
+// are unchanged. The service still owns each item's data; its raw Ionicons icon
+// name is mapped to the registry and its tone is derived from theme tokens so
+// nothing is hardcoded and light/dark both come free.
 import React, { useState, useEffect, useCallback } from 'react';
-import {
-  View, Text, FlatList, TouchableOpacity, StyleSheet,
-  RefreshControl, ActivityIndicator, Linking,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View, FlatList, RefreshControl, Linking } from 'react-native';
 import {
   fetchActivityItems, ALL_TYPES, TYPE_META,
   type ActivityItem, type ActivityType,
 } from '../../services/activityService';
 import { CHAINS } from '../../constants/chains';
+import { useTheme } from '@/theme';
+import {
+  Badge,
+  Chip,
+  Icon,
+  IconName,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
-const GOLD = '#D4AF37';
 const PAGE_SIZE = 20;
 const EMBEDDED_SIZE = 5;
+
+// Map the service's raw Ionicons names to the semantic icon registry. Anything
+// unmapped falls back to a neutral list glyph (the Icon primitive also no-ops on
+// an unknown name as defense-in-depth).
+const ITEM_ICONS: Record<string, IconName> = {
+  'arrow-up': 'arrowUp',
+  'arrow-down': 'arrowDown',
+  'swap-horizontal': 'swap',
+  'checkmark-circle': 'checkCircle',
+  'lock-closed': 'lock',
+  'star': 'star',
+  'gift': 'gift',
+  'bag-handle': 'cart',
+  'call': 'mobile',
+  'ellipse': 'dots',
+};
+
+// Filter-chip icons (TYPE_META uses outline Ionicons names).
+const TYPE_ICONS: Record<ActivityType, IconName> = {
+  wallet: 'wallet',
+  swap: 'swap',
+  tp: 'star',
+  cashback: 'gift',
+  order: 'cart',
+  service: 'mobile',
+};
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -33,52 +78,85 @@ function explorerUrl(item: ActivityItem): string | null {
   return chain ? `${chain.explorerUrl}/tx/${item.txHash}` : null;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { color: string; bg: string }> = {
-    confirmed:       { color: '#22C55E', bg: '#F0FDF4' },
-    completed:       { color: '#22C55E', bg: '#F0FDF4' },
-    submitted:       { color: '#3B82F6', bg: '#EFF6FF' },
-    shipped:         { color: '#3B82F6', bg: '#EFF6FF' },
-    pending:         { color: '#F59E0B', bg: '#FFFBEB' },
-    pending_payment: { color: '#F59E0B', bg: '#FFFBEB' },
-    failed:          { color: '#EF4444', bg: '#FEF2F2' },
-    cancelled:       { color: '#EF4444', bg: '#FEF2F2' },
-    disputed:        { color: '#EF4444', bg: '#FEF2F2' },
+// Map an activity status to a theme tone (color + tinted background).
+function useStatusTone(status: string): { color: string; bg: string } {
+  const { colors } = useTheme();
+  const tones: Record<string, { color: string; bg: string }> = {
+    confirmed:       { color: colors.success, bg: colors.successBg },
+    completed:       { color: colors.success, bg: colors.successBg },
+    submitted:       { color: colors.info, bg: colors.infoBg },
+    shipped:         { color: colors.info, bg: colors.infoBg },
+    pending:         { color: colors.warning, bg: colors.warningBg },
+    pending_payment: { color: colors.warning, bg: colors.warningBg },
+    failed:          { color: colors.danger, bg: colors.dangerBg },
+    cancelled:       { color: colors.danger, bg: colors.dangerBg },
+    disputed:        { color: colors.danger, bg: colors.dangerBg },
   };
-  const st = map[status] ?? map.pending;
+  return tones[status] ?? { color: colors.warning, bg: colors.warningBg };
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const { color, bg } = useStatusTone(status);
   const label = status.replace(/_/g, ' ');
-  return (
-    <View style={[s.badge, { backgroundColor: st.bg }]}>
-      <Text style={[s.badgeText, { color: st.color }]}>{label}</Text>
-    </View>
-  );
+  return <Badge label={label} color={color} background={bg} size="sm" />;
 }
 
 function ActivityRow({ item }: { item: ActivityItem }) {
+  const { colors, spacing, radius } = useTheme();
   const url = explorerUrl(item);
+  const iconName = ITEM_ICONS[item.iconName] ?? 'list';
+  // Tone derived from the item's direction (credit = success), not the legacy
+  // per-item hex. Falls back to the accent for neutral/outgoing entries.
+  const tone = item.positive ? colors.success : colors.accent;
+  const toneBg = item.positive ? colors.successBg : colors.accentMuted;
+  const amountColor = item.positive ? colors.success : colors.textPrimary;
+
   return (
-    <TouchableOpacity
-      style={s.row}
-      activeOpacity={url ? 0.7 : 1}
+    <PressableScale
       onPress={() => url && Linking.openURL(url)}
+      disabled={!url}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.md,
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.md,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.hairline,
+      }}
     >
-      <View style={[s.iconWrap, { backgroundColor: item.iconBg }]}>
-        <Ionicons name={item.iconName as any} size={18} color={item.iconColor} />
+      <View
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: radius.pill,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: toneBg,
+        }}
+      >
+        <Icon name={iconName} size={18} color={tone} />
       </View>
-      <View style={s.rowMid}>
-        <Text style={s.rowTitle}>{item.title}</Text>
-        <Text style={s.rowSub} numberOfLines={1}>{item.subtitle}</Text>
+      <View style={{ flex: 1 }}>
+        <Text variant="bodySm" weight="600">
+          {item.title}
+        </Text>
+        <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 2 }}>
+          {item.subtitle}
+        </Text>
       </View>
-      <View style={s.rowRight}>
+      <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
         {item.amount && (
-          <Text style={[s.rowAmount, { color: item.positive ? '#22C55E' : '#1A1A1A' }]}>
+          <Text variant="bodySm" weight="700" numeric style={{ color: amountColor }}>
             {item.positive ? '+' : ''}{item.amount}
           </Text>
         )}
-        <Text style={s.rowDate}>{formatDate(item.timestamp)}</Text>
+        <Text variant="caption" color="textMuted">
+          {formatDate(item.timestamp)}
+        </Text>
         <StatusBadge status={item.status} />
       </View>
-    </TouchableOpacity>
+    </PressableScale>
   );
 }
 
@@ -93,6 +171,7 @@ interface Props {
 }
 
 export default function ActivityFeed({ types = [], embedded = false, onSeeAll, showFilters = false }: Props) {
+  const { colors, spacing } = useTheme();
   const [activeTypes, setActiveTypes] = useState<ActivityType[]>(types.length > 0 ? types : []);
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [page, setPage] = useState(1);
@@ -134,8 +213,8 @@ export default function ActivityFeed({ types = [], embedded = false, onSeeAll, s
   const availableTypes = types.length > 0 ? types : ALL_TYPES;
 
   if (loading) return (
-    <View style={s.center}>
-      <ActivityIndicator color={GOLD} />
+    <View style={{ paddingVertical: spacing['4xl'], alignItems: 'center' }}>
+      <Spinner />
     </View>
   );
 
@@ -143,36 +222,54 @@ export default function ActivityFeed({ types = [], embedded = false, onSeeAll, s
     <View style={embedded ? undefined : { flex: 1 }}>
       {/* Filter chips */}
       {showFilterBar && (
-        <View style={s.filterWrap}>
-          <TouchableOpacity
-            style={[s.chip, activeTypes.length === 0 && s.chipActive]}
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            gap: spacing.sm,
+            paddingHorizontal: spacing.lg,
+            paddingBottom: spacing.md,
+          }}
+        >
+          <Chip
+            label="All"
+            selected={activeTypes.length === 0}
             onPress={() => setActiveTypes([])}
-            activeOpacity={0.7}
-          >
-            <Text style={[s.chipText, activeTypes.length === 0 && s.chipTextActive]}>All</Text>
-          </TouchableOpacity>
+          />
           {availableTypes.map(t => {
             const meta = TYPE_META[t];
             const active = activeTypes.includes(t);
             return (
-              <TouchableOpacity
+              <Chip
                 key={t}
-                style={[s.chip, active && s.chipActive]}
+                label={meta.label}
+                leftIcon={TYPE_ICONS[t]}
+                selected={active}
                 onPress={() => toggleType(t)}
-                activeOpacity={0.7}
-              >
-                <Ionicons name={meta.iconName as any} size={12} color={active ? '#FFF' : '#888'} />
-                <Text style={[s.chipText, active && s.chipTextActive]}>{meta.label}</Text>
-              </TouchableOpacity>
+              />
             );
           })}
         </View>
       )}
 
       {items.length === 0 ? (
-        <View style={s.center}>
-          <Ionicons name="receipt-outline" size={36} color="#DDD" />
-          <Text style={s.emptyText}>No activity yet</Text>
+        <View style={{ paddingVertical: spacing['4xl'], alignItems: 'center', gap: spacing.sm }}>
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 32,
+              backgroundColor: colors.surfaceAlt,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: spacing.sm,
+            }}
+          >
+            <Icon name="list" size={30} color={colors.textMuted} />
+          </View>
+          <Text variant="bodySm" color="textMuted" weight="600">
+            No activity yet
+          </Text>
         </View>
       ) : (
         <FlatList
@@ -185,66 +282,40 @@ export default function ActivityFeed({ types = [], embedded = false, onSeeAll, s
           onEndReachedThreshold={0.3}
           keyboardShouldPersistTaps="handled"
           refreshControl={!embedded ? (
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={GOLD} colors={[GOLD]} />
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />
           ) : undefined}
           ListFooterComponent={
             embedded ? (
               onSeeAll ? (
-                <TouchableOpacity style={s.seeAll} onPress={onSeeAll}>
-                  <Text style={s.seeAllText}>See all activity</Text>
-                  <Ionicons name="chevron-forward" size={14} color={GOLD} />
-                </TouchableOpacity>
+                <PressableScale
+                  onPress={onSeeAll}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: spacing.xs,
+                    paddingVertical: spacing.lg,
+                  }}
+                >
+                  <Text variant="bodySm" weight="600" color="accent">
+                    See all activity
+                  </Text>
+                  <Icon name="chevronRight" size={14} color={colors.accent} />
+                </PressableScale>
               ) : null
             ) : loadingMore ? (
-              <ActivityIndicator color={GOLD} style={{ padding: 16 }} />
+              <View style={{ padding: spacing.lg, alignItems: 'center' }}>
+                <Spinner />
+              </View>
             ) : !hasMore && items.length > 0 ? (
-              <Text style={s.endText}>All caught up</Text>
+              <Text variant="caption" color="textMuted" align="center" style={{ padding: spacing.lg }}>
+                All caught up
+              </Text>
             ) : null
           }
-          contentContainerStyle={!embedded ? { paddingBottom: 40 } : undefined}
+          contentContainerStyle={!embedded ? { paddingBottom: spacing['4xl'] } : undefined}
         />
       )}
     </View>
   );
 }
-
-const s = StyleSheet.create({
-  center: { padding: 40, alignItems: 'center', gap: 10 },
-  emptyText: { fontSize: 14, color: '#BBB', fontWeight: '600' },
-  endText: { fontSize: 12, color: '#CCC', textAlign: 'center', padding: 16 },
-
-  filterWrap: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
-    paddingHorizontal: 16, paddingBottom: 12,
-  },
-  chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: 20, backgroundColor: '#F0F0F0',
-  },
-  chipActive: { backgroundColor: '#1A1A1A' },
-  chipText: { fontSize: 12, fontWeight: '600', color: '#888' },
-  chipTextActive: { color: '#FFF' },
-
-  row: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F5F5F5',
-  },
-  iconWrap: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  rowMid: { flex: 1 },
-  rowTitle: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-  rowSub: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  rowRight: { alignItems: 'flex-end', gap: 3 },
-  rowAmount: { fontSize: 13, fontWeight: '700' },
-  rowDate: { fontSize: 11, color: '#AAA' },
-
-  badge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
-  badgeText: { fontSize: 9, fontWeight: '700', textTransform: 'capitalize' },
-
-  seeAll: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 4, paddingVertical: 14,
-  },
-  seeAllText: { fontSize: 14, fontWeight: '600', color: GOLD },
-});

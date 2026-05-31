@@ -1,21 +1,41 @@
+// app/wallet/receive.tsx
+//
+// Receive — shows the active wallet address as a scannable QR code plus a
+// copyable/shareable address, with a chain selector for the receiving network.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives).
+//
+// FINANCIAL screen: the address derivation (getActiveWallet), the QR encoding of
+// that exact address, the chain selection (ChainSelector + CHAINS/CHAIN_KEYS), and
+// the copy/share handlers are preserved verbatim — this is a visual/structural
+// restyle only. The QR is intentionally rendered dark-on-light at a fixed size so
+// it stays scannable in both light and dark themes.
 import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Share,
-  Alert,
-} from 'react-native';
-import { router } from 'expo-router';
+import { View, Share } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { ScrollView } from 'react-native';
 import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
-import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import { CHAINS, CHAIN_KEYS, type ChainKey, getSupportedNetworkNames } from '../../constants/chains';
 import ChainSelector from '../../components/wallet/ChainSelector';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  Text,
+} from '@/components/ui';
+
+// QR codes must stay high-contrast dark-on-light to remain scannable regardless of
+// the active theme, so these two values are intentionally not theme-driven.
+const QR_FG = '#16201F';
+const QR_BG = '#FFFFFF';
 
 const ReceiveToken = () => {
+  const { colors, spacing, radius } = useTheme();
   const [walletAddress, setWalletAddress] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
@@ -47,177 +67,88 @@ const ReceiveToken = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.subtitle}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+        <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing['2xl'] }}>
           Share your address or QR code to receive tokens on supported networks ({getSupportedNetworkNames()}).
         </Text>
-      </View>
 
-      <Text style={styles.sectionLabel}>NETWORK</Text>
-      <ChainSelector
-        availableChains={CHAIN_KEYS}
-        selectedChain={selectedChain}
-        onSelect={setSelectedChain}
-      />
-      <Text style={styles.chainInfo}>
-        Send tokens on {CHAINS[selectedChain]?.name || 'Unknown'} to this address
-      </Text>
+        <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+          NETWORK
+        </Text>
+        <ChainSelector
+          availableChains={CHAIN_KEYS}
+          selectedChain={selectedChain}
+          onSelect={setSelectedChain}
+        />
+        <Text
+          variant="caption"
+          color="textMuted"
+          align="center"
+          style={{ marginTop: spacing.md, marginBottom: spacing.sm }}
+        >
+          Send tokens on {CHAINS[selectedChain]?.name || 'Unknown'} to this address
+        </Text>
 
-      <View style={styles.qrContainer}>
-        {walletAddress ? (
-          <View style={styles.qrWrapper}>
-            <QRCode
-              value={walletAddress}
-              size={200}
-              color={COLORS.dark}
-              backgroundColor={COLORS.white}
+        <View style={{ alignItems: 'center', marginVertical: spacing['2xl'] }}>
+          {walletAddress ? (
+            <Card
+              padding="2xl"
+              style={{ backgroundColor: QR_BG, borderRadius: radius.lg, alignItems: 'center' }}
+            >
+              <QRCode
+                value={walletAddress}
+                size={200}
+                color={QR_FG}
+                backgroundColor={QR_BG}
+              />
+            </Card>
+          ) : (
+            <EmptyState
+              icon="wallet"
+              title="No wallet address"
+              subtitle="Set up a wallet to receive tokens"
             />
-          </View>
-        ) : (
-          <View style={[styles.qrWrapper, { justifyContent: 'center', alignItems: 'center' }]}>
-            <Text style={styles.placeholderText}>No wallet address</Text>
-          </View>
-        )}
-      </View>
+          )}
+        </View>
 
-      <View style={styles.addressContainer}>
-        <Text style={styles.addressLabel}>Your Wallet Address</Text>
-        <Text style={styles.addressText} selectable numberOfLines={2}>
-          {walletAddress || 'Not available'}
-        </Text>
-      </View>
-
-      <View style={styles.buttonRow}>
-        <TouchableOpacity style={styles.copyButton} onPress={handleCopy}>
-          <Text style={styles.copyButtonText}>
-            {copied ? 'Copied!' : 'Copy Address'}
+        <Card padding="lg" style={{ alignItems: 'center', marginBottom: spacing.xl }}>
+          <Text variant="caption" color="textMuted" style={{ marginBottom: spacing.xs }}>
+            Your Wallet Address
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.shareButton} onPress={handleShare}>
-          <Text style={styles.shareButtonText}>Share</Text>
-        </TouchableOpacity>
-      </View>
+          <Text variant="bodySm" weight="500" align="center" numeric selectable numberOfLines={2}>
+            {walletAddress || 'Not available'}
+          </Text>
+        </Card>
 
-      <View style={styles.infoBox}>
-        <Text style={styles.infoText}>
-          Only send tokens on supported networks ({getSupportedNetworkNames()}) to this address.
-          Sending tokens on unsupported networks may result in permanent loss.
-        </Text>
-      </View>
-    </View>
+        <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.xl }}>
+          <Button
+            title={copied ? 'Copied!' : 'Copy Address'}
+            leftIcon={copied ? 'check' : 'copy'}
+            onPress={handleCopy}
+            style={{ flex: 1 }}
+          />
+          <Button
+            title="Share"
+            variant="secondary"
+            leftIcon="send"
+            onPress={handleShare}
+            style={{ flex: 1 }}
+          />
+        </View>
+
+        <AccentCard padding="md" railColor={colors.warning}>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            <Icon name="warning" size={18} color={colors.warning} />
+            <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+              Only send tokens on supported networks ({getSupportedNetworkNames()}) to this address.
+              Sending tokens on unsupported networks may result in permanent loss.
+            </Text>
+          </View>
+        </AccentCard>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 export default ReceiveToken;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-    padding: SIZES.padding3,
-  },
-  header: {
-    marginBottom: 32,
-  },
-  subtitle: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    lineHeight: 22,
-  },
-  qrContainer: {
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  qrWrapper: {
-    padding: 24,
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    ...SHADOWS.medium,
-  },
-  placeholderText: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    width: 200,
-    height: 200,
-    textAlign: 'center',
-    textAlignVertical: 'center',
-    lineHeight: 200,
-  },
-  addressContainer: {
-    backgroundColor: COLORS.lightGray,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 24,
-    alignItems: 'center',
-  },
-  addressLabel: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    marginBottom: 8,
-  },
-  addressText: {
-    ...FONTS.body4,
-    color: COLORS.dark,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 24,
-  },
-  copyButton: {
-    flex: 1,
-    backgroundColor: COLORS.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    ...SHADOWS.medium,
-  },
-  copyButtonText: {
-    ...FONTS.h4,
-    color: COLORS.white,
-    fontWeight: '600',
-  },
-  shareButton: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.primary,
-  },
-  shareButtonText: {
-    ...FONTS.h4,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  infoBox: {
-    backgroundColor: '#FEF3C7',
-    borderRadius: 12,
-    padding: 16,
-  },
-  infoText: {
-    ...FONTS.body4,
-    color: '#92400E',
-    lineHeight: 20,
-  },
-  sectionLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#AAA',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  chainInfo: {
-    fontSize: 13,
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 12,
-    marginBottom: 8,
-  },
-});
