@@ -160,7 +160,7 @@ const MyAdsScreen: React.FC = () => {
         }
       >
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text variant="title1" weight="800">
+          <Text variant="title1" weight="700">
             My Ads
           </Text>
           <Button

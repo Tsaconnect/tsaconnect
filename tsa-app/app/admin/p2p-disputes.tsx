@@ -112,7 +112,7 @@ const AdminDisputesScreen: React.FC = () => {
           />
         }
       >
-        <Text variant="title1" weight="800">
+        <Text variant="title1" weight="700">
           Disputes
         </Text>
         <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
