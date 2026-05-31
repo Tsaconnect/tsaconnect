@@ -3,32 +3,30 @@
 // List of saved bank/mobile-money accounts the user receives fiat through
 // for P2P trades. Soft-deletes are blocked server-side when the method is
 // referenced by an open trade; the UI surfaces the 409 message cleanly.
+//
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui);
+// data fetching, the delete confirm + 409 handling, and navigation are
+// unchanged — this is a visual/UX restyle only.
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { paymentMethodsApi, type P2PPaymentMethod } from '../../../services/p2p';
-
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-};
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Button,
+  Divider,
+  EmptyState,
+  Icon,
+  PressableScale,
+  SkeletonGroup,
+  Text,
+} from '@/components/ui';
 
 const PaymentMethodsScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const [methods, setMethods] = useState<P2PPaymentMethod[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,19 +70,22 @@ const PaymentMethodsScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
-        <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 80 }} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ padding: spacing.lg }}>
+          <SkeletonGroup shape="adCard" count={3} />
+        </View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView
-        contentContainerStyle={styles.scroll}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
+            tintColor={colors.accent}
             onRefresh={() => {
               setRefreshing(true);
               load();
@@ -92,66 +93,95 @@ const PaymentMethodsScreen: React.FC = () => {
           />
         }
       >
-        <Text style={styles.heading}>Payment methods</Text>
-        <Text style={styles.subheading}>
+        <Text variant="title1" weight="800">
+          Payment methods
+        </Text>
+        <Text
+          variant="bodySm"
+          color="textSecondary"
+          style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}
+        >
           The accounts buyers send fiat to during P2P trades.
         </Text>
 
         {methods.length === 0 ? (
-          <View style={styles.empty}>
-            <Icon name="account-balance-wallet" size={48} color={GOLD.muted} />
-            <Text style={styles.emptyText}>
-              No payment methods yet — add one before posting an ad.
-            </Text>
-          </View>
+          <EmptyState
+            icon="wallet"
+            title="No payment methods yet"
+            subtitle="Add one before posting an ad so buyers know where to send fiat."
+            actionLabel="Add payment method"
+            onAction={() => router.push('/p2p/payment-methods/new')}
+          />
         ) : (
-          methods.map((m) => (
-            <View key={m.id} style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon
-                  name={m.type === 'mobile_money' ? 'phone-iphone' : 'account-balance'}
-                  size={24}
-                  color={GOLD.dark}
-                />
-                <Text style={styles.bankName}>{m.bankName}</Text>
-                {m.isDefault && (
-                  <View style={styles.defaultBadge}>
-                    <Text style={styles.defaultBadgeText}>Default</Text>
-                  </View>
-                )}
-              </View>
-              <Text style={styles.account}>{maskAccount(m.accountNumber)}</Text>
-              <Text style={styles.accountName}>{m.accountName}</Text>
-              <View style={styles.metaRow}>
-                <Text style={styles.meta}>
-                  {m.currency} · {m.country}
-                </Text>
-                {m.verified && (
-                  <Text style={[styles.meta, { color: '#28A745' }]}>✓ Verified</Text>
-                )}
-              </View>
-              <TouchableOpacity
-                style={styles.deleteButton}
-                onPress={() => handleDelete(m)}
-                activeOpacity={0.7}
-              >
-                <Icon name="delete-outline" size={20} color={GOLD.error} />
-                <Text style={styles.deleteButtonText}>Remove</Text>
-              </TouchableOpacity>
+          <>
+            <View style={{ gap: spacing.md }}>
+              {methods.map((m) => (
+                <MethodCard key={m.id} method={m} onDelete={handleDelete} />
+              ))}
             </View>
-          ))
-        )}
 
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => router.push('/p2p/payment-methods/new')}
-          activeOpacity={0.85}
-        >
-          <Icon name="add-circle" size={24} color="#000" />
-          <Text style={styles.addButtonText}>Add payment method</Text>
-        </TouchableOpacity>
+            <Button
+              title="Add payment method"
+              leftIcon="plus"
+              onPress={() => router.push('/p2p/payment-methods/new')}
+              style={{ marginTop: spacing.lg }}
+            />
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
+  );
+};
+
+const MethodCard: React.FC<{
+  method: P2PPaymentMethod;
+  onDelete: (m: P2PPaymentMethod) => void;
+}> = ({ method: m, onDelete }) => {
+  const { colors, spacing } = useTheme();
+
+  return (
+    <AccentCard>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: spacing.sm }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 }}>
+          <Icon name={m.type === 'mobile_money' ? 'mobile' : 'bank'} size={22} color={colors.accent} />
+          <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flex: 1 }}>
+            {m.bankName}
+          </Text>
+        </View>
+        {m.isDefault && (
+          <Badge label="Default" color={colors.accent} background={colors.accentMuted} size="sm" />
+        )}
+      </View>
+
+      <Text variant="title3" weight="600" numeric style={{ marginTop: spacing.sm, letterSpacing: 1 }}>
+        {maskAccount(m.accountNumber)}
+      </Text>
+      <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+        {m.accountName}
+      </Text>
+
+      <Divider spacing="md" />
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <Text variant="caption" color="textMuted">
+            {m.currency} · {m.country}
+          </Text>
+          {m.verified && (
+            <Badge label="Verified" icon="checkCircle" color={colors.success} background={colors.successBg} size="sm" />
+          )}
+        </View>
+        <PressableScale
+          onPress={() => onDelete(m)}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingVertical: spacing.xs }}
+        >
+          <Icon name="trash" size={16} color={colors.danger} />
+          <Text variant="bodySm" weight="700" color="danger">
+            Remove
+          </Text>
+        </PressableScale>
+      </View>
+    </AccentCard>
   );
 };
 
@@ -160,74 +190,5 @@ function maskAccount(account: string): string {
   if (account.length <= 4) return account;
   return '•'.repeat(account.length - 4) + account.slice(-4);
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 60 },
-  heading: { fontSize: 24, fontWeight: '800', color: '#000', marginBottom: 6 },
-  subheading: { fontSize: 14, color: '#666', marginBottom: 20, lineHeight: 20 },
-  empty: {
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  emptyText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: '#888',
-    textAlign: 'center',
-    maxWidth: 240,
-  },
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  bankName: { fontSize: 16, fontWeight: '700', color: '#000', marginLeft: 10, flex: 1 },
-  defaultBadge: {
-    backgroundColor: GOLD.light,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-  },
-  defaultBadgeText: { fontSize: 11, fontWeight: '700', color: GOLD.dark },
-  account: { fontSize: 18, fontWeight: '600', color: '#000', letterSpacing: 1 },
-  accountName: { fontSize: 14, color: '#444', marginTop: 4 },
-  metaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  meta: { fontSize: 12, color: '#888' },
-  deleteButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    paddingVertical: 6,
-  },
-  deleteButtonText: { color: GOLD.error, fontSize: 14, marginLeft: 4, fontWeight: '600' },
-  addButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    marginTop: 12,
-    shadowColor: GOLD.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  addButtonText: { fontWeight: '800', color: '#000', marginLeft: 8, fontSize: 16 },
-});
 
 export default PaymentMethodsScreen;

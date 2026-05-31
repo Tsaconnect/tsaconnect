@@ -2,44 +2,56 @@
 //
 // The state-machine cockpit for a single P2P trade. Single screen that:
 //
-//   - Renders the trade's current status as a visual progress bar
+//   - Renders the trade's current status as a visual progress timeline
 //   - Shows trade summary (counterparty, amount, rate, payment method)
 //   - Surfaces context-aware actions per role + status:
 //       buyer / pending_payment    → Mark as paid (with proof upload)
 //       seller / pending or paid   → Release
-//       either / paid              → Open dispute
+//       either / paid              → Open dispute (navigates to the wizard)
 //       either / past expiry       → Cancel (anyone after 30 min)
 //   - Embeds the chat thread (system + user messages, text + image)
 //   - Provides a composer for chat (text + Cloudinary-backed image upload)
 //
 // Realtime: polls every 5 seconds for trade + messages. WS replacement is
 // a Phase-1.5 follow-up; polling keeps the wire shape simple.
+//
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui).
+// Behavior is unchanged: the 5s polling, chat, countdown, and all
+// markPaid/release/cancel action handlers (incl. post-broadcast error handling)
+// are preserved verbatim. The only logic change is the removal of the now-dead
+// inline dispute modal — the dispute button navigates to /p2p/dispute/<tradeId>.
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   ScrollView,
-  StyleSheet,
-  Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Button,
+  Card,
+  Icon,
+  IconButton,
+  PressableScale,
+  Spinner,
+  StatusPill,
+  Text,
+} from '@/components/ui';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import type { ChainKey } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import {
-  formatFiat,
   formatTokenAmount,
   messagesApi,
   ratingsApi,
@@ -51,17 +63,6 @@ import {
 import { broadcastTransaction, getActiveWallet, signTransaction } from '../../../services/wallet';
 import { getAuthHeaders } from '../../../services/walletApi';
 
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#28A745',
-  info: '#3B82F6',
-};
-
 const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 const POLL_INTERVAL_MS = 5000;
 
@@ -72,6 +73,7 @@ const STAGES: { key: P2PTrade['status']; label: string }[] = [
 ];
 
 const TradeDetailScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { tradeId } = useLocalSearchParams<{ tradeId: string }>();
   const { currentUser } = useAuth();
   const user = currentUser as { id?: string } | null;
@@ -79,8 +81,6 @@ const TradeDetailScreen: React.FC = () => {
   const [messages, setMessages] = useState<P2PMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string>(''); // current action stage
-  const [showDispute, setShowDispute] = useState(false);
-  const [disputeReason, setDisputeReason] = useState('');
   const [composerText, setComposerText] = useState('');
   const [composerImage, setComposerImage] = useState<string | null>(null);
   const [rated, setRated] = useState(false);
@@ -166,8 +166,10 @@ const TradeDetailScreen: React.FC = () => {
 
   if (loading || !trade) {
     return (
-      <SafeAreaView style={styles.container}>
-        <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 80 }} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <Spinner label="Loading trade…" />
+        </View>
       </SafeAreaView>
     );
   }
@@ -175,21 +177,25 @@ const TradeDetailScreen: React.FC = () => {
     // Loaded trade, but the viewer is neither buyer nor seller.
     // Admin lands on the admin queue, not here, so this is an error state.
     return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.deniedWrap}>
-          <Icon name="lock" size={48} color={GOLD.muted} />
-          <Text style={styles.deniedTitle}>Not your trade</Text>
-          <Text style={styles.deniedBody}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View
+          style={{
+            flex: 1,
+            alignItems: 'center',
+            justifyContent: 'center',
+            paddingHorizontal: spacing['3xl'],
+            gap: spacing.md,
+          }}
+        >
+          <Icon name="lock" size={48} color={colors.textMuted} />
+          <Text variant="title2" weight="800" align="center">
+            Not your trade
+          </Text>
+          <Text variant="bodySm" color="textSecondary" align="center">
             You&apos;re not a party to this trade. If you&apos;re an admin reviewing a
             dispute, open it from the admin queue.
           </Text>
-          <TouchableOpacity
-            style={styles.deniedBtn}
-            onPress={() => router.back()}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.deniedBtnText}>Go back</Text>
-          </TouchableOpacity>
+          <Button title="Go back" variant="secondary" fullWidth={false} onPress={() => router.back()} />
         </View>
       </SafeAreaView>
     );
@@ -296,39 +302,6 @@ const TradeDetailScreen: React.FC = () => {
     }
   };
 
-  const handleSubmitDispute = async () => {
-    if (acting || !disputeReason.trim()) return;
-    let broadcastHash: string | null = null;
-    try {
-      startActing('Loading wallet…');
-      const callerAddress = await getActiveWallet();
-      if (!callerAddress) throw new Error('No wallet found');
-
-      startActing('Preparing dispute…');
-      const prep = await tradesApi.raiseDispute(trade.id, disputeReason.trim(), callerAddress);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-
-      startActing('Signing…');
-      const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
-
-      startActing('Broadcasting…');
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
-      broadcastHash = resp.hash;
-
-      startActing('Confirming…');
-      const conf = await tradesApi.confirmRaiseDispute(trade.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-      setTrade(conf.data ?? trade);
-      setShowDispute(false);
-      setDisputeReason('');
-      load();
-    } catch (err: any) {
-      handlePostBroadcastError('Dispute', broadcastHash, err);
-    } finally {
-      stopActing();
-    }
-  };
-
   const handleSendMessage = async () => {
     if (composerImage) {
       const url = await uploadImage(composerImage, startActing);
@@ -374,8 +347,10 @@ const TradeDetailScreen: React.FC = () => {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
+  const canSend = !acting && (!!composerImage || !!composerText.trim());
+
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
@@ -383,47 +358,55 @@ const TradeDetailScreen: React.FC = () => {
       >
         <ScrollView
           ref={scrollRef}
-          contentContainerStyle={styles.scroll}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xl }}
           keyboardShouldPersistTaps="handled"
         >
-          <StatusBar status={trade.status} />
+          <StatusTimeline status={trade.status} />
 
-          <View style={styles.summary}>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Amount</Text>
-              <Text style={styles.summaryValue}>
-                {formatTokenAmount(trade.tokenAmount, tokenDecimals, 4)} {trade.token}
-              </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Fiat</Text>
-              <Text style={styles.summaryValue}>
-                {trade.fiatCurrency} {formatFiat(trade.fiatAmount)}
-              </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Rate</Text>
-              <Text style={styles.summaryValue}>
-                {trade.fiatCurrency} {formatFiat(trade.rate)} / {trade.token}
-              </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Your role</Text>
-              <Text style={[styles.summaryValue, { textTransform: 'capitalize' }]}>
+          <Card style={{ marginTop: spacing.lg }}>
+            <SummaryLine label="Amount">
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                <AmountText
+                  value={formatTokenAmount(trade.tokenAmount, tokenDecimals, 4)}
+                  variant="bodyMed"
+                />
+                <Text variant="bodySm" color="textMuted">
+                  {trade.token}
+                </Text>
+              </View>
+            </SummaryLine>
+            <SummaryLine label="Fiat">
+              <AmountText value={trade.fiatAmount} currency={trade.fiatCurrency} variant="bodyMed" />
+            </SummaryLine>
+            <SummaryLine label="Rate">
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                <AmountText value={trade.rate} currency={trade.fiatCurrency} variant="bodySm" />
+                <Text variant="caption" color="textMuted">
+                  / {trade.token}
+                </Text>
+              </View>
+            </SummaryLine>
+            <SummaryLine label="Your role">
+              <Text variant="bodySm" weight="700" style={{ textTransform: 'capitalize' }}>
                 {role}
               </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Expires</Text>
+            </SummaryLine>
+            <SummaryLine label="Expires">
               {trade.status === 'pending_payment' ? (
-                <Text style={styles.countdown}>
+                <Text
+                  variant="bodyMed"
+                  weight="800"
+                  style={{ color: countdown.expired ? colors.danger : colors.escrow }}
+                >
                   {countdown.expired ? 'Expired' : `${countdown.label} left to pay`}
                 </Text>
               ) : (
-                <Text style={styles.summaryValue}>{formatRelative(trade.expiresAt)}</Text>
+                <Text variant="bodySm" weight="700" color="textSecondary">
+                  {formatRelative(trade.expiresAt)}
+                </Text>
               )}
-            </View>
-          </View>
+            </SummaryLine>
+          </Card>
 
           {!isTerminal && (
             <ActionPanel
@@ -438,79 +421,149 @@ const TradeDetailScreen: React.FC = () => {
           )}
 
           {trade.status === 'released' && !rated && (
-            <View style={styles.ratePrompt}>
-              <Text style={styles.rateText}>Rate this trade</Text>
-              <View style={{ flexDirection: 'row', gap: 24 }}>
-                <TouchableOpacity onPress={() => rate(1)} hitSlop={8}>
-                  <Icon name="thumb-up" size={28} color="#2E8B57" />
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => rate(-1)} hitSlop={8}>
-                  <Icon name="thumb-down" size={28} color={GOLD.error} />
-                </TouchableOpacity>
+            <Card style={{ marginTop: spacing.lg }}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <Text variant="bodyMed" weight="700">
+                  Rate this trade
+                </Text>
+                <View style={{ flexDirection: 'row', gap: spacing['2xl'] }}>
+                  <IconButton
+                    icon="thumbUp"
+                    accessibilityLabel="Rate positive"
+                    color={colors.success}
+                    onPress={() => rate(1)}
+                  />
+                  <IconButton
+                    icon="thumbDown"
+                    accessibilityLabel="Rate negative"
+                    color={colors.danger}
+                    onPress={() => rate(-1)}
+                  />
+                </View>
               </View>
-            </View>
+            </Card>
           )}
           {trade.status === 'released' && rated && (
-            <Text style={styles.rateThanks}>Thanks for your feedback.</Text>
+            <Text
+              variant="bodySm"
+              weight="600"
+              color="accent"
+              align="center"
+              style={{ marginTop: spacing.lg }}
+            >
+              Thanks for your feedback.
+            </Text>
           )}
 
-          <Text style={styles.chatHeading}>Chat</Text>
-          <View style={styles.chatThread}>
+          <Text variant="title3" weight="800" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+            Chat
+          </Text>
+          <View style={{ gap: spacing.sm }}>
             {messages.length === 0 ? (
-              <Text style={styles.chatEmpty}>No messages yet.</Text>
+              <Text
+                variant="bodySm"
+                color="textMuted"
+                align="center"
+                style={{ paddingVertical: spacing.xl, fontStyle: 'italic' }}
+              >
+                No messages yet.
+              </Text>
             ) : (
-              messages.map((m) => <MessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />)
+              messages.map((m) => (
+                <MessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />
+              ))
             )}
           </View>
         </ScrollView>
 
         {!isTerminal && (
-          <View style={styles.composer}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'flex-end',
+              gap: spacing.sm,
+              paddingHorizontal: spacing.md,
+              paddingVertical: spacing.sm,
+              backgroundColor: colors.surface,
+              borderTopWidth: 1,
+              borderTopColor: colors.hairline,
+            }}
+          >
             {composerImage ? (
-              <View style={styles.composerImagePreview}>
-                <Image source={{ uri: composerImage }} style={styles.composerImage} />
-                <TouchableOpacity onPress={() => setComposerImage(null)} style={styles.composerImageRemove}>
-                  <Icon name="close" size={18} color="#FFF" />
-                </TouchableOpacity>
+              <View style={{ flex: 1, position: 'relative' }}>
+                <Image
+                  source={{ uri: composerImage }}
+                  style={{ width: 80, height: 80, borderRadius: 8 }}
+                />
+                <PressableScale
+                  onPress={() => setComposerImage(null)}
+                  accessibilityLabel="Remove attached image"
+                  style={{
+                    position: 'absolute',
+                    top: 4,
+                    left: 60,
+                    backgroundColor: colors.overlay,
+                    borderRadius: 12,
+                    width: 24,
+                    height: 24,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Icon name="close" size={16} color={colors.textInverse} />
+                </PressableScale>
               </View>
             ) : (
-              <TextInput
-                style={styles.composerInput}
-                value={composerText}
-                onChangeText={setComposerText}
-                placeholder="Type a message…"
-                placeholderTextColor="#999"
-                multiline
-                editable={!acting}
-              />
+              <View
+                style={{
+                  flex: 1,
+                  minHeight: 38,
+                  maxHeight: 100,
+                  justifyContent: 'center',
+                  backgroundColor: colors.surfaceAlt,
+                  borderRadius: 18,
+                  paddingHorizontal: spacing.md,
+                }}
+              >
+                <TextInput
+                  value={composerText}
+                  onChangeText={setComposerText}
+                  placeholder="Type a message…"
+                  placeholderTextColor={colors.textMuted}
+                  multiline
+                  editable={!acting}
+                  style={{
+                    color: colors.textPrimary,
+                    fontSize: 14,
+                    paddingVertical: spacing.sm,
+                  }}
+                />
+              </View>
             )}
-            <TouchableOpacity
-              style={styles.composerButton}
-              onPress={pickImage}
+            <IconButton
+              icon="image"
+              accessibilityLabel="Attach image"
+              color={colors.accent}
               disabled={!!acting}
-            >
-              <Icon name="image" size={22} color={GOLD.dark} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.composerButton, styles.composerSend]}
+              onPress={pickImage}
+            />
+            <IconButton
+              icon="send"
+              variant="surface"
+              accessibilityLabel="Send message"
+              color={canSend ? colors.onAccent : colors.textMuted}
+              disabled={!canSend}
               onPress={handleSendMessage}
-              disabled={!!acting || (!composerImage && !composerText.trim())}
-            >
-              <Icon name="send" size={20} color="#000" />
-            </TouchableOpacity>
+              style={{ backgroundColor: canSend ? colors.accent : colors.surfaceAlt }}
+            />
           </View>
         )}
-
-        <DisputeModal
-          visible={showDispute}
-          token={trade.token}
-          role={role}
-          reason={disputeReason}
-          onChange={setDisputeReason}
-          onClose={() => setShowDispute(false)}
-          onSubmit={handleSubmitDispute}
-          busy={!!acting}
-        />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -518,7 +571,8 @@ const TradeDetailScreen: React.FC = () => {
 
 // ─── Components ──────────────────────────────────────────────────────────────
 
-const StatusBar: React.FC<{ status: P2PTrade['status'] }> = ({ status }) => {
+const StatusTimeline: React.FC<{ status: P2PTrade['status'] }> = ({ status }) => {
+  const { colors, spacing } = useTheme();
   let stageIdx = STAGES.findIndex((s) => s.key === status);
   const isCancelled = status === 'cancelled';
   const isDisputed = status === 'disputed';
@@ -528,55 +582,60 @@ const StatusBar: React.FC<{ status: P2PTrade['status'] }> = ({ status }) => {
   if (isReleasing) stageIdx = 1; // visual marker between paid and released
   if (isResolved) stageIdx = 2;
 
+  // Resolve the headline status to a StatusPill for a single consistent rendering.
   return (
-    <View style={styles.statusBar}>
-      <View style={styles.statusStages}>
+    <View style={{ alignItems: 'center', gap: spacing.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
         {STAGES.map((stage, idx) => {
           const reached = idx <= stageIdx && !isCancelled;
+          const cancelledHead = isCancelled && idx === 0;
+          const dotBg = cancelledHead
+            ? colors.danger
+            : reached
+            ? colors.accent
+            : colors.surfaceAlt;
+          const glyph: React.ComponentProps<typeof Icon>['name'] = cancelledHead
+            ? 'close'
+            : reached
+            ? 'check'
+            : 'checkCircle';
+          const glyphColor = cancelledHead || reached ? colors.onAccent : colors.textMuted;
           return (
             <React.Fragment key={stage.key}>
               <View
-                style={[
-                  styles.statusDot,
-                  reached && styles.statusDotActive,
-                  isCancelled && idx === 0 && styles.statusDotCancelled,
-                ]}
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 14,
+                  backgroundColor: dotBg,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
               >
-                <Icon
-                  name={
-                    isCancelled
-                      ? 'close'
-                      : reached
-                      ? 'check'
-                      : 'radio-button-unchecked'
-                  }
-                  size={14}
-                  color={reached || isCancelled ? '#000' : '#999'}
-                />
+                <Icon name={glyph} size={16} color={glyphColor} />
               </View>
               {idx < STAGES.length - 1 && (
                 <View
-                  style={[
-                    styles.statusLine,
-                    idx < stageIdx && !isCancelled && styles.statusLineActive,
-                  ]}
+                  style={{
+                    width: 32,
+                    height: 2,
+                    marginHorizontal: spacing.xs,
+                    backgroundColor:
+                      idx < stageIdx && !isCancelled ? colors.accent : colors.hairline,
+                  }}
                 />
               )}
             </React.Fragment>
           );
         })}
       </View>
-      <Text style={styles.statusLabel}>
-        {isCancelled
-          ? 'Cancelled'
-          : isDisputed
-          ? 'Disputed — awaiting admin review'
-          : isResolved
-          ? 'Resolved by admin'
-          : isReleasing
-          ? 'Releasing on chain…'
-          : STAGES[stageIdx]?.label || status}
-      </Text>
+      {isDisputed || isResolved || isCancelled ? (
+        <StatusPill kind="trade" status={status} />
+      ) : (
+        <Text variant="bodySm" weight="700" color="textSecondary">
+          {isReleasing ? 'Releasing on chain…' : STAGES[stageIdx]?.label || status}
+        </Text>
+      )}
     </View>
   );
 };
@@ -590,6 +649,7 @@ const ActionPanel: React.FC<{
   onCancel: () => void;
   onDispute: () => void;
 }> = ({ role, trade, acting, onMarkPaid, onRelease, onCancel, onDispute }) => {
+  const { colors, spacing } = useTheme();
   const expired = new Date(trade.expiresAt).getTime() < Date.now();
   // Role-awareness for both sell-ad and buy-ad trades:
   //   sell-ad trade: user is buyer (buys crypto), merchant is seller
@@ -607,49 +667,55 @@ const ActionPanel: React.FC<{
   const releasingDisabled = trade.status === 'releasing';
 
   return (
-    <View style={styles.actions}>
+    <View style={{ marginTop: spacing.lg }}>
       {acting ? (
-        <View style={styles.actingRow}>
-          <ActivityIndicator color={GOLD.dark} />
-          <Text style={styles.actingText}>{acting}</Text>
-        </View>
+        <AccentCard padding="md">
+          <Spinner label={acting} inline />
+        </AccentCard>
       ) : (
-        <>
+        <View style={{ gap: spacing.md }}>
           {canMarkPaid && (
-            <TouchableOpacity style={styles.primaryAction} onPress={onMarkPaid}>
-              <Icon name="check-circle" size={20} color="#000" />
-              <Text style={styles.primaryActionText}>I&apos;ve paid — attach proof</Text>
-            </TouchableOpacity>
+            <Button
+              title="I've paid — attach proof"
+              leftIcon="checkCircle"
+              onPress={onMarkPaid}
+            />
           )}
           {canRelease && (
-            <TouchableOpacity
-              style={[styles.primaryAction, releasingDisabled && styles.actionDisabled]}
-              onPress={onRelease}
+            <Button
+              title={releasingDisabled ? 'Releasing…' : `Release ${trade.token}`}
+              leftIcon="lock"
+              loading={releasingDisabled}
               disabled={releasingDisabled}
-            >
-              <Icon name="lock-open" size={20} color="#000" />
-              <Text style={styles.primaryActionText}>
-                {releasingDisabled ? 'Releasing…' : `Release ${trade.token}`}
-              </Text>
-            </TouchableOpacity>
+              onPress={onRelease}
+            />
           )}
-          <View style={styles.secondaryRow}>
-            {canCancel && (
-              <TouchableOpacity style={styles.secondaryAction} onPress={onCancel}>
-                <Icon name="cancel" size={16} color="#666" />
-                <Text style={styles.secondaryActionText}>Cancel (timed out)</Text>
-              </TouchableOpacity>
-            )}
-            {canDispute && (
-              <TouchableOpacity style={styles.secondaryAction} onPress={onDispute}>
-                <Icon name="report" size={16} color={GOLD.error} />
-                <Text style={[styles.secondaryActionText, { color: GOLD.error }]}>
-                  Open dispute
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </>
+          {(canCancel || canDispute) && (
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              {canCancel && (
+                <Button
+                  title="Cancel (timed out)"
+                  leftIcon="close"
+                  variant="secondary"
+                  size="sm"
+                  fullWidth={false}
+                  onPress={onCancel}
+                />
+              )}
+              {canDispute && (
+                <Button
+                  title="Open dispute"
+                  leftIcon="dispute"
+                  variant="secondary"
+                  size="sm"
+                  fullWidth={false}
+                  onPress={onDispute}
+                  style={{ borderColor: colors.danger }}
+                />
+              )}
+            </View>
+          )}
+        </View>
       )}
     </View>
   );
@@ -659,79 +725,80 @@ const MessageBubble: React.FC<{ message: P2PMessage; isMine: boolean }> = ({
   message,
   isMine,
 }) => {
+  const { colors, spacing, radius } = useTheme();
   if (message.type === 'system' || message.type === 'bot') {
     return (
-      <View style={styles.sysMessage}>
-        <Text style={styles.sysMessageText}>{message.body}</Text>
+      <View
+        style={{
+          alignSelf: 'center',
+          backgroundColor: colors.surfaceAlt,
+          paddingHorizontal: spacing.md,
+          paddingVertical: spacing.xs,
+          borderRadius: radius.md,
+          maxWidth: '90%',
+          marginVertical: spacing.xs,
+        }}
+      >
+        <Text variant="caption" color="textSecondary" align="center" style={{ fontStyle: 'italic' }}>
+          {message.body}
+        </Text>
       </View>
     );
   }
   return (
-    <View style={[styles.bubble, isMine ? styles.bubbleMine : styles.bubbleTheirs]}>
+    <View
+      style={{
+        maxWidth: '85%',
+        paddingHorizontal: spacing.md,
+        paddingVertical: spacing.sm,
+        borderRadius: radius.lg,
+        alignSelf: isMine ? 'flex-end' : 'flex-start',
+        backgroundColor: isMine ? colors.accent : colors.surface,
+        borderWidth: isMine ? 0 : 1,
+        borderColor: colors.hairline,
+        borderBottomRightRadius: isMine ? radius.sm : radius.lg,
+        borderBottomLeftRadius: isMine ? radius.lg : radius.sm,
+      }}
+    >
       {message.type === 'image' && message.imageUrl ? (
-        <Image source={{ uri: message.imageUrl }} style={styles.bubbleImage} />
+        <Image
+          source={{ uri: message.imageUrl }}
+          style={{ width: 200, height: 200, borderRadius: radius.sm }}
+        />
       ) : (
-        <Text style={[styles.bubbleText, isMine && styles.bubbleTextMine]}>
+        <Text variant="bodySm" style={{ color: isMine ? colors.onAccent : colors.textPrimary }}>
           {message.body}
         </Text>
       )}
-      <Text style={[styles.bubbleTime, isMine && { color: '#555' }]}>
+      <Text
+        variant="caption"
+        style={{ marginTop: spacing.xs, color: isMine ? colors.onAccent : colors.textMuted }}
+      >
         {formatTime(message.createdAt)}
       </Text>
     </View>
   );
 };
 
-const DisputeModal: React.FC<{
-  visible: boolean;
-  token: string;
-  role: 'buyer' | 'seller' | null;
-  reason: string;
-  onChange: (s: string) => void;
-  onClose: () => void;
-  onSubmit: () => void;
-  busy: boolean;
-}> = ({ visible, token, role, reason, onChange, onClose, onSubmit, busy }) => {
-  // Role-aware body copy:
-  //   buyer  → "…seller releases your {token} or you get a refund"
-  //   seller → "…funds are released to the buyer or returned to you"
-  const bodyText = role === 'seller'
-    ? `Explain what went wrong. Admins use this to decide whether funds are released to the buyer or returned to you. Funds stay locked on chain until resolution.`
-    : `Explain what went wrong. Admins use this to decide whether the seller releases your ${token} or you get a refund. Funds stay locked on chain until resolution.`;
-
+const SummaryLine: React.FC<{ label: string; children: React.ReactNode }> = ({
+  label,
+  children,
+}) => {
+  const { spacing } = useTheme();
   return (
-  <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-    <View style={styles.modalOverlay}>
-      <View style={styles.modalCard}>
-        <Text style={styles.modalTitle}>Open a dispute</Text>
-        <Text style={styles.modalBody}>
-          {bodyText}
-        </Text>
-        <TextInput
-          style={styles.modalInput}
-          multiline
-          placeholder="e.g. I sent the fiat at 14:32 but seller hasn't released after 20 minutes."
-          placeholderTextColor="#999"
-          value={reason}
-          onChangeText={onChange}
-          maxLength={1000}
-          editable={!busy}
-        />
-        <View style={styles.modalActions}>
-          <TouchableOpacity style={styles.modalCancel} onPress={onClose} disabled={busy}>
-            <Text style={styles.modalCancelText}>Cancel</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.modalSubmit, (!reason.trim() || busy) && styles.actionDisabled]}
-            onPress={onSubmit}
-            disabled={!reason.trim() || busy}
-          >
-            <Text style={styles.modalSubmitText}>{busy ? 'Working…' : 'Open dispute'}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+    <View
+      style={{
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: spacing.xs,
+      }}
+    >
+      <Text variant="bodySm" color="textSecondary">
+        {label}
+      </Text>
+      {children}
     </View>
-  </Modal>
   );
 };
 
@@ -829,242 +896,5 @@ function formatTime(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 16, paddingBottom: 16 },
-
-  deniedWrap: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 40,
-    gap: 12,
-  },
-  deniedTitle: { fontSize: 20, fontWeight: '800', color: '#000' },
-  deniedBody: {
-    fontSize: 14,
-    color: '#666',
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 8,
-  },
-  deniedBtn: {
-    backgroundColor: GOLD.primary,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  deniedBtnText: { color: '#000', fontWeight: '800' },
-
-  statusBar: { marginBottom: 16, alignItems: 'center' },
-  statusStages: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  statusDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#EEE',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statusDotActive: { backgroundColor: GOLD.primary },
-  statusDotCancelled: { backgroundColor: GOLD.error },
-  statusLine: { width: 32, height: 2, backgroundColor: '#EEE', marginHorizontal: 4 },
-  statusLineActive: { backgroundColor: GOLD.primary },
-  statusLabel: { fontSize: 13, color: '#444', fontWeight: '700' },
-
-  summary: {
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    marginBottom: 14,
-  },
-  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
-  summaryLabel: { fontSize: 13, color: '#888' },
-  summaryValue: { fontSize: 14, color: '#000', fontWeight: '700' },
-
-  actions: { marginBottom: 18 },
-  actingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD.light,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    borderRadius: 10,
-  },
-  actingText: { marginLeft: 10, color: GOLD.dark, fontWeight: '700' },
-  primaryAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.primary,
-    paddingVertical: 14,
-    borderRadius: 10,
-    marginBottom: 10,
-    shadowColor: GOLD.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  primaryActionText: { fontWeight: '800', color: '#000', marginLeft: 8 },
-  secondaryRow: { flexDirection: 'row', gap: 12 },
-  secondaryAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: '#DDD',
-  },
-  secondaryActionText: { marginLeft: 6, color: '#666', fontWeight: '600', fontSize: 12 },
-  actionDisabled: { opacity: 0.5 },
-
-  chatHeading: { fontSize: 16, fontWeight: '800', marginBottom: 10, color: '#000' },
-  chatThread: { gap: 8 },
-  chatEmpty: { color: '#888', fontStyle: 'italic', textAlign: 'center', paddingVertical: 20 },
-  bubble: {
-    maxWidth: '85%',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 14,
-    marginBottom: 4,
-  },
-  bubbleMine: {
-    backgroundColor: GOLD.primary,
-    alignSelf: 'flex-end',
-    borderBottomRightRadius: 4,
-  },
-  bubbleTheirs: {
-    backgroundColor: '#FFF',
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#EEE',
-    borderBottomLeftRadius: 4,
-  },
-  bubbleText: { fontSize: 14, color: '#000', lineHeight: 19 },
-  bubbleTextMine: { color: '#000' },
-  bubbleTime: { fontSize: 10, color: '#888', marginTop: 4 },
-  bubbleImage: { width: 200, height: 200, borderRadius: 8 },
-  sysMessage: {
-    alignSelf: 'center',
-    backgroundColor: '#EEF2F4',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 10,
-    maxWidth: '90%',
-    marginVertical: 4,
-  },
-  sysMessageText: { fontSize: 12, color: '#555', textAlign: 'center', fontStyle: 'italic' },
-
-  composer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: '#FFF',
-    borderTopWidth: 1,
-    borderTopColor: '#EEE',
-  },
-  composerInput: {
-    flex: 1,
-    minHeight: 38,
-    maxHeight: 100,
-    backgroundColor: '#F5F5F5',
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    color: '#000',
-    fontSize: 14,
-  },
-  composerImagePreview: { flex: 1, position: 'relative', marginRight: 8 },
-  composerImage: { width: 80, height: 80, borderRadius: 8 },
-  composerImageRemove: {
-    position: 'absolute',
-    top: 4,
-    right: 4,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  composerButton: {
-    width: 38,
-    height: 38,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 4,
-  },
-  composerSend: {
-    backgroundColor: GOLD.primary,
-    borderRadius: 19,
-  },
-
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-  },
-  modalCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    padding: 20,
-  },
-  modalTitle: { fontSize: 18, fontWeight: '800', color: '#000', marginBottom: 8 },
-  modalBody: { fontSize: 13, color: '#666', marginBottom: 14, lineHeight: 18 },
-  modalInput: {
-    minHeight: 100,
-    backgroundColor: '#F5F5F5',
-    borderRadius: 10,
-    padding: 12,
-    color: '#000',
-    textAlignVertical: 'top',
-    fontSize: 14,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 16,
-    gap: 10,
-  },
-  modalCancel: { paddingVertical: 10, paddingHorizontal: 16 },
-  modalCancelText: { color: '#666', fontWeight: '600' },
-  modalSubmit: {
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    backgroundColor: GOLD.error,
-    borderRadius: 10,
-  },
-  modalSubmitText: { color: '#FFF', fontWeight: '800' },
-
-  countdown: { fontSize: 14, color: GOLD.dark, fontWeight: '800' },
-  ratePrompt: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    marginBottom: 14,
-  },
-  rateText: { fontSize: 14, fontWeight: '700', color: '#000' },
-  rateThanks: {
-    fontSize: 13,
-    color: GOLD.dark,
-    fontWeight: '600',
-    textAlign: 'center',
-    paddingVertical: 10,
-    marginBottom: 14,
-  },
-});
 
 export default TradeDetailScreen;

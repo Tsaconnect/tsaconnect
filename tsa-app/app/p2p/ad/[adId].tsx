@@ -2,6 +2,10 @@
 //
 // Ad detail — mode-aware for both sell-ads (user buys crypto, fiat-amount
 // entry) and buy-ads (user sells crypto to a merchant, token-amount entry).
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui);
+// all data fetching, the fiat↔token computation, the openTrade /
+// openTradeWithDeposit sign+broadcast+confirm flows, and every gate
+// (token-supported, min/max limits, stale rate, valid) are preserved verbatim.
 //
 // Sell-ad (ad.side === 'sell'):
 //   User enters fiat amount → receives token preview
@@ -16,18 +20,12 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
@@ -54,19 +52,28 @@ import {
 import type { ChainKey } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
-
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-};
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountInput,
+  AmountText,
+  Avatar,
+  Badge,
+  BottomActionBar,
+  Button,
+  Card,
+  Divider,
+  Icon,
+  PressableScale,
+  RadioRow,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 // TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
 const AdDetailScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { adId } = useLocalSearchParams<{ adId: string }>();
   const [ad, setAd] = useState<P2PAd | null>(null);
   const [selectedPmId, setSelectedPmId] = useState<string>('');
@@ -266,7 +273,6 @@ const AdDetailScreen: React.FC = () => {
       }
       if (!withinFiatLimits(fiatPreview, ad.minLimit, ad.maxLimit)) {
         const minNum = ad.minLimit ? parseFloat(ad.minLimit) : undefined;
-        const maxNum = ad.maxLimit ? parseFloat(ad.maxLimit) : undefined;
         const fiatNum = parseFloat(fiatPreview);
         if (minNum !== undefined && isFinite(minNum) && fiatNum < minNum) {
           throw new Error("Below the merchant's minimum.");
@@ -372,8 +378,10 @@ const AdDetailScreen: React.FC = () => {
 
   if (loading || !ad) {
     return (
-      <SafeAreaView style={styles.container}>
-        <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 80 }} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <Spinner label="Loading ad…" />
+        </View>
       </SafeAreaView>
     );
   }
@@ -381,375 +389,240 @@ const AdDetailScreen: React.FC = () => {
   const fiatSymbol =
     supportedCurrencies.find((c) => c.code === ad.fiatCurrency)?.symbol ?? ad.fiatCurrency;
 
+  const sellerLabel = ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
+  // For buy-ads the "seller" shown is the merchant posting the buy-ad.
+  const counterpartySub = isBuyAd
+    ? `Buying ${ad.token} with ${ad.fiatCurrency}`
+    : `Selling ${ad.token} for ${ad.fiatCurrency}`;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
       >
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          {(() => {
-            const sellerLabel =
-              ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
-            const sellerInitial = sellerLabel.charAt(0).toUpperCase();
-            // For buy-ads the "seller" shown is the merchant posting the buy-ad.
-            const counterpartySub = isBuyAd
-              ? `Buying ${ad.token} with ${ad.fiatCurrency}`
-              : `Selling ${ad.token} for ${ad.fiatCurrency}`;
-            return (
-              <View style={styles.sellerHeader}>
-                <TouchableOpacity
-                  style={styles.sellerAvatarNameRow}
-                  onPress={() => router.push(('/p2p/seller/' + ad.sellerId) as any)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.sellerAvatar}>
-                    <Text style={styles.sellerAvatarText}>{sellerInitial}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.sellerName} numberOfLines={1}>
-                      @{sellerLabel}
-                    </Text>
-                    <Text style={styles.sellerSub}>{counterpartySub}</Text>
-                  </View>
-                  {ad.rateType === 'float' && (
-                    <View style={styles.floatChipRow}>
-                      <Icon name="trending-up" size={11} color={GOLD.dark} />
-                      <Text style={styles.floatChipText}>Float</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-                <SellerTrustBadges stats={ad.sellerStats} />
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Seller header */}
+          <AccentCard padding="md">
+            <PressableScale
+              onPress={() => router.push(('/p2p/seller/' + ad.sellerId) as any)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}
+            >
+              <Avatar name={sellerLabel} size={42} />
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700" numberOfLines={1}>
+                  @{sellerLabel}
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  {counterpartySub}
+                </Text>
               </View>
-            );
-          })()}
+              {ad.rateType === 'float' && (
+                <Badge
+                  label="Float"
+                  icon="trendingUp"
+                  color={colors.accent}
+                  background={colors.accentMuted}
+                  size="sm"
+                />
+              )}
+            </PressableScale>
+            <SellerTrustBadges stats={ad.sellerStats} />
+          </AccentCard>
 
-          <View style={styles.summary}>
-            <Text style={styles.summaryLabel}>Price</Text>
-            <View style={styles.summaryRateRow}>
-              <Text style={styles.summaryCurrency}>{ad.fiatCurrency}</Text>
-              <Text style={styles.summaryRate}>{formatFiat(ad.rate)}</Text>
-              <Text style={styles.summaryRateUnit}>/ {ad.token}</Text>
+          {/* Price + meta summary */}
+          <Card style={{ marginTop: spacing.md }}>
+            <Text variant="overline" color="textMuted">
+              PRICE
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6, marginTop: spacing.xs }}>
+              <AmountText value={ad.rate} currency={ad.fiatCurrency} variant="title1" />
+              <Text variant="bodyMed" color="textMuted">
+                / {ad.token}
+              </Text>
             </View>
+
             {ad.rateType === 'float' && (
-              <Text style={styles.floatHint}>
+              <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
                 Float rate — recomputes from the live market when you open a trade.
               </Text>
             )}
+
             {ad.rateStale && (
-              <View style={styles.staleBanner}>
-                <Icon name="error-outline" size={15} color={GOLD.error} />
-                <Text style={styles.staleBannerText}>
-                  Live rate unavailable. Trades are temporarily disabled —
-                  the ad will reactivate automatically once the feed recovers.
-                </Text>
-              </View>
+              <AccentCard
+                railColor={colors.danger}
+                padding="md"
+                style={{ marginTop: spacing.md, backgroundColor: colors.dangerBg }}
+              >
+                <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+                  <Icon name="warning" size={16} color={colors.danger} />
+                  <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                    Live rate unavailable. Trades are temporarily disabled — the ad will
+                    reactivate automatically once the feed recovers.
+                  </Text>
+                </View>
+              </AccentCard>
             )}
 
-            <View style={styles.summaryDivider} />
+            <Divider spacing="md" />
 
-            <View style={styles.summaryMetaGrid}>
-              <View style={styles.summaryMetaCol}>
-                <Text style={styles.summaryMetaLabel}>Available</Text>
-                <Text style={styles.summaryMetaValue}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <View>
+                <Text variant="overline" color="textMuted">
+                  AVAILABLE
+                </Text>
+                <Text variant="bodySm" weight="700" numeric style={{ marginTop: 2 }}>
                   {formatTokenAmount(ad.remaining, tokenDecimals, 4)} {ad.token}
                 </Text>
               </View>
               {!isBuyAd && ad.minLimit && ad.maxLimit && (
-                <View style={[styles.summaryMetaCol, styles.summaryMetaColRight]}>
-                  <Text style={styles.summaryMetaLabel}>Order range</Text>
-                  <Text style={styles.summaryMetaValue}>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text variant="overline" color="textMuted">
+                    ORDER RANGE
+                  </Text>
+                  <Text variant="bodySm" weight="700" numeric style={{ marginTop: 2 }}>
                     {fiatSymbol}{formatFiat(ad.minLimit, 0)} – {fiatSymbol}{formatFiat(ad.maxLimit, 0)}
                   </Text>
                 </View>
               )}
             </View>
-          </View>
+          </Card>
 
+          {/* Terms */}
           {ad.terms && (
-            <View style={styles.terms}>
-              <View style={styles.termsHeader}>
-                <Icon name="info-outline" size={14} color={GOLD.dark} />
-                <Text style={styles.termsLabel}>
-                  {isBuyAd ? "Merchant's terms" : "Seller's terms"}
+            <AccentCard padding="md" style={{ marginTop: spacing.md }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.xs }}>
+                <Icon name="info" size={14} color={colors.accent} />
+                <Text variant="overline" color="textSecondary">
+                  {isBuyAd ? "MERCHANT'S TERMS" : "SELLER'S TERMS"}
                 </Text>
               </View>
-              <Text style={styles.termsBody}>{ad.terms}</Text>
-            </View>
+              <Text variant="bodySm" color="textSecondary">
+                {ad.terms}
+              </Text>
+            </AccentCard>
           )}
 
           {/* Amount input — fiat for sell-ads; token for buy-ads */}
           {isBuyAd ? (
-            <>
+            <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
               {/* FIX 1: show an error banner when the sell token isn't supported */}
               {!tokenSupported && (
-                <View style={styles.staleBanner}>
-                  <Icon name="error-outline" size={15} color={GOLD.error} />
-                  <Text style={styles.staleBannerText}>
-                    Unsupported token — cannot sell {ad.token} here.
+                <AccentCard railColor={colors.danger} padding="md" style={{ backgroundColor: colors.dangerBg }}>
+                  <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+                    <Icon name="warning" size={16} color={colors.danger} />
+                    <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                      Unsupported token — cannot sell {ad.token} here.
+                    </Text>
+                  </View>
+                </AccentCard>
+              )}
+              <AmountInput
+                label={`You send (${ad.token})`}
+                placeholder="0.00"
+                symbol={ad.token}
+                value={amountInput}
+                onChangeText={setAmountInput}
+              />
+              <Card padding="md" style={{ backgroundColor: colors.accentMuted }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text variant="bodySm" weight="600" color="accent">
+                    You receive
                   </Text>
+                  <AmountText value={fiatPreview} currency={ad.fiatCurrency} variant="title3" />
                 </View>
-              )}
-              <Text style={styles.label}>You send ({ad.token})</Text>
-              <View style={styles.inputCard}>
-                <Text style={styles.inputPrefix}>{ad.token}</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="0.00"
-                  placeholderTextColor="#999"
-                  keyboardType="decimal-pad"
-                  value={amountInput}
-                  onChangeText={setAmountInput}
-                />
-              </View>
-              <View style={styles.preview}>
-                <Text style={styles.previewLabel}>You receive</Text>
-                <Text style={styles.previewValue}>
-                  {fiatSymbol}{fiatPreview} {ad.fiatCurrency}
-                </Text>
-              </View>
-            </>
+              </Card>
+            </View>
           ) : (
-            <>
-              <Text style={styles.label}>You pay ({ad.fiatCurrency})</Text>
-              <View style={styles.inputCard}>
-                <Text style={styles.inputPrefix}>{fiatSymbol}</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="0"
-                  placeholderTextColor="#999"
-                  keyboardType="decimal-pad"
-                  value={amountInput}
-                  onChangeText={setAmountInput}
-                />
-              </View>
-              {!minOk && amountInput && (
-                <Text style={styles.errorText}>Below seller's minimum ({fiatSymbol}{ad.minLimit})</Text>
-              )}
-              {!maxOk && amountInput && (
-                <Text style={styles.errorText}>Above seller's maximum ({fiatSymbol}{ad.maxLimit})</Text>
-              )}
-              <View style={styles.preview}>
-                <Text style={styles.previewLabel}>You receive</Text>
-                <Text style={styles.previewValue}>
-                  {tokenPreview} {ad.token}
-                </Text>
-              </View>
-            </>
+            <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
+              <AmountInput
+                label={`You pay (${ad.fiatCurrency})`}
+                placeholder="0"
+                symbol={fiatSymbol}
+                value={amountInput}
+                onChangeText={setAmountInput}
+                error={
+                  !minOk && amountInput
+                    ? `Below seller's minimum (${fiatSymbol}${ad.minLimit})`
+                    : !maxOk && amountInput
+                      ? `Above seller's maximum (${fiatSymbol}${ad.maxLimit})`
+                      : undefined
+                }
+              />
+              <Card padding="md" style={{ backgroundColor: colors.accentMuted }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text variant="bodySm" weight="600" color="accent">
+                    You receive
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                    <AmountText value={tokenPreview} variant="title3" />
+                    <Text variant="bodySm" color="textMuted">
+                      {ad.token}
+                    </Text>
+                  </View>
+                </View>
+              </Card>
+            </View>
           )}
 
           {/* Payment method selection */}
-          <Text style={styles.label}>
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
             {isBuyAd ? 'Receive fiat via (your account)' : 'Pay via'}
           </Text>
           {loadingUserPms ? (
-            <ActivityIndicator color={GOLD.dark} style={{ marginVertical: 12 }} />
+            <View style={{ paddingVertical: spacing.md }}>
+              <Spinner inline label="Loading payment methods…" />
+            </View>
           ) : paymentMethods.length === 0 ? (
-            <Text style={styles.placeholder}>
+            <Text variant="bodySm" color="textMuted" style={{ paddingVertical: spacing.sm }}>
               {isBuyAd
                 ? 'You have no payment methods. Add one so the merchant knows where to send fiat.'
                 : 'Seller has no payment methods configured on this ad.'}
             </Text>
           ) : (
-            paymentMethods.map((m) => (
-              <TouchableOpacity
-                key={m.id}
-                style={[styles.pmCard, selectedPmId === m.id && styles.pmCardActive]}
-                onPress={() => setSelectedPmId(m.id)}
-                activeOpacity={0.8}
-              >
-                <Icon
-                  name={selectedPmId === m.id ? 'radio-button-checked' : 'radio-button-unchecked'}
-                  size={22}
-                  color={selectedPmId === m.id ? GOLD.dark : '#999'}
+            <View style={{ gap: spacing.sm }}>
+              {paymentMethods.map((m) => (
+                <RadioRow
+                  key={m.id}
+                  label={m.bankName}
+                  sublabel={`${m.accountName} · ••••${m.accountNumber.slice(-4)}`}
+                  selected={selectedPmId === m.id}
+                  onPress={() => setSelectedPmId(m.id)}
                 />
-                <View style={{ flex: 1, marginLeft: 10 }}>
-                  <Text style={styles.pmBank}>{m.bankName}</Text>
-                  <Text style={styles.pmAccount}>
-                    {m.accountName} · ••••{m.accountNumber.slice(-4)}
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            ))
+              ))}
+            </View>
           )}
 
-          <TouchableOpacity
-            style={[
-              styles.submit,
-              (!valid || submitting) && styles.submitDisabled,
-            ]}
-            onPress={handleOpen}
-            disabled={!valid || submitting}
-            activeOpacity={0.85}
-          >
-            {submitting ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <ActivityIndicator color="#000" />
-                <Text style={[styles.submitText, { marginLeft: 10 }]}>{submitStage}</Text>
-              </View>
-            ) : (
-              <Text style={styles.submitText}>Open trade</Text>
-            )}
-          </TouchableOpacity>
-
-          <Text style={styles.disclaimer}>
+          <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg }}>
             {isBuyAd
               ? `After opening, the merchant has 30 minutes to send ${ad.fiatCurrency} to your account. Release your ${ad.token} only after confirming receipt.`
               : `After opening, you have 30 minutes to send fiat. The seller releases your ${ad.token} after confirming receipt.`}
           </Text>
         </ScrollView>
+
+        <BottomActionBar>
+          {submitting && submitStage ? (
+            // The Button's loading state shows only a spinner, so surface the
+            // live multi-stage progress text (Signing…, Broadcasting…, etc.)
+            // here — same staged feedback the pre-redesign screen gave.
+            <Text variant="caption" color="textMuted" style={{ textAlign: 'center', marginBottom: spacing.sm }}>
+              {submitStage}
+            </Text>
+          ) : null}
+          <Button
+            title="Open trade"
+            onPress={handleOpen}
+            disabled={!valid || submitting}
+            loading={submitting}
+            size="lg"
+          />
+        </BottomActionBar>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 80 },
-  sellerHeader: {
-    flexDirection: 'column',
-    backgroundColor: '#FFF',
-    padding: 14,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    marginBottom: 12,
-  },
-  sellerAvatarNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  sellerAvatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: GOLD.light,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sellerAvatarText: { fontSize: 17, fontWeight: '800', color: GOLD.dark },
-  sellerName: { fontSize: 15, fontWeight: '800', color: '#1A1A1A' },
-  sellerSub: { fontSize: 12, color: '#888', marginTop: 2, fontWeight: '500' },
-  summary: {
-    backgroundColor: '#FFF',
-    padding: 18,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    marginBottom: 16,
-  },
-  summaryLabel: {
-    fontSize: 11,
-    color: '#999',
-    fontWeight: '700',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-  },
-  summaryRateRow: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
-  summaryCurrency: { fontSize: 13, fontWeight: '800', color: GOLD.dark, letterSpacing: 0.5 },
-  summaryRate: { fontSize: 30, fontWeight: '800', color: '#000', letterSpacing: -0.4 },
-  summaryRateUnit: { fontSize: 14, color: '#666', fontWeight: '600' },
-  floatHint: { fontSize: 12, color: '#777', marginTop: 8, lineHeight: 17 },
-  floatChipRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: GOLD.light,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  floatChipText: { fontSize: 11, color: GOLD.dark, fontWeight: '700' },
-  staleBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
-    marginTop: 10,
-    backgroundColor: '#FDECEF',
-    padding: 10,
-    borderRadius: 8,
-  },
-  staleBannerText: { flex: 1, fontSize: 12, color: GOLD.error, lineHeight: 17 },
-  summaryDivider: { height: 1, backgroundColor: '#F1ECDE', marginTop: 14, marginBottom: 12 },
-  summaryMetaGrid: { flexDirection: 'row', justifyContent: 'space-between' },
-  summaryMetaCol: { flex: 1 },
-  summaryMetaColRight: { alignItems: 'flex-end' },
-  summaryMetaLabel: {
-    fontSize: 11,
-    color: '#999',
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-    marginBottom: 3,
-  },
-  summaryMetaValue: { fontSize: 13, color: '#1A1A1A', fontWeight: '700' },
-  terms: {
-    backgroundColor: GOLD.light,
-    padding: 14,
-    borderRadius: 10,
-    marginBottom: 16,
-  },
-  termsHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  termsLabel: { fontSize: 12, fontWeight: '700', color: GOLD.dark, letterSpacing: 0.3 },
-  termsBody: { fontSize: 13, color: '#333', lineHeight: 18 },
-  label: { fontSize: 14, fontWeight: '700', color: '#333', marginTop: 8, marginBottom: 6 },
-  inputCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  inputField: { flex: 1, fontSize: 18, color: '#000', paddingVertical: 0, fontWeight: '600' },
-  inputPrefix: { fontSize: 18, fontWeight: '700', color: GOLD.dark, marginRight: 6 },
-  errorText: { color: GOLD.error, fontSize: 12, marginTop: 6 },
-  preview: {
-    backgroundColor: GOLD.light,
-    padding: 14,
-    borderRadius: 10,
-    marginTop: 12,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  previewLabel: { fontSize: 13, color: GOLD.dark, fontWeight: '600' },
-  previewValue: { fontSize: 18, fontWeight: '800', color: '#000' },
-  placeholder: { fontSize: 13, color: '#888', paddingVertical: 12, fontStyle: 'italic' },
-  pmCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  pmCardActive: { borderColor: GOLD.dark, backgroundColor: GOLD.light },
-  pmBank: { fontSize: 15, fontWeight: '600', color: '#000' },
-  pmAccount: { fontSize: 12, color: '#666', marginTop: 2 },
-  submit: {
-    marginTop: 24,
-    backgroundColor: GOLD.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    shadowColor: GOLD.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  submitDisabled: { opacity: 0.5 },
-  submitText: { fontWeight: '800', color: '#000', fontSize: 16 },
-  disclaimer: { fontSize: 12, color: '#888', marginTop: 12, textAlign: 'center', lineHeight: 16 },
-});
 
 export default AdDetailScreen;
