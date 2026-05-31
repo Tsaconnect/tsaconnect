@@ -1,7 +1,7 @@
 // Text field with label, helper, error, optional counter + adornments. Focus ring
 // uses the theme focusRing token; error state overrides border + helper color.
 import React, { useState } from 'react';
-import { TextInput, TextInputProps, View, ViewStyle } from 'react-native';
+import { TextInput, TextInputProps, TextStyle, View, ViewStyle } from 'react-native';
 import { useTheme } from '@/theme';
 import { Text } from './Text';
 
@@ -14,10 +14,10 @@ export interface InputProps extends Omit<TextInputProps, 'style'> {
   leftAdornment?: React.ReactNode;
   rightAdornment?: React.ReactNode;
   containerStyle?: ViewStyle;
-  inputStyle?: ViewStyle;
+  inputStyle?: TextStyle;
 }
 
-export const Input: React.FC<InputProps> = ({
+export const Input = React.forwardRef<TextInput, InputProps>(({
   label,
   helper,
   error,
@@ -31,7 +31,7 @@ export const Input: React.FC<InputProps> = ({
   onFocus,
   onBlur,
   ...rest
-}) => {
+}, ref) => {
   const { colors, radius, spacing, fonts, type } = useTheme();
   const [focused, setFocused] = useState(false);
 
@@ -63,6 +63,7 @@ export const Input: React.FC<InputProps> = ({
       >
         {leftAdornment}
         <TextInput
+          ref={ref}
           value={value}
           maxLength={maxLength}
           placeholderTextColor={colors.textMuted}
@@ -102,4 +103,6 @@ export const Input: React.FC<InputProps> = ({
       )}
     </View>
   );
-};
+});
+
+Input.displayName = 'Input';
