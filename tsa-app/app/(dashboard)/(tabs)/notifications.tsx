@@ -1,38 +1,50 @@
+// app/(dashboard)/(tabs)/notifications.tsx
+//
+// Notifications list. Merges realtime (WebSocket) notifications from
+// NotificationContext with the paginated REST feed, supports pull-to-refresh,
+// infinite scroll, tap-to-mark-read, and mark-all-read.
+//
+// Restyled onto the TSA Signature design system (tokens + @/components/ui).
+// Behavior — fetch / pagination / read & mark-all-read — is unchanged.
 import React, { useEffect, useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  RefreshControl,
-  StyleSheet,
-  ActivityIndicator,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { View, FlatList, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import moment from 'moment';
 import { useNotifications } from '../../../contexts/NotificationContext';
-import { COLORS } from '../../../constants/theme';
 import api from '@/components/services/api';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Button,
+  EmptyState,
+  Icon,
+  IconName,
+  PressableScale,
+  SkeletonGroup,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
-const CATEGORY_ICONS: Record<string, string> = {
-  transaction: 'swap-horizontal',
-  order: 'cart',
+// Map a notification category (the first segment of `type`) to a registry icon.
+// Falls back to a generic info glyph for unmapped categories.
+const CATEGORY_ICONS: Record<string, IconName> = {
+  transaction: 'swap',
+  order: 'list',
   security: 'shield',
-  verification: 'checkmark-circle',
+  verification: 'checkCircle',
   merchant: 'storefront',
-  product: 'pricetag',
+  product: 'card',
   wallet: 'wallet',
 };
 
 const NotificationsScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { notifications: realtimeNotifications, setNotifications, refreshUnreadCount } = useNotifications();
   const [notifications, setLocalNotifications] = useState<any[]>([]);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const router = useRouter();
 
   const fetchNotifications = useCallback(async (pageNum: number, refresh = false) => {
     try {
@@ -95,91 +107,131 @@ const NotificationsScreen: React.FC = () => {
     refreshUnreadCount();
   }, [refreshUnreadCount, setNotifications]);
 
-  const getIcon = (type: string) => {
+  const getIcon = (type: string): IconName => {
     const category = type.split('.')[0];
-    return CATEGORY_ICONS[category] || 'notifications';
+    return CATEGORY_ICONS[category] || 'info';
   };
 
-  const renderItem = ({ item }: { item: any }) => (
-    <TouchableOpacity
-      style={[styles.item, !item.isRead && styles.unread]}
-      onPress={() => handlePress(item)}
-    >
-      <View style={[styles.iconContainer, !item.isRead && styles.iconUnread]}>
-        <Ionicons name={getIcon(item.type) as any} size={20} color={!item.isRead ? COLORS.primary : COLORS.gray} />
-      </View>
-      <View style={styles.content}>
-        <Text style={[styles.title, !item.isRead && styles.titleUnread]}>{item.title}</Text>
-        <Text style={styles.message} numberOfLines={2}>{item.message}</Text>
-        <Text style={styles.time}>{moment(item.createdAt).fromNow()}</Text>
-      </View>
-    </TouchableOpacity>
-  );
+  const renderItem = ({ item }: { item: any }) => {
+    const unread = !item.isRead;
+    const iconColor = unread ? colors.accent : colors.textMuted;
+    return (
+      <PressableScale onPress={() => handlePress(item)} style={{ marginBottom: spacing.md }}>
+        <AccentCard
+          padding="md"
+          railColor={unread ? colors.accentRail : colors.hairline}
+          railWidth={unread ? 4 : 0}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md }}>
+            <View
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 20,
+                backgroundColor: unread ? colors.accentMuted : colors.surfaceAlt,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Icon name={getIcon(item.type)} size={20} color={iconColor} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight={unread ? '700' : '600'} numberOfLines={1}>
+                {item.title}
+              </Text>
+              <Text variant="bodySm" color="textSecondary" numberOfLines={2} style={{ marginTop: 2 }}>
+                {item.message}
+              </Text>
+              <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                {moment(item.createdAt).fromNow()}
+              </Text>
+            </View>
+            {unread && (
+              <View
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  backgroundColor: colors.accent,
+                  marginTop: spacing.xs,
+                }}
+              />
+            )}
+          </View>
+        </AccentCard>
+      </PressableScale>
+    );
+  };
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ padding: spacing.lg }}>
+          <Text variant="title1" weight="700">
+            Notifications
+          </Text>
+          <View style={{ marginTop: spacing.lg }}>
+            <SkeletonGroup shape="tradeRow" count={6} />
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
-      {mergedNotifications.length > 0 && (
-        <TouchableOpacity style={styles.markAllBtn} onPress={handleMarkAllRead}>
-          <Text style={styles.markAllText}>Mark all as read</Text>
-        </TouchableOpacity>
-      )}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <FlatList
         data={mergedNotifications}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} />
+          <RefreshControl refreshing={refreshing} tintColor={colors.accent} onRefresh={onRefresh} />
         }
         onEndReached={loadMore}
         onEndReachedThreshold={0.3}
+        ListHeaderComponent={
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: spacing.lg,
+            }}
+          >
+            <Text variant="title1" weight="700">
+              Notifications
+            </Text>
+            {mergedNotifications.length > 0 && (
+              <Button
+                title="Mark all read"
+                variant="ghost"
+                size="sm"
+                fullWidth={false}
+                onPress={handleMarkAllRead}
+              />
+            )}
+          </View>
+        }
+        ListFooterComponent={
+          !loading && refreshing === false && mergedNotifications.length > 0 && hasMore ? (
+            <View style={{ paddingVertical: spacing.lg }}>
+              <Spinner />
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
-          <View style={styles.center}>
-            <Ionicons name="notifications-off-outline" size={48} color={COLORS.lightGray} />
-            <Text style={styles.emptyText}>No notifications yet</Text>
+          <View style={{ paddingTop: spacing['4xl'] }}>
+            <EmptyState
+              icon="empty"
+              title="No notifications yet"
+              subtitle="Updates about your orders, trades, and account will show up here."
+            />
           </View>
         }
       />
-    </View>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f9fafb' },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100 },
-  markAllBtn: { padding: 12, alignItems: 'flex-end' },
-  markAllText: { color: COLORS.primary, fontSize: 14, fontWeight: '600' },
-  item: {
-    flexDirection: 'row',
-    padding: 16,
-    backgroundColor: '#ffffff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  unread: { backgroundColor: '#fef9f3' },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#f3f4f6',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  iconUnread: { backgroundColor: '#fde8cd' },
-  content: { flex: 1 },
-  title: { fontSize: 14, color: COLORS.dark, marginBottom: 2 },
-  titleUnread: { fontWeight: '700' },
-  message: { fontSize: 13, color: COLORS.gray, lineHeight: 18 },
-  time: { fontSize: 11, color: '#9ca3af', marginTop: 4 },
-  emptyText: { marginTop: 12, color: COLORS.gray, fontSize: 15 },
-});
 
 export default NotificationsScreen;

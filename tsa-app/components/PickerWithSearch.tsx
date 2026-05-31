@@ -1,15 +1,16 @@
-// PickerWithSearch.tsx (Updated to support searchable prop)
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  Modal,
-  FlatList,
-  TextInput,
-  StyleSheet,
-} from 'react-native';
-import { COLORS, SIZES, FONTS } from '../constants/theme';
+// PickerWithSearch.tsx
+//
+// Generic searchable picker. Migrated onto the TSA Signature design system:
+// the inline trigger is now a `SelectRow` and the modal is delegated to the
+// shared `PickerSheet` (which already provides the search/filter + grouped
+// list behavior). The exported API — `data` ({label,value}[]), `selectedValue`,
+// `onSelect(item)`, `placeholder`, `style`, `searchable` — and all behavior
+// (auto-select when there is exactly one option, search-by-label/value,
+// disabled trigger when there is a single option) are preserved verbatim so
+// existing consumers (screens/dash.tsx) keep working unchanged.
+import React, { useEffect, useMemo, useState } from 'react';
+import { ViewStyle } from 'react-native';
+import { PickerSheet, SelectRow, type PickerItem as SheetPickerItem } from '@/components/ui';
 
 type PickerItem = {
   label: string;
@@ -21,7 +22,7 @@ type PickerWithSearchProps = {
   selectedValue: string;
   onSelect: (item: PickerItem) => void;
   placeholder?: string;
-  style?: object;
+  style?: ViewStyle;
   searchable?: boolean;
 };
 
@@ -34,182 +35,52 @@ const PickerWithSearch = ({
   searchable = true,
 }: PickerWithSearchProps) => {
   const [modalVisible, setModalVisible] = useState(false);
-  const [searchText, setSearchText] = useState('');
 
+  // Auto-select the sole option so callers never sit on an unset value when
+  // there is only one possible choice. (Behavior preserved from the original.)
   useEffect(() => {
     if (data.length === 1 && selectedValue !== data[0].value) {
       onSelect(data[0]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  const selectedItem = data.find(item => item.value === selectedValue);
-  
-  const filteredData = searchable
-    ? data.filter(item =>
-        item.label.toLowerCase().includes(searchText.toLowerCase()) ||
-        item.value.toLowerCase().includes(searchText.toLowerCase())
-      )
-    : data;
-  
-  const handleSelect = (item: PickerItem) => {
-    onSelect(item);
+  const selectedItem = data.find((item) => item.value === selectedValue);
+
+  // Map {label, value} → PickerSheet's {id, label}; `value` is the stable id so
+  // PickerSheet's label/sublabel search still matches the original label/value
+  // filter (value === id, label === label).
+  const sheetItems = useMemo<SheetPickerItem[]>(
+    () => data.map((item) => ({ id: item.value, label: item.label, sublabel: item.value })),
+    [data],
+  );
+
+  const handleSelect = (item: SheetPickerItem) => {
+    onSelect({ label: item.label, value: item.id });
     setModalVisible(false);
-    setSearchText('');
   };
-  
+
   return (
-    <View>
-      <TouchableOpacity
-        style={[styles.pickerButton, style]}
+    <>
+      <SelectRow
+        value={selectedItem?.label}
+        placeholder={placeholder}
+        disabled={data.length <= 1}
         onPress={() => data.length > 1 && setModalVisible(true)}
-      >
-        <Text style={styles.pickerText}>
-          {selectedItem ? selectedItem.label : placeholder}
-        </Text>
-        <Text style={styles.dropdownIcon}>▼</Text>
-      </TouchableOpacity>
-      
-      <Modal
+        style={style}
+      />
+
+      <PickerSheet
         visible={modalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => {
-          setModalVisible(false);
-          setSearchText('');
-        }}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            {/* Header */}
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Select Asset</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Text style={styles.closeButton}>✕</Text>
-              </TouchableOpacity>
-            </View>
-            
-            {/* Search Input (conditional) */}
-            {searchable && (
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search assets..."
-                value={searchText}
-                onChangeText={setSearchText}
-                autoCapitalize="none"
-              />
-            )}
-            
-            {/* Options List */}
-            <FlatList
-              data={filteredData}
-              nestedScrollEnabled
-              keyExtractor={(item) => item.value}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[
-                    styles.optionItem,
-                    selectedValue === item.value && styles.selectedOption,
-                  ]}
-                  onPress={() => handleSelect(item)}
-                >
-                  <Text
-                    style={[
-                      styles.optionText,
-                      selectedValue === item.value && styles.selectedOptionText,
-                    ]}
-                  >
-                    {item.label}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              ItemSeparatorComponent={() => <View style={styles.separator} />}
-            />
-          </View>
-        </View>
-      </Modal>
-    </View>
+        onClose={() => setModalVisible(false)}
+        title="Select Asset"
+        items={sheetItems}
+        selectedId={selectedValue}
+        onSelect={handleSelect}
+        searchable={searchable}
+      />
+    </>
   );
 };
-
-const styles = StyleSheet.create({
-  pickerButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: COLORS.gray,
-    borderRadius: SIZES.radius,
-    paddingHorizontal: SIZES.base,
-    paddingVertical: SIZES.base * 0.8,
-    backgroundColor: COLORS.white,
-  },
-  pickerText: {
-    ...FONTS.body4,
-    color: COLORS.black,
-  },
-  dropdownIcon: {
-    ...FONTS.body4,
-    color: COLORS.gray,
-    marginLeft: SIZES.base,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: COLORS.white,
-    borderRadius: SIZES.radius * 2,
-    width: '80%',
-    maxHeight: '60%',
-    overflow: 'hidden',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: SIZES.padding,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.grey,
-  },
-  modalTitle: {
-    ...FONTS.h4,
-    color: COLORS.black,
-    fontWeight: 'bold',
-  },
-  closeButton: {
-    ...FONTS.h4,
-    color: COLORS.gray,
-  },
-  searchInput: {
-    ...FONTS.body4,
-    borderWidth: 1,
-    borderColor: COLORS.grey,
-    borderRadius: SIZES.radius,
-    paddingHorizontal: SIZES.base,
-    paddingVertical: SIZES.base * 0.8,
-    margin: SIZES.padding,
-  },
-  optionItem: {
-    paddingHorizontal: SIZES.padding,
-    paddingVertical: SIZES.base * 1.5,
-  },
-  selectedOption: {
-    backgroundColor: COLORS.primary + '10',
-  },
-  optionText: {
-    ...FONTS.body4,
-    color: COLORS.black,
-  },
-  selectedOptionText: {
-    color: COLORS.primary,
-    fontWeight: 'bold',
-  },
-  separator: {
-    height: 1,
-    backgroundColor: COLORS.grey,
-  },
-});
 
 export { PickerWithSearch };

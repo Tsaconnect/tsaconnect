@@ -56,6 +56,17 @@ const REGISTRY = {
   trendingUp: { set: 'ion', glyph: 'trending-up' },
   trendingDown: { set: 'ion', glyph: 'trending-down' },
   pool: { set: 'mci', glyph: 'safe' },
+  // Added for the app-wide migration (dashboard / wallet / marketplace / notifications).
+  eye: { set: 'ion', glyph: 'eye' },
+  eyeOff: { set: 'ion', glyph: 'eye-off' },
+  arrowUp: { set: 'ion', glyph: 'arrow-up' },
+  arrowDown: { set: 'ion', glyph: 'arrow-down' },
+  notifications: { set: 'ion', glyph: 'notifications' },
+  cart: { set: 'ion', glyph: 'cart' },
+  pricetag: { set: 'ion', glyph: 'pricetag' },
+  localOffer: { set: 'ion', glyph: 'pricetags' },
+  nearMe: { set: 'ion', glyph: 'navigate' },
+  construction: { set: 'ion', glyph: 'construct' },
 } as const satisfies Record<string, IconEntry>;
 
 export type IconName = keyof typeof REGISTRY;
@@ -70,6 +81,9 @@ export const Icon: React.FC<IconProps> = ({ name, size = 20, color }) => {
   const { colors } = useTheme();
   const entry = REGISTRY[name];
   const c = color ?? colors.textPrimary;
+  // Defense-in-depth: an unknown name (e.g. a stale `as IconName` cast) renders
+  // nothing rather than crashing the screen.
+  if (!entry) return null;
   if (entry.set === 'mci') {
     return <MaterialCommunityIcons name={entry.glyph} size={size} color={c} />;
   }
