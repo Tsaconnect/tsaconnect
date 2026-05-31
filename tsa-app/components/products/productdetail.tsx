@@ -1,22 +1,37 @@
+// components/products/productdetail.tsx
+//
+// Product detail — image gallery, seller/title/price/rating info, expandable
+// description + attributes, verified-customer reviews, and the add-to-cart /
+// checkout CTA. Restyled onto the TSA Signature design system (@/theme tokens +
+// @/components/ui primitives). Every bit of logic is preserved verbatim: the
+// `addItem` POST to `${baseUrl}/cart` (raw axios + Bearer token), `getItems`
+// GET on mount, the `checkItemExist` cart-presence check, `cartService.notifyChange()`
+// after a direct add, the `images` filter/sort/map, the `isMore` description
+// toggle, and the `router.push("/cart")` checkout navigation. The component's
+// props interface ({ item }) and default export are unchanged — this is a
+// visual / structural migration only.
 import React, { useEffect, useState } from "react";
-import {
-  View,
-  Text,
-  Image,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-} from "react-native";
-import Icon from "@expo/vector-icons/FontAwesome";
-import { COLORS } from "../../constants";
-import { RectButton } from "../designs";
+import { View, Image, ScrollView } from "react-native";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { cartService } from "../services/cart";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
+import { useTheme } from "@/theme";
+import {
+  AccentCard,
+  AmountText,
+  Button,
+  Card,
+  Divider,
+  Icon,
+  PressableScale,
+  Text,
+} from "@/components/ui";
+
 //@ts-ignore
 const ProductDetail = ({ item }) => {
+  const { colors, spacing, radius } = useTheme();
   const [isMore, setIsMore] = useState(false);
   const { items, token, setItems } = useAuth();
   console.log(item.attributes);
@@ -67,9 +82,8 @@ const ProductDetail = ({ item }) => {
         <Icon
           key={i}
           name="star"
-          size={20}
-          color={i <= rating ? "gold" : "lightgray"}
-          style={styles.star}
+          size={16}
+          color={i <= rating ? colors.warning : colors.border}
         />
       );
     }
@@ -83,339 +97,249 @@ const ProductDetail = ({ item }) => {
         .map((img: any) => img.url)
     : [];
 
+  if (!item) return null;
+
+  const inCart = checkItemExist(item.name);
+
   return (
-    <ScrollView style={styles.container}>
-      {item && (
-        <>
-          <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} style={styles.pagerView}>
-            {images.map((image: string, index: number) => (
-              <View style={styles.page} key={index}>
-                <Image
-                  source={{ uri: image }}
-                  style={styles.image}
-                  accessibilityLabel="Product Image"
-                />
-              </View>
-            ))}
-          </ScrollView>
-
-          <View style={styles.contentContainer}>
-            <View style={styles.titleContainer}>
-              <Text style={styles.title}>
-                {item.companyName}
-                {"'s "}
-                {item.name}
-              </Text>
-              <View style={styles.locationContainer}>
-                <View style={styles.locationRow}>
-                  <Icon
-                    name="map-marker"
-                    size={20}
-                    color="gray"
-                    style={styles.locationIcon}
-                  />
-                  <Text style={styles.location}>{item.location}</Text>
-                </View>
-                <View style={styles.ratingRow}>
-                  {renderStars(item.averageRating)}
-                  <Text style={styles.rating}>{item.averageRating}</Text>
-                  <Text style={styles.ratingCount}>
-                    {item.reviews?.length || 0} ratings
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.priceContainer}>
-                <Text style={styles.price}>{item.price}</Text>
-              </View>
-              <View style={styles.feeContainer}>
-                <Text style={styles.shipping}>15 items sold</Text>
-              </View>
+    <ScrollView
+      style={{ flex: 1 }}
+      contentContainerStyle={{ paddingBottom: spacing["4xl"] }}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Gallery */}
+      {images.length > 0 && (
+        <ScrollView
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          style={{ backgroundColor: colors.surfaceAlt }}
+        >
+          {images.map((image: string, index: number) => (
+            <View
+              key={index}
+              style={{ alignItems: "center", justifyContent: "center" }}
+            >
+              <Image
+                source={{ uri: image }}
+                style={{ width: 360, height: 300, resizeMode: "contain" }}
+                accessibilityLabel="Product Image"
+              />
             </View>
+          ))}
+        </ScrollView>
+      )}
 
-            <View style={styles.descriptionContainer}>
-              <Text style={styles.descriptionTitle}>Description</Text>
-              <Text style={styles.descriptionText}>
-                {isMore ? item.description : item.description.slice(0, 100)}
+      <View style={{ padding: spacing.lg, gap: spacing.lg }}>
+        {/* Title / location / rating / price */}
+        <Card padding="lg">
+          <Text variant="title3" weight="700">
+            {item.companyName}
+            {"'s "}
+            {item.name}
+          </Text>
+
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
+              marginTop: spacing.sm,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                flex: 1,
+                gap: spacing.xs,
+              }}
+            >
+              <Icon name="nearMe" size={16} color={colors.textMuted} />
+              <Text variant="bodySm" color="textSecondary">
+                {item.location}
               </Text>
-              {!isMore && (
-                <TouchableOpacity
-                  onPress={() => setIsMore(true)}
-                  accessibilityRole="button"
-                  accessibilityLabel="See more details"
-                >
-                  <Text style={styles.viewMoreText}>See more</Text>
-                </TouchableOpacity>
-              )}
             </View>
-            {isMore && (
-              <>
-                <View style={styles.productInfoContainer}>
-                  {(Array.isArray(item.attributes) ? item.attributes : [])
-                    .map((attribute: any, index: number) => (
-                      <View style={styles.productInfoRow} key={index}>
-                        <Text style={styles.productInfoTitle}>
-                          {attribute.name}:{" "}
-                        </Text>
-                        <Text style={styles.productInfoValue}>
-                          {attribute.value}
-                        </Text>
-                      </View>
-                    ))}
-                </View>
-                <TouchableOpacity
-                  onPress={() => setIsMore(false)}
-                  style={styles.viewLessButton}
-                  accessibilityRole="button"
-                  accessibilityLabel="View less details"
-                >
-                  <Text style={styles.viewMoreText}>View less</Text>
-                </TouchableOpacity>
-              </>
-            )}
-            <View style={styles.reviewsContainer}>
-              <Text style={styles.reviewRating}>
-                Verified Customer Feedback
-              </Text>
-              <Text style={styles.reviewTitle}>Product rating and review</Text>
-              <View style={{ flexDirection: "row" }}>
-                <Text style={styles.reviewScore}>{item.averageRating}/5</Text>
-                <Text style={styles.reviewCount}>
-                  {item.reviews?.length || 0} ratings so far
-                </Text>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: spacing.xs,
+              }}
+            >
+              <View style={{ flexDirection: "row", gap: 2 }}>
+                {renderStars(item.averageRating)}
               </View>
-
-              {(Array.isArray(item.reviews) ? item.reviews : []).map((review: any, index: number) => (
-                <View key={index} style={styles.review}>
-                  <View style={styles.reviewHeader}>
-                    <View style={{ flexDirection: "row" }}>
-                      {renderStars(review.rating)}
-                    </View>
-                    <Text style={styles.reviewDate}>{review.date}</Text>
-                  </View>
-                  <Text style={styles.reviewAuthor}>{review.reviewedBy}</Text>
-                  <Text style={styles.reviewText}>{review.reviewText}</Text>
-                </View>
-              ))}
-            </View>
-            <View>
-              {!checkItemExist(item.name) ? (
-                <RectButton
-                  minWidth={50}
-                  fontSize={10}
-                  title="Add to cart"
-                  handlePress={async () => {
-                    if (item.name && item.price && images[0]) {
-                      const newItem = {
-                        productId: item.id, // unique id
-                        quantity: 1,
-                      };
-                      const response = await addItem(newItem);
-                      await getItems();
-                      // This add bypasses cartService, so refresh the shared count badge.
-                      cartService.notifyChange();
-                    }
-                  }}
-                />
-              ) : (
-                <RectButton
-                  minWidth={50}
-                  fontSize={10}
-                  fontWeight="700"
-                  color="white"
-                  title="Checkout"
-                  handlePress={() => {
-                    router.push("/cart");
-                  }}
-                />
-              )}
+              <Text variant="bodySm" weight="600">
+                {item.averageRating}
+              </Text>
+              <Text variant="caption" color="textMuted">
+                {item.reviews?.length || 0} ratings
+              </Text>
             </View>
           </View>
-        </>
-      )}
+
+          <Divider spacing="md" />
+
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <AmountText value={item.price} currency="USD" variant="title1" color="accent" />
+            <Text variant="caption" color="textMuted">
+              15 items sold
+            </Text>
+          </View>
+        </Card>
+
+        {/* Description */}
+        <View>
+          <Text variant="title3" weight="700" style={{ marginBottom: spacing.sm }}>
+            Description
+          </Text>
+          <Text variant="bodySm" color="textSecondary">
+            {isMore ? item.description : item.description.slice(0, 100)}
+          </Text>
+          {!isMore && (
+            <PressableScale
+              onPress={() => setIsMore(true)}
+              accessibilityRole="button"
+              accessibilityLabel="See more details"
+              style={{ marginTop: spacing.sm }}
+            >
+              <Text variant="bodySm" weight="600" color="accent">
+                See more
+              </Text>
+            </PressableScale>
+          )}
+        </View>
+
+        {/* Attributes (revealed with description) */}
+        {isMore && (
+          <>
+            <Card padding="lg">
+              {(Array.isArray(item.attributes) ? item.attributes : []).map(
+                (attribute: any, index: number, arr: any[]) => (
+                  <View key={index}>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        paddingVertical: spacing.xs,
+                      }}
+                    >
+                      <Text variant="bodySm" color="textMuted">
+                        {attribute.name}
+                      </Text>
+                      <Text variant="bodySm" weight="600">
+                        {attribute.value}
+                      </Text>
+                    </View>
+                    {index < arr.length - 1 && <Divider />}
+                  </View>
+                )
+              )}
+            </Card>
+            <PressableScale
+              onPress={() => setIsMore(false)}
+              accessibilityRole="button"
+              accessibilityLabel="View less details"
+              style={{ alignSelf: "center" }}
+            >
+              <Text variant="bodySm" weight="600" color="accent">
+                View less
+              </Text>
+            </PressableScale>
+          </>
+        )}
+
+        {/* Reviews */}
+        <AccentCard padding="lg">
+          <Text variant="overline" color="textSecondary">
+            VERIFIED CUSTOMER FEEDBACK
+          </Text>
+          <Text variant="title3" weight="700" style={{ marginTop: spacing.xs }}>
+            Product rating and review
+          </Text>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "baseline",
+              gap: spacing.sm,
+              marginTop: spacing.xs,
+            }}
+          >
+            <Text variant="bodyMed" weight="700" color="accent">
+              {item.averageRating}/5
+            </Text>
+            <Text variant="caption" color="textMuted">
+              {item.reviews?.length || 0} ratings so far
+            </Text>
+          </View>
+
+          {(Array.isArray(item.reviews) ? item.reviews : []).map(
+            (review: any, index: number) => (
+              <View key={index} style={{ marginTop: spacing.md }}>
+                <Divider spacing="sm" />
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: spacing.xs,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", gap: 2 }}>
+                    {renderStars(review.rating)}
+                  </View>
+                  <Text variant="caption" color="textMuted">
+                    {review.date}
+                  </Text>
+                </View>
+                <Text variant="bodySm" weight="700">
+                  {review.reviewedBy}
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  {review.reviewText}
+                </Text>
+              </View>
+            )
+          )}
+        </AccentCard>
+
+        {/* CTA — add to cart / checkout (logic preserved verbatim) */}
+        {!inCart ? (
+          <Button
+            title="Add to cart"
+            leftIcon="cart"
+            onPress={async () => {
+              if (item.name && item.price && images[0]) {
+                const newItem = {
+                  productId: item.id, // unique id
+                  quantity: 1,
+                };
+                const response = await addItem(newItem);
+                await getItems();
+                // This add bypasses cartService, so refresh the shared count badge.
+                cartService.notifyChange();
+              }
+            }}
+          />
+        ) : (
+          <Button
+            title="Checkout"
+            rightIcon="arrowRight"
+            onPress={() => {
+              router.push("/cart");
+            }}
+          />
+        )}
+      </View>
     </ScrollView>
   );
 };
 
 export default ProductDetail;
-
-const styles = StyleSheet.create({
-  container: {
-    backgroundColor: COLORS.white,
-  },
-  pagerView: {
-    height: 300,
-  },
-  page: {
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  image: {
-    width: "100%",
-    height: 300,
-    resizeMode: "contain",
-  },
-  contentContainer: {
-    padding: 20,
-  },
-  titleContainer: {
-    marginBottom: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: "#d3d3d3",
-    paddingBottom: 10,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: "bold",
-    lineHeight: 22,
-    marginBottom: 10,
-  },
-  locationContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 10,
-    flexWrap: "wrap",
-  },
-  locationRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    flex: 1,
-  },
-  ratingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    flex: 1,
-    justifyContent: "flex-end",
-  },
-  locationIcon: {
-    marginRight: 5,
-  },
-  location: {
-    marginRight: 10,
-  },
-  star: {
-    marginRight: 2,
-  },
-  rating: {
-    marginLeft: 5,
-    marginRight: 10,
-  },
-  ratingCount: {
-    color: "gray",
-  },
-  priceContainer: {
-    marginBottom: 10,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  price: {
-    fontSize: 20,
-    fontWeight: "bold",
-    marginBottom: 5,
-    lineHeight: 22,
-    color: "#9D6B38",
-  },
-  feeContainer: {
-    marginBottom: 10,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  shipping: {
-    fontSize: 11,
-    lineHeight: 22,
-    color: "#000",
-  },
-  productInfoContainer: {
-    marginBottom: 20,
-  },
-  productInfoRow: {
-    flexDirection: "row",
-    marginBottom: 10,
-    justifyContent: "space-between",
-  },
-  productInfoTitle: {
-    fontSize: 14,
-    fontWeight: "bold",
-    marginBottom: 5,
-    color: "#9C9C9C",
-    letterSpacing: -0.41,
-  },
-  productInfoValue: {
-    fontSize: 14,
-    letterSpacing: -0.41,
-  },
-  viewMoreButton: {
-    alignItems: "center",
-    marginVertical: 10,
-  },
-  viewLessButton: {
-    alignItems: "center",
-    marginBottom: 50,
-  },
-  viewMoreText: {
-    color: "#E8A14A",
-    fontSize: 12,
-  },
-  descriptionTitle: {
-    fontSize: 18,
-    fontWeight: "bold",
-    marginBottom: 10,
-  },
-  descriptionText: {
-    fontSize: 14,
-    marginBottom: 15,
-    lineHeight: 22,
-  },
-  descriptionContainer: {
-    marginBottom: 20,
-  },
-  reviewsContainer: {
-    backgroundColor: COLORS.gray,
-  },
-  reviewTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    marginBottom: 5,
-  },
-  reviewRating: {
-    fontSize: 12,
-    marginBottom: 5,
-  },
-  reviewScore: {
-    fontSize: 12,
-    color: "#E8A14A",
-    fontWeight: "bold",
-    marginBottom: 5,
-  },
-  reviewCount: {
-    fontSize: 12,
-    marginBottom: 20,
-  },
-  review: {
-    marginBottom: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: "#d3d3d3",
-    paddingBottom: 10,
-  },
-  reviewHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 5,
-  },
-  reviewAuthor: {
-    fontSize: 14,
-    fontWeight: "bold",
-    marginBottom: 5,
-  },
-  reviewDate: {
-    fontSize: 12,
-    color: "gray",
-  },
-  reviewText: {
-    fontSize: 12,
-  },
-});
