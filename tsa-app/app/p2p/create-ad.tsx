@@ -393,7 +393,7 @@ const CreateAdScreen: React.FC = () => {
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
           keyboardShouldPersistTaps="handled"
         >
-          <Text variant="title1" weight="800">
+          <Text variant="title1" weight="700">
             Create sell ad
           </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>

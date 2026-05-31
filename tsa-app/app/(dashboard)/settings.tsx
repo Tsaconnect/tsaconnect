@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -10,13 +10,14 @@ import {
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
-import api from "@/components/services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
 import CurrencySelector from "../../components/currency/CurrencySelector";
+import { SegmentedControl } from "@/components/ui";
+import { useThemeControls, type SchemePreference } from "@/theme";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
-  authenticateWithBiometric, verifyPin,
+  authenticateWithBiometric,
 } from "@/services/localAuth";
 
 interface SettingsItem {
@@ -33,7 +34,8 @@ interface SettingsSection {
 }
 
 const SettingsScreen = () => {
-  const { logOut, logOutFull, currentUser } = useAuth();
+  const { logOut, logOutFull } = useAuth();
+  const { preference, setScheme } = useThemeControls();
   const [lockOn, setLockOn] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioEnabled, setBioEnabled] = useState(false);
@@ -175,6 +177,10 @@ const SettingsScreen = () => {
       items: [],
     },
     {
+      title: "Appearance",
+      items: [],
+    },
+    {
       title: "Wallet",
       items: [
         {
@@ -304,6 +310,21 @@ const SettingsScreen = () => {
             {section.title === "Currency" ? (
               <View style={{ padding: 4 }}>
                 <CurrencySelector variant="card" showRates />
+              </View>
+            ) : section.title === "Appearance" ? (
+              <View style={{ padding: 12, gap: 8 }}>
+                <SegmentedControl
+                  segments={[
+                    { key: "light", label: "Light" },
+                    { key: "dark", label: "Dark" },
+                    { key: "system", label: "System" },
+                  ]}
+                  value={preference}
+                  onChange={(k) => setScheme(k as SchemePreference)}
+                />
+                <Text style={styles.description}>
+                  Defaults to light. System follows your device setting.
+                </Text>
               </View>
             ) : (
               section.items.map((item, index) => (

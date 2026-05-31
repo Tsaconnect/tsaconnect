@@ -372,7 +372,7 @@ const P2PPoolScreen: React.FC = () => {
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
           keyboardShouldPersistTaps="handled"
         >
-          <Text variant="title1" weight="800">
+          <Text variant="title1" weight="700">
             P2P Pool
           </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
@@ -431,7 +431,7 @@ const P2PPoolScreen: React.FC = () => {
               {loadingBal ? (
                 <Spinner size="small" inline />
               ) : (
-                <Text variant="title3" weight="800" numeric>
+                <Text variant="title3" weight="700" numeric>
                   {fmt(available)}
                 </Text>
               )}
