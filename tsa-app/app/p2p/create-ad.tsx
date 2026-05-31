@@ -9,22 +9,14 @@
 //
 // Capital is locked at the user-balance level via a separate deposit flow
 // (see app/p2p/deposit.tsx). Publishing an ad never moves on-chain funds.
+//
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui).
+// Visual/UX only — the EIP-712 voucher signing flow, field validation,
+// payment-method selection, and fixed/float rate logic are unchanged.
 
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
@@ -36,12 +28,27 @@ import {
 } from '../../services/p2p';
 import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
-import { MAX_FLOAT_OFFSET_PCT, P2P_GOLD, pctToBps } from '../../constants/p2p';
+import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-
-const GOLD = P2P_GOLD;
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountInput,
+  Button,
+  Card,
+  Chip,
+  Divider,
+  Icon,
+  Input,
+  PressableScale,
+  SegmentedControl,
+  Spinner,
+  SummaryCard,
+  SummaryRow,
+  Text,
+} from '@/components/ui';
 
 const SUPPORTED_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
@@ -52,6 +59,8 @@ const SUPPORTED_TOKENS = [
 type RateType = 'fixed' | 'float';
 
 const CreateAdScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
+
   // Currency for THIS ad is a local form field. We seed it from the P2P market
   // currency (do not mutate the hook's setCurrency here), then resolve the full
   // config off supportedCurrencies so we have the right symbol for display.
@@ -367,450 +376,326 @@ const CreateAdScreen: React.FC = () => {
     return message || 'Server rejected the request';
   }
 
+  const poolHint =
+    poolAvailable && poolAvailable !== '-'
+      ? `Pool: ${formatTokenAmount(poolAvailable, token.decimals, 4)} ${token.symbol}`
+      : poolAvailable === '-'
+        ? 'Pool unavailable'
+        : undefined;
+
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
       >
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <Text style={styles.heading}>Create sell ad</Text>
-          <Text style={styles.subheading}>
-            You're offering {token.symbol} for {currencyCode}. Publishing is off-chain — you'll
-            sign a voucher to authorise trades. Funds are drawn from your pool
-            balance (deposit first via the Pool screen).
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text variant="title1" weight="800">
+            Create sell ad
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            You&apos;re offering {token.symbol} for {currencyCode}. Publishing is off-chain — you&apos;ll
+            sign a voucher to authorise trades. Funds are drawn from your pool balance (deposit
+            first via the Pool screen).
           </Text>
 
-          <Text style={styles.label}>Currency</Text>
+          {/* ── Currency ─────────────────────────────────────────────── */}
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+            Currency
+          </Text>
           <CurrencySelector
             variant="card"
             selectedCode={currencyCode}
             onSelectCode={(code) => setAdCurrencyCode(code)}
           />
 
-          <Text style={styles.label}>Token</Text>
-          <View style={styles.tokenRow}>
+          {/* ── Token ────────────────────────────────────────────────── */}
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+            Token
+          </Text>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
             {SUPPORTED_TOKENS.map((t) => (
-              <TouchableOpacity
+              <Chip
                 key={t.symbol}
-                style={[styles.tokenChip, token.symbol === t.symbol && styles.tokenChipActive]}
+                label={t.symbol}
+                selected={token.symbol === t.symbol}
                 onPress={() => setToken(t)}
-                activeOpacity={0.8}
-              >
-                <Text
-                  style={[
-                    styles.tokenChipText,
-                    token.symbol === t.symbol && styles.tokenChipTextActive,
-                  ]}
-                >
-                  {t.symbol}
-                </Text>
-              </TouchableOpacity>
+              />
             ))}
           </View>
 
-          <View style={styles.amountHeaderRow}>
-            <Text style={styles.labelInline}>Amount ({token.symbol})</Text>
-            {poolAvailable && poolAvailable !== '-' && (
-              <TouchableOpacity
-                onPress={() =>
-                  setAmountInput(
-                    formatTokenAmount(poolAvailable!, token.decimals, token.decimals),
-                  )
-                }
-                hitSlop={6}
-              >
-                <Text style={styles.balanceHint}>
-                  Pool: {formatTokenAmount(poolAvailable, token.decimals, 4)}{' '}
-                  {token.symbol}
-                </Text>
-              </TouchableOpacity>
-            )}
-            {poolAvailable === '-' && (
-              <Text style={styles.balanceHintMuted}>Pool unavailable</Text>
-            )}
-          </View>
-          <View style={[styles.inputCard, exceedsPool && styles.inputCardError]}>
-            <TextInput
-              style={styles.inputField}
+          {/* ── Amount ───────────────────────────────────────────────── */}
+          <View style={{ marginTop: spacing.lg }}>
+            <AmountInput
+              label={`Amount (${token.symbol})`}
               placeholder="0.00"
-              placeholderTextColor="#999"
-              keyboardType="decimal-pad"
+              symbol={token.symbol}
+              symbolPosition="suffix"
               value={amountInput}
               onChangeText={setAmountInput}
+              onMax={
+                poolAvailable && poolAvailable !== '-'
+                  ? () =>
+                      setAmountInput(
+                        formatTokenAmount(poolAvailable!, token.decimals, token.decimals),
+                      )
+                  : undefined
+              }
+              maxLabel="Use pool"
+              helper={exceedsPool ? undefined : poolHint}
+              error={
+                exceedsPool
+                  ? `Exceeds your pool balance. Deposit more ${token.symbol} via the Pool screen.`
+                  : undefined
+              }
             />
-            <Text style={styles.inputSuffix}>{token.symbol}</Text>
           </View>
-          {exceedsPool && (
-            <Text style={styles.amountError}>
-              Exceeds your pool balance. Deposit more {token.symbol} via the Pool screen.
-            </Text>
-          )}
 
-          <Text style={styles.label}>Rate type</Text>
-          <View style={styles.segmentedRow}>
-            <TouchableOpacity
-              style={[styles.segmentBtn, rateType === 'fixed' && styles.segmentBtnActive]}
-              onPress={() => setRateType('fixed')}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.segmentText, rateType === 'fixed' && styles.segmentTextActive]}>
-                Fixed
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.segmentBtn,
-                rateType === 'float' && styles.segmentBtnActive,
-                !floatSupported && styles.segmentBtnDisabled,
-              ]}
-              onPress={() => setRateType('float')}
-              disabled={!floatSupported}
-              activeOpacity={0.8}
-            >
-              <Text
-                style={[
-                  styles.segmentText,
-                  rateType === 'float' && styles.segmentTextActive,
-                  !floatSupported && styles.segmentTextDisabled,
-                ]}
-              >
-                Float (auto-update)
-              </Text>
-            </TouchableOpacity>
-          </View>
+          {/* ── Rate type ────────────────────────────────────────────── */}
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+            Rate type
+          </Text>
+          <SegmentedControl<RateType>
+            segments={[
+              { key: 'fixed', label: 'Fixed' },
+              { key: 'float', label: 'Float (auto-update)' },
+            ]}
+            value={rateType}
+            onChange={(k) => {
+              // Float requires a live Bybit anchor; ignore the tap if the
+              // selected currency has none (mirrors the old disabled segment).
+              if (k === 'float' && !floatSupported) return;
+              setRateType(k);
+            }}
+            style={!floatSupported ? { opacity: 0.85 } : undefined}
+          />
           {!floatSupported && (
-            <Text style={styles.helperText}>
-              Float rate isn't available for {currencyCode} — use a fixed rate.
+            <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+              Float rate isn&apos;t available for {currencyCode} — use a fixed rate.
             </Text>
           )}
 
+          {/* ── Rate input (fixed | float) ───────────────────────────── */}
           {rateType === 'fixed' ? (
-            <>
-              <Text style={styles.label}>Rate ({currencyCode} per 1 {token.symbol})</Text>
-              <View style={styles.inputCard}>
-                <Text style={styles.inputPrefix}>{symbol}</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder={suggestedRate ? String(suggestedRate) : '0.00'}
-                  placeholderTextColor="#999"
-                  keyboardType="decimal-pad"
-                  value={rateInput}
-                  onChangeText={setRateInput}
-                />
-              </View>
+            <View style={{ marginTop: spacing.lg }}>
+              <Input
+                label={`Rate (${currencyCode} per 1 ${token.symbol})`}
+                placeholder={suggestedRate ? String(suggestedRate) : '0.00'}
+                keyboardType="decimal-pad"
+                value={rateInput}
+                onChangeText={setRateInput}
+                leftAdornment={
+                  <Text variant="bodyMed" weight="700" color="textSecondary">
+                    {symbol}
+                  </Text>
+                }
+              />
               {suggestedRate !== null && (
-                <View style={styles.rateHint}>
-                  <Icon name="info-outline" size={14} color={rateStale ? GOLD.error : GOLD.dark} />
-                  <Text style={[styles.rateHintText, rateStale && { color: GOLD.error }]}>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    marginTop: spacing.sm,
+                  }}
+                >
+                  <Icon name="info" size={14} color={rateStale ? colors.danger : colors.accent} />
+                  <Text variant="caption" color={rateStale ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
                     {rateStale
-                      ? `Bybit rate stale — verify before publishing`
+                      ? 'Bybit rate stale — verify before publishing'
                       : `Current Bybit P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
                   </Text>
-                  <TouchableOpacity onPress={() => setRateInput(String(suggestedRate))}>
-                    <Text style={styles.rateApply}>Use</Text>
-                  </TouchableOpacity>
+                  <PressableScale onPress={() => setRateInput(String(suggestedRate))}>
+                    <Text variant="caption" weight="700" color="accent">
+                      Use
+                    </Text>
+                  </PressableScale>
                 </View>
               )}
-            </>
+            </View>
           ) : (
-            <>
-              <Text style={styles.label}>Offset from market</Text>
-              <View style={styles.inputCard}>
-                <Text style={styles.inputPrefix}>%</Text>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="0.00"
-                  placeholderTextColor="#999"
-                  keyboardType="numbers-and-punctuation"
-                  value={floatOffsetPctInput}
-                  onChangeText={setFloatOffsetPctInput}
-                />
-              </View>
-              <Text style={styles.helperText}>
-                Positive sells above market, negative below. Capped at ±{MAX_FLOAT_OFFSET_PCT}%.
-              </Text>
+            <View style={{ marginTop: spacing.lg }}>
+              <Input
+                label="Offset from market"
+                placeholder="0.00"
+                keyboardType="numbers-and-punctuation"
+                value={floatOffsetPctInput}
+                onChangeText={setFloatOffsetPctInput}
+                leftAdornment={
+                  <Text variant="bodyMed" weight="700" color="textSecondary">
+                    %
+                  </Text>
+                }
+                helper={`Positive sells above market, negative below. Capped at ±${MAX_FLOAT_OFFSET_PCT}%.`}
+              />
               {suggestedRate == null || rateStale ? (
-                <View style={[styles.rateHint, { marginTop: 8 }]}>
-                  <Icon name="error-outline" size={14} color={GOLD.error} />
-                  <Text style={[styles.rateHintText, { color: GOLD.error }]}>
-                    Live rate unavailable — float ads can't be published right now.
+                <View
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
+                >
+                  <Icon name="warning" size={14} color={colors.danger} />
+                  <Text variant="caption" color="danger" style={{ flex: 1 }}>
+                    Live rate unavailable — float ads can&apos;t be published right now.
                   </Text>
                 </View>
               ) : (
-                <View style={[styles.rateHint, { marginTop: 8 }]}>
-                  <Icon name="info-outline" size={14} color={GOLD.dark} />
-                  <Text style={styles.rateHintText}>
+                <View
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
+                >
+                  <Icon name="info" size={14} color={colors.accent} />
+                  <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
                     Anchor: Bybit P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
-                    {effectiveRate != null && (
-                      <Text> · Your rate: {symbol}{effectiveRate.toFixed(2)}</Text>
-                    )}
+                    {effectiveRate != null && ` · Your rate: ${symbol}${effectiveRate.toFixed(2)}`}
                   </Text>
                 </View>
               )}
               {!floatOffsetPctValid && floatOffsetPctInput.trim() !== '' && (
-                <View style={[styles.rateHint, { marginTop: 4 }]}>
-                  <Icon name="warning" size={14} color={GOLD.error} />
-                  <Text style={[styles.rateHintText, { color: GOLD.error }]}>
+                <View
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }}
+                >
+                  <Icon name="warning" size={14} color={colors.danger} />
+                  <Text variant="caption" color="danger" style={{ flex: 1 }}>
                     Enter a number within ±{MAX_FLOAT_OFFSET_PCT}%.
                   </Text>
                 </View>
               )}
-            </>
+            </View>
           )}
 
-          <View style={styles.limitsRow}>
+          {/* ── Order limits ─────────────────────────────────────────── */}
+          <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg }}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Min order ({currencyCode})</Text>
-              <View style={styles.inputCard}>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Optional"
-                  placeholderTextColor="#999"
-                  keyboardType="decimal-pad"
-                  value={minLimitInput}
-                  onChangeText={setMinLimitInput}
-                />
-              </View>
+              <Input
+                label={`Min order (${currencyCode})`}
+                placeholder="Optional"
+                keyboardType="decimal-pad"
+                value={minLimitInput}
+                onChangeText={setMinLimitInput}
+              />
             </View>
-            <View style={{ width: 12 }} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Max order ({currencyCode})</Text>
-              <View style={styles.inputCard}>
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Optional"
-                  placeholderTextColor="#999"
-                  keyboardType="decimal-pad"
-                  value={maxLimitInput}
-                  onChangeText={setMaxLimitInput}
-                />
-              </View>
+              <Input
+                label={`Max order (${currencyCode})`}
+                placeholder="Optional"
+                keyboardType="decimal-pad"
+                value={maxLimitInput}
+                onChangeText={setMaxLimitInput}
+              />
             </View>
           </View>
 
-          <Text style={styles.label}>Payment methods</Text>
+          {/* ── Payment methods ──────────────────────────────────────── */}
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+            Payment methods
+          </Text>
           {loadingPms ? (
-            <ActivityIndicator color={GOLD.dark} style={{ marginVertical: 16 }} />
+            <View style={{ paddingVertical: spacing.lg }}>
+              <Spinner />
+            </View>
           ) : paymentMethods.length === 0 ? (
-            <TouchableOpacity
-              style={styles.emptyPmCard}
-              onPress={() => router.push('/p2p/payment-methods/new')}
-              activeOpacity={0.8}
-            >
-              <Icon name="add-circle-outline" size={20} color={GOLD.dark} />
-              <Text style={styles.emptyPmText}>
-                Add a payment method before publishing
-              </Text>
-            </TouchableOpacity>
-          ) : (
-            paymentMethods.map((m) => (
-              <TouchableOpacity
-                key={m.id}
-                style={[
-                  styles.pmCard,
-                  selectedPmIds.includes(m.id) && styles.pmCardActive,
-                ]}
-                onPress={() => togglePm(m.id)}
-                activeOpacity={0.8}
-              >
-                <Icon
-                  name={
-                    selectedPmIds.includes(m.id)
-                      ? 'check-box'
-                      : 'check-box-outline-blank'
-                  }
-                  size={22}
-                  color={selectedPmIds.includes(m.id) ? GOLD.dark : '#999'}
-                />
-                <View style={{ flex: 1, marginLeft: 10 }}>
-                  <Text style={styles.pmBank}>{m.bankName}</Text>
-                  <Text style={styles.pmAccount}>
-                    {m.accountName} · {m.accountNumber.slice(-4)}
+            <PressableScale onPress={() => router.push('/p2p/payment-methods/new')}>
+              <AccentCard padding="md">
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Icon name="plus" size={20} color={colors.accent} />
+                  <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
+                    Add a payment method before publishing
                   </Text>
+                  <Icon name="chevronRight" size={18} color={colors.textMuted} />
                 </View>
-              </TouchableOpacity>
-            ))
+              </AccentCard>
+            </PressableScale>
+          ) : (
+            <View style={{ gap: spacing.sm }}>
+              {paymentMethods.map((m) => {
+                const selected = selectedPmIds.includes(m.id);
+                return (
+                  <PressableScale key={m.id} onPress={() => togglePm(m.id)}>
+                    <Card
+                      padding="md"
+                      style={{
+                        borderWidth: 1,
+                        borderColor: selected ? colors.accent : colors.border,
+                        backgroundColor: selected ? colors.accentMuted : colors.surface,
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                        <Icon
+                          name={selected ? 'checkCircle' : 'closeCircle'}
+                          size={22}
+                          color={selected ? colors.accent : colors.textMuted}
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text variant="bodyMed" weight="600">
+                            {m.bankName}
+                          </Text>
+                          <Text variant="caption" color="textSecondary">
+                            {m.accountName} · {m.accountNumber.slice(-4)}
+                          </Text>
+                        </View>
+                      </View>
+                    </Card>
+                  </PressableScale>
+                );
+              })}
+            </View>
           )}
 
-          <View style={styles.preview}>
-            <Text style={styles.previewTitle}>Preview</Text>
-            <View style={styles.previewRow}>
-              <Text style={styles.previewLabel}>Selling</Text>
-              <Text style={styles.previewValue}>
-                {amountInput || '0'} {token.symbol}
-              </Text>
-            </View>
-            <View style={styles.previewRow}>
-              <Text style={styles.previewLabel}>At</Text>
-              <Text style={styles.previewValue}>
-                {symbol}{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
-                {rateType === 'float' && <Text style={styles.previewMeta}> (auto)</Text>}
-              </Text>
-            </View>
-            <View style={styles.previewRow}>
-              <Text style={styles.previewLabel}>Total value</Text>
-              <Text style={styles.previewValue}>
-                {symbol}{previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              </Text>
-            </View>
-            <View style={styles.previewRow}>
-              <Text style={styles.previewLabel}>Fee on release</Text>
-              <Text style={styles.previewValue}>
-                {token.symbol === 'MCGP' ? '0% (MCGP)' : '0.5%'}
-              </Text>
-            </View>
-          </View>
+          {/* ── Preview ──────────────────────────────────────────────── */}
+          <Card style={{ marginTop: spacing.xl }}>
+            <Text variant="overline" color="textMuted">
+              PREVIEW
+            </Text>
+            <Divider spacing="sm" />
+            <SummaryCard>
+              <SummaryRow label="Selling" value={`${amountInput || '0'} ${token.symbol}`} />
+              <SummaryRow
+                label="At"
+                value={
+                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                    <Text variant="bodyMed" weight="600" numeric>
+                      {symbol}{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
+                    </Text>
+                    {rateType === 'float' && (
+                      <Text variant="caption" color="accent">
+                        (auto)
+                      </Text>
+                    )}
+                  </View>
+                }
+              />
+              <SummaryRow
+                label="Total value"
+                value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+              />
+              <SummaryRow
+                label="Fee on release"
+                value={token.symbol === 'MCGP' ? '0% (MCGP)' : '0.5%'}
+              />
+            </SummaryCard>
+          </Card>
 
-          <TouchableOpacity
-            style={[styles.submit, (!valid || submitting) && styles.submitDisabled]}
+          {/* ── Publish ──────────────────────────────────────────────── */}
+          <Button
+            title="Publish ad"
+            leftIcon="check"
             onPress={handleSubmit}
             disabled={!valid || submitting}
-            activeOpacity={0.85}
-          >
-            {submitting ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <ActivityIndicator color="#000" />
-                <Text style={[styles.submitText, { marginLeft: 10 }]}>{submitStage}</Text>
-              </View>
-            ) : (
-              <Text style={styles.submitText}>Publish ad</Text>
-            )}
-          </TouchableOpacity>
+            loading={submitting}
+            style={{ marginTop: spacing.xl }}
+          />
+          {submitting && !!submitStage && (
+            <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
+              <Text variant="caption" color="textSecondary">
+                {submitStage}
+              </Text>
+            </View>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 60 },
-  heading: { fontSize: 24, fontWeight: '800', color: '#000', marginBottom: 6 },
-  subheading: { fontSize: 14, color: '#666', marginBottom: 18, lineHeight: 20 },
-  label: { fontSize: 14, fontWeight: '700', color: '#333', marginTop: 14, marginBottom: 6 },
-  tokenRow: { flexDirection: 'row', gap: 10 },
-  tokenChip: {
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 10,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  tokenChipActive: { backgroundColor: GOLD.primary, borderColor: GOLD.dark },
-  tokenChipText: { fontWeight: '700', color: GOLD.dark },
-  tokenChipTextActive: { color: '#000' },
-  inputCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  inputCardError: { borderColor: GOLD.error },
-  inputField: { flex: 1, fontSize: 16, color: '#000', paddingVertical: 0 },
-  inputPrefix: { fontSize: 16, fontWeight: '700', color: GOLD.dark, marginRight: 6 },
-  inputSuffix: { fontSize: 14, fontWeight: '700', color: GOLD.dark, marginLeft: 6 },
-  amountHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    marginTop: 14,
-    marginBottom: 6,
-  },
-  // Inline label sized to match `label` but without its outer marginTop —
-  // the parent amountHeaderRow already supplies the spacing.
-  labelInline: { fontSize: 14, fontWeight: '700', color: '#333' },
-  balanceHint: { fontSize: 12, color: GOLD.dark, fontWeight: '600' },
-  balanceHintMuted: { fontSize: 12, color: '#999', fontWeight: '500' },
-  amountError: { color: GOLD.error, fontSize: 12, marginTop: 6 },
-  rateHint: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 6,
-    paddingHorizontal: 4,
-  },
-  rateHintText: { flex: 1, marginLeft: 6, fontSize: 12, color: GOLD.dark },
-  rateApply: { fontSize: 12, fontWeight: '700', color: GOLD.dark, textDecorationLine: 'underline' },
-  limitsRow: { flexDirection: 'row' },
-  pmCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-  },
-  pmCardActive: { borderColor: GOLD.dark, backgroundColor: GOLD.light },
-  pmBank: { fontSize: 15, fontWeight: '600', color: '#000' },
-  pmAccount: { fontSize: 12, color: '#666', marginTop: 2 },
-  emptyPmCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFF',
-    padding: 16,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: GOLD.muted,
-  },
-  emptyPmText: { marginLeft: 8, fontWeight: '600', color: GOLD.dark },
-  preview: {
-    backgroundColor: GOLD.light,
-    padding: 16,
-    borderRadius: 12,
-    marginTop: 20,
-  },
-  previewTitle: { fontSize: 14, fontWeight: '800', color: '#000', marginBottom: 10 },
-  previewRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  previewLabel: { fontSize: 13, color: '#666' },
-  previewValue: { fontSize: 14, fontWeight: '700', color: '#000' },
-  previewMeta: { fontSize: 11, fontWeight: '600', color: GOLD.dark },
-  segmentedRow: {
-    flexDirection: 'row',
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    overflow: 'hidden',
-  },
-  segmentBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-  },
-  segmentBtnActive: { backgroundColor: GOLD.primary },
-  segmentBtnDisabled: { opacity: 0.4 },
-  segmentText: { fontSize: 14, fontWeight: '700', color: GOLD.dark },
-  segmentTextActive: { color: '#000' },
-  segmentTextDisabled: { color: '#999' },
-  helperText: { marginTop: 6, fontSize: 12, color: '#666', paddingHorizontal: 4 },
-  submit: {
-    marginTop: 24,
-    backgroundColor: GOLD.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    shadowColor: GOLD.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  submitDisabled: { opacity: 0.5 },
-  submitText: { fontWeight: '800', color: '#000', fontSize: 16 },
-});
 
 export default CreateAdScreen;

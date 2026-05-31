@@ -1,16 +1,30 @@
-// app/p2p/seller/[sellerId].tsx — merchant profile: badges, stats, recent feedback, active ads.
+// app/p2p/seller/[sellerId].tsx
+//
+// Merchant public profile — trust badges, completion/feedback stats, and the
+// seller's active ads. Restyled onto the TSA Signature design system; data
+// fetching (sellersApi.profile), state, effect deps, and navigation routes are
+// unchanged — this is a visual/UX restyle only.
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { sellersApi, formatFiat, type MerchantProfile } from '../../../services/p2p';
+import { sellersApi, type MerchantProfile } from '../../../services/p2p';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
-import { P2P_GOLD } from '../../../constants/p2p';
-
-const GOLD = P2P_GOLD;
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Avatar,
+  Card,
+  EmptyState,
+  Icon,
+  PressableScale,
+  SkeletonGroup,
+  Text,
+} from '@/components/ui';
 
 const SellerProfileScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { sellerId } = useLocalSearchParams<{ sellerId: string }>();
   const [profile, setProfile] = useState<MerchantProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,66 +40,123 @@ const SellerProfileScreen: React.FC = () => {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
-        <ActivityIndicator size="large" color={GOLD.dark} style={{ marginTop: 80 }} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ padding: spacing.lg }}>
+          <SkeletonGroup shape="line" count={6} />
+        </View>
       </SafeAreaView>
     );
   }
+
   if (!profile) {
     return (
-      <SafeAreaView style={styles.container}>
-        <Text style={styles.empty}>Seller not found.</Text>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <EmptyState
+            icon="user"
+            title="Seller not found"
+            subtitle="This merchant profile isn't available right now."
+            actionLabel="Go back"
+            onAction={() => router.back()}
+          />
+        </View>
       </SafeAreaView>
     );
   }
+
   const up = profile.recentRatings.filter((r) => r.value === 1).length;
   const down = profile.recentRatings.filter((r) => r.value === -1).length;
+  const sellerLabel = `seller-${profile.userId.slice(0, 4)}`;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.heading}>Merchant</Text>
-        <View style={styles.card}>
-          <SellerTrustBadges stats={profile.stats} />
-        </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+        <Text variant="title1" weight="800">
+          Merchant
+        </Text>
 
-        <Text style={styles.sectionLabel}>Recent feedback</Text>
-        <View style={styles.card}>
-          <View style={styles.feedbackRow}>
-            <Icon name="thumb-up" size={16} color="#2E8B57" />
-            <Text style={styles.feedbackNum}>{up}</Text>
-            <Icon name="thumb-down" size={16} color={GOLD.error} style={{ marginLeft: 16 }} />
-            <Text style={styles.feedbackNum}>{down}</Text>
+        {/* Identity + trust signals */}
+        <AccentCard style={{ marginTop: spacing.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+            <Avatar name={sellerLabel} size={48} online={profile.stats.online} />
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="700" numberOfLines={1}>
+                @{sellerLabel}
+              </Text>
+              <Text variant="caption" color="textMuted">
+                {profile.stats.totalOrders} {profile.stats.totalOrders === 1 ? 'order' : 'orders'}
+              </Text>
+            </View>
           </View>
-          {profile.recentRatings.length === 0 && <Text style={styles.muted}>No feedback yet.</Text>}
-        </View>
+          <SellerTrustBadges stats={profile.stats} />
+        </AccentCard>
 
-        <Text style={styles.sectionLabel}>Active ads ({profile.activeAds.length})</Text>
-        {profile.activeAds.map((ad) => (
-          <TouchableOpacity key={ad.id} style={styles.adRow} onPress={() => router.push(`/p2p/ad/${ad.id}` as any)} activeOpacity={0.85}>
-            <Text style={styles.adToken}>{ad.token}</Text>
-            <Text style={styles.adRate}>{ad.fiatCurrency} {formatFiat(ad.rate)}</Text>
-          </TouchableOpacity>
-        ))}
-        {profile.activeAds.length === 0 && <Text style={styles.muted}>No active ads.</Text>}
+        {/* Recent feedback */}
+        <Text variant="overline" color="textMuted" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
+          RECENT FEEDBACK
+        </Text>
+        <Card>
+          {profile.recentRatings.length === 0 ? (
+            <Text variant="bodySm" color="textSecondary">
+              No feedback yet.
+            </Text>
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.lg }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                <Icon name="thumbUp" size={16} color={colors.success} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {up}
+                </Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                <Icon name="thumbDown" size={16} color={colors.danger} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {down}
+                </Text>
+              </View>
+            </View>
+          )}
+        </Card>
+
+        {/* Active ads */}
+        <Text variant="overline" color="textMuted" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
+          ACTIVE ADS ({profile.activeAds.length})
+        </Text>
+        {profile.activeAds.length === 0 ? (
+          <Card>
+            <Text variant="bodySm" color="textSecondary">
+              No active ads.
+            </Text>
+          </Card>
+        ) : (
+          <View style={{ gap: spacing.sm }}>
+            {profile.activeAds.map((ad) => (
+              <PressableScale key={ad.id} onPress={() => router.push(`/p2p/ad/${ad.id}` as any)}>
+                <Card>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: spacing.sm,
+                    }}
+                  >
+                    <Text variant="bodyMed" weight="700">
+                      {ad.token}
+                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                      <AmountText value={ad.rate} currency={ad.fiatCurrency} variant="bodyMed" weight="700" />
+                      <Icon name="chevronRight" size={18} color={colors.textMuted} />
+                    </View>
+                  </View>
+                </Card>
+              </PressableScale>
+            ))}
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: GOLD.background },
-  scroll: { padding: 20, paddingBottom: 60 },
-  heading: { fontSize: 22, fontWeight: '800', color: '#000', marginBottom: 12 },
-  card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: GOLD.muted, marginBottom: 16 },
-  sectionLabel: { fontSize: 13, fontWeight: '700', color: '#333', marginBottom: 8 },
-  feedbackRow: { flexDirection: 'row', alignItems: 'center' },
-  feedbackNum: { fontSize: 15, fontWeight: '700', color: '#000', marginLeft: 6 },
-  adRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#FFF', borderRadius: 10, padding: 14, borderWidth: 1, borderColor: GOLD.muted, marginBottom: 8 },
-  adToken: { fontSize: 15, fontWeight: '700', color: '#000' },
-  adRate: { fontSize: 14, color: GOLD.dark, fontWeight: '700' },
-  muted: { fontSize: 13, color: '#888', fontStyle: 'italic' },
-  empty: { textAlign: 'center', marginTop: 60, color: '#888' },
-});
 
 export default SellerProfileScreen;
