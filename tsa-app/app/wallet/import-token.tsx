@@ -4,32 +4,45 @@
 // components/wallet/ImportTokenModal flow. Auto-fills name/symbol/decimals
 // by reading the ERC-20 contract on the selected chain, then persists the
 // custom token via useTokens().importToken (AsyncStorage, per-network).
+//
+// Migrated onto the TSA Signature design system (@/theme tokens +
+// @/components/ui primitives). FINANCIAL screen: address validation, the
+// ERC-20 contract lookup (readTokenContract), decimals bounds-checking, and
+// the add-token persistence (importToken) are preserved verbatim — this is a
+// visual/structural restyle only. Chain icon Images keep their remote URLs.
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
   View,
-  Text,
-  TextInput,
-  Pressable,
-  StyleSheet,
   ScrollView,
-  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
-  Modal,
   Image,
 } from 'react-native';
 import { router, Stack } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MaterialIcons as Icon } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { readTokenContract, isValidAddress } from '../../services/wallet';
 import { useTokens, type CustomToken } from '../../hooks/useTokens';
-
-const GOLD = '#D4AF37';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Button,
+  BottomActionBar,
+  EmptyState,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  SegmentedControl,
+  SelectRow,
+  Sheet,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 type TabKey = 'token' | 'network';
 
@@ -41,55 +54,69 @@ function hashColor(str: string): string {
   return `hsl(${Math.abs(hash) % 360}, 55%, 50%)`;
 }
 
-const ChainPickerModal: React.FC<{
+const ChainPickerSheet: React.FC<{
   visible: boolean;
   selected: ChainKey;
   onSelect: (key: ChainKey) => void;
   onClose: () => void;
 }> = ({ visible, selected, onSelect, onClose }) => {
-  const insets = useSafeAreaInsets();
+  const { colors, spacing, radius } = useTheme();
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.sheetOverlay} onPress={onClose}>
-        <Pressable
-          style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 16) }]}
-          onPress={e => e.stopPropagation()}
-        >
-          <View style={styles.sheetHandle} />
-          <Text style={styles.sheetTitle}>Select network</Text>
-          <ScrollView style={{ maxHeight: 420 }}>
-            {CHAIN_KEYS.map(key => {
-              const chain = CHAINS[key];
-              const active = selected === key;
-              return (
-                <Pressable
-                  key={key}
-                  style={styles.chainRow}
-                  onPress={() => {
-                    onSelect(key);
-                    onClose();
+    <Sheet visible={visible} onClose={onClose} title="Select network">
+      <ScrollView
+        style={{ flexShrink: 1 }}
+        contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }}
+        keyboardShouldPersistTaps="handled"
+      >
+        {CHAIN_KEYS.map((key) => {
+          const chain = CHAINS[key];
+          const active = selected === key;
+          return (
+            <PressableScale
+              key={key}
+              onPress={() => {
+                onSelect(key);
+                onClose();
+              }}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.md,
+                paddingVertical: spacing.md,
+              }}
+            >
+              {chain.iconUrl ? (
+                <Image
+                  source={{ uri: chain.iconUrl }}
+                  style={{ width: 28, height: 28, borderRadius: radius.pill }}
+                />
+              ) : (
+                <View
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: radius.pill,
+                    backgroundColor: chain.iconColor,
                   }}
-                >
-                  {chain.iconUrl ? (
-                    <Image source={{ uri: chain.iconUrl }} style={styles.chainRowIcon} />
-                  ) : (
-                    <View style={[styles.chainRowDot, { backgroundColor: chain.iconColor }]} />
-                  )}
-                  <Text style={styles.chainRowText}>{chain.name}</Text>
-                  {active && <Icon name="check" size={20} color={GOLD} />}
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        </Pressable>
-      </Pressable>
-    </Modal>
+                />
+              )}
+              <Text variant="body" weight={active ? '600' : '400'} style={{ flex: 1 }}>
+                {chain.name}
+              </Text>
+              {active && <Icon name="check" size={20} color={colors.accent} />}
+            </PressableScale>
+          );
+        })}
+      </ScrollView>
+    </Sheet>
   );
 };
 
 const ImportTokenScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const { importToken } = useTokens();
-  const insets = useSafeAreaInsets();
 
   const [tab, setTab] = useState<TabKey>('token');
   const [chainKey, setChainKey] = useState<ChainKey>('ethereum');
@@ -192,31 +219,41 @@ const ImportTokenScreen: React.FC = () => {
   const canSave = isAddressValid && !!name && !!symbol && !!decimals && !submitting;
 
   return (
-    <View style={[styles.screen, { paddingBottom: insets.bottom }]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <Stack.Screen
         options={{
           title: 'Import crypto',
           headerRight: () => (
-            <Pressable hitSlop={12} onPress={() => Alert.alert(
-              'Import crypto',
-              'Anyone can create a token on a chain, including fake versions of well-known assets. Verify the contract address before importing.',
-            )}>
-              <Icon name="info-outline" size={22} color="#1A1A1A" />
-            </Pressable>
+            <IconButton
+              icon="info"
+              accessibilityLabel="About importing crypto"
+              onPress={() =>
+                Alert.alert(
+                  'Import crypto',
+                  'Anyone can create a token on a chain, including fake versions of well-known assets. Verify the contract address before importing.',
+                )
+              }
+            />
           ),
         }}
       />
 
       {/* Tabs */}
-      <View style={styles.tabsRow}>
-        <Pressable style={styles.tab} onPress={() => setTab('token')}>
-          <Text style={[styles.tabLabel, tab === 'token' && styles.tabLabelActive]}>Token</Text>
-          {tab === 'token' && <View style={styles.tabUnderline} />}
-        </Pressable>
-        <Pressable style={styles.tab} onPress={() => setTab('network')}>
-          <Text style={[styles.tabLabel, tab === 'network' && styles.tabLabelActive]}>Network</Text>
-          {tab === 'network' && <View style={styles.tabUnderline} />}
-        </Pressable>
+      <View
+        style={{
+          paddingHorizontal: spacing.lg,
+          paddingTop: spacing.md,
+          paddingBottom: spacing.sm,
+        }}
+      >
+        <SegmentedControl<TabKey>
+          segments={[
+            { key: 'token', label: 'Token' },
+            { key: 'network', label: 'Network' },
+          ]}
+          value={tab}
+          onChange={setTab}
+        />
       </View>
 
       <KeyboardAvoidingView
@@ -224,243 +261,126 @@ const ImportTokenScreen: React.FC = () => {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.body}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
           {tab === 'token' ? (
-            <>
-              <View style={styles.warning}>
-                <Icon name="info" size={18} color="#B98900" />
-                <Text style={styles.warningText}>
-                  Anyone can create a token, including fake versions of existing tokens.
-                  Verify the contract address before importing.
-                </Text>
-              </View>
+            <View style={{ gap: spacing.lg }}>
+              <AccentCard padding="md" railColor={colors.warning}>
+                <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+                  <Icon name="info" size={18} color={colors.warning} />
+                  <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+                    Anyone can create a token, including fake versions of existing tokens.
+                    Verify the contract address before importing.
+                  </Text>
+                </View>
+              </AccentCard>
 
-              <Text style={styles.label}>Network</Text>
-              <Pressable style={styles.networkField} onPress={() => setShowChainPicker(true)}>
-                {selectedChain.iconUrl ? (
-                  <Image source={{ uri: selectedChain.iconUrl }} style={styles.networkIcon} />
-                ) : (
-                  <View style={[styles.networkIcon, { backgroundColor: selectedChain.iconColor }]} />
-                )}
-                <Text style={styles.networkText}>{selectedChain.name}</Text>
-                <Icon name="keyboard-arrow-down" size={22} color="#888" />
-              </Pressable>
+              <SelectRow
+                label="Network"
+                value={selectedChain.name}
+                onPress={() => setShowChainPicker(true)}
+                leftElement={
+                  selectedChain.iconUrl ? (
+                    <Image
+                      source={{ uri: selectedChain.iconUrl }}
+                      style={{ width: 22, height: 22, borderRadius: 11 }}
+                    />
+                  ) : (
+                    <Icon name="wallet" size={20} />
+                  )
+                }
+              />
 
-              <Text style={styles.label}>Address</Text>
-              <View style={styles.addressField}>
-                <TextInput
-                  style={styles.addressInput}
-                  placeholder="0x..."
-                  placeholderTextColor="#BBB"
-                  value={address}
-                  onChangeText={handleAddressChange}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  multiline
-                />
-                <Pressable style={styles.pasteBtn} onPress={handlePaste} hitSlop={8}>
-                  <Text style={styles.pasteText}>Paste</Text>
-                </Pressable>
-              </View>
+              <Input
+                label="Address"
+                placeholder="0x..."
+                value={address}
+                onChangeText={handleAddressChange}
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline
+                inputStyle={{ minHeight: 24 }}
+                rightAdornment={
+                  <PressableScale onPress={handlePaste} hitSlop={8}>
+                    <Text variant="bodySm" weight="600" color="accent">
+                      Paste
+                    </Text>
+                  </PressableScale>
+                }
+              />
 
               {fetching && (
-                <View style={styles.statusRow}>
-                  <ActivityIndicator size="small" color={GOLD} />
-                  <Text style={styles.statusText}>Reading contract on {selectedChain.name}…</Text>
-                </View>
+                <Spinner inline label={`Reading contract on ${selectedChain.name}…`} />
               )}
 
-              <Text style={styles.label}>Name</Text>
-              <View style={styles.input}>
-                <TextInput
-                  style={styles.inputText}
-                  value={name}
-                  onChangeText={setName}
-                  placeholder="Token name"
-                  placeholderTextColor="#BBB"
-                  autoCapitalize="words"
-                />
-              </View>
+              <Input
+                label="Name"
+                value={name}
+                onChangeText={setName}
+                placeholder="Token name"
+                autoCapitalize="words"
+              />
 
-              <Text style={styles.label}>Symbol</Text>
-              <View style={styles.input}>
-                <TextInput
-                  style={styles.inputText}
-                  value={symbol}
-                  onChangeText={setSymbol}
-                  placeholder="e.g. USDC"
-                  placeholderTextColor="#BBB"
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                />
-              </View>
+              <Input
+                label="Symbol"
+                value={symbol}
+                onChangeText={setSymbol}
+                placeholder="e.g. USDC"
+                autoCapitalize="characters"
+                autoCorrect={false}
+              />
 
-              <Text style={styles.label}>Decimals</Text>
-              <View style={styles.input}>
-                <TextInput
-                  style={styles.inputText}
-                  value={decimals}
-                  onChangeText={setDecimals}
-                  placeholder="e.g. 18"
-                  placeholderTextColor="#BBB"
-                  keyboardType="number-pad"
-                />
-              </View>
+              <Input
+                label="Decimals"
+                value={decimals}
+                onChangeText={setDecimals}
+                placeholder="e.g. 18"
+                keyboardType="number-pad"
+              />
 
               {error ? (
-                <View style={styles.errorRow}>
-                  <Icon name="error-outline" size={16} color="#DC2626" />
-                  <Text style={styles.errorText}>{error}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                  <Icon name="warning" size={16} color={colors.danger} />
+                  <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                    {error}
+                  </Text>
                 </View>
               ) : null}
-
-              <Pressable
-                style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
-                onPress={handleSave}
-                disabled={!canSave}
-              >
-                {submitting ? (
-                  <ActivityIndicator color="#FFF" />
-                ) : (
-                  <Text style={styles.saveText}>Import {symbol || 'token'}</Text>
-                )}
-              </Pressable>
-            </>
+            </View>
           ) : (
-            <View style={styles.networkTabEmpty}>
-              <Icon name="hub" size={42} color="#DDD" />
-              <Text style={styles.emptyTitle}>Custom networks</Text>
-              <Text style={styles.emptyDesc}>
-                Adding custom RPC networks isn&apos;t supported yet. Use the supported networks listed in the Token tab.
-              </Text>
+            <View style={{ paddingTop: spacing['2xl'] }}>
+              <EmptyState
+                icon="pool"
+                title="Custom networks"
+                subtitle="Adding custom RPC networks isn't supported yet. Use the supported networks listed in the Token tab."
+              />
             </View>
           )}
         </ScrollView>
       </KeyboardAvoidingView>
 
-      <ChainPickerModal
+      {tab === 'token' && (
+        <BottomActionBar>
+          <Button
+            title={`Import ${symbol || 'token'}`}
+            onPress={handleSave}
+            disabled={!canSave}
+            loading={submitting}
+            size="lg"
+          />
+        </BottomActionBar>
+      )}
+
+      <ChainPickerSheet
         visible={showChainPicker}
         selected={chainKey}
         onSelect={handleChainChange}
         onClose={() => setShowChainPicker(false)}
       />
-    </View>
+    </SafeAreaView>
   );
 };
 
 export default ImportTokenScreen;
-
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#FFF' },
-
-  tabsRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#EFEFEF',
-  },
-  tab: { flex: 1, alignItems: 'center', paddingVertical: 14 },
-  tabLabel: { fontSize: 15, fontWeight: '500', color: '#888' },
-  tabLabelActive: { color: '#1A1A1A', fontWeight: '700' },
-  tabUnderline: {
-    position: 'absolute',
-    bottom: 0,
-    height: 3,
-    width: 60,
-    backgroundColor: '#2F44FF',
-    borderRadius: 2,
-  },
-
-  body: { padding: 20, paddingBottom: 40 },
-
-  warning: {
-    flexDirection: 'row',
-    gap: 10,
-    backgroundColor: '#FFF4D6',
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 24,
-  },
-  warningText: { flex: 1, fontSize: 13, color: '#1A1A1A', lineHeight: 18 },
-
-  label: { fontSize: 14, color: '#1A1A1A', marginBottom: 6, marginTop: 14, fontWeight: '500' },
-
-  networkField: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  networkIcon: { width: 22, height: 22, borderRadius: 11 },
-  networkText: { flex: 1, fontSize: 15, color: '#1A1A1A', fontWeight: '500' },
-
-  addressField: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 12 : 6,
-  },
-  addressInput: {
-    flex: 1,
-    fontSize: 14,
-    color: '#1A1A1A',
-    minHeight: 40,
-    paddingVertical: 4,
-  },
-  pasteBtn: { paddingHorizontal: 10, paddingVertical: 6 },
-  pasteText: { color: '#2F44FF', fontSize: 14, fontWeight: '600' },
-
-  input: {
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-  },
-  inputText: { fontSize: 15, color: '#1A1A1A' },
-
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
-  statusText: { fontSize: 13, color: '#666' },
-
-  errorRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 14 },
-  errorText: { flex: 1, fontSize: 13, color: '#DC2626' },
-
-  saveBtn: {
-    marginTop: 28,
-    backgroundColor: GOLD,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  saveBtnDisabled: { opacity: 0.4 },
-  saveText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
-
-  networkTabEmpty: { alignItems: 'center', paddingVertical: 60, paddingHorizontal: 30, gap: 12 },
-  emptyTitle: { fontSize: 17, fontWeight: '700', color: '#1A1A1A' },
-  emptyDesc: { fontSize: 13, color: '#888', textAlign: 'center', lineHeight: 19 },
-
-  sheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
-  sheetContent: {
-    backgroundColor: '#FFF',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    paddingHorizontal: 20,
-    paddingTop: 10,
-  },
-  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#E0E0E0', alignSelf: 'center', marginBottom: 14 },
-  sheetTitle: { fontSize: 17, fontWeight: '700', color: '#1A1A1A', marginBottom: 12 },
-  chainRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14 },
-  chainRowIcon: { width: 26, height: 26, borderRadius: 13 },
-  chainRowDot: { width: 26, height: 26, borderRadius: 13 },
-  chainRowText: { flex: 1, fontSize: 15, color: '#1A1A1A' },
-});
