@@ -93,7 +93,7 @@ const PaymentMethodsScreen: React.FC = () => {
           />
         }
       >
-        <Text variant="title1" weight="800">
+        <Text variant="title1" weight="700">
           Payment methods
         </Text>
         <Text
