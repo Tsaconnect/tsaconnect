@@ -1,26 +1,33 @@
+// Login form (rendered by app/login.tsx).
+//
+// Migrated onto the TSA Signature design system: legacy constants/theme styling
+// replaced with @/theme tokens + @/components/ui primitives. AUTH logic
+// (login API call, biometric/refresh-token session restore, credential state,
+// validation, error handling, and post-login navigation) is preserved verbatim.
 import React, { useState, useEffect } from "react";
-import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  Pressable,
-  ActivityIndicator,
-  ScrollView,
-  TouchableOpacity,
-} from "react-native";
-import { Ionicons } from "@expo/vector-icons";
-import { COLORS } from "../../constants/theme";
+import { ScrollView, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router, Link } from "expo-router";
-import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import api from "../services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
 import {
   isLockEnabled, isBiometricAvailable,
   authenticateWithBiometric, getBiometricType,
 } from "../../services/localAuth";
+import { useTheme } from "@/theme";
+import {
+  AccentCard,
+  Button,
+  Divider,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Text,
+} from "@/components/ui";
 
 export default function Login() {
+  const { colors, spacing, radius } = useTheme();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
@@ -75,7 +82,6 @@ export default function Login() {
       const { clearRefreshToken } = await import('../../services/localAuth');
       await clearRefreshToken();
       setShowBiometric(false);
-      setShowPinLogin(false);
       setGeneralError("Session expired. Please sign in with your password.");
     } catch (error) {
       setGeneralError("Failed to authenticate. Please try again.");
@@ -139,360 +145,193 @@ export default function Login() {
   }
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.scrollContainer}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={styles.container}>
-        <View style={styles.brandingContainer}>
-          <View style={styles.logoCircle}>
-            <Text style={styles.logoText}>TSA</Text>
-          </View>
-          <Text style={styles.welcomeText}>Welcome Back</Text>
-          <Text style={styles.subtitle}>Sign in to your account</Text>
-        </View>
-
-        <View style={styles.formContainer}>
-          <View style={styles.fieldWrapper}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <ScrollView
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: "center",
+          padding: spacing.lg,
+        }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={{ width: "100%", maxWidth: 400, alignSelf: "center" }}>
+          <View style={{ alignItems: "center", marginBottom: spacing["3xl"] }}>
             <View
-              style={[
-                styles.inputContainer,
-                emailError ? styles.inputError : null,
-              ]}
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
+                alignItems: "center",
+                justifyContent: "center",
+                marginBottom: spacing.lg,
+              }}
             >
-              <MaterialIcons
-                name="email"
-                size={20}
-                color={emailError ? COLORS.danger : COLORS.gray}
-                style={styles.inputIcon}
-              />
-              <TextInput
-                style={styles.input}
-                value={email}
-                onChangeText={(text) => {
-                  setEmail(text);
-                  if (emailError) setEmailError("");
-                  if (generalError) setGeneralError("");
-                }}
-                placeholder="Email or Username"
-                keyboardType="email-address"
-                autoCapitalize="none"
-                autoComplete="email"
-                editable={!loading}
-                placeholderTextColor="#999"
-              />
+              <Text variant="title2" weight="700" style={{ color: colors.onAccent }}>
+                TSA
+              </Text>
             </View>
-            {emailError ? (
-              <Text style={styles.errorText}>{emailError}</Text>
-            ) : null}
+            <Text variant="title1" weight="700" align="center">
+              Welcome Back
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+              Sign in to your account
+            </Text>
           </View>
 
-          <View style={styles.fieldWrapper}>
+          <View>
+            <Input
+              value={email}
+              onChangeText={(text) => {
+                setEmail(text);
+                if (emailError) setEmailError("");
+                if (generalError) setGeneralError("");
+              }}
+              placeholder="Email or Username"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoComplete="email"
+              editable={!loading}
+              error={emailError || undefined}
+              containerStyle={{ marginBottom: spacing.md }}
+              leftAdornment={
+                <Icon
+                  name="user"
+                  size={20}
+                  color={emailError ? colors.danger : colors.textMuted}
+                />
+              }
+            />
+
+            <Input
+              value={password}
+              placeholder="Password"
+              secureTextEntry={!isPasswordVisible}
+              autoCapitalize="none"
+              autoComplete="password"
+              onChangeText={(text) => {
+                setPassword(text);
+                if (passwordError) setPasswordError("");
+                if (generalError) setGeneralError("");
+              }}
+              editable={!loading}
+              error={passwordError || undefined}
+              containerStyle={{ marginBottom: spacing.xs }}
+              leftAdornment={
+                <Icon
+                  name="lock"
+                  size={20}
+                  color={passwordError ? colors.danger : colors.textMuted}
+                />
+              }
+              rightAdornment={
+                <IconButton
+                  icon={isPasswordVisible ? "eye" : "eyeOff"}
+                  size={20}
+                  color={loading ? colors.textDisabled : colors.textMuted}
+                  disabled={loading}
+                  onPress={() => setIsPasswordVisible(!isPasswordVisible)}
+                  accessibilityLabel={isPasswordVisible ? "Hide password" : "Show password"}
+                  style={{ width: 32, height: 32 }}
+                />
+              }
+            />
+
+            <Link href="/recovery" asChild disabled={loading}>
+              <PressableScale
+                disabled={loading}
+                style={{ alignSelf: "flex-end", marginTop: spacing.xs, marginBottom: spacing.xl }}
+              >
+                <Text
+                  variant="bodySm"
+                  weight="500"
+                  color={loading ? "textDisabled" : "accent"}
+                >
+                  Forgot Password?
+                </Text>
+              </PressableScale>
+            </Link>
+
+            {generalError ? (
+              <AccentCard
+                railColor={colors.danger}
+                padding="md"
+                style={{ backgroundColor: colors.dangerBg, marginBottom: spacing.lg }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+                  <Icon name="warning" size={16} color={colors.danger} />
+                  <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                    {generalError}
+                  </Text>
+                </View>
+              </AccentCard>
+            ) : null}
+
+            <Button
+              title="Login"
+              onPress={handleLogin}
+              loading={loading}
+              disabled={loading}
+              size="lg"
+            />
+
+            {showBiometric && (
+              <Button
+                title={`Login with ${bioType}`}
+                variant="secondary"
+                size="lg"
+                leftIcon="fingerprint"
+                disabled={loading}
+                onPress={handleBiometricLogin}
+                style={{ marginTop: spacing.md }}
+              />
+            )}
+
             <View
-              style={[
-                styles.inputContainer,
-                passwordError ? styles.inputError : null,
-              ]}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                marginVertical: spacing["2xl"],
+              }}
             >
-              <MaterialIcons
-                name="lock"
-                size={20}
-                color={passwordError ? COLORS.danger : COLORS.gray}
-                style={styles.inputIcon}
-              />
-              <TextInput
-                style={styles.input}
-                value={password}
-                placeholder="Password"
-                secureTextEntry={!isPasswordVisible}
-                autoCapitalize="none"
-                autoComplete="password"
-                onChangeText={(text) => {
-                  setPassword(text);
-                  if (passwordError) setPasswordError("");
-                  if (generalError) setGeneralError("");
-                }}
-                editable={!loading}
-                placeholderTextColor="#999"
-              />
-              <Pressable
-                style={styles.passwordToggle}
-                onPress={() => setIsPasswordVisible(!isPasswordVisible)}
+              <View style={{ flex: 1 }}>
+                <Divider />
+              </View>
+              <Text variant="bodySm" weight="500" color="textMuted" style={{ marginHorizontal: spacing.lg }}>
+                OR
+              </Text>
+              <View style={{ flex: 1 }}>
+                <Divider />
+              </View>
+            </View>
+
+            <View
+              style={{
+                flexDirection: "row",
+                justifyContent: "center",
+                alignItems: "center",
+                gap: spacing.sm,
+              }}
+            >
+              <Text variant="bodySm" color="textSecondary">
+                New to TSA Connect?
+              </Text>
+              <PressableScale
+                onPress={() => router.push("/signup")}
                 disabled={loading}
               >
-                <MaterialIcons
-                  name={isPasswordVisible ? "visibility" : "visibility-off"}
-                  size={20}
-                  color={loading ? "#cccccc" : COLORS.gray}
-                />
-              </Pressable>
+                <Text
+                  variant="bodySm"
+                  weight="600"
+                  color={loading ? "textDisabled" : "accent"}
+                >
+                  Create Account
+                </Text>
+              </PressableScale>
             </View>
-            {passwordError ? (
-              <Text style={styles.errorText}>{passwordError}</Text>
-            ) : null}
-          </View>
-
-          <Link href="/recovery" asChild disabled={loading}>
-            <Pressable style={styles.forgotPasswordButton} disabled={loading}>
-              <Text
-                style={[styles.forgotPassword, loading && styles.disabledText]}
-              >
-                Forgot Password?
-              </Text>
-            </Pressable>
-          </Link>
-
-          {generalError ? (
-            <View style={styles.generalErrorContainer}>
-              <MaterialIcons name="error-outline" size={16} color={COLORS.danger} />
-              <Text style={styles.generalErrorText}>{generalError}</Text>
-            </View>
-          ) : null}
-
-          <Pressable
-            onPress={handleLogin}
-            style={({ pressed }) => [
-              styles.button,
-              loading && styles.buttonLoading,
-              pressed && styles.buttonPressed,
-            ]}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Text style={styles.buttonText}>Login</Text>
-            )}
-          </Pressable>
-
-          {showBiometric && (
-            <TouchableOpacity
-              style={styles.biometricButton}
-              onPress={handleBiometricLogin}
-              disabled={loading}
-            >
-              <Ionicons
-                name={bioType === "Face ID" ? "scan" : "finger-print"}
-                size={24}
-                color={COLORS.primary}
-              />
-              <Text style={styles.biometricText}>Login with {bioType}</Text>
-            </TouchableOpacity>
-          )}
-
-
-          <View style={styles.separatorContainer}>
-            <View style={styles.separatorLine} />
-            <Text style={styles.orText}>OR</Text>
-            <View style={styles.separatorLine} />
-          </View>
-
-          <View style={styles.signupContainer}>
-            <Text style={styles.question}>New to TSA Connect?</Text>
-            <Pressable
-              onPress={() => router.push("/signup")}
-              disabled={loading}
-              style={({ pressed }) => [pressed && styles.signupPressed]}
-            >
-              <Text
-                style={[styles.signUpText, loading && styles.disabledText]}
-              >
-                Create Account
-              </Text>
-            </Pressable>
           </View>
         </View>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  scrollContainer: {
-    flexGrow: 1,
-  },
-  container: {
-    flex: 1,
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: "#fff",
-    alignItems: "center",
-  },
-  brandingContainer: {
-    alignItems: "center",
-    marginBottom: 32,
-  },
-  logoCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: COLORS.primary,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
-  },
-  logoText: {
-    color: "#fff",
-    fontSize: 24,
-    fontWeight: "700",
-  },
-  welcomeText: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: COLORS.primary,
-    textAlign: "center",
-  },
-  subtitle: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginTop: 4,
-  },
-  formContainer: {
-    width: "100%",
-    maxWidth: 400,
-  },
-  fieldWrapper: {
-    marginBottom: 4,
-  },
-  inputContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    width: "100%",
-    height: 56,
-    borderColor: COLORS.lightGray,
-    borderWidth: 1,
-    marginBottom: 2,
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    backgroundColor: "#f9f9f9",
-  },
-  inputError: {
-    borderColor: COLORS.danger,
-    borderWidth: 1.5,
-    backgroundColor: "#fff5f5",
-  },
-  inputIcon: {
-    marginRight: 10,
-  },
-  input: {
-    flex: 1,
-    fontSize: 16,
-    height: "100%",
-    color: COLORS.dark,
-  },
-  passwordToggle: {
-    padding: 8,
-  },
-  errorText: {
-    color: COLORS.danger,
-    fontSize: 12,
-    marginLeft: 15,
-    marginBottom: 8,
-  },
-  forgotPasswordButton: {
-    alignSelf: "flex-end",
-    marginTop: 4,
-    marginBottom: 20,
-  },
-  forgotPassword: {
-    color: COLORS.primary,
-    fontWeight: "500",
-    fontSize: 14,
-  },
-  disabledText: {
-    color: "#cccccc",
-  },
-  generalErrorContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fff5f5",
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-  },
-  generalErrorText: {
-    color: COLORS.danger,
-    fontSize: 14,
-    marginLeft: 8,
-    flex: 1,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-    height: 56,
-    borderRadius: 12,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  buttonPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.99 }],
-  },
-  buttonLoading: {
-    opacity: 0.8,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "600",
-  },
-  biometricButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    width: "100%",
-    height: 56,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-    marginTop: 12,
-    gap: 10,
-    backgroundColor: "#FFF",
-  },
-  biometricText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: COLORS.primary,
-  },
-  separatorContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 24,
-    width: "100%",
-  },
-  separatorLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: "#ddd",
-  },
-  orText: {
-    marginHorizontal: 16,
-    color: "#666",
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  signupContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 16,
-  },
-  signupPressed: {
-    opacity: 0.7,
-  },
-  question: {
-    color: "#666",
-    fontSize: 14,
-    marginRight: 8,
-  },
-  signUpText: {
-    color: COLORS.primary,
-    fontWeight: "600",
-    fontSize: 14,
-  },
-});

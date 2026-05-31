@@ -1,24 +1,34 @@
+// Recovery OTP entry + password reset (rendered by the recovery OTP route).
+//
+// Migrated onto the TSA Signature design system: legacy constants/theme styling
+// (COLORS, StyleSheet, MaterialIcons, raw TextInput/TouchableOpacity) replaced
+// with @/theme tokens + @/components/ui primitives. AUTH logic is preserved
+// verbatim — the OTP verify step, resetPassword/forgotPassword API calls, resend
+// logic, password validation, error→step routing, and navigation (router.replace
+// to /login, router.back) are unchanged. The third-party OtpInput is retained but
+// re-themed with token colors.
 import React, { useState } from 'react';
-import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  TouchableOpacity,
-  ActivityIndicator,
-  ScrollView,
-  Alert,
-} from 'react-native';
+import { Alert, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { OtpInput } from 'react-native-otp-entry';
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { COLORS } from '../../constants/theme';
 import { router, useLocalSearchParams } from 'expo-router';
 import api from '../services/api';
+import { useTheme } from '@/theme';
+import {
+  Button,
+  Card,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 type Step = 'otp' | 'password';
 
 const RecoveryOTP = () => {
+  const { colors, spacing, radius } = useTheme();
   const { emailOrPhone } = useLocalSearchParams<{ emailOrPhone?: string }>();
   const [step, setStep] = useState<Step>('otp');
   const [otp, setOtp] = useState('');
@@ -107,367 +117,256 @@ const RecoveryOTP = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-    <ScrollView style={styles.scrollView} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <TouchableOpacity
-        onPress={() => {
-          if (step === 'password') {
-            setStep('otp');
-          } else {
-            router.back();
-          }
-        }}
-        style={styles.backButton}
-      >
-        <MaterialIcons name="arrow-back" size={24} color={COLORS.primary} />
-      </TouchableOpacity>
-
-      {/* Step indicator */}
-      <View style={styles.stepIndicator}>
-        <View style={styles.stepRow}>
-          <View style={[styles.stepDot, styles.stepDotActive]} />
-          <View style={[styles.stepLine, step === 'password' && styles.stepLineActive]} />
-          <View style={[styles.stepDot, step === 'password' && styles.stepDotActive]} />
-        </View>
-        <View style={styles.stepLabelRow}>
-          <Text style={[styles.stepLabel, styles.stepLabelActive]}>Verify</Text>
-          <Text style={[styles.stepLabel, step === 'password' && styles.stepLabelActive]}>Reset</Text>
-        </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <View style={{ paddingHorizontal: spacing.sm, paddingTop: spacing.xs }}>
+        <IconButton
+          icon="chevronLeft"
+          color={colors.accent}
+          accessibilityLabel="Go back"
+          onPress={() => {
+            if (step === 'password') {
+              setStep('otp');
+            } else {
+              router.back();
+            }
+          }}
+        />
       </View>
 
-      {step === 'otp' ? (
-        /* ───── Step 1: OTP Verification ───── */
-        <View style={styles.stepContainer}>
-          <Text style={styles.title}>Verify Code</Text>
-          <Text style={styles.subtitle}>
-            {emailOrPhone
-              ? `Enter the 6-digit code sent to ${emailOrPhone}`
-              : 'Enter the code sent to your email'}
-          </Text>
-
-          <OtpInput
-            numberOfDigits={6}
-            onTextChange={(text) => {
-              setOtp(text);
-              if (errors.otp) setErrors({});
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Step indicator */}
+        <View style={{ alignItems: 'center', marginBottom: spacing['3xl'] }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              width: 120,
+              justifyContent: 'center',
             }}
-            onFilled={(text) => setOtp(text)}
-            theme={{
-              containerStyle: styles.otpContainer,
-              inputsContainerStyle: styles.otpInputsContainer,
-              pinCodeContainerStyle: {
-                ...styles.pinCodeContainer,
-                ...(errors.otp ? styles.pinCodeError : {}),
-              },
-              pinCodeTextStyle: styles.pinCodeText,
-              focusStickStyle: styles.focusStick,
-              focusedPinCodeContainerStyle: styles.activePinCodeContainer,
-            }}
-          />
-          {errors.otp ? <Text style={styles.errorText}>{errors.otp}</Text> : null}
-
-          <TouchableOpacity onPress={handleResendCode} disabled={resending} style={styles.resendButton}>
-            {resending ? (
-              <ActivityIndicator size="small" color={COLORS.primary} />
-            ) : (
-              <Text style={styles.resendText}>Didn't receive a code? Resend</Text>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.button, otp.length < 6 && styles.buttonDisabled]}
-            onPress={handleVerifyCode}
-            disabled={otp.length < 6}
           >
-            <Text style={styles.buttonText}>Continue</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        /* ───── Step 2: New Password ───── */
-        <View style={styles.stepContainer}>
-          <Text style={styles.title}>New Password</Text>
-          <Text style={styles.subtitle}>
-            Create a strong password for your account.
-          </Text>
-
-          <View style={[styles.inputContainer, errors.password ? styles.inputError : null]}>
-            <MaterialIcons name="lock" size={20} color={errors.password ? COLORS.danger : COLORS.gray} style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="New Password (min. 8 characters)"
-              placeholderTextColor="#999"
-              value={newPassword}
-              onChangeText={(text) => {
-                setNewPassword(text);
-                if (errors.password) setErrors(prev => ({ ...prev, password: undefined }));
+            <View
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
               }}
+            />
+            <View
+              style={{
+                flex: 1,
+                height: 2,
+                marginHorizontal: spacing.xs,
+                backgroundColor: step === 'password' ? colors.accent : colors.border,
+              }}
+            />
+            <View
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: radius.pill,
+                backgroundColor: step === 'password' ? colors.accent : colors.border,
+              }}
+            />
+          </View>
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              width: 140,
+              marginTop: spacing.xs,
+            }}
+          >
+            <Text variant="caption" weight="600" color="accent">
+              Verify
+            </Text>
+            <Text variant="caption" weight="600" color={step === 'password' ? 'accent' : 'textMuted'}>
+              Reset
+            </Text>
+          </View>
+        </View>
+
+        {step === 'otp' ? (
+          /* ───── Step 1: OTP Verification ───── */
+          <View>
+            <Text variant="title1" weight="700" color="accent">
+              Verify Code
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm, marginBottom: spacing['2xl'] }}>
+              {emailOrPhone
+                ? `Enter the 6-digit code sent to ${emailOrPhone}`
+                : 'Enter the code sent to your email'}
+            </Text>
+
+            <OtpInput
+              numberOfDigits={6}
+              onTextChange={(text) => {
+                setOtp(text);
+                if (errors.otp) setErrors({});
+              }}
+              onFilled={(text) => setOtp(text)}
+              theme={{
+                containerStyle: { flexDirection: 'row', justifyContent: 'space-between' },
+                inputsContainerStyle: { alignItems: 'center', justifyContent: 'center' },
+                pinCodeContainerStyle: {
+                  borderWidth: 1.5,
+                  borderColor: errors.otp ? colors.danger : colors.border,
+                  borderRadius: radius.md,
+                  padding: spacing.md,
+                  marginHorizontal: spacing.xs,
+                  backgroundColor: colors.surface,
+                },
+                pinCodeTextStyle: {
+                  fontSize: 18,
+                  textAlign: 'center',
+                  color: colors.textPrimary,
+                },
+                focusStickStyle: {
+                  backgroundColor: colors.accent,
+                  width: 2,
+                  borderRadius: radius.sm,
+                },
+                focusedPinCodeContainerStyle: {
+                  borderColor: colors.accent,
+                },
+              }}
+            />
+            {errors.otp ? (
+              <Text variant="caption" color="danger" style={{ marginTop: spacing.xs, marginLeft: spacing.xs }}>
+                {errors.otp}
+              </Text>
+            ) : null}
+
+            <PressableScale
+              onPress={handleResendCode}
+              disabled={resending}
+              style={{ alignSelf: 'center', marginTop: spacing.lg, padding: spacing.sm }}
+            >
+              {resending ? (
+                <Spinner size="small" />
+              ) : (
+                <Text variant="bodySm" weight="600" color="accent">
+                  Didn&apos;t receive a code? Resend
+                </Text>
+              )}
+            </PressableScale>
+
+            <Button
+              title="Continue"
+              size="lg"
+              onPress={handleVerifyCode}
+              disabled={otp.length < 6}
+              style={{ marginTop: spacing['2xl'] }}
+            />
+          </View>
+        ) : (
+          /* ───── Step 2: New Password ───── */
+          <View>
+            <Text variant="title1" weight="700" color="accent">
+              New Password
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm, marginBottom: spacing['2xl'] }}>
+              Create a strong password for your account.
+            </Text>
+
+            <Input
+              value={newPassword}
+              placeholder="New Password (min. 8 characters)"
               secureTextEntry={!showPassword}
               editable={!loading}
-            />
-            <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.passwordIcon}>
-              <MaterialIcons name={showPassword ? 'visibility' : 'visibility-off'} size={20} color={COLORS.gray} />
-            </TouchableOpacity>
-          </View>
-          {errors.password ? <Text style={styles.errorText}>{errors.password}</Text> : null}
-
-          <View style={[styles.inputContainer, errors.confirmPassword ? styles.inputError : null]}>
-            <MaterialIcons name="lock-outline" size={20} color={errors.confirmPassword ? COLORS.danger : COLORS.gray} style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              placeholder="Confirm New Password"
-              placeholderTextColor="#999"
-              value={confirmPassword}
+              error={errors.password || undefined}
               onChangeText={(text) => {
-                setConfirmPassword(text);
-                if (errors.confirmPassword) setErrors(prev => ({ ...prev, confirmPassword: undefined }));
+                setNewPassword(text);
+                if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
               }}
+              containerStyle={{ marginBottom: spacing.md }}
+              leftAdornment={
+                <Icon name="lock" size={20} color={errors.password ? colors.danger : colors.textMuted} />
+              }
+              rightAdornment={
+                <IconButton
+                  icon={showPassword ? 'eye' : 'eyeOff'}
+                  size={20}
+                  color={colors.textMuted}
+                  accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                  onPress={() => setShowPassword(!showPassword)}
+                />
+              }
+            />
+
+            <Input
+              value={confirmPassword}
+              placeholder="Confirm New Password"
               secureTextEntry={!showConfirmPassword}
               editable={!loading}
+              error={errors.confirmPassword || undefined}
+              onChangeText={(text) => {
+                setConfirmPassword(text);
+                if (errors.confirmPassword) setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+              }}
+              containerStyle={{ marginBottom: spacing.md }}
+              leftAdornment={
+                <Icon name="lock" size={20} color={errors.confirmPassword ? colors.danger : colors.textMuted} />
+              }
+              rightAdornment={
+                <IconButton
+                  icon={showConfirmPassword ? 'eye' : 'eyeOff'}
+                  size={20}
+                  color={colors.textMuted}
+                  accessibilityLabel={showConfirmPassword ? 'Hide password' : 'Show password'}
+                  onPress={() => setShowConfirmPassword(!showConfirmPassword)}
+                />
+              }
             />
-            <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)} style={styles.passwordIcon}>
-              <MaterialIcons name={showConfirmPassword ? 'visibility' : 'visibility-off'} size={20} color={COLORS.gray} />
-            </TouchableOpacity>
-          </View>
-          {errors.confirmPassword ? <Text style={styles.errorText}>{errors.confirmPassword}</Text> : null}
 
-          {/* Password requirements hint */}
-          <View style={styles.requirementsBox}>
-            <Text style={styles.requirementsTitle}>Password must contain:</Text>
-            <PasswordRule met={newPassword.length >= 8} label="At least 8 characters" />
-            <PasswordRule met={/[A-Z]/.test(newPassword)} label="An uppercase letter" />
-            <PasswordRule met={/[a-z]/.test(newPassword)} label="A lowercase letter" />
-            <PasswordRule met={/\d/.test(newPassword)} label="A number" />
-          </View>
+            {/* Password requirements hint */}
+            <Card padding="md" style={{ marginTop: spacing.xs }}>
+              <Text variant="bodySm" weight="600" style={{ marginBottom: spacing.sm }}>
+                Password must contain:
+              </Text>
+              <PasswordRule met={newPassword.length >= 8} label="At least 8 characters" />
+              <PasswordRule met={/[A-Z]/.test(newPassword)} label="An uppercase letter" />
+              <PasswordRule met={/[a-z]/.test(newPassword)} label="A lowercase letter" />
+              <PasswordRule met={/\d/.test(newPassword)} label="A number" />
+            </Card>
 
-          <TouchableOpacity
-            style={[styles.button, loading && styles.buttonDisabled]}
-            onPress={handleResetPassword}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Text style={styles.buttonText}>Reset Password</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      )}
-    </ScrollView>
+            <Button
+              title="Reset Password"
+              size="lg"
+              onPress={handleResetPassword}
+              loading={loading}
+              disabled={loading}
+              style={{ marginTop: spacing['2xl'] }}
+            />
+          </View>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 };
 
-const PasswordRule = ({ met, label }: { met: boolean; label: string }) => (
-  <View style={styles.ruleRow}>
-    <MaterialIcons
-      name={met ? 'check-circle' : 'radio-button-unchecked'}
-      size={16}
-      color={met ? '#10b981' : '#ccc'}
-    />
-    <Text style={[styles.ruleText, met && styles.ruleTextMet]}>{label}</Text>
-  </View>
-);
+const PasswordRule = ({ met, label }: { met: boolean; label: string }) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xs }}>
+      <Icon
+        name={met ? 'checkCircle' : 'closeCircle'}
+        size={16}
+        color={met ? colors.success : colors.textDisabled}
+      />
+      <Text
+        variant="bodySm"
+        color={met ? 'textPrimary' : 'textMuted'}
+        style={{ marginLeft: spacing.sm }}
+      >
+        {label}
+      </Text>
+    </View>
+  );
+};
 
 export default RecoveryOTP;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  scrollView: {
-    flex: 1,
-  },
-  content: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  backButton: {
-    padding: 8,
-    alignSelf: 'flex-start',
-    marginBottom: 8,
-  },
-  // Step indicator
-  stepIndicator: {
-    marginBottom: 32,
-    alignItems: 'center',
-  },
-  stepRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: 120,
-    justifyContent: 'center',
-  },
-  stepDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#e5e7eb',
-  },
-  stepDotActive: {
-    backgroundColor: COLORS.primary,
-  },
-  stepLine: {
-    flex: 1,
-    height: 2,
-    backgroundColor: '#e5e7eb',
-    marginHorizontal: 4,
-  },
-  stepLineActive: {
-    backgroundColor: COLORS.primary,
-  },
-  stepLabelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: 140,
-    marginTop: 6,
-  },
-  stepLabel: {
-    fontSize: 12,
-    color: '#ccc',
-    fontWeight: '500',
-  },
-  stepLabelActive: {
-    color: COLORS.primary,
-  },
-  // Shared
-  stepContainer: {
-    flex: 1,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: COLORS.primary,
-    marginBottom: 10,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginBottom: 24,
-    lineHeight: 20,
-  },
-  errorText: {
-    color: COLORS.danger,
-    fontSize: 12,
-    marginLeft: 4,
-    marginTop: 4,
-    marginBottom: 8,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-    height: 56,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 24,
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  buttonDisabled: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  // OTP step
-  otpContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  otpInputsContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pinCodeContainer: {
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 10,
-    padding: 10,
-    marginHorizontal: 4,
-  },
-  pinCodeError: {
-    borderColor: COLORS.danger,
-  },
-  pinCodeText: {
-    fontSize: 18,
-    textAlign: 'center',
-    color: COLORS.dark,
-  },
-  focusStick: {
-    backgroundColor: COLORS.primary,
-    width: 2,
-    borderRadius: 5,
-  },
-  activePinCodeContainer: {
-    borderColor: COLORS.primary,
-  },
-  resendButton: {
-    alignSelf: 'center',
-    marginTop: 16,
-    padding: 8,
-  },
-  resendText: {
-    color: COLORS.primary,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  // Password step
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    paddingHorizontal: 15,
-    marginBottom: 4,
-  },
-  inputError: {
-    borderColor: COLORS.danger,
-    borderWidth: 1.5,
-    backgroundColor: '#fff5f5',
-  },
-  inputIcon: {
-    marginRight: 10,
-  },
-  input: {
-    flex: 1,
-    height: 56,
-    fontSize: 16,
-    color: COLORS.dark,
-  },
-  passwordIcon: {
-    padding: 10,
-  },
-  // Password requirements
-  requirementsBox: {
-    backgroundColor: '#f9fafb',
-    borderRadius: 10,
-    padding: 14,
-    marginTop: 16,
-  },
-  requirementsTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  ruleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  ruleText: {
-    fontSize: 13,
-    color: '#999',
-    marginLeft: 8,
-  },
-  ruleTextMet: {
-    color: COLORS.dark,
-  },
-});

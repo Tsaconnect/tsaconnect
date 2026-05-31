@@ -68,6 +68,14 @@ const REGISTRY = {
   nearMe: { set: 'ion', glyph: 'navigate' },
   construction: { set: 'ion', glyph: 'construct' },
   edit: { set: 'ion', glyph: 'create-outline' },
+  mail: { set: 'ion', glyph: 'mail' },
+  home: { set: 'ion', glyph: 'home' },
+  gift: { set: 'ion', glyph: 'gift' },
+  fingerprint: { set: 'ion', glyph: 'finger-print' },
+  scan: { set: 'ion', glyph: 'scan' },
+  keypad: { set: 'ion', glyph: 'keypad' },
+  arrowLeft: { set: 'ion', glyph: 'arrow-back' },
+  at: { set: 'ion', glyph: 'at' },
 } as const satisfies Record<string, IconEntry>;
 
 export type IconName = keyof typeof REGISTRY;
