@@ -1,18 +1,35 @@
-import { Image, StyleSheet, Text, View, ToastAndroid } from "react-native";
+// components/orders/paymentproof.tsx
+//
+// Payment-proof uploader — pick a proof-of-payment image and POST it to the
+// order pay endpoint. Restyled onto the TSA Signature design system (theme
+// tokens + @/components/ui primitives) off the legacy COLORS/SIZES chrome.
+//
+// The image upload + submit flow is preserved EXACTLY: same expo-image-picker
+// media-library pick (local URI), same multipart FormData, same
+// `axios.post(${baseUrl}/order/${id}/pay)` with the same headers + interceptor,
+// same ToastAndroid success + router.push('/confirmation'), and the same
+// alert()-based validation/permission/error paths. Visual restyle only.
+import { Image, View, ToastAndroid } from "react-native";
 import React, { useState } from "react";
-import { TouchableOpacity } from "react-native";
 import { generateFileName } from "../../constants/api/filename";
 import { sendProof } from "../../constants/api/AuthenticationService";
 import * as ImagePicker from "expo-image-picker";
-import { COLORS, SIZES } from "../../constants";
 import { router } from "expo-router";
-import { Icon } from "react-native-elements";
 import { apiClient, baseUrl } from "../../constants/api/apiClient";
 import axios from "axios";
 import { useAuth } from "../../AuthContext/AuthContext";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  Icon,
+  PressableScale,
+  Text,
+} from "@/components/ui";
 
 //@ts-ignore
 const PaymentProof = ({ id }) => {
+  const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
   const [image, setImage] = useState(null);
   const pickImageAsync = async () => {
@@ -81,76 +98,72 @@ const PaymentProof = ({ id }) => {
       alert(error?.response.data.message);
     }
   }
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.label}>Upload Proof of Payment</Text>
-      <View style={styles.uploadContainer}>
-        <TouchableOpacity onPress={pickImageAsync}>
-          <Icon name="upload" size={25} color="#aaa" />
-        </TouchableOpacity>
+    <View style={{ gap: spacing.lg }}>
+      <View style={{ gap: spacing.xs }}>
+        <Text variant="title3" weight="700">
+          Upload Proof of Payment
+        </Text>
+        <Text variant="bodySm" color="textSecondary">
+          Attach a screenshot or photo of your payment receipt, then send it for review.
+        </Text>
       </View>
 
-      {image && (
-        <View style={styles.imageContainer}>
-          <Image source={{ uri: image }} style={styles.uploadedImage} />
-        </View>
+      {image ? (
+        <Card padding="md" style={{ gap: spacing.md }}>
+          <Image
+            source={{ uri: image }}
+            style={{
+              width: "100%",
+              height: 220,
+              borderRadius: radius.md,
+              resizeMode: "contain",
+              backgroundColor: colors.surfaceAlt,
+            }}
+          />
+          <PressableScale
+            onPress={pickImageAsync}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.xs,
+              paddingVertical: spacing.sm,
+            }}
+          >
+            <Icon name="refresh" size={16} color={colors.accent} />
+            <Text variant="bodySm" weight="600" color="accent">
+              Replace image
+            </Text>
+          </PressableScale>
+        </Card>
+      ) : (
+        <PressableScale onPress={pickImageAsync}>
+          <View
+            style={{
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.sm,
+              height: 160,
+              borderWidth: 1,
+              borderStyle: "dashed",
+              borderColor: colors.border,
+              borderRadius: radius.lg,
+              backgroundColor: colors.surfaceAlt,
+            }}
+          >
+            <Icon name="upload" size={28} color={colors.textMuted} />
+            <Text variant="bodySm" weight="600" color="textSecondary">
+              Tap to select an image
+            </Text>
+          </View>
+        </PressableScale>
       )}
-      <View style={{ alignItems: "center", marginBottom: 55 }}>
-        <TouchableOpacity style={styles.button} onPress={uploadProof}>
-          <Text style={styles.buttonText}>Send proof</Text>
-        </TouchableOpacity>
-      </View>
+
+      <Button title="Send proof" leftIcon="send" onPress={uploadProof} />
     </View>
   );
 };
 
 export default PaymentProof;
-
-const styles = StyleSheet.create({
-  label: {
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  uploadContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    width: SIZES.width * 0.9,
-    height: 100,
-    borderColor: "#ccc",
-    borderWidth: 1,
-    borderRadius: 5,
-    marginBottom: 20,
-    backgroundColor: "#f9f9f9",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  uploadedImage: {
-    width: 100,
-    height: 100,
-    resizeMode: "contain",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  imageContainer: {
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
-    alignItems: "center",
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 20,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-});

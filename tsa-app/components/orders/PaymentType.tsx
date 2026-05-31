@@ -1,18 +1,33 @@
-import {
-  Image,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
+// components/orders/PaymentType.tsx
+//
+// Checkout payment-method selection — pick Fiat (bank transfer) or Crypto
+// (USDT / MCGP), then place the order and route to the matching payment-detail
+// screen. Restyled onto the TSA Signature design system (theme tokens +
+// @/components/ui primitives); previously used legacy COLORS/SIZES + raw
+// TouchableOpacity/TextInput.
+//
+// FINANCIAL component: the payment-method options, selection state, order
+// placement (POST /order), payment-method lookup (GET /payment-methods), the
+// tTy "system fee" gating, the alerts, and the next-step navigation to
+// /paymentdetail and /cryptodetails (with their exact params) are all preserved
+// verbatim — this is a visual/structural restyle only. Props interface and the
+// default export are unchanged.
+import { Image, View } from "react-native";
 import React, { useState } from "react";
-import { COLORS, SIZES } from "../../constants";
 import { baseUrl } from "../../constants/api/apiClient";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
 import axios from "axios";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Icon,
+  Input,
+  PressableScale,
+  SegmentedControl,
+  Text,
+} from "@/components/ui";
+
 interface PaymentSelectionProps {
   address: string;
   state: string;
@@ -22,6 +37,7 @@ interface PaymentSelectionProps {
   totalAmount: string;
   fullName: string;
 }
+
 const PaymentSelection: React.FC<PaymentSelectionProps> = ({
   address,
   state,
@@ -31,6 +47,7 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
   totalAmount,
   fullName,
 }) => {
+  const { colors, spacing, radius } = useTheme();
   const [selectedPaymentType, setSelectedPaymentType] = useState("Fiat");
   const [amount, setAmount] = useState(totalAmount);
   const { token, tTy } = useAuth();
@@ -75,297 +92,201 @@ const PaymentSelection: React.FC<PaymentSelectionProps> = ({
       };
     }
   };
+
+  const ctaTitle = tTy ? "Pay System Fee" : "Buy Product";
+
+  // Selectable crypto tile — mirrors the RadioRow look so we can show the
+  // brand token logo (not in the Icon registry) while staying on theme tokens.
+  const CryptoOption: React.FC<{
+    symbol: string;
+    logo: any;
+    onPress: () => void;
+  }> = ({ symbol, logo, onPress }) => {
+    const selected = currency === symbol;
+    return (
+      <PressableScale
+        onPress={onPress}
+        accessibilityRole="radio"
+        accessibilityState={{ selected }}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: spacing.md,
+          padding: spacing.md,
+          borderRadius: radius.md,
+          borderWidth: 1.5,
+          borderColor: selected ? colors.accent : colors.border,
+          backgroundColor: selected ? colors.accentMuted : colors.surface,
+        }}
+      >
+        <Image
+          source={logo}
+          style={{ width: 28, height: 28 }}
+          resizeMode="contain"
+        />
+        <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
+          {symbol}
+        </Text>
+        {selected && <Icon name="checkCircle" size={22} color={colors.success} />}
+      </PressableScale>
+    );
+  };
+
   return (
-    <View style={styles.cover}>
-      <View style={{ marginTop: 40 }}>
-        <View style={{ alignItems: "center" }}>
-          <View
+    <View style={{ gap: spacing.lg }}>
+      <SegmentedControl
+        segments={[
+          { key: "Fiat", label: "Fiat" },
+          { key: "Crypto", label: "Crypto" },
+        ]}
+        value={selectedPaymentType}
+        onChange={setSelectedPaymentType}
+      />
+
+      <Input
+        label="Amount"
+        placeholder="Enter Amount"
+        value={amount}
+        onChangeText={setAmount}
+        keyboardType="numeric"
+        editable={false}
+      />
+
+      {selectedPaymentType === "Fiat" && (
+        <View style={{ gap: spacing.lg }}>
+          <PressableScale
+            accessibilityRole="radio"
+            accessibilityState={{ selected: true }}
             style={{
               flexDirection: "row",
-              width: SIZES.width * 0.60217,
-              height: SIZES.height * 0.06686695,
-              backgroundColor: "#DDA15E",
               alignItems: "center",
-              justifyContent: "center",
-              borderWidth: 1,
-              borderColor: "#DDA15E",
-              marginBottom: 50,
-              borderRadius: 3,
+              gap: spacing.md,
+              padding: spacing.md,
+              borderRadius: radius.md,
+              borderWidth: 1.5,
+              borderColor: colors.accent,
+              backgroundColor: colors.accentMuted,
             }}
           >
-            <TouchableOpacity
-              style={[
-                styles.toggleButton,
-                selectedPaymentType === "Fiat" && styles.selectedToggleButton,
-              ]}
-              onPress={() => setSelectedPaymentType("Fiat")}
-            >
-              <Text style={styles.toggleButtonText}>Fiat</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.toggleButton,
-                selectedPaymentType === "Crypto" && styles.selectedToggleButton,
-              ]}
-              onPress={() => setSelectedPaymentType("Crypto")}
-            >
-              <Text style={styles.toggleButtonText}>Crypto</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-        {selectedPaymentType === "Fiat" && (
-          <>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter Amount"
-              value={amount}
-              onChangeText={setAmount}
-              keyboardType="numeric"
-              editable={false}
+            <Image
+              source={require("../../assets/icons/bank.png")}
+              style={{ width: 28, height: 28 }}
+              resizeMode="contain"
             />
-            <View style={styles.itemContainer}>
-              <Image
-                source={require("../../assets/icons/bank.png")}
-                style={styles.iconStyle}
-                resizeMode="contain"
-              />
-              <Text style={styles.itemText}>Bank Transfer</Text>
-            </View>
-            <TouchableOpacity
-              style={[styles.button]}
-              onPress={async () => {
-                const result: any = await placeOrder({
-                  deliveryAddress: {
-                    address,
-                    state,
-                    city,
-                    country,
-                    phoneNumber,
-                    fullName,
+            <Text variant="bodyMed" weight="600">
+              Bank Transfer
+            </Text>
+          </PressableScale>
+
+          <Button
+            title={ctaTitle}
+            onPress={async () => {
+              const result: any = await placeOrder({
+                deliveryAddress: {
+                  address,
+                  state,
+                  city,
+                  country,
+                  phoneNumber,
+                  fullName,
+                },
+                paymentMethod: "fiat",
+              });
+              //@ts-ignore
+              if (result.success) {
+                router.push({
+                  pathname: "/paymentdetail",
+                  params: {
+                    bankName: result.data.paymentDetails.bankName,
+                    accountName: result.data.paymentDetails.accountName,
+                    accountNumber: result.data.paymentDetails.accountNumber,
+                    id: result.data.id,
                   },
-                  paymentMethod: "fiat",
                 });
-                //@ts-ignore
-                if (result.success) {
+              } else {
+                alert(result.message);
+              }
+            }}
+            /*  disabled={loading} */
+          />
+        </View>
+      )}
+
+      {selectedPaymentType === "Crypto" && (
+        <View style={{ gap: spacing.md }}>
+          <CryptoOption
+            symbol="USDT"
+            logo={require("../../assets/icons/usdt.png")}
+            onPress={() => {
+              if (countUSDT > 0) {
+                setCurrency("");
+                setCountUSDT(0);
+                setCountMCGP(0);
+              } else {
+                setCountUSDT(1);
+                setCurrency("USDT");
+              }
+            }}
+          />
+          <CryptoOption
+            symbol="MCGP"
+            logo={require("../../assets/digital/mcgp.png")}
+            onPress={() => {
+              if (countMCGP > 0) {
+                setCurrency("");
+                setCountMCGP(0);
+                setCountUSDT(0);
+              } else {
+                setCountMCGP(1);
+                setCurrency("MCGP");
+              }
+            }}
+          />
+
+          <Button
+            title={ctaTitle}
+            style={{ marginTop: spacing.sm }}
+            onPress={async () => {
+              if (!currency) {
+                return alert("Please select currency");
+              }
+              const response: any = await paymentMethods();
+              const result: any = await placeOrder({
+                deliveryAddress: {
+                  address,
+                  state,
+                  city,
+                  country,
+                  phoneNumber,
+                  fullName,
+                },
+                paymentMethod: "crypto",
+              });
+              if (result.success) {
+                if (response.success && response.data.length > 0) {
+                  const paymentDetails = response.data.find(
+                    (method: any) => method.symbol === currency
+                  );
+
                   router.push({
-                    pathname: "/paymentdetail",
+                    pathname: "/cryptodetails",
                     params: {
-                      bankName: result.data.paymentDetails.bankName,
-                      accountName: result.data.paymentDetails.accountName,
-                      accountNumber: result.data.paymentDetails.accountNumber,
+                      walletAddress: paymentDetails.walletAddress,
+                      network: paymentDetails.network,
+                      symbol: paymentDetails.symbol,
                       id: result.data.id,
                     },
                   });
-                } else {
-                  alert(result.message);
                 }
-              }}
-              /*  disabled={loading} */
-            >
-              <Text style={styles.buttonText}>
-                {tTy ? "Pay System Fee" : "Buy Product"}
-              </Text>
-            </TouchableOpacity>
-          </>
-        )}
-        {selectedPaymentType === "Crypto" && (
-          <>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter Amount"
-              value={amount}
-              onChangeText={setAmount}
-              keyboardType="numeric"
-              editable={false}
-            />
-            <Pressable
-              onPress={() => {
-                if (countUSDT > 0) {
-                  setCurrency("");
-                  setCountUSDT(0);
-                  setCountMCGP(0);
-                } else {
-                  setCountUSDT(1);
-                  setCurrency("USDT");
-                }
-              }}
-            >
-              <View style={styles.itemContainer}>
-                <Image
-                  source={require("../../assets/icons/usdt.png")}
-                  style={styles.iconStyle}
-                  resizeMode="contain"
-                />
-                <Text style={styles.itemText}>USDT</Text>
-                {currency === "USDT" && (
-                  <Text
-                    style={{ position: "absolute", right: 10, color: "green" }}
-                  >
-                    ✔️
-                  </Text>
-                )}
-              </View>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                if (countMCGP > 0) {
-                  setCurrency("");
-                  setCountMCGP(0);
-                  setCountUSDT(0);
-                } else {
-                  setCountMCGP(1);
-                  setCurrency("MCGP");
-                }
-              }}
-            >
-              <View style={styles.itemContainer}>
-                <Image
-                  source={require("../../assets/digital/mcgp.png")}
-                  style={styles.iconStyle}
-                  resizeMode="contain"
-                />
-                <Text style={styles.itemText}>MCGP</Text>
-                {currency === "MCGP" && (
-                  <Text
-                    style={{ position: "absolute", right: 10, color: "green" }}
-                  >
-                    ✔️
-                  </Text>
-                )}
-              </View>
-            </Pressable>
-            <TouchableOpacity
-              style={[styles.button]}
-              onPress={async () => {
-                if (!currency) {
-                  return alert("Please select currency");
-                }
-                const response: any = await paymentMethods();
-                const result: any = await placeOrder({
-                  deliveryAddress: {
-                    address,
-                    state,
-                    city,
-                    country,
-                    phoneNumber,
-                    fullName,
-                  },
-                  paymentMethod: "crypto",
-                });
-                if (result.success) {
-                  if (response.success && response.data.length > 0) {
-                    const paymentDetails = response.data.find(
-                      (method: any) => method.symbol === currency
-                    );
-
-                    router.push({
-                      pathname: "/cryptodetails",
-                      params: {
-                        walletAddress: paymentDetails.walletAddress,
-                        network: paymentDetails.network,
-                        symbol: paymentDetails.symbol,
-                        id: result.data.id,
-                      },
-                    });
-                  }
-                } else {
-                  alert(result.message);
-                }
-              }}
-            >
-              <Text style={styles.buttonText}>
-                {tTy ? "Pay System Fee" : "Buy Product"}
-              </Text>
-            </TouchableOpacity>
-          </>
-        )}
-      </View>
-      <View style={{ alignItems: "center" }}></View>
+              } else {
+                alert(result.message);
+              }
+            }}
+          />
+        </View>
+      )}
     </View>
   );
 };
+
 export default PaymentSelection;
-
-const styles = StyleSheet.create({
-  container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
-    alignItems: "center",
-  },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  cover: {
-    backgroundColor: COLORS.white,
-    height: SIZES.height,
-  },
-  label: {
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  priceRangeContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-
-  toggleButton: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    backgroundColor: "#DDA15E",
-    alignItems: "center",
-    borderRadius: 5,
-    margin: 3,
-  },
-  selectedToggleButton: {
-    backgroundColor: "#fff",
-  },
-  toggleButtonText: {
-    color: "#000",
-    fontSize: 14,
-  },
-  itemContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 10,
-    borderColor: COLORS.gray,
-    borderBottomWidth: 0.5,
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    backgroundColor: "#FFF4E8",
-    marginHorizontal: SIZES.width * 0.05,
-    borderRadius: 5,
-  },
-
-  iconStyle: {
-    margin: 10,
-    resizeMode: "contain",
-  },
-  itemText: {
-    fontSize: 16,
-  },
-});
