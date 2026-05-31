@@ -42,6 +42,7 @@ const REGISTRY = {
   search: { set: 'ion', glyph: 'search' },
   filter: { set: 'ion', glyph: 'options-outline' },
   plus: { set: 'ion', glyph: 'add' },
+  minus: { set: 'ion', glyph: 'remove' },
   refresh: { set: 'ion', glyph: 'refresh' },
   user: { set: 'ion', glyph: 'person' },
   dots: { set: 'ion', glyph: 'ellipsis-horizontal' },

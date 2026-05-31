@@ -1,17 +1,30 @@
+// components/orders/delivery.tsx
+//
+// Checkout step 1 — delivery address capture for a product order. Collects the
+// buyer's name, location (country/state/city via LocationPicker), street address,
+// and phone number, validates that every required field is present, then forwards
+// to /paymenttype carrying the order total and the captured shipping details.
+//
+// Migrated onto the TSA Signature design system: the form is rebuilt on @/theme
+// tokens + @/components/ui primitives (Text, Input, Card, Button, BottomActionBar)
+// inside a themed SafeAreaView/ScrollView. No legacy COLORS/SIZES remain. The
+// state, validation rule, phone normalisation, and the /paymenttype navigation
+// (route + params, including totalAmount: data) are preserved verbatim.
 import React, { useState } from 'react';
-import {
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-  Alert,
-} from 'react-native';
-import { COLORS, SIZES } from '../../constants/theme';
+import { Alert, ScrollView, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import PhoneNumber from '../country/phoneNumber';
 import LocationPicker from '../common/LocationPicker';
+import { useTheme } from '@/theme';
+import {
+  BottomActionBar,
+  Button,
+  Card,
+  Icon,
+  Input,
+  Text,
+} from '@/components/ui';
 
 type DeliveryProps = {
   data: number; // Adjust the type if `data` is an object or other type
@@ -24,6 +37,7 @@ type Country = {
 };
 
 const Delivery: React.FC<DeliveryProps> = ({ data }) => {
+  const { colors, spacing, radius } = useTheme();
   const [address, setAddress] = useState<string>('');
   const [locationValue, setLocationValue] = useState({
     country: 'Nigeria',
@@ -38,133 +52,100 @@ const Delivery: React.FC<DeliveryProps> = ({ data }) => {
     return str.replace(/\s+/g, '');
   };
 
+  const onContinue = () => {
+    if (
+      !address ||
+      !locationValue.state ||
+      !locationValue.city ||
+      !locationValue.country ||
+      !phoneNumber
+    ) {
+      return Alert.alert('Error', 'Enter every field');
+    }
+    router.push({
+      pathname: '/paymenttype',
+      params: {
+        address,
+        state: locationValue.state,
+        city: locationValue.city,
+        country: locationValue.country,
+        phoneNumber: removeAllSpaces(
+          selectedCountry?.callingCode + phoneNumber,
+        ),
+        totalAmount: data,
+        fullName,
+      },
+    });
+  };
+
   return (
-    <View style={{ backgroundColor: '#fff', flex: 1 }}>
-      <ScrollView style={styles.cover}>
-        <Text
-          style={[
-            styles.labelHeader,
-            { color: COLORS.primary, fontWeight: '600' },
-          ]}
-        >
-          Input Your Delivery Address Information
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
+          <Icon name="nearMe" size={22} color={colors.accent} />
+          <Text variant="title2" weight="700">
+            Delivery address
+          </Text>
+        </View>
+        <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
+          Tell us where this order should be shipped.
         </Text>
 
-        <Text style={styles.label}>Enter your Name</Text>
-        <TextInput
-          placeholder="Your Name"
-          style={styles.input}
-          value={fullName}
-          onChangeText={setFullName}
-          numberOfLines={1}
-        />
+        <Card padding="lg" style={{ gap: spacing.lg }}>
+          <Input
+            label="Full name"
+            placeholder="Your name"
+            value={fullName}
+            onChangeText={setFullName}
+            numberOfLines={1}
+          />
 
-        <LocationPicker value={locationValue} onChange={setLocationValue} />
+          <LocationPicker value={locationValue} onChange={setLocationValue} />
 
-        <Text style={styles.label}>Enter Delivery Address</Text>
-        <TextInput
-          placeholder="Your Address"
-          style={styles.input}
-          value={address}
-          onChangeText={setAddress}
-          numberOfLines={3}
-        />
+          <Input
+            label="Delivery address"
+            placeholder="Your address"
+            value={address}
+            onChangeText={setAddress}
+            multiline
+            numberOfLines={3}
+          />
 
-        <Text style={styles.label}>Enter Phone</Text>
-        <PhoneNumber
-          //@ts-ignore
-          inputValue={phoneNumber}
-          setInputValue={setPhoneNumber}
-          //@ts-ignore
-          selectedCountry={selectedCountry}
-          //@ts-ignore
-          setSelectedCountry={setSelectedCountry}
-        />
-
-        <View style={{ alignItems: 'center', marginBottom: 55 }}>
-          <TouchableOpacity
-            style={styles.button}
-            onPress={() => {
-              if (
-                !address ||
-                !locationValue.state ||
-                !locationValue.city ||
-                !locationValue.country ||
-                !phoneNumber
-              ) {
-                return Alert.alert('Error', 'Enter every field');
-              }
-              router.push({
-                pathname: '/paymenttype',
-                params: {
-                  address,
-                  state: locationValue.state,
-                  city: locationValue.city,
-                  country: locationValue.country,
-                  phoneNumber: removeAllSpaces(
-                    selectedCountry?.callingCode + phoneNumber,
-                  ),
-                  totalAmount: data,
-                  fullName,
-                },
-              });
-            }}
-          >
-            <Text style={styles.buttonText}>Continue</Text>
-          </TouchableOpacity>
-        </View>
+          <View>
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+              Phone
+            </Text>
+            <View
+              style={{
+                borderWidth: 1.5,
+                borderColor: colors.border,
+                borderRadius: radius.md,
+                backgroundColor: colors.surface,
+                overflow: 'hidden',
+              }}
+            >
+              <PhoneNumber
+                //@ts-ignore
+                inputValue={phoneNumber}
+                setInputValue={setPhoneNumber}
+                //@ts-ignore
+                selectedCountry={selectedCountry}
+                //@ts-ignore
+                setSelectedCountry={setSelectedCountry}
+              />
+            </View>
+          </View>
+        </Card>
       </ScrollView>
-    </View>
+
+      <BottomActionBar>
+        <Button title="Continue" rightIcon="arrowRight" onPress={onContinue} />
+      </BottomActionBar>
+    </SafeAreaView>
   );
 };
 
 export default Delivery;
-
-const styles = StyleSheet.create({
-  container: {
-    justifyContent: 'center',
-    padding: 20,
-    backgroundColor: COLORS.white,
-  },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: 'gray',
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
-  },
-  labelHeader: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: 'gray',
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 20,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-  },
-  label: {
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  cover: {
-    backgroundColor: COLORS.white,
-  },
-});
