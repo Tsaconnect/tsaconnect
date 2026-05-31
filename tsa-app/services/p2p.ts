@@ -186,6 +186,10 @@ export interface P2PDispute {
   raisedBy: string;
   raisedRole: 'buyer' | 'seller';
   reason: string;
+  /** Cloudinary image URLs submitted with the dispute as evidence. Decoded
+   *  server-side from the stored JSON (P2PDispute.AfterFind); omitted when
+   *  none were attached. */
+  evidenceUrls?: string[];
   status: 'open' | 'resolved' | 'rejected';
   resolvedBy?: string;
   resolution?: string;
@@ -399,7 +403,7 @@ export interface ListAdsFilter {
 // The seller's wallet signs it via signTypedData; the signature goes back
 // via adsApi.sign(). No on-chain transaction at publish time.
 export interface VoucherTypedData {
-  types: Record<string, Array<{ name: string; type: string }>>;
+  types: Record<string, { name: string; type: string }[]>;
   primaryType: string;
   domain: {
     name: string;
@@ -608,11 +612,22 @@ export const tradesApi = {
       { txHash }
     ),
 
-  raiseDispute: (tradeId: string, reason: string, callerAddress?: string) =>
+  raiseDispute: (
+    tradeId: string,
+    reason: string,
+    callerAddress?: string,
+    evidenceUrls?: string[],
+  ) =>
     request<{ unsignedTx: UnsignedTx }>(
       'POST',
       `/p2p/trades/${encodeURIComponent(tradeId)}/dispute`,
-      { reason, callerAddress }
+      // evidenceUrls is omitted from the body when empty/absent so older
+      // backends ignore it and the wire shape stays identical to before.
+      {
+        reason,
+        callerAddress,
+        ...(evidenceUrls && evidenceUrls.length > 0 ? { evidenceUrls } : {}),
+      }
     ),
 
   confirmRaiseDispute: (tradeId: string, txHash: string) =>

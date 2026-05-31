@@ -180,7 +180,7 @@ const TradeDetailScreen: React.FC = () => {
           <Icon name="lock" size={48} color={GOLD.muted} />
           <Text style={styles.deniedTitle}>Not your trade</Text>
           <Text style={styles.deniedBody}>
-            You're not a party to this trade. If you're an admin reviewing a
+            You&apos;re not a party to this trade. If you&apos;re an admin reviewing a
             dispute, open it from the admin queue.
           </Text>
           <TouchableOpacity
@@ -433,7 +433,7 @@ const TradeDetailScreen: React.FC = () => {
               onMarkPaid={handleMarkPaid}
               onRelease={handleRelease}
               onCancel={handleCancel}
-              onDispute={() => setShowDispute(true)}
+              onDispute={() => router.push(`/p2p/dispute/${trade.id}`)}
             />
           )}
 
@@ -618,7 +618,7 @@ const ActionPanel: React.FC<{
           {canMarkPaid && (
             <TouchableOpacity style={styles.primaryAction} onPress={onMarkPaid}>
               <Icon name="check-circle" size={20} color="#000" />
-              <Text style={styles.primaryActionText}>I've paid — attach proof</Text>
+              <Text style={styles.primaryActionText}>I&apos;ve paid — attach proof</Text>
             </TouchableOpacity>
           )}
           {canRelease && (
