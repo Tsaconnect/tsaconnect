@@ -1,9 +1,19 @@
 // components/dashboard/BalanceCard.tsx
+//
+// Total-portfolio hero with the value-hide toggle and the four quick actions
+// (Buy / Services / Trade / Wallet). Migrated onto the TSA Signature design
+// system — the dual-price reads, the visibility toggle, and every quick-action
+// route are preserved verbatim; only presentation moved to @/theme tokens.
 import React from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { View } from 'react-native';
 import { router } from 'expo-router';
 import { useCurrency } from '@/contexts/CurrencyContext';
+import { useTheme } from '@/theme';
+import { Card, Divider, Icon, IconButton, PressableScale, Text } from '@/components/ui';
+import type { IconName } from '@/components/ui';
+
+const EYE: IconName = 'eye';
+const EYE_OFF: IconName = 'eyeOff';
 
 interface BalanceCardProps {
   totalUsdValue: number;
@@ -12,12 +22,12 @@ interface BalanceCardProps {
   onToggleVisibility: () => void;
 }
 
-const QUICK_ACTIONS = [
-  { key: 'buy', label: 'Buy', icon: 'shopping-bag', route: '/(dashboard)/(tabs)/(marketplace)' },
-  { key: 'services', label: 'Services', icon: 'miscellaneous-services', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
-  { key: 'trade', label: 'Trade', icon: 'trending-up', route: '/easyswap' },
-  { key: 'wallet', label: 'Wallet', icon: 'account-balance-wallet', route: '/tokenization' },
-] as const;
+const QUICK_ACTIONS: { key: string; label: string; icon: IconName; route: string }[] = [
+  { key: 'buy', label: 'Buy', icon: 'storefront', route: '/(dashboard)/(tabs)/(marketplace)' },
+  { key: 'services', label: 'Services', icon: 'list', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
+  { key: 'trade', label: 'Trade', icon: 'trendingUp', route: '/easyswap' },
+  { key: 'wallet', label: 'Wallet', icon: 'wallet', route: '/tokenization' },
+];
 
 export const BalanceCard: React.FC<BalanceCardProps> = ({
   totalUsdValue,
@@ -25,102 +35,88 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
   isValuesHidden,
   onToggleVisibility,
 }) => {
+  const { colors, spacing } = useTheme();
   const { formatDualPrice } = useCurrency();
   const dualBalance = formatDualPrice(totalUsdValue);
   const dualChange = formatDualPrice(Math.abs(dailyChange));
-  const changeColor = dailyChange >= 0 ? '#4ADE80' : '#F87171';
-  const changePrefix = dailyChange >= 0 ? '+' : '-';
+  const isUp = dailyChange >= 0;
+  const changeColor = isUp ? colors.success : colors.danger;
+  const changePrefix = isUp ? '+' : '-';
 
   return (
-    <View style={styles.card}>
-      <View style={styles.header}>
-        <Text style={styles.label}>Total Portfolio</Text>
-        <Pressable onPress={onToggleVisibility} hitSlop={8}>
-          <Icon
-            name={isValuesHidden ? 'visibility-off' : 'visibility'}
-            size={20}
-            color="rgba(255,255,255,0.4)"
-          />
-        </Pressable>
+    <Card elevation="md" padding="xl" style={{ marginTop: spacing.sm }}>
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: spacing.sm,
+        }}
+      >
+        <Text variant="caption" color="textSecondary">
+          Total Portfolio
+        </Text>
+        <IconButton
+          icon={isValuesHidden ? EYE_OFF : EYE}
+          size={20}
+          color={colors.textMuted}
+          onPress={onToggleVisibility}
+          accessibilityLabel={isValuesHidden ? 'Show balances' : 'Hide balances'}
+        />
       </View>
 
-      <Text style={styles.balance}>
+      <Text variant="display" weight="700" numeric>
         {isValuesHidden ? '••••••' : dualBalance.primary}
       </Text>
-      <Text style={styles.balanceSecondary}>
+      <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
         {isValuesHidden ? '••••' : dualBalance.secondary}
       </Text>
 
       {dailyChange !== 0 && (
-        <View style={styles.changeRow}>
-          <Icon
-            name={dailyChange >= 0 ? 'trending-up' : 'trending-down'}
-            size={14}
-            color={changeColor}
-          />
-          <Text style={[styles.changeText, { color: changeColor }]}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: spacing.xs,
+            marginTop: spacing.xs,
+          }}
+        >
+          <Icon name={isUp ? 'trendingUp' : 'trendingDown'} size={14} color={changeColor} />
+          <Text variant="caption" weight="600" style={{ color: changeColor }}>
             {changePrefix}{dualChange.primary} today
           </Text>
         </View>
       )}
 
-      <View style={styles.actionsRow}>
+      <Divider spacing="lg" />
+
+      <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
         {QUICK_ACTIONS.map((action) => (
-          <Pressable
+          <PressableScale
             key={action.key}
-            style={({ pressed }) => [styles.actionButton, pressed && styles.actionPressed]}
             onPress={() => router.push(action.route as any)}
+            style={{ alignItems: 'center', minWidth: 56, gap: spacing.xs }}
           >
-            <View style={styles.actionIcon}>
-              <Icon name={action.icon} size={20} color="#D4AF37" />
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                backgroundColor: colors.accentMuted,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <Icon name={action.icon} size={20} color={colors.accent} />
             </View>
-            <Text style={styles.actionLabel}>{action.label}</Text>
-          </Pressable>
+            <Text variant="caption" color="textSecondary">
+              {action.label}
+            </Text>
+          </PressableScale>
         ))}
       </View>
-    </View>
+    </Card>
   );
 };
-
-const styles = StyleSheet.create({
-  card: {
-    marginHorizontal: 16,
-    marginTop: 8,
-    borderRadius: 16,
-    padding: 20,
-    backgroundColor: '#1A1A1A',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  label: { fontSize: 13, color: 'rgba(255,255,255,0.6)' },
-  balance: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', marginBottom: 2 },
-  balanceSecondary: { fontSize: 14, fontWeight: '500', color: 'rgba(255,255,255,0.65)', marginBottom: 4 },
-  changeRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 },
-  changeText: { fontSize: 12, fontWeight: '500' },
-  actionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 18,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
-  },
-  actionButton: { alignItems: 'center', minWidth: 56 },
-  actionPressed: { opacity: 0.7 },
-  actionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(212,175,55,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  actionLabel: { fontSize: 11, color: 'rgba(255,255,255,0.7)', fontWeight: '500' },
-});
 
 export default BalanceCard;
