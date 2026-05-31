@@ -1,16 +1,37 @@
+// app/wallet/tokens.tsx
+//
+// All-tokens list — every asset across chains (natives, BE-known ERC-20s,
+// user-imported custom tokens, and indexer-discovered tokens), with pull-to-
+// refresh and tap-through to the per-token screen. Restyled onto the TSA
+// Signature design system (theme tokens + @/components/ui primitives).
+//
+// FINANCIAL screen: the three-way parallel balance fetch (BE balances +
+// discovered tokens + on-chain custom-token reads), the dedup/merge/sort
+// pipeline, the AsyncStorage cache snapshot, and the per-token navigation
+// params are all preserved verbatim — this is a visual/structural restyle only.
+// Per-token/per-chain brand colors (item.iconColor / CHAINS[*].iconColor) come
+// from token/chain config data, not the design tokens, so they stay as-is.
 import { router } from 'expo-router';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, FlatList, StyleSheet, Pressable, Image, RefreshControl, ActivityIndicator } from 'react-native';
+import { View, FlatList, Image, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { MaterialIcons as Icon } from '@expo/vector-icons';
 import { ethers } from 'ethers';
 import { CHAINS, type ChainKey } from '@/constants/chains';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
 import { useTokens } from '@/hooks/useTokens';
 import { useNetwork } from '@/hooks/useNetwork';
+import { useTheme } from '@/theme';
+import {
+  AmountText,
+  Badge,
+  EmptyState,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
-const GOLD = '#D4AF37';
 const CACHE_PREFIX = 'wallet-all-tokens-cache::';
 
 interface Asset {
@@ -35,6 +56,7 @@ function cacheKey(address: string, network: string): string {
 }
 
 export default function AllTokensScreen() {
+  const { colors, spacing, radius } = useTheme();
   const { tokenList, customTokens } = useTokens();
   const { network } = useNetwork();
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -255,102 +277,114 @@ export default function AllTokensScreen() {
   );
 
   const renderItem = ({ item }: { item: Asset }) => (
-    <Pressable style={({ pressed }) => [s.row, pressed && { opacity: 0.7 }]} onPress={() => handlePress(item)}>
-      <View style={[s.avatar, { backgroundColor: item.iconColor + '20' }]}>
+    <PressableScale
+      onPress={() => handlePress(item)}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.md,
+        backgroundColor: colors.surface,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.hairline,
+      }}
+    >
+      <View
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: radius.pill,
+          justifyContent: 'center',
+          alignItems: 'center',
+          marginRight: spacing.md,
+          // Per-token brand tint comes from token/chain config data.
+          backgroundColor: item.iconColor + '20',
+        }}
+      >
         {item.iconUrl ? (
-          <Image source={{ uri: item.iconUrl }} style={s.avatarImg} />
+          <Image source={{ uri: item.iconUrl }} style={{ width: 24, height: 24, borderRadius: 12 }} />
         ) : (
-          <Text style={[s.avatarText, { color: item.iconColor }]}>{item.symbol.charAt(0)}</Text>
+          <Text variant="bodyMed" weight="700" style={{ color: item.iconColor }}>
+            {item.symbol.charAt(0)}
+          </Text>
         )}
       </View>
-      <View style={s.info}>
-        <View style={s.symbolRow}>
-          <Text style={s.symbol}>{item.symbol}</Text>
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <Text variant="bodyMed" weight="600">
+            {item.symbol}
+          </Text>
           {item.discovered && (
-            <View style={s.newBadge}>
-              <Text style={s.newBadgeText}>NEW</Text>
-            </View>
+            <Badge label="NEW" size="sm" color={colors.accent} background={colors.accentMuted} />
           )}
           {item.imported && (
-            <View style={s.importedBadge}>
-              <Text style={s.importedBadgeText}>IMPORTED</Text>
-            </View>
+            <Badge label="IMPORTED" size="sm" color={colors.info} background={colors.infoBg} />
           )}
         </View>
-        <View style={s.meta}>
-          <Text style={s.name}>{item.name}</Text>
-          <View style={[s.dot, { backgroundColor: CHAINS[item.chainKey]?.iconColor || '#999' }]} />
-          <Text style={s.chain}>{item.chainName}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2, gap: spacing.xs }}>
+          <Text variant="caption" color="textMuted">
+            {item.name}
+          </Text>
+          <View
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: 2.5,
+              // Per-chain brand dot color comes from chain config data.
+              backgroundColor: CHAINS[item.chainKey]?.iconColor || colors.textMuted,
+            }}
+          />
+          <Text variant="caption" color="textMuted">
+            {item.chainName}
+          </Text>
         </View>
       </View>
-      <View style={s.values}>
-        <Text style={s.balance}>
+      <View style={{ alignItems: 'flex-end' }}>
+        <Text variant="bodySm" weight="600" numeric>
           {item.balance.toFixed(4)} {item.symbol}
         </Text>
-        <Text style={s.usd}>
-          ${item.usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-        </Text>
+        <AmountText
+          value={item.usdValue}
+          currency="USD"
+          variant="caption"
+          weight="500"
+          color="textMuted"
+          minimumFractionDigits={2}
+          maximumFractionDigits={2}
+          style={{ marginTop: 2 }}
+        />
       </View>
-    </Pressable>
+    </PressableScale>
   );
 
   if (loading) {
     return (
-      <View style={s.center}>
-        <ActivityIndicator color={GOLD} />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading tokens..." />
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <FlatList
-      style={s.container}
-      data={assets}
-      keyExtractor={(a) => a.id}
-      showsVerticalScrollIndicator={false}
-      contentContainerStyle={{ paddingBottom: 40 }}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={() => fetch(true)} tintColor={GOLD} colors={[GOLD]} />
-      }
-      renderItem={renderItem}
-      ListEmptyComponent={
-        <View style={s.center}>
-          <Icon name="account-balance-wallet" size={36} color="#DDD" />
-          <Text style={s.emptyText}>No tokens</Text>
-        </View>
-      }
-    />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <FlatList
+        style={{ flex: 1, backgroundColor: colors.background }}
+        data={assets}
+        keyExtractor={(a) => a.id}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: spacing['4xl'] }}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={() => fetch(true)} tintColor={colors.accent} />
+        }
+        renderItem={renderItem}
+        ListEmptyComponent={
+          <View style={{ paddingTop: spacing['4xl'] }}>
+            <EmptyState icon="wallet" title="No tokens" subtitle="Your assets will appear here." />
+          </View>
+        }
+      />
+    </SafeAreaView>
   );
 }
-
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40 },
-  emptyText: { fontSize: 15, color: '#BBB', fontWeight: '600' },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#FFF',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#F5F5F5',
-  },
-  avatar: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
-  avatarImg: { width: 24, height: 24, borderRadius: 12 },
-  avatarText: { fontSize: 16, fontWeight: '700' },
-  info: { flex: 1 },
-  symbolRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  symbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  newBadge: { backgroundColor: 'rgba(212,175,55,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  newBadgeText: { fontSize: 9, fontWeight: '800', color: '#8B6914' },
-  importedBadge: { backgroundColor: 'rgba(47,68,255,0.10)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  importedBadgeText: { fontSize: 9, fontWeight: '800', color: '#2F44FF' },
-  meta: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  name: { fontSize: 12, color: '#888' },
-  dot: { width: 5, height: 5, borderRadius: 2.5, marginHorizontal: 5 },
-  chain: { fontSize: 11, color: '#AAA' },
-  values: { alignItems: 'flex-end' },
-  balance: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-  usd: { fontSize: 12, color: '#888', marginTop: 2 },
-});
