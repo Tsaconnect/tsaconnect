@@ -23,12 +23,12 @@ import {
   AmountText,
   Avatar,
   Badge,
+  Button,
   Chip,
   Divider,
   EmptyState,
   ErrorState,
   Icon,
-  IconName,
   PressableScale,
   SegmentedControl,
   SkeletonGroup,
@@ -115,13 +115,15 @@ const P2PMarketScreen: React.FC = () => {
           />
         </View>
 
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.lg }}>
-          <ActionButton icon={adSide === 'sell' ? 'plus' : 'plus'} label={adSide === 'sell' ? 'Sell' : 'Post'} onPress={onCreate} />
-          <ActionButton icon="list" label="My ads" onPress={() => router.push('/p2p/my-ads')} />
-          <ActionButton icon="swap" label="My trades" onPress={() => router.push('/p2p/my-trades')} />
-          <ActionButton icon="bank" label="Banks" onPress={() => router.push('/p2p/payment-methods')} />
-          <ActionButton icon="pool" label="Pool" onPress={() => router.push('/p2p/pool')} />
-        </View>
+        {/* Section nav (My ads / Orders / Banks / Pool) lives in the bottom footer
+            now; the Market screen keeps only the create CTA. */}
+        <Button
+          title={adSide === 'sell' ? `Sell ${token}` : 'Post a buy ad'}
+          leftIcon="plus"
+          variant="secondary"
+          onPress={onCreate}
+          style={{ marginTop: spacing.lg }}
+        />
 
         <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.md, marginBottom: spacing.lg }}>
           {adSide === 'sell'
@@ -189,29 +191,6 @@ const P2PMarketScreen: React.FC = () => {
         )}
       </ScrollView>
     </SafeAreaView>
-  );
-};
-
-const ActionButton: React.FC<{ icon: IconName; label: string; onPress: () => void }> = ({ icon, label, onPress }) => {
-  const { colors, spacing } = useTheme();
-  return (
-    <PressableScale onPress={onPress} accessibilityLabel={label} style={{ alignItems: 'center', gap: spacing.xs }}>
-      <View
-        style={{
-          width: 44,
-          height: 44,
-          borderRadius: 22,
-          backgroundColor: colors.accentMuted,
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <Icon name={icon} size={20} color={colors.accent} />
-      </View>
-      <Text variant="caption" color="textSecondary" weight="600">
-        {label}
-      </Text>
-    </PressableScale>
   );
 };
 
