@@ -1,27 +1,35 @@
 import { Dimensions } from "react-native";
+import { lightColors } from "../theme/colors";
 const { height, width } = Dimensions.get("window");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY COLOR BRIDGE (Phase 0 of the app-wide TSA Signature migration, #34).
+//
+// `COLORS` is consumed by ~77 not-yet-migrated screens via StyleSheet.create.
+// Rather than hand-edit each, we re-source every key from the light design
+// tokens so the whole app instantly shares one palette. This is LIGHT-ONLY by
+// nature (StyleSheet values are static) — a screen only becomes dark-adaptive
+// once its phase migrates it to useTheme().
+//
+// Brand alignment (intentional, flagged in the PR): the legacy brown `primary`
+// (#9D6B38) now maps to the signature gold `accent`, matching the redesigned
+// P2P surface. The warm brown lives on in the accent rail gradients.
+// ─────────────────────────────────────────────────────────────────────────────
 export const COLORS = {
-  primary: "#9D6B38",
-  white: "#FFFFFF",
-  background: "#253334",
-  //gray: "#ebedf0",
-  lightButton: "#E8A14A",
-  black: "#000000",
-  grey: "#bab8b1",
-  secondary: "#FF3FFF",
-  //
-  //primary: '#6366f1', // Modern indigo
-  //secondary: '#8b5cf6', // Purple
-  success: '#10b981', // Emerald
-  warning: '#f59e0b', // Amber
-  danger: '#ef4444', // Red
-  dark: '#1f2937', // Gray-800
-  gray: '#6b7280', // Gray-500
-  lightGray: '#e5e7eb', // Gray-200
-  lightPrimary: 'rgba(99, 102, 241, 0.1)',
-  background: '#f9fafb', // Gray-50
-  white: '#ffffff',
+  primary: lightColors.accent,
+  white: lightColors.surface,
+  background: lightColors.background,
+  lightButton: lightColors.accentHover,
+  black: lightColors.textPrimary,
+  grey: lightColors.textMuted,
+  secondary: lightColors.accent,
+  success: lightColors.success,
+  warning: lightColors.warning,
+  danger: lightColors.danger,
+  dark: lightColors.textPrimary,
+  gray: lightColors.textSecondary,
+  lightGray: lightColors.border,
+  lightPrimary: lightColors.accentMuted,
 };
 
 export const SIZES = {
@@ -33,7 +41,6 @@ export const SIZES = {
   padding2: 12,
   padding3: 16,
   small: 12,
-  font: 14,
   medium: 16,
   large: 18,
   extraLarge: 24,
@@ -47,7 +54,6 @@ export const SIZES = {
   body2: 20,
   body3: 16,
   body4: 14,
-
 
   // App Dimensions
   width,

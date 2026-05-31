@@ -1,15 +1,41 @@
-import { Image, StyleSheet } from "react-native";
+// app/(dashboard)/(tabs)/_layout.tsx
+//
+// Bottom tab navigator for the main app (Home / Marketplace / Services /
+// Easyswap / Tokenization / Notifications). Migrated off the legacy
+// constants/theme (COLORS) onto the TSA Signature design system: the tab bar
+// + header colors and the active/inactive icon tints are now read from
+// useTheme() tokens, so the bar adapts to light/dark for free. The exact
+// Tabs.Screen registrations, names, order, titles, href gating, and the
+// require()'d image icon logic are preserved verbatim — this is a
+// visual/structural restyle only.
+import { Image } from "react-native";
 import { Tabs } from "expo-router";
-import { COLORS } from "../../../constants";
+import { useTheme, fontFamily } from "@/theme";
 
 const DashLayout = () => {
+  const { colors } = useTheme();
+
+  // Tint the require()'d PNG icons via tokens: brand accent when focused,
+  // muted neutral otherwise. Mirrors the legacy COLORS.primary/COLORS.black
+  // split but adapts to the active scheme.
+  const iconTint = (focused: boolean) => (focused ? colors.accent : colors.textMuted);
+
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: COLORS.black,
+        tabBarActiveTintColor: colors.accent,
+        tabBarInactiveTintColor: colors.textMuted,
         headerShown: false,
+        tabBarStyle: {
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+        },
         tabBarLabelStyle: {
-          fontSize: 11, // Increase the font size here
+          fontSize: 11,
+          fontFamily: fontFamily["500"],
+        },
+        sceneStyle: {
+          backgroundColor: colors.background,
         },
       }}
     >
@@ -23,12 +49,12 @@ const DashLayout = () => {
               style={{
                 height: 25,
                 width: 25,
-                tintColor: focused ? COLORS.primary : COLORS.black,
+                tintColor: iconTint(focused),
               }}
               resizeMode="contain"
             />
           ),
-          headerTintColor: COLORS.primary,
+          headerTintColor: colors.accent,
           headerShown: false,
         }}
       />
@@ -43,7 +69,7 @@ const DashLayout = () => {
               style={{
                 height: 24,
                 width: 24,
-                tintColor: focused ? COLORS.primary : COLORS.black,
+                tintColor: iconTint(focused),
               }}
               resizeMode="contain"
             />
@@ -62,7 +88,7 @@ const DashLayout = () => {
               style={{
                 height: 24,
                 width: 24,
-                tintColor: focused ? COLORS.primary : COLORS.black,
+                tintColor: iconTint(focused),
               }}
               resizeMode="contain"
             />
@@ -81,7 +107,7 @@ const DashLayout = () => {
               style={{
                 height: 24,
                 width: 24,
-                tintColor: focused ? COLORS.primary : COLORS.black,
+                tintColor: iconTint(focused),
               }}
               resizeMode="contain"
             />
@@ -100,7 +126,7 @@ const DashLayout = () => {
               style={{
                 height: 24,
                 width: 24,
-                tintColor: focused ? COLORS.primary : COLORS.black,
+                tintColor: iconTint(focused),
               }}
               resizeMode="contain"
             />
@@ -120,5 +146,3 @@ const DashLayout = () => {
 };
 
 export default DashLayout;
-
-const styles = StyleSheet.create({});

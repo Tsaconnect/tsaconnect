@@ -62,6 +62,7 @@ export interface AmountTextProps extends Omit<TextProps, 'children' | 'numeric'>
   currency?: string;
   withCode?: boolean;
   locale?: string;
+  minimumFractionDigits?: number;
   maximumFractionDigits?: number;
 }
 
@@ -71,6 +72,7 @@ export const AmountText: React.FC<AmountTextProps> = ({
   currency,
   withCode,
   locale,
+  minimumFractionDigits,
   maximumFractionDigits,
   variant = 'title3',
   weight = '700',
@@ -78,8 +80,8 @@ export const AmountText: React.FC<AmountTextProps> = ({
 }) => {
   const num = typeof value === 'string' ? Number(value) : value;
   const text = currency
-    ? formatFiat(value, currency, { withCode, locale, maximumFractionDigits })
-    : formatNumber(isFinite(num) ? num : 0, { locale, maximumFractionDigits });
+    ? formatFiat(value, currency, { withCode, locale, minimumFractionDigits, maximumFractionDigits })
+    : formatNumber(isFinite(num) ? num : 0, { locale, minimumFractionDigits, maximumFractionDigits });
   return (
     <Text variant={variant} weight={weight} numeric {...rest}>
       {text}

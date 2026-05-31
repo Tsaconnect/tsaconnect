@@ -49,6 +49,8 @@ export interface FormatFiatOptions {
   locale?: string;
   /** Append the ISO code (e.g. "₦1,500 NGN"). */
   withCode?: boolean;
+  /** Force a minimum number of fraction digits (e.g. 2 to always show cents). */
+  minimumFractionDigits?: number;
   /** Override fraction digits (defaults: 0 for whole-unit fiat like NGN, 2 otherwise). */
   maximumFractionDigits?: number;
 }
@@ -66,8 +68,10 @@ export function formatFiat(
   const code = (currency || '').toUpperCase();
   const symbol = CURRENCY_SYMBOLS[code];
   const maxFrac = opts.maximumFractionDigits ?? (code === 'NGN' ? 0 : 2);
+  const minFrac = Math.min(opts.minimumFractionDigits ?? 0, maxFrac);
   const num = formatNumber(isFinite(value) ? value : 0, {
     locale: opts.locale,
+    minimumFractionDigits: minFrac,
     maximumFractionDigits: maxFrac,
   });
   const hasSymbol = symbol !== undefined && symbol !== '';
