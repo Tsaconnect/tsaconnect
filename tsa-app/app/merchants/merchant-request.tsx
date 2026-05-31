@@ -1,21 +1,33 @@
+// app/merchants/merchant-request.tsx
+//
+// Become-a-merchant request form. Restyled onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives). This is a visual/structural
+// restyle ONLY — the existing-request fetch, AsyncStorage role write on approval,
+// the required-field validation, the submitMerchantRequest payload (optional
+// fields collapsed to `undefined`), the pending/approved/rejected status gating,
+// the focus-chain refs, and every navigation route are all preserved verbatim.
+//
+// NOTE: the fields use a local token-themed TextInput `Field` (not the @/components/ui
+// `Input`) because the focus-chain — businessName → … → submit, driven by the
+// onSubmitEditing refs — must keep working, and the Input primitive does not yet
+// forward a ref to its inner TextInput. `Field` mirrors Input's chrome exactly.
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
-  Text,
   TextInput,
-  TouchableOpacity,
+  TextInputProps,
   ScrollView,
-  StyleSheet,
-  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { COLORS } from '../../constants';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
+import { useTheme } from '@/theme';
+import { Button, Chip, Icon, Spinner, Text } from '@/components/ui';
 
 const BUSINESS_TYPES = [
   { label: 'General Products', value: 'general_products' },
@@ -25,6 +37,7 @@ const BUSINESS_TYPES = [
 ];
 
 export default function MerchantRequestScreen() {
+  const { colors, spacing } = useTheme();
   const { currentUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -103,10 +116,12 @@ export default function MerchantRequestScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Stack.Screen options={{ title: 'Merchant Application' }} />
-        <ActivityIndicator size="large" color={COLORS.primary} />
-      </View>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading…" />
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -115,262 +130,288 @@ export default function MerchantRequestScreen() {
 
     if (status === 'pending') {
       return (
-        <View style={styles.container}>
-          <Stack.Screen options={{ title: 'Merchant Application' }} />
-          <View style={styles.statusCard}>
-            <Text style={styles.statusEmoji}>&#9203;</Text>
-            <Text style={styles.statusTitle}>Application Under Review</Text>
-            <Text style={styles.statusText}>
-              Your merchant application for "{existingRequest.businessName}" is being reviewed. We'll update your status soon.
-            </Text>
-            <TouchableOpacity
-              style={[styles.submitButton, { marginTop: 24 }]}
-              onPress={() => router.back()}
-            >
-              <Text style={styles.submitButtonText}>Go Back</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <StatusScreen
+          icon="clock"
+          tone={colors.warning}
+          toneBg={colors.warningBg}
+          title="Application Under Review"
+          body={`Your merchant application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
+          actionTitle="Go Back"
+          actionVariant="secondary"
+          onAction={() => router.back()}
+        />
       );
     }
 
     if (status === 'approved') {
       return (
-        <View style={styles.container}>
-          <Stack.Screen options={{ title: 'Merchant Application' }} />
-          <View style={[styles.statusCard, { borderColor: '#22c55e' }]}>
-            <Text style={styles.statusEmoji}>&#9989;</Text>
-            <Text style={styles.statusTitle}>You're a Merchant!</Text>
-            <Text style={styles.statusText}>
-              Your application has been approved. You now have access to the merchant portal.
-            </Text>
-            <TouchableOpacity
-              style={[styles.submitButton, { backgroundColor: '#22c55e' }]}
-              onPress={() => router.push('/merchants/dashboard')}
-            >
-              <Text style={styles.submitButtonText}>Go to Merchant Dashboard</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <StatusScreen
+          icon="checkCircle"
+          tone={colors.success}
+          toneBg={colors.successBg}
+          title="You're a Merchant!"
+          body="Your application has been approved. You now have access to the merchant portal."
+          actionTitle="Go to Merchant Dashboard"
+          actionVariant="success"
+          onAction={() => router.push('/merchants/dashboard')}
+        />
       );
     }
 
     if (status === 'rejected') {
       return (
-        <View style={styles.container}>
-          <Stack.Screen options={{ title: 'Merchant Application' }} />
-          <View style={[styles.statusCard, { borderColor: '#ef4444' }]}>
-            <Text style={styles.statusEmoji}>&#10060;</Text>
-            <Text style={styles.statusTitle}>Application Rejected</Text>
-            <Text style={styles.statusText}>
-              Reason: {existingRequest.adminNote || 'No reason provided'}
-            </Text>
-            <TouchableOpacity
-              style={styles.submitButton}
-              onPress={() => {
-                setExistingRequest(null);
-                setBusinessName('');
-                setBusinessDescription('');
-                setAddress('');
-                setCity('');
-                setState('');
-                setCountry('');
-                setRegistrationNumber('');
-              }}
-            >
-              <Text style={styles.submitButtonText}>Apply Again</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <StatusScreen
+          icon="closeCircle"
+          tone={colors.danger}
+          toneBg={colors.dangerBg}
+          title="Application Rejected"
+          body={`Reason: ${existingRequest.adminNote || 'No reason provided'}`}
+          actionTitle="Apply Again"
+          actionVariant="primary"
+          onAction={() => {
+            setExistingRequest(null);
+            setBusinessName('');
+            setBusinessDescription('');
+            setAddress('');
+            setCity('');
+            setState('');
+            setCountry('');
+            setRegistrationNumber('');
+          }}
+        />
       );
     }
   }
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      <ScrollView
-        ref={scrollRef}
-        style={styles.container}
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingBottom: 60 }}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <Stack.Screen options={{ title: 'Merchant Application' }} />
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
-        <Stack.Screen options={{ title: 'Merchant Application' }} />
-        <Text style={styles.heading}>Become a Merchant</Text>
-        <Text style={styles.subheading}>Fill in your business details to apply</Text>
+        <ScrollView
+          ref={scrollRef}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+        >
+          <Text variant="title1" weight="700">
+            Become a Merchant
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.xl }}>
+            Fill in your business details to apply
+          </Text>
 
-        <Text style={styles.label}>Business Type *</Text>
-        <View style={styles.pickerRow}>
-          {BUSINESS_TYPES.map((bt) => (
-            <TouchableOpacity
-              key={bt.value}
-              style={[styles.pickerOption, businessType === bt.value && styles.pickerOptionSelected]}
-              onPress={() => setBusinessType(bt.value)}
-            >
-              <Text style={[styles.pickerText, businessType === bt.value && styles.pickerTextSelected]}>
-                {bt.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
+            Business Type *
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+            {BUSINESS_TYPES.map((bt) => (
+              <Chip
+                key={bt.value}
+                label={bt.label}
+                selected={businessType === bt.value}
+                onPress={() => setBusinessType(bt.value)}
+              />
+            ))}
+          </View>
 
-        <Text style={styles.label}>Business Name *</Text>
-        <TextInput
-          ref={businessNameRef}
-          style={styles.input}
-          value={businessName}
-          onChangeText={setBusinessName}
-          placeholder="e.g. Business Name"
-          returnKeyType="next"
-          onSubmitEditing={() => descriptionRef.current?.focus()}
+          <Field
+            ref={businessNameRef}
+            label="Business Name *"
+            value={businessName}
+            onChangeText={setBusinessName}
+            placeholder="e.g. Business Name"
+            returnKeyType="next"
+            onSubmitEditing={() => descriptionRef.current?.focus()}
+          />
 
-        />
+          <Field
+            ref={descriptionRef}
+            label="Business Description"
+            value={businessDescription}
+            onChangeText={setBusinessDescription}
+            placeholder="Describe your business..."
+            multiline
+            multilineHeight={80}
+            returnKeyType="next"
+            blurOnSubmit={true}
+            onSubmitEditing={() => addressRef.current?.focus()}
+          />
 
-        <Text style={styles.label}>Business Description</Text>
-        <TextInput
-          ref={descriptionRef}
-          style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
-          value={businessDescription}
-          onChangeText={setBusinessDescription}
-          placeholder="Describe your business..."
-          multiline
-          returnKeyType="next"
-          blurOnSubmit={true}
-          onSubmitEditing={() => addressRef.current?.focus()}
-        />
+          <Field
+            ref={addressRef}
+            label="Address *"
+            value={address}
+            onChangeText={setAddress}
+            placeholder="Street address"
+            returnKeyType="next"
+            onSubmitEditing={() => cityRef.current?.focus()}
+          />
 
-        <Text style={styles.label}>Address *</Text>
-        <TextInput
-          ref={addressRef}
-          style={styles.input}
-          value={address}
-          onChangeText={setAddress}
-          placeholder="Street address"
-          returnKeyType="next"
-          onSubmitEditing={() => cityRef.current?.focus()}
+          <Field
+            ref={cityRef}
+            label="City *"
+            value={city}
+            onChangeText={setCity}
+            placeholder="City"
+            returnKeyType="next"
+            onSubmitEditing={() => stateRef.current?.focus()}
+          />
 
-        />
+          <Field
+            ref={stateRef}
+            label="State *"
+            value={state}
+            onChangeText={setState}
+            placeholder="State"
+            returnKeyType="next"
+            onSubmitEditing={() => countryRef.current?.focus()}
+          />
 
-        <Text style={styles.label}>City *</Text>
-        <TextInput
-          ref={cityRef}
-          style={styles.input}
-          value={city}
-          onChangeText={setCity}
-          placeholder="City"
-          returnKeyType="next"
-          onSubmitEditing={() => stateRef.current?.focus()}
+          <Field
+            ref={countryRef}
+            label="Country *"
+            value={country}
+            onChangeText={setCountry}
+            placeholder="Country"
+            returnKeyType="next"
+            onSubmitEditing={() => phoneRef.current?.focus()}
+          />
 
-        />
+          <Field
+            ref={phoneRef}
+            label="Phone *"
+            value={phone}
+            onChangeText={setPhone}
+            placeholder="+234..."
+            keyboardType="phone-pad"
+            returnKeyType="next"
+            onSubmitEditing={() => regNumberRef.current?.focus()}
+          />
 
-        <Text style={styles.label}>State *</Text>
-        <TextInput
-          ref={stateRef}
-          style={styles.input}
-          value={state}
-          onChangeText={setState}
-          placeholder="State"
-          returnKeyType="next"
-          onSubmitEditing={() => countryRef.current?.focus()}
+          <Field
+            ref={regNumberRef}
+            label="Registration Number (optional)"
+            value={registrationNumber}
+            onChangeText={setRegistrationNumber}
+            placeholder="e.g. RC-123456"
+            returnKeyType="done"
+            onSubmitEditing={handleSubmit}
+          />
 
-        />
-
-        <Text style={styles.label}>Country *</Text>
-        <TextInput
-          ref={countryRef}
-          style={styles.input}
-          value={country}
-          onChangeText={setCountry}
-          placeholder="Country"
-          returnKeyType="next"
-          onSubmitEditing={() => phoneRef.current?.focus()}
-
-        />
-
-        <Text style={styles.label}>Phone *</Text>
-        <TextInput
-          ref={phoneRef}
-          style={styles.input}
-          value={phone}
-          onChangeText={setPhone}
-          placeholder="+234..."
-          keyboardType="phone-pad"
-          returnKeyType="next"
-          onSubmitEditing={() => regNumberRef.current?.focus()}
-
-        />
-
-        <Text style={styles.label}>Registration Number (optional)</Text>
-        <TextInput
-          ref={regNumberRef}
-          style={styles.input}
-          value={registrationNumber}
-          onChangeText={setRegistrationNumber}
-          placeholder="e.g. RC-123456"
-          returnKeyType="done"
-          onSubmitEditing={handleSubmit}
-        />
-
-        <TouchableOpacity style={styles.submitButton} onPress={handleSubmit} disabled={submitting}>
-          {submitting ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.submitButtonText}>Submit Application</Text>
-          )}
-        </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+          <Button
+            title="Submit Application"
+            onPress={handleSubmit}
+            disabled={submitting}
+            loading={submitting}
+            style={{ marginTop: spacing.xl }}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f5f5f5', padding: 16 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  heading: { fontSize: 22, fontWeight: '700', color: '#1e293b', marginBottom: 4 },
-  subheading: { fontSize: 14, color: '#64748b', marginBottom: 20 },
-  label: { fontSize: 13, fontWeight: '600', color: '#475569', marginTop: 12, marginBottom: 4 },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 14,
-    color: '#1e293b',
-  },
-  pickerRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  pickerOption: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    backgroundColor: '#fff',
-  },
-  pickerOptionSelected: { borderColor: '#9b795fff', backgroundColor: '#fef3c7' },
-  pickerText: { fontSize: 13, color: '#64748b' },
-  pickerTextSelected: { color: '#9b795fff', fontWeight: '600' },
-  submitButton: {
-    backgroundColor: '#9b795fff',
-    borderRadius: 8,
-    padding: 14,
-    alignItems: 'center',
-    marginTop: 20,
-  },
-  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  statusCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 24,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#f59e0b',
-    marginTop: 40,
-  },
-  statusEmoji: { fontSize: 48, marginBottom: 12 },
-  statusTitle: { fontSize: 20, fontWeight: '700', color: '#1e293b', marginBottom: 8 },
-  statusText: { fontSize: 14, color: '#64748b', textAlign: 'center', lineHeight: 20 },
-});
+// Token-themed labelled text field. Mirrors the @/components/ui Input chrome
+// (label, accent focus border, surface fill, token radius/spacing) while
+// forwarding its ref to the underlying TextInput so the onSubmitEditing focus
+// chain keeps working exactly as before.
+interface FieldProps extends Omit<TextInputProps, 'style'> {
+  label: string;
+  multilineHeight?: number;
+}
+
+const Field = React.forwardRef<TextInput, FieldProps>(
+  ({ label, multilineHeight, onFocus, onBlur, ...rest }, ref) => {
+    const { colors, radius, spacing, fonts, type } = useTheme();
+    const [focused, setFocused] = useState(false);
+    return (
+      <View style={{ marginTop: spacing.md }}>
+        <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+          {label}
+        </Text>
+        <TextInput
+          ref={ref}
+          placeholderTextColor={colors.textMuted}
+          onFocus={(e) => {
+            setFocused(true);
+            onFocus?.(e);
+          }}
+          onBlur={(e) => {
+            setFocused(false);
+            onBlur?.(e);
+          }}
+          style={{
+            paddingHorizontal: spacing.md,
+            paddingVertical: spacing.md,
+            borderRadius: radius.md,
+            borderWidth: focused ? 2 : 1.5,
+            borderColor: focused ? colors.accent : colors.border,
+            backgroundColor: colors.surface,
+            color: colors.textPrimary,
+            fontFamily: fonts['400'],
+            fontSize: type.body.fontSize,
+            ...(multilineHeight ? { height: multilineHeight, textAlignVertical: 'top' } : null),
+          }}
+          {...rest}
+        />
+      </View>
+    );
+  }
+);
+Field.displayName = 'Field';
+
+// Shared status panel for the pending / approved / rejected branches — keeps the
+// status registration + actions identical, only the chrome is themed.
+const StatusScreen: React.FC<{
+  icon: 'clock' | 'checkCircle' | 'closeCircle';
+  tone: string;
+  toneBg: string;
+  title: string;
+  body: string;
+  actionTitle: string;
+  actionVariant: 'primary' | 'secondary' | 'success';
+  onAction: () => void;
+}> = ({ icon, tone, toneBg, title, body, actionTitle, actionVariant, onAction }) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <Stack.Screen options={{ title: 'Merchant Application' }} />
+      <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: spacing.lg }}>
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderRadius: radius.lg,
+            borderWidth: 1,
+            borderColor: tone,
+            padding: spacing['2xl'],
+            alignItems: 'center',
+          }}
+        >
+          <View
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: radius.pill,
+              backgroundColor: toneBg,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: spacing.lg,
+            }}
+          >
+            <Icon name={icon} size={36} color={tone} />
+          </View>
+          <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
+            {title}
+          </Text>
+          <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing.xl }}>
+            {body}
+          </Text>
+          <Button title={actionTitle} variant={actionVariant} onPress={onAction} />
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+};
