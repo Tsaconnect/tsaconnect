@@ -125,9 +125,10 @@ func main() {
 	// path to River.
 	scheduler := jobs.NewScheduler()
 
-	// Initialize email and notification services
+	// Initialize email, push, and notification services
 	emailService := services.NewEmailService(cfg.MailjetAPIKey, cfg.MailjetSecretKey)
-	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService)
+	expoPush := services.NewExpoPushService(cfg.ExpoAccessToken)
+	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService, expoPush)
 
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService, p2pService)

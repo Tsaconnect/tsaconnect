@@ -43,17 +43,68 @@ var emailEvents = map[string]bool{
 	events.ProductRejected:          true,
 }
 
+// pushEvents is the curated allowlist of event types that also fire an Expo
+// push (out-of-app). Counterparty-actionable + urgent events only — self-
+// triggered ones (p2p.ad.*, product.listed, *.submitted, transaction.pending)
+// are intentionally excluded so the tray isn't noisy.
+var pushEvents = map[string]bool{
+	events.TransactionReceived:  true,
+	events.TransactionCompleted: true,
+	events.TransactionFailed:    true,
+	events.OrderPlaced:          true,
+	events.OrderEscrowed:        true,
+	events.OrderShipped:         true,
+	events.OrderDelivered:       true,
+	events.OrderCompleted:       true,
+	events.OrderRefundRequested: true,
+	events.OrderRefundApproved:  true,
+	events.OrderRefundRejected:  true,
+	events.OrderRefunded:        true,
+	events.OrderCancelRequested: true,
+	events.OrderCancelApproved:  true,
+	events.OrderCancelRejected:  true,
+	events.OrderDisputed:        true,
+	events.OrderDisputeResolved: true,
+	events.SecurityLoginNewDevice:  true,
+	events.SecurityFailedAttempts:  true,
+	events.SecurityPasswordChanged: true,
+	events.SecurityAccountLocked:   true,
+	events.VerificationApproved: true,
+	events.VerificationRejected: true,
+	events.MerchantApproved:     true,
+	events.MerchantRejected:     true,
+	events.MerchantSuspended:    true,
+	events.ProductApproved:      true,
+	events.ProductRejected:      true,
+	events.P2PTradeOpened:    true,
+	events.P2PTradePaid:      true,
+	events.P2PTradeReleasing: true,
+	events.P2PTradeReleased:  true,
+	events.P2PTradeCancelled: true,
+	events.P2PTradeDisputed:  true,
+	events.P2PTradeResolved:  true,
+	events.P2PTradeExpired:   true,
+	"p2p.message.new":        true, // raw string in p2p_message_service.go (not a const)
+	events.P2PDepositConfirmed:  true,
+	events.P2PWithdrawConfirmed: true,
+}
+
+// pushWorthy reports whether an event type should also be delivered as a push.
+func pushWorthy(eventType string) bool { return pushEvents[eventType] }
+
 type NotificationService struct {
 	db           *gorm.DB
 	hub          *ws.Hub
 	emailService *EmailService
+	push         *ExpoPushService // nil → push delivery disabled
 }
 
-func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService) *NotificationService {
+func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService, push *ExpoPushService) *NotificationService {
 	ns := &NotificationService{
 		db:           db,
 		hub:          hub,
 		emailService: emailService,
+		push:         push,
 	}
 	bus.Subscribe("*", ns.handleEvent)
 	return ns
@@ -102,6 +153,11 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 			"createdAt": notification.CreatedAt,
 		})
 		ns.hub.SendToUser(event.UserID, wsPayload)
+
+		// Out-of-app Expo push for the curated set (async; best-effort).
+		if ns.push != nil && pushWorthy(event.Type) {
+			go ns.sendPush(event)
+		}
 	}
 
 	// Send email (if applicable and not muted)
@@ -114,6 +170,35 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 			event.Message,
 			"", "",
 		)
+	}
+}
+
+// sendPush delivers the event to a user's registered Expo device tokens and
+// prunes any the push service reports as dead. The push `data` carries the
+// event `type` (+ ids) so the app can deep-link on tap. Best-effort: runs in a
+// goroutine and never blocks the bus.
+func (ns *NotificationService) sendPush(event events.Event) {
+	var tokens []models.DeviceToken
+	if err := ns.db.Where("user_id = ?", event.UserID).Find(&tokens).Error; err != nil {
+		log.Printf("[NotificationService] device-token lookup for %s: %v", event.UserID, err)
+		return
+	}
+	if len(tokens) == 0 {
+		return
+	}
+	toks := make([]string, len(tokens))
+	for i := range tokens {
+		toks[i] = tokens[i].Token
+	}
+	data := map[string]interface{}{"type": event.Type}
+	for k, v := range event.Data {
+		data[k] = v
+	}
+	dead := ns.push.Send(toks, event.Title, event.Message, data)
+	if len(dead) > 0 {
+		if err := ns.db.Where("token IN ?", dead).Delete(&models.DeviceToken{}).Error; err != nil {
+			log.Printf("[NotificationService] prune dead tokens: %v", err)
+		}
 	}
 }
 

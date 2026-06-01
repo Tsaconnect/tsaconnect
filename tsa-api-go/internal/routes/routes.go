@@ -309,6 +309,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		notifGroup.GET("/unread-count", h.GetUnreadCount)
 		notifGroup.GET("/preferences", h.GetNotificationPreferences)
 		notifGroup.PATCH("/preferences", h.UpdateNotificationPreferences)
+		// Expo push device-token registry (per device).
+		notifGroup.POST("/device-tokens", h.RegisterDevice)
+		notifGroup.DELETE("/device-tokens/:token", h.UnregisterDevice)
 	}
 
 	// Private sale routes

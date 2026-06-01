@@ -116,6 +116,10 @@ type Config struct {
 	MailjetAPIKey    string
 	MailjetSecretKey string
 
+	// Expo push notifications. Optional — sends work unauthenticated; set to
+	// enable Expo's enhanced push security. Dormant if unset.
+	ExpoAccessToken string
+
 	// Persona KYC verification
 	PersonaAPIKey        string
 	PersonaTemplateID    string
@@ -221,6 +225,9 @@ func Load() *Config {
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
+
+	// Expo push notifications (optional)
+	cfg.ExpoAccessToken = os.Getenv("EXPO_ACCESS_TOKEN")
 
 	// Persona KYC
 	cfg.PersonaAPIKey = os.Getenv("PERSONA_API_KEY")

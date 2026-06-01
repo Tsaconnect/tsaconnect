@@ -3,10 +3,12 @@ package handlers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -161,4 +163,55 @@ func (h *Handlers) UpdateNotificationPreferences(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Preferences updated"})
+}
+
+type registerDeviceRequest struct {
+	Token    string `json:"token" binding:"required"`
+	Platform string `json:"platform"`
+}
+
+// RegisterDevice upserts an Expo push token for the authed user. Upsert (by the
+// unique token) re-points a token at the current user after a reinstall or a
+// different login, and bumps last_seen.
+func (h *Handlers) RegisterDevice(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+	var req registerDeviceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token is required"})
+		return
+	}
+	token := strings.TrimSpace(req.Token)
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token is required"})
+		return
+	}
+	now := time.Now()
+	dt := models.DeviceToken{UserID: user.ID, Token: token, Platform: req.Platform, LastSeen: now}
+	if err := config.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "token"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"user_id": user.ID, "platform": req.Platform, "last_seen": now, "updated_at": now,
+		}),
+	}).Create(&dt).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to register device"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Device registered"})
+}
+
+// UnregisterDevice removes a push token (e.g. on logout). Scoped to the caller
+// so one user can't delete another's token.
+func (h *Handlers) UnregisterDevice(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+	token := c.Param("token")
+	config.DB.Where("token = ? AND user_id = ?", token, user.ID).Delete(&models.DeviceToken{})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Device unregistered"})
 }
