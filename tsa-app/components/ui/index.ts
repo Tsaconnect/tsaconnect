@@ -53,6 +53,8 @@ export { ToastProvider, useToast } from './Toast';
 export type { ToastType } from './Toast';
 export { Sheet } from './Sheet';
 export type { SheetProps } from './Sheet';
+export { Dropdown } from './Dropdown';
+export type { DropdownProps } from './Dropdown';
 export { RadioRow, RadioGroup } from './RadioRow';
 export type { RadioRowProps, RadioOption, RadioGroupProps } from './RadioRow';
 export { SelectRow } from './SelectRow';

@@ -21,6 +21,7 @@ import {
   Icon,
   Input,
   Sheet,
+  Dropdown,
   Spinner,
   EmptyState,
   PressableScale,
@@ -125,45 +126,146 @@ export default function CurrencySelector({
     );
   }
 
-  // Header variant: compact button
+  // Header variant: compact pill that opens an anchored dropdown (not a sheet).
   return (
-    <>
-      <PressableScale
-        onPress={() => setVisible(true)}
-        accessibilityRole="button"
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          gap: spacing.xs,
-          paddingHorizontal: spacing.md,
-          paddingVertical: spacing.xs,
-          borderRadius: radius.sm,
-          borderWidth: 1,
-          borderColor: colors.accent,
-          backgroundColor: colors.accentMuted,
-        }}
-      >
-        {loading && (
-          <View style={{ marginRight: spacing.xs }}>
-            <Spinner size="small" />
-          </View>
-        )}
-        <Text variant="bodySm" weight="700" color="accent">
-          {display.symbol} {display.code}
-        </Text>
-        <Icon name="chevronDown" size={14} color={colors.accent} />
-      </PressableScale>
+    <Dropdown
+      align="end"
+      menuWidth={300}
+      renderTrigger={() => (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: spacing.xs,
+            paddingHorizontal: spacing.md,
+            paddingVertical: spacing.xs,
+            borderRadius: radius.sm,
+            borderWidth: 1,
+            borderColor: colors.accent,
+            backgroundColor: colors.accentMuted,
+          }}
+        >
+          {loading && (
+            <View style={{ marginRight: spacing.xs }}>
+              <Spinner size="small" />
+            </View>
+          )}
+          <Text variant="bodySm" weight="700" color="accent">
+            {display.symbol} {display.code}
+          </Text>
+          <Icon name="chevronDown" size={14} color={colors.accent} />
+        </View>
+      )}
+    >
+      {({ close, maxHeight }) => (
+        <CurrencyMenu
+          currencies={supportedCurrencies}
+          selectedCode={selectedCode ?? currency.code}
+          allRates={allRates}
+          showRates={showRates}
+          maxHeight={maxHeight}
+          onPick={(code) => {
+            handleSelect(code);
+            close();
+          }}
+        />
+      )}
+    </Dropdown>
+  );
+}
 
-      <CurrencyModal
-        visible={visible}
-        onClose={() => setVisible(false)}
-        onSelect={handleSelect}
-        selectedCode={selectedCode ?? currency.code}
-        allRates={allRates}
-        showRates={showRates}
-        currencies={supportedCurrencies}
+// Shared filter: match by code / name / symbol.
+function filterCurrencies(list: CurrencyConfig[], query: string): CurrencyConfig[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(
+    (c) =>
+      c.code.toLowerCase().includes(q) ||
+      c.name.toLowerCase().includes(q) ||
+      (c.symbol && c.symbol.toLowerCase().includes(q)),
+  );
+}
+
+// ── Dropdown menu (header variant) ──
+
+function CurrencyMenu({
+  currencies,
+  selectedCode,
+  allRates,
+  showRates,
+  maxHeight,
+  onPick,
+}: {
+  currencies: CurrencyConfig[];
+  selectedCode: string;
+  allRates: Record<string, any>;
+  showRates: boolean;
+  maxHeight: number;
+  onPick: (code: string) => void;
+}) {
+  const { colors, spacing } = useTheme();
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => filterCurrencies(currencies, query), [currencies, query]);
+
+  return (
+    <View>
+      <View style={{ padding: spacing.sm }}>
+        <Input
+          placeholder="Search currency"
+          value={query}
+          onChangeText={setQuery}
+          autoCorrect={false}
+          autoCapitalize="characters"
+          returnKeyType="search"
+          leftAdornment={<Icon name="search" size={16} color={colors.textMuted} />}
+        />
+      </View>
+      <FlatList
+        data={filtered}
+        keyExtractor={(item) => item.code}
+        keyboardShouldPersistTaps="handled"
+        style={{ maxHeight: Math.max(120, maxHeight - 64) }}
+        ListEmptyComponent={
+          <View style={{ padding: spacing.lg }}>
+            <Text variant="bodySm" color="textMuted" align="center">
+              No currencies match “{query}”
+            </Text>
+          </View>
+        }
+        renderItem={({ item }) => {
+          const isSelected = item.code === selectedCode;
+          const rate = allRates[item.code];
+          return (
+            <PressableScale
+              onPress={() => onPick(item.code)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: isSelected }}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.sm,
+                backgroundColor: isSelected ? colors.accentMuted : "transparent",
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm, flex: 1 }}>
+                <Text variant="bodyMed">{item.flag || "💱"}</Text>
+                <Text variant="bodySm" weight="600" numberOfLines={1}>
+                  {item.symbol} {item.code}
+                </Text>
+                {showRates && rate && (
+                  <Text variant="caption" color="textMuted" numeric>
+                    · {rate.midRate?.toFixed(2) ?? "—"}
+                  </Text>
+                )}
+              </View>
+              {isSelected && <Icon name="checkCircle" size={18} color={colors.accent} />}
+            </PressableScale>
+          );
+        }}
       />
-    </>
+    </View>
   );
 }
 
@@ -191,16 +293,7 @@ function CurrencyModal({
   const { colors, spacing } = useTheme();
   const [query, setQuery] = useState("");
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return currencies;
-    return currencies.filter(
-      (c) =>
-        c.code.toLowerCase().includes(q) ||
-        c.name.toLowerCase().includes(q) ||
-        (c.symbol && c.symbol.toLowerCase().includes(q)),
-    );
-  }, [currencies, query]);
+  const filtered = useMemo(() => filterCurrencies(currencies, query), [currencies, query]);
 
   const handleClose = () => {
     setQuery("");

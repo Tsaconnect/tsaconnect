@@ -24,9 +24,11 @@ import {
   Badge,
   Button,
   Chip,
+  Dropdown,
   EmptyState,
   ErrorState,
   Icon,
+  Input,
   PressableScale,
   SegmentedControl,
   SkeletonGroup,
@@ -49,6 +51,9 @@ const P2PMarketScreen: React.FC = () => {
   const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
+  // Minimum trade amount (fiat, in the selected currency). Shows ads whose
+  // max limit can accommodate this amount and up.
+  const [minAmount, setMinAmount] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setError(false);
@@ -66,14 +71,25 @@ const P2PMarketScreen: React.FC = () => {
     load();
   }, [load]);
 
-  // Clear any stale provider filter when currency/token/side changes.
+  // Clear stale filters when currency/token/side changes (the amount filter is
+  // denominated in the current currency, so it can't carry across switches).
   useEffect(() => {
     setProviderFilter(null);
+    setMinAmount(null);
   }, [currency.code, token, adSide]);
 
-  const visibleAds = providerFilter
-    ? ads.filter((a) => (a.paymentMethodSummary ?? []).some((s) => s.provider === providerFilter))
-    : ads;
+  const filtersActive = providerFilter != null || minAmount != null;
+  const visibleAds = ads.filter((a) => {
+    if (providerFilter && !(a.paymentMethodSummary ?? []).some((s) => s.provider === providerFilter)) {
+      return false;
+    }
+    if (minAmount != null) {
+      const max = a.maxLimit != null ? Number(a.maxLimit) : null;
+      // Ads with no max limit are unbounded → always accommodate the amount.
+      if (max != null && isFinite(max) && max < minAmount) return false;
+    }
+    return true;
+  });
 
   const createRoute = adSide === 'sell' ? '/p2p/create-ad' : '/p2p/create-buy-ad';
   const onCreate = () => router.push((isMerchant ? createRoute : '/merchants/merchant-request') as never);
@@ -175,8 +191,16 @@ const P2PMarketScreen: React.FC = () => {
         </View>
 
         {!loading && !error && ads.length > 0 && (
-          <View style={{ marginBottom: spacing.md }}>
-            <PaymentMethodFilter options={distinctAdProviders(ads)} selected={providerFilter} onChange={setProviderFilter} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+            <AmountFilter
+              value={minAmount}
+              onChange={setMinAmount}
+              currencyCode={currency.code}
+              currencySymbol={currency.symbol}
+            />
+            <View style={{ flexShrink: 1 }}>
+              <PaymentMethodFilter options={distinctAdProviders(ads)} selected={providerFilter} onChange={setProviderFilter} />
+            </View>
           </View>
         )}
 
@@ -195,10 +219,21 @@ const P2PMarketScreen: React.FC = () => {
         ) : visibleAds.length === 0 ? (
           <EmptyState
             icon="filter"
-            title="No ads match this filter"
-            subtitle="Try a different payment method."
-            actionLabel="Clear filter"
-            onAction={() => setProviderFilter(null)}
+            title="No ads match these filters"
+            subtitle={
+              minAmount != null
+                ? `No ads handle ${currencyShort(currency.code, minAmount)}+ with this payment method.`
+                : 'Try a different payment method.'
+            }
+            actionLabel={filtersActive ? 'Clear filters' : undefined}
+            onAction={
+              filtersActive
+                ? () => {
+                    setProviderFilter(null);
+                    setMinAmount(null);
+                  }
+                : undefined
+            }
           />
         ) : (
           <View style={{ gap: spacing.md }}>
@@ -327,6 +362,100 @@ const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide })
         </View>
       </AccentCard>
     </PressableScale>
+  );
+};
+
+// Compact "minimum amount" filter — a chip trigger that opens an anchored
+// dropdown with a numeric field. Filters the list to ads whose max limit can
+// accommodate the entered amount and up (see visibleAds).
+const AmountFilter: React.FC<{
+  value: number | null;
+  onChange: (v: number | null) => void;
+  currencyCode: string;
+  currencySymbol: string;
+}> = ({ value, onChange, currencyCode, currencySymbol }) => {
+  const { colors, spacing, radius } = useTheme();
+  const active = value != null;
+  return (
+    <Dropdown
+      align="start"
+      menuWidth={240}
+      renderTrigger={() => (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: spacing.xs,
+            paddingHorizontal: spacing.md,
+            paddingVertical: spacing.sm,
+            borderRadius: radius.sm,
+            borderWidth: 1,
+            borderColor: active ? colors.accent : colors.border,
+            backgroundColor: active ? colors.accentMuted : colors.surface,
+          }}
+        >
+          <Text variant="bodySm" weight="600" color={active ? 'accent' : 'textSecondary'} numberOfLines={1}>
+            {value != null ? `≥ ${currencyShort(currencyCode, value)}` : 'Amount'}
+          </Text>
+          <Icon name="chevronDown" size={16} color={active ? colors.accent : colors.textMuted} />
+        </View>
+      )}
+    >
+      {({ close }) => (
+        <AmountMenu
+          initial={value}
+          currencyCode={currencyCode}
+          currencySymbol={currencySymbol}
+          onApply={(v) => {
+            onChange(v);
+            close();
+          }}
+          onClear={() => {
+            onChange(null);
+            close();
+          }}
+        />
+      )}
+    </Dropdown>
+  );
+};
+
+const AmountMenu: React.FC<{
+  initial: number | null;
+  currencyCode: string;
+  currencySymbol: string;
+  onApply: (v: number | null) => void;
+  onClear: () => void;
+}> = ({ initial, currencyCode, currencySymbol, onApply, onClear }) => {
+  const { spacing } = useTheme();
+  const [draft, setDraft] = useState(initial != null ? String(initial) : '');
+  const apply = () => {
+    const n = parseFloat(draft);
+    onApply(isFinite(n) && n > 0 ? n : null);
+  };
+  return (
+    <View style={{ padding: spacing.md, gap: spacing.sm }}>
+      <Text variant="overline" color="textMuted">
+        MIN AMOUNT ({currencyCode})
+      </Text>
+      <Input
+        value={draft}
+        onChangeText={(t) => setDraft(t.replace(/[^0-9.]/g, ''))}
+        keyboardType="numeric"
+        placeholder="0"
+        returnKeyType="done"
+        onSubmitEditing={apply}
+        leftAdornment={
+          <Text variant="bodyMed" color="textMuted">
+            {currencySymbol}
+          </Text>
+        }
+      />
+      <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+        <Button title="Clear" variant="secondary" size="sm" onPress={onClear} style={{ flex: 1 }} />
+        <Button title="Apply" size="sm" onPress={apply} style={{ flex: 1 }} />
+      </View>
+    </View>
   );
 };
 
