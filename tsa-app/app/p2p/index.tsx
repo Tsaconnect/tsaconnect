@@ -16,7 +16,6 @@ import { useUserRole } from '../../hooks/useUserRole';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import PaymentMethodFilter from '../../components/p2p/PaymentMethodFilter';
-import SellerTrustBadges from '../../components/p2p/SellerTrustBadges';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -25,7 +24,6 @@ import {
   Badge,
   Button,
   Chip,
-  Divider,
   EmptyState,
   ErrorState,
   Icon,
@@ -142,10 +140,10 @@ const P2PMarketScreen: React.FC = () => {
           leftIcon="plus"
           variant="secondary"
           onPress={onCreate}
-          style={{ marginTop: spacing.lg }}
+          style={{ marginTop: spacing.md }}
         />
 
-        <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.md, marginBottom: spacing.lg }}>
+        <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm, marginBottom: spacing.md }}>
           {adSide === 'sell'
             ? `Buy ${token} with ${currency.code}. Funds are escrowed on chain until the seller releases.`
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
@@ -170,14 +168,14 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg }}>
+        <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md }}>
           {TOKENS.map((t) => (
             <Chip key={t} label={t} selected={token === t} onPress={() => setToken(t)} />
           ))}
         </View>
 
         {!loading && !error && ads.length > 0 && (
-          <View style={{ marginBottom: spacing.lg }}>
+          <View style={{ marginBottom: spacing.md }}>
             <PaymentMethodFilter options={distinctAdProviders(ads)} selected={providerFilter} onChange={setProviderFilter} />
           </View>
         )}
@@ -222,6 +220,28 @@ const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide })
   const isStale = !!ad.rateStale;
   const sellerLabel = ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
 
+  // Fold the seller's trust signals into a single caption line (Bybit-style)
+  // instead of a full-height badge row — keeps each card to ~1/3 screen.
+  const stats = ad.sellerStats;
+  const isNew = !stats || stats.isNew;
+  const statsText = (() => {
+    if (isNew || !stats) return '';
+    const parts = [`${stats.totalOrders} orders`];
+    if (stats.completionRate != null) parts.push(`${(stats.completionRate * 100).toFixed(0)}%`);
+    const rel = relTime(stats.avgReleaseSecs);
+    if (rel) parts.push(`releases ${rel}`);
+    return parts.join(' · ');
+  })();
+
+  // One tight meta line: limit range + remaining, instead of a divider + 2-col row.
+  const limitText =
+    ad.minLimit && ad.maxLimit
+      ? `${currencyShort(ad.fiatCurrency, ad.minLimit)}–${currencyShort(ad.fiatCurrency, ad.maxLimit)}`
+      : null;
+  const metaText = [limitText ? `Limit ${limitText}` : null, `${remaining} ${ad.token} avail`]
+    .filter(Boolean)
+    .join('  ·  ');
+
   return (
     <PressableScale
       onPress={() => {
@@ -231,70 +251,91 @@ const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide })
       disabled={isStale}
       style={{ opacity: isStale ? 0.6 : 1 }}
     >
-      <AccentCard railColor={isStale ? colors.textMuted : colors.accentRail}>
-        <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-          <PressableScale
-            onPress={() => router.push((`/p2p/seller/${ad.sellerId}`) as never)}
-            style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 }}
-          >
-            <Avatar name={sellerLabel} size={36} />
-            <View style={{ flex: 1 }}>
-              <Text variant="bodyMed" weight="700" numberOfLines={1}>
-                @{sellerLabel}
-              </Text>
+      <AccentCard padding="md" railColor={isStale ? colors.textMuted : colors.accentRail}>
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          {/* LEFT — seller, rate, limits and payment, tightly stacked */}
+          <View style={{ flex: 1 }}>
+            <PressableScale
+              onPress={() => router.push((`/p2p/seller/${ad.sellerId}`) as never)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}
+            >
+              <Avatar name={sellerLabel} size={32} />
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                  <Text variant="bodySm" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>
+                    @{sellerLabel}
+                  </Text>
+                  {stats?.online && (
+                    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colors.online }} />
+                  )}
+                  {isNew ? (
+                    <Badge label="New" size="sm" color={colors.info} background={colors.infoBg} />
+                  ) : stats?.trusted ? (
+                    <Badge label="Trusted" icon="verified" size="sm" color={colors.accent} background={colors.accentMuted} />
+                  ) : stats?.verified ? (
+                    <Badge label="Verified" icon="checkCircle" size="sm" color={colors.success} background={colors.successBg} />
+                  ) : null}
+                  {isFloat && (
+                    <Badge label="Float" icon="trendingUp" size="sm" color={colors.accent} background={colors.accentMuted} />
+                  )}
+                </View>
+                {statsText ? (
+                  <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 1 }}>
+                    {statsText}
+                  </Text>
+                ) : (
+                  <Text variant="caption" color="textMuted" numberOfLines={1}>
+                    {adSide === 'sell' ? `Sells ${ad.token}` : `Buys ${ad.token}`}
+                  </Text>
+                )}
+              </View>
+            </PressableScale>
+
+            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4, marginTop: spacing.sm }}>
+              <AmountText value={ad.rate} currency={ad.fiatCurrency} variant="title2" />
               <Text variant="caption" color="textMuted">
-                {adSide === 'sell' ? `Sells ${ad.token}` : `Buys ${ad.token}`}
+                / {ad.token}
               </Text>
             </View>
-          </PressableScale>
-          {isFloat && <Badge label="Float" icon="trendingUp" color={colors.accent} background={colors.accentMuted} size="sm" />}
-        </View>
 
-        <SellerTrustBadges stats={ad.sellerStats} />
-
-        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4, marginTop: spacing.sm }}>
-          <AmountText value={ad.rate} currency={ad.fiatCurrency} variant="title1" />
-          <Text variant="bodySm" color="textMuted">
-            / {ad.token}
-          </Text>
-        </View>
-
-        {isStale && <StatusPill kind="ad" status="rateStale" size="sm" style={{ marginTop: spacing.xs }} />}
-
-        <Divider spacing="md" />
-
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-          <View>
-            <Text variant="overline" color="textMuted">
-              AVAILABLE
+            <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 2 }}>
+              {metaText}
             </Text>
-            <Text variant="bodySm" weight="700">
-              {remaining} {ad.token}
-            </Text>
+
+            {ad.paymentMethodSummary && ad.paymentMethodSummary.length > 0 && (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm }}>
+                {ad.paymentMethodSummary.slice(0, 3).map((s) => (
+                  <Badge key={s.provider} label={s.label} size="sm" />
+                ))}
+              </View>
+            )}
+
+            {isStale && <StatusPill kind="ad" status="rateStale" size="sm" style={{ marginTop: spacing.xs }} />}
           </View>
-          {ad.minLimit && ad.maxLimit && (
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text variant="overline" color="textMuted">
-                LIMIT
-              </Text>
-              <Text variant="bodySm" weight="700" numeric>
-                {`${currencyShort(ad.fiatCurrency, ad.minLimit)} – ${currencyShort(ad.fiatCurrency, ad.maxLimit)}`}
-              </Text>
-            </View>
+
+          {/* RIGHT — primary CTA filling the otherwise-empty column, centered
+              against the info stack so it adds no extra height. */}
+          {!isStale && (
+            <Button
+              title={adSide === 'sell' ? 'Buy' : 'Sell'}
+              size="sm"
+              fullWidth={false}
+              onPress={() => router.push(`/p2p/ad/${ad.id}`)}
+              style={{ alignSelf: 'center', minWidth: 76 }}
+            />
           )}
         </View>
-
-        {ad.paymentMethodSummary && ad.paymentMethodSummary.length > 0 && (
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.md }}>
-            {ad.paymentMethodSummary.slice(0, 4).map((s) => (
-              <Badge key={s.provider} label={s.label} size="sm" />
-            ))}
-          </View>
-        )}
       </AccentCard>
     </PressableScale>
   );
 };
+
+// Approx. avg-release time for the seller-stats caption (~Ns / ~Nm).
+function relTime(secs?: number): string | null {
+  if (secs == null) return null;
+  if (secs < 90) return `~${secs}s`;
+  return `~${Math.round(secs / 60)}m`;
+}
 
 // Compact fiat for tight limit rows (symbol + grouped integer).
 function currencyShort(currency: string, amount: string | number): string {
