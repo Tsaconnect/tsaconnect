@@ -1,16 +1,35 @@
+// components/wallet/ImportTokenModal.tsx
+//
+// Import-token modal — a 3-step flow (enter contract address → read on-chain
+// token data → confirm + import) launched from the wallet home "Import Token"
+// action. Restyled onto the TSA Signature design system (theme tokens +
+// @/components/ui primitives), now built on the shared Sheet primitive.
+//
+// FINANCIAL component: the props interface + default export, ERC20 address
+// validation, on-chain token lookup (readTokenContract), the duplicate-symbol
+// guard, and the importToken persistence call are all preserved verbatim — this
+// is a visual/structural restyle only. The hashColor() helper is registry-style
+// data (the custom token's icon color), not chrome, so it is kept unchanged.
 import React, { useState } from 'react';
-import {
-  View, Text, TextInput, TouchableOpacity, Modal, Pressable,
-  StyleSheet, ActivityIndicator, Alert,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View, ScrollView, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { readTokenContract } from '../../services/wallet';
 import { useTokens, type CustomToken } from '../../hooks/useTokens';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Button,
+  Icon,
+  IconButton,
+  Input,
+  Spinner,
+  SummaryCard,
+  SummaryRow,
+  Text,
+  Sheet,
+} from '@/components/ui';
 import ChainSelector from './ChainSelector';
-
-const GOLD = '#D4AF37';
 
 interface ImportTokenModalProps {
   visible: boolean;
@@ -29,6 +48,7 @@ function hashColor(str: string): string {
 }
 
 const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
+  const { colors, spacing, radius } = useTheme();
   const { tokens, importToken } = useTokens();
   const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
   const [contractAddress, setContractAddress] = useState('');
@@ -105,143 +125,159 @@ const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
     }
   };
 
+  const errorBanner = error ? (
+    <AccentCard padding="md" railColor={colors.danger} style={{ marginTop: spacing.md }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+        <Icon name="warning" size={16} color={colors.danger} />
+        <Text variant="caption" color="danger" style={{ flex: 1 }}>
+          {error}
+        </Text>
+      </View>
+    </AccentCard>
+  ) : null;
+
   return (
-    <Modal visible={visible} transparent animationType="slide">
-      <Pressable style={styles.overlay} onPress={handleClose}>
-        <Pressable style={styles.content} onPress={(e) => e.stopPropagation()}>
-          <View style={styles.handle} />
-          <Text style={styles.title}>Import Token</Text>
+    <Sheet visible={visible} onClose={handleClose} title="Import Token">
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.md }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+          NETWORK
+        </Text>
+        <ChainSelector
+          availableChains={CHAIN_KEYS}
+          selectedChain={selectedChain}
+          onSelect={(chain) => { setSelectedChain(chain); setError(''); }}
+          size="normal"
+        />
 
-          <Text style={styles.label}>NETWORK</Text>
-          <ChainSelector
-            availableChains={CHAIN_KEYS}
-            selectedChain={selectedChain}
-            onSelect={(chain) => { setSelectedChain(chain); setError(''); }}
-            size="normal"
-          />
-
-          {step === 'input' && (
-            <>
-              <Text style={[styles.label, { marginTop: 20 }]}>CONTRACT ADDRESS</Text>
-              <View style={styles.inputRow}>
-                <TextInput
-                  style={styles.input}
-                  placeholder="0x..."
-                  placeholderTextColor="#CCC"
-                  value={contractAddress}
-                  onChangeText={(t) => { setContractAddress(t); setError(''); }}
-                  autoCapitalize="none"
-                  autoCorrect={false}
+        {step === 'input' && (
+          <>
+            <Text variant="overline" color="textMuted" style={{ marginTop: spacing.xl, marginBottom: spacing.sm }}>
+              CONTRACT ADDRESS
+            </Text>
+            <Input
+              placeholder="0x..."
+              value={contractAddress}
+              onChangeText={(t) => { setContractAddress(t); setError(''); }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              rightAdornment={
+                <IconButton
+                  icon="copy"
+                  accessibilityLabel="Paste from clipboard"
+                  onPress={handlePaste}
+                  size={18}
+                  variant="surface"
+                  color={colors.accent}
                 />
-                <TouchableOpacity style={styles.pasteBtn} onPress={handlePaste}>
-                  <Ionicons name="clipboard-outline" size={18} color={GOLD} />
-                </TouchableOpacity>
-              </View>
+              }
+            />
 
-              {error ? (
-                <View style={styles.errorRow}>
-                  <Ionicons name="alert-circle" size={14} color="#DC2626" />
-                  <Text style={styles.errorText}>{error}</Text>
-                </View>
-              ) : null}
+            {errorBanner}
 
-              <TouchableOpacity
-                style={[styles.btn, !contractAddress.trim() && { opacity: 0.4 }]}
-                onPress={handleLookup}
-                disabled={!contractAddress.trim()}
+            <Button
+              title="Look Up Token"
+              onPress={handleLookup}
+              disabled={!contractAddress.trim()}
+              style={{ marginTop: spacing.xl }}
+            />
+          </>
+        )}
+
+        {step === 'loading' && (
+          <View style={{ alignItems: 'center', paddingVertical: spacing['4xl'] }}>
+            <Spinner size="large" label={`Reading contract on ${CHAINS[selectedChain].name}...`} />
+          </View>
+        )}
+
+        {step === 'confirm' && tokenData && (
+          <>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: colors.surfaceAlt,
+                borderRadius: radius.lg,
+                padding: spacing.lg,
+                marginTop: spacing.xl,
+              }}
+            >
+              <View
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: radius.pill,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  backgroundColor: hashColor(tokenData.symbol),
+                }}
               >
-                <Text style={styles.btnText}>Look Up Token</Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {step === 'loading' && (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={GOLD} />
-              <Text style={styles.loadingText}>Reading contract on {CHAINS[selectedChain].name}...</Text>
+                <Text variant="title3" weight="700" style={{ color: colors.onAccent }}>
+                  {tokenData.symbol[0]}
+                </Text>
+              </View>
+              <View style={{ flex: 1, marginLeft: spacing.md }}>
+                <Text variant="bodyMed" weight="700">
+                  {tokenData.name}
+                </Text>
+                <Text variant="bodySm" color="textMuted">
+                  {tokenData.symbol}
+                </Text>
+              </View>
             </View>
-          )}
 
-          {step === 'confirm' && tokenData && (
-            <>
-              <View style={styles.tokenCard}>
-                <View style={[styles.tokenBadge, { backgroundColor: hashColor(tokenData.symbol) }]}>
-                  <Text style={styles.tokenBadgeText}>{tokenData.symbol[0]}</Text>
-                </View>
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.tokenName}>{tokenData.name}</Text>
-                  <Text style={styles.tokenSymbol}>{tokenData.symbol}</Text>
-                </View>
-              </View>
+            <View
+              style={{
+                backgroundColor: colors.surfaceAlt,
+                borderRadius: radius.md,
+                paddingHorizontal: spacing.lg,
+                paddingVertical: spacing.xs,
+                marginTop: spacing.md,
+              }}
+            >
+              <SummaryCard>
+                <SummaryRow label="Symbol" value={tokenData.symbol} />
+                <SummaryRow label="Decimals" value={String(tokenData.decimals)} />
+                <SummaryRow label="Network" value={CHAINS[selectedChain].name} />
+                <SummaryRow
+                  label="Contract"
+                  value={
+                    <Text
+                      variant="bodyMed"
+                      weight="600"
+                      numeric
+                      numberOfLines={1}
+                      ellipsizeMode="middle"
+                      style={{ flexShrink: 1, maxWidth: '60%' }}
+                    >
+                      {contractAddress}
+                    </Text>
+                  }
+                />
+              </SummaryCard>
+            </View>
 
-              <View style={styles.detailsCard}>
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Symbol</Text>
-                  <Text style={styles.detailValue}>{tokenData.symbol}</Text>
-                </View>
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Decimals</Text>
-                  <Text style={styles.detailValue}>{tokenData.decimals}</Text>
-                </View>
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Network</Text>
-                  <Text style={styles.detailValue}>{CHAINS[selectedChain].name}</Text>
-                </View>
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Contract</Text>
-                  <Text style={styles.detailValue} numberOfLines={1} ellipsizeMode="middle">
-                    {contractAddress}
-                  </Text>
-                </View>
-              </View>
+            {errorBanner}
 
-              {error ? (
-                <View style={styles.errorRow}>
-                  <Ionicons name="alert-circle" size={14} color="#DC2626" />
-                  <Text style={styles.errorText}>{error}</Text>
-                </View>
-              ) : null}
-
-              <TouchableOpacity style={styles.btn} onPress={handleImport}>
-                <Text style={styles.btnText}>Import {tokenData.symbol}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setStep('input')}>
-                <Text style={styles.cancelText}>Back</Text>
-              </TouchableOpacity>
-            </>
-          )}
-        </Pressable>
-      </Pressable>
-    </Modal>
+            <Button
+              title={`Import ${tokenData.symbol}`}
+              onPress={handleImport}
+              style={{ marginTop: spacing.xl }}
+            />
+            <Button
+              title="Back"
+              variant="ghost"
+              onPress={() => setStep('input')}
+              style={{ marginTop: spacing.sm }}
+            />
+          </>
+        )}
+      </ScrollView>
+    </Sheet>
   );
 };
 
 export default ImportTokenModal;
-
-const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  content: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, maxHeight: '80%' },
-  handle: { width: 40, height: 4, backgroundColor: '#E0E0E0', borderRadius: 2, alignSelf: 'center', marginBottom: 16 },
-  title: { fontSize: 20, fontWeight: '700', color: '#1A1A1A', marginBottom: 20, textAlign: 'center' },
-  label: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 8 },
-  inputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  input: { flex: 1, backgroundColor: '#F5F5F5', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14, fontSize: 15, color: '#1A1A1A', borderWidth: 1, borderColor: '#F0F0F0' },
-  pasteBtn: { width: 44, height: 48, backgroundColor: '#FFF8E1', borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
-  errorRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
-  errorText: { fontSize: 12, color: '#DC2626', flex: 1 },
-  btn: { backgroundColor: '#D4AF37', paddingVertical: 16, borderRadius: 14, alignItems: 'center', marginTop: 20 },
-  btnText: { fontSize: 16, fontWeight: '700', color: '#FFF' },
-  cancelBtn: { paddingVertical: 14, alignItems: 'center', marginTop: 8 },
-  cancelText: { fontSize: 15, color: '#888', fontWeight: '600' },
-  loadingContainer: { alignItems: 'center', paddingVertical: 40, gap: 16 },
-  loadingText: { fontSize: 14, color: '#888' },
-  tokenCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F9F9F9', borderRadius: 16, padding: 16, marginTop: 20 },
-  tokenBadge: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
-  tokenBadgeText: { fontSize: 18, fontWeight: '700', color: '#FFF' },
-  tokenName: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
-  tokenSymbol: { fontSize: 13, color: '#888' },
-  detailsCard: { backgroundColor: '#F9F9F9', borderRadius: 12, padding: 14, marginTop: 12 },
-  detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },
-  detailLabel: { fontSize: 13, color: '#888' },
-  detailValue: { fontSize: 13, fontWeight: '600', color: '#1A1A1A', maxWidth: '60%' },
-});
