@@ -144,7 +144,11 @@ const ServicesScreen: React.FC = () => {
                 onPress={() => router.push(item.route as never)}
                 style={{ flexGrow: 1, flexBasis: '47%' }}
               >
-                <Card padding="lg" style={{ height: '100%' }}>
+                {/* No height:'100%' — a percentage height resolves against the
+                    ScrollView's unbounded measuring height and blows the card up
+                    to full-screen. The row's default alignItems:'stretch' already
+                    equalizes the two cells; tiles size to their (uniform) content. */}
+                <Card padding="lg">
                   <View
                     style={{
                       width: 48,
