@@ -1,5 +1,15 @@
+// components/wallet/ChainSelector.tsx
+//
+// Horizontal chain-filter chip row for the wallet (send / receive / home).
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives). Visual/structural restyle only — the props interface, exports,
+// chain list (CHAINS registry), and selection logic are preserved verbatim. The
+// per-chain dot color still comes from each chain's `iconColor` (registry data,
+// not styling).
 import React from 'react';
-import { View, ScrollView, TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { ScrollView, View } from 'react-native';
+import { useTheme } from '@/theme';
+import { PressableScale, Text } from '@/components/ui';
 import { CHAINS, type ChainKey } from '../../constants/chains';
 
 interface ChainSelectorProps {
@@ -21,48 +31,67 @@ const ChainSelector = ({
   allSelected = false,
   size = 'normal',
 }: ChainSelectorProps) => {
+  const { colors, spacing, radius } = useTheme();
   const isCompact = size === 'compact';
-  const chipPadH = isCompact ? 10 : 14;
-  const chipPadV = isCompact ? 6 : 10;
-  const fontSize = isCompact ? 12 : 13;
+  const chipPadH = isCompact ? spacing.md : spacing.lg;
+  const chipPadV = isCompact ? spacing.xs : spacing.sm;
+
+  const chipStyle = (active: boolean) => ({
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: spacing.xs,
+    paddingHorizontal: chipPadH,
+    paddingVertical: chipPadV,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: active ? colors.accent : colors.border,
+    backgroundColor: active ? colors.accentMuted : colors.surface,
+  });
 
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scroll} contentContainerStyle={styles.container}>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={{ flexGrow: 0 }}
+      contentContainerStyle={{ flexDirection: 'row', gap: spacing.sm }}
+    >
       {showAll && onSelectAll && (
-        <TouchableOpacity
-          style={[
-            styles.chip,
-            { paddingHorizontal: chipPadH, paddingVertical: chipPadV },
-            allSelected && styles.chipActive,
-          ]}
-          onPress={onSelectAll}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.chipText, { fontSize }, allSelected && styles.chipTextActive]}>
+        <PressableScale style={chipStyle(allSelected)} onPress={onSelectAll}>
+          <Text
+            variant={isCompact ? 'caption' : 'bodySm'}
+            weight={allSelected ? '700' : '600'}
+            style={{ color: allSelected ? colors.textPrimary : colors.textMuted }}
+          >
             All
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
       )}
       {availableChains.map((chainKey) => {
         const chain = CHAINS[chainKey];
         if (!chain) return null;
         const active = !allSelected && selectedChain === chainKey;
         return (
-          <TouchableOpacity
+          <PressableScale
             key={chainKey}
-            style={[
-              styles.chip,
-              { paddingHorizontal: chipPadH, paddingVertical: chipPadV },
-              active && styles.chipActive,
-            ]}
+            style={chipStyle(active)}
             onPress={() => onSelect(chainKey)}
-            activeOpacity={0.7}
           >
-            <View style={[styles.chainDot, { backgroundColor: chain.iconColor }]} />
-            <Text style={[styles.chipText, { fontSize }, active && styles.chipTextActive]}>
+            <View
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: radius.pill,
+                backgroundColor: chain.iconColor,
+              }}
+            />
+            <Text
+              variant={isCompact ? 'caption' : 'bodySm'}
+              weight={active ? '700' : '600'}
+              style={{ color: active ? colors.textPrimary : colors.textMuted }}
+            >
               {chain.shortName}
             </Text>
-          </TouchableOpacity>
+          </PressableScale>
         );
       })}
     </ScrollView>
@@ -70,41 +99,3 @@ const ChainSelector = ({
 };
 
 export default ChainSelector;
-
-const GOLD = '#D4AF37';
-
-const styles = StyleSheet.create({
-  scroll: {
-    flexGrow: 0,
-  },
-  container: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#F5F5F5',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  chipActive: {
-    backgroundColor: '#FFF8E1',
-    borderColor: GOLD,
-  },
-  chainDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  chipText: {
-    fontWeight: '600',
-    color: '#888',
-  },
-  chipTextActive: {
-    color: '#1A1A1A',
-    fontWeight: '700',
-  },
-});

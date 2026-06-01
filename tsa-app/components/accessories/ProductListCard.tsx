@@ -1,15 +1,18 @@
+// components/accessories/ProductListCard.tsx
+//
+// Product / service category list card. Restyled onto the TSA Signature design
+// system: legacy constants/theme (COLORS/SIZES) and the hand-rolled StyleSheet
+// are replaced by useTheme tokens + @/components/ui primitives (Card, Avatar,
+// Text, Icon, EmptyState, Button, PressableScale). The props interface, exports,
+// AppContext.setCategory wiring, the isDisabled debounce, the "digital → coming
+// soon" alert, the empty-state "Register" link, and the navigation route/params
+// are all unchanged — this is a visual / structural migration only.
 import React, { useContext, useState } from "react";
-import {
-  ScrollView,
-  View,
-  Text,
-  Image,
-  StyleSheet,
-  Pressable,
-} from "react-native";
-import { COLORS, SIZES } from "../../constants";
+import { ScrollView, View, Image } from "react-native";
 import { Link, router } from "expo-router";
 import { AppContext } from "../../AuthContext/AuthContext";
+import { useTheme } from "@/theme";
+import { Avatar, Card, EmptyState, Icon, PressableScale, Text } from "@/components/ui";
 
 interface Item {
   id: string;
@@ -31,28 +34,22 @@ const ProductListCard: React.FC<ProductListCardProps> = ({
 }) => {
   const { setCategory } = useContext(AppContext);
   const [isDisabled, setIsDisabled] = useState(false);
+  const { colors, spacing, radius } = useTheme();
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView
+      style={{ flex: 1, backgroundColor: colors.background }}
+      contentContainerStyle={{ padding: spacing.lg, gap: spacing.sm }}
+    >
       {itemList.length === 0 ? (
-        <View style={styles.notFoundContainer}>
-          <Text style={styles.notFoundText}>
-            No registered available vendor merchant at the moment.
-          </Text>
-          <Text style={styles.subText}>
-            Do you offer such product or service?
-          </Text>
-          <Link
-            //@ts-ignore
-            href="/serviceaction"
-            style={styles.registerLink}
-          >
-            Register
-          </Link>
-        </View>
+        <EmptyState
+          icon="storefront"
+          title="No registered available vendor merchant at the moment."
+          subtitle="Do you offer such product or service?"
+        />
       ) : (
         itemList.map((item, itemIndex) => (
-          <Pressable
+          <PressableScale
             onPress={() => {
               if (itemValue === "digital") {
                 alert("coming soon");
@@ -74,69 +71,54 @@ const ProductListCard: React.FC<ProductListCardProps> = ({
             key={itemIndex}
             disabled={isDisabled}
           >
-            <View style={styles.itemContainer}>
-              {(item.icon || item.image) ? (
+            <Card
+              padding="md"
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: spacing.md,
+              }}
+            >
+              {item.icon || item.image ? (
                 <Image
                   source={{ uri: item.icon || item.image }}
-                  style={styles.iconStyle}
+                  style={{
+                    width: 44,
+                    height: 44,
+                    borderRadius: radius.pill,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
                   resizeMode="contain"
                 />
               ) : (
-                <View style={[styles.iconStyle, styles.iconPlaceholder]} />
+                <Avatar name={item.title} size={44} />
               )}
-              <Text style={styles.itemText}>{item.title}</Text>
-            </View>
-          </Pressable>
+              <Text variant="bodyMed" weight="600" style={{ flex: 1 }} numberOfLines={2}>
+                {item.title}
+              </Text>
+              <Icon name="chevronRight" size={20} color={colors.textMuted} />
+            </Card>
+          </PressableScale>
         ))
+      )}
+
+      {itemList.length === 0 && (
+        <View style={{ alignItems: "center", marginTop: spacing.md }}>
+          <Link
+            //@ts-ignore
+            href="/serviceaction"
+            style={{
+              fontSize: 16,
+              color: colors.accent,
+              paddingVertical: spacing.sm,
+            }}
+          >
+            Register
+          </Link>
+        </View>
       )}
     </ScrollView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 10,
-    backgroundColor: "#fff",
-  },
-  notFoundContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    height: SIZES.height * 0.7,
-  },
-  notFoundText: {
-    fontSize: 14,
-  },
-  subText: {
-    fontSize: 14,
-  },
-  registerLink: {
-    fontSize: 16,
-    color: "#E8A14A",
-    marginTop: 20,
-  },
-  itemContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 5,
-    borderColor: COLORS.gray,
-    borderBottomWidth: 0.5,
-    height: SIZES.height * 0.07081545,
-    backgroundColor: "#FFF4E8",
-  },
-  iconStyle: {
-    width: 40,
-    height: "96%",
-    marginRight: 5,
-    borderRadius: 60,
-  },
-  iconPlaceholder: {
-    backgroundColor: "#FFE5C4",
-  },
-  itemText: {
-    fontSize: 16,
-  },
-});
 
 export default ProductListCard;

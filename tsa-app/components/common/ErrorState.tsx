@@ -1,6 +1,13 @@
-// Simple inline ErrorState component
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+// components/common/ErrorState.tsx
+//
+// Inline error-state component. Restyled onto the TSA Signature design system
+// (theme tokens + @/components/ui primitives) — visual/structural restyle only.
+// Props interface ({ message, onRetry }) and the named `ErrorState` export are
+// preserved verbatim so existing consumers keep working; a separate design-system
+// ErrorState lives at @/components/ui (different `subtitle`-based API).
+import { View } from 'react-native';
+import { useTheme } from '@/theme';
+import { Text, Button, Icon } from '@/components/ui';
 
 interface ErrorStateProps {
   message: string;
@@ -8,62 +15,46 @@ interface ErrorStateProps {
 }
 
 export const ErrorState = ({ message, onRetry }: ErrorStateProps) => {
+  const { colors, spacing, radius } = useTheme();
   return (
-    <View style={errorStyles.container}>
-      <View style={errorStyles.iconContainer}>
-        <Ionicons name="alert-circle-outline" size={64} color="#FF6B6B" />
+    <View
+      style={{
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+        paddingHorizontal: spacing['3xl'],
+        paddingVertical: spacing['4xl'],
+        gap: spacing.sm,
+      }}
+    >
+      <View
+        style={{
+          width: 96,
+          height: 96,
+          borderRadius: radius.pill,
+          backgroundColor: colors.dangerBg,
+          justifyContent: 'center',
+          alignItems: 'center',
+          marginBottom: spacing.lg,
+        }}
+      >
+        <Icon name="warning" size={48} color={colors.danger} />
       </View>
-      <Text style={errorStyles.title}>Something went wrong</Text>
-      <Text style={errorStyles.message}>{message}</Text>
+      <Text variant="title2" weight="700" align="center">
+        Something went wrong
+      </Text>
+      <Text variant="body" color="textSecondary" align="center">
+        {message}
+      </Text>
       {onRetry && (
-        <TouchableOpacity style={errorStyles.retryButton} onPress={onRetry}>
-          <Text style={errorStyles.retryText}>Try Again</Text>
-        </TouchableOpacity>
+        <Button
+          title="Try Again"
+          onPress={onRetry}
+          leftIcon="refresh"
+          fullWidth={false}
+          style={{ marginTop: spacing.xl }}
+        />
       )}
     </View>
   );
 };
-
-const errorStyles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 40,
-    paddingVertical: 60,
-  },
-  iconContainer: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: 'rgba(255, 107, 107, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '600',
-    color: '#1A1A1A',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  message: {
-    fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: 32,
-  },
-  retryButton: {
-    backgroundColor: '#D4AF37',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  retryText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
-});

@@ -1,16 +1,26 @@
+// components/marketplace/ProductPreview.tsx
+//
+// Product preview card — a horizontal strip of product cards (with search-term
+// highlighting, featured / low-stock badges, and a "view all" tile) shown on
+// seller / search surfaces. Restyled onto the TSA Signature design system
+// (theme tokens + @/components/ui primitives). Props, exports, the search
+// highlight logic, the 6-item slice, money formatting, and all navigation
+// routes + params are unchanged — this is a visual / structural migration only.
 import React, { memo } from 'react';
-import {
-  View,
-  Text,
-  Image,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  Dimensions
-} from 'react-native';
+import { View, Image, ScrollView, Dimensions } from 'react-native';
 import { Product } from '@/types/marketplace';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '@/theme';
+import {
+  AmountText,
+  Badge,
+  Card,
+  EmptyState,
+  Icon,
+  PressableScale,
+  Surface,
+  Text,
+} from '@/components/ui';
 
 interface ProductPreviewProps {
   products: Product[];
@@ -20,16 +30,12 @@ interface ProductPreviewProps {
 const { width } = Dimensions.get('window');
 const PRODUCT_PREVIEW_WIDTH = (width - 80) / 3;
 
-export const ProductPreview = memo(({ products, searchQuery }: ProductPreviewProps) => {
+export const ProductPreview = memo(function ProductPreview({ products, searchQuery }: ProductPreviewProps) {
   const router = useRouter();
-  
+  const { colors, spacing, radius } = useTheme();
+
   if (products.length === 0) {
-    return (
-      <View style={styles.emptyContainer}>
-        <Ionicons name="cube-outline" size={32} color="#D4AF37" />
-        <Text style={styles.emptyText}>No products available</Text>
-      </View>
-    );
+    return <EmptyState icon="pricetag" title="No products available" />;
   }
 
   const handleProductPress = (productId: string) => {
@@ -38,19 +44,30 @@ export const ProductPreview = memo(({ products, searchQuery }: ProductPreviewPro
 
   const highlightText = (text: string, highlight?: string) => {
     if (!highlight || !text.toLowerCase().includes(highlight.toLowerCase())) {
-      return <Text style={styles.productName} numberOfLines={1}>{text}</Text>;
+      return (
+        <Text variant="caption" weight="500" numberOfLines={1}>
+          {text}
+        </Text>
+      );
     }
-    
+
     const parts = text.split(new RegExp(`(${highlight})`, 'gi'));
     return (
-      <Text style={styles.productName} numberOfLines={1}>
-        {parts.map((part, i) => 
+      <Text variant="caption" weight="500" numberOfLines={1}>
+        {parts.map((part, i) =>
           part.toLowerCase() === highlight.toLowerCase() ? (
-            <Text key={i} style={styles.highlightedText}>
+            <Text
+              key={i}
+              variant="caption"
+              weight="700"
+              style={{ backgroundColor: colors.accentMuted, color: colors.accent }}
+            >
               {part}
             </Text>
           ) : (
-            <Text key={i}>{part}</Text>
+            <Text key={i} variant="caption" weight="500">
+              {part}
+            </Text>
           )
         )}
       </Text>
@@ -58,60 +75,79 @@ export const ProductPreview = memo(({ products, searchQuery }: ProductPreviewPro
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Products</Text>
-        <Text style={styles.productCount}>{products.length} items</Text>
+    <View style={{ marginTop: spacing.sm }}>
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: spacing.md,
+          paddingHorizontal: spacing.xs,
+        }}
+      >
+        <Text variant="title3" weight="700">
+          Products
+        </Text>
+        <Badge label={`${products.length} items`} color={colors.accent} background={colors.accentMuted} size="sm" />
       </View>
-      
+
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={{ paddingRight: spacing.lg }}
       >
         {products.slice(0, 6).map((product) => (
-          <TouchableOpacity
+          <PressableScale
             key={product.productId}
-            style={styles.productCard}
             onPress={() => handleProductPress(product.productId)}
-            activeOpacity={0.8}
+            style={{ width: PRODUCT_PREVIEW_WIDTH, marginRight: spacing.md }}
           >
-            <View style={styles.imageContainer}>
-              <Image
-                source={{ uri: product.image }}
-                style={styles.productImage}
-                resizeMode="cover"
-              />
-              {product.isFeatured && (
-                <View style={styles.featuredBadge}>
-                  <Text style={styles.featuredText}>🔥</Text>
-                </View>
-              )}
-              {product.stock && product.stock < 10 && (
-                <View style={styles.lowStockBadge}>
-                  <Text style={styles.lowStockText}>Low Stock</Text>
-                </View>
-              )}
-            </View>
-            <View style={styles.productInfo}>
-              {highlightText(product.name, searchQuery)}
-              <View style={styles.priceContainer}>
-                <Text style={styles.productPrice}>
-                  ${product.price.toFixed(2)}
-                </Text>
-                {product.stock && (
-                  <Text style={styles.stockText}>
-                    {product.stock} left
-                  </Text>
+            <Surface elevation="sm" style={{ overflow: 'hidden' }}>
+              <View style={{ position: 'relative' }}>
+                <Image
+                  source={{ uri: product.image }}
+                  style={{
+                    width: '100%',
+                    height: PRODUCT_PREVIEW_WIDTH,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
+                  resizeMode="cover"
+                />
+                {product.isFeatured && (
+                  <View style={{ position: 'absolute', top: spacing.sm, left: spacing.sm }}>
+                    <Badge label="Featured" icon="bolt" color={colors.onAccent} background={colors.accent} size="sm" />
+                  </View>
+                )}
+                {product.stock && product.stock < 10 && (
+                  <View style={{ position: 'absolute', bottom: spacing.sm, right: spacing.sm }}>
+                    <Badge label="Low Stock" color={colors.warning} background={colors.warningBg} size="sm" />
+                  </View>
                 )}
               </View>
-            </View>
-          </TouchableOpacity>
+              <View style={{ padding: spacing.sm }}>
+                {highlightText(product.name, searchQuery)}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: spacing.xs,
+                  }}
+                >
+                  <AmountText value={product.price} currency="USD" variant="bodySm" color="accent" minimumFractionDigits={2} maximumFractionDigits={2} />
+                  {product.stock && (
+                    <Text variant="overline" color="textMuted">
+                      {product.stock} left
+                    </Text>
+                  )}
+                </View>
+              </View>
+            </Surface>
+          </PressableScale>
         ))}
-        
+
         {products.length > 6 && (
-          <TouchableOpacity
-            style={styles.moreContainer}
+          <PressableScale
             onPress={() => {
               // Navigate to full product list
               const sellerId = products[0]?.sellerId;
@@ -119,168 +155,32 @@ export const ProductPreview = memo(({ products, searchQuery }: ProductPreviewPro
                 router.push(`/seller/${sellerId}`);
               }
             }}
+            style={{ width: PRODUCT_PREVIEW_WIDTH }}
           >
-            <View style={styles.moreContent}>
-              <Ionicons name="grid-outline" size={24} color="#D4AF37" />
-              <Text style={styles.moreText}>
-                View all{'\n'}
-                <Text style={styles.moreCount}>+{products.length - 6} more</Text>
+            <Card
+              padding="md"
+              style={{
+                flex: 1,
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderWidth: 2,
+                borderStyle: 'dashed',
+                borderColor: colors.accentMuted,
+                backgroundColor: colors.accentMuted,
+                borderRadius: radius.lg,
+              }}
+            >
+              <Icon name="list" size={24} color={colors.accent} />
+              <Text variant="caption" color="textSecondary" align="center" style={{ marginTop: spacing.sm }}>
+                View all
               </Text>
-            </View>
-          </TouchableOpacity>
+              <Text variant="overline" weight="700" color="accent" align="center">
+                +{products.length - 6} more
+              </Text>
+            </Card>
+          </PressableScale>
         )}
       </ScrollView>
     </View>
   );
-});
-
-const styles = StyleSheet.create({
-  container: {
-    marginTop: 8,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-    paddingHorizontal: 4,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1A1A1A',
-  },
-  productCount: {
-    fontSize: 12,
-    color: '#666',
-    backgroundColor: 'rgba(212, 175, 55, 0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-  },
-  scrollContent: {
-    paddingRight: 16,
-  },
-  productCard: {
-    width: PRODUCT_PREVIEW_WIDTH,
-    marginRight: 12,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.08)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  imageContainer: {
-    position: 'relative',
-  },
-  productImage: {
-    width: '100%',
-    height: PRODUCT_PREVIEW_WIDTH,
-    backgroundColor: '#F5F5F5',
-  },
-  featuredBadge: {
-    position: 'absolute',
-    top: 8,
-    left: 8,
-    backgroundColor: 'rgba(255, 69, 0, 0.9)',
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  featuredText: {
-    fontSize: 10,
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-  },
-  lowStockBadge: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    backgroundColor: 'rgba(255, 215, 0, 0.9)',
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  lowStockText: {
-    fontSize: 9,
-    color: '#1A1A1A',
-    fontWeight: 'bold',
-  },
-  productInfo: {
-    padding: 10,
-  },
-  productName: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: '#333',
-    marginBottom: 6,
-    lineHeight: 16,
-  },
-  highlightedText: {
-    backgroundColor: 'rgba(212, 175, 55, 0.3)',
-    borderRadius: 2,
-    paddingHorizontal: 1,
-    color: '#1A1A1A',
-    fontWeight: '700',
-  },
-  priceContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  productPrice: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#D4AF37',
-  },
-  stockText: {
-    fontSize: 10,
-    color: '#666',
-    fontStyle: 'italic',
-  },
-  emptyContainer: {
-    padding: 20,
-    alignItems: 'center',
-    backgroundColor: 'rgba(212, 175, 55, 0.05)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(212, 175, 55, 0.1)',
-    borderStyle: 'dashed',
-  },
-  emptyText: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 8,
-  },
-  moreContainer: {
-    width: PRODUCT_PREVIEW_WIDTH,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(212, 175, 55, 0.05)',
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: 'rgba(212, 175, 55, 0.2)',
-    borderStyle: 'dashed',
-  },
-  moreContent: {
-    alignItems: 'center',
-    padding: 8,
-  },
-  moreText: {
-    fontSize: 11,
-    color: '#666',
-    textAlign: 'center',
-    marginTop: 6,
-    lineHeight: 14,
-  },
-  moreCount: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#D4AF37',
-  },
 });

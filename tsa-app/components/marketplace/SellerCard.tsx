@@ -1,19 +1,28 @@
+// components/marketplace/SellerCard.tsx
+//
+// Seller card — a product-grid hero with seller attribution footer, used in the
+// subcategory/search seller list. Migrated onto the TSA Signature design system
+// (theme tokens via useTheme + @/components/ui primitives). All logic is
+// unchanged: the props interface + default export, the search-highlight helper,
+// price formatting, product-image resolution, the derived seller/product values,
+// role/status gating (active vs inactive), and every navigation callback
+// (onPress for the seller, onProductPress for products + the cart overlay with
+// its stopPropagation) are preserved verbatim. This is a visual / structural
+// restyle only.
 import React from 'react';
+import { View, Image, Dimensions } from 'react-native';
+import { useTheme } from '@/theme';
 import {
-  View,
+  Avatar,
+  Badge,
+  Divider,
+  Icon,
+  PressableScale,
+  Surface,
   Text,
-  TouchableOpacity,
-  Image,
-  StyleSheet,
-  Dimensions,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+} from '@/components/ui';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const CARD_PADDING = 16;
-const CARD_MARGIN = 16;
-const GRID_GAP = 10;
-const TILE_WIDTH = (SCREEN_WIDTH - CARD_MARGIN * 2 - CARD_PADDING * 2 - GRID_GAP) / 2;
 
 interface SellerCardProps {
   seller: {
@@ -38,6 +47,12 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   onProductPress,
   searchQuery,
 }) => {
+  const { colors, spacing, radius } = useTheme();
+
+  // Two-up grid sized off the screen width minus the card margin + padding + gap.
+  const tileWidth =
+    (SCREEN_WIDTH - spacing.lg * 2 - spacing.lg * 2 - spacing.sm) / 2;
+
   const highlightText = (text: string) => {
     if (!searchQuery || !text) return text;
     const parts = text.split(new RegExp(`(${searchQuery})`, 'gi'));
@@ -45,7 +60,9 @@ export const SellerCard: React.FC<SellerCardProps> = ({
       <Text>
         {parts.map((part, index) =>
           part.toLowerCase() === searchQuery.toLowerCase() ? (
-            <Text key={index} style={styles.highlightedText}>{part}</Text>
+            <Text key={index} weight="700" style={{ backgroundColor: colors.warningBg, color: colors.textPrimary }}>
+              {part}
+            </Text>
           ) : (
             <Text key={index}>{part}</Text>
           )
@@ -66,7 +83,6 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   };
 
   const sellerDisplayName = seller.businessName || seller.name || seller.email?.split('@')[0] || 'Seller';
-  const sellerInitial = sellerDisplayName.charAt(0).toUpperCase();
   const visibleProducts = (seller.products || []).slice(0, 4);
   const totalCount = seller.productCount || seller.products?.length || 0;
   const hasMoreProducts = totalCount > 4;
@@ -74,307 +90,156 @@ export const SellerCard: React.FC<SellerCardProps> = ({
   const isActive = (seller.products || []).some((p: any) => p.status === 'active');
 
   return (
-    <View style={styles.container}>
+    <Surface
+      elevation="sm"
+      style={{ marginHorizontal: spacing.lg, marginVertical: spacing.sm, overflow: 'hidden' }}
+    >
       {/* ===== Product Grid (Hero) ===== */}
-      <View style={styles.grid}>
+      <View
+        style={{
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          padding: spacing.lg,
+          gap: spacing.sm,
+        }}
+      >
         {visibleProducts.map((product: any, index: number) => {
           const imageUrl = getProductImage(product);
+          const isFull = visibleProducts.length === 1;
           return (
-            <TouchableOpacity
+            <PressableScale
               key={product._id || product.id || `p-${index}`}
-              style={[styles.tile, visibleProducts.length === 1 && styles.tileFull]}
+              style={{ width: isFull ? '100%' : tileWidth }}
               onPress={() => onProductPress(product._id || product.id, product)}
-              activeOpacity={0.7}
             >
               {/* Product Image */}
-              <View style={styles.tileImageWrap}>
+              <View
+                style={{
+                  width: '100%',
+                  aspectRatio: 1,
+                  maxHeight: 200,
+                  borderRadius: radius.md,
+                  backgroundColor: colors.surfaceAlt,
+                  overflow: 'hidden',
+                }}
+              >
                 {imageUrl ? (
-                  <Image source={{ uri: imageUrl }} style={styles.tileImage} resizeMode="cover" />
+                  <Image source={{ uri: imageUrl }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                 ) : (
-                  <View style={styles.tilePlaceholder}>
-                    <Ionicons name="image-outline" size={36} color="#C4B89A" />
+                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+                    <Icon name="image" size={36} color={colors.textMuted} />
                   </View>
                 )}
                 {/* Cart overlay */}
-                <TouchableOpacity
-                  style={styles.cartOverlay}
+                <PressableScale
+                  style={{
+                    position: 'absolute',
+                    bottom: spacing.sm,
+                    right: spacing.sm,
+                    width: 30,
+                    height: 30,
+                    borderRadius: radius.pill,
+                    backgroundColor: colors.surface,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
                   onPress={(e) => {
                     e.stopPropagation();
                     onProductPress(product._id || product.id, product);
                   }}
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 >
-                  <Ionicons name="cart-outline" size={14} color="#D4AF37" />
-                </TouchableOpacity>
+                  <Icon name="cart" size={14} color={colors.accent} />
+                </PressableScale>
               </View>
 
               {/* Product Info */}
-              <View style={styles.tileInfo}>
-                <Text style={styles.tileName} numberOfLines={2}>
+              <View style={{ paddingTop: spacing.sm, paddingBottom: spacing.xs }}>
+                <Text variant="bodySm" weight="600" numberOfLines={2} style={{ marginBottom: spacing.xs }}>
                   {searchQuery ? highlightText(product.name) : product.name}
                 </Text>
                 {product.condition && (
-                  <View style={styles.conditionPill}>
-                    <Text style={styles.conditionText}>{product.condition}</Text>
-                  </View>
+                  <Badge label={product.condition} size="sm" style={{ marginBottom: spacing.xs }} />
                 )}
-                <View style={styles.priceRow}>
-                  <Text style={styles.tilePrice}>{formatPrice(product.price)}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: spacing.xs }}>
+                  <Text variant="bodyMed" weight="700" color="accent" numeric>
+                    {formatPrice(product.price)}
+                  </Text>
                   {product.type === 'Service' && (
-                    <Text style={styles.contactFeeText}>0.1$ contact fee</Text>
+                    <Text variant="caption" weight="500" color="danger">
+                      0.1$ contact fee
+                    </Text>
                   )}
                 </View>
               </View>
-            </TouchableOpacity>
+            </PressableScale>
           );
         })}
       </View>
 
       {/* View All */}
       {hasMoreProducts && (
-        <TouchableOpacity style={styles.viewAllRow} onPress={onPress} activeOpacity={0.7}>
-          <Text style={styles.viewAllText}>View all {totalCount} products</Text>
-          <Ionicons name="arrow-forward" size={14} color="#D4AF37" />
-        </TouchableOpacity>
+        <>
+          <Divider />
+          <PressableScale
+            onPress={onPress}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              paddingVertical: spacing.md,
+              gap: spacing.xs,
+            }}
+          >
+            <Text variant="bodySm" weight="600" color="accent">
+              View all {totalCount} products
+            </Text>
+            <Icon name="arrowRight" size={14} color={colors.accent} />
+          </PressableScale>
+        </>
       )}
 
       {/* ===== Seller Attribution (Footer) ===== */}
-      <TouchableOpacity style={styles.sellerFooter} onPress={onPress} activeOpacity={0.7}>
-        <View style={styles.sellerAvatar}>
-          <Text style={styles.sellerInitial}>{sellerInitial}</Text>
-        </View>
-        <View style={styles.sellerInfo}>
-          <Text style={styles.sellerLabel} numberOfLines={1}>
-            <Text style={styles.sellerPrefix}>Offers by </Text>
+      <Divider />
+      <PressableScale
+        onPress={onPress}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: spacing.lg,
+          paddingVertical: spacing.md,
+          backgroundColor: colors.backgroundAlt,
+        }}
+      >
+        <Avatar name={sellerDisplayName} size={26} />
+        <View style={{ flex: 1, marginLeft: spacing.sm }}>
+          <Text variant="bodySm" weight="500" color="textSecondary" numberOfLines={1}>
+            <Text variant="bodySm" weight="600" color="success">Offers by </Text>
             {sellerDisplayName}
           </Text>
           {hasRating && (
-            <View style={styles.ratingRow}>
-              <Ionicons name="star" size={11} color="#F59E0B" />
-              <Text style={styles.ratingText}>{seller.rating?.toFixed(1)}</Text>
-              <Text style={styles.reviewText}>({seller.reviewCount} {seller.reviewCount === 1 ? 'review' : 'reviews'})</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2, gap: 3 }}>
+              <Icon name="star" size={11} color={colors.warning} />
+              <Text variant="caption" weight="600" color="warning">{seller.rating?.toFixed(1)}</Text>
+              <Text variant="caption" color="textMuted">({seller.reviewCount} {seller.reviewCount === 1 ? 'review' : 'reviews'})</Text>
             </View>
           )}
         </View>
-        <View style={styles.sellerCta}>
-          <View style={[styles.statusBadge, isActive ? styles.activeBadge : styles.inactiveBadge]}>
-            <Text style={[styles.statusBadgeText, isActive ? styles.activeText : styles.inactiveText]}>
-              {isActive ? 'Active' : 'Inactive'}
-            </Text>
-          </View>
-          <Text style={styles.sellerCtaCount}>{totalCount} {totalCount === 1 ? 'Product' : 'Products'}</Text>
-          <Ionicons name="chevron-forward" size={14} color="#D4AF37" />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <Badge
+            label={isActive ? 'Active' : 'Inactive'}
+            size="sm"
+            color={isActive ? colors.escrow : colors.textSecondary}
+            background={isActive ? colors.escrowBg : colors.surfaceAlt}
+          />
+          <Text variant="caption" weight="500" color="accent">
+            {totalCount} {totalCount === 1 ? 'Product' : 'Products'}
+          </Text>
+          <Icon name="chevronRight" size={14} color={colors.accent} />
         </View>
-      </TouchableOpacity>
-    </View>
+      </PressableScale>
+    </Surface>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#FFF',
-    marginHorizontal: CARD_MARGIN,
-    marginVertical: 10,
-    borderRadius: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 3,
-    overflow: 'hidden',
-  },
-
-  // ── Product Grid ──
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    padding: CARD_PADDING,
-    gap: GRID_GAP,
-  },
-  tile: {
-    width: TILE_WIDTH,
-  },
-  tileFull: {
-    width: '100%',
-  },
-  tileImageWrap: {
-    width: '100%',
-    aspectRatio: 1,
-    maxHeight: 200,
-    borderRadius: 10,
-    backgroundColor: '#F5F3EE',
-    overflow: 'hidden',
-  },
-  tileImage: {
-    width: '100%',
-    height: '100%',
-  },
-  tilePlaceholder: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#F5F3EE',
-  },
-  cartOverlay: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  tileInfo: {
-    paddingTop: 8,
-    paddingBottom: 4,
-  },
-  tileName: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#1A1A1A',
-    lineHeight: 17,
-    marginBottom: 4,
-  },
-  tilePrice: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#D4AF37',
-  },
-  conditionPill: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#F0F0F0',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginBottom: 4,
-  },
-  conditionText: {
-    fontSize: 10,
-    color: '#666',
-  },
-  highlightedText: {
-    backgroundColor: '#FFEAA7',
-    color: '#1A1A1A',
-    fontWeight: '600',
-  },
-
-  // ── View All ──
-  viewAllRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    marginHorizontal: CARD_PADDING,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,0,0,0.05)',
-    gap: 4,
-  },
-  viewAllText: {
-    fontSize: 13,
-    color: '#D4AF37',
-    fontWeight: '600',
-  },
-
-  // ── Seller Footer ──
-  sellerFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: CARD_PADDING,
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0,0,0,0.05)',
-    backgroundColor: '#FAFAFA',
-  },
-  sellerAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: '#D4AF37',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sellerInitial: {
-    color: '#FFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  sellerInfo: {
-    flex: 1,
-    marginLeft: 8,
-  },
-  sellerLabel: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: '#555',
-  },
-  sellerPrefix: {
-    fontWeight: '600',
-    color: '#16a34a',
-  },
-  ratingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 2,
-    gap: 3,
-  },
-  ratingText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#92400E',
-  },
-  reviewText: {
-    fontSize: 11,
-    color: '#AAA',
-  },
-  sellerCta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  sellerCtaCount: {
-    fontSize: 12,
-    color: '#D4AF37',
-    fontWeight: '500',
-  },
-  priceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 4,
-  },
-  contactFeeText: {
-    fontSize: 11,
-    color: '#dc2626',
-    fontWeight: '500',
-  },
-  statusBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  activeBadge: {
-    backgroundColor: '#f3e8ff',
-  },
-  inactiveBadge: {
-    backgroundColor: '#f3f4f6',
-  },
-  statusBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  activeText: {
-    color: '#7c3aed',
-  },
-  inactiveText: {
-    color: '#6b7280',
-  },
-});
 
 export default SellerCard;
