@@ -1,26 +1,30 @@
+// app/(dashboard)/(tabs)/(home)/subcategory/[subcategoryId].tsx
+//
+// Subcategory products — sellers (with their products) within a subcategory or
+// category tree. Restyled onto the TSA Signature design system (@/theme tokens
+// + @/components/ui primitives). Data fetching (useSubcategoryProducts hook),
+// the debounced SearchBar-driven search/filtering, sort state, role/service
+// gating, the SellerCard rendering, and every navigation route + param are
+// preserved verbatim — this is a visual / structural migration only.
 import React, { useState, useCallback, useMemo } from 'react';
-import {
-  View,
-  FlatList,
-  StyleSheet,
-  RefreshControl,
-  StatusBar,
-  Platform,
-  Text,
-  Pressable,
-  Image,
-} from 'react-native';
+import { View, FlatList, RefreshControl, Image } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
-import { SearchBar } from '@/components/common/SearchBar';
-import { EmptyState } from '@/components/common/EmptyState';
-import { LoadingState } from '@/components/common/LoadingState';
-import { ErrorState } from '@/components/common/ErrorState';
-import { useSubcategoryProducts } from '@/hooks/useSubcategoryProducts';
-import { Ionicons } from '@expo/vector-icons';
-import { SellerCard } from '@/components/marketplace/SellerCard';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
+import { SearchBar } from '@/components/common/SearchBar';
+import { useSubcategoryProducts } from '@/hooks/useSubcategoryProducts';
+import { SellerCard } from '@/components/marketplace/SellerCard';
+import { useTheme } from '@/theme';
+import {
+  Card,
+  Chip,
+  Divider,
+  EmptyState,
+  ErrorState,
+  Icon,
+  IconButton,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const SORT_OPTIONS = [
   'recent',
@@ -32,11 +36,20 @@ const SORT_OPTIONS = [
 
 type SortOption = typeof SORT_OPTIONS[number];
 
+const SORT_LABELS: Record<SortOption, string> = {
+  recent: 'Recent',
+  popular: 'Popular',
+  price_low: 'Price: Low to High',
+  price_high: 'Price: High to Low',
+  rating: 'Rating',
+};
+
 /* ---------------------------------- */
 /* Component */
 /* ---------------------------------- */
 
 export default function SubcategorySellersScreen() {
+  const { colors, spacing, radius } = useTheme();
 
   const { subcategoryId, categoryId, categoryTitle, subcategoryName, categoryType, userRole } =
     useLocalSearchParams<{
@@ -73,22 +86,20 @@ export default function SubcategorySellersScreen() {
     limit: 20,
   });
 
-
   const baseHeaderOptions = useMemo(
     () => ({
       headerShown: true,
       headerBackTitle: 'Back',
-      headerTintColor: '#D4AF37',
-      headerStyle: { backgroundColor: '#FFFFFF' },
+      headerTintColor: colors.accent,
+      headerStyle: { backgroundColor: colors.surface },
       headerTitleStyle: {
         fontWeight: '600' as const,
-        color: '#1A1A1A',
+        color: colors.textPrimary,
+        fontSize: 16,
       },
     }),
-    []
+    [colors.accent, colors.surface, colors.textPrimary]
   );
-
-
 
   const handleSearch = useCallback((query: string) => {
     setSearchQuery(query);
@@ -139,95 +150,106 @@ export default function SubcategorySellersScreen() {
     }
   }, [router]);
 
-  const renderHeader = useCallback(() => (
-    <View style={styles.header}>
-
-      {/* Category Info */}
-      <View style={styles.categoryHeader}>
-        {categoryInfo?.image ? (
-          <Image
-            source={{ uri: categoryInfo.image }}
-            style={styles.categoryImage}
-            resizeMode="cover"
-          />
-        ) : (
-          <View style={styles.categoryIconContainer}>
-            <Icon
-              name={categoryInfo?.icon ?? 'category'}
-              size={32}
-              color="#D4AF37"
-            />
-          </View>
-        )}
-
-        <View style={styles.categoryInfo}>
-          <Text style={styles.categoryTitle}>
-            {subcategoryName || categoryInfo?.title || 'Products'}
-          </Text>
-
-          <Text style={styles.categoryDescription}>
-            {categoryInfo?.description || (isService ? 'Browse services in this category' : 'Browse products in this category')}
-          </Text>
-
-          {totalProducts > 0 && (
-            <Text style={styles.productCount}>
-              {totalProducts} {isService ? 'services' : 'products'} available
-            </Text>
-          )}
-        </View>
-      </View>
-
-      {/* Search */}
-      <SearchBar
-        placeholder="Search sellers, products, or emails..."
-        onSearch={handleSearch}
-        initialValue={searchQuery}
-        debounceDelay={400}
-      /* style={styles.searchBar} */
-      />
-
-      {/* Sort */}
-      <View style={styles.sortContainer}>
-        <Text style={styles.sortLabel}>Sort by:</Text>
-
-        <View style={styles.sortOptions}>
-          {SORT_OPTIONS.map(option => (
-            <Pressable
-              key={option}
-              style={[
-                styles.sortOption,
-                sortOption === option && styles.activeSortOption,
-              ]}
-              onPress={() => setSortOption(option)}
-            >
-              <Text
-                style={[
-                  styles.sortOptionText,
-                  sortOption === option && styles.activeSortOptionText,
-                ]}
+  const renderHeader = useCallback(
+    () => (
+      <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.lg, gap: spacing.lg }}>
+        {/* Category Info */}
+        <Card padding="lg">
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.lg }}>
+            {categoryInfo?.image ? (
+              <Image
+                source={{ uri: categoryInfo.image }}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.surfaceAlt,
+                }}
+                resizeMode="cover"
+              />
+            ) : (
+              <View
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.accentMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
               >
-                {option === 'recent' && 'Recent'}
-                {option === 'popular' && 'Popular'}
-                {option === 'price_low' && 'Price: Low to High'}
-                {option === 'price_high' && 'Price: High to Low'}
-                {option === 'rating' && 'Rating'}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      </View>
+                <Icon name="storefront" size={28} color={colors.accent} />
+              </View>
+            )}
 
-      {/* Results */}
-      {!loading && (
-        <View style={styles.resultsInfo}>
-          <Text style={styles.resultsText}>
+            <View style={{ flex: 1 }}>
+              <Text variant="title3" weight="700" numberOfLines={1}>
+                {subcategoryName || categoryInfo?.title || 'Products'}
+              </Text>
+
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                {categoryInfo?.description ||
+                  (isService ? 'Browse services in this category' : 'Browse products in this category')}
+              </Text>
+
+              {totalProducts > 0 && (
+                <Text variant="caption" weight="600" color="accent" style={{ marginTop: spacing.xs }}>
+                  {totalProducts} {isService ? 'services' : 'products'} available
+                </Text>
+              )}
+            </View>
+          </View>
+        </Card>
+
+        {/* Search */}
+        <SearchBar
+          placeholder="Search sellers, products, or emails..."
+          onSearch={handleSearch}
+          initialValue={searchQuery}
+          debounceDelay={400}
+        />
+
+        {/* Sort */}
+        <View style={{ gap: spacing.sm }}>
+          <Text variant="bodySm" weight="600">
+            Sort by:
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+            {SORT_OPTIONS.map((option) => (
+              <Chip
+                key={option}
+                label={SORT_LABELS[option]}
+                selected={sortOption === option}
+                onPress={() => setSortOption(option)}
+              />
+            ))}
+          </View>
+        </View>
+
+        {/* Results */}
+        {!loading && (
+          <Text variant="caption" color="textSecondary">
             Showing {showingProducts} of {totalProducts} {isService ? 'services' : 'products'}
             {searchQuery ? ` for "${searchQuery}"` : ''}
           </Text>
-        </View>
-      )}
-    </View>
-  ), [categoryInfo, subcategoryName, searchQuery, sortOption, totalProducts, showingProducts, loading]);
+        )}
+      </View>
+    ),
+    [
+      categoryInfo,
+      subcategoryName,
+      searchQuery,
+      sortOption,
+      totalProducts,
+      showingProducts,
+      loading,
+      isService,
+      colors,
+      spacing,
+      radius,
+      handleSearch,
+    ]
+  );
 
   /* ---------------------------------- */
   /* Empty State */
@@ -237,42 +259,29 @@ export default function SubcategorySellersScreen() {
     if (searchQuery) {
       return (
         <EmptyState
+          icon="search"
           title="No Results Found"
-          message={`No sellers or products match "${searchQuery}"`}
-          icon="search-outline"
-          action={
-            <Pressable
-              style={styles.clearSearchButton}
-              onPress={() => setSearchQuery('')}
-            >
-              <Text style={styles.clearSearchText}>Clear search</Text>
-            </Pressable>
-          }
+          subtitle={`No sellers or products match "${searchQuery}"`}
+          actionLabel="Clear search"
+          onAction={() => setSearchQuery('')}
         />
       );
     }
 
     return (
       <EmptyState
-        title={isService ? "No Services Available" : "No Products Available"}
-        message={isService ? "There are no services in this category yet." : "There are no products in this category yet."}
-        icon="storefront-outline"
-        action={
-          isMerchant ? (
-            <Pressable
-              style={styles.becomeSellerButton}
-              onPress={() => router.push(isService ? '/serviceaction?index=1' : '/merchants/inventory/add')}
-            >
-              <Text style={styles.becomeSellerText}>{isService ? "List a Service" : "List a Product"}</Text>
-            </Pressable>
-          ) : (
-            <Pressable
-              style={styles.becomeSellerButton}
-              onPress={() => router.push('/merchants/merchant-request')}
-            >
-              <Text style={styles.becomeSellerText}>Become a Merchant</Text>
-            </Pressable>
-          )
+        icon="storefront"
+        title={isService ? 'No Services Available' : 'No Products Available'}
+        subtitle={
+          isService
+            ? 'There are no services in this category yet.'
+            : 'There are no products in this category yet.'
+        }
+        actionLabel={isMerchant ? (isService ? 'List a Service' : 'List a Product') : 'Become a Merchant'}
+        onAction={() =>
+          isMerchant
+            ? router.push(isService ? '/serviceaction?index=1' : '/merchants/inventory/add')
+            : router.push('/merchants/merchant-request')
         }
       />
     );
@@ -284,14 +293,16 @@ export default function SubcategorySellersScreen() {
 
   if (loading && !refreshing && sellers.length === 0) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
         <Stack.Screen
           options={{
             ...baseHeaderOptions,
             title: subcategoryName || categoryTitle || 'Loading...',
           }}
         />
-        <LoadingState /* message="Loading products..." */ />
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Spinner size="large" />
+        </View>
       </SafeAreaView>
     );
   }
@@ -302,17 +313,19 @@ export default function SubcategorySellersScreen() {
 
   if (error) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
         <Stack.Screen
           options={{
             ...baseHeaderOptions,
             title: subcategoryName || categoryTitle || 'Error',
           }}
         />
-        <ErrorState
-          message={error || 'Failed to load sellers. Please try again.'}
-          onRetry={handleRefresh}
-        />
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <ErrorState
+            subtitle={error || 'Failed to load sellers. Please try again.'}
+            onRetry={handleRefresh}
+          />
+        </View>
       </SafeAreaView>
     );
   }
@@ -322,25 +335,28 @@ export default function SubcategorySellersScreen() {
   /* ---------------------------------- */
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
       <Stack.Screen
         options={{
           ...baseHeaderOptions,
           title: subcategoryName || categoryTitle || (isService ? 'Services' : 'Products'),
           headerLeft: () => (
-            <Pressable onPress={handleBackPress}>
-              <Ionicons name="arrow-back" size={22} color="#D4AF37" />
-            </Pressable>
+            <IconButton
+              icon="chevronLeft"
+              accessibilityLabel="Go back"
+              color={colors.accent}
+              size={24}
+              onPress={handleBackPress}
+            />
           ),
           headerRight: () => (
-            <Pressable
+            <IconButton
+              icon="refresh"
+              accessibilityLabel="Refresh"
+              color={colors.accent}
+              size={20}
               onPress={handleRefresh}
-              style={styles.headerButton}
-            >
-              <Ionicons name="refresh-outline" size={22} color="#D4AF37" />
-            </Pressable>
+            />
           ),
         }}
       />
@@ -358,19 +374,19 @@ export default function SubcategorySellersScreen() {
         )}
         ListHeaderComponent={renderHeader}
         ListEmptyComponent={renderEmptyState}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={{ flexGrow: 1, paddingBottom: spacing['4xl'] }}
         showsVerticalScrollIndicator={false}
         keyboardDismissMode="on-drag"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
             onRefresh={handleRefresh}
-            tintColor="#D4AF37"
-            colors={['#D4AF37']}
+            tintColor={colors.accent}
+            colors={[colors.accent]}
           />
         }
-        ItemSeparatorComponent={() => <View style={styles.separator} />}
-        ListFooterComponent={<View style={styles.footer} />}
+        ItemSeparatorComponent={() => <Divider spacing="xs" />}
+        ListFooterComponent={<View style={{ height: spacing['4xl'] }} />}
         initialNumToRender={5}
         maxToRenderPerBatch={10}
         windowSize={10}
@@ -378,134 +394,3 @@ export default function SubcategorySellersScreen() {
     </SafeAreaView>
   );
 }
-
-/* ---------------------------------- */
-/* Styles */
-/* ---------------------------------- */
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#F8F9FA',
-  },
-  header: {
-    paddingTop: 16,
-    paddingBottom: 8,
-  },
-  categoryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 16,
-    marginBottom: 16,
-    borderRadius: 12,
-    elevation: 2,
-  },
-  categoryIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: 'rgba(212,175,55,0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  categoryImage: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    marginRight: 16,
-    backgroundColor: '#F5F5F5',
-  },
-  categoryInfo: { flex: 1 },
-  categoryTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1A1A1A',
-  },
-  categoryDescription: {
-    fontSize: 14,
-    color: '#666',
-    marginVertical: 6,
-  },
-  productCount: {
-    fontSize: 13,
-    color: '#D4AF37',
-    fontWeight: '600',
-  },
-  searchBar: {
-    marginHorizontal: 16,
-    marginBottom: 16,
-  },
-  sortContainer: {
-    paddingHorizontal: 16,
-    marginBottom: 16,
-  },
-  sortLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  sortOptions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  sortOption: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: '#F0F0F0',
-  },
-  activeSortOption: {
-    backgroundColor: '#D4AF37',
-  },
-  sortOptionText: {
-    fontSize: 12,
-    color: '#666',
-  },
-  activeSortOptionText: {
-    color: '#FFF',
-    fontWeight: '600',
-  },
-  resultsInfo: {
-    paddingHorizontal: 24,
-  },
-  resultsText: {
-    fontSize: 13,
-    color: '#666',
-    fontStyle: 'italic',
-  },
-  listContent: {
-    flexGrow: 1,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
-  },
-  separator: {
-    height: 1,
-    backgroundColor: 'rgba(0,0,0,0.05)',
-    marginHorizontal: 24,
-  },
-  footer: { height: 60 },
-  headerButton: {
-    marginRight: 16,
-  },
-  clearSearchButton: {
-    backgroundColor: '#F0F0F0',
-    padding: 12,
-    borderRadius: 8,
-  },
-  clearSearchText: {
-    color: '#666',
-  },
-  becomeSellerButton: {
-    backgroundColor: '#D4AF37',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  becomeSellerText: {
-    color: '#FFF',
-    fontWeight: '600',
-  },
-});
