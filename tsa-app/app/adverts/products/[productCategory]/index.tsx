@@ -1,3 +1,12 @@
+// app/adverts/products/[productCategory]/index.tsx
+//
+// Adverts — products in a category. Browse / search / sort / price + type filter
+// the products of a single category, paginated with pull-to-refresh and
+// infinite scroll. Restyled onto the TSA Signature design system (theme tokens +
+// @/components/ui primitives). Data fetching (api.getProductsByCategory),
+// pagination state, search/sort/price/type filters, currency formatting, and all
+// navigation routes + params are unchanged — this is a visual / structural
+// migration only.
 import api from '@/components/services/api';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState, useCallback } from 'react';
@@ -5,20 +14,29 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
     View,
-    Text,
-    StyleSheet,
     FlatList,
     Image,
-    TouchableOpacity,
-    ActivityIndicator,
     RefreshControl,
-    Alert,
-    TextInput,
-    Pressable,
-    ScrollView
+    ScrollView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import {
+    Badge,
+    Button,
+    Chip,
+    Divider,
+    EmptyState,
+    ErrorState,
+    Icon,
+    IconButton,
+    Input,
+    PressableScale,
+    Sheet,
+    Spinner,
+    Surface,
+    Text,
+} from '@/components/ui';
 
 interface Product {
     _id: string;
@@ -44,6 +62,7 @@ interface Product {
 
 const CategoryProductsScreen = () => {
     const { productCategory } = useLocalSearchParams<{ productCategory: string }>();
+    const { colors, spacing, radius } = useTheme();
 
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
@@ -175,224 +194,278 @@ const CategoryProductsScreen = () => {
     };
 
     // Render product item
-    const renderProductItem = ({ item }: { item: Product }) => (
-        <TouchableOpacity
-            style={styles.productCard}
-            onPress={() => handleProductPress(item._id)}
-            activeOpacity={0.7}
-        >
-            <View style={styles.productImageContainer}>
-                {item.images && item.images.length > 0 ? (
-                    <Image
-                        source={{ uri: item.images[0].url }}
-                        style={styles.productImage}
-                        resizeMode="cover"
-                    />
-                ) : (
-                    <View style={styles.placeholderImage}>
-                        <Ionicons name="image-outline" size={40} color="#9CA3AF" />
-                    </View>
-                )}
+    const renderProductItem = ({ item }: { item: Product }) => {
+        const statusTone =
+            item.status === 'active'
+                ? colors.success
+                : item.status === 'out_of_stock' || item.status === 'sold'
+                    ? colors.danger
+                    : colors.textMuted;
+        const statusBg =
+            item.status === 'active'
+                ? colors.successBg
+                : item.status === 'out_of_stock' || item.status === 'sold'
+                    ? colors.dangerBg
+                    : colors.surfaceAlt;
 
-                {item.discountedPrice && (
-                    <View style={styles.discountBadge}>
-                        <Text style={styles.discountText}>
-                            -{calculateDiscount(item.price, item.discountedPrice)}%
-                        </Text>
-                    </View>
-                )}
-            </View>
-
-            <View style={styles.productInfo}>
-                <Text style={styles.productName} numberOfLines={2}>
-                    {item.name}
-                </Text>
-
-                <Text style={styles.productDescription} numberOfLines={2}>
-                    {item.description}
-                </Text>
-
-                <View style={styles.priceContainer}>
-                    {item.discountedPrice ? (
-                        <>
-                            <Text style={styles.discountedPrice}>
-                                {formatPrice(item.discountedPrice)}
-                            </Text>
-                            <Text style={styles.originalPrice}>
-                                {formatPrice(item.price)}
-                            </Text>
-                        </>
-                    ) : (
-                        <Text style={styles.price}>
-                            {formatPrice(item.price)}
-                        </Text>
-                    )}
-                </View>
-
-                <View style={styles.productMeta}>
-                    <Text style={styles.productType}>
-                        {item.type}
-                    </Text>
-                    <Text style={styles.productStatus}>
-                        {item.status}
-                    </Text>
-                </View>
-
-                <View style={styles.merchantInfo}>
-                    {item.merchant?.profilePhoto?.url ? (
-                        <Image
-                            source={{ uri: item.merchant.profilePhoto.url }}
-                            style={styles.merchantAvatar}
-                        />
-                    ) : (
-                        <View style={styles.merchantAvatarPlaceholder}>
-                            <Text style={styles.merchantInitial}>
-                                {item.merchant?.name?.charAt(0).toUpperCase() || 'M'}
-                            </Text>
-                        </View>
-                    )}
-                    <Text style={styles.merchantName} numberOfLines={1}>
-                        {item.merchant?.name || 'Unknown Merchant'}
-                    </Text>
-                </View>
-            </View>
-        </TouchableOpacity>
-    );
-
-    // Render filter modal
-    const renderFilters = () => (
-        <View style={styles.filterContainer}>
-            <View style={styles.filterHeader}>
-                <Text style={styles.filterTitle}>Filters</Text>
-                <TouchableOpacity onPress={() => setShowFilters(false)}>
-                    <Ionicons name="close" size={24} color="#374151" />
-                </TouchableOpacity>
-            </View>
-
-            <ScrollView style={styles.filterContent}>
-                <View style={styles.filterSection}>
-                    <Text style={styles.filterSectionTitle}>Price Range</Text>
-                    <View style={styles.priceInputs}>
-                        <View style={styles.priceInput}>
-                            <Text style={styles.priceLabel}>Min</Text>
-                            <TextInput
-                                style={styles.input}
-                                placeholder="0"
-                                keyboardType="numeric"
-                                value={minPrice?.toString() || ''}
-                                onChangeText={(text) => setMinPrice(text ? Number(text) : undefined)}
+        return (
+            <PressableScale
+                onPress={() => handleProductPress(item._id)}
+                style={{ flex: 1, maxWidth: '48%' }}
+            >
+                <Surface elevation="sm" style={{ overflow: 'hidden' }}>
+                    <View style={{ position: 'relative', width: '100%', aspectRatio: 1 }}>
+                        {item.images && item.images.length > 0 ? (
+                            <Image
+                                source={{ uri: item.images[0].url }}
+                                style={{ width: '100%', height: '100%' }}
+                                resizeMode="cover"
                             />
-                        </View>
-                        <View style={styles.priceInput}>
-                            <Text style={styles.priceLabel}>Max</Text>
-                            <TextInput
-                                style={styles.input}
-                                placeholder="1000000"
-                                keyboardType="numeric"
-                                value={maxPrice?.toString() || ''}
-                                onChangeText={(text) => setMaxPrice(text ? Number(text) : undefined)}
-                            />
-                        </View>
-                    </View>
-                </View>
-
-                <View style={styles.filterSection}>
-                    <Text style={styles.filterSectionTitle}>Product Type</Text>
-                    <View style={styles.typeOptions}>
-                        <TouchableOpacity
-                            style={[
-                                styles.typeOption,
-                                productType === 'all' && styles.typeOptionActive
-                            ]}
-                            onPress={() => setProductType('all')}
-                        >
-                            <Text style={[
-                                styles.typeOptionText,
-                                productType === 'all' && styles.typeOptionTextActive
-                            ]}>All</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            style={[
-                                styles.typeOption,
-                                productType === 'Product' && styles.typeOptionActive
-                            ]}
-                            onPress={() => setProductType('Product')}
-                        >
-                            <Text style={[
-                                styles.typeOptionText,
-                                productType === 'Product' && styles.typeOptionTextActive
-                            ]}>Products</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            style={[
-                                styles.typeOption,
-                                productType === 'Service' && styles.typeOptionActive
-                            ]}
-                            onPress={() => setProductType('Service')}
-                        >
-                            <Text style={[
-                                styles.typeOptionText,
-                                productType === 'Service' && styles.typeOptionTextActive
-                            ]}>Services</Text>
-                        </TouchableOpacity>
-                    </View>
-                </View>
-
-                <View style={styles.filterSection}>
-                    <Text style={styles.filterSectionTitle}>Sort By</Text>
-                    <View style={styles.sortOptions}>
-                        {[
-                            { key: 'createdAt', label: 'Newest' },
-                            { key: 'price', label: 'Price' },
-                            { key: 'name', label: 'Name' }
-                        ].map((option) => (
-                            <TouchableOpacity
-                                key={option.key}
-                                style={[
-                                    styles.sortOption,
-                                    sortBy === option.key && styles.sortOptionActive
-                                ]}
-                                onPress={() => setSortBy(option.key)}
+                        ) : (
+                            <View
+                                style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    backgroundColor: colors.surfaceAlt,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
                             >
-                                <Text style={[
-                                    styles.sortOptionText,
-                                    sortBy === option.key && styles.sortOptionTextActive
-                                ]}>
+                                <Icon name="image" size={40} color={colors.textMuted} />
+                            </View>
+                        )}
+
+                        {item.discountedPrice && (
+                            <View style={{ position: 'absolute', top: spacing.sm, left: spacing.sm }}>
+                                <Badge
+                                    label={`-${calculateDiscount(item.price, item.discountedPrice)}%`}
+                                    color={colors.onAccent}
+                                    background={colors.danger}
+                                    size="sm"
+                                />
+                            </View>
+                        )}
+                    </View>
+
+                    <View style={{ padding: spacing.md }}>
+                        <Text variant="bodySm" weight="700" numberOfLines={2}>
+                            {item.name}
+                        </Text>
+
+                        <Text
+                            variant="caption"
+                            color="textSecondary"
+                            numberOfLines={2}
+                            style={{ marginTop: spacing.xs }}
+                        >
+                            {item.description}
+                        </Text>
+
+                        <View
+                            style={{
+                                flexDirection: 'row',
+                                alignItems: 'baseline',
+                                gap: spacing.xs,
+                                marginTop: spacing.sm,
+                            }}
+                        >
+                            {item.discountedPrice ? (
+                                <>
+                                    <Text variant="bodyMed" weight="700" color="danger" numeric>
+                                        {formatPrice(item.discountedPrice)}
+                                    </Text>
+                                    <Text
+                                        variant="caption"
+                                        color="textMuted"
+                                        numeric
+                                        style={{ textDecorationLine: 'line-through' }}
+                                    >
+                                        {formatPrice(item.price)}
+                                    </Text>
+                                </>
+                            ) : (
+                                <Text variant="bodyMed" weight="700" numeric>
+                                    {formatPrice(item.price)}
+                                </Text>
+                            )}
+                        </View>
+
+                        <View
+                            style={{
+                                flexDirection: 'row',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                marginTop: spacing.sm,
+                            }}
+                        >
+                            <Badge
+                                label={item.type}
+                                color={colors.accent}
+                                background={colors.accentMuted}
+                                size="sm"
+                            />
+                            <Badge
+                                label={item.status}
+                                color={statusTone}
+                                background={statusBg}
+                                size="sm"
+                            />
+                        </View>
+
+                        <Divider spacing="sm" />
+
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                            {item.merchant?.profilePhoto?.url ? (
+                                <Image
+                                    source={{ uri: item.merchant.profilePhoto.url }}
+                                    style={{ width: 24, height: 24, borderRadius: 12 }}
+                                />
+                            ) : (
+                                <View
+                                    style={{
+                                        width: 24,
+                                        height: 24,
+                                        borderRadius: 12,
+                                        backgroundColor: colors.accentMuted,
+                                        justifyContent: 'center',
+                                        alignItems: 'center',
+                                    }}
+                                >
+                                    <Text variant="overline" weight="700" color="accent">
+                                        {item.merchant?.name?.charAt(0).toUpperCase() || 'M'}
+                                    </Text>
+                                </View>
+                            )}
+                            <Text variant="caption" color="textSecondary" numberOfLines={1} style={{ flex: 1 }}>
+                                {item.merchant?.name || 'Unknown Merchant'}
+                            </Text>
+                        </View>
+                    </View>
+                </Surface>
+            </PressableScale>
+        );
+    };
+
+    // Type filter options (preserves productType state values)
+    const TYPE_OPTIONS: { key: 'all' | 'Product' | 'Service'; label: string }[] = [
+        { key: 'all', label: 'All' },
+        { key: 'Product', label: 'Products' },
+        { key: 'Service', label: 'Services' },
+    ];
+
+    // Sort options (preserves sortBy keys)
+    const SORT_OPTIONS = [
+        { key: 'createdAt', label: 'Newest' },
+        { key: 'price', label: 'Price' },
+        { key: 'name', label: 'Name' },
+    ];
+
+    // Render filter sheet
+    const renderFilters = () => (
+        <Sheet visible={showFilters} onClose={() => setShowFilters(false)} title="Filters">
+            <ScrollView
+                style={{ maxHeight: '70%' as any }}
+                contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}
+            >
+                {/* Price Range */}
+                <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.md }}>
+                    Price Range
+                </Text>
+                <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                    <Input
+                        containerStyle={{ flex: 1 }}
+                        label="Min"
+                        placeholder="0"
+                        keyboardType="numeric"
+                        value={minPrice?.toString() || ''}
+                        onChangeText={(text) => setMinPrice(text ? Number(text) : undefined)}
+                    />
+                    <Input
+                        containerStyle={{ flex: 1 }}
+                        label="Max"
+                        placeholder="1000000"
+                        keyboardType="numeric"
+                        value={maxPrice?.toString() || ''}
+                        onChangeText={(text) => setMaxPrice(text ? Number(text) : undefined)}
+                    />
+                </View>
+
+                {/* Product Type */}
+                <Text variant="bodyMed" weight="700" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+                    Product Type
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                    {TYPE_OPTIONS.map((option) => (
+                        <Chip
+                            key={option.key}
+                            label={option.label}
+                            selected={productType === option.key}
+                            onPress={() => setProductType(option.key)}
+                        />
+                    ))}
+                </View>
+
+                {/* Sort By */}
+                <Text variant="bodyMed" weight="700" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+                    Sort By
+                </Text>
+                <View style={{ gap: spacing.sm }}>
+                    {SORT_OPTIONS.map((option) => {
+                        const active = sortBy === option.key;
+                        return (
+                            <PressableScale
+                                key={option.key}
+                                onPress={() => setSortBy(option.key)}
+                                style={{
+                                    flexDirection: 'row',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    paddingHorizontal: spacing.lg,
+                                    minHeight: 48,
+                                    borderRadius: radius.md,
+                                    borderWidth: 1,
+                                    borderColor: active ? colors.accent : colors.border,
+                                    backgroundColor: active ? colors.accentMuted : colors.surface,
+                                }}
+                            >
+                                <Text
+                                    variant="bodySm"
+                                    weight={active ? '600' : '400'}
+                                    color={active ? 'accent' : 'textSecondary'}
+                                >
                                     {option.label}
                                 </Text>
-                                {sortBy === option.key && (
-                                    <TouchableOpacity onPress={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}>
-                                        <Ionicons
-                                            name={sortOrder === 'asc' ? 'arrow-up' : 'arrow-down'}
-                                            size={16}
-                                            color="#3B82F6"
-                                        />
-                                    </TouchableOpacity>
+                                {active && (
+                                    <IconButton
+                                        icon={sortOrder === 'asc' ? 'arrowUp' : 'arrowDown'}
+                                        accessibilityLabel="Toggle sort order"
+                                        size={16}
+                                        color={colors.accent}
+                                        onPress={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                                    />
                                 )}
-                            </TouchableOpacity>
-                        ))}
-                    </View>
+                            </PressableScale>
+                        );
+                    })}
                 </View>
             </ScrollView>
 
-            <View style={styles.filterActions}>
-                <TouchableOpacity style={styles.resetButton} onPress={resetFilters}>
-                    <Text style={styles.resetButtonText}>Reset</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.applyButton} onPress={applyFilters}>
-                    <Text style={styles.applyButtonText}>Apply Filters</Text>
-                </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.md, paddingHorizontal: spacing.lg, paddingTop: spacing.lg }}>
+                <Button title="Reset" variant="secondary" onPress={resetFilters} style={{ flex: 1 }} />
+                <Button title="Apply Filters" onPress={applyFilters} style={{ flex: 1 }} />
             </View>
-        </View>
+        </Sheet>
     );
 
     // Render loading state
     if (loading && products.length === 0) {
         return (
-            <SafeAreaView style={styles.container}>
-                <View style={styles.loadingContainer}>
-                    <ActivityIndicator size="large" color="#3B82F6" />
-                    <Text style={styles.loadingText}>Loading products...</Text>
+            <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md }}>
+                    <Spinner size="large" />
+                    <Text variant="bodySm" color="textSecondary">
+                        Loading products...
+                    </Text>
                 </View>
             </SafeAreaView>
         );
@@ -401,86 +474,91 @@ const CategoryProductsScreen = () => {
     // Render error state
     if (error && products.length === 0) {
         return (
-            <SafeAreaView style={styles.container}>
-                <View style={styles.errorContainer}>
-                    <Ionicons name="alert-circle-outline" size={64} color="#DC2626" />
-                    <Text style={styles.errorTitle}>Failed to load products</Text>
-                    <Text style={styles.errorMessage}>{error}</Text>
-                    <TouchableOpacity style={styles.retryButton} onPress={() => fetchProducts(1)}>
-                        <Text style={styles.retryButtonText}>Retry</Text>
-                    </TouchableOpacity>
+            <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+                <View style={{ flex: 1, justifyContent: 'center' }}>
+                    <ErrorState
+                        title="Failed to load products"
+                        subtitle={error}
+                        onRetry={() => fetchProducts(1)}
+                        retryLabel="Retry"
+                    />
                 </View>
             </SafeAreaView>
         );
     }
 
     return (
-        <SafeAreaView style={styles.container}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
             {/* Header */}
-            <View style={styles.header}>
-                <TouchableOpacity
-                    style={styles.backButton}
+            <View
+                style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.sm,
+                    paddingHorizontal: spacing.lg,
+                    paddingVertical: spacing.sm,
+                    borderBottomWidth: 1,
+                    borderBottomColor: colors.hairline,
+                }}
+            >
+                <IconButton
+                    icon="chevronLeft"
+                    accessibilityLabel="Go back"
                     onPress={() => router.back()}
-                >
-                    <Ionicons name="arrow-back" size={24} color="#374151" />
-                </TouchableOpacity>
+                />
 
-                <View style={styles.headerTitleContainer}>
-                    <Text style={styles.headerTitle} numberOfLines={1}>
+                <View style={{ flex: 1 }}>
+                    <Text variant="title3" weight="700" numberOfLines={1}>
                         {categoryDetails?.name || productCategory || 'Products'}
                     </Text>
                     {pagination.totalProducts > 0 && (
-                        <Text style={styles.productCount}>
+                        <Text variant="caption" color="textSecondary">
                             {pagination.totalProducts} products
                         </Text>
                     )}
                 </View>
 
-                <TouchableOpacity
-                    style={styles.filterButton}
+                <IconButton
+                    icon="filter"
+                    accessibilityLabel="Open filters"
                     onPress={() => setShowFilters(true)}
-                >
-                    <Ionicons name="filter-outline" size={24} color="#374151" />
-                </TouchableOpacity>
+                />
             </View>
 
             {/* Search Bar */}
-            <View style={styles.searchContainer}>
-                <Ionicons name="search-outline" size={20} color="#9CA3AF" style={styles.searchIcon} />
-                <TextInput
-                    style={styles.searchInput}
+            <View style={{ paddingHorizontal: spacing.lg, paddingVertical: spacing.md }}>
+                <Input
                     placeholder="Search products..."
                     value={searchQuery}
                     onChangeText={setSearchQuery}
                     onSubmitEditing={() => fetchProducts(1)}
                     returnKeyType="search"
+                    leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+                    rightAdornment={
+                        searchQuery ? (
+                            <PressableScale onPress={() => setSearchQuery('')} hitSlop={8}>
+                                <Icon name="closeCircle" size={18} color={colors.textMuted} />
+                            </PressableScale>
+                        ) : undefined
+                    }
                 />
-                {searchQuery ? (
-                    <TouchableOpacity onPress={() => setSearchQuery('')}>
-                        <Ionicons name="close-circle" size={20} color="#9CA3AF" />
-                    </TouchableOpacity>
-                ) : null}
             </View>
 
             {/* Active Filters */}
             {(minPrice !== undefined || maxPrice !== undefined || productType !== 'all') && (
-                <View style={styles.activeFilters}>
-                    <Text style={styles.activeFiltersTitle}>Active Filters:</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <View style={{ paddingHorizontal: spacing.lg, marginBottom: spacing.sm }}>
+                    <Text variant="caption" color="textSecondary" style={{ marginBottom: spacing.sm }}>
+                        Active Filters:
+                    </Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>
                         {minPrice !== undefined && (
-                            <View style={styles.filterChip}>
-                                <Text style={styles.filterChipText}>Min: ${minPrice.toLocaleString()}</Text>
-                            </View>
+                            <Badge label={`Min: $${minPrice.toLocaleString()}`} color={colors.accent} background={colors.accentMuted} />
                         )}
                         {maxPrice !== undefined && (
-                            <View style={styles.filterChip}>
-                                <Text style={styles.filterChipText}>Max: ${maxPrice.toLocaleString()}</Text>
-                            </View>
+                            <Badge label={`Max: $${maxPrice.toLocaleString()}`} color={colors.accent} background={colors.accentMuted} />
                         )}
                         {productType !== 'all' && (
-                            <View style={styles.filterChip}>
-                                <Text style={styles.filterChipText}>Type: {productType}</Text>
-                            </View>
+                            <Badge label={`Type: ${productType}`} color={colors.accent} background={colors.accentMuted} />
                         )}
                     </ScrollView>
                 </View>
@@ -492,491 +570,50 @@ const CategoryProductsScreen = () => {
                 renderItem={renderProductItem}
                 keyExtractor={(item) => item._id}
                 numColumns={2}
-                columnWrapperStyle={styles.columnWrapper}
-                contentContainerStyle={styles.productsList}
+                columnWrapperStyle={{ justifyContent: 'space-between', gap: spacing.md }}
+                contentContainerStyle={{
+                    paddingHorizontal: spacing.lg,
+                    paddingBottom: spacing['4xl'],
+                    gap: spacing.md,
+                }}
                 refreshControl={
                     <RefreshControl
                         refreshing={refreshing}
                         onRefresh={onRefresh}
-                        colors={['#3B82F6']}
-                        tintColor="#3B82F6"
+                        tintColor={colors.accent}
                     />
                 }
                 onEndReached={loadMore}
                 onEndReachedThreshold={0.5}
                 ListEmptyComponent={
-                    <View style={styles.emptyContainer}>
-                        <Ionicons name="cube-outline" size={64} color="#9CA3AF" />
-                        <Text style={styles.emptyTitle}>No products found</Text>
-                        <Text style={styles.emptyMessage}>
-                            {searchQuery
+                    <EmptyState
+                        icon="storefront"
+                        title="No products found"
+                        subtitle={
+                            searchQuery
                                 ? `No products found for "${searchQuery}"`
-                                : `No products available in this category`}
-                        </Text>
-                        <TouchableOpacity
-                            style={styles.exploreButton}
-                            onPress={() => router.push('/home')}
-                        >
-                            <Text style={styles.exploreButtonText}>Explore Other Categories</Text>
-                        </TouchableOpacity>
-                    </View>
+                                : `No products available in this category`
+                        }
+                        actionLabel="Explore Other Categories"
+                        onAction={() => router.push('/home')}
+                    />
                 }
                 ListFooterComponent={
                     loading && products.length > 0 ? (
-                        <View style={styles.footerLoading}>
-                            <ActivityIndicator size="small" color="#3B82F6" />
-                            <Text style={styles.footerLoadingText}>Loading more...</Text>
+                        <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.lg }}>
+                            <Spinner size="small" />
+                            <Text variant="bodySm" color="textSecondary">
+                                Loading more...
+                            </Text>
                         </View>
                     ) : null
                 }
             />
 
-            {/* Filters Modal */}
-            {showFilters && (
-                <View style={styles.modalOverlay}>
-                    {renderFilters()}
-                </View>
-            )}
+            {/* Filters Sheet */}
+            {renderFilters()}
         </SafeAreaView>
     );
 };
-
-const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#F9FAFB',
-    },
-    loadingContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    loadingText: {
-        marginTop: 12,
-        fontSize: 16,
-        color: '#6B7280',
-    },
-    errorContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 20,
-    },
-    errorTitle: {
-        fontSize: 20,
-        fontWeight: '600',
-        color: '#111827',
-        marginTop: 16,
-        marginBottom: 8,
-    },
-    errorMessage: {
-        fontSize: 14,
-        color: '#6B7280',
-        textAlign: 'center',
-        marginBottom: 24,
-    },
-    retryButton: {
-        backgroundColor: '#3B82F6',
-        paddingHorizontal: 24,
-        paddingVertical: 12,
-        borderRadius: 8,
-    },
-    retryButtonText: {
-        color: '#FFFFFF',
-        fontSize: 16,
-        fontWeight: '600',
-    },
-    header: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 12,
-        backgroundColor: '#FFFFFF',
-        borderBottomWidth: 1,
-        borderBottomColor: '#E5E7EB',
-    },
-    backButton: {
-        marginRight: 12,
-    },
-    headerTitleContainer: {
-        flex: 1,
-    },
-    headerTitle: {
-        fontSize: 18,
-        fontWeight: '600',
-        color: '#111827',
-    },
-    productCount: {
-        fontSize: 12,
-        color: '#6B7280',
-        marginTop: 2,
-    },
-    filterButton: {
-        padding: 4,
-    },
-    searchContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginHorizontal: 16,
-        marginVertical: 12,
-        paddingHorizontal: 12,
-        backgroundColor: '#FFFFFF',
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: '#E5E7EB',
-    },
-    searchIcon: {
-        marginRight: 8,
-    },
-    searchInput: {
-        flex: 1,
-        paddingVertical: 10,
-        fontSize: 16,
-        color: '#374151',
-    },
-    activeFilters: {
-        paddingHorizontal: 16,
-        marginBottom: 8,
-    },
-    activeFiltersTitle: {
-        fontSize: 12,
-        color: '#6B7280',
-        marginBottom: 8,
-    },
-    filterChip: {
-        backgroundColor: '#E0E7FF',
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderRadius: 16,
-        marginRight: 8,
-    },
-    filterChipText: {
-        fontSize: 12,
-        color: '#3730A3',
-        fontWeight: '500',
-    },
-    productsList: {
-        paddingHorizontal: 8,
-        paddingBottom: 16,
-    },
-    columnWrapper: {
-        justifyContent: 'space-between',
-    },
-    productCard: {
-        flex: 1,
-        backgroundColor: '#FFFFFF',
-        borderRadius: 12,
-        margin: 8,
-        overflow: 'hidden',
-        borderWidth: 1,
-        borderColor: '#F3F4F6',
-        maxWidth: '48%',
-    },
-    productImageContainer: {
-        position: 'relative',
-        width: '100%',
-        aspectRatio: 1,
-    },
-    productImage: {
-        width: '100%',
-        height: '100%',
-    },
-    placeholderImage: {
-        width: '100%',
-        height: '100%',
-        backgroundColor: '#F3F4F6',
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    discountBadge: {
-        position: 'absolute',
-        top: 8,
-        left: 8,
-        backgroundColor: '#DC2626',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 4,
-    },
-    discountText: {
-        color: '#FFFFFF',
-        fontSize: 12,
-        fontWeight: '600',
-    },
-    productInfo: {
-        padding: 12,
-    },
-    productName: {
-        fontSize: 14,
-        fontWeight: '600',
-        color: '#111827',
-        marginBottom: 4,
-    },
-    productDescription: {
-        fontSize: 12,
-        color: '#6B7280',
-        marginBottom: 8,
-    },
-    priceContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 8,
-    },
-    price: {
-        fontSize: 16,
-        fontWeight: '700',
-        color: '#111827',
-    },
-    discountedPrice: {
-        fontSize: 16,
-        fontWeight: '700',
-        color: '#DC2626',
-        marginRight: 8,
-    },
-    originalPrice: {
-        fontSize: 14,
-        color: '#9CA3AF',
-        textDecorationLine: 'line-through',
-    },
-    productMeta: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginBottom: 8,
-    },
-    productType: {
-        fontSize: 10,
-        color: '#3B82F6',
-        backgroundColor: '#EFF6FF',
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        borderRadius: 4,
-        overflow: 'hidden',
-    },
-    productStatus: {
-        fontSize: 10,
-        color: '#059669',
-        backgroundColor: '#D1FAE5',
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        borderRadius: 4,
-        overflow: 'hidden',
-    },
-    merchantInfo: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    merchantAvatar: {
-        width: 24,
-        height: 24,
-        borderRadius: 12,
-        marginRight: 8,
-    },
-    merchantAvatarPlaceholder: {
-        width: 24,
-        height: 24,
-        borderRadius: 12,
-        backgroundColor: '#3B82F6',
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginRight: 8,
-    },
-    merchantInitial: {
-        color: '#FFFFFF',
-        fontSize: 12,
-        fontWeight: '600',
-    },
-    merchantName: {
-        fontSize: 12,
-        color: '#6B7280',
-        flex: 1,
-    },
-    emptyContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        paddingVertical: 64,
-    },
-    emptyTitle: {
-        fontSize: 18,
-        fontWeight: '600',
-        color: '#111827',
-        marginTop: 16,
-        marginBottom: 8,
-    },
-    emptyMessage: {
-        fontSize: 14,
-        color: '#6B7280',
-        textAlign: 'center',
-        marginBottom: 24,
-    },
-    exploreButton: {
-        backgroundColor: '#3B82F6',
-        paddingHorizontal: 20,
-        paddingVertical: 10,
-        borderRadius: 8,
-    },
-    exploreButtonText: {
-        color: '#FFFFFF',
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    footerLoading: {
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-        paddingVertical: 16,
-    },
-    footerLoadingText: {
-        marginLeft: 8,
-        fontSize: 14,
-        color: '#6B7280',
-    },
-    modalOverlay: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        justifyContent: 'flex-end',
-    },
-    filterContainer: {
-        backgroundColor: '#FFFFFF',
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        maxHeight: '80%',
-    },
-    filterHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        paddingHorizontal: 20,
-        paddingVertical: 16,
-        borderBottomWidth: 1,
-        borderBottomColor: '#E5E7EB',
-    },
-    filterTitle: {
-        fontSize: 20,
-        fontWeight: '600',
-        color: '#111827',
-    },
-    filterContent: {
-        paddingHorizontal: 20,
-    },
-    filterSection: {
-        marginVertical: 16,
-    },
-    filterSectionTitle: {
-        fontSize: 16,
-        fontWeight: '600',
-        color: '#374151',
-        marginBottom: 12,
-    },
-    priceInputs: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-    },
-    priceInput: {
-        flex: 1,
-        marginRight: 8,
-    },
-    priceLabel: {
-        fontSize: 14,
-        color: '#6B7280',
-        marginBottom: 4,
-    },
-    input: {
-        borderWidth: 1,
-        borderColor: '#D1D5DB',
-        borderRadius: 8,
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        fontSize: 16,
-        color: '#374151',
-    },
-    typeOptions: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: 8,
-    },
-    typeOption: {
-        paddingHorizontal: 16,
-        paddingVertical: 8,
-        borderRadius: 20,
-        backgroundColor: '#F3F4F6',
-        borderWidth: 1,
-        borderColor: '#F3F4F6',
-    },
-    typeOptionActive: {
-        backgroundColor: '#E0E7FF',
-        borderColor: '#3B82F6',
-    },
-    typeOptionText: {
-        fontSize: 14,
-        color: '#6B7280',
-        fontWeight: '500',
-    },
-    typeOptionTextActive: {
-        color: '#3B82F6',
-    },
-    sortOptions: {
-        gap: 8,
-    },
-    sortOption: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 12,
-        borderRadius: 8,
-        backgroundColor: '#F3F4F6',
-        borderWidth: 1,
-        borderColor: '#F3F4F6',
-    },
-    sortOptionActive: {
-        backgroundColor: '#E0E7FF',
-        borderColor: '#3B82F6',
-    },
-    sortOptionText: {
-        fontSize: 14,
-        color: '#6B7280',
-        fontWeight: '500',
-    },
-    sortOptionTextActive: {
-        color: '#3B82F6',
-    },
-    filterActions: {
-        flexDirection: 'row',
-        paddingHorizontal: 20,
-        paddingVertical: 16,
-        borderTopWidth: 1,
-        borderTopColor: '#E5E7EB',
-        gap: 12,
-    },
-    resetButton: {
-        flex: 1,
-        paddingVertical: 12,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: '#D1D5DB',
-        alignItems: 'center',
-    },
-    resetButtonText: {
-        fontSize: 16,
-        fontWeight: '600',
-        color: '#374151',
-    },
-    applyButton: {
-        flex: 1,
-        paddingVertical: 12,
-        borderRadius: 8,
-        backgroundColor: '#3B82F6',
-        alignItems: 'center',
-    },
-    applyButtonText: {
-        fontSize: 16,
-        fontWeight: '600',
-        color: '#FFFFFF',
-    },
-});
 
 export default CategoryProductsScreen;
