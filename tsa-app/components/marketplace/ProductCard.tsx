@@ -1,18 +1,24 @@
 // app/components/marketplace/ProductCard.tsx
+//
+// Product card (list + grid variants) used across marketplace / home / category
+// lists. Migrated onto the TSA Signature design system (theme tokens +
+// @/components/ui primitives). The props interface, exports, onPress/navigation
+// wiring, image rendering (primaryImage + onError fallback), and all price /
+// rating / stock computations are preserved verbatim — this is a visual /
+// structural restyle only.
 import React, { useState } from 'react';
-import {
-    View,
-    Text,
-    TouchableOpacity,
-    Image,
-    StyleSheet,
-    Dimensions,
-} from 'react-native';
+import { View, Image } from 'react-native';
 import { Product } from '@/components/services/api';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice, formatPriceDual } from '@/utils/formatPrice';
+import { useTheme } from '@/theme';
+import {
+    Badge,
+    Card,
+    Icon,
+    PressableScale,
+    Text,
+} from '@/components/ui';
 
 interface ProductCardProps {
     product: Product;
@@ -20,11 +26,10 @@ interface ProductCardProps {
     variant?: 'list' | 'grid';
 }
 
-const { width } = Dimensions.get('window');
-
 const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = 'list' }) => {
     const [imageError, setImageError] = useState(false);
     const { currency, rate } = useCurrency();
+    const { colors, spacing, radius } = useTheme();
 
     const primaryImage = product.images?.[0]?.url;
     const formattedPrice = formatPrice(product.price, { currency, rate });
@@ -35,398 +40,254 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
 
     if (variant === 'grid') {
         return (
-            <TouchableOpacity style={styles.gridCard} onPress={onPress} activeOpacity={0.7}>
-                {/* Image */}
-                <View style={styles.gridImageContainer}>
-                    {primaryImage && !imageError ? (
-                        <Image
-                            source={{ uri: primaryImage }}
-                            style={styles.gridImage}
-                            resizeMode="cover"
-                            onError={() => setImageError(true)}
-                        />
-                    ) : (
-                        <View style={[styles.gridImage, styles.gridPlaceholder]}>
-                            <Icon name="image" size={32} color="#999" />
-                        </View>
-                    )}
+            <PressableScale onPress={onPress} style={{ width: '100%' }}>
+                <Card style={{ overflow: 'hidden', padding: 0 }}>
+                    {/* Image */}
+                    <View style={{ position: 'relative', width: '100%', height: 160 }}>
+                        {primaryImage && !imageError ? (
+                            <Image
+                                source={{ uri: primaryImage }}
+                                style={{ width: '100%', height: '100%' }}
+                                resizeMode="cover"
+                                onError={() => setImageError(true)}
+                            />
+                        ) : (
+                            <View
+                                style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    backgroundColor: colors.surfaceAlt,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <Icon name="image" size={32} color={colors.textMuted} />
+                            </View>
+                        )}
 
-                    {/* Stock Status */}
-                    {!isInStock && (
-                        <View style={styles.outOfStockBadge}>
-                            <Text style={styles.outOfStockText}>Out of Stock</Text>
-                        </View>
-                    )}
+                        {/* Stock Status */}
+                        {!isInStock && (
+                            <View style={{ position: 'absolute', top: spacing.sm, left: spacing.sm }}>
+                                <Badge label="Out of Stock" color={colors.onAccent} background={colors.danger} size="sm" />
+                            </View>
+                        )}
 
-                    {/* Featured Badge */}
-                    {product.isFeatured && (
-                        <View style={styles.featuredBadge}>
-                            <Ionicons name="star" size={12} color="#FFFFFF" />
-                        </View>
-                    )}
-                </View>
-
-                {/* Product Info */}
-                <View style={styles.gridInfo}>
-                    <Text style={styles.gridName} numberOfLines={2}>
-                        {product.name}
-                    </Text>
-
-                    <Text style={styles.gridPrice}>{formattedPrice}</Text>
-
-                    {rating > 0 && (
-                        <View style={styles.ratingContainer}>
-                            <Ionicons name="star" size={12} color="#FFD700" />
-                            <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
-                            <Text style={styles.ratingCount}>({ratingCount})</Text>
-                        </View>
-                    )}
-
-                    {/* Quick Actions */}
-                    <View style={styles.quickActions}>
-                        <TouchableOpacity style={styles.quickActionButton}>
-                            <Ionicons name="heart-outline" size={16} color="#666" />
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.quickActionButton}>
-                            <Ionicons name="cart-outline" size={16} color="#666" />
-                        </TouchableOpacity>
+                        {/* Featured Badge */}
+                        {product.isFeatured && (
+                            <View
+                                style={{
+                                    position: 'absolute',
+                                    top: spacing.sm,
+                                    right: spacing.sm,
+                                    width: 24,
+                                    height: 24,
+                                    borderRadius: radius.pill,
+                                    backgroundColor: colors.accent,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <Icon name="star" size={12} color={colors.onAccent} />
+                            </View>
+                        )}
                     </View>
-                </View>
-            </TouchableOpacity>
+
+                    {/* Product Info */}
+                    <View style={{ padding: spacing.md }}>
+                        <Text variant="bodySm" weight="600" numberOfLines={2} style={{ marginBottom: spacing.xs }}>
+                            {product.name}
+                        </Text>
+
+                        <Text
+                            variant="bodyMed"
+                            weight="700"
+                            color="accent"
+                            numeric
+                            style={{ marginBottom: spacing.xs }}
+                        >
+                            {formattedPrice}
+                        </Text>
+
+                        {rating > 0 && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                <Icon name="star" size={12} color={colors.warning} />
+                                <Text variant="caption" weight="600" style={{ marginLeft: spacing.xs, marginRight: 2 }}>
+                                    {rating.toFixed(1)}
+                                </Text>
+                                <Text variant="caption" color="textMuted">
+                                    ({ratingCount})
+                                </Text>
+                            </View>
+                        )}
+
+                        {/* Quick Actions */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm }}>
+                            <PressableScale
+                                style={{
+                                    width: 32,
+                                    height: 32,
+                                    borderRadius: radius.pill,
+                                    backgroundColor: colors.surfaceAlt,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <Icon name="heartOutline" size={16} color={colors.textSecondary} />
+                            </PressableScale>
+                            <PressableScale
+                                style={{
+                                    width: 32,
+                                    height: 32,
+                                    borderRadius: radius.pill,
+                                    backgroundColor: colors.surfaceAlt,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <Icon name="cart" size={16} color={colors.textSecondary} />
+                            </PressableScale>
+                        </View>
+                    </View>
+                </Card>
+            </PressableScale>
         );
     }
 
     // List View
     return (
-        <TouchableOpacity style={styles.listCard} onPress={onPress} activeOpacity={0.7}>
-            {/* Image */}
-            <View style={styles.listImageContainer}>
-                {primaryImage && !imageError ? (
-                    <Image
-                        source={{ uri: primaryImage }}
-                        style={styles.listImage}
-                        resizeMode="cover"
-                        onError={() => setImageError(true)}
-                    />
-                ) : (
-                    <View style={[styles.listImage, styles.listPlaceholder]}>
-                        <Icon name="image" size={40} color="#999" />
-                    </View>
-                )}
-
-                {/* Stock Status */}
-                {!isInStock && (
-                    <View style={[styles.outOfStockBadge, styles.listStockBadge]}>
-                        <Text style={styles.outOfStockText}>Out of Stock</Text>
-                    </View>
-                )}
-            </View>
-
-            {/* Product Info */}
-            <View style={styles.listInfo}>
-                <View style={styles.listHeader}>
-                    <View style={styles.listTitleContainer}>
-                        <Text style={styles.listName} numberOfLines={2}>
-                            {product.name}
-                        </Text>
-                        {product.isFeatured && (
-                            <View style={styles.featuredBadgeList}>
-                                <Ionicons name="star" size={12} color="#FFFFFF" />
-                                <Text style={styles.featuredText}>Featured</Text>
-                            </View>
-                        )}
-                    </View>
-
-                    <Text style={styles.listPrice}>{formattedPrice}</Text>
-                </View>
-
-                <Text style={styles.listDescription} numberOfLines={2}>
-                    {product.description}
-                </Text>
-
-                {/* Rating and Location */}
-                <View style={styles.listDetails}>
-                    {rating > 0 && (
-                        <View style={styles.ratingContainer}>
-                            <Ionicons name="star" size={14} color="#FFD700" />
-                            <Text style={styles.ratingText}>{rating.toFixed(1)}</Text>
-                            <Text style={styles.ratingCount}>({ratingCount})</Text>
+        <PressableScale onPress={onPress} style={{ marginHorizontal: spacing.lg, marginBottom: spacing.md }}>
+            <Card padding="md" style={{ flexDirection: 'row' }}>
+                {/* Image */}
+                <View style={{ position: 'relative', width: 100, height: 100, marginRight: spacing.md }}>
+                    {primaryImage && !imageError ? (
+                        <Image
+                            source={{ uri: primaryImage }}
+                            style={{ width: '100%', height: '100%', borderRadius: radius.sm }}
+                            resizeMode="cover"
+                            onError={() => setImageError(true)}
+                        />
+                    ) : (
+                        <View
+                            style={{
+                                width: '100%',
+                                height: '100%',
+                                borderRadius: radius.sm,
+                                backgroundColor: colors.surfaceAlt,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                            }}
+                        >
+                            <Icon name="image" size={40} color={colors.textMuted} />
                         </View>
                     )}
 
-                    <View style={styles.locationContainer}>
-                        <Ionicons name="location-outline" size={12} color="#666" />
-                        <Text style={styles.locationText} numberOfLines={1}>
-                            {product.location}
+                    {/* Stock Status */}
+                    {!isInStock && (
+                        <View style={{ position: 'absolute', top: spacing.xs, left: spacing.xs }}>
+                            <Badge label="Out of Stock" color={colors.onAccent} background={colors.danger} size="sm" />
+                        </View>
+                    )}
+                </View>
+
+                {/* Product Info */}
+                <View style={{ flex: 1 }}>
+                    <View
+                        style={{
+                            flexDirection: 'row',
+                            justifyContent: 'space-between',
+                            alignItems: 'flex-start',
+                            marginBottom: spacing.xs,
+                        }}
+                    >
+                        <View style={{ flex: 1, marginRight: spacing.sm }}>
+                            <Text variant="bodyMed" weight="600" numberOfLines={2} style={{ marginBottom: spacing.xs }}>
+                                {product.name}
+                            </Text>
+                            {product.isFeatured && (
+                                <Badge label="Featured" icon="star" color={colors.onAccent} background={colors.accent} size="sm" />
+                            )}
+                        </View>
+
+                        <Text variant="title3" weight="700" color="accent" numeric>
+                            {formattedPrice}
                         </Text>
                     </View>
-                </View>
 
-                {/* Seller Info */}
-                {product.companyName && (
-                    <View style={styles.sellerContainer}>
-                        <Text style={styles.sellerText}>Sold by: {product.companyName}</Text>
+                    <Text variant="bodySm" color="textSecondary" numberOfLines={2} style={{ marginBottom: spacing.sm }}>
+                        {product.description}
+                    </Text>
+
+                    {/* Rating and Location */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm }}>
+                        {rating > 0 && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: spacing.md }}>
+                                <Icon name="star" size={14} color={colors.warning} />
+                                <Text variant="caption" weight="600" style={{ marginLeft: spacing.xs, marginRight: 2 }}>
+                                    {rating.toFixed(1)}
+                                </Text>
+                                <Text variant="caption" color="textMuted">
+                                    ({ratingCount})
+                                </Text>
+                            </View>
+                        )}
+
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                            <Icon name="nearMe" size={12} color={colors.textSecondary} />
+                            <Text variant="caption" color="textSecondary" numberOfLines={1} style={{ marginLeft: spacing.xs, flex: 1 }}>
+                                {product.location}
+                            </Text>
+                        </View>
                     </View>
-                )}
 
-                {/* Quick Actions */}
-                <View style={styles.listActions}>
-                    <TouchableOpacity style={styles.wishlistButton}>
-                        <Ionicons name="heart-outline" size={18} color="#666" />
-                        <Text style={styles.actionText}>Wishlist</Text>
-                    </TouchableOpacity>
+                    {/* Seller Info */}
+                    {product.companyName && (
+                        <View style={{ marginBottom: spacing.sm }}>
+                            <Text variant="caption" color="textSecondary" style={{ fontStyle: 'italic' }}>
+                                Sold by: {product.companyName}
+                            </Text>
+                        </View>
+                    )}
 
-                    <TouchableOpacity style={styles.cartButton}>
-                        <Ionicons name="cart-outline" size={18} color="#D4AF37" />
-                        <Text style={[styles.actionText, styles.cartText]}>Add to Cart</Text>
-                    </TouchableOpacity>
+                    {/* Quick Actions */}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm }}>
+                        <PressableScale
+                            style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                paddingHorizontal: spacing.md,
+                                paddingVertical: spacing.sm,
+                                borderRadius: radius.sm,
+                                backgroundColor: colors.surfaceAlt,
+                            }}
+                        >
+                            <Icon name="heartOutline" size={18} color={colors.textSecondary} />
+                            <Text variant="bodySm" weight="500" color="textSecondary" style={{ marginLeft: spacing.xs }}>
+                                Wishlist
+                            </Text>
+                        </PressableScale>
+
+                        <PressableScale
+                            style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                paddingHorizontal: spacing.lg,
+                                paddingVertical: spacing.sm,
+                                borderRadius: radius.sm,
+                                backgroundColor: colors.accentMuted,
+                                borderWidth: 1,
+                                borderColor: colors.accent,
+                            }}
+                        >
+                            <Icon name="cart" size={18} color={colors.accent} />
+                            <Text variant="bodySm" weight="500" color="accent" style={{ marginLeft: spacing.xs }}>
+                                Add to Cart
+                            </Text>
+                        </PressableScale>
+                    </View>
                 </View>
-            </View>
-        </TouchableOpacity>
+            </Card>
+        </PressableScale>
     );
 };
-
-const styles = StyleSheet.create({
-    // Grid Styles
-    gridCard: {
-        width: '100%',
-        backgroundColor: '#FFFFFF',
-        borderRadius: 12,
-        overflow: 'hidden',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.05,
-        shadowRadius: 4,
-        elevation: 2,
-        borderWidth: 1,
-        borderColor: '#F0F0F0',
-    },
-    gridImageContainer: {
-        position: 'relative',
-        width: '100%',
-        height: 160,
-    },
-    gridImage: {
-        width: '100%',
-        height: '100%',
-    },
-    gridPlaceholder: {
-        backgroundColor: '#F5F5F5',
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    gridInfo: {
-        padding: 12,
-    },
-    gridName: {
-        fontSize: 14,
-        fontWeight: '600',
-        color: '#1A1A1A',
-        marginBottom: 6,
-        lineHeight: 18,
-    },
-    gridPrice: {
-        fontSize: 16,
-        fontWeight: '700',
-        color: '#D4AF37',
-        marginBottom: 6,
-    },
-
-    // List Styles
-    listCard: {
-        flexDirection: 'row',
-        backgroundColor: '#FFFFFF',
-        borderRadius: 12,
-        marginHorizontal: 16,
-        marginBottom: 12,
-        padding: 12,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.05,
-        shadowRadius: 4,
-        elevation: 2,
-        borderWidth: 1,
-        borderColor: '#F0F0F0',
-    },
-    listImageContainer: {
-        position: 'relative',
-        width: 100,
-        height: 100,
-        marginRight: 12,
-    },
-    listImage: {
-        width: '100%',
-        height: '100%',
-        borderRadius: 8,
-    },
-    listPlaceholder: {
-        backgroundColor: '#F5F5F5',
-        justifyContent: 'center',
-        alignItems: 'center',
-        borderRadius: 8,
-    },
-    listInfo: {
-        flex: 1,
-    },
-    listHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-        marginBottom: 6,
-    },
-    listTitleContainer: {
-        flex: 1,
-        marginRight: 8,
-    },
-    listName: {
-        fontSize: 16,
-        fontWeight: '600',
-        color: '#1A1A1A',
-        lineHeight: 20,
-        marginBottom: 4,
-    },
-    listPrice: {
-        fontSize: 18,
-        fontWeight: '700',
-        color: '#D4AF37',
-    },
-    listDescription: {
-        fontSize: 13,
-        color: '#666',
-        lineHeight: 18,
-        marginBottom: 8,
-    },
-    listDetails: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 8,
-    },
-
-    // Common Styles
-    outOfStockBadge: {
-        position: 'absolute',
-        top: 8,
-        left: 8,
-        backgroundColor: 'rgba(220, 53, 69, 0.9)',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 4,
-    },
-    listStockBadge: {
-        top: 4,
-        left: 4,
-    },
-    outOfStockText: {
-        fontSize: 10,
-        fontWeight: '600',
-        color: '#FFFFFF',
-    },
-    featuredBadge: {
-        position: 'absolute',
-        top: 8,
-        right: 8,
-        backgroundColor: '#D4AF37',
-        width: 24,
-        height: 24,
-        borderRadius: 12,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    featuredBadgeList: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#D4AF37',
-        paddingHorizontal: 8,
-        paddingVertical: 2,
-        borderRadius: 4,
-        alignSelf: 'flex-start',
-        marginBottom: 4,
-    },
-    featuredText: {
-        fontSize: 10,
-        fontWeight: '600',
-        color: '#FFFFFF',
-        marginLeft: 4,
-    },
-    ratingContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginRight: 12,
-    },
-    ratingText: {
-        fontSize: 12,
-        fontWeight: '600',
-        color: '#1A1A1A',
-        marginLeft: 4,
-        marginRight: 2,
-    },
-    ratingCount: {
-        fontSize: 11,
-        color: '#666',
-    },
-    locationContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        flex: 1,
-    },
-    locationText: {
-        fontSize: 12,
-        color: '#666',
-        marginLeft: 4,
-        flex: 1,
-    },
-    sellerContainer: {
-        marginBottom: 8,
-    },
-    sellerText: {
-        fontSize: 12,
-        color: '#666',
-        fontStyle: 'italic',
-    },
-    quickActions: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginTop: 8,
-    },
-    quickActionButton: {
-        width: 32,
-        height: 32,
-        borderRadius: 16,
-        backgroundColor: '#F5F5F5',
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    listActions: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginTop: 8,
-    },
-    wishlistButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 6,
-        backgroundColor: '#F5F5F5',
-    },
-    cartButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 8,
-        borderRadius: 6,
-        backgroundColor: '#FFF8E1',
-        borderWidth: 1,
-        borderColor: '#D4AF37',
-    },
-    actionText: {
-        fontSize: 13,
-        fontWeight: '500',
-        marginLeft: 6,
-    },
-    cartText: {
-        color: '#D4AF37',
-    },
-});
 
 export default ProductCard;

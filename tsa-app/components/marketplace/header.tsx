@@ -1,24 +1,33 @@
+// components/marketplace/header.tsx
+//
+// Marketplace search header — debounced product/service search with an
+// absolutely-positioned results dropdown. Restyled onto the TSA Signature
+// design system (theme tokens + @/components/ui primitives). Props, exports,
+// data fetching (api.getMarketplaceProducts), state, the debounce, effects,
+// and every navigation route + param are unchanged — visual / structural
+// migration only.
 import React, { useState, useEffect } from "react";
-import {
-  StyleSheet,
-  TextInput,
-  View,
-  FlatList,
-  Text,
-  ActivityIndicator,
-  TouchableOpacity,
-} from "react-native";
-import Ionicons from "@expo/vector-icons/Ionicons";
-import { SIZES, COLORS } from "../../constants";
+import { View, FlatList } from "react-native";
 import { useDebounce } from "use-debounce";
 import { router } from "expo-router";
 import { api, Product } from "../services/api";
+import { useTheme } from "@/theme";
+import {
+  Divider,
+  Icon,
+  Input,
+  PressableScale,
+  Spinner,
+  Surface,
+  Text,
+} from "@/components/ui";
 
 type HeaderSearchProps = {
   type: "Product" | "Service";
 };
 
 const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
+  const { colors, spacing, radius } = useTheme();
   const [search, setSearch] = useState<string>("");
   const [debouncedSearch] = useDebounce(search, 300);
   const [results, setResults] = useState<Product[]>([]);
@@ -92,59 +101,90 @@ const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
 
     if (loading) {
       return (
-        <View style={styles.dropdown}>
-          <View style={styles.statusContainer}>
-            <ActivityIndicator size="small" color={COLORS.primary} />
+        <Surface
+          elevation="lg"
+          radius="md"
+          padding="md"
+          style={styles.dropdown}
+        >
+          <View style={{ paddingVertical: spacing.lg, alignItems: "center" }}>
+            <Spinner size="small" />
           </View>
-        </View>
+        </Surface>
       );
     }
 
     if (error) {
       return (
-        <View style={styles.dropdown}>
-          <View style={styles.statusContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+        <Surface
+          elevation="lg"
+          radius="md"
+          padding="md"
+          style={styles.dropdown}
+        >
+          <View style={{ paddingVertical: spacing.lg, alignItems: "center" }}>
+            <Text variant="bodySm" color="danger" align="center">
+              {error}
+            </Text>
           </View>
-        </View>
+        </Surface>
       );
     }
 
     if (results.length === 0) {
       return (
-        <View style={styles.dropdown}>
-          <View style={styles.statusContainer}>
-            <Text style={styles.emptyText}>
-              No {type === "Service" ? "services" : "products"} match "{debouncedSearch}"
+        <Surface
+          elevation="lg"
+          radius="md"
+          padding="md"
+          style={styles.dropdown}
+        >
+          <View style={{ paddingVertical: spacing.lg, alignItems: "center" }}>
+            <Text variant="bodySm" color="textMuted" align="center">
+              No {type === "Service" ? "services" : "products"} match &quot;
+              {debouncedSearch}&quot;
             </Text>
           </View>
-        </View>
+        </Surface>
       );
     }
 
     return (
-      <View style={styles.dropdown}>
+      <Surface
+        elevation="lg"
+        radius="md"
+        style={[styles.dropdown, { maxHeight: 350, paddingVertical: spacing.xs }]}
+      >
         <FlatList
           data={results}
           keyboardShouldPersistTaps="handled"
           keyExtractor={(item) => item.id || (item as any)._id}
+          ItemSeparatorComponent={() => <Divider />}
           renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.dropdownItem}
+            <PressableScale
               onPress={() => handleSelect(item)}
+              style={{
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.md,
+              }}
             >
-              <Text style={styles.dropdownItemTitle} numberOfLines={1}>
+              <Text variant="bodySm" weight="600" numberOfLines={1}>
                 {item.name}
               </Text>
               {item.companyName ? (
-                <Text style={styles.dropdownItemSub} numberOfLines={1}>
+                <Text
+                  variant="caption"
+                  color="textMuted"
+                  numberOfLines={1}
+                  style={{ marginTop: 2 }}
+                >
                   {item.companyName}
                 </Text>
               ) : null}
-            </TouchableOpacity>
+            </PressableScale>
           )}
         />
-      </View>
+      </Surface>
     );
   };
 
@@ -155,30 +195,34 @@ const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.searchBar}>
-        <Ionicons name="search" size={20} color="#666" style={styles.searchIcon} />
-        <TextInput
-          placeholder={`Search ${type === "Service" ? "services" : "products"}...`}
-          value={search}
-          onChangeText={setSearch}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-          style={styles.searchInput}
-          autoCorrect={false}
-          returnKeyType="search"
-        />
-        {search !== "" && (
-          <TouchableOpacity onPress={clearSearch}>
-            <Ionicons
-              name="close-circle"
-              size={20}
-              color="#666"
-              style={styles.clearIcon}
-            />
-          </TouchableOpacity>
-        )}
-      </View>
+    <View
+      style={{
+        backgroundColor: colors.surface,
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.sm,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.border,
+        zIndex: 1,
+      }}
+    >
+      <Input
+        placeholder={`Search ${type === "Service" ? "services" : "products"}...`}
+        value={search}
+        onChangeText={setSearch}
+        onFocus={() => setIsFocused(true)}
+        onBlur={() => setIsFocused(false)}
+        autoCorrect={false}
+        returnKeyType="search"
+        inputStyle={{ borderRadius: radius.pill }}
+        leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+        rightAdornment={
+          search !== "" ? (
+            <PressableScale onPress={clearSearch} hitSlop={8}>
+              <Icon name="closeCircle" size={18} color={colors.textMuted} />
+            </PressableScale>
+          ) : undefined
+        }
+      />
       {renderSearchResults()}
     </View>
   );
@@ -186,79 +230,15 @@ const HeaderSearch: React.FC<HeaderSearchProps> = ({ type }) => {
 
 export default HeaderSearch;
 
-const styles = StyleSheet.create({
-  container: {
-    backgroundColor: "#fff",
-    paddingHorizontal: SIZES.padding,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "#ddd",
-    zIndex: 1,
-  },
-  searchBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#f0f0f0",
-    borderRadius: 20,
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-  },
-  searchIcon: {
-    marginRight: 10,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 16,
-    color: "#333",
-  },
-  clearIcon: {
-    marginLeft: 10,
-  },
-  statusContainer: {
-    paddingVertical: 16,
-    alignItems: "center",
-  },
-  errorText: {
-    color: "#DC2626",
-    textAlign: "center",
-  },
-  emptyText: {
-    color: "#888",
-    textAlign: "center",
-    fontSize: 14,
-  },
+// Only the absolute-positioning geometry of the dropdown lives here; all colors,
+// elevation, radius and spacing come from theme tokens / primitives above.
+const styles = {
   dropdown: {
-    position: "absolute",
-    top: "130%",
+    position: "absolute" as const,
+    top: "120%" as const,
     left: 10,
     right: 0,
-    backgroundColor: "#fff",
-    maxHeight: 350,
-    borderRadius: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 5,
+    width: "98%" as const,
     zIndex: 1000,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    width: "98%",
   },
-  dropdownItem: {
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderBottomColor: COLORS.gray,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  dropdownItemTitle: {
-    fontSize: 14,
-    color: "#1A1A1A",
-    fontWeight: "600",
-  },
-  dropdownItemSub: {
-    fontSize: 12,
-    color: "#888",
-    marginTop: 2,
-  },
-});
+};
