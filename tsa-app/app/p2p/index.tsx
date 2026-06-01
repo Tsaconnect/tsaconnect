@@ -182,18 +182,16 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        {/* Filter row — Token is always present; Amount + Payment appear once
-            ads load. Wraps on narrow screens so each chip keeps its full label.
-            The Token picker is where a network sub-selector will live once more
-            chains are supported. */}
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            gap: spacing.sm,
-            marginBottom: spacing.md,
-          }}
+        {/* Filter row — Token always; Amount + Payment once ads load. One
+            horizontally-scrollable line so the chips stay on the same row (and
+            scroll instead of wrapping if a selected label runs long). The Token
+            picker is where a network sub-selector will live as chains grow. */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          style={{ marginBottom: spacing.md }}
+          contentContainerStyle={{ alignItems: 'center', gap: spacing.sm, paddingRight: spacing.lg }}
         >
           <TokenFilter
             token={token}
@@ -217,7 +215,7 @@ const P2PMarketScreen: React.FC = () => {
               />
             </>
           )}
-        </View>
+        </ScrollView>
 
         {loading ? (
           <SkeletonGroup shape="adCard" count={4} />
@@ -470,9 +468,7 @@ const PaymentFilter: React.FC<{
   onChange: (provider: string | null) => void;
 }> = ({ options, selected, onChange }) => {
   const selectedLabel =
-    selected == null
-      ? 'All Payment Methods'
-      : options.find((o) => o.provider === selected)?.label ?? 'All Payment Methods';
+    selected == null ? 'Payment' : options.find((o) => o.provider === selected)?.label ?? 'Payment';
   return (
     <Dropdown align="start" menuWidth={240} renderTrigger={() => <FilterChip label={selectedLabel} active={selected != null} />}>
       {({ close }) => (
