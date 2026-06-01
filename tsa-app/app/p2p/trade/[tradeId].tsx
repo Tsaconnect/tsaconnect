@@ -54,6 +54,7 @@ import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import type { ChainKey } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
+import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';
 import { useTradeRealtime } from '../../../hooks/useTradeRealtime';
 import { useNotifications } from '../../../contexts/NotificationContext';
 import {
@@ -95,6 +96,9 @@ const TradeDetailScreen: React.FC = () => {
   const scrollRef = useRef<ScrollView>(null);
 
   const countdown = useCountdown(trade?.status === 'pending_payment' ? trade?.expiresAt : undefined);
+
+  // Local notification ~5 min before a pending_payment trade expires.
+  useTradeExpiryReminder(trade);
 
   const rate = async (value: 1 | -1) => {
     const res = await ratingsApi.rate(String(tradeId), value);

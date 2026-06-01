@@ -11,6 +11,14 @@ import { CurrencyProvider } from '../contexts/CurrencyContext';
 import { CartProvider } from '../contexts/CartContext';
 import { ThemeProvider, ThemedStatusBar, useAppFonts } from "@/theme";
 import { ToastProvider } from "@/components/ui";
+import { usePushRegistration } from "../hooks/usePushRegistration";
+
+// Registers the device for Expo push + wires tap-to-navigate. Mounted inside the
+// auth tree so it can read the login state; renders nothing.
+function PushRegistrar() {
+  usePushRegistration();
+  return null;
+}
 
 // Hold the native splash until the Inter family is ready (design-system fonts).
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -63,6 +71,7 @@ const RootLayout = () => {
               <CartProvider>
                 <ToastProvider>
                   <ThemedStatusBar />
+                  <PushRegistrar />
                   <Stack screenOptions={{ headerShown: false }}>
                     <Stack.Screen name="index" options={{ headerShown: false }} />
                     <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
