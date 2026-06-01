@@ -15,7 +15,6 @@ import {
 import { useUserRole } from '../../hooks/useUserRole';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-import PaymentMethodFilter from '../../components/p2p/PaymentMethodFilter';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -23,7 +22,6 @@ import {
   Avatar,
   Badge,
   Button,
-  Chip,
   Dropdown,
   EmptyState,
   ErrorState,
@@ -184,25 +182,42 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md }}>
-          {TOKENS.map((t) => (
-            <Chip key={t} label={t} selected={token === t} onPress={() => setToken(t)} />
-          ))}
+        {/* Filter row — Token is always present; Amount + Payment appear once
+            ads load. Wraps on narrow screens so each chip keeps its full label.
+            The Token picker is where a network sub-selector will live once more
+            chains are supported. */}
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: spacing.sm,
+            marginBottom: spacing.md,
+          }}
+        >
+          <TokenFilter
+            token={token}
+            onChange={(t) => {
+              setToken(t);
+              setLoading(true);
+            }}
+          />
+          {!loading && !error && ads.length > 0 && (
+            <>
+              <AmountFilter
+                value={minAmount}
+                onChange={setMinAmount}
+                currencyCode={currency.code}
+                currencySymbol={currency.symbol}
+              />
+              <PaymentFilter
+                options={distinctAdProviders(ads)}
+                selected={providerFilter}
+                onChange={setProviderFilter}
+              />
+            </>
+          )}
         </View>
-
-        {!loading && !error && ads.length > 0 && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
-            <AmountFilter
-              value={minAmount}
-              onChange={setMinAmount}
-              currencyCode={currency.code}
-              currencySymbol={currency.symbol}
-            />
-            <View style={{ flexShrink: 1 }}>
-              <PaymentMethodFilter options={distinctAdProviders(ads)} selected={providerFilter} onChange={setProviderFilter} />
-            </View>
-          </View>
-        )}
 
         {loading ? (
           <SkeletonGroup shape="adCard" count={4} />
@@ -365,53 +380,110 @@ const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide })
   );
 };
 
-// Compact "minimum amount" filter — a chip trigger that opens an anchored
-// dropdown with a numeric field. Filters the list to ads whose max limit can
-// accommodate the entered amount and up (see visibleAds).
-const AmountFilter: React.FC<{
-  value: number | null;
-  onChange: (v: number | null) => void;
-  currencyCode: string;
-  currencySymbol: string;
-}> = ({ value, onChange, currencyCode, currencySymbol }) => {
+// Shared filter-row chip trigger (Token / Amount / Payment). `active` paints
+// the accent treatment; the value text doubles as the label so each chip always
+// shows what it filters.
+const FilterChip: React.FC<{ label: string; active?: boolean }> = ({ label, active }) => {
   const { colors, spacing, radius } = useTheme();
-  const active = value != null;
   return (
-    <Dropdown
-      align="start"
-      menuWidth={240}
-      renderTrigger={() => (
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: spacing.xs,
-            paddingHorizontal: spacing.md,
-            paddingVertical: spacing.sm,
-            borderRadius: radius.sm,
-            borderWidth: 1,
-            borderColor: active ? colors.accent : colors.border,
-            backgroundColor: active ? colors.accentMuted : colors.surface,
-          }}
-        >
-          <Text variant="bodySm" weight="600" color={active ? 'accent' : 'textSecondary'} numberOfLines={1}>
-            {value != null ? `≥ ${currencyShort(currencyCode, value)}` : 'Amount'}
-          </Text>
-          <Icon name="chevronDown" size={16} color={active ? colors.accent : colors.textMuted} />
-        </View>
-      )}
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.xs,
+        paddingHorizontal: spacing.md,
+        paddingVertical: spacing.sm,
+        borderRadius: radius.sm,
+        borderWidth: 1,
+        borderColor: active ? colors.accent : colors.border,
+        backgroundColor: active ? colors.accentMuted : colors.surface,
+      }}
     >
+      <Text variant="bodySm" weight="600" color={active ? 'accent' : 'textSecondary'} numberOfLines={1}>
+        {label}
+      </Text>
+      <Icon name="chevronDown" size={16} color={active ? colors.accent : colors.textMuted} />
+    </View>
+  );
+};
+
+// Single-select option list for the compact dropdown menus (Token / Payment).
+const OptionList: React.FC<{
+  options: { key: string; label: string }[];
+  selectedKey: string;
+  onPick: (key: string) => void;
+}> = ({ options, selectedKey, onPick }) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <View style={{ paddingVertical: spacing.xs }}>
+      {options.map((o) => {
+        const sel = o.key === selectedKey;
+        return (
+          <PressableScale
+            key={o.key}
+            onPress={() => onPick(o.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: sel }}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingHorizontal: spacing.md,
+              paddingVertical: spacing.sm,
+              backgroundColor: sel ? colors.accentMuted : 'transparent',
+            }}
+          >
+            <Text variant="bodySm" weight="600" numberOfLines={1}>
+              {o.label}
+            </Text>
+            {sel && <Icon name="check" size={16} color={colors.accent} />}
+          </PressableScale>
+        );
+      })}
+    </View>
+  );
+};
+
+// Token (asset) selector — replaces the inline token chips. A network
+// sub-selector will live here once more chains are supported.
+const TokenFilter: React.FC<{ token: string; onChange: (t: string) => void }> = ({ token, onChange }) => (
+  <Dropdown align="start" menuWidth={180} renderTrigger={() => <FilterChip label={token} active />}>
+    {({ close }) => (
+      <OptionList
+        options={TOKENS.map((t) => ({ key: t, label: t }))}
+        selectedKey={token}
+        onPick={(t) => {
+          if (t !== token) onChange(t);
+          close();
+        }}
+      />
+    )}
+  </Dropdown>
+);
+
+// Payment-method filter (themed; replaces the legacy bottom-sheet component).
+// `null` selection means "All Payment Methods".
+const ALL_PAYMENTS = '__all__';
+const PaymentFilter: React.FC<{
+  options: { provider: string; label: string }[];
+  selected: string | null;
+  onChange: (provider: string | null) => void;
+}> = ({ options, selected, onChange }) => {
+  const selectedLabel =
+    selected == null
+      ? 'All Payment Methods'
+      : options.find((o) => o.provider === selected)?.label ?? 'All Payment Methods';
+  return (
+    <Dropdown align="start" menuWidth={240} renderTrigger={() => <FilterChip label={selectedLabel} active={selected != null} />}>
       {({ close }) => (
-        <AmountMenu
-          initial={value}
-          currencyCode={currencyCode}
-          currencySymbol={currencySymbol}
-          onApply={(v) => {
-            onChange(v);
-            close();
-          }}
-          onClear={() => {
-            onChange(null);
+        <OptionList
+          options={[
+            { key: ALL_PAYMENTS, label: 'All Payment Methods' },
+            ...options.map((o) => ({ key: o.provider, label: o.label })),
+          ]}
+          selectedKey={selected ?? ALL_PAYMENTS}
+          onPick={(key) => {
+            onChange(key === ALL_PAYMENTS ? null : key);
             close();
           }}
         />
@@ -419,6 +491,39 @@ const AmountFilter: React.FC<{
     </Dropdown>
   );
 };
+
+// Minimum-amount filter — a chip that opens a numeric field; filters the list
+// to ads whose max limit can accommodate the entered amount and up (visibleAds).
+const AmountFilter: React.FC<{
+  value: number | null;
+  onChange: (v: number | null) => void;
+  currencyCode: string;
+  currencySymbol: string;
+}> = ({ value, onChange, currencyCode, currencySymbol }) => (
+  <Dropdown
+    align="start"
+    menuWidth={240}
+    renderTrigger={() => (
+      <FilterChip label={value != null ? `≥ ${currencyShort(currencyCode, value)}` : 'Amount'} active={value != null} />
+    )}
+  >
+    {({ close }) => (
+      <AmountMenu
+        initial={value}
+        currencyCode={currencyCode}
+        currencySymbol={currencySymbol}
+        onApply={(v) => {
+          onChange(v);
+          close();
+        }}
+        onClear={() => {
+          onChange(null);
+          close();
+        }}
+      />
+    )}
+  </Dropdown>
+);
 
 const AmountMenu: React.FC<{
   initial: number | null;
