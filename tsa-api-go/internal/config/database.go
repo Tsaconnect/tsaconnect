@@ -40,6 +40,7 @@ func AutoMigrate() error {
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
 		&models.Notification{},
+		&models.DeviceToken{},
 		&models.EmailVerification{},
 		&models.PasswordReset{},
 		&models.PrivateSaleSubmission{},

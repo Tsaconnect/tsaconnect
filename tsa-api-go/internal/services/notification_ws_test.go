@@ -105,7 +105,8 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let the hub goroutine finish registering
 
 	// The bridge under test — subscribes "*" to the bus in its constructor.
-	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""))
+	// nil push service: this test exercises the WS frame, not Expo delivery.
+	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), nil)
 
 	tradeID := uuid.New().String()
 	cases := []struct {
