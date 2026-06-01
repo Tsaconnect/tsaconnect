@@ -1,22 +1,21 @@
-import {
-  StyleSheet,
-  Text,
-  View,
-  Modal,
-  TouchableOpacity,
-  Alert,
-  ScrollView,
-  Image,
-  Dimensions,
-  FlatList,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+// app/(servicegroup)/servicedetail.tsx
+//
+// Service detail — restyled onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives). The service fetch
+// (getServiceContact status check + api.getProductById catalogue fetch) and
+// the contact-fee action flow (prepareContactFee → sign → broadcast → confirm
+// via submitContactFee, the sign/broadcast/confirm + verification path) are
+// preserved EXACTLY — this is a visual/structural restyle only. The reveal
+// flow's two-step approve + payContactFee broadcast, the withTimeout guards,
+// the humanizePaymentError mapping, the USDC/USDT token selection, and the
+// ServiceDetailCard composition (props unchanged) are all untouched.
 import React, { useEffect, useState, useCallback } from 'react';
+import { Modal, ScrollView, Image, Dimensions, FlatList, Alert, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import ServiceDetailCard from '../../components/services/ServiceDetail';
 import { useLocalSearchParams } from 'expo-router';
+import ServiceDetailCard from '../../components/services/ServiceDetail';
 import { useAuth } from '../../AuthContext/AuthContext';
-import { COLORS } from '../../constants';
 import { signTransaction, broadcastTransaction } from '../../services/wallet';
 import {
   prepareContactFee,
@@ -25,6 +24,15 @@ import {
   type ContactInfo,
 } from '../../services/serviceContactApi';
 import { api } from '../../components/services/api';
+import { useTheme } from '@/theme';
+import {
+  Text,
+  Button,
+  IconButton,
+  SegmentedControl,
+  Sheet,
+  Spinner,
+} from '@/components/ui';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -113,7 +121,13 @@ const STEP_LABELS: Record<PaymentStep, string> = {
   done: '',
 };
 
+const TOKEN_SEGMENTS = [
+  { key: 'USDC' as const, label: 'USDC' },
+  { key: 'USDT' as const, label: 'USDT' },
+];
+
 const ServiceDetail = () => {
+  const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
   const { title, image, description, id: serviceId } = useLocalSearchParams<{
     title: string;
@@ -282,90 +296,97 @@ const ServiceDetail = () => {
   };
 
   return (
-    <ScrollView style={styles.container}>
-      {/* Loading status */}
-      {loading && paymentStep !== 'idle' && (
-        <View style={styles.statusBar}>
-          <Text style={styles.statusText}>{STEP_LABELS[paymentStep]}</Text>
-        </View>
-      )}
-
-      <ServiceDetailCard
-        title={title as string}
-        imageSrc={image as string}
-        address={description as string}
-        contactPaid={contactPaid}
-        contact={contact}
-        feeDisplay={feeDisplay}
-        loading={loading}
-        onRevealPress={handleRevealPress}
-        onCopyPress={handleCopy}
-        onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
-      />
-
-      {/* Payment Confirmation Modal */}
-      <Modal visible={showModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Reveal Contact Details</Text>
-            <Text style={styles.modalDesc}>
-              Pay {feeDisplay} in {selectedToken} to reveal this provider's contact details.
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
+        {/* Loading status */}
+        {loading && paymentStep !== 'idle' && (
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: spacing.sm,
+              backgroundColor: colors.accentMuted,
+              borderRadius: radius.md,
+              paddingVertical: spacing.sm,
+              paddingHorizontal: spacing.lg,
+              marginBottom: spacing.lg,
+            }}
+          >
+            <Spinner inline />
+            <Text variant="bodySm" weight="600" color="accent">
+              {STEP_LABELS[paymentStep]}
             </Text>
-
-            {/* Token selector — contract uses a single global feeAmount sized
-                for 6-decimal stablecoins, so only USDC/USDT are supported. */}
-            <View style={styles.tokenSelector}>
-              {(['USDC', 'USDT'] as const).map((tk) => (
-                <TouchableOpacity
-                  key={tk}
-                  style={[
-                    styles.tokenPill,
-                    selectedToken === tk && styles.tokenPillActive,
-                  ]}
-                  onPress={() => setSelectedToken(tk)}
-                >
-                  <Text
-                    style={[
-                      styles.tokenPillText,
-                      selectedToken === tk && styles.tokenPillTextActive,
-                    ]}
-                  >
-                    {tk}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <TouchableOpacity style={styles.payButton} onPress={handlePayAndReveal}>
-              <Text style={styles.payButtonText}>Pay & Reveal</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.cancelButton}
-              onPress={() => setShowModal(false)}
-            >
-              <Text style={styles.cancelButtonText}>Cancel</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
+        )}
 
-      {/* Catalogue gallery — shows the merchant's full multi-image upload. */}
+        <ServiceDetailCard
+          title={title as string}
+          imageSrc={image as string}
+          address={description as string}
+          contactPaid={contactPaid}
+          contact={contact}
+          feeDisplay={feeDisplay}
+          loading={loading}
+          onRevealPress={handleRevealPress}
+          onCopyPress={handleCopy}
+          onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
+        />
+      </ScrollView>
+
+      {/* Payment Confirmation Sheet */}
+      <Sheet visible={showModal} onClose={() => setShowModal(false)} title="Reveal Contact Details">
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.lg }}>
+          <Text variant="bodySm" color="textSecondary">
+            Pay {feeDisplay} in {selectedToken} to reveal this provider&apos;s contact details.
+          </Text>
+
+          {/* Token selector — contract uses a single global feeAmount sized
+              for 6-decimal stablecoins, so only USDC/USDT are supported. */}
+          <SegmentedControl
+            segments={TOKEN_SEGMENTS}
+            value={selectedToken}
+            onChange={setSelectedToken}
+          />
+
+          <Button title="Pay & Reveal" onPress={handlePayAndReveal} size="lg" />
+          <Button title="Cancel" variant="ghost" onPress={() => setShowModal(false)} />
+        </View>
+      </Sheet>
+
+      {/* Catalogue gallery — shows the merchant's full multi-image upload.
+          Kept as an immersive full-screen lightbox over the scrim token so the
+          merchant's photos read edge-to-edge regardless of light/dark scheme. */}
       <Modal
         visible={showCatalogue}
         animationType="fade"
         transparent
         onRequestClose={() => setShowCatalogue(false)}
       >
-        <View style={styles.catalogueOverlay}>
-          <View style={styles.catalogueHeader}>
-            <Text style={styles.catalogueTitle}>Catalogue</Text>
-            <TouchableOpacity
+        <View style={{ flex: 1, backgroundColor: colors.overlay, justifyContent: 'center' }}>
+          <View
+            style={{
+              position: 'absolute',
+              top: spacing['4xl'],
+              left: 0,
+              right: 0,
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              paddingHorizontal: spacing.xl,
+              zIndex: 1,
+            }}
+          >
+            <Text variant="title3" weight="700" style={{ color: colors.textInverse }}>
+              Catalogue
+            </Text>
+            <IconButton
+              icon="close"
+              accessibilityLabel="Close catalogue"
               onPress={() => setShowCatalogue(false)}
-              hitSlop={12}
-            >
-              <Ionicons name="close" size={26} color="#fff" />
-            </TouchableOpacity>
+              size={24}
+              color={colors.textInverse}
+            />
           </View>
           <FlatList
             data={catalogueImages}
@@ -376,142 +397,28 @@ const ServiceDetail = () => {
             renderItem={({ item }) => (
               <Image
                 source={{ uri: item }}
-                style={styles.catalogueImage}
+                style={{ width: Dimensions.get('window').width, height: '100%' }}
                 resizeMode="contain"
               />
             )}
           />
-          <Text style={styles.catalogueHint}>
+          <Text
+            variant="bodySm"
+            align="center"
+            style={{
+              position: 'absolute',
+              bottom: spacing['4xl'],
+              left: 0,
+              right: 0,
+              color: colors.textInverse,
+            }}
+          >
             {catalogueImages.length} image{catalogueImages.length === 1 ? '' : 's'} — swipe to browse
           </Text>
         </View>
       </Modal>
-    </ScrollView>
+    </SafeAreaView>
   );
 };
 
 export default ServiceDetail;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
-  statusBar: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    alignItems: 'center',
-  },
-  statusText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 24,
-    paddingBottom: 40,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: COLORS.primary,
-    marginBottom: 8,
-  },
-  modalDesc: {
-    fontSize: 14,
-    color: '#555',
-    marginBottom: 16,
-    lineHeight: 20,
-  },
-  tokenSelector: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 20,
-  },
-  tokenPill: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-    alignItems: 'center',
-  },
-  tokenPillActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  tokenPillText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#777',
-  },
-  tokenPillTextActive: {
-    color: '#fff',
-  },
-  payButton: {
-    backgroundColor: '#E8A14A',
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  payButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  cancelButton: {
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  cancelButtonText: {
-    fontSize: 14,
-    color: '#777',
-  },
-
-  // Catalogue gallery modal
-  catalogueOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.92)',
-    justifyContent: 'center',
-  },
-  catalogueHeader: {
-    position: 'absolute',
-    top: 40,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    zIndex: 1,
-  },
-  catalogueTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  catalogueImage: {
-    width: Dimensions.get('window').width,
-    height: '100%',
-  },
-  catalogueHint: {
-    position: 'absolute',
-    bottom: 40,
-    left: 0,
-    right: 0,
-    textAlign: 'center',
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 13,
-  },
-});

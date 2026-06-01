@@ -1,24 +1,28 @@
+// app/profile/kyc.tsx
+//
+// KYC identity-verification flow (Persona inquiry in a WebView). Restyled onto the
+// TSA Signature design system (@/theme tokens + @/components/ui primitives).
+//
+// VERIFICATION screen: the KYC status check (api.getKYCStatus), session creation
+// (api.createKYCSession), camera-permission request, Persona WebView (document /
+// selfie capture) and its completion-redirect detection, and all status gating
+// (loading / not_started / webview_active / in_progress / verified / rejected) are
+// preserved verbatim — this is a visual/structural restyle only.
 import React, { useState, useCallback } from "react";
-import {
-  StyleSheet,
-  View,
-  Text,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  Linking,
-} from "react-native";
+import { View, ActivityIndicator, Alert, Linking } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
 import { Camera } from "expo-camera";
 import { WebView } from "react-native-webview";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
-import { COLORS, SIZES } from "../../constants/theme";
+import { useTheme } from "@/theme";
+import { Text, Button, IconButton, Icon } from "@/components/ui";
 
 type KYCState = "not_started" | "loading" | "webview_active" | "in_progress" | "verified" | "rejected";
 
 export default function KYCScreen() {
+  const { colors, spacing, radius } = useTheme();
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
   const [inquiryUrl, setInquiryUrl] = useState<string | null>(null);
@@ -96,30 +100,100 @@ export default function KYCScreen() {
   };
 
   const Header = () => (
-    <View style={styles.header}>
-      <TouchableOpacity onPress={() => router.back()} style={styles.headerBackButton}>
-        <Ionicons name="arrow-back" size={24} color="#111" />
-      </TouchableOpacity>
-      <Text style={styles.headerTitle}>KYC Verification</Text>
-      <View style={{ width: 24 }} />
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.sm,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.hairline,
+      }}
+    >
+      <IconButton
+        icon="chevronLeft"
+        accessibilityLabel="Go back"
+        onPress={() => router.back()}
+      />
+      <Text variant="title3" weight="700">
+        KYC Verification
+      </Text>
+      <View style={{ width: 44 }} />
+    </View>
+  );
+
+  // Reusable centered status panel: hero icon ring + title + subtitle + actions.
+  const StatusPanel = ({
+    icon,
+    iconColor,
+    iconBg,
+    title,
+    subtitle,
+    children,
+  }: {
+    icon: React.ComponentProps<typeof Icon>["name"];
+    iconColor: string;
+    iconBg: string;
+    title: string;
+    subtitle?: string;
+    children?: React.ReactNode;
+  }) => (
+    <View
+      style={{
+        flex: 1,
+        alignItems: "center",
+        justifyContent: "center",
+        paddingHorizontal: spacing.lg,
+      }}
+    >
+      <View
+        style={{
+          width: 96,
+          height: 96,
+          borderRadius: radius.pill,
+          backgroundColor: iconBg,
+          alignItems: "center",
+          justifyContent: "center",
+          marginBottom: spacing.xl,
+        }}
+      >
+        <Icon name={icon} size={48} color={iconColor} />
+      </View>
+      <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.md }}>
+        {title}
+      </Text>
+      {subtitle && (
+        <Text
+          variant="bodySm"
+          color="textSecondary"
+          align="center"
+          style={{ marginBottom: spacing.xl }}
+        >
+          {subtitle}
+        </Text>
+      )}
+      {children}
     </View>
   );
 
   if (state === "loading") {
     return (
-      <View style={styles.screenContainer}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <Header />
-        <View style={styles.container}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading...</Text>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: spacing.md }}>
+          <ActivityIndicator size="large" color={colors.accent} />
+          <Text variant="bodySm" color="textSecondary">
+            Loading...
+          </Text>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   if (state === "webview_active" && inquiryUrl) {
     return (
-      <View style={styles.webviewContainer}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <WebView
           source={{ uri: inquiryUrl }}
           onNavigationStateChange={handleWebViewNavigationChange}
@@ -130,197 +204,99 @@ export default function KYCScreen() {
           mediaCapturePermissionGrantType="grant"
           allowsBackForwardNavigationGestures={false}
           onPermissionRequest={(event: any) => event.grant()}
-          style={styles.webview}
+          style={{ flex: 1 }}
         />
-      </View>
+      </SafeAreaView>
     );
   }
 
   if (state === "verified") {
     return (
-      <View style={styles.screenContainer}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <Header />
-        <View style={styles.container}>
-          <View style={styles.iconContainer}>
-            <Ionicons name="checkmark-circle" size={80} color={COLORS.primary} />
-          </View>
-          <Text style={styles.title}>Identity Verified</Text>
-          <Text style={styles.subtitle}>Your identity has been successfully verified.</Text>
-          <TouchableOpacity style={styles.button} onPress={() => router.back()}>
-            <Text style={styles.buttonText}>Go Back</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+        <StatusPanel
+          icon="checkCircle"
+          iconColor={colors.success}
+          iconBg={colors.successBg}
+          title="Identity Verified"
+          subtitle="Your identity has been successfully verified."
+        >
+          <Button title="Go Back" onPress={() => router.back()} fullWidth />
+        </StatusPanel>
+      </SafeAreaView>
     );
   }
 
   if (state === "in_progress") {
     return (
-      <View style={styles.screenContainer}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <Header />
-        <View style={styles.container}>
-          <View style={styles.iconContainer}>
-            <Ionicons name="time-outline" size={80} color={COLORS.secondary} />
+        <StatusPanel
+          icon="clock"
+          iconColor={colors.warning}
+          iconBg={colors.warningBg}
+          title="Verification In Progress"
+          subtitle="Your verification is being reviewed. If you didn't finish submitting, you can start again."
+        >
+          <View style={{ width: "100%", gap: spacing.md }}>
+            <Button title="Continue Verification" onPress={startVerification} fullWidth />
+            <Button title="Refresh Status" variant="secondary" onPress={checkStatus} fullWidth />
+            <Button title="Go Back" variant="ghost" onPress={() => router.back()} fullWidth />
           </View>
-          <Text style={styles.title}>Verification In Progress</Text>
-          <Text style={styles.subtitle}>
-            Your verification is being reviewed. If you didn't finish submitting, you can start again.
-          </Text>
-          <TouchableOpacity style={styles.button} onPress={startVerification}>
-            <Text style={styles.buttonText}>Continue Verification</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryButton} onPress={checkStatus}>
-            <Text style={styles.secondaryButtonText}>Refresh Status</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
-            <Text style={styles.secondaryButtonText}>Go Back</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+        </StatusPanel>
+      </SafeAreaView>
     );
   }
 
   if (state === "rejected") {
     return (
-      <View style={styles.screenContainer}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <Header />
-        <View style={styles.container}>
-          <View style={styles.iconContainer}>
-            <Ionicons name="close-circle" size={80} color="#EF4444" />
+        <StatusPanel
+          icon="closeCircle"
+          iconColor={colors.danger}
+          iconBg={colors.dangerBg}
+          title="Verification Failed"
+          subtitle={notes}
+        >
+          <View style={{ width: "100%", gap: spacing.md }}>
+            <Button title="Try Again" onPress={startVerification} fullWidth />
+            <Button title="Go Back" variant="secondary" onPress={() => router.back()} fullWidth />
           </View>
-          <Text style={styles.title}>Verification Failed</Text>
-          <Text style={styles.subtitle}>{notes}</Text>
-          <TouchableOpacity style={styles.button} onPress={startVerification}>
-            <Text style={styles.buttonText}>Try Again</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
-            <Text style={styles.secondaryButtonText}>Go Back</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+        </StatusPanel>
+      </SafeAreaView>
     );
   }
 
   // not_started
   return (
-    <View style={styles.screenContainer}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
       <Header />
-      <View style={styles.container}>
-        <View style={styles.iconContainer}>
-          <Ionicons name="shield-checkmark-outline" size={80} color={COLORS.primary} />
+      <StatusPanel
+        icon="shield"
+        iconColor={colors.accent}
+        iconBg={colors.accentMuted}
+        title="Verify Your Identity"
+        subtitle="Complete identity verification to unlock all features including buying, selling, and sending funds."
+      >
+        <View style={{ width: "100%", gap: spacing.sm, marginBottom: spacing.xl }}>
+          {[
+            "A valid government-issued ID",
+            "A well-lit environment for a selfie",
+          ].map((line) => (
+            <View key={line} style={{ flexDirection: "row", alignItems: "center", gap: spacing.sm }}>
+              <Icon name="checkCircle" size={16} color={colors.accent} />
+              <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+                {line}
+              </Text>
+            </View>
+          ))}
         </View>
-        <Text style={styles.title}>Verify Your Identity</Text>
-        <Text style={styles.subtitle}>
-          Complete identity verification to unlock all features including buying, selling, and sending funds.
-        </Text>
-        <Text style={styles.infoText}>
-          You'll need:{"\n"}
-          {"\u2022"} A valid government-issued ID{"\n"}
-          {"\u2022"} A well-lit environment for a selfie
-        </Text>
-        <TouchableOpacity style={styles.button} onPress={startVerification}>
-          <Text style={styles.buttonText}>Start Verification</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.secondaryButton} onPress={() => router.back()}>
-          <Text style={styles.secondaryButtonText}>Do This Later</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+        <View style={{ width: "100%", gap: spacing.md }}>
+          <Button title="Start Verification" onPress={startVerification} fullWidth />
+          <Button title="Do This Later" variant="ghost" onPress={() => router.back()} fullWidth />
+        </View>
+      </StatusPanel>
+    </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  screenContainer: {
-    flex: 1,
-    backgroundColor: "#fff",
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingTop: 50,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: "#eee",
-  },
-  headerBackButton: {
-    padding: 4,
-  },
-  headerTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#111",
-  },
-  webviewContainer: {
-    flex: 1,
-    backgroundColor: "#fff",
-  },
-  webview: {
-    flex: 1,
-  },
-  container: {
-    flex: 1,
-    backgroundColor: "#fff",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: SIZES.large,
-  },
-  iconContainer: {
-    marginBottom: 24,
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: "700",
-    color: "#111",
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  subtitle: {
-    fontSize: 15,
-    color: "#666",
-    textAlign: "center",
-    marginBottom: 20,
-    lineHeight: 22,
-  },
-  infoText: {
-    fontSize: 14,
-    color: "#444",
-    marginBottom: 32,
-    lineHeight: 22,
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 15,
-    color: "#666",
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    borderRadius: 10,
-    width: "100%",
-    alignItems: "center",
-    marginBottom: 12,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  secondaryButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    borderRadius: 10,
-    width: "100%",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 12,
-  },
-  secondaryButtonText: {
-    color: COLORS.primary,
-    fontSize: 16,
-    fontWeight: "600",
-  },
-});

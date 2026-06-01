@@ -1,20 +1,33 @@
+// app/(dashboard)/myAdverts.tsx
+//
+// My adverts — the seller's own product/service listings, with edit / delete /
+// details actions and the list-your-first-product onboarding empty state.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives). Data fetching (axios GET /products/user), the delete flow
+// (axios DELETE /products/:id + refetch), 401/session handling, the multi-shape
+// response normalization, the image normalization, status/rejection gating, and
+// every navigation route + param are preserved verbatim — this is a
+// visual / structural migration only.
 import React, { useState, useEffect } from "react";
-import {
-  StyleSheet,
-  View,
-  Text,
-  TouchableOpacity,
-  Image,
-  FlatList,
-  Alert,
-  ActivityIndicator,
-} from "react-native";
-import { Card, Icon } from "react-native-elements";
+import { View, Image, FlatList, Alert } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { ADVERT_TYPE_PRODUCT } from "../../constants/constantValues";
+import { useTheme } from "@/theme";
+import {
+  AmountText,
+  Badge,
+  Card,
+  Divider,
+  EmptyState,
+  Icon,
+  IconButton,
+  Spinner,
+  Text,
+} from "@/components/ui";
 
 // Normalize the auth header to always include the "Bearer " prefix.
 function authHeaderFor(token: string | null | undefined): string {
@@ -23,6 +36,7 @@ function authHeaderFor(token: string | null | undefined): string {
 }
 
 const MyAdvertsScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
   const [adverts, setAdverts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -137,213 +151,154 @@ const MyAdvertsScreen = () => {
     return undefined;
   };
 
-  const renderItem = ({ item }: { item: any }) => (
-    <Card containerStyle={styles.card}>
-      {getFirstImage(item.images) ? (
-        <Image
-          source={{ uri: getFirstImage(item.images) }}
-          style={styles.image}
-          resizeMode="contain"
-        />
-      ) : (
-        <View style={[styles.image, { backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center' }]}>
-          <Icon name="image" size={40} color="#ccc" />
-        </View>
-      )}
-      <View style={styles.infoContainer}>
-        <Text style={styles.title}>{item?.name ?? 'Untitled'}</Text>
-        {item?.type === ADVERT_TYPE_PRODUCT && item?.price != null && (
-          <Text style={styles.amount}>${Number(item.price).toFixed(2)}</Text>
-        )}
-        {item?.status && (
-          <Text style={[styles.status, item.status === 'Rejected' && styles.statusRejected]}>
-            {item.status}
-          </Text>
-        )}
-        {item?.status === 'Rejected' && (
-          <Text style={styles.rejectionReason}>
-            Reason: {item.rejectionReason || "Please contact admin for details"}
-          </Text>
-        )}
-        {item?.type && <Text style={styles.status}>{item.type}</Text>}
-        {item?.createdAt && (
-          <Text style={styles.date}>
-            {(() => {
-              const d = new Date(item.createdAt);
-              return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
-            })()}
-          </Text>
-        )}
-        <View style={styles.actions}>
-          <TouchableOpacity
-            onPress={() =>
-              router.push({
-                pathname: `/profile/edit-advert`,
-                params: { id: item?.id ?? item?._id },
-              })
-            }
+  const renderItem = ({ item }: { item: any }) => {
+    const imageUri = getFirstImage(item.images);
+    const isRejected = item?.status === 'Rejected';
+    const formattedDate = (() => {
+      const d = new Date(item?.createdAt);
+      return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
+    })();
+
+    return (
+      <Card padding="md" style={{ marginBottom: spacing.md }}>
+        {imageUri ? (
+          <Image
+            source={{ uri: imageUri }}
+            style={{ width: '100%', height: 150, borderRadius: radius.md }}
+            resizeMode="contain"
+          />
+        ) : (
+          <View
+            style={{
+              width: '100%',
+              height: 150,
+              borderRadius: radius.md,
+              backgroundColor: colors.surfaceAlt,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
           >
-            <Icon name="edit" size={20} color="#9D6B38" />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => handleDelete(item.id)}>
-            <Icon name="delete" size={20} color="#9D6B38" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() =>
-              router.push({
-                pathname: `/profile/advert-details`,
-                params: { id: item.id },
-              })
-            }
-          >
-            <Icon name="info" size={20} color="#9D6B38" />
-          </TouchableOpacity>
+            <Icon name="image" size={40} color={colors.textMuted} />
+          </View>
+        )}
+
+        <View style={{ marginTop: spacing.md }}>
+          <Text variant="bodyMed" weight="700" numberOfLines={2}>
+            {item?.name ?? 'Untitled'}
+          </Text>
+
+          {item?.type === ADVERT_TYPE_PRODUCT && item?.price != null && (
+            <AmountText
+              value={Number(item.price)}
+              currency="USD"
+              variant="title3"
+              minimumFractionDigits={2}
+              maximumFractionDigits={2}
+              style={{ marginTop: spacing.xs }}
+            />
+          )}
+
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm }}>
+            {item?.status && (
+              <Badge
+                label={item.status}
+                size="sm"
+                color={isRejected ? colors.danger : colors.textSecondary}
+                background={isRejected ? colors.dangerBg : colors.surfaceAlt}
+              />
+            )}
+            {item?.type && <Badge label={item.type} size="sm" />}
+          </View>
+
+          {isRejected && (
+            <Text variant="caption" color="danger" style={{ marginTop: spacing.xs, fontStyle: 'italic' }}>
+              Reason: {item.rejectionReason || "Please contact admin for details"}
+            </Text>
+          )}
+
+          {item?.createdAt && !!formattedDate && (
+            <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+              {formattedDate}
+            </Text>
+          )}
+
+          <Divider spacing="md" />
+
+          <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
+            <IconButton
+              icon="edit"
+              accessibilityLabel="Edit product"
+              color={colors.accent}
+              onPress={() =>
+                router.push({
+                  pathname: `/profile/edit-advert`,
+                  params: { id: item?.id ?? item?._id },
+                })
+              }
+            />
+            <IconButton
+              icon="trash"
+              accessibilityLabel="Delete product"
+              color={colors.accent}
+              onPress={() => handleDelete(item.id)}
+            />
+            <IconButton
+              icon="info"
+              accessibilityLabel="View product details"
+              color={colors.accent}
+              onPress={() =>
+                router.push({
+                  pathname: `/profile/advert-details`,
+                  params: { id: item.id },
+                })
+              }
+            />
+          </View>
         </View>
-      </View>
-    </Card>
-  );
+      </Card>
+    );
+  };
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#9D6B38" />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" />
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <FlatList
         data={adverts}
         keyExtractor={(item, index) => String(item?.id ?? item?._id ?? index)}
         renderItem={renderItem}
+        contentContainerStyle={{
+          padding: spacing.lg,
+          paddingBottom: spacing['4xl'],
+          flexGrow: 1,
+        }}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Icon name="inventory" size={72} color="#D4B896" />
-            <Text style={styles.emptyTitle}>No products yet</Text>
-            <Text style={styles.emptySubtitle}>
-              Products and services you list will appear here
-            </Text>
-            <TouchableOpacity
-              style={styles.emptyButton}
-              onPress={() => {
+          <View style={{ flex: 1, justifyContent: 'center' }}>
+            <EmptyState
+              icon="storefront"
+              title="No products yet"
+              subtitle="Products and services you list will appear here"
+              actionLabel="List your first product"
+              onAction={() =>
                 router.push({
                   pathname: "/serviceaction",
                   params: { index: 0 },
-                });
-              }}
-              activeOpacity={0.8}
-            >
-              <Icon name="add" size={20} color="#000" />
-              <Text style={styles.emptyButtonText}>List your first product</Text>
-            </TouchableOpacity>
+                })
+              }
+            />
           </View>
         }
       />
-    </View>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#f0f0f0",
-    padding: 10,
-  },
-  card: {
-    borderRadius: 10,
-    padding: 20,
-    marginVertical: 10,
-    backgroundColor: "#F5FCFF",
-  },
-  image: {
-    width: "100%",
-    height: 150,
-    borderRadius: 10,
-  },
-  infoContainer: {
-    marginTop: 10,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: "bold",
-  },
-  amount: {
-    fontSize: 16,
-    color: "#666",
-  },
-  status: {
-    fontSize: 14,
-    color: "#666",
-  },
-  date: {
-    fontSize: 12,
-    color: "#999",
-  },
-  actions: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    marginTop: 10,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  registerLink: {
-    fontSize: 16,
-    color: "#E8A14A",
-    marginTop: 20,
-  },
-  registerLinkText: {
-    marginTop: 15,
-    fontSize: 16,
-    color: "#E8A14A",
-  },
-  statusRejected: {
-    color: "red",
-    fontWeight: "bold",
-  },
-  rejectionReason: {
-    color: "red",
-    marginTop: 4,
-    fontSize: 12,
-    fontStyle: "italic",
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 80,
-    paddingHorizontal: 32,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#333',
-    marginTop: 16,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#999',
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 20,
-  },
-  emptyButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFD700',
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 12,
-    marginTop: 24,
-    gap: 8,
-  },
-  emptyButtonText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000',
-  },
-});
 
 export default MyAdvertsScreen;
