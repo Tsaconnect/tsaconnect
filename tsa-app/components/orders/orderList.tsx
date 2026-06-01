@@ -1,17 +1,33 @@
+// components/orders/orderList.tsx
+//
+// Orders list (rendered by the orders screen) — buyer order history with a
+// horizontal status filter, pull-to-refresh, and infinite scroll. Restyled onto
+// the TSA Signature design system (@/theme tokens + @/components/ui primitives).
+//
+// VISUAL/STRUCTURAL restyle ONLY: the getOrders fetch (page/limit/status/role),
+// pagination + append logic, status filtering, refresh, load-more, and the
+// orderdetail navigation route are preserved verbatim. STATUS_COLORS /
+// formatStatus / formatDate / formatTokenAmount remain the source of truth for
+// status presentation and amount/date formatting.
 import React, { useEffect, useState, useCallback } from 'react';
-import {
-  View,
-  StyleSheet,
-  FlatList,
-  ActivityIndicator,
-  Text,
-  TouchableOpacity,
-  RefreshControl,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View, FlatList, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Chip,
+  Divider,
+  EmptyState,
+  ErrorState,
+  Icon,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const STATUS_FILTERS = [
   { key: '', label: 'All' },
@@ -24,6 +40,7 @@ const STATUS_FILTERS = [
 ];
 
 const OrderList = () => {
+  const { colors, spacing } = useTheme();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -80,237 +97,126 @@ const OrderList = () => {
   const renderOrderCard = ({ item }: { item: Order }) => {
     const statusColor = STATUS_COLORS[item.status] || STATUS_COLORS.cancelled;
     return (
-      <TouchableOpacity
-        style={styles.orderCard}
+      <PressableScale
         onPress={() => router.push(`/(dashboard)/orderdetail?id=${item.id}`)}
-        activeOpacity={0.7}
+        style={{ marginBottom: spacing.md }}
       >
-        <View style={styles.orderCardHeader}>
-          <Text style={styles.orderId} numberOfLines={1}>
-            Order #{item.id.slice(0, 8)}...
-          </Text>
-          <View style={[styles.statusBadge, { backgroundColor: statusColor.bg }]}>
-            <Text style={[styles.statusText, { color: statusColor.text }]}>
-              {formatStatus(item.status)}
+        <AccentCard padding="lg">
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flex: 1, marginRight: spacing.sm }}>
+              Order #{item.id.slice(0, 8)}...
             </Text>
+            <Badge label={formatStatus(item.status)} color={statusColor.text} background={statusColor.bg} size="sm" />
           </View>
-        </View>
 
-        <View style={styles.orderCardBody}>
-          <View style={styles.orderInfoRow}>
-            <Ionicons name="cube-outline" size={16} color="#A67C52" />
-            <Text style={styles.orderInfoText}>Qty: {item.quantity}</Text>
+          <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Icon name="list" size={16} color={colors.textMuted} />
+              <Text variant="bodySm" color="textSecondary">
+                Qty: {item.quantity}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Icon name="wallet" size={16} color={colors.textMuted} />
+              <Text variant="bodySm" color="textSecondary" numeric>
+                {formatTokenAmount(item.totalAmount, item.token)}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Icon name="clock" size={16} color={colors.textMuted} />
+              <Text variant="bodySm" color="textSecondary">
+                {formatDate(item.createdAt)}
+              </Text>
+            </View>
           </View>
-          <View style={styles.orderInfoRow}>
-            <Ionicons name="wallet-outline" size={16} color="#A67C52" />
-            <Text style={styles.orderInfoText}>
-              {formatTokenAmount(item.totalAmount, item.token)}
+
+          <Divider spacing="md" />
+
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              gap: spacing.xs,
+            }}
+          >
+            <Text variant="bodySm" weight="700" color="accent">
+              View Details
             </Text>
+            <Icon name="chevronRight" size={16} color={colors.accent} />
           </View>
-          <View style={styles.orderInfoRow}>
-            <Ionicons name="calendar-outline" size={16} color="#A67C52" />
-            <Text style={styles.orderInfoText}>{formatDate(item.createdAt)}</Text>
-          </View>
-        </View>
-
-        <View style={styles.orderCardFooter}>
-          <Text style={styles.viewDetail}>View Details</Text>
-          <Ionicons name="chevron-forward" size={16} color="#8B5A2B" />
-        </View>
-      </TouchableOpacity>
+        </AccentCard>
+      </PressableScale>
     );
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       {/* Status filter tabs */}
       <FlatList
         horizontal
         showsHorizontalScrollIndicator={false}
         data={STATUS_FILTERS}
         keyExtractor={(item) => item.key}
-        contentContainerStyle={styles.filterContainer}
-        style={styles.filterList}
+        contentContainerStyle={{
+          paddingHorizontal: spacing.lg,
+          paddingVertical: spacing.md,
+          gap: spacing.sm,
+        }}
+        style={{ flexGrow: 0 }}
         renderItem={({ item: filter }) => (
-          <TouchableOpacity
-            style={[
-              styles.filterPill,
-              selectedStatus === filter.key && styles.filterPillActive,
-            ]}
+          <Chip
+            label={filter.label}
+            selected={selectedStatus === filter.key}
             onPress={() => setSelectedStatus(filter.key)}
-          >
-            <Text
-              style={[
-                styles.filterPillText,
-                selectedStatus === filter.key && styles.filterPillTextActive,
-              ]}
-            >
-              {filter.label}
-            </Text>
-          </TouchableOpacity>
+          />
         )}
       />
 
       {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#8B5A2B" />
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading orders..." />
         </View>
       ) : (
         <FlatList
           data={orders}
           keyExtractor={(item) => item.id}
           renderItem={renderOrderCard}
-          contentContainerStyle={orders.length === 0 ? styles.centered : styles.listContent}
+          contentContainerStyle={
+            orders.length === 0
+              ? { flexGrow: 1, justifyContent: 'center' }
+              : { padding: spacing.lg, paddingTop: spacing.xs }
+          }
           refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={handleRefresh}
-              tintColor="#8B5A2B"
-            />
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.accent} />
           }
           onEndReached={handleLoadMore}
           onEndReachedThreshold={0.3}
           ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="receipt-outline" size={64} color="#D9B68B" />
-              <Text style={styles.emptyTitle}>
-                {error ? 'Something went wrong' : 'No orders yet'}
-              </Text>
-              <Text style={styles.emptySubtitle}>
-                {error || 'Your order history will appear here'}
-              </Text>
-            </View>
+            error ? (
+              <ErrorState
+                title="Something went wrong"
+                subtitle={error}
+                onRetry={handleRefresh}
+              />
+            ) : (
+              <EmptyState
+                icon="list"
+                title="No orders yet"
+                subtitle="Your order history will appear here"
+              />
+            )
           }
         />
       )}
-    </View>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FDF8F3',
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  filterList: {
-    flexGrow: 0,
-  },
-  filterContainer: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 8,
-  },
-  filterPill: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-    marginRight: 8,
-  },
-  filterPillActive: {
-    backgroundColor: '#8B5A2B',
-    borderColor: '#8B5A2B',
-  },
-  filterPillText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: '#8B5A2B',
-  },
-  filterPillTextActive: {
-    color: '#FFF',
-  },
-  listContent: {
-    padding: 16,
-    paddingTop: 4,
-  },
-  orderCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-    shadowColor: '#8B5A2B',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  orderCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  orderId: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#4A2C1A',
-    flex: 1,
-    marginRight: 8,
-  },
-  statusBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  orderCardBody: {
-    gap: 6,
-  },
-  orderInfoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  orderInfoText: {
-    fontSize: 13,
-    color: '#4A2C1A',
-  },
-  orderCardFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#F0E0D0',
-  },
-  viewDetail: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#8B5A2B',
-    marginRight: 4,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 80,
-    paddingHorizontal: 32,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#4A2C1A',
-    marginTop: 16,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#A67C52',
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 20,
-  },
-});
 
 export default OrderList;

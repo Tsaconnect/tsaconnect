@@ -1,21 +1,23 @@
-import {
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-  ActivityIndicator,
-  Pressable,
-} from "react-native";
+// app/(servicegroup)/categoryservice.tsx
+//
+// Services in a category — lists the registered vendor merchants whose service
+// products belong to the selected category, plus a "register as a vendor" CTA.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives). Data fetching (api.getProductsByCategory), state, effects, the
+// cancellation guard, the ServiceCard props, and all navigation routes + params
+// are unchanged — this is a visual / structural migration only.
 import React, { useState, useEffect } from "react";
-import Icon from "react-native-vector-icons/MaterialIcons";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import ServiceCard from "../../components/services/ServiceCard";
+import { ScrollView, View } from "react-native";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
+import ServiceCard from "../../components/services/ServiceCard";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { COLORS } from "../../constants";
 import { api, Product } from "../../components/services/api";
+import { useTheme } from "@/theme";
+import { EmptyState, PressableScale, Spinner, Text } from "@/components/ui";
 
 const Services = () => {
+  const { colors, spacing } = useTheme();
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,25 +55,26 @@ const Services = () => {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
       {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <Spinner size="large" />
         </View>
       ) : services.length === 0 ? (
-        <View style={styles.centered}>
-          <Icon name="storefront" size={56} color="#E0E0E0" />
-          <Text style={styles.emptyTitle}>No vendors yet</Text>
-          <Text style={styles.emptyBody}>
-            No registered vendor merchants in this category at the moment.
-          </Text>
+        <View style={{ flex: 1, justifyContent: "center", paddingBottom: 80 }}>
+          <EmptyState
+            icon="storefront"
+            title="No vendors yet"
+            subtitle="No registered vendor merchants in this category at the moment."
+          />
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={[
-            styles.scrollContent,
-            { paddingBottom: 80 + insets.bottom },
-          ]}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{
+            paddingTop: spacing.sm,
+            paddingBottom: spacing["4xl"] + insets.bottom + 40,
+          }}
         >
           {services.map((item) => (
             <ServiceCard
@@ -85,59 +88,28 @@ const Services = () => {
         </ScrollView>
       )}
 
-      <View style={[styles.footer, { paddingBottom: 12 + insets.bottom }]}>
-        <Pressable onPress={handleRegister} hitSlop={8}>
-          <Text style={styles.footerLink}>Click here to register as a vendor</Text>
-        </Pressable>
+      <View
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          paddingTop: spacing.md,
+          paddingBottom: spacing.md + insets.bottom,
+          backgroundColor: colors.surface,
+          borderTopWidth: 1,
+          borderTopColor: colors.hairline,
+          alignItems: "center",
+        }}
+      >
+        <PressableScale onPress={handleRegister} hitSlop={8}>
+          <Text variant="bodySm" weight="600" color="accent">
+            Click here to register as a vendor
+          </Text>
+        </PressableScale>
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 export default Services;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F5F5F7",
-  },
-  scrollContent: {
-    paddingTop: 8,
-  },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-    paddingBottom: 80,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#1A1A1A",
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  emptyBody: {
-    fontSize: 14,
-    color: "#666",
-    textAlign: "center",
-    lineHeight: 20,
-  },
-  footer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: 12,
-    backgroundColor: "rgba(255,255,255,0.96)",
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#EEE",
-    alignItems: "center",
-  },
-  footerLink: {
-    color: COLORS.primary,
-    fontWeight: "600",
-    fontSize: 14,
-  },
-});
