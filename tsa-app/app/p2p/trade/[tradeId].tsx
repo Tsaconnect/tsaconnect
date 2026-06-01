@@ -12,14 +12,17 @@
 //   - Embeds the chat thread (system + user messages, text + image)
 //   - Provides a composer for chat (text + Cloudinary-backed image upload)
 //
-// Realtime: polls every 5 seconds for trade + messages. WS replacement is
-// a Phase-1.5 follow-up; polling keeps the wire shape simple.
+// Realtime: event-driven. useTradeRealtime subscribes to the per-user WS
+// (NotificationContext) and refreshes instantly on this trade's p2p.trade.*
+// transitions and p2p.message.new frames. A slow (30s) focus-gated safety poll
+// + a reconcile on (re)connect/focus backstop the best-effort socket (events
+// can be dropped/missed, and system messages emit no event).
 //
 // Restyled onto the TSA Signature design system (@/theme + @/components/ui).
-// Behavior is unchanged: the 5s polling, chat, countdown, and all
-// markPaid/release/cancel action handlers (incl. post-broadcast error handling)
-// are preserved verbatim. The only logic change is the removal of the now-dead
-// inline dispute modal — the dispute button navigates to /p2p/dispute/<tradeId>.
+// Chat, countdown, and all markPaid/release/cancel action handlers (incl.
+// post-broadcast error handling) are preserved verbatim; only the refresh
+// transport changed (5s poll → events + safety poll). The dispute button
+// navigates to /p2p/dispute/<tradeId> (the old inline modal is gone).
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
@@ -51,6 +54,8 @@ import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import type { ChainKey } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
+import { useTradeRealtime } from '../../../hooks/useTradeRealtime';
+import { useNotifications } from '../../../contexts/NotificationContext';
 import {
   formatTokenAmount,
   messagesApi,
@@ -64,7 +69,9 @@ import { broadcastTransaction, getActiveWallet, signTransaction } from '../../..
 import { getAuthHeaders } from '../../../services/walletApi';
 
 const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
-const POLL_INTERVAL_MS = 5000;
+// Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
+// only backstops dropped/missed events and system messages (which emit none).
+const SAFETY_POLL_INTERVAL_MS = 30000;
 
 const STAGES: { key: P2PTrade['status']; label: string }[] = [
   { key: 'pending_payment', label: 'Pending payment' },
@@ -77,6 +84,7 @@ const TradeDetailScreen: React.FC = () => {
   const { tradeId } = useLocalSearchParams<{ tradeId: string }>();
   const { currentUser } = useAuth();
   const user = currentUser as { id?: string } | null;
+  const { connected } = useNotifications();
   const [trade, setTrade] = useState<P2PTrade | null>(null);
   const [messages, setMessages] = useState<P2PMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,34 +125,78 @@ const TradeDetailScreen: React.FC = () => {
     setLoading(false);
   }, [tradeId]);
 
+  // Mirror messages into a ref so the WS message refresher can read the latest
+  // cursor without re-subscribing the socket on every new message.
+  const messagesRef = useRef<P2PMessage[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // Fast-path refreshers fired by useTradeRealtime on WS frames for this trade.
+  // onTrade does a full reconcile (also surfaces system chat rows, which emit no
+  // event); both skip while an action is in flight so they can't clobber
+  // optimistic markPaid/release/cancel state.
+  const reloadTrade = useCallback(() => {
+    if (actingRef.current) return;
+    load();
+  }, [load]);
+
+  const reloadMessages = useCallback(async () => {
+    if (!tradeId || actingRef.current) return;
+    const list = messagesRef.current;
+    const since = list.length ? list[list.length - 1].createdAt : undefined;
+    const res = await messagesApi.list(String(tradeId), since ? { since } : {});
+    if (res.success && res.data?.length) {
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        const fresh = res.data!.filter((m) => !seen.has(m.id));
+        return fresh.length ? [...prev, ...fresh] : prev;
+      });
+    }
+  }, [tradeId]);
+
   // A terminal trade (released/cancelled/resolved) won't change again.
   const isTerminal =
     trade?.status === 'released' ||
     trade?.status === 'cancelled' ||
     trade?.status === 'resolved';
 
-  // Only poll while the screen is focused and the trade can still change.
-  // An unfocused screen (one pushed over, or a backgrounded tab) the user
-  // isn't watching, or a terminal trade, means polling /trades + /messages
-  // every 5s is wasted traffic.
+  // Refresh only while the screen is focused and the trade can still change.
+  // An unfocused screen (pushed over, or a backgrounded tab) or a terminal trade
+  // means any traffic is wasted — so both the WS subscription and the safety
+  // poll are gated on this.
   const isFocused = useIsFocused();
   const pollingActive = isFocused && !isTerminal;
 
+  // Fast path: refresh instantly on WS frames for THIS trade.
+  useTradeRealtime(
+    tradeId ? String(tradeId) : undefined,
+    { onTrade: reloadTrade, onMessage: reloadMessages },
+    pollingActive,
+  );
+
   useEffect(() => {
-    // Only fetch when the trade can still change and the user is looking at it.
-    // We deliberately don't load on the way *out* of polling: action handlers
-    // call load() themselves, so a trade that just went terminal is already
-    // current, and there's no point fetching for a screen being left. On (re)
-    // focus of a live trade this fires an immediate load, then resumes polling.
+    // Fetch once on (re)focus of a live trade, then run a slow safety reconcile.
+    // We deliberately don't load on the way *out*: action handlers call load()
+    // themselves, so a trade that just went terminal is already current.
     if (!pollingActive) return;
     load();
-    // Skip polls while a sign/broadcast/confirm flow is in flight, so an
+    // Skip a tick while a sign/broadcast/confirm flow is in flight, so an
     // intermediate server fetch doesn't clobber optimistic local state.
     const id = setInterval(() => {
       if (!actingRef.current) load();
-    }, POLL_INTERVAL_MS);
+    }, SAFETY_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [load, pollingActive]);
+
+  // On socket (re)connect, do one full reconcile — events aren't replayed across
+  // a disconnect, so anything missed while the WS was down is caught here.
+  useEffect(() => {
+    if (connected && pollingActive) load();
+    // Intentionally only on the `connected` edge; focus/mount loads are handled
+    // by the effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected]);
 
   const startActing = useCallback((stage: string) => {
     actingRef.current = stage;
