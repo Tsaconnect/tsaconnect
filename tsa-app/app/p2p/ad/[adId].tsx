@@ -73,7 +73,7 @@ import {
 // TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
 const AdDetailScreen: React.FC = () => {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
   const { adId } = useLocalSearchParams<{ adId: string }>();
   const [ad, setAd] = useState<P2PAd | null>(null);
   const [selectedPmId, setSelectedPmId] = useState<string>('');
@@ -527,14 +527,24 @@ const AdDetailScreen: React.FC = () => {
                 value={amountInput}
                 onChangeText={setAmountInput}
               />
-              <Card padding="md" style={{ backgroundColor: colors.accentMuted }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text variant="bodySm" weight="600" color="accent">
-                    You receive
-                  </Text>
-                  <AmountText value={fiatPreview} currency={ad.fiatCurrency} variant="title3" />
-                </View>
-              </Card>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  paddingHorizontal: spacing.md,
+                  paddingVertical: spacing.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surfaceAlt,
+                }}
+              >
+                <Text variant="bodySm" color="textSecondary">
+                  You receive
+                </Text>
+                <AmountText value={fiatPreview} currency={ad.fiatCurrency} variant="title3" color="textPrimary" />
+              </View>
             </View>
           ) : (
             <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
@@ -552,19 +562,29 @@ const AdDetailScreen: React.FC = () => {
                       : undefined
                 }
               />
-              <Card padding="md" style={{ backgroundColor: colors.accentMuted }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text variant="bodySm" weight="600" color="accent">
-                    You receive
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  paddingHorizontal: spacing.md,
+                  paddingVertical: spacing.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surfaceAlt,
+                }}
+              >
+                <Text variant="bodySm" color="textSecondary">
+                  You receive
+                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                  <AmountText value={tokenPreview} variant="title3" color="textPrimary" />
+                  <Text variant="bodySm" color="textMuted">
+                    {ad.token}
                   </Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                    <AmountText value={tokenPreview} variant="title3" />
-                    <Text variant="bodySm" color="textMuted">
-                      {ad.token}
-                    </Text>
-                  </View>
                 </View>
-              </Card>
+              </View>
             </View>
           )}
 
