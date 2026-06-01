@@ -1,22 +1,30 @@
+// app/(dashboard)/categories.tsx
+//
+// Categories browse screen — search, list, "view all" paging, and an add-category
+// CTA. Restyled onto the TSA Signature design system (theme tokens +
+// @/components/ui primitives). All data fetching (api.getStoredToken/setToken,
+// api.getProfile, api.getCategories, api.deleteCategory), state, effects, the
+// search filter, role fetch, showAll paging, and navigation routes/params are
+// preserved verbatim — this is a visual/structural migration only.
 import React, { useState, useEffect } from "react";
-import {
-  View,
-  Text,
-  FlatList,
-  Image,
-  TouchableOpacity,
-  StyleSheet,
-  TextInput,
-  Alert,
-} from "react-native";
-import { COLORS } from "../../constants/theme";
+import { View, Image, FlatList, Alert } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import Icon from "@expo/vector-icons/FontAwesome";
 import api from "@/components/services/api";
-
-import LoadingSpinner from "../../components/others/LoadingSpinner";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  Input,
+  PressableScale,
+  Spinner,
+  Text,
+} from "@/components/ui";
 
 const Categories = () => {
+  const { colors, spacing, radius } = useTheme();
   const [categories, setCategories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -88,146 +96,106 @@ const Categories = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search Categories"
-          value={searchQuery}
-          onChangeText={(text) => setSearchQuery(text)}
-        />
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => router.push("/add-category")}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <View style={{ flex: 1, padding: spacing.lg }}>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: spacing.sm,
+            marginBottom: spacing.lg,
+          }}
         >
-          <Text style={styles.addButtonText}>Add Category</Text>
-        </TouchableOpacity>
-      </View>
-      {loading ? (
-        <LoadingSpinner />
-      ) : (
-        <FlatList
-          data={showAll ? filteredCategories : filteredCategories.slice(0, 20)}
-          keyExtractor={(item) => item.id?.toString() || item._id}
-          renderItem={({ item }) => (
-            <View style={styles.categoryContainer}>
-              <Image
-                source={{ uri: item.image }}
-                style={styles.categoryImage}
+          <Input
+            containerStyle={{ flex: 1 }}
+            placeholder="Search Categories"
+            value={searchQuery}
+            onChangeText={(text) => setSearchQuery(text)}
+            returnKeyType="search"
+            leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+            rightAdornment={
+              searchQuery.length > 0 ? (
+                <PressableScale onPress={() => setSearchQuery("")} hitSlop={8}>
+                  <Icon name="close" size={16} color={colors.textMuted} />
+                </PressableScale>
+              ) : undefined
+            }
+          />
+          <Button
+            title="Add Category"
+            size="md"
+            fullWidth={false}
+            leftIcon="plus"
+            onPress={() => router.push("/add-category")}
+          />
+        </View>
+
+        {loading ? (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Spinner size="large" />
+          </View>
+        ) : (
+          <FlatList
+            data={showAll ? filteredCategories : filteredCategories.slice(0, 20)}
+            keyExtractor={(item) => item.id?.toString() || item._id}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingBottom: spacing["4xl"], gap: spacing.md }}
+            renderItem={({ item }) => (
+              <Card padding="md">
+                <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.md }}>
+                  {item.image ? (
+                    <Image
+                      source={{ uri: item.image }}
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: radius.md,
+                        backgroundColor: colors.surfaceAlt,
+                      }}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: radius.md,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        backgroundColor: colors.accentMuted,
+                      }}
+                    >
+                      <Icon name="list" size={22} color={colors.accent} />
+                    </View>
+                  )}
+                  <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flex: 1 }}>
+                    {item.title}
+                  </Text>
+                </View>
+              </Card>
+            )}
+            ListEmptyComponent={
+              <EmptyState
+                icon="list"
+                title="No categories found"
+                subtitle="Try a different search term."
               />
-              <View style={styles.categoryInfo}>
-                <Text style={styles.categoryTitle}>{item.title}</Text>
-              </View>
-            </View>
-          )}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Icon name="folder-open" size={48} color="#D4B896" />
-              <Text style={styles.emptyTitle}>No categories found</Text>
-            </View>
-          }
-          ListFooterComponent={
-            !showAll && filteredCategories.length > 20 ? (
-              <TouchableOpacity
-                style={styles.viewAllButton}
-                onPress={() => setShowAll(true)}
-              >
-                <Text style={styles.viewAllButtonText}>View All</Text>
-              </TouchableOpacity>
-            ) : null
-          }
-        />
-      )}
-    </View>
+            }
+            ListFooterComponent={
+              !showAll && filteredCategories.length > 20 ? (
+                <Button
+                  title="View All"
+                  variant="secondary"
+                  onPress={() => setShowAll(true)}
+                  style={{ marginTop: spacing.md }}
+                />
+              ) : null
+            }
+          />
+        )}
+      </View>
+    </SafeAreaView>
   );
 };
 
 export default Categories;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-    padding: 20,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  addButton: {
-    backgroundColor: COLORS.primary,
-    padding: 10,
-    borderRadius: 5,
-    alignItems: "center",
-  },
-  addButtonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  searchInput: {
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 5,
-    padding: 10,
-    flex: 1,
-    marginRight: 10,
-    backgroundColor: "#f9f9f9",
-  },
-  categoryContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 10,
-    padding: 5,
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 5,
-    backgroundColor: "#f9f9f9",
-  },
-  categoryImage: {
-    width: 45,
-    height: 45,
-    borderRadius: 5,
-    marginRight: 10,
-  },
-  categoryInfo: {
-    flex: 1,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  categoryTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    flex: 1,
-  },
-  actions: {
-    flexDirection: "row",
-  },
-  actionButton: {
-    marginLeft: 10,
-  },
-  emptyContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 80,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#999",
-    marginTop: 16,
-  },
-  viewAllButton: {
-    padding: 10,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    borderRadius: 5,
-  },
-  viewAllButtonText: {
-    color: COLORS.primary,
-    fontSize: 16,
-  },
-});

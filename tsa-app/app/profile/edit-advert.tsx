@@ -1,21 +1,18 @@
-import {
-  Image,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-  Modal,
-  ToastAndroid,
-} from "react-native";
+// app/profile/edit-advert.tsx
+//
+// Edit Advert — prefill an existing product/service advert, edit its fields,
+// and PUT the update back to the marketplace API.
+//
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui).
+// Visual/structural only: the advert prefill (seeded from the route params),
+// field validation, image-picker behavior, the multipart `axios.put
+// ${baseUrl}/products/:id` update submit, ToastAndroid feedback, and the
+// post-update navigation to /myAdverts are all preserved verbatim.
+import { Image, ScrollView, ToastAndroid, View } from "react-native";
 import React, { useState, useEffect, useCallback } from "react";
-import { COLORS, SIZES } from "../../constants/theme";
-import Icon from "@expo/vector-icons/FontAwesome";
+import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
-import { LinearProgress } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { Picker } from "@react-native-picker/picker";
 import { baseUrl } from "../../constants/api/apiClient";
 import axios from "axios";
 import {
@@ -23,8 +20,22 @@ import {
   ADVERT_TYPE_SERVICE,
 } from "../../constants/constantValues";
 import { router, useLocalSearchParams } from "expo-router";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  Icon,
+  Input,
+  PressableScale,
+  SelectRow,
+  PickerSheet,
+  Spinner,
+  Text,
+  type PickerItem,
+} from "@/components/ui";
 
 const UpdateAdvert = () => {
+  const { colors, spacing, radius } = useTheme();
   const item = useLocalSearchParams();
   const [productImages, setProductImages] = useState(
     //@ts-ignore
@@ -41,8 +52,11 @@ const UpdateAdvert = () => {
   const [price, setPrice] = useState(item.price || 0);
   const { setLoading, loading, token } = useAuth();
 
-  const [isModalVisible, setIsModalVisible] = useState(false);
   const [categories, setCategories] = useState([]);
+  // Local picker-sheet visibility (replaces the legacy @react-native-picker
+  // dropdowns; the underlying type/category state is unchanged).
+  const [typeSheetVisible, setTypeSheetVisible] = useState(false);
+  const [categorySheetVisible, setCategorySheetVisible] = useState(false);
   const maxDescriptionLength = 100;
 
   const delay = useCallback((duration: any) => {
@@ -83,7 +97,6 @@ const UpdateAdvert = () => {
       productImages.length === 0
     ) {
       await delay(3000);
-      setIsModalVisible(true);
       ToastAndroid.show(
         "Please fill all the fields and upload images.!",
         ToastAndroid.SHORT
@@ -136,18 +149,15 @@ const UpdateAdvert = () => {
       );
       if (response) {
         setLoading(false);
-        setIsModalVisible(true);
         ToastAndroid.show(
           "The Advert was updated successfully.!",
           ToastAndroid.SHORT
         );
         await delay(2000);
-        setIsModalVisible(false);
         router.push("/myAdverts");
       }
     } catch (error: any) {
       setLoading(false);
-      setIsModalVisible(true);
       ToastAndroid.show(
         `Error Creating Advert! ${
           error.response?.data?.message || "An error occurred"
@@ -155,7 +165,6 @@ const UpdateAdvert = () => {
         ToastAndroid.SHORT
       );
       await delay(4000);
-      setIsModalVisible(false);
     }
   };
 
@@ -188,287 +197,203 @@ const UpdateAdvert = () => {
     }
   }, []);
 
-  return (
-    <ScrollView style={styles.cover}>
-      <Modal visible={isModalVisible} style={styles.modal} transparent={true}>
-        <TouchableOpacity
-          onPress={() => {
-            setIsModalVisible(false);
-          }}
-          style={styles.closeButton}
-        >
-          <Text style={styles.closeButtonText}>Close</Text>
-        </TouchableOpacity>
-      </Modal>
+  // ── Picker-sheet item maps (visual control only; setters unchanged) ──────
+  const typeItems: PickerItem[] = [
+    { id: ADVERT_TYPE_PRODUCT, label: ADVERT_TYPE_PRODUCT },
+    { id: ADVERT_TYPE_SERVICE, label: ADVERT_TYPE_SERVICE },
+  ];
+  const categoryItems: PickerItem[] = categories.map((c: any) => ({
+    id: c.id,
+    label: c.title,
+  }));
+  const selectedCategoryLabel = categoryItems.find(
+    //@ts-ignore
+    (c) => c.id === category
+  )?.label;
 
-      <Text style={styles.label}>Enter Advert name</Text>
-      <TextInput
-        style={styles.input}
-        //@ts-ignore
-        value={productName}
-        onChangeText={setProductName}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Location</Text>
-      <TextInput
-        style={styles.input}
-        //@ts-ignore
-        value={location}
-        onChangeText={setLocation}
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid phone number</Text>
-      <TextInput
-        style={styles.input}
-        //@ts-ignore
-        value={phoneNumber}
-        onChangeText={setPhoneNumber}
-        keyboardType="phone-pad"
-        autoCapitalize="none"
-      />
-      <Text style={styles.label}>Enter Valid Email</Text>
-      <TextInput
-        style={styles.input}
-        //@ts-ignore
-        value={email}
-        onChangeText={setEmail}
-        keyboardType="email-address"
-      />
-      {type === ADVERT_TYPE_PRODUCT && (
-        <>
-          <Text style={styles.label}>Product Price</Text>
-          <TextInput
-            style={styles.input}
+  return (
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: colors.background }}
+      edges={["top"]}
+    >
+      <ScrollView
+        contentContainerStyle={{
+          padding: spacing.lg,
+          paddingBottom: spacing["4xl"],
+          gap: spacing.lg,
+        }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Input
+          label="Advert name"
+          //@ts-ignore
+          value={productName}
+          onChangeText={setProductName}
+          autoCapitalize="none"
+        />
+
+        <Input
+          label="Location"
+          //@ts-ignore
+          value={location}
+          onChangeText={setLocation}
+          autoCapitalize="none"
+        />
+
+        <Input
+          label="Phone number"
+          //@ts-ignore
+          value={phoneNumber}
+          onChangeText={setPhoneNumber}
+          keyboardType="phone-pad"
+          autoCapitalize="none"
+        />
+
+        <Input
+          label="Email"
+          //@ts-ignore
+          value={email}
+          onChangeText={setEmail}
+          keyboardType="email-address"
+        />
+
+        {type === ADVERT_TYPE_PRODUCT && (
+          <Input
+            label="Product price"
             value={String(price)}
             onChangeText={setPrice}
             keyboardType="numeric"
           />
-        </>
-      )}
-      <Text style={styles.label}>Company Name</Text>
-      <TextInput
-        style={styles.input}
-        //@ts-ignore
-        value={companyName}
-        onChangeText={setCompanyName}
-      />
-      <Text style={styles.label}>Advert Type</Text>
-      <Picker
-        style={styles.input}
-        selectedValue={type}
-        onValueChange={(itemValue) => setType(itemValue)}
-      >
-        <Picker.Item label={"Select Advert Type"} value={""} />
-        <Picker.Item label={ADVERT_TYPE_PRODUCT} value={ADVERT_TYPE_PRODUCT} />
-        <Picker.Item label={ADVERT_TYPE_SERVICE} value={ADVERT_TYPE_SERVICE} />
-      </Picker>
-      <Text style={styles.label}>Advert Category</Text>
-      <Picker
-        style={styles.input}
-        selectedValue={category}
-        onValueChange={(itemValue) => setCategory(itemValue)}
-      >
-        <Picker.Item label={"Select Category"} value={""} />
-        {categories.map((item, index) => (
+        )}
+
+        <Input
+          label="Company name"
           //@ts-ignore
-          <Picker.Item key={index} label={item.title} value={item.id} />
-        ))}
-      </Picker>
+          value={companyName}
+          onChangeText={setCompanyName}
+        />
 
-      <Text style={styles.label}>Upload Quality service images</Text>
-      <View style={styles.multipleImageContainer}>
-        <TouchableOpacity onPress={pickProductImages}>
-          <Icon name="upload" size={25} color="#aaa" />
-        </TouchableOpacity>
-      </View>
+        <SelectRow
+          label="Advert type"
+          //@ts-ignore
+          value={type || undefined}
+          placeholder="Select Advert Type"
+          onPress={() => setTypeSheetVisible(true)}
+        />
 
-      <View style={styles.imageContainer}>
-        {productImages &&
-          productImages.map((uri: any, index: number) => (
-            <Image key={index} source={{ uri }} style={styles.uploadedImage} />
-          ))}
-      </View>
-      <View style={styles.textAreaContainer}>
-        <TextInput
-          style={styles.textArea}
+        <SelectRow
+          label="Advert category"
+          value={selectedCategoryLabel}
+          placeholder="Select Category"
+          onPress={() => setCategorySheetVisible(true)}
+        />
+
+        {/* ── Images ──────────────────────────────────────────────────── */}
+        <View style={{ gap: spacing.sm }}>
+          <Text variant="bodySm" weight="600" color="textSecondary">
+            Quality service images
+          </Text>
+          <PressableScale
+            onPress={pickProductImages}
+            accessibilityRole="button"
+            accessibilityLabel="Upload images"
+            style={{
+              minHeight: 120,
+              borderRadius: radius.lg,
+              borderWidth: 1.5,
+              borderStyle: "dashed",
+              borderColor: colors.border,
+              backgroundColor: colors.surfaceAlt,
+              alignItems: "center",
+              justifyContent: "center",
+              gap: spacing.xs,
+              paddingVertical: spacing.xl,
+            }}
+          >
+            <Icon name="upload" size={26} color={colors.textMuted} />
+            <Text variant="caption" color="textMuted">
+              Tap to upload images
+            </Text>
+          </PressableScale>
+
+          {productImages && productImages.length > 0 && (
+            <View
+              style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}
+            >
+              {productImages.map((uri: any, index: number) => (
+                <Image
+                  key={index}
+                  source={{ uri }}
+                  style={{
+                    width: 96,
+                    height: 96,
+                    borderRadius: radius.md,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
+                />
+              ))}
+            </View>
+          )}
+        </View>
+
+        {/* ── Description ─────────────────────────────────────────────── */}
+        <Input
+          label="Description"
           placeholder="Description"
-          placeholderTextColor="grey"
+          multiline
           numberOfLines={10}
-          multiline={true}
           maxLength={maxDescriptionLength}
+          counter={maxDescriptionLength}
           //@ts-ignore
           value={description}
           onChangeText={setDescription}
+          inputStyle={{ minHeight: 120, textAlignVertical: "top" }}
         />
-        <Text style={styles.charCount}>
-          {description.length}/{maxDescriptionLength}
-        </Text>
-      </View>
-      {loading && (
-        <View style={styles.progressContainer}>
-          <LinearProgress color={COLORS.primary} />
-          <Text style={styles.loadingText}>Submitting...</Text>
-        </View>
-      )}
-      <View style={{ alignItems: "center" }}>
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonLoading]}
+
+        {loading && (
+          <Card padding="md" style={{ alignItems: "center", gap: spacing.sm }}>
+            <Spinner inline label="Submitting…" />
+          </Card>
+        )}
+
+        <Button
+          title="Continue"
           onPress={createService}
           disabled={loading}
-        >
-          <Text style={styles.buttonText}>Continue</Text>
-        </TouchableOpacity>
-      </View>
-    </ScrollView>
+          loading={loading}
+          size="lg"
+        />
+      </ScrollView>
+
+      <PickerSheet
+        visible={typeSheetVisible}
+        onClose={() => setTypeSheetVisible(false)}
+        title="Select Advert Type"
+        items={typeItems}
+        //@ts-ignore
+        selectedId={type || undefined}
+        searchable={false}
+        onSelect={(it) => {
+          setType(it.id);
+          setTypeSheetVisible(false);
+        }}
+      />
+
+      <PickerSheet
+        visible={categorySheetVisible}
+        onClose={() => setCategorySheetVisible(false)}
+        title="Select Category"
+        items={categoryItems}
+        //@ts-ignore
+        selectedId={category || undefined}
+        emptyText="No categories"
+        onSelect={(it) => {
+          setCategory(it.id);
+          setCategorySheetVisible(false);
+        }}
+      />
+    </SafeAreaView>
   );
 };
 
 export default UpdateAdvert;
-
-const styles = StyleSheet.create({
-  container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
-  },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 30,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  cover: {
-    top: 10,
-    marginBottom: 15,
-    backgroundColor: COLORS.white,
-  },
-  label: {
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  priceRangeContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-  priceInput: {
-    flex: 1,
-  },
-  priceSeparator: {
-    marginHorizontal: 10,
-  },
-  multipleImageContainer: {
-    alignItems: "center",
-    backgroundColor: COLORS.gray,
-    width: SIZES.width * 0.9,
-    height: 0.285407725 * SIZES.height,
-    marginHorizontal: SIZES.width * 0.05,
-    justifyContent: "center",
-    marginBottom: 20,
-  },
-  uploadedImage: {
-    width: 100,
-    height: 100,
-    resizeMode: "contain",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  imageContainer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-  },
-  textAreaContainer: {
-    width: SIZES.width * 0.9,
-    borderColor: "gray",
-    borderWidth: 1,
-    borderRadius: 5,
-    padding: 10,
-    backgroundColor: "#f9f9f9",
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
-  },
-  textArea: {
-    height: 150,
-    justifyContent: "flex-start",
-    textAlignVertical: "top",
-  },
-  charCount: {
-    textAlign: "right",
-    color: "gray",
-    fontSize: 12,
-  },
-  progressContainer: {
-    marginTop: 20,
-    alignItems: "center",
-  },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-  },
-  buttonLoading: {
-    backgroundColor: "#d4ba92", // Change to your desired color when loading
-  },
-  dropdown: {
-    width: "90%",
-    height: 50,
-    borderColor: "#ccc",
-    borderWidth: 1,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 15,
-  },
-  dropdownContainer: {
-    borderColor: "#ccc",
-    borderWidth: 1,
-  },
-  icon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-  },
-  placeholderIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#ccc",
-  },
-  modal: {
-    justifyContent: "center",
-    alignContent: "center",
-    alignItems: "center",
-    width: "50%",
-    height: "55%",
-  },
-  closeButton: {
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 10,
-    backgroundColor: COLORS.primary,
-    borderRadius: 5,
-  },
-  closeButtonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-});
