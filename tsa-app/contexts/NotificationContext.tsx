@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
 
-interface Notification {
+export interface Notification {
   id: string;
   type: string;
   title: string;
@@ -12,12 +12,18 @@ interface Notification {
   createdAt: string;
 }
 
+/** Inbound WS frame listener. Fired for every notification the socket delivers,
+ *  so screens (e.g. the P2P trade cockpit) can react to a relevant event without
+ *  their own poll. Returns an unsubscribe. */
+export type NotificationListener = (n: Notification) => void;
+
 interface NotificationContextType {
   unreadCount: number;
   notifications: Notification[];
   setNotifications: React.Dispatch<React.SetStateAction<Notification[]>>;
   refreshUnreadCount: () => Promise<void>;
   connected: boolean;
+  subscribe: (listener: NotificationListener) => () => void;
 }
 
 const NotificationContext = createContext<NotificationContextType>({
@@ -26,6 +32,7 @@ const NotificationContext = createContext<NotificationContextType>({
   setNotifications: () => {},
   refreshUnreadCount: async () => {},
   connected: false,
+  subscribe: () => () => {},
 });
 
 export const useNotifications = () => useContext(NotificationContext);
@@ -37,6 +44,16 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>();
   const reconnectDelay = useRef(1000);
+  // Raw-frame listeners (e.g. the trade cockpit). Kept in a ref so the WS
+  // callbacks always see the current set without re-binding the socket.
+  const listenersRef = useRef<Set<NotificationListener>>(new Set());
+
+  const subscribe = useCallback((listener: NotificationListener) => {
+    listenersRef.current.add(listener);
+    return () => {
+      listenersRef.current.delete(listener);
+    };
+  }, []);
 
   const wsUrl = API_BASE_URL.replace(/^http/, 'ws').replace(/\/api$/, '');
 
@@ -72,6 +89,13 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
         const notification: Notification = JSON.parse(event.data);
         setNotifications((prev) => [notification, ...prev]);
         setUnreadCount((prev) => prev + 1);
+        // Fan out to raw-frame subscribers (cockpit, etc.). Guard each so one
+        // throwing listener can't break notification delivery to the rest.
+        listenersRef.current.forEach((listener) => {
+          try {
+            listener(notification);
+          } catch {}
+        });
       } catch {}
     };
 
@@ -114,7 +138,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   return (
     <NotificationContext.Provider
-      value={{ unreadCount, notifications, setNotifications, refreshUnreadCount, connected }}
+      value={{ unreadCount, notifications, setNotifications, refreshUnreadCount, connected, subscribe }}
     >
       {children}
     </NotificationContext.Provider>
