@@ -1,21 +1,38 @@
+// components/profile/profile.tsx
+//
+// User profile screen content (rendered by the profile route) — avatar/identity
+// header, email-verify + KYC/verify links, account links (adverts, orders,
+// wishlist, balance, referral, referrals, settings), and logout.
+//
+// Migrated onto the TSA Signature design system: theme tokens (useTheme) +
+// @/components/ui primitives, replacing the legacy hardcoded StyleSheet/colors
+// and react-native-elements Avatar/Icon. VISUAL/STRUCTURAL restyle ONLY — the
+// profile fetch, token/auth gating, edit navigation, KYC/verify links, referral
+// copy, and logout flow are preserved verbatim.
 import React, { useCallback, useEffect, useState } from "react";
-import {
-  StyleSheet,
-  View,
-  Text,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  ScrollView,
-} from "react-native";
-import { Avatar, Icon } from "react-native-elements";
+import { View, TouchableOpacity, Alert, ScrollView } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
-
+import { useTheme } from "@/theme";
+import {
+  AccentCard,
+  Avatar,
+  Button,
+  Card,
+  Divider,
+  Icon,
+  IconButton,
+  IconName,
+  PressableScale,
+  Spinner,
+  Text,
+} from "@/components/ui";
 
 const ProfileScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
@@ -133,283 +150,209 @@ const ProfileScreen = () => {
     return name.charAt(0).toUpperCase();
   };
 
+  // Account links rendered as a single Card list. Each row preserves its exact
+  // navigation/handler; the balance + referral rows render custom right content.
+  type LinkRow = {
+    key: string;
+    icon: IconName;
+    label: string;
+    onPress?: () => void;
+  };
+  const linkRows: LinkRow[] = [
+    { key: "adverts", icon: "list", label: "My Adverts", onPress: () => router.push("/myAdverts") },
+    { key: "orders", icon: "list", label: "Orders", onPress: () => router.push("/orderlist") },
+    { key: "wishlist", icon: "star", label: "Wishlist" },
+  ];
+  const lowerLinkRows: LinkRow[] = [
+    { key: "referrals", icon: "user", label: "My Referrals", onPress: () => router.push("/referrals") },
+    { key: "settings", icon: "construction", label: "Settings", onPress: () => router.push("/(dashboard)/settings") },
+  ];
+
+  const Row: React.FC<{
+    icon: IconName;
+    onPress?: () => void;
+    children: React.ReactNode;
+    showChevron?: boolean;
+    last?: boolean;
+  }> = ({ icon, onPress, children, showChevron, last }) => (
+    <PressableScale onPress={onPress} disabled={!onPress}>
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: spacing.md,
+          paddingVertical: spacing.md,
+        }}
+      >
+        <Icon name={icon} size={20} color={colors.accent} />
+        <View style={{ flex: 1 }}>{children}</View>
+        {showChevron && onPress && <Icon name="chevronRight" size={18} color={colors.textMuted} />}
+      </View>
+      {!last && <Divider />}
+    </PressableScale>
+  );
+
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
       {loading || !user ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size={24} color="#9D6B38" />
+        <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+          <Spinner size="large" label="Loading profile..." />
         </View>
       ) : (
-        <ScrollView showsVerticalScrollIndicator={false}>
-          <View style={styles.card}>
-            <TouchableOpacity
-              style={styles.editIcon}
-              onPress={() =>
-                router.push({ pathname: "/profile/edit", params: user })
-              }
-            >
-              <Icon name="edit" size={20} color="#9D6B38" />
-            </TouchableOpacity>
-            <View style={styles.profileInfo}>
-              {user?.profilePicture ? (
-                <Avatar
-                  rounded
-                  source={{ uri: user.profilePicture }}
-                  size="large"
-                />
-              ) : (
-                <Avatar
-                  rounded
-                  title={getUserInitials(user.name)}
-                  size="large"
-                  overlayContainerStyle={{ backgroundColor: "#9D6B38" }}
-                  titleStyle={{ color: "#fff" }}
-                />
-              )}
-              <View style={styles.textInfo}>
-                <Text style={styles.fullName}>{user.name}</Text>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing["4xl"] }}
+        >
+          {/* Identity header */}
+          <AccentCard padding="xl">
+            <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+              <IconButton
+                icon="edit"
+                accessibilityLabel="Edit profile"
+                onPress={() => router.push({ pathname: "/profile/edit", params: user })}
+              />
+            </View>
+            <View style={{ alignItems: "center", justifyContent: "center" }}>
+              <Avatar
+                name={getUserInitials(user.name)}
+                uri={user?.profilePicture || undefined}
+                size={88}
+              />
+              <View style={{ alignItems: "center", marginTop: spacing.md }}>
+                <Text variant="title2" weight="700" align="center">
+                  {user.name}
+                </Text>
                 {user?.username ? (
-                  <Text style={styles.username}>@{user.username}</Text>
+                  <Text variant="bodySm" weight="600" color="accent" align="center">
+                    @{user.username}
+                  </Text>
                 ) : null}
-                <Text style={styles.phoneNumber}>{user?.phoneNumber}</Text>
+                {user?.phoneNumber ? (
+                  <Text variant="bodySm" color="textSecondary" align="center">
+                    {user.phoneNumber}
+                  </Text>
+                ) : null}
               </View>
             </View>
 
             {!user.emailVerified && (
-              <TouchableOpacity
-                style={styles.verificationButton}
+              <Button
+                title="Verify Email"
+                leftIcon="mail"
                 onPress={handleVerifyEmail}
-              >
-                <Icon name="mail" size={20} color="#FFFFFF" />
-                <Text style={styles.verificationText}>Verify Email</Text>
-              </TouchableOpacity>
+                style={{ marginTop: spacing.lg }}
+              />
             )}
 
             {user.verificationStatus === 'verified' ? (
-              <View style={styles.verifiedContainer}>
-                <Icon name="verified" size={20} color="green" />
-                <Text style={styles.verifiedText}>Verified</Text>
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: spacing.sm,
+                  marginTop: spacing.md,
+                }}
+              >
+                <Icon name="verified" size={20} color={colors.success} />
+                <Text variant="bodyMed" weight="600" color="success">
+                  Verified
+                </Text>
               </View>
             ) : user.verificationStatus === 'in_review' ? (
-              <TouchableOpacity style={styles.inReviewContainer} onPress={handleKycVerification}>
-                <Icon name="hourglass-empty" size={20} color="#9D6B38" />
-                <Text style={styles.inReviewText}>Verification In Progress</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={styles.verificationButton}
-                onPress={handleKycVerification}
-              >
-                <Icon name="account-box" size={20} color="#FFFFFF" />
-                <Text style={styles.verificationText}>
-                  {user.verificationStatus === 'rejected'
-                    ? 'Verification Failed - Try Again'
-                    : 'Verify Identity'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-          <View style={styles.linksContainer}>
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() => router.push("/myAdverts")}
-            >
-              <Icon name="description" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>My Adverts</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() => router.push("/orderlist")}
-            >
-              <Icon name="list" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Orders</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.profileLink}>
-              <Icon name="favorite" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Wishlist</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.profileLink}>
-              <Icon name="account-balance-wallet" size={20} color="#9D6B38" />
-              <View style={styles.balanceRow}>
-                <Text style={styles.balance}>{user?.balance || "0"} USD</Text>
-                <Text style={styles.balanceText}>My Balance</Text>
-              </View>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.profileLink}>
-              <Icon name="share" size={20} color="#9D6B38" />
-              <View style={styles.referralRow}>
-                <Text style={styles.referralCode}>{user?.referralCode || "N/A"}</Text>
-                <TouchableOpacity
-                  style={styles.copyButton}
-                  onPress={copyToClipboard}
+              <PressableScale onPress={handleKycVerification} style={{ marginTop: spacing.md }}>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: spacing.sm,
+                    paddingVertical: spacing.md,
+                    borderRadius: radius.md,
+                    backgroundColor: colors.warningBg,
+                  }}
                 >
-                  <Text style={styles.copyButtonText}>Copy</Text>
-                </TouchableOpacity>
+                  <Icon name="clock" size={20} color={colors.warning} />
+                  <Text variant="bodyMed" weight="600" color="warning">
+                    Verification In Progress
+                  </Text>
+                </View>
+              </PressableScale>
+            ) : (
+              <Button
+                title={
+                  user.verificationStatus === 'rejected'
+                    ? 'Verification Failed - Try Again'
+                    : 'Verify Identity'
+                }
+                leftIcon="shield"
+                onPress={handleKycVerification}
+                style={{ marginTop: spacing.lg }}
+              />
+            )}
+          </AccentCard>
+
+          {/* Account links */}
+          <Card padding="lg" style={{ marginTop: spacing.lg }}>
+            {linkRows.map((r) => (
+              <Row key={r.key} icon={r.icon} onPress={r.onPress} showChevron>
+                <Text variant="body" weight="500">
+                  {r.label}
+                </Text>
+              </Row>
+            ))}
+
+            {/* Balance row */}
+            <Row icon="wallet">
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <Text variant="body" weight="500">
+                  My Balance
+                </Text>
+                <Text variant="bodyMed" weight="700" numeric>
+                  {user?.balance || "0"} USD
+                </Text>
               </View>
-            </TouchableOpacity>
+            </Row>
 
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() => router.push("/referrals")}
-            >
-              <Icon name="people" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>My Referrals</Text>
-            </TouchableOpacity>
+            {/* Referral code row */}
+            <Row icon="gift" last>
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm }}>
+                <View style={{ flex: 1 }}>
+                  <Text variant="caption" color="textMuted">
+                    Referral Code
+                  </Text>
+                  <Text variant="bodyMed" weight="600" numeric numberOfLines={1}>
+                    {user?.referralCode || "N/A"}
+                  </Text>
+                </View>
+                <Button title="Copy" size="sm" variant="secondary" leftIcon="copy" fullWidth={false} onPress={copyToClipboard} />
+              </View>
+            </Row>
+          </Card>
 
-            <TouchableOpacity
-              style={styles.profileLink}
-              onPress={() => router.push("/(dashboard)/settings")}
-            >
-              <Icon name="settings" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Settings</Text>
-            </TouchableOpacity>
+          {/* Secondary links */}
+          <Card padding="lg" style={{ marginTop: spacing.lg }}>
+            {lowerLinkRows.map((r) => (
+              <Row key={r.key} icon={r.icon} onPress={r.onPress} showChevron last={r.key === "settings"}>
+                <Text variant="body" weight="500">
+                  {r.label}
+                </Text>
+              </Row>
+            ))}
+          </Card>
 
-            <TouchableOpacity style={styles.profileLink} onPress={handleLogout}>
-              <Icon name="exit-to-app" size={20} color="#9D6B38" />
-              <Text style={styles.linkText}>Logout</Text>
-            </TouchableOpacity>
-          </View>
+          {/* Logout */}
+          <Button
+            title="Logout"
+            variant="danger"
+            leftIcon="close"
+            onPress={handleLogout}
+            style={{ marginTop: spacing.lg }}
+          />
         </ScrollView>
       )}
-    </View>
+    </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#f0f0f0",
-    padding: 10,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  card: {
-    borderRadius: 10,
-    padding: 20,
-    width: "94%",
-    backgroundColor: "#F5FCFF",
-  },
-  editIcon: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-  },
-  profileInfo: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 15,
-  },
-  textInfo: {
-    marginLeft: 15,
-  },
-  fullName: {
-    fontSize: 18,
-    fontWeight: "bold",
-  },
-  username: {
-    fontSize: 14,
-    color: "#9D6B38",
-    fontWeight: "500",
-  },
-  phoneNumber: {
-    fontSize: 14,
-    color: "#666",
-  },
-  linksContainer: {
-    marginTop: 20,
-    minHeight: 300,
-  },
-  profileLink: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: "#ccc",
-    borderRadius: 10,
-  },
-  linkText: {
-    marginLeft: 10,
-    fontSize: 16,
-  },
-  balance: {
-    marginTop: 5,
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-  balanceRow: {
-    marginLeft: 15,
-  },
-  balanceText: {
-    fontSize: 14,
-  },
-  referralCode: {
-    fontSize: 16,
-    marginLeft: 15,
-  },
-  referralRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    width: "100%",
-  },
-  copyButton: {
-    marginLeft: 10,
-    backgroundColor: "#9D6B38",
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 5,
-    marginRight: 10,
-  },
-  copyButtonText: {
-    color: "#fff",
-    fontSize: 14,
-  },
-  verificationButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#9D6B38",
-    padding: 15,
-    borderRadius: 10,
-    marginVertical: 10,
-  },
-  verificationText: {
-    color: "#fff",
-    marginLeft: 10,
-    fontSize: 16,
-  },
-  verifiedContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 15,
-    borderRadius: 10,
-    marginVertical: 10,
-    backgroundColor: "#e0ffe0",
-  },
-  verifiedText: {
-    color: "green",
-    marginLeft: 10,
-    fontSize: 16,
-  },
-  inReviewContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 15,
-    borderRadius: 10,
-    marginVertical: 10,
-    backgroundColor: "#fff8e1",
-  },
-  inReviewText: {
-    color: "#9D6B38",
-    marginLeft: 10,
-    fontSize: 16,
-  },
-});
 
 export default ProfileScreen;

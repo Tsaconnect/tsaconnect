@@ -69,6 +69,8 @@ const REGISTRY = {
   nearMe: { set: 'ion', glyph: 'navigate' },
   construction: { set: 'ion', glyph: 'construct' },
   edit: { set: 'ion', glyph: 'create-outline' },
+  wifi: { set: 'ion', glyph: 'wifi' },
+  wifiOff: { set: 'mci', glyph: 'wifi-off' },
   mail: { set: 'ion', glyph: 'mail' },
   home: { set: 'ion', glyph: 'home' },
   gift: { set: 'ion', glyph: 'gift' },

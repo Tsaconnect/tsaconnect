@@ -1,29 +1,33 @@
+// app/(dashboard)/referrals.tsx
+//
+// Referrals / invite — shows the user's referral code (copy + share), referral
+// stats (total / verified / TP earned), and the list of referred users with their
+// verification status and TP contribution. Restyled onto the TSA Signature design
+// system (theme tokens + @/components/ui primitives).
+//
+// Visual/structural restyle ONLY: the stats fetch (api.getReferrals + api.getProfile),
+// referral-code resolution, clipboard copy, and native Share flow are preserved
+// verbatim.
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-  Alert,
-  RefreshControl,
-  Share,
-} from 'react-native';
+import { View, FlatList, Alert, RefreshControl, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
 import api from '../../components/services/api';
-
-const GOLD_COLORS = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  success: '#28A745',
-};
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  Divider,
+  EmptyState,
+  IconButton,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 interface Referral {
   id: string;
@@ -43,6 +47,7 @@ interface ReferralData {
 }
 
 const ReferralsScreen: React.FC = () => {
+  const { colors, spacing } = useTheme();
   const [data, setData] = useState<ReferralData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -110,325 +115,171 @@ const ReferralsScreen: React.FC = () => {
     });
   };
 
-  const getInitial = (name: string) => {
-    return name ? name.charAt(0).toUpperCase() : '?';
-  };
-
   const getStatusBadge = (status: string) => {
     if (status === 'verified') {
-      return { icon: 'verified', color: GOLD_COLORS.success, label: 'Verified' };
+      return { icon: 'verified' as const, color: colors.success, bg: colors.successBg, label: 'Verified' };
     }
     if (status === 'in_review') {
-      return { icon: 'hourglass-empty', color: '#F57C00', label: 'In Review' };
+      return { icon: 'clock' as const, color: colors.warning, bg: colors.warningBg, label: 'In Review' };
     }
-    return { icon: 'schedule', color: '#999', label: 'Pending' };
+    return { icon: 'clock' as const, color: colors.textMuted, bg: colors.surfaceAlt, label: 'Pending' };
   };
+
+  const referralCode = userProfile?.referralCode || userProfile?.username || 'N/A';
 
   const renderReferralItem = ({ item }: { item: Referral }) => {
     const badge = getStatusBadge(item.verificationStatus);
     return (
-      <View style={styles.referralItem}>
-        <View style={styles.avatarCircle}>
-          <Text style={styles.avatarText}>{getInitial(item.name)}</Text>
-        </View>
-        <View style={styles.referralInfo}>
-          <Text style={styles.referralName}>{item.name}</Text>
-          <Text style={styles.referralUsername}>@{item.username}</Text>
-          <Text style={styles.referralDate}>Joined {formatDate(item.createdAt)}</Text>
-        </View>
-        <View style={styles.referralRight}>
-          <View style={styles.statusBadge}>
-            <Icon name={badge.icon} size={14} color={badge.color} />
-            <Text style={[styles.statusText, { color: badge.color }]}>{badge.label}</Text>
+      <Card padding="md" style={{ marginBottom: spacing.sm }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Avatar name={item.name} size={44} />
+          <View style={{ flex: 1, marginLeft: spacing.md }}>
+            <Text variant="bodyMed" weight="700" numberOfLines={1}>
+              {item.name}
+            </Text>
+            <Text variant="caption" color="textSecondary" numberOfLines={1}>
+              @{item.username}
+            </Text>
+            <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+              Joined {formatDate(item.createdAt)}
+            </Text>
           </View>
-          <Text style={styles.tpContributed}>{item.tpContributed.toFixed(4)} TP</Text>
+          <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
+            <Badge label={badge.label} icon={badge.icon} color={badge.color} background={badge.bg} size="sm" />
+            <Text variant="bodySm" weight="700" color="accent" numeric>
+              {item.tpContributed.toFixed(4)} TP
+            </Text>
+          </View>
         </View>
-      </View>
+      </Card>
     );
   };
 
   const renderEmpty = () => (
-    <View style={styles.emptyContainer}>
-      <Icon name="people-outline" size={64} color="#ccc" />
-      <Text style={styles.emptyTitle}>No referrals yet</Text>
-      <Text style={styles.emptySubtitle}>
-        Share your referral code to start earning!
-      </Text>
-    </View>
+    <EmptyState
+      icon="user"
+      title="No referrals yet"
+      subtitle="Share your referral code to start earning!"
+    />
   );
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={GOLD_COLORS.dark} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading referrals..." />
         </View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <FlatList
         data={data?.referrals || []}
         renderItem={renderReferralItem}
         keyExtractor={(item) => item.id}
         ListEmptyComponent={renderEmpty}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
         }
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         ListHeaderComponent={
           <View>
             {/* Header */}
-            <View style={styles.header}>
-              <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-                <Icon name="arrow-back" size={24} color="#000" />
-              </TouchableOpacity>
-              <Text style={styles.headerTitle}>My Referrals</Text>
-            </View>
-
-            {/* Summary Cards */}
-            <View style={styles.summaryRow}>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryValue}>{data?.totalReferrals || 0}</Text>
-                <Text style={styles.summaryLabel}>Total</Text>
-              </View>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryValue}>{data?.verifiedReferrals || 0}</Text>
-                <Text style={styles.summaryLabel}>Verified</Text>
-              </View>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryValue}>
-                  {(data?.totalTPFromReferrals || 0).toFixed(2)}
-                </Text>
-                <Text style={styles.summaryLabel}>TP Earned</Text>
-              </View>
-            </View>
-
-            {/* Referral Code Section */}
-            <View style={styles.codeSection}>
-              <Text style={styles.codeLabel}>Your Referral Code</Text>
-              <Text style={styles.codeValue}>
-                {userProfile?.referralCode || userProfile?.username || 'N/A'}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
+              <IconButton
+                icon="chevronLeft"
+                onPress={() => router.back()}
+                accessibilityLabel="Go back"
+                style={{ marginLeft: -spacing.md }}
+              />
+              <Text variant="title1" weight="700">
+                My Referrals
               </Text>
-              <View style={styles.codeActions}>
-                <TouchableOpacity style={styles.codeButton} onPress={copyReferralCode}>
-                  <Icon name="content-copy" size={18} color={GOLD_COLORS.dark} />
-                  <Text style={styles.codeButtonText}>Copy</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.codeButton} onPress={shareReferralCode}>
-                  <Icon name="share" size={18} color={GOLD_COLORS.dark} />
-                  <Text style={styles.codeButtonText}>Share</Text>
-                </TouchableOpacity>
+            </View>
+
+            {/* Summary stats */}
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg }}>
+              <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+                <Text variant="title1" weight="700" numeric>
+                  {data?.totalReferrals || 0}
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  Total
+                </Text>
+              </Card>
+              <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+                <Text variant="title1" weight="700" numeric>
+                  {data?.verifiedReferrals || 0}
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  Verified
+                </Text>
+              </Card>
+              <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+                <AmountText
+                  value={data?.totalTPFromReferrals || 0}
+                  variant="title1"
+                  minimumFractionDigits={2}
+                  maximumFractionDigits={2}
+                />
+                <Text variant="caption" color="textSecondary">
+                  TP Earned
+                </Text>
+              </Card>
+            </View>
+
+            {/* Referral code */}
+            <AccentCard padding="xl" style={{ marginBottom: spacing.lg }}>
+              <Text variant="caption" color="textSecondary" align="center">
+                Your Referral Code
+              </Text>
+              <Text
+                variant="title1"
+                weight="700"
+                color="accent"
+                align="center"
+                numeric
+                style={{ marginTop: spacing.xs, marginBottom: spacing.md }}
+              >
+                {referralCode}
+              </Text>
+              <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                <Button
+                  title="Copy"
+                  leftIcon="copy"
+                  variant="secondary"
+                  size="sm"
+                  onPress={copyReferralCode}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  title="Share"
+                  leftIcon="send"
+                  variant="secondary"
+                  size="sm"
+                  onPress={shareReferralCode}
+                  style={{ flex: 1 }}
+                />
               </View>
-              <Text style={styles.codeHint}>
+              <Divider spacing="md" />
+              <Text variant="caption" color="textMuted" align="center">
                 Share your username with others to earn TP when they trade
               </Text>
-            </View>
+            </AccentCard>
 
-            {/* Referral List Header */}
+            {/* Referral list header */}
             {(data?.referrals?.length || 0) > 0 && (
-              <Text style={styles.listHeader}>Referred Users</Text>
+              <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+                Referred Users
+              </Text>
             )}
           </View>
         }
-        contentContainerStyle={styles.listContent}
       />
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD_COLORS.background,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  backButton: {
-    padding: 8,
-    marginRight: 12,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#000',
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 10,
-    marginBottom: 16,
-  },
-  summaryCard: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  summaryValue: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: '#000',
-    marginBottom: 4,
-  },
-  summaryLabel: {
-    fontSize: 12,
-    color: '#666',
-  },
-  codeSection: {
-    backgroundColor: '#fff',
-    marginHorizontal: 16,
-    borderRadius: 12,
-    padding: 20,
-    alignItems: 'center',
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  codeLabel: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
-  },
-  codeValue: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: GOLD_COLORS.dark,
-    marginBottom: 12,
-  },
-  codeActions: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 12,
-  },
-  codeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-    gap: 6,
-  },
-  codeButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: GOLD_COLORS.dark,
-  },
-  codeHint: {
-    fontSize: 12,
-    color: '#999',
-    textAlign: 'center',
-  },
-  listHeader: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#000',
-    paddingHorizontal: 16,
-    marginBottom: 12,
-  },
-  listContent: {
-    paddingBottom: 32,
-  },
-  referralItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    marginHorizontal: 16,
-    marginBottom: 8,
-    borderRadius: 12,
-    padding: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  avatarCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: GOLD_COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  avatarText: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000',
-  },
-  referralInfo: {
-    flex: 1,
-  },
-  referralName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#000',
-  },
-  referralUsername: {
-    fontSize: 13,
-    color: '#666',
-  },
-  referralDate: {
-    fontSize: 12,
-    color: '#999',
-    marginTop: 2,
-  },
-  referralRight: {
-    alignItems: 'flex-end',
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 4,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  tpContributed: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: GOLD_COLORS.dark,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    paddingVertical: 48,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#333',
-    marginTop: 16,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 8,
-    textAlign: 'center',
-    paddingHorizontal: 48,
-  },
-});
 
 export default ReferralsScreen;
