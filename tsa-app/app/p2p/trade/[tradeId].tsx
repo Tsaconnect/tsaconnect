@@ -94,6 +94,14 @@ const TradeDetailScreen: React.FC = () => {
   const [composerImage, setComposerImage] = useState<string | null>(null);
   const [rated, setRated] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
+  // Chat is collapsed by default — it's secondary to the trade actions. The
+  // header shows a count of counterparty messages that arrived while it was
+  // closed (the docked composer only mounts while the chat is open).
+  const [chatOpen, setChatOpen] = useState(false);
+  const [unread, setUnread] = useState(0);
+  const seenCountRef = useRef(0);
+  const chatBaselineSetRef = useRef(false);
 
   const countdown = useCountdown(trade?.status === 'pending_payment' ? trade?.expiresAt : undefined);
 
@@ -211,14 +219,48 @@ const TradeDetailScreen: React.FC = () => {
     setActing('');
   }, []);
 
-  // Auto-scroll the chat to the latest message when count grows.
+  // Auto-scroll the chat to the latest message when count grows — only while the
+  // chat is expanded (collapsed, the thread isn't rendered).
   const lastMessageCount = useRef(0);
   useEffect(() => {
-    if (messages.length > lastMessageCount.current) {
+    if (chatOpen && messages.length > lastMessageCount.current) {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
     }
     lastMessageCount.current = messages.length;
-  }, [messages.length]);
+  }, [messages.length, chatOpen]);
+
+  // Reveal the latest message + composer when the chat is opened.
+  useEffect(() => {
+    if (chatOpen) setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
+  }, [chatOpen]);
+
+  // Track unread counterparty messages while the chat is collapsed. The baseline
+  // is set once the initial history loads, so pre-existing messages don't count.
+  useEffect(() => {
+    if (loading) return;
+    if (!chatBaselineSetRef.current) {
+      chatBaselineSetRef.current = true;
+      seenCountRef.current = messages.length;
+      return;
+    }
+    if (chatOpen) {
+      seenCountRef.current = messages.length;
+      setUnread(0); // React no-ops if already 0
+      return;
+    }
+    if (messages.length > seenCountRef.current) {
+      // Count only real chat messages from the counterparty. System/bot rows
+      // carry no senderId (so `senderId !== user.id` is trivially true) and are
+      // emitted on every lifecycle transition — counting them would inflate the
+      // badge past the human-visible chat. seenCountRef still advances to
+      // messages.length below, so those rows are consumed, not re-counted later.
+      const fresh = messages
+        .slice(seenCountRef.current)
+        .filter((m) => (m.type === 'text' || m.type === 'image') && m.senderId !== user?.id);
+      seenCountRef.current = messages.length;
+      if (fresh.length) setUnread((n) => n + fresh.length);
+    }
+  }, [loading, messages, chatOpen, user?.id]);
 
   if (loading || !trade) {
     return (
@@ -517,28 +559,74 @@ const TradeDetailScreen: React.FC = () => {
             </Text>
           )}
 
-          <Text variant="title3" weight="700" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
-            Chat
-          </Text>
-          <View style={{ gap: spacing.sm }}>
-            {messages.length === 0 ? (
-              <Text
-                variant="bodySm"
-                color="textMuted"
-                align="center"
-                style={{ paddingVertical: spacing.xl, fontStyle: 'italic' }}
-              >
-                No messages yet.
+          <PressableScale
+            onPress={() => setChatOpen((o) => !o)}
+            accessibilityLabel={chatOpen ? 'Collapse chat' : 'Expand chat'}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginTop: spacing.xl,
+              marginBottom: chatOpen ? spacing.md : 0,
+              paddingVertical: spacing.xs,
+            }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Icon
+                name={chatOpen ? 'chevronDown' : 'chevronRight'}
+                size={20}
+                color={colors.textSecondary}
+              />
+              <Text variant="title3" weight="700">
+                Chat
               </Text>
-            ) : (
-              messages.map((m) => (
-                <MessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />
-              ))
+              {!chatOpen && unread > 0 && (
+                <View
+                  style={{
+                    minWidth: 20,
+                    height: 20,
+                    borderRadius: 10,
+                    paddingHorizontal: 6,
+                    backgroundColor: colors.accent,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Text variant="caption" weight="700" style={{ color: colors.onAccent }}>
+                    {unread}
+                  </Text>
+                </View>
+              )}
+            </View>
+            {!chatOpen && (
+              <Text variant="caption" color="textMuted">
+                {messages.length === 0
+                  ? 'No messages'
+                  : `${messages.length} message${messages.length === 1 ? '' : 's'}`}
+              </Text>
             )}
-          </View>
+          </PressableScale>
+          {chatOpen && (
+            <View style={{ gap: spacing.sm }}>
+              {messages.length === 0 ? (
+                <Text
+                  variant="bodySm"
+                  color="textMuted"
+                  align="center"
+                  style={{ paddingVertical: spacing.xl, fontStyle: 'italic' }}
+                >
+                  No messages yet.
+                </Text>
+              ) : (
+                messages.map((m) => (
+                  <MessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />
+                ))
+              )}
+            </View>
+          )}
         </ScrollView>
 
-        {!isTerminal && (
+        {!isTerminal && chatOpen && (
           <View
             style={{
               flexDirection: 'row',
@@ -579,15 +667,18 @@ const TradeDetailScreen: React.FC = () => {
               <View
                 style={{
                   flex: 1,
-                  minHeight: 38,
-                  maxHeight: 100,
+                  maxHeight: 120,
                   justifyContent: 'center',
                   backgroundColor: colors.surfaceAlt,
-                  borderRadius: 18,
+                  borderRadius: 20,
                   paddingHorizontal: spacing.md,
                 }}
               >
+                {/* minHeight on the TextInput (not the wrapper) makes the WHOLE
+                    pill a tap target — previously a centered, content-height
+                    input left only a thin tappable strip in the middle. */}
                 <TextInput
+                  ref={inputRef}
                   value={composerText}
                   onChangeText={setComposerText}
                   placeholder="Type a message…"
@@ -597,7 +688,9 @@ const TradeDetailScreen: React.FC = () => {
                   style={{
                     color: colors.textPrimary,
                     fontSize: 14,
+                    minHeight: 40,
                     paddingVertical: spacing.sm,
+                    textAlignVertical: 'center',
                   }}
                 />
               </View>
@@ -715,8 +808,16 @@ const ActionPanel: React.FC<{
   // The role field already resolves correctly from buyerId/sellerId vs user.id,
   // so canMarkPaid and canRelease gate correctly in both cases with no changes.
   const canMarkPaid = role === 'buyer' && trade.status === 'pending_payment';
-  const canRelease =
-    role === 'seller' && (trade.status === 'pending_payment' || trade.status === 'paid');
+  // Gate the Release button on the buyer's markPaid (status === 'paid'). The
+  // contract + backend deliberately ALSO allow a seller to release straight from
+  // pending_payment — the seller's signature is the real gate, since markPaid is
+  // an unverifiable off-chain claim — but the intended flow is buyer-pays →
+  // buyer-marks-paid → seller-releases, so the button only surfaces once the
+  // buyer has marked the trade paid. (Both sell-ad and buy-ad map to role here:
+  // on a buy-ad the depositing user is the seller and the merchant is the buyer.)
+  const canRelease = role === 'seller' && trade.status === 'paid';
+  // Seller is waiting on the buyer's fiat payment — explains the absent Release.
+  const sellerAwaitingPayment = role === 'seller' && trade.status === 'pending_payment';
   const canCancel = expired && trade.status === 'pending_payment';
   const canDispute =
     trade.status === 'pending_payment' || trade.status === 'paid';
@@ -730,6 +831,12 @@ const ActionPanel: React.FC<{
         </AccentCard>
       ) : (
         <View style={{ gap: spacing.md }}>
+          {sellerAwaitingPayment && (
+            <Text variant="bodySm" color="textSecondary" align="center">
+              Waiting for the buyer to send payment and mark it paid. You can
+              release once they do.
+            </Text>
+          )}
           {canMarkPaid && (
             <Button
               title="I've paid — attach proof"
