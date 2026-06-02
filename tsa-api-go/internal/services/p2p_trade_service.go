@@ -1047,10 +1047,11 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	if tokenAmount.Cmp(uint96Max) > 0 {
 		return nil, nil, ErrAmountOverflow
 	}
-	// The PM the user picks is the MERCHANT's account (in the ad's allowlist) —
-	// where the merchant will send fiat. ad.SellerID is the merchant, so the
-	// existing helper (which scopes the PM to ad.SellerID) is correct as-is.
-	if err := s.validateAdPaymentMethod(ad, params.PaymentMethodID); err != nil {
+	// Buy-ad: the MERCHANT pays fiat TO the taker, so the payment method must be
+	// the TAKER's OWN account (where they receive fiat) — NOT the ad's allowlist
+	// (those are the merchant's). Validate it's owned by the opener (the depositing
+	// user/crypto-seller) and matches the trade currency.
+	if err := s.validatePaymentMethodsOwned(openerID, []uuid.UUID{params.PaymentMethodID}, ad.FiatCurrency); err != nil {
 		return nil, nil, err
 	}
 
