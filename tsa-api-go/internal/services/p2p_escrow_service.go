@@ -965,11 +965,19 @@ func (s *P2PEscrowService) callContract(data []byte) ([]byte, error) {
 	return s.client.Client.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
 }
 
+// receiptConfirmTimeout bounds how long a confirm endpoint waits for a
+// just-broadcast tx to be mined before giving up (Sonic mines in ~1-2s; the
+// chain reconciler backstops anything that still slips through).
+const receiptConfirmTimeout = 30 * time.Second
+
 func (s *P2PEscrowService) fetchReceiptAndCheckOK(txHash string) (*types.Receipt, error) {
 	if err := s.requireConfigured(); err != nil {
 		return nil, err
 	}
-	receipt, err := s.client.GetTransactionReceipt(txHash)
+	// The app broadcasts then immediately calls confirm, so the tx is usually
+	// not mined yet — poll for the receipt instead of failing on the first
+	// "not found".
+	receipt, err := s.client.WaitForReceipt(txHash, receiptConfirmTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("get receipt: %w", err)
 	}
