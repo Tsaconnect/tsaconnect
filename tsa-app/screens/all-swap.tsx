@@ -1,14 +1,21 @@
+// screens/all-swap.tsx
+//
+// Cross-chain "All Swap" — pick any token on any chain, get a LiFi quote, confirm,
+// then sign approval + swap. Restyled onto the TSA Signature design system (theme
+// tokens + @/components/ui primitives). All quote/fee/decimal math, the LiFi quote
+// lifecycle (debounce + expiry countdown + refresh), the two-step approve→swap
+// signing flow, live on-chain balance reads, navigation, and the TokenPickerModal
+// wiring are unchanged — this is a visual/structural restyle only.
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet,
-  ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Pressable,
-  Switch, Image, Linking,
+  View, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
+  Modal, Pressable, Image, Linking, StyleSheet, TextInput as RNTextInput,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Animated, {
   useSharedValue, useAnimatedStyle, withSpring, withTiming,
   withDelay, withSequence,
 } from 'react-native-reanimated';
-import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { getChainByChainId, CHAINS } from '@/constants/chains';
@@ -17,9 +24,17 @@ import { getActiveWallet, fetchPendingNonce, signLiFiTransaction, readErc20Balan
 import { ethers } from 'ethers';
 import { getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, buildERC20ApproveCalldata, type LiFiToken, type LiFiQuote } from '@/services/lifi';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
+import { useTheme } from '@/theme';
+import {
+  Button,
+  Card,
+  Icon,
+  IconButton,
+  PressableScale,
+  Text,
+  Toggle,
+} from '@/components/ui';
 
-const GOLD = '#D4AF37';
-const DARK = '#1A1A1A';
 const FEE_PCT = 3;
 const DEFAULT_FROM_CHAIN_ID = 56;
 const DEFAULT_TO_CHAIN_ID = 1;
@@ -28,16 +43,18 @@ type QuoteStatus = 'idle' | 'quoting' | 'quoted' | 'no_route' | 'error' | 'expir
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
 function TokenIcon({ uri, symbol, size = 32 }: { uri?: string; symbol?: string; size?: number }) {
+  const { colors } = useTheme();
   if (uri) return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
   if (!symbol) return null;
   return (
-    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: '#E0E0E0', alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: size * 0.38, fontWeight: '700', color: '#555' }}>{symbol[0]}</Text>
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' }}>
+      <Text style={{ fontSize: size * 0.38 }} weight="700" color="textSecondary">{symbol[0]}</Text>
     </View>
   );
 }
 
 export default function AllSwapScreen() {
+  const { colors, spacing, radius } = useTheme();
   const [fromToken, setFromToken] = useState<LiFiToken | null>(null);
   const [fromChainId, setFromChainId] = useState(DEFAULT_FROM_CHAIN_ID);
   const [toToken, setToToken] = useState<LiFiToken | null>(null);
@@ -392,16 +409,22 @@ export default function AllSwapScreen() {
 
   // ── Signing ──────────────────────────────────────────────────
   if (screen === 'signing') return (
-    <View style={s.container}>
-      <View style={s.center}>
-        <View style={s.signingRing}>
-          <ActivityIndicator size="large" color={GOLD} />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing['2xl'] }}>
+        <View
+          style={{
+            width: 80, height: 80, borderRadius: radius.pill,
+            borderWidth: 2, borderColor: colors.border,
+            alignItems: 'center', justifyContent: 'center', marginBottom: spacing['2xl'],
+          }}
+        >
+          <ActivityIndicator size="large" color={colors.accent} />
         </View>
-        <Text style={s.bigTitle}>Processing Swap</Text>
-        <Text style={s.signingStep}>{signingStatus}</Text>
-        <Text style={s.signingHint}>Please keep the app open</Text>
+        <Text variant="title1" weight="700">Processing Swap</Text>
+        <Text variant="bodySm" weight="600" color="accent" style={{ marginTop: spacing.sm }}>{signingStatus}</Text>
+        <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>Please keep the app open</Text>
       </View>
-    </View>
+    </SafeAreaView>
   );
 
   // ── Success / Failure ─────────────────────────────────────────
@@ -426,278 +449,370 @@ export default function AllSwapScreen() {
 
   // ── Confirm ───────────────────────────────────────────────────
   if (screen === 'confirm') return (
-    <View style={s.container}>
-      <ScrollView contentContainerStyle={s.scroll}>
-        <TouchableOpacity onPress={() => setScreen('form')} style={s.backRow}>
-          <Ionicons name="chevron-back" size={20} color={GOLD} />
-          <Text style={[s.sub, { color: GOLD }]}>Back</Text>
-        </TouchableOpacity>
-        <Text style={s.bigTitle}>Confirm Swap</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, paddingBottom: spacing['4xl'] }}>
+        <PressableScale
+          onPress={() => setScreen('form')}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: spacing.lg }}
+        >
+          <Icon name="chevronLeft" size={20} color={colors.accent} />
+          <Text variant="bodySm" weight="600" color="accent">Back</Text>
+        </PressableScale>
+        <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>Confirm Swap</Text>
 
         {/* From → To summary */}
-        <View style={s.card}>
-          <View style={s.confirmSection}>
-            <Text style={s.cardLabel}>YOU PAY</Text>
-            <View style={s.confirmTokenRow}>
+        <Card padding="lg">
+          <View style={{ paddingVertical: spacing.md }}>
+            <Text variant="overline" color="textMuted">YOU PAY</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
               <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={40} />
               <View style={{ flex: 1 }}>
-                <Text style={s.confirmAmount}>{fromAmount} {fromToken?.symbol}</Text>
-                <Text style={s.confirmMeta}>{fromToken?.name} · {chainName(fromChainId)}</Text>
+                <Text variant="title2" weight="700">{fromAmount} {fromToken?.symbol}</Text>
+                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name} · {chainName(fromChainId)}</Text>
               </View>
             </View>
           </View>
 
-          <View style={s.arrowDivider}>
-            <View style={s.arrowDividerLine} />
-            <View style={s.arrowCircle}>
-              <Ionicons name="arrow-down" size={16} color="#FFF" />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginVertical: spacing.xs }}>
+            <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
+            <View
+              style={{
+                width: 28, height: 28, borderRadius: 14, backgroundColor: colors.accent,
+                alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <Icon name="arrowDown" size={16} color={colors.onAccent} />
             </View>
-            <View style={s.arrowDividerLine} />
+            <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
           </View>
 
-          <View style={s.confirmSection}>
-            <Text style={s.cardLabel}>YOU RECEIVE</Text>
-            <View style={s.confirmTokenRow}>
+          <View style={{ paddingVertical: spacing.md }}>
+            <Text variant="overline" color="textMuted">YOU RECEIVE</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
               <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={40} />
               <View style={{ flex: 1 }}>
-                <Text style={[s.confirmAmount, { color: GOLD }]}>{outputAmount} {toToken?.symbol}</Text>
-                <Text style={s.confirmMeta}>{toToken?.name} · {chainName(toChainId)}</Text>
+                <Text variant="title2" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
+                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name} · {chainName(toChainId)}</Text>
               </View>
             </View>
           </View>
-        </View>
+        </Card>
 
         {/* Details */}
-        <View style={[s.card, { marginTop: 12 }]}>
+        <Card padding="lg" style={{ marginTop: spacing.md }}>
           <DetailRow label="Route" value={quote?.tool ?? '—'} />
           <DetailRow label="Est. time" value={quote ? `~${Math.ceil(quote.estimatedDuration / 60)} min` : '—'} />
           <DetailRow label="Gas cost" value={`$${quote?.gasCostUSD ?? '0'}`} />
           <DetailRow label="Fee" value={`${FEE_PCT}%`} highlight />
           <DetailRow label="Slippage" value={slippageAuto ? '0.5% (auto)' : `${(Number(slippage) * 100).toFixed(1)}%`} last />
-        </View>
+        </Card>
 
         {quote?.approvalAddress && (
-          <View style={s.approvalNote}>
-            <Ionicons name="information-circle-outline" size={14} color="#888" />
-            <Text style={s.disc}>Two transactions required: token approval + swap</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.md, marginBottom: spacing.xs }}>
+            <Icon name="info" size={14} color={colors.textMuted} />
+            <Text variant="caption" color="textMuted" style={{ flex: 1 }}>Two transactions required: token approval + swap</Text>
           </View>
         )}
 
-        <TouchableOpacity style={s.btn} onPress={handleSwap}>
-          <Ionicons name="swap-vertical" size={18} color="#FFF" style={{ marginRight: 8 }} />
-          <Text style={s.btnT}>Confirm Swap</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={s.btn2} onPress={() => setScreen('form')}>
-          <Text style={s.btn2T}>Cancel</Text>
-        </TouchableOpacity>
+        <Button
+          title="Confirm Swap"
+          leftIcon="swapVertical"
+          onPress={handleSwap}
+          size="lg"
+          style={{ marginTop: spacing.xl }}
+        />
+        <Button
+          title="Cancel"
+          variant="ghost"
+          onPress={() => setScreen('form')}
+          style={{ marginTop: spacing.sm }}
+        />
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 
   // ── Wallet not connected ─────────────────────────────────────
   if (!walletLoading && !walletAddress) return (
-    <View style={s.container}>
-      <View style={s.center}>
-        <View style={[s.resIcon, { backgroundColor: '#F5F5F5' }]}>
-          <Ionicons name="wallet-outline" size={40} color="#AAA" />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing['2xl'] }}>
+        <View
+          style={{
+            width: 80, height: 80, borderRadius: radius.pill,
+            backgroundColor: colors.surfaceAlt,
+            alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <Icon name="wallet" size={40} color={colors.textMuted} />
         </View>
-        <Text style={s.bigTitle}>No Wallet Connected</Text>
-        <Text style={[s.sub, { textAlign: 'center', marginTop: 8, paddingHorizontal: 32 }]}>
+        <Text variant="title1" weight="700" style={{ marginTop: spacing.lg }}>No Wallet Connected</Text>
+        <Text variant="bodySm" color="textSecondary" align="center" style={{ marginTop: spacing.sm, paddingHorizontal: spacing['3xl'] }}>
           You need a wallet to swap tokens. Set one up in the Wallet tab first.
         </Text>
-        <TouchableOpacity style={[s.btn, { marginTop: 32, paddingHorizontal: 32 }]} onPress={() => router.push('/wallet')}>
-          <Ionicons name="wallet-outline" size={18} color="#FFF" style={{ marginRight: 8 }} />
-          <Text style={s.btnT}>Go to Wallet</Text>
-        </TouchableOpacity>
+        <Button
+          title="Go to Wallet"
+          leftIcon="wallet"
+          onPress={() => router.push('/wallet')}
+          fullWidth={false}
+          size="lg"
+          style={{ marginTop: spacing['3xl'], paddingHorizontal: spacing['3xl'] }}
+        />
       </View>
-    </View>
+    </SafeAreaView>
   );
 
   // ── Form ──────────────────────────────────────────────────────
   const validationError = validate();
   return (
-    <KeyboardAvoidingView style={s.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <View style={s.headerRow}>
-          <View>
-            <Text style={s.bigTitle}>All Swap</Text>
-            <Text style={s.sub}>Any token · Any chain</Text>
-          </View>
-          <TouchableOpacity onPress={() => setSlippageSheetVisible(true)} style={s.settingsBtn}>
-            <Ionicons name="settings-outline" size={20} color="#888" />
-          </TouchableOpacity>
-        </View>
-
-        <View style={s.card}>
-          {/* From */}
-          <Text style={s.cardLabel}>YOU PAY</Text>
-          <View style={s.cardRow}>
-            <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('from')} activeOpacity={0.7}>
-              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
-              <View>
-                <Text style={s.tokenBtnText}>{fromToken?.symbol ?? 'Select'}</Text>
-                {fromToken && <Text style={s.tokenChain}>{chainName(fromChainId)}</Text>}
-              </View>
-              <Ionicons name="chevron-down" size={13} color="#888" />
-            </TouchableOpacity>
-            <TextInput
-              style={s.amountInput}
-              placeholder="0.00"
-              placeholderTextColor="#CCC"
-              value={fromAmount}
-              onChangeText={t => { setFromAmount(t); setError(''); }}
-              keyboardType="decimal-pad"
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, paddingBottom: spacing['4xl'] }} keyboardShouldPersistTaps="handled">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.xl }}>
+            <View>
+              <Text variant="title1" weight="700">All Swap</Text>
+              <Text variant="bodySm" color="textMuted" style={{ marginTop: 2 }}>Any token · Any chain</Text>
+            </View>
+            <IconButton
+              icon="filter"
+              size={20}
+              color={colors.textMuted}
+              accessibilityLabel="Slippage settings"
+              onPress={() => setSlippageSheetVisible(true)}
             />
           </View>
-          <View style={s.amountMeta}>
-            {fromAmountUSD != null && (
-              <Text style={s.usdValue}>≈ ${fromAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
-            )}
-            <TouchableOpacity onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
-              <Text style={s.balanceText}>Balance: {formattedBalance} {fromToken?.symbol}</Text>
-            </TouchableOpacity>
-          </View>
 
-          {/* Swap direction button */}
-          <View style={s.arrowWrap}>
-            <TouchableOpacity style={s.arrowBtn} onPress={swapDirection} activeOpacity={0.7}>
-              <Ionicons name="swap-vertical" size={18} color="#FFF" />
-            </TouchableOpacity>
-          </View>
-
-          {/* To */}
-          <Text style={s.cardLabel}>YOU RECEIVE</Text>
-          <View style={s.cardRow}>
-            <TouchableOpacity style={s.tokenBtn} onPress={() => setPickerMode('to')} activeOpacity={0.7}>
-              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
-              <View>
-                <Text style={s.tokenBtnText}>{toToken?.symbol ?? 'Select'}</Text>
-                {toToken && <Text style={s.tokenChain}>{chainName(toChainId)}</Text>}
-              </View>
-              <Ionicons name="chevron-down" size={13} color="#888" />
-            </TouchableOpacity>
-            {quoteStatus === 'quoting'
-              ? <ActivityIndicator size="small" color={GOLD} style={{ flex: 1 }} />
-              : <View style={{ flex: 1, alignItems: 'flex-end' }}>
-                  <Text style={s.amountOutput}>{outputAmount ?? '—'}</Text>
-                  {toAmountUSD != null && (
-                    <Text style={s.usdValue}>≈ ${toAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
-                  )}
+          <Card padding="lg">
+            {/* From */}
+            <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>YOU PAY</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
+              <PressableScale
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                  backgroundColor: colors.surfaceAlt, paddingHorizontal: spacing.sm, paddingVertical: spacing.sm,
+                  borderRadius: radius.xl, maxWidth: '50%',
+                }}
+                onPress={() => setPickerMode('from')}
+              >
+                <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={24} />
+                <View>
+                  <Text variant="bodySm" weight="700">{fromToken?.symbol ?? 'Select'}</Text>
+                  {fromToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(fromChainId)}</Text>}
                 </View>
-            }
-          </View>
-        </View>
-
-        {/* Quote info / errors */}
-        {(quoteStatus === 'quoted' || quoteStatus === 'expired') && quote && (
-          <View style={s.infoBar}>
-            <Ionicons name="flash" size={13} color={GOLD} />
-            <Text style={s.infoText}>
-              {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
-            </Text>
-            {quoteStatus === 'expired' ? (
-              <TouchableOpacity onPress={refreshQuote} style={s.refreshBtn}>
-                <Ionicons name="refresh" size={13} color={GOLD} />
-                <Text style={s.refreshText}>Refresh</Text>
-              </TouchableOpacity>
-            ) : (
-              <View style={s.countdown}>
-                <Text style={s.countdownText}>{quoteSecondsLeft}s</Text>
-              </View>
-            )}
-          </View>
-        )}
-        {/* Price impact warning */}
-        {priceImpactPct != null && priceImpactPct < -5 && (
-          <View style={[s.infoBar, priceImpactPct < -15 ? s.infoError : s.infoWarn]}>
-            <Ionicons name="warning" size={13} color={priceImpactPct < -15 ? '#DC2626' : '#D97706'} />
-            <Text style={[s.infoText, { color: priceImpactPct < -15 ? '#DC2626' : '#92400E' }]}>
-              {priceImpactPct < -15 ? 'High' : 'Moderate'} price impact ({Math.abs(priceImpactPct).toFixed(1)}%) — check liquidity before swapping
-            </Text>
-          </View>
-        )}
-        {quoteStatus === 'no_route' && (
-          <View style={[s.infoBar, s.infoError]}>
-            <Ionicons name="warning" size={13} color="#DC2626" />
-            <Text style={[s.infoText, { color: '#DC2626' }]}>No route available for this pair. Try a different token or amount.</Text>
-          </View>
-        )}
-        {quoteStatus === 'error' && (
-          <View style={[s.infoBar, s.infoError]}>
-            <Ionicons name="alert-circle" size={13} color="#DC2626" />
-            <Text style={[s.infoText, { color: '#DC2626' }]}>{quoteError || 'Swap pricing unavailable. Try again shortly.'}</Text>
-          </View>
-        )}
-        {quoteStatus === 'expired' && (
-          <View style={[s.infoBar, s.infoWarn]}>
-            <Ionicons name="time-outline" size={13} color="#D97706" />
-            <Text style={[s.infoText, { color: '#92400E' }]}>Quote expired — tap Refresh for a new price</Text>
-          </View>
-        )}
-
-        <TouchableOpacity
-          style={[s.btn, !!validationError && { opacity: 0.4 }]}
-          onPress={() => { const e = validate(); if (e) { setError(e); return; } setScreen('confirm'); }}
-          disabled={!!validationError}
-        >
-          <Text style={s.btnT}>Review Swap</Text>
-        </TouchableOpacity>
-      </ScrollView>
-
-      <TokenPickerModal
-        visible={pickerMode !== null}
-        mode={pickerMode ?? 'from'}
-        chainId={pickerMode === 'from' ? fromChainId : toChainId}
-        userBalances={balances}
-        allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
-        allChainsTokens={allChainsTokens}
-        allChainsLoading={allChainsLoading}
-        allChainsHasMore={allChainsTokens.length < allChainsTotal}
-        onAllChainsLoadMore={handleAllChainsLoadMore}
-        onAllChainsSearchChange={handleAllChainsSearchChange}
-        tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
-        onChainChange={(newChainId) => {
-          if (pickerMode === 'from') setFromChainId(newChainId);
-          else setToChainId(newChainId);
-        }}
-        onSelect={(token, chainId) => {
-          if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
-          else { setToToken(token); setToChainId(chainId); }
-          setPickerMode(null);
-          setFromAmount(''); setQuote(null); setQuoteStatus('idle');
-        }}
-        onClose={() => setPickerMode(null)}
-      />
-
-      <Modal visible={slippageSheetVisible} transparent animationType="slide">
-        <Pressable style={s.overlay} onPress={() => setSlippageSheetVisible(false)}>
-          <Pressable style={s.slippageSheet} onPress={() => {}}>
-            <View style={s.slippageHandle} />
-            <Text style={s.slippageTitle}>Slippage Tolerance</Text>
-            <View style={s.slippageRow}>
-              <View>
-                <Text style={s.detL}>Auto</Text>
-                <Text style={s.slippageHint}>0.5% — recommended</Text>
-              </View>
-              <Switch value={slippageAuto} onValueChange={setSlippageAuto} trackColor={{ true: GOLD }} thumbColor="#FFF" />
+                <Icon name="chevronDown" size={13} color={colors.textMuted} />
+              </PressableScale>
+              <RNTextInput
+                style={{ flex: 1, fontSize: 28, fontWeight: '700', color: colors.textPrimary, textAlign: 'right', padding: 0 }}
+                placeholder="0.00"
+                placeholderTextColor={colors.textDisabled}
+                value={fromAmount}
+                onChangeText={t => { setFromAmount(t); setError(''); }}
+                keyboardType="decimal-pad"
+              />
             </View>
-            {!slippageAuto && (
-              <View style={s.slippageInputWrap}>
-                <TextInput
-                  style={s.slippageInput}
-                  value={String(Number(slippage) * 100)}
-                  onChangeText={v => { const n = Number(v); if (!isNaN(n) && n >= 0.1 && n <= 49) setSlippage(String(n / 100)); }}
-                  keyboardType="decimal-pad"
-                  placeholder="Enter %"
-                  placeholderTextColor="#CCC"
-                />
-                <Text style={s.slippagePct}>%</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.lg }}>
+              {fromAmountUSD != null && (
+                <Text variant="caption" color="textMuted">≈ ${fromAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
+              )}
+              <PressableScale onPress={() => fromBalance !== '0' && setFromAmount(fromBalance)}>
+                <Text variant="caption" weight="500" color="accent">Balance: {formattedBalance} {fromToken?.symbol}</Text>
+              </PressableScale>
+            </View>
+
+            {/* Swap direction button */}
+            <View style={{ alignItems: 'center', marginVertical: spacing.xs }}>
+              <PressableScale
+                style={{
+                  width: 38, height: 38, borderRadius: 19, backgroundColor: colors.textPrimary,
+                  justifyContent: 'center', alignItems: 'center',
+                }}
+                onPress={swapDirection}
+              >
+                <Icon name="swapVertical" size={18} color={colors.background} />
+              </PressableScale>
+            </View>
+
+            {/* To */}
+            <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>YOU RECEIVE</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
+              <PressableScale
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                  backgroundColor: colors.surfaceAlt, paddingHorizontal: spacing.sm, paddingVertical: spacing.sm,
+                  borderRadius: radius.xl, maxWidth: '50%',
+                }}
+                onPress={() => setPickerMode('to')}
+              >
+                <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={24} />
+                <View>
+                  <Text variant="bodySm" weight="700">{toToken?.symbol ?? 'Select'}</Text>
+                  {toToken && <Text variant="caption" color="textMuted" style={{ marginTop: 1 }}>{chainName(toChainId)}</Text>}
+                </View>
+                <Icon name="chevronDown" size={13} color={colors.textMuted} />
+              </PressableScale>
+              {quoteStatus === 'quoting'
+                ? <ActivityIndicator size="small" color={colors.accent} style={{ flex: 1 }} />
+                : <View style={{ flex: 1, alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 28 }} weight="700" color="accent">{outputAmount ?? '—'}</Text>
+                    {toAmountUSD != null && (
+                      <Text variant="caption" color="textMuted">≈ ${toAmountUSD.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</Text>
+                    )}
+                  </View>
+              }
+            </View>
+          </Card>
+
+          {/* Quote info / errors */}
+          {(quoteStatus === 'quoted' || quoteStatus === 'expired') && quote && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.accentMuted, borderWidth: 1, borderColor: colors.accent,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="bolt" size={13} color={colors.accent} />
+              <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                {quote.tool} · ~{Math.ceil(quote.estimatedDuration / 60)} min · {FEE_PCT}% fee · ${quote.gasCostUSD} gas
+              </Text>
+              {quoteStatus === 'expired' ? (
+                <PressableScale onPress={refreshQuote} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                  <Icon name="refresh" size={13} color={colors.accent} />
+                  <Text variant="caption" weight="700" color="accent">Refresh</Text>
+                </PressableScale>
+              ) : (
+                <View style={{ backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 2 }}>
+                  <Text variant="caption" weight="700" color="textSecondary">{quoteSecondsLeft}s</Text>
+                </View>
+              )}
+            </View>
+          )}
+          {/* Price impact warning */}
+          {priceImpactPct != null && priceImpactPct < -5 && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: priceImpactPct < -15 ? colors.dangerBg : colors.warningBg,
+                borderWidth: 1, borderColor: priceImpactPct < -15 ? colors.danger : colors.warning,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="warning" size={13} color={priceImpactPct < -15 ? colors.danger : colors.warning} />
+              <Text variant="caption" style={{ flex: 1, color: priceImpactPct < -15 ? colors.danger : colors.warning }}>
+                {priceImpactPct < -15 ? 'High' : 'Moderate'} price impact ({Math.abs(priceImpactPct).toFixed(1)}%) — check liquidity before swapping
+              </Text>
+            </View>
+          )}
+          {quoteStatus === 'no_route' && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.dangerBg, borderWidth: 1, borderColor: colors.danger,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="warning" size={13} color={colors.danger} />
+              <Text variant="caption" style={{ flex: 1, color: colors.danger }}>No route available for this pair. Try a different token or amount.</Text>
+            </View>
+          )}
+          {quoteStatus === 'error' && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.dangerBg, borderWidth: 1, borderColor: colors.danger,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="dispute" size={13} color={colors.danger} />
+              <Text variant="caption" style={{ flex: 1, color: colors.danger }}>{quoteError || 'Swap pricing unavailable. Try again shortly.'}</Text>
+            </View>
+          )}
+          {quoteStatus === 'expired' && (
+            <View
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                backgroundColor: colors.warningBg, borderWidth: 1, borderColor: colors.warning,
+                borderRadius: radius.md, padding: spacing.sm, marginTop: spacing.md,
+              }}
+            >
+              <Icon name="clock" size={13} color={colors.warning} />
+              <Text variant="caption" style={{ flex: 1, color: colors.warning }}>Quote expired — tap Refresh for a new price</Text>
+            </View>
+          )}
+
+          <Button
+            title="Review Swap"
+            onPress={() => { const e = validate(); if (e) { setError(e); return; } setScreen('confirm'); }}
+            disabled={!!validationError}
+            size="lg"
+            style={{ marginTop: spacing.xl }}
+          />
+        </ScrollView>
+
+        <TokenPickerModal
+          visible={pickerMode !== null}
+          mode={pickerMode ?? 'from'}
+          chainId={pickerMode === 'from' ? fromChainId : toChainId}
+          userBalances={balances}
+          allTokens={pickerMode === 'from' ? allTokens : toAllTokens}
+          allChainsTokens={allChainsTokens}
+          allChainsLoading={allChainsLoading}
+          allChainsHasMore={allChainsTokens.length < allChainsTotal}
+          onAllChainsLoadMore={handleAllChainsLoadMore}
+          onAllChainsSearchChange={handleAllChainsSearchChange}
+          tokensLoading={pickerMode === 'from' ? tokensLoading : toTokensLoading}
+          onChainChange={(newChainId) => {
+            if (pickerMode === 'from') setFromChainId(newChainId);
+            else setToChainId(newChainId);
+          }}
+          onSelect={(token, chainId) => {
+            if (pickerMode === 'from') { setFromToken(token); setFromChainId(chainId); }
+            else { setToToken(token); setToChainId(chainId); }
+            setPickerMode(null);
+            setFromAmount(''); setQuote(null); setQuoteStatus('idle');
+          }}
+          onClose={() => setPickerMode(null)}
+        />
+
+        <Modal visible={slippageSheetVisible} transparent animationType="slide">
+          <Pressable style={{ flex: 1, backgroundColor: colors.overlay, justifyContent: 'flex-end' }} onPress={() => setSlippageSheetVisible(false)}>
+            <Pressable
+              style={{
+                backgroundColor: colors.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+                padding: spacing['2xl'], paddingTop: spacing.lg, gap: spacing.xl,
+              }}
+              onPress={() => {}}
+            >
+              <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: 'center', marginBottom: spacing.sm }} />
+              <Text variant="title3" weight="700">Slippage Tolerance</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <View>
+                  <Text variant="bodySm" color="textSecondary">Auto</Text>
+                  <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>0.5% — recommended</Text>
+                </View>
+                <Toggle value={slippageAuto} onValueChange={setSlippageAuto} accessibilityLabel="Auto slippage" />
               </View>
-            )}
+              {!slippageAuto && (
+                <View
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.border,
+                    borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
+                  }}
+                >
+                  <RNTextInput
+                    style={{ flex: 1, fontSize: 16, color: colors.textPrimary }}
+                    value={String(Number(slippage) * 100)}
+                    onChangeText={v => { const n = Number(v); if (!isNaN(n) && n >= 0.1 && n <= 49) setSlippage(String(n / 100)); }}
+                    keyboardType="decimal-pad"
+                    placeholder="Enter %"
+                    placeholderTextColor={colors.textDisabled}
+                  />
+                  <Text variant="bodyMed" weight="600" color="textMuted">%</Text>
+                </View>
+              )}
+            </Pressable>
           </Pressable>
-        </Pressable>
-      </Modal>
-    </KeyboardAvoidingView>
+        </Modal>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -706,6 +821,7 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
   fromAmount: string; outputAmount: string | null;
   txHash: string; chainId: number; onDone: () => void;
 }) {
+  const { colors, spacing, radius } = useTheme();
   const iconScale = useSharedValue(0);
   const ringScale = useSharedValue(1);
   const ringOpacity = useSharedValue(0);
@@ -733,82 +849,85 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
   const btnStyle = useAnimatedStyle(() => ({ opacity: btnOpacity.value, transform: [{ translateY: btnTranslateY.value }] }));
 
   return (
-    <View style={[s.container, { justifyContent: 'center', padding: 24 }]}>
-      {/* Animated checkmark */}
-      <View style={{ alignItems: 'center', marginBottom: 32 }}>
-        <View style={{ width: 100, height: 100, alignItems: 'center', justifyContent: 'center' }}>
-          <Animated.View style={[{
-            position: 'absolute', width: 100, height: 100, borderRadius: 50,
-            backgroundColor: '#D1FAE5',
-          }, ringStyle]} />
-          <Animated.View style={[{
-            width: 72, height: 72, borderRadius: 36,
-            backgroundColor: '#16A34A',
-            alignItems: 'center', justifyContent: 'center',
-            shadowColor: '#16A34A', shadowOffset: { width: 0, height: 6 },
-            shadowOpacity: 0.3, shadowRadius: 12, elevation: 8,
-          }, iconStyle]}>
-            <Ionicons name="checkmark" size={38} color="#FFF" />
-          </Animated.View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={{ flex: 1, justifyContent: 'center', padding: spacing['2xl'] }}>
+        {/* Animated checkmark */}
+        <View style={{ alignItems: 'center', marginBottom: spacing['3xl'] }}>
+          <View style={{ width: 100, height: 100, alignItems: 'center', justifyContent: 'center' }}>
+            <Animated.View style={[{
+              position: 'absolute', width: 100, height: 100, borderRadius: 50,
+              backgroundColor: colors.successBg,
+            }, ringStyle]} />
+            <Animated.View style={[{
+              width: 72, height: 72, borderRadius: 36,
+              backgroundColor: colors.success,
+              alignItems: 'center', justifyContent: 'center',
+              shadowColor: colors.success, shadowOffset: { width: 0, height: 6 },
+              shadowOpacity: 0.3, shadowRadius: 12, elevation: 8,
+            }, iconStyle]}>
+              <Icon name="check" size={38} color={colors.textInverse} />
+            </Animated.View>
+          </View>
         </View>
+
+        {/* Title + swap summary */}
+        <Animated.View style={[{ alignItems: 'center' }, contentStyle]}>
+          <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing['2xl'] }}>Swap Complete</Text>
+
+          <Card padding="lg" style={{ width: '100%' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
+              <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
+              <View style={{ flex: 1 }}>
+                <Text variant="title3" weight="700">{fromAmount} {fromToken?.symbol}</Text>
+                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{fromToken?.name}</Text>
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: 2 }}>
+              <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
+              <Icon name="arrowDown" size={14} color={colors.textMuted} />
+              <View style={{ flex: 1, height: 1, backgroundColor: colors.hairline }} />
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md }}>
+              <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
+              <View style={{ flex: 1 }}>
+                <Text variant="title3" weight="700" color="accent">{outputAmount} {toToken?.symbol}</Text>
+                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>{toToken?.name}</Text>
+              </View>
+            </View>
+          </Card>
+
+          {txHash ? (() => {
+            const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
+            const url = explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;
+            return (
+              <PressableScale
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: spacing.lg,
+                  padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.accentMuted,
+                }}
+                onPress={() => url && Linking.openURL(url)}
+                disabled={!url}
+              >
+                <Icon name="arrowRight" size={13} color={colors.accent} />
+                <Text variant="caption" weight="600" color="accent" numberOfLines={1} ellipsizeMode="middle" style={{ maxWidth: 220 }}>
+                  {txHash.slice(0, 10)}…{txHash.slice(-8)}
+                </Text>
+              </PressableScale>
+            );
+          })() : null}
+        </Animated.View>
+
+        {/* Done button */}
+        <Animated.View style={[{ width: '100%', marginTop: spacing['2xl'] }, btnStyle]}>
+          <Button title="Done" onPress={onDone} size="lg" />
+        </Animated.View>
       </View>
-
-      {/* Title + swap summary */}
-      <Animated.View style={[{ alignItems: 'center' }, contentStyle]}>
-        <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 24 }]}>Swap Complete</Text>
-
-        <View style={[s.card, { width: '100%', gap: 0 }]}>
-          <View style={s.successTokenRow}>
-            <TokenIcon uri={fromToken?.logoURI} symbol={fromToken?.symbol} size={36} />
-            <View style={{ flex: 1 }}>
-              <Text style={s.successAmt}>{fromAmount} {fromToken?.symbol}</Text>
-              <Text style={s.successTokenName}>{fromToken?.name}</Text>
-            </View>
-          </View>
-          <View style={s.successArrowRow}>
-            <View style={s.successArrowLine} />
-            <Ionicons name="arrow-down" size={14} color="#AAA" />
-            <View style={s.successArrowLine} />
-          </View>
-          <View style={s.successTokenRow}>
-            <TokenIcon uri={toToken?.logoURI} symbol={toToken?.symbol} size={36} />
-            <View style={{ flex: 1 }}>
-              <Text style={[s.successAmt, { color: GOLD }]}>{outputAmount} {toToken?.symbol}</Text>
-              <Text style={s.successTokenName}>{toToken?.name}</Text>
-            </View>
-          </View>
-        </View>
-
-        {txHash ? (() => {
-          const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
-          const url = explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;
-          return (
-            <TouchableOpacity
-              style={s.explorerLink}
-              onPress={() => url && Linking.openURL(url)}
-              disabled={!url}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="open-outline" size={13} color={GOLD} />
-              <Text style={s.explorerText} numberOfLines={1} ellipsizeMode="middle">
-                {txHash.slice(0, 10)}…{txHash.slice(-8)}
-              </Text>
-            </TouchableOpacity>
-          );
-        })() : null}
-      </Animated.View>
-
-      {/* Done button */}
-      <Animated.View style={[{ width: '100%', marginTop: 28 }, btnStyle]}>
-        <TouchableOpacity style={s.btn} onPress={onDone}>
-          <Text style={s.btnT}>Done</Text>
-        </TouchableOpacity>
-      </Animated.View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 function SwapFailureScreen({ error, onRetry }: { error: string; onRetry: () => void }) {
+  const { colors, spacing } = useTheme();
   const iconScale = useSharedValue(0);
   const contentOpacity = useSharedValue(0);
 
@@ -821,163 +940,45 @@ function SwapFailureScreen({ error, onRetry }: { error: string; onRetry: () => v
   const contentStyle = useAnimatedStyle(() => ({ opacity: contentOpacity.value }));
 
   return (
-    <View style={[s.container, { justifyContent: 'center', padding: 24 }]}>
-      <View style={{ alignItems: 'center', marginBottom: 32 }}>
-        <Animated.View style={[{
-          width: 72, height: 72, borderRadius: 36,
-          backgroundColor: '#DC2626',
-          alignItems: 'center', justifyContent: 'center',
-          shadowColor: '#DC2626', shadowOffset: { width: 0, height: 6 },
-          shadowOpacity: 0.25, shadowRadius: 12, elevation: 8,
-        }, iconStyle]}>
-          <Ionicons name="close" size={36} color="#FFF" />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={{ flex: 1, justifyContent: 'center', padding: spacing['2xl'] }}>
+        <View style={{ alignItems: 'center', marginBottom: spacing['3xl'] }}>
+          <Animated.View style={[{
+            width: 72, height: 72, borderRadius: 36,
+            backgroundColor: colors.danger,
+            alignItems: 'center', justifyContent: 'center',
+            shadowColor: colors.danger, shadowOffset: { width: 0, height: 6 },
+            shadowOpacity: 0.25, shadowRadius: 12, elevation: 8,
+          }, iconStyle]}>
+            <Icon name="close" size={36} color={colors.textInverse} />
+          </Animated.View>
+        </View>
+
+        <Animated.View style={[{ alignItems: 'center', width: '100%' }, contentStyle]}>
+          <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing.md }}>Swap Failed</Text>
+          {error ? (
+            <Card padding="lg" style={{ width: '100%', backgroundColor: colors.dangerBg }}>
+              <Text variant="bodySm" align="center" style={{ color: colors.danger, lineHeight: 20 }}>{error}</Text>
+            </Card>
+          ) : null}
+          <Button title="Try Again" onPress={onRetry} size="lg" style={{ marginTop: spacing['2xl'] }} />
         </Animated.View>
       </View>
-
-      <Animated.View style={[{ alignItems: 'center', width: '100%' }, contentStyle]}>
-        <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 12 }]}>Swap Failed</Text>
-        {error ? (
-          <View style={[s.card, { width: '100%', backgroundColor: '#FEF2F2' }]}>
-            <Text style={{ fontSize: 13, color: '#DC2626', textAlign: 'center', lineHeight: 20 }}>{error}</Text>
-          </View>
-        ) : null}
-        <TouchableOpacity style={[s.btn, { marginTop: 28, width: '100%' }]} onPress={onRetry}>
-          <Text style={s.btnT}>Try Again</Text>
-        </TouchableOpacity>
-      </Animated.View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 function DetailRow({ label, value, highlight, last }: { label: string; value: string; highlight?: boolean; last?: boolean }) {
+  const { colors } = useTheme();
   return (
-    <View style={[s.detRow, !last && s.detRowBorder]}>
-      <Text style={s.detL}>{label}</Text>
-      <Text style={[s.detV, highlight && { color: GOLD }]}>{value}</Text>
+    <View
+      style={{
+        flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 11,
+        ...(last ? null : { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.hairline }),
+      }}
+    >
+      <Text variant="bodySm" color="textSecondary">{label}</Text>
+      <Text variant="bodySm" weight="600" style={highlight ? { color: colors.accent } : undefined}>{value}</Text>
     </View>
   );
 }
-
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FAFAFA' },
-  scroll: { flexGrow: 1, padding: 20, paddingBottom: 48 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-
-  // Header
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 },
-  bigTitle: { fontSize: 26, fontWeight: '700', color: DARK },
-  sub: { fontSize: 13, color: '#888', marginTop: 2 },
-  settingsBtn: { padding: 8 },
-
-  // Card
-  card: {
-    backgroundColor: '#FFF', borderRadius: 20, padding: 18,
-    borderWidth: 1, borderColor: '#F0F0F0',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05, shadowRadius: 10, elevation: 2,
-  },
-  cardLabel: { fontSize: 10, fontWeight: '700', color: '#BBB', letterSpacing: 1.2, marginBottom: 10 },
-  cardRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 },
-
-  // Token button
-  tokenBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#F5F5F5', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 20,
-    maxWidth: '50%',
-  },
-  tokenBtnText: { fontSize: 15, fontWeight: '700', color: DARK },
-  tokenChain: { fontSize: 10, color: '#AAA', marginTop: 1 },
-
-  // Amount
-  amountInput: { flex: 1, fontSize: 28, fontWeight: '700', color: DARK, textAlign: 'right', padding: 0 },
-  amountOutput: { flex: 1, fontSize: 28, fontWeight: '700', color: GOLD, textAlign: 'right' },
-  amountMeta: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  usdValue: { fontSize: 12, color: '#AAA', fontWeight: '400' },
-  balanceText: { fontSize: 12, color: GOLD, fontWeight: '500' },
-
-  // Swap arrow
-  arrowWrap: { alignItems: 'center', marginVertical: 4 },
-  arrowBtn: {
-    width: 38, height: 38, borderRadius: 19, backgroundColor: DARK,
-    justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.15, shadowRadius: 6, elevation: 4,
-  },
-
-  // Info bar
-  infoBar: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A',
-    borderRadius: 12, padding: 10, marginTop: 12,
-  },
-  infoError: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
-  infoWarn: { backgroundColor: '#FFFBEB', borderColor: '#FCD34D' },
-  infoText: { fontSize: 12, color: '#92400E', flex: 1 },
-  countdown: { backgroundColor: '#F0F0F0', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2 },
-  countdownText: { fontSize: 11, fontWeight: '700', color: '#888' },
-  refreshBtn: { flexDirection: 'row', alignItems: 'center', gap: 3 },
-  refreshText: { fontSize: 12, fontWeight: '700', color: GOLD },
-
-  // Buttons
-  btn: {
-    flexDirection: 'row', backgroundColor: GOLD, paddingVertical: 16,
-    borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginTop: 20,
-    shadowColor: GOLD, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3, shadowRadius: 10, elevation: 4,
-  },
-  btnT: { fontSize: 16, fontWeight: '700', color: '#FFF' },
-  btn2: { paddingVertical: 14, borderRadius: 16, alignItems: 'center', marginTop: 8 },
-  btn2T: { fontSize: 15, color: '#AAA', fontWeight: '600' },
-
-  // Confirm screen
-  backRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 2 },
-  confirmSection: { paddingVertical: 12 },
-  confirmTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
-  confirmAmount: { fontSize: 22, fontWeight: '700', color: DARK },
-  confirmMeta: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  arrowDivider: { flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 4 },
-  arrowDividerLine: { flex: 1, height: 1, backgroundColor: '#F0F0F0' },
-  arrowCircle: {
-    width: 28, height: 28, borderRadius: 14, backgroundColor: GOLD,
-    alignItems: 'center', justifyContent: 'center',
-  },
-
-  // Details table
-  detRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 11 },
-  detRowBorder: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
-  detL: { fontSize: 13, color: '#888' },
-  detV: { fontSize: 13, fontWeight: '600', color: DARK },
-
-  // Approval note
-  approvalNote: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 4 },
-  disc: { fontSize: 12, color: '#AAA', flex: 1 },
-
-  // Signing screen
-  signingRing: {
-    width: 80, height: 80, borderRadius: 40,
-    borderWidth: 2, borderColor: '#F0F0F0',
-    alignItems: 'center', justifyContent: 'center', marginBottom: 24,
-  },
-  signingStep: { fontSize: 14, color: GOLD, fontWeight: '600', marginTop: 8 },
-  signingHint: { fontSize: 12, color: '#AAA', marginTop: 6 },
-
-  // Success / failure
-  successTokenRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
-  successAmt: { fontSize: 16, fontWeight: '700', color: DARK },
-  successTokenName: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  successArrowRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
-  successArrowLine: { flex: 1, height: 1, backgroundColor: '#F0F0F0' },
-  explorerLink: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 16, padding: 8, borderRadius: 10, backgroundColor: '#FFF8E1' },
-  explorerText: { fontSize: 12, color: GOLD, fontWeight: '600', maxWidth: 220 },
-
-  // Slippage sheet
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  slippageSheet: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingTop: 16, gap: 20 },
-  slippageHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: '#E0E0E0', alignSelf: 'center', marginBottom: 8 },
-  slippageTitle: { fontSize: 17, fontWeight: '700', color: DARK },
-  slippageRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  slippageHint: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  slippageInputWrap: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#E0E0E0', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12 },
-  slippageInput: { flex: 1, fontSize: 16, color: DARK },
-  slippagePct: { fontSize: 15, fontWeight: '600', color: '#AAA' },
-});
