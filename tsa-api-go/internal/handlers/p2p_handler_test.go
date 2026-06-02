@@ -270,7 +270,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, ad_id TEXT NOT NULL,
-			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL,
+			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL, opener_id TEXT,
 			token TEXT, chain_id INTEGER,
 			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
@@ -1108,18 +1108,12 @@ func TestOpenBuyAdTrade_DepositPath(t *testing.T) {
 	}
 	*r.user = *opener
 
-	// The PM must be one of the ad's allowlist (the merchant's PM).
-	var ad models.P2PAd
-	if err := r.db.First(&ad, "id = ?", adID).Error; err != nil {
-		t.Fatalf("reload ad: %v", err)
-	}
-	var pmID string
-	if len(ad.PaymentMethodIDs) > 0 {
-		pmID = string(ad.PaymentMethodIDs[0])
-	}
+	// On a buy-ad, the PM must be owned by the TAKER (opener), who receives the
+	// fiat — not the merchant's allowlisted PM. Seed one for the opener.
+	openerPm := seedPaymentMethod(t, r.db, opener.ID, "NGN")
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/trades", map[string]any{
 		"fiatAmount":      "1300",
-		"paymentMethodId": pmID,
+		"paymentMethodId": openerPm.String(),
 		"sellerAddress":   opener.WalletAddress,
 	})
 	if rec.Code != http.StatusCreated {

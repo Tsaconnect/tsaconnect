@@ -1241,12 +1241,13 @@ func buyAdFixture(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, merchant
 }
 
 func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
-	svc, esc, merchantID, merchantAddr, adID, pmID, db := buyAdFixture(t)
+	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
 	userID := uuid.New() // the user selling crypto
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
 	trade, raw, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade(buy): %v", err)
 	}
@@ -1297,12 +1298,13 @@ func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 // must escrow EXACTLY that (so the app's prior approve matches the deposit),
 // and fiat is derived from it (50 USDT × 1300 = 65000 NGN).
 func TestOpenBuyAdTrade_TokenAmountIsAuthoritative(t *testing.T) {
-	svc, esc, _, _, adID, pmID, _ := buyAdFixture(t)
+	svc, esc, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{TokenAmount: "50000000", PaymentMethodID: pmID})
+		OpenTradeParams{TokenAmount: "50000000", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade(buy, tokenAmount): %v", err)
 	}
@@ -1339,11 +1341,12 @@ func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
 }
 
 func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
-	svc, esc, merchantID, merchantAddr, adID, pmID, _ := buyAdFixture(t)
+	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1370,11 +1373,12 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 }
 
 func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
-	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
+	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1420,13 +1424,14 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 // decremented to zero but remaining is NOT re-credited. This guards against
 // regressions where a refactoring accidentally credits remaining on release.
 func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
-	svc, esc, merchantID, merchantAddr, adID, pmID, db := buyAdFixture(t)
+	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
 	// Open a JIT trade — reserved incremented, remaining decremented at open.
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1482,11 +1487,12 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 }
 
 func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
-	svc, esc, _, _, adID, pmID, db := buyAdFixture(t)
+	svc, esc, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1514,11 +1520,12 @@ func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 }
 
 func TestConfirmCancelBuyAdTrade_RejectsPoolFlagMismatch(t *testing.T) {
-	svc, esc, _, _, adID, pmID, _ := buyAdFixture(t)
+	svc, esc, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1563,11 +1570,12 @@ func TestValidateCreateAd_RejectsNonNumeric(t *testing.T) {
 // open is confirmed on-chain (OpenTxHash set), so a never-broadcast trade can't be
 // flipped to `paid`.
 func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
-	svc, _, merchantID, _, adID, pmID, _ := buyAdFixture(t)
+	svc, _, merchantID, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1580,15 +1588,16 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 // TestOpenTrade_RejectsDuplicateActiveTrade locks audit #2: a second open by the
 // same opener on the same ad is rejected (would otherwise double-debit capacity).
 func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
-	svc, _, _, _, adID, pmID, _ := buyAdFixture(t)
+	svc, _, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	addr := "0x000000000000000000000000000000000000beef"
 	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID}); err != nil {
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm}); err != nil {
 		t.Fatalf("first OpenTrade: %v", err)
 	}
 	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID}); err == nil {
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm}); err == nil {
 		t.Fatalf("second concurrent open should be rejected (ErrActiveTradeExists)")
 	}
 }
@@ -1658,11 +1667,12 @@ func TestExpressMatch_RanksAndFilters(t *testing.T) {
 // evidence image URLs submitted with a dispute are stored + decoded on load, and
 // the count/URL validation rejects bad input.
 func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
-	svc, _, _, _, adID, pmID, db := buyAdFixture(t)
+	svc, _, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1693,11 +1703,12 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 }
 
 func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
-	svc, esc, merchantID, _, adID, pmID, db := buyAdFixture(t)
+	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
 	userAddr := "0x000000000000000000000000000000000000beef"
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1774,11 +1785,12 @@ func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTrade
 // whose on-chain open never landed (OpenTxHash empty, not on chain) and whose window
 // has elapsed is reclaimed by the reconciler — cancelled + ad capacity restored.
 func TestReconcile_OrphanOpen_ReclaimsCapacity(t *testing.T) {
-	svc, esc, _, _, adID, pmID, db := buyAdFixture(t)
+	svc, esc, _, _, adID, _, db := buyAdFixture(t)
 	userID := uuid.New()
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pmID})
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
