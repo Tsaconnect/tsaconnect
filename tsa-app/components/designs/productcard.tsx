@@ -1,6 +1,16 @@
-import { View, Image, Text, Dimensions, Pressable, Alert } from "react-native";
+// components/designs/productcard.tsx
+//
+// Legacy designs product card (half-width grid tile) used by the designs
+// gallery / home rows. Migrated onto the TSA Signature design system (theme
+// tokens via useTheme() + @/components/ui primitives + the already-migrated
+// designs/Button.tsx + designs/SubInfo.tsx children). The props interface,
+// exports, the useAuth hook order, the cart add/exist/fetch logic, the
+// useEffect, navigation route + params (`/productdetails` with the item),
+// cartService.notifyChange(), and the Add-to-cart / Checkout conditional are
+// all preserved verbatim — this is a visual / structural restyle only.
+import { View, Image, Dimensions } from "react-native";
 import React, { useEffect } from "react";
-import { COLORS, SIZES, SHADOWS, assets } from "../../constants";
+import { assets } from "../../constants";
 import { CircleButton, RatingButton, RectButton, SellerButton } from "./Button";
 import { Catalogue, ProductTitle } from "./SubInfo";
 import { router } from "expo-router";
@@ -8,6 +18,8 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { cartService } from "../services/cart";
+import { useTheme } from "@/theme";
+import { Card, Icon, PressableScale, Text } from "@/components/ui";
 
 type ProductCardProps = {
   item: {
@@ -23,6 +35,7 @@ type ProductCardProps = {
 
 const ProductCard: React.FC<ProductCardProps> = ({ item }) => {
   const { items, token, setItems } = useAuth();
+  const { colors, spacing, radius } = useTheme();
   const cardWidth = Dimensions.get("window").width / 2 - 15;
 
   const addItem = async (newItem: { productId: string; quantity: number }) => {
@@ -65,18 +78,18 @@ const ProductCard: React.FC<ProductCardProps> = ({ item }) => {
   }, []);
 
   return (
-    <View
+    <Card
       style={{
-        backgroundColor: COLORS.white,
-        borderTopEndRadius: SIZES.font,
-        marginBottom: SIZES.base,
+        padding: 0,
+        borderTopEndRadius: radius.md,
+        marginBottom: spacing.sm,
         marginHorizontal: 5,
         width: cardWidth,
-        ...SHADOWS.dark,
+        overflow: "hidden",
       }}
     >
       <View style={{ width: "100%", height: 150 }}>
-        <Pressable
+        <PressableScale
           onPress={() => {
             router.push({
               pathname: "/productdetails",
@@ -90,40 +103,44 @@ const ProductCard: React.FC<ProductCardProps> = ({ item }) => {
             style={{
               width: "100%",
               height: "100%",
-              borderTopLeftRadius: SIZES.font,
-              borderTopRightRadius: SIZES.font,
+              borderTopLeftRadius: radius.md,
+              borderTopRightRadius: radius.md,
             }}
           />
           <RatingButton right={5} top={5} rating={item.averageRating} />
           <CircleButton imgUrl={assets.heart} right={5} bottom={5} />
           <SellerButton left={5} top={5} />
-        </Pressable>
+        </PressableScale>
       </View>
 
-      <View style={{ width: "100%", padding: SIZES.base }}>
+      <View style={{ width: "100%", padding: spacing.sm }}>
         <ProductTitle
           title={item.name}
           companyName={item.companyName}
-          titleSize={SIZES.small}
+          titleSize={12}
         />
-        <View style={{ flexDirection: "row", marginTop: 5 }}>
-          <Image
-            //@ts-ignores
-            source={assets.location}
-            resizeMode="contain"
-          />
-          <Text style={{ paddingLeft: 5, fontSize: 11, fontWeight: "500" }}>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            marginTop: 5,
+          }}
+        >
+          <Icon name="location" size={12} color={colors.textSecondary} />
+          <Text
+            variant="caption"
+            weight="500"
+            style={{ paddingLeft: 5 }}
+          >
             {item.location}
           </Text>
         </View>
         <View style={{ flexDirection: "row", marginTop: 5 }}>
           <Text
-            style={{
-              paddingLeft: 5,
-              fontSize: 11,
-              fontWeight: "500",
-              color: COLORS.primary,
-            }}
+            variant="caption"
+            weight="500"
+            color="accent"
+            style={{ paddingLeft: 5 }}
           >
             {item.price}K
           </Text>
@@ -165,7 +182,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ item }) => {
           )}
         </View>
       </View>
-    </View>
+    </Card>
   );
 };
 
