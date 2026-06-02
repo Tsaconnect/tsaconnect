@@ -1,16 +1,17 @@
 // Schedules a local notification ~5 min before a pending_payment trade's expiry,
 // and cancels it when the trade leaves pending_payment (or the screen unmounts).
-// App-side only (works offline); native, so it no-ops in Expo Go / simulators.
+// App-side only (works offline); native, so it no-ops in Expo Go / simulators
+// (gated by pushSupported, which detects the Expo Go client, not just a device).
 import { useEffect } from 'react';
-import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import type { P2PTrade } from '../services/p2p';
+import { pushSupported } from './pushSupported';
 
 const LEAD_MS = 5 * 60 * 1000; // fire ~5 min before expiry
 
 export function useTradeExpiryReminder(trade: P2PTrade | null): void {
   useEffect(() => {
-    if (!Device.isDevice) return;
+    if (!pushSupported) return;
     if (!trade || trade.status !== 'pending_payment' || !trade.expiresAt) return;
     const fireInMs = new Date(trade.expiresAt).getTime() - LEAD_MS - Date.now();
     if (fireInMs <= 0) return; // not enough runway for a useful reminder
