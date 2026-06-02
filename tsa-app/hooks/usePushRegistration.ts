@@ -1,32 +1,36 @@
 // Expo push registration + tap-to-navigate. Native (expo-notifications/-device),
-// so it no-ops safely in Expo Go / on simulators (guarded by Device.isDevice +
-// try/catch) — real delivery needs a dev/EAS build.
+// so it fully no-ops in Expo Go / on simulators (gated by `pushSupported`, which
+// detects the Expo Go client — not just a real device) — real delivery needs a
+// dev/EAS build.
 //
 // On login: request permission → get the Expo push token → register it with the
 // backend (upsert). On a notification tap: deep-link via routeForNotification.
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
-import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
 import { useAuth } from '../AuthContext/AuthContext';
 import { registerDevice } from '../services/notifications';
 import { routeForNotification, type NotificationData } from './notificationRouting';
+import { pushSupported } from './pushSupported';
 
 // Foreground behavior: show the banner + list and play a sound even with the app
-// open (don't touch the app icon badge).
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+// open (don't touch the app icon badge). Skipped in Expo Go so no
+// expo-notifications API runs there at all.
+if (pushSupported) {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
 
 async function registerForPush(): Promise<void> {
-  if (!Device.isDevice) return; // no push tokens on simulators / Expo Go web
+  if (!pushSupported) return; // simulator or Expo Go — push APIs unavailable
   const existing = await Notifications.getPermissionsAsync();
   let status = existing.status;
   if (status !== 'granted') {
@@ -67,6 +71,7 @@ export function usePushRegistration(): void {
 
   // Deep-link on tap — independent of auth so a tap that cold-starts the app routes too.
   useEffect(() => {
+    if (!pushSupported) return;
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data as NotificationData;
       const route = routeForNotification(data);
