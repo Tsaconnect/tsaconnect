@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { StyleSheet, View, Text, ActivityIndicator, Alert } from "react-native";
+import { View, Alert } from "react-native";
 import { Image } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { useLocalSearchParams } from "expo-router";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
+import { useTheme } from "@/theme";
+import { Card, Spinner, Text } from "@/components/ui";
 
 // Normalize auth header to always include Bearer prefix
 function authHeaderFor(token: string | null | undefined): string {
@@ -28,6 +30,7 @@ function firstImageUrl(images: any): string | undefined {
 }
 
 const AdvertDetailScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
   const [advert, setAdvert] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,16 +70,16 @@ const AdvertDetailScreen = () => {
 
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#9D6B38" />
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.background }}>
+        <Spinner size="large" />
       </View>
     );
   }
 
   if (!advert) {
     return (
-      <View style={styles.container}>
-        <Text>No product details available.</Text>
+      <View style={{ flex: 1, padding: spacing.md, backgroundColor: colors.background }}>
+        <Text color="textMuted">No product details available.</Text>
       </View>
     );
   }
@@ -88,87 +91,61 @@ const AdvertDetailScreen = () => {
   })() : "";
 
   return (
-    <View style={styles.container}>
+    <View style={{ flex: 1, backgroundColor: colors.background, padding: spacing.md }}>
       {imgUrl ? (
-        <Image source={{ uri: imgUrl }} style={styles.image} />
+        <Image source={{ uri: imgUrl }} style={{ width: "100%", height: 200, resizeMode: "cover", borderRadius: radius.lg }} />
       ) : (
-        <View style={[styles.image, { backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center' }]}>
-          <Text style={{ color: '#999' }}>No image</Text>
+        <View
+          style={{
+            width: "100%",
+            height: 200,
+            borderRadius: radius.lg,
+            backgroundColor: colors.surfaceAlt,
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <Text color="textMuted">No image</Text>
         </View>
       )}
-      <View style={styles.infoContainer}>
-        <Text style={styles.title}>{advert.name ?? 'Untitled'}</Text>
+      <Card padding="lg" style={{ marginTop: spacing.lg }}>
+        <Text variant="title2" weight="700">{advert.name ?? 'Untitled'}</Text>
         {advert.price != null && (
-          <Text style={styles.amount}>${Number(advert.price).toFixed(2)} USD</Text>
+          <Text variant="title3" weight="700" color="accent" style={{ marginVertical: spacing.xs }}>
+            ${Number(advert.price).toFixed(2)} USD
+          </Text>
         )}
-        {advert.status && <Text style={styles.status}>Status: {advert.status}</Text>}
-        {advert.description && <Text style={styles.description}>{advert.description}</Text>}
-        {advert.location && <Text style={styles.details}>Location: {advert.location}</Text>}
+        {advert.status && (
+          <Text variant="bodySm" color="textSecondary" style={{ marginVertical: spacing.xs }}>Status: {advert.status}</Text>
+        )}
+        {advert.description && (
+          <Text variant="bodySm" color="textPrimary" style={{ marginVertical: spacing.sm }}>{advert.description}</Text>
+        )}
+        {advert.location && (
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>Location: {advert.location}</Text>
+        )}
         {(advert.phoneNumber || advert.email) && (
-          <Text style={styles.details}>
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>
             Contact: {[advert.phoneNumber, advert.email].filter(Boolean).join(' / ')}
           </Text>
         )}
-        {advert.stock != null && <Text style={styles.details}>Stock: {advert.stock}</Text>}
+        {advert.stock != null && (
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>Stock: {advert.stock}</Text>
+        )}
         {advert.negotiable != null && (
-          <Text style={styles.details}>
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>
             Negotiable: {advert.negotiable ? "Yes" : "No"}
           </Text>
         )}
-        {advert.companyName && <Text style={styles.details}>Company: {advert.companyName}</Text>}
-        {createdDate && <Text style={styles.details}>Created At: {createdDate}</Text>}
-      </View>
+        {advert.companyName && (
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>Company: {advert.companyName}</Text>
+        )}
+        {createdDate && (
+          <Text variant="caption" color="textMuted" style={{ marginVertical: 2 }}>Created At: {createdDate}</Text>
+        )}
+      </Card>
     </View>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#f0f0f0",
-    padding: 10,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  infoContainer: {
-    marginTop: 20,
-    padding: 10,
-    backgroundColor: "#fff",
-    borderRadius: 10,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: "bold",
-  },
-  amount: {
-    fontSize: 20,
-    color: "#666",
-    marginVertical: 5,
-  },
-  status: {
-    fontSize: 16,
-    color: "#666",
-    marginVertical: 5,
-  },
-  description: {
-    fontSize: 16,
-    color: "#333",
-    marginVertical: 10,
-  },
-  details: {
-    fontSize: 14,
-    color: "#666",
-    marginVertical: 2,
-  },
-  image: {
-    width: "100%",
-    height: 200,
-    resizeMode: "cover",
-    borderRadius: 10,
-  },
-});
 
 export default AdvertDetailScreen;
