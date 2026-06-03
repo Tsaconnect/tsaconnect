@@ -9,7 +9,6 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { formatTokenAmount, tradesApi, type P2PTrade } from '../../services/p2p';
 import { useAuth } from '../../AuthContext/AuthContext';
-import { NotificationBell } from '../../components/p2p/NotificationBell';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -113,12 +112,9 @@ const MyTradesScreen: React.FC = () => {
           />
         }
       >
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text variant="title1" weight="700">
-            My Trades
-          </Text>
-          <NotificationBell />
-        </View>
+        <Text variant="title1" weight="700">
+          My Trades
+        </Text>
 
         <View style={{ marginTop: spacing.md }}>
           <SegmentedControl
