@@ -22,8 +22,8 @@ func TestLoad_SonicAlways_BSCDormantByDefault(t *testing.T) {
 	if sonic.EscrowAddress == "" {
 		t.Errorf("sonic escrow should be the testnet preset, got empty")
 	}
-	if !reflect.DeepEqual(sonic.Assets, []string{"MCGP"}) {
-		t.Errorf("sonic assets = %v, want [MCGP]", sonic.Assets)
+	if !reflect.DeepEqual(sonic.Assets, []string{"USDT", "USDC", "MCGP"}) {
+		t.Errorf("sonic assets = %v, want [USDT USDC MCGP]", sonic.Assets)
 	}
 	if _, bsc := cfg.P2PChains[97]; bsc {
 		t.Errorf("BSC must be dormant when no escrow configured, but 97 present")

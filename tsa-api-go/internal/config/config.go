@@ -274,7 +274,9 @@ func Load() *Config {
 			ChainKey:      "sonic",
 			EscrowAddress: cfg.P2PEscrowAddress,
 			EIP712Version: cfg.P2PEscrowEIP712Version,
-			Assets:        []string{"MCGP"},
+			// Transition: Sonic serves all three today. At BSC launch, narrow this
+			// to []string{"MCGP"} (stablecoin P2P moves to BSC) — spec §4.5.
+			Assets: []string{"USDT", "USDC", "MCGP"},
 		},
 	}
 
