@@ -338,7 +338,7 @@ func newRig(t *testing.T) *rig {
 	db := setupP2PTestDB(t)
 	esc := newMockEscrow()
 	bus := &mockBus{}
-	trade := services.NewP2PTradeService(db, esc, &mockRates{}, bus, 146, "1")
+	trade := services.NewP2PTradeService(db, services.NewP2PEscrowRegistryFromMap(map[int64]services.P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, bus, 146)
 	trade = trade.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
 	trade.SetTokenResolver(func(s string) string {
 		if s == "USDT" {

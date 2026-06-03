@@ -125,16 +125,21 @@ var SystemClock Clock = realClock{}
 // ─── Service ───────────────────────────────────────────────────────────────
 
 type P2PTradeService struct {
-	db      *gorm.DB
-	escrow  P2PEscrowAdapter
-	rates   RateProvider
-	bus     EventPublisher
-	clock   Clock
-	chainID int64
-	// eip712Version is the voucher domain `version` stamped into the typed-data
-	// the app signs; must match the deployed contract. Empty falls back to "1".
-	eip712Version string
-	tokenResolver func(symbol string) string
+	db *gorm.DB
+	// escrows resolves the per-chain escrow adapter + EIP-712 domain (chainId,
+	// version) from an entity's ChainID. There is deliberately NO single
+	// escrow/chainID/version scalar: every escrow-touching method resolves from
+	// the entity it loads (trade.ChainID / ad.ChainID), so a missed site is a
+	// compile error, not a silent Sonic fallback (Option B, spec §5.2.4).
+	escrows *P2PEscrowRegistry
+	// defaultChainID is used only for ops that have no entity chain yet —
+	// CreateAd (new ads default to this chain) and the pool/seller ops
+	// (approve/deposit/withdraw/allowance/balance). Sonic in production.
+	defaultChainID int64
+	rates          RateProvider
+	bus            EventPublisher
+	clock          Clock
+	tokenResolver  func(symbol string) string
 	// messages is optional. When set, every state transition also writes a
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
 	// — internal calls go through `s.systemMsg` which guards.
@@ -151,19 +156,23 @@ type P2PTradeService struct {
 // and dev environments.
 const defaultFloatOffsetMaxBps = 1000
 
-func NewP2PTradeService(db *gorm.DB, escrow P2PEscrowAdapter, rates RateProvider, bus EventPublisher, chainID int64, eip712Version string) *P2PTradeService {
-	if eip712Version == "" {
-		eip712Version = "1"
-	}
+func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvider, bus EventPublisher, defaultChainID int64) *P2PTradeService {
 	return &P2PTradeService{
-		db:            db,
-		escrow:        escrow,
-		rates:         rates,
-		bus:           bus,
-		clock:         SystemClock,
-		chainID:       chainID,
-		eip712Version: eip712Version,
+		db:             db,
+		escrows:        escrows,
+		rates:          rates,
+		bus:            bus,
+		clock:          SystemClock,
+		defaultChainID: defaultChainID,
 	}
+}
+
+// resolve returns the escrow adapter + EIP-712 domain (chainId, version) for a
+// chain. Fail-loud — callers MUST propagate the error, never fall back to
+// another chain (an unconfigured-chain entity must surface, not route funds to
+// Sonic).
+func (s *P2PTradeService) resolve(chainID int64) (P2PEscrowAdapter, int64, string, error) {
+	return s.escrows.Resolve(chainID)
 }
 
 // WithClock returns a copy of the service using the supplied clock — tests
@@ -354,13 +363,22 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return nil, err
 	}
 
+	// New sell-ads are published on the default chain (Sonic). Resolve its
+	// escrow + EIP-712 domain up front so the pool-balance check, voucher hash,
+	// and typed-data domain all use the same chain (Plan 5 will let the caller
+	// pick the chain).
+	escrow, domainChainID, version, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Verify the seller actually holds enough deposited capital before we
 	// publish a voucher promising it. The contract is still the authoritative
 	// gate (openTrade reverts if available < amount), but failing here means
 	// the seller doesn't sign a voucher they can't honour — protecting their
 	// reputation and preventing the off-chain ad/voucher accounting from
 	// diverging from the on-chain pool balance.
-	bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr)
+	bal, err := escrow.ReadBalance(sellerAddress, tokenAddr)
 	if err != nil {
 		// Don't silently proceed: a stuck RPC during publish would let a
 		// seller stamp out unbacked vouchers (they sign, post, buyers later
@@ -378,7 +396,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		SellerID:         sellerID,
 		Side:             models.P2PAdSideSell,
 		Token:            strings.ToUpper(params.Token),
-		ChainID:          s.chainID,
+		ChainID:          s.defaultChainID,
 		Amount:           params.TokenAmount,
 		Remaining:        params.TokenAmount,
 		Reserved:         "0",
@@ -426,7 +444,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	// Ask the contract for the canonical EIP-712 digest. We could compute
 	// it locally but delegating to the contract guarantees parity with the
 	// on-chain check and surfaces any RPC misconfiguration early.
-	hash, err := s.escrow.HashVoucher(voucher)
+	hash, err := escrow.HashVoucher(voucher)
 	if err != nil {
 		return nil, fmt.Errorf("hash voucher: %w", err)
 	}
@@ -441,7 +459,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return nil, fmt.Errorf("persist ad: %w", err)
 	}
 
-	typedData := s.buildVoucherTypedData(voucher)
+	typedData := s.buildVoucherTypedData(voucher, escrow.ContractAddress(), domainChainID, version)
 
 	s.audit(ctx, models.P2PAuditAdCreated, &sellerID, &ad.ID, nil, map[string]any{
 		"token":       ad.Token,
@@ -513,7 +531,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		SellerID:         merchantID,
 		Side:             models.P2PAdSideBuy,
 		Token:            strings.ToUpper(params.Token),
-		ChainID:          s.chainID,
+		ChainID:          s.defaultChainID,
 		Amount:           params.TokenAmount,
 		Remaining:        params.TokenAmount, // off-chain capacity
 		Reserved:         "0",
@@ -595,7 +613,13 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 		return nil, err
 	}
 
-	hash, err := s.escrow.HashVoucher(voucher)
+	// Resolve the ad's chain so the voucher hash (and the mismatch-log domain)
+	// match the contract the seller signed against — NOT a default chain.
+	escrow, domainChainID, _, err := s.resolve(ad.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := escrow.HashVoucher(voucher)
 	if err != nil {
 		return nil, fmt.Errorf("hash voucher: %w", err)
 	}
@@ -614,7 +638,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 			"[p2p SignAd] signature recovery mismatch: recovered=%s expected=%s "+
 				"adID=%s voucherHash=0x%x chainID=%d verifyingContract=%s "+
 				"seller=%s token=%s maxAmount=%s deadline=%d nonce=0x%x",
-			recovered.Hex(), sellerAddress, ad.ID, hash, s.chainID, s.escrow.ContractAddress(),
+			recovered.Hex(), sellerAddress, ad.ID, hash, domainChainID, escrow.ContractAddress(),
 			voucher.Seller.Hex(), voucher.Token.Hex(), voucher.MaxAmount.String(),
 			voucher.Deadline.Int64(), voucher.Nonce,
 		)
@@ -685,7 +709,11 @@ func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uu
 	if err != nil {
 		return nil, err
 	}
-	return s.escrow.PrepareCancelVoucher(sellerAddress, voucher)
+	escrow, _, _, err := s.resolve(ad.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.PrepareCancelVoucher(sellerAddress, voucher)
 }
 
 // ConfirmCancelAd verifies the on-chain VoucherCancelled receipt and marks
@@ -723,7 +751,11 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 		return nil, fmt.Errorf("%w: stored voucher hash is corrupt (%v)", ErrInvalidTransition, err)
 	}
 
-	if _, err := s.escrow.VerifyVoucherCancelled(txHash, hash); err != nil {
+	escrow, _, _, err := s.resolve(ad.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := escrow.VerifyVoucherCancelled(txHash, hash); err != nil {
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
 
@@ -933,7 +965,11 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: stored voucher signature is corrupt (%v)", ErrInvalidTransition, err)
 	}
-	unsignedTx, err := s.escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
+	escrow, _, _, err := s.resolve(ad.ChainID)
+	if err != nil {
+		return nil, nil, err
+	}
+	unsignedTx, err := escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
 	if err != nil {
 		return nil, nil, fmt.Errorf("prepare openTrade: %w", err)
 	}
@@ -1082,7 +1118,11 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 
 	// from = opener wallet (depositor / on-chain seller); merchant = ad poster
 	// wallet (on-chain buyer / cryptoRecipient).
-	unsignedTx, err := s.escrow.PrepareOpenTradeWithDeposit(onChainTradeID, tokenAddr, tokenAmount, ad.SellerAddress, openerAddress)
+	escrow, _, _, err := s.resolve(ad.ChainID)
+	if err != nil {
+		return nil, nil, err
+	}
+	unsignedTx, err := escrow.PrepareOpenTradeWithDeposit(onChainTradeID, tokenAddr, tokenAmount, ad.SellerAddress, openerAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("prepare openTradeWithDeposit: %w", err)
 	}
@@ -1172,8 +1212,15 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 
 	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 
+	// Resolve the trade's chain so the open receipt is verified against the
+	// escrow the trade was actually opened on — never a default chain.
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		ev, err := s.escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID))
+		ev, err := escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID))
 		if err != nil {
 			return nil, fmt.Errorf("verify on-chain open (deposit): %w", err)
 		}
@@ -1187,7 +1234,7 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 			return nil, fmt.Errorf("on-chain seller %s does not match opener %s", ev.Seller.Hex(), openerAddress)
 		}
 	} else {
-		ev, err := s.escrow.VerifyTradeOpened(txHash, HashID(trade.ID))
+		ev, err := escrow.VerifyTradeOpened(txHash, HashID(trade.ID))
 		if err != nil {
 			return nil, fmt.Errorf("verify on-chain open: %w", err)
 		}
@@ -1207,7 +1254,7 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	// enforces cancelByTimeout at createdAt+paymentWindow, but expires_at was set
 	// at intent time and drifts earlier if the open mined late — which would nudge
 	// a timeout-cancel the contract reverts. Best-effort: keep intent-time on read failure.
-	if onchain, rerr := s.escrow.ReadTrade(HashID(trade.ID)); rerr == nil && onchain.CreatedAt != nil && onchain.CreatedAt.Sign() > 0 {
+	if onchain, rerr := escrow.ReadTrade(HashID(trade.ID)); rerr == nil && onchain.CreatedAt != nil && onchain.CreatedAt.Sign() > 0 {
 		openUpdates["expires_at"] = time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow)
 	}
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
@@ -1291,6 +1338,13 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
+	// Resolve the trade's chain BEFORE the status flip so an unconfigured chain
+	// fails loud without stranding the trade in `releasing`.
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Transition (Pending|Paid) → Releasing FIRST (atomically), then prepare
 	// the unsigned tx. This closes the race with RaiseDispute: a concurrent
 	// dispute will win the optimistic lock here, and the seller will get
@@ -1330,7 +1384,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 			Update("updated_at", s.clock.Now())
 	}
 
-	unsignedTx, err := s.escrow.PrepareRelease(HashID(trade.ID), sellerAddress)
+	unsignedTx, err := escrow.PrepareRelease(HashID(trade.ID), sellerAddress)
 	if err != nil {
 		// We flipped (Pending|Paid) → Releasing above; roll it back so a failed
 		// prepare doesn't strand the trade in `releasing` for the reconciler's
@@ -1363,7 +1417,11 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusReleasing {
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
-	ev, err := s.escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
@@ -1467,7 +1525,11 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 		return nil, fmt.Errorf("%w: trade has not yet expired (expires_at=%s)",
 			ErrInvalidTransition, trade.ExpiresAt.Format(time.RFC3339))
 	}
-	return s.escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
 }
 
 // ConfirmCancel verifies the on-chain TradeCancelled event and applies the
@@ -1491,7 +1553,11 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	ev, err := s.escrow.VerifyTradeCancelled(txHash, HashID(trade.ID))
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := escrow.VerifyTradeCancelled(txHash, HashID(trade.ID))
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
@@ -1645,6 +1711,13 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, err
 	}
 
+	// Resolve the trade's chain BEFORE persisting the dispute row so an
+	// unconfigured chain fails loud without leaving an orphan dispute.
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+
 	dispute := &models.P2PDispute{
 		ID:           uuid.New(),
 		TradeID:      trade.ID,
@@ -1658,7 +1731,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("persist dispute: %w", err)
 	}
 
-	unsignedTx, err := s.escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
+	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
 	if err != nil {
 		// Best-effort rollback so a failed prep doesn't leave a phantom
 		// dispute row blocking future retries.
@@ -1701,7 +1774,11 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	if _, err := s.escrow.VerifyTradeDisputed(txHash, HashID(trade.ID)); err != nil {
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := escrow.VerifyTradeDisputed(txHash, HashID(trade.ID)); err != nil {
 		return nil, fmt.Errorf("verify on-chain dispute: %w", err)
 	}
 
@@ -1765,7 +1842,13 @@ func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeI
 		return nil, err
 	}
 
-	unsignedTx, err := s.escrow.PrepareAdminResolve(HashID(trade.ID), refundBuyer, adminAddress)
+	// Admin resolution MUST route by the disputed trade's chain, never a
+	// default — resolving on the wrong escrow would move the wrong funds.
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	unsignedTx, err := escrow.PrepareAdminResolve(HashID(trade.ID), refundBuyer, adminAddress)
 	if err != nil {
 		return nil, fmt.Errorf("prepare adminResolve: %w", err)
 	}
@@ -1815,7 +1898,11 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	ev, err := s.escrow.VerifyTradeResolved(txHash, HashID(trade.ID))
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := escrow.VerifyTradeResolved(txHash, HashID(trade.ID))
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain resolve: %w", err)
 	}
@@ -2006,7 +2093,14 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		return ReconcileResult{}, nil
 	}
 
-	onchain, err := s.escrow.ReadTrade(HashID(trade.ID))
+	// Reconcile against the trade's own chain — fail-loud if it's unconfigured
+	// (§8.5: a wrong-chain ReadTrade would compare against the wrong escrow and
+	// could mis-correct DB state).
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("resolve escrow for trade chain %d: %w", trade.ChainID, err)
+	}
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("read on-chain trade: %w", err)
 	}
@@ -3010,7 +3104,11 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	return s.escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
 }
 
 // GetAllowance returns the seller's current ERC-20 allowance to the escrow
@@ -3024,7 +3122,11 @@ func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, token
 	if err != nil {
 		return nil, err
 	}
-	return s.escrow.ReadAllowance(sellerAddress, tokenAddr)
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.ReadAllowance(sellerAddress, tokenAddr)
 }
 
 // PrepareDeposit builds the unsigned tx for `deposit(token, amount)`. The
@@ -3047,11 +3149,15 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
 	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{
 		"token":  strings.ToUpper(tokenSymbol),
 		"amount": amount,
 	})
-	return s.escrow.PrepareDeposit(sellerAddress, tokenAddr, amt)
+	return escrow.PrepareDeposit(sellerAddress, tokenAddr, amt)
 }
 
 // ConfirmDeposit verifies the Deposited event for the supplied tx hash AND
@@ -3071,7 +3177,11 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	ev, err := s.escrow.VerifyDeposited(txHash,
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := escrow.VerifyDeposited(txHash,
 		common.HexToAddress(sellerAddress),
 		common.HexToAddress(tokenAddr))
 	if err != nil {
@@ -3105,10 +3215,14 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
 	// Soft pre-check — fast-fail with a useful message if the seller is
 	// trying to withdraw more than they have. The contract will reject
 	// regardless; this just turns a tx revert into a friendly 400.
-	if bal, err := s.escrow.ReadBalance(sellerAddress, tokenAddr); err == nil {
+	if bal, err := escrow.ReadBalance(sellerAddress, tokenAddr); err == nil {
 		if bal.Available.Cmp(amt) < 0 {
 			return nil, fmt.Errorf("%w: insufficient available balance (have %s)", ErrInvalidParams, bal.Available)
 		}
@@ -3117,7 +3231,7 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 		"token":  strings.ToUpper(tokenSymbol),
 		"amount": amount,
 	})
-	return s.escrow.PrepareWithdraw(sellerAddress, tokenAddr, amt)
+	return escrow.PrepareWithdraw(sellerAddress, tokenAddr, amt)
 }
 
 // ConfirmWithdraw verifies the Withdrawn event for the supplied tx hash AND
@@ -3135,7 +3249,11 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	ev, err := s.escrow.VerifyWithdrawn(txHash,
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := escrow.VerifyWithdrawn(txHash,
 		common.HexToAddress(sellerAddress),
 		common.HexToAddress(tokenAddr))
 	if err != nil {
@@ -3167,7 +3285,11 @@ func (s *P2PTradeService) GetPoolBalance(ctx context.Context, sellerAddress, tok
 	if err != nil {
 		return nil, err
 	}
-	return s.escrow.ReadBalance(sellerAddress, tokenAddr)
+	escrow, _, _, err := s.resolve(s.defaultChainID)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.ReadBalance(sellerAddress, tokenAddr)
 }
 
 // ─── Voucher helpers ────────────────────────────────────────────────────────
@@ -3214,8 +3336,10 @@ func (s *P2PTradeService) adVoucher(ad *models.P2PAd, sellerAddrOverride string)
 // buildVoucherTypedData formats the voucher as an EIP-712 typed-data payload
 // the seller's wallet (wagmi/ethers/RainbowKit) signs via signTypedData.
 // Field order MUST match AD_VOUCHER_TYPEHASH in the contract — otherwise the
-// digest will differ and the contract will reject the signature.
-func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher) *VoucherTypedData {
+// digest will differ and the contract will reject the signature. The domain
+// (verifyingContract, chainId, version) is resolved per the ad's chain by the
+// caller and passed in — there is no single-chain fallback.
+func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher, contractAddress string, domainChainID int64, version string) *VoucherTypedData {
 	return &VoucherTypedData{
 		Types: map[string][]VoucherTypedField{
 			"EIP712Domain": {
@@ -3237,9 +3361,9 @@ func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher) *VoucherTypedData {
 		PrimaryType: "AdVoucher",
 		Domain: VoucherTypedDomain{
 			Name:              "TSAConnectP2PEscrow",
-			Version:           s.eip712Version,
-			ChainID:           s.chainID,
-			VerifyingContract: s.escrow.ContractAddress(),
+			Version:           version,
+			ChainID:           domainChainID,
+			VerifyingContract: contractAddress,
 		},
 		Message: VoucherTypedMessage{
 			Seller:      v.Seller.Hex(),
