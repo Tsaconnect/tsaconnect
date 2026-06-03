@@ -7,12 +7,10 @@ import (
 	"strings"
 )
 
-// sonicPreset bundles every value that has to flip together when switching
-// the P2P stack between Sonic mainnet and Sonic testnet. Flipping these
-// piecemeal (e.g. mainnet RPC but testnet chainID) makes the EIP-712 voucher
-// domain mismatch what the contract recovers, so every signature gets
-// rejected — keep them together.
-type sonicPreset struct {
+// chainPreset bundles every value that has to flip together for one chain's
+// P2P deployment (Sonic or BSC). Flipping piecemeal makes the EIP-712 voucher
+// domain mismatch what the contract recovers, so every signature gets rejected.
+type chainPreset struct {
 	rpcURL          string
 	chainID         int64
 	usdcAddress     string
@@ -33,7 +31,7 @@ type sonicPreset struct {
 // restart — no other env vars need to change. Individual addresses can
 // still be overridden via the legacy SONIC_RPC_URL / *_TOKEN_ADDRESS /
 // P2P_ESCROW_ADDRESS env vars (escape hatch for hot-fixes).
-var sonicPresets = map[string]sonicPreset{
+var sonicPresets = map[string]chainPreset{
 	"mainnet": {
 		rpcURL:      "https://rpc.soniclabs.com",
 		chainID:     146,
@@ -56,6 +54,45 @@ var sonicPresets = map[string]sonicPreset{
 		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
 		eip712Version: "2",
 	},
+}
+
+// bscPresets mirrors sonicPresets for BSC. p2pEscrow is EMPTY until P2PEscrowV2
+// is deployed to BSC (see Plan 6) — an empty escrow keeps BSC P2P dormant (Load
+// omits it from P2PChains). mcgpAddress is intentionally empty: MCGP is Sonic-
+// only, so the fee-discount path is disabled on BSC (P2PEscrowV2 charges the
+// standard fee when mcgpToken is address(0)). Testnet token addresses are filled
+// in at deploy time via P2P_ESCROW_ADDRESS_BSC + the *_TOKEN_ADDRESS overrides.
+var bscPresets = map[string]chainPreset{
+	"mainnet": {
+		rpcURL:        "https://bsc-dataseed.binance.org",
+		chainID:       56,
+		usdcAddress:   "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+		usdtAddress:   "0x55d398326f99059fF775485246999027B3197955",
+		mcgpAddress:   "",
+		p2pEscrow:     "", // set after the audit-gated BSC mainnet deploy
+		eip712Version: "2",
+	},
+	"testnet": {
+		rpcURL:        "https://data-seed-prebsc-1-s1.binance.org:8545",
+		chainID:       97,
+		usdcAddress:   "", // set at BSC-testnet deploy (test token addresses)
+		usdtAddress:   "",
+		mcgpAddress:   "",
+		p2pEscrow:     "", // set after the BSC testnet deploy
+		eip712Version: "2",
+	},
+}
+
+// P2PChainConfig is the per-chain P2P deployment the trade/escrow services
+// resolve by chainID. ChainID + EscrowAddress + EIP712Version move in lockstep
+// (a mismatch rejects every voucher). Assets is the curated allow-list of
+// tradeable asset symbols on this chain — no asset is split across chains.
+type P2PChainConfig struct {
+	ChainID       int64
+	ChainKey      string // blockchainService key: "sonic", "bsc"
+	EscrowAddress string
+	EIP712Version string
+	Assets        []string // e.g. ["MCGP"] on Sonic, ["USDT","USDC"] on BSC
 }
 
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
@@ -102,9 +139,15 @@ type Config struct {
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
 	// P2PEscrowEIP712Version is the voucher domain `version` matching the
-	// deployed P2PEscrow (see sonicPreset.eip712Version). Stamped into the
+	// deployed P2PEscrow (see chainPreset.eip712Version). Stamped into the
 	// typed-data the app signs.
 	P2PEscrowEIP712Version string
+
+	// P2PChains is the per-chain P2P deployment registry keyed by chainID,
+	// assembled in Load(). Sonic is always present; BSC is present only when
+	// its escrow address is configured (dormant-by-default). Later refactors
+	// resolve escrow/domain/version by trade.ChainID from this map.
+	P2PChains map[int64]P2PChainConfig
 
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
