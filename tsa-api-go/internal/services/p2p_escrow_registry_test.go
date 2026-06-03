@@ -41,6 +41,41 @@ func TestP2PEscrowRegistry_EIP712VersionFor(t *testing.T) {
 	}
 }
 
+func TestP2PEscrowRegistry_Resolve(t *testing.T) {
+	esc := NewP2PEscrowServiceForChain(nil, nil, "0xSonic") // a P2PEscrowAdapter
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		146: {service: esc, eip712Version: "2", domainChainID: 146},
+	}}
+	got, domainID, ver, err := reg.Resolve(146)
+	if err != nil {
+		t.Fatalf("Resolve(146) err=%v", err)
+	}
+	if got.ContractAddress() != "0xSonic" || domainID != 146 || ver != "2" {
+		t.Errorf("Resolve(146) = (%q,%d,%q), want (0xSonic,146,2)", got.ContractAddress(), domainID, ver)
+	}
+	if _, _, _, err := reg.Resolve(56); err == nil {
+		t.Errorf("Resolve(56) on unconfigured chain must fail loud")
+	}
+}
+
+// TestP2PEscrowRegistryFromMap_StampsDomainChainID verifies the test/ops seam
+// builds entries with domainChainID == chainID and resolves them.
+func TestP2PEscrowRegistryFromMap_StampsDomainChainID(t *testing.T) {
+	reg := NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{
+		146: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"),
+	}, "1")
+	got, domainID, ver, err := reg.Resolve(146)
+	if err != nil {
+		t.Fatalf("Resolve(146) err=%v", err)
+	}
+	if got.ContractAddress() != "0xSonic" || domainID != 146 || ver != "1" {
+		t.Errorf("Resolve(146) = (%q,%d,%q), want (0xSonic,146,1)", got.ContractAddress(), domainID, ver)
+	}
+	if _, _, _, err := reg.Resolve(56); err == nil {
+		t.Errorf("Resolve(56) on unconfigured chain must fail loud")
+	}
+}
+
 func TestP2PEscrowRegistry_NilSafety(t *testing.T) {
 	var r *P2PEscrowRegistry
 	if _, err := r.For(146); err == nil {
