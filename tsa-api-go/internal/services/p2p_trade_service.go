@@ -244,6 +244,9 @@ type CreateAdParams struct {
 	MaxLimit         string // fiat
 	PaymentMethodIDs []uuid.UUID
 	Terms            string
+	// ChainID selects the P2P chain. When 0 (omitted by current app) the
+	// service defaults to s.defaultChainID (Sonic 146) for back-compat.
+	ChainID int64
 }
 
 type OpenTradeParams struct {
@@ -358,16 +361,26 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		anchor = models.P2PAdFloatAnchorBybitSell
 	}
 
+	// Resolve the target chain: default to Sonic when omitted (back-compat).
+	chainID := params.ChainID
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
+	// Chain must be P2P-enabled (escrow configured) and the token allowed on it.
+	if _, _, _, err := s.resolve(chainID); err != nil {
+		return nil, fmt.Errorf("%w: chain %d not available for P2P", ErrInvalidParams, chainID)
+	}
+	if !s.escrows.AssetAllowed(chainID, params.Token) {
+		return nil, fmt.Errorf("%w: %s is not tradeable on chain %d", ErrInvalidParams, params.Token, chainID)
+	}
+
 	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(params.Token))
 	if err != nil {
 		return nil, err
 	}
 
-	// New sell-ads are published on the default chain (Sonic). Resolve its
-	// escrow + EIP-712 domain up front so the pool-balance check, voucher hash,
-	// and typed-data domain all use the same chain (Plan 5 will let the caller
-	// pick the chain).
-	escrow, domainChainID, version, err := s.resolve(s.defaultChainID)
+	// Resolve the escrow + EIP-712 domain for the chosen chain.
+	escrow, domainChainID, version, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +409,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		SellerID:         sellerID,
 		Side:             models.P2PAdSideSell,
 		Token:            strings.ToUpper(params.Token),
-		ChainID:          s.defaultChainID,
+		ChainID:          chainID,
 		Amount:           params.TokenAmount,
 		Remaining:        params.TokenAmount,
 		Reserved:         "0",
@@ -520,6 +533,19 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 	if anchor == "" {
 		anchor = models.P2PAdFloatAnchorBybitSell
 	}
+	// Resolve the target chain: default to Sonic when omitted (back-compat).
+	chainID := params.ChainID
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
+	// Chain must be P2P-enabled (escrow configured) and the token allowed on it.
+	if _, _, _, err := s.resolve(chainID); err != nil {
+		return nil, fmt.Errorf("%w: chain %d not available for P2P", ErrInvalidParams, chainID)
+	}
+	if !s.escrows.AssetAllowed(chainID, params.Token) {
+		return nil, fmt.Errorf("%w: %s is not tradeable on chain %d", ErrInvalidParams, params.Token, chainID)
+	}
+
 	// Validate the token is supported so OpenTrade can resolve it to an
 	// address later (buy-ads skip the voucher but still settle on-chain).
 	if _, err := s.resolveTokenAddress(strings.ToUpper(params.Token)); err != nil {
@@ -531,7 +557,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		SellerID:         merchantID,
 		Side:             models.P2PAdSideBuy,
 		Token:            strings.ToUpper(params.Token),
-		ChainID:          s.defaultChainID,
+		ChainID:          chainID,
 		Amount:           params.TokenAmount,
 		Remaining:        params.TokenAmount, // off-chain capacity
 		Reserved:         "0",
@@ -2602,6 +2628,7 @@ type AdFilter struct {
 	SellerID     uuid.UUID
 	Limit        int
 	Offset       int
+	ChainID      int64
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -2631,6 +2658,9 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	}
 	if f.SellerID != uuid.Nil {
 		q = q.Where("seller_id = ?", f.SellerID)
+	}
+	if f.ChainID != 0 {
+		q = q.Where("chain_id = ?", f.ChainID)
 	}
 	limit := f.Limit
 	if limit <= 0 || limit > 100 {
