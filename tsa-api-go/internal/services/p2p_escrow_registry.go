@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -23,6 +24,10 @@ type chainEscrow struct {
 	// configured chainID when the probe fails — a mismatch with what the
 	// contract hashes makes every ecrecover resolve to a wrong address.
 	domainChainID int64
+	// assets is the curated allow-list of token symbols tradeable on this chain.
+	// An empty slice means "allow all" (used by NewP2PEscrowRegistryFromMap so
+	// tests and ops maps stay permissive). An unconfigured chain returns false.
+	assets []string
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by
@@ -104,6 +109,29 @@ func (r *P2PEscrowRegistry) ChainIDs() []int64 {
 	return out
 }
 
+// AssetAllowed reports whether symbol may be traded on chainID per the
+// per-chain curation. An empty allow-list means "allow all" (used by the
+// test/ops map constructor). An unconfigured chain returns false.
+func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
+	if r == nil || r.byChain == nil {
+		return false
+	}
+	e, ok := r.byChain[chainID]
+	if !ok {
+		return false
+	}
+	if len(e.assets) == 0 {
+		return true
+	}
+	sym := strings.ToUpper(symbol)
+	for _, a := range e.assets {
+		if strings.ToUpper(a) == sym {
+			return true
+		}
+	}
+	return false
+}
+
 // NewP2PEscrowRegistry builds the per-chain escrow registry from cfg.P2PChains,
 // resolving each chain's client via bs.ClientForChainID. It also runs a boot
 // verification per chain (eth_chainId probe + escrow bytecode check) and logs
@@ -125,6 +153,7 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 			service:       NewP2PEscrowServiceForChain(client, cfg, cc.EscrowAddress),
 			eip712Version: cc.EIP712Version,
 			domainChainID: verifyP2PChainAtBoot(client, chainID, cc),
+			assets:        cc.Assets,
 		}
 	}
 	log.Printf("[config] P2P escrow registry: %d chain(s) enabled: %v", len(reg.byChain), reg.ChainIDs())
