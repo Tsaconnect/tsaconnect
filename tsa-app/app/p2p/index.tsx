@@ -15,6 +15,7 @@ import {
 import { useUserRole } from '../../hooks/useUserRole';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
+import { NotificationBell } from '../../components/p2p/NotificationBell';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -130,7 +131,10 @@ const P2PMarketScreen: React.FC = () => {
           <Text variant="title1" weight="700">
             {adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`}
           </Text>
-          <CurrencySelector variant="header" selectedCode={currency.code} onSelectCode={setMarketCurrency} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+            <CurrencySelector variant="header" selectedCode={currency.code} onSelectCode={setMarketCurrency} />
+            <NotificationBell />
+          </View>
         </View>
 
         <View style={{ marginTop: spacing.md }}>
