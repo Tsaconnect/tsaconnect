@@ -11,10 +11,18 @@ import (
 )
 
 // chainEscrow bundles a chain's escrow adapter with its EIP-712 domain version
-// (they move in lockstep — see spec §8.2).
+// (they move in lockstep — see spec §8.2) and the RPC-probed chainId used for
+// the EIP-712 domain.
 type chainEscrow struct {
-	service       *P2PEscrowService
+	// service is held as the P2PEscrowAdapter interface (not the concrete
+	// *P2PEscrowService) so tests can inject a mock via NewP2PEscrowRegistryFromMap.
+	service       P2PEscrowAdapter
 	eip712Version string
+	// domainChainID is the chainId stamped into the EIP-712 domain. It is the
+	// value the RPC actually reports (eth_chainId), falling back to the
+	// configured chainID when the probe fails — a mismatch with what the
+	// contract hashes makes every ecrecover resolve to a wrong address.
+	domainChainID int64
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by
@@ -28,7 +36,7 @@ type P2PEscrowRegistry struct {
 // For returns the escrow adapter for chainID, or an error if that chain is not
 // P2P-enabled. Callers MUST treat the error as "P2P unavailable on this chain",
 // not as a reason to use a default chain.
-func (r *P2PEscrowRegistry) For(chainID int64) (*P2PEscrowService, error) {
+func (r *P2PEscrowRegistry) For(chainID int64) (P2PEscrowAdapter, error) {
 	if r == nil || r.byChain == nil {
 		return nil, fmt.Errorf("p2p escrow registry not initialized")
 	}
@@ -37,6 +45,38 @@ func (r *P2PEscrowRegistry) For(chainID int64) (*P2PEscrowService, error) {
 		return nil, fmt.Errorf("p2p: no escrow configured for chain %d", chainID)
 	}
 	return e.service, nil
+}
+
+// Resolve returns everything the trade service needs to act on a chain: the
+// escrow adapter, the EIP-712 domain chainId (RPC-probed), and the domain
+// version. Fail-loud for an unconfigured chain — NEVER default to another
+// chain (a BSC trade resolved against the Sonic escrow would orphan funds).
+func (r *P2PEscrowRegistry) Resolve(chainID int64) (P2PEscrowAdapter, int64, string, error) {
+	if r == nil || r.byChain == nil {
+		return nil, 0, "", fmt.Errorf("p2p escrow registry not initialized")
+	}
+	e, ok := r.byChain[chainID]
+	if !ok {
+		return nil, 0, "", fmt.Errorf("p2p: no escrow configured for chain %d", chainID)
+	}
+	return e.service, e.domainChainID, e.eip712Version, nil
+}
+
+// NewP2PEscrowRegistryFromMap builds a registry directly from a chainID →
+// adapter map, stamping domainChainID = chainID for every entry. Production
+// code uses NewP2PEscrowRegistry (which RPC-probes the domain chainId); this
+// constructor is the seam both the in-package and external (handlers) tests
+// use to inject mock adapters, and is also handy for ops/diagnostics.
+func NewP2PEscrowRegistryFromMap(m map[int64]P2PEscrowAdapter, version string) *P2PEscrowRegistry {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{}}
+	for chainID, esc := range m {
+		reg.byChain[chainID] = &chainEscrow{
+			service:       esc,
+			eip712Version: version,
+			domainChainID: chainID,
+		}
+	}
+	return reg
 }
 
 // EIP712VersionFor returns the EIP-712 domain version for chainID, or an error
@@ -84,26 +124,33 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 		reg.byChain[chainID] = &chainEscrow{
 			service:       NewP2PEscrowServiceForChain(client, cfg, cc.EscrowAddress),
 			eip712Version: cc.EIP712Version,
+			domainChainID: verifyP2PChainAtBoot(client, chainID, cc),
 		}
-		verifyP2PChainAtBoot(client, chainID, cc)
 	}
 	log.Printf("[config] P2P escrow registry: %d chain(s) enabled: %v", len(reg.byChain), reg.ChainIDs())
 	return reg
 }
 
-// verifyP2PChainAtBoot warns (does not abort) when the RPC's eth_chainId
-// disagrees with the configured chainID, or when the escrow address has no
-// bytecode — either makes signatures/txs fail later with opaque errors.
-func verifyP2PChainAtBoot(client *blockchain.EVMClient, chainID int64, cc config.P2PChainConfig) {
+// verifyP2PChainAtBoot warns (does not abort) when the escrow address has no
+// bytecode, and returns the effective EIP-712 domain chainId: the value the
+// RPC actually reports (eth_chainId), falling back to the configured chainID
+// when the probe fails. The EIP-712 domain MUST use whatever the chain itself
+// reports — a mismatch with what the contract hashes makes every ecrecover
+// resolve to a wrong address and rejects all signatures.
+func verifyP2PChainAtBoot(client *blockchain.EVMClient, chainID int64, cc config.P2PChainConfig) int64 {
+	domainChainID := chainID
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if rpcID, err := client.Client.ChainID(ctx); err != nil {
-		log.Printf("[config] WARNING: eth_chainId probe failed for P2P chain %d (%s): %v", chainID, cc.ChainKey, err)
-	} else if rpcID.Int64() != chainID {
-		log.Printf("[config] WARNING: P2P chain %s configured chainID=%d but RPC reports %d (EIP712Version=%s) — voucher signatures will be rejected until this matches", cc.ChainKey, chainID, rpcID.Int64(), cc.EIP712Version)
+		log.Printf("[config] WARNING: eth_chainId probe failed for P2P chain %d (%s): %v — using configured %d for the EIP-712 domain", chainID, cc.ChainKey, err, chainID)
+	} else {
+		domainChainID = rpcID.Int64()
+		if domainChainID != chainID {
+			log.Printf("[config] WARNING: P2P chain %s configured chainID=%d but RPC reports %d (EIP712Version=%s) — using the RPC value for the domain so signatures stay valid", cc.ChainKey, chainID, domainChainID, cc.EIP712Version)
+		}
 	}
 	if cc.EscrowAddress == "" {
-		return
+		return domainChainID
 	}
 	if code, err := client.GetCode(cc.EscrowAddress); err != nil {
 		log.Printf("[config] WARNING: could not check bytecode at %s escrow %s: %v", cc.ChainKey, cc.EscrowAddress, err)
@@ -112,4 +159,5 @@ func verifyP2PChainAtBoot(client *blockchain.EVMClient, chainID int64, cc config
 	} else {
 		log.Printf("[config] P2P escrow verified: %s %s on chain %d (%d bytes)", cc.ChainKey, cc.EscrowAddress, chainID, len(code))
 	}
+	return domainChainID
 }
