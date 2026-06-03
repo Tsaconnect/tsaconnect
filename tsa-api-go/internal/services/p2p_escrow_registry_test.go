@@ -1,6 +1,8 @@
 package services
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestNewP2PEscrowServiceForChain_UsesExplicitAddress(t *testing.T) {
 	s := NewP2PEscrowServiceForChain(nil, nil, "0xBSCescrow")
@@ -91,5 +93,24 @@ func TestP2PEscrowRegistry_NilSafety(t *testing.T) {
 	}
 	if _, err := reg.For(146); err == nil {
 		t.Errorf("empty registry For must fail loud")
+	}
+}
+
+func TestP2PEscrowRegistry_AssetAllowed(t *testing.T) {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		146: {service: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"), eip712Version: "1", domainChainID: 146, assets: []string{"USDT", "USDC", "MCGP"}},
+		56:  {service: NewP2PEscrowServiceForChain(nil, nil, "0xBSC"), eip712Version: "2", domainChainID: 56, assets: []string{"USDT", "USDC"}},
+	}}
+	if !reg.AssetAllowed(146, "MCGP") {
+		t.Errorf("MCGP must be allowed on Sonic")
+	}
+	if reg.AssetAllowed(56, "MCGP") {
+		t.Errorf("MCGP must NOT be allowed on BSC")
+	}
+	if !reg.AssetAllowed(56, "usdt") { // case-insensitive
+		t.Errorf("USDT must be allowed on BSC (case-insensitive)")
+	}
+	if reg.AssetAllowed(999, "USDT") { // unconfigured chain
+		t.Errorf("no chain → not allowed")
 	}
 }
