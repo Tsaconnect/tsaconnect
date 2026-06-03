@@ -81,24 +81,12 @@ func main() {
 	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
 	p2pEscrowService := services.NewP2PEscrowService(p2pSonicClient, cfg)
 
-	// Verify the P2P escrow address actually has a contract deployed on the
-	// chain we're pointed at. A misconfigured address (e.g. mainnet contract
-	// while SONIC_NETWORK=testnet) would silently make `hashVoucher` return
-	// empty data and every SignAd would fail with a meaningless recovery
-	// mismatch. Failing the probe doesn't abort boot — we still want the
-	// non-P2P routes up — but it produces a loud log so the operator can
-	// fix the env before the first user hits this in the field.
-	if cfg.P2PEscrowAddress != "" && p2pSonicClient != nil {
-		code, codeErr := p2pSonicClient.GetCode(cfg.P2PEscrowAddress)
-		switch {
-		case codeErr != nil:
-			log.Printf("[config] WARNING: could not check bytecode at P2P_ESCROW_ADDRESS=%s: %v", cfg.P2PEscrowAddress, codeErr)
-		case len(code) == 0:
-			log.Printf("[config] WARNING: P2P_ESCROW_ADDRESS=%s has NO bytecode on chain %d (SONIC_NETWORK=%s) — P2P ad signing will fail with recovery mismatches until this is corrected", cfg.P2PEscrowAddress, p2pSonicClient.ChainID(), cfg.SonicNetwork)
-		default:
-			log.Printf("[config] P2P escrow contract verified at %s on chain %d (%d bytes of bytecode)", cfg.P2PEscrowAddress, p2pSonicClient.ChainID(), len(code))
-		}
-	}
+	// Per-chain escrow registry (Sonic + any enabled BSC). Boot verification
+	// (eth_chainId + bytecode per chain) runs inside the constructor. The single
+	// p2pEscrowService above stays wired to the trade service until Plan 3
+	// migrates it to this registry.
+	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
+	_ = p2pEscrowRegistry // consumed by the trade service in Plan 3
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
