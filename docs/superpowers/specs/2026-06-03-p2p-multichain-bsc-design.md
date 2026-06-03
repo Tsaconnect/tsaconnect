@@ -2,10 +2,12 @@
 
 **Date:** 2026-06-03
 **Status:** Design — brainstormed, **independently reviewed 2026-06-03 (3-lens panel,
-verdict: ready-with-fixes; all confirmed fixes folded in below)**. NOT implemented. The
-backend refactor + BSC deploy are gated on owner sign-off of the §10 decisions; BSC
-**mainnet** is additionally gated on the P2PEscrowV2 re-audit (Sonic mainnet itself is
-still v1 awaiting that audit — see `2026-05-29-p2p-escrow-v2-two-sided-design.md`).
+verdict: ready-with-fixes; all confirmed fixes folded in)**. **Chain strategy APPROVED
+2026-06-03 (PM + owner): multi-chain Sonic + BSC, asset-curated — §4.5.** Implementation
+plan to follow (writing-plans). NOT yet implemented. Only open decision is **BSC key
+custody (§10.6)**, needed at deploy time, not blocking the build. BSC **mainnet** remains
+gated on the P2PEscrowV2 re-audit (Sonic mainnet itself is still v1 awaiting that audit —
+see `2026-05-29-p2p-escrow-v2-two-sided-design.md`).
 **Phase:** P2P Phase 1 follow-on — extends the Sonic-only P2P stack to a second chain.
 **Backed by:** `2026-05-29-p2p-escrow-v2-two-sided-design.md`; a 5-agent cross-project
 BSC scoping map + a 3-lens spec review (2026-06-03).
@@ -68,9 +70,18 @@ to do it honestly is to make chain an **explicit choice**, not a hidden one.
 4. **Explicit chain choice is a safety surface.** In this market "chain" usually means
    *destination compatibility* (will Binance / my recipient accept it — e.g. BEP-20).
    The trade flow shows a **trade-time confirmation** of the receive-chain/standard.
-5. **Primary buyer-facing chain at launch = BSC** (RECOMMENDED; config-reversible, §10.1).
-   BEP-20 demand in the NG market; Sonic retained for MCGP/native. Default/seeding only,
-   **not** architectural.
+5. **APPROVED 2026-06-03 — launch multi-chain on Sonic + BSC, curated by asset (no
+   split).** Per the PM (support major networks) + the MCGP constraint: **MCGP trades on
+   Sonic only** (its sole home); **USDT/USDC trade on BSC** (BEP-20 demand). At launch a
+   given asset lives on exactly **one** chain, so no single order book is fragmented; the
+   marketplace is **asset-first** (the buyer picks the asset, the chain follows) and the
+   chain shows as a badge + a "you'll receive X on <network>" confirm. The already-
+   multi-chain **wallet** (send/receive/instant-transfer/LiFi-swap) covers anyone who
+   needs the asset on a different network — the escrow never bridges. Adding a *second*
+   chain for the *same* asset is a later, demand-gated step, not launch.
+   - **Allowed (chain, asset) combos at launch:** `(Sonic, MCGP)`, `(BSC, USDT)`,
+     `(BSC, USDC)`. `CreateAd` validates against this allow-list; it is config-driven so
+     the matrix can grow without code changes.
 6. **Dormant-by-default.** A chain is P2P-enabled only when its escrow address is
    configured. Unset BSC = BSC P2P unavailable; nothing breaks.
 7. **Backend shape is LOCKED to per-chain service instances** (review-confirmed, §5.1):
@@ -79,8 +90,8 @@ to do it honestly is to make chain an **explicit choice**, not a hidden one.
    (any missed site silently falls back to Sonic). This is the **gating prerequisite**,
    sequenced before config/app work.
 
-> Still needing owner sign-off before implementation: §10 (primary chain, mainnet-vs-
-> testnet, gas-token strategy, key custody, marketplace default).
+> All §10 decisions are resolved except **BSC key custody (§10.6)**, which is needed at
+> deploy time (Phase 1) and does not block starting the backend refactor.
 
 ---
 
@@ -249,22 +260,20 @@ sites + chain-choice UI.
 
 ---
 
-## 10. Open decisions (need owner sign-off)
+## 10. Decisions (resolved 2026-06-03 unless noted)
 
-1. **Primary buyer-facing chain at launch.** RECOMMENDED: **BSC primary** (BEP-20 demand),
-   Sonic for MCGP/native. Architecture identical either way.
-2. **BSC mainnet now, or testnet-only first?** RECOMMENDED: **testnet-only first** (mainnet
-   needs external audit sign-off).
-3. **Gas-token strategy on BSC.** RECOMMENDED for MVP: **users self-fund BNB** + the
-   pre-broadcast balance guard (§7.6); deploy an **EIP-2771 relayer on BSC later** (the V2
-   contract is relayer-ready). Decide before launch — this is a hard first-run blocker.
-4. **MCGP on BSC.** RECOMMENDED: **no** — `mcgpAddress = address(0)`, USDT/USDC only.
-5. **Marketplace default:** RECOMMENDED: one chain at a time, defaulting to the user's
-   preferred/last-used (vs all chains with a per-row badge).
-6. **Owner/admin key custody on BSC:** same multisig as Sonic vs chain-specific. Affects
-   who can `adminResolve`/upgrade + deploy coordination.
-7. **Chain-enablement mechanism:** RECOMMENDED: "enabled when escrow address configured"
-   (matches dormant-by-default), vs an explicit `P2P_CHAINS` allowlist env.
+1. ✅ **Launch chains/assets:** multi-chain **Sonic + BSC, asset-curated** — `(Sonic,MCGP)`,
+   `(BSC,USDT)`, `(BSC,USDC)`; no asset split; asset-first marketplace (§4.5).
+2. ✅ **Testnet-only first.** BSC **mainnet** is gated on the P2PEscrowV2 re-audit.
+3. ✅ **Gas-token strategy:** for MVP **users self-fund** the chain's gas (BNB on BSC, S on
+   Sonic) + a pre-broadcast native-balance guard (§7.6); an EIP-2771 relayer is a later
+   upgrade (the V2 contract is relayer-ready).
+4. ✅ **MCGP on BSC: no** — `mcgpAddress = address(0)` in the BSC deploy (§6.2).
+5. ✅ **Marketplace: asset-first**, chain shown as a badge + receive-chain confirm (§4.5).
+6. ⏳ **OPEN — owner/admin key custody on BSC:** same multisig as Sonic vs chain-specific.
+   Needed at **BSC deploy time** (Phase 1), not for the backend/app build; does not block
+   starting the refactor. **Owner's call.**
+7. ✅ **Chain-enablement:** "enabled when escrow address configured" (dormant-by-default).
 
 ---
 
