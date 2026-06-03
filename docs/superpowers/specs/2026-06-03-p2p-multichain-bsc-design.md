@@ -84,11 +84,17 @@ to do it honestly is to make chain an **explicit choice**, not a hidden one.
      the matrix can grow without code changes.
 6. **Dormant-by-default.** A chain is P2P-enabled only when its escrow address is
    configured. Unset BSC = BSC P2P unavailable; nothing breaks.
-7. **Backend shape is LOCKED to per-chain service instances** (review-confirmed, §5.1):
-   `map[int64]*P2PTradeService` + `map[int64]*P2PEscrowService`, multiplexed in the
-   handler on ad/trade `ChainID` — **not** threading `chainID` through ~30 call sites
-   (any missed site silently falls back to Sonic). This is the **gating prerequisite**,
-   sequenced before config/app work.
+7. **Backend shape (revised 2026-06-03 → Option B; supersedes the originally-locked
+   per-chain-instances approach).** The single `P2PTradeService` holds the
+   `P2PEscrowRegistry` and resolves `(escrow, domainChainID, eip712Version)`
+   **per-operation from the loaded entity's `ChainID`**. The scalar
+   `s.escrow`/`s.chainID`/`s.eip712Version` are **removed**, so every internal call site
+   becomes a **compile error** until converted — eliminating the silent-fallback-to-Sonic
+   risk *by construction* (compiler-enforced, not vigilance-enforced); the handler stays
+   ~unchanged. *(Why the change: reading the ~30 handler sites showed per-chain instances
+   force the handler to resolve each trade's chain before dispatch — more churn,
+   vigilance-enforced. Option B is less code and compile-safe.)* Still the **gating
+   prerequisite**, sequenced before app work.
 
 > All §10 decisions are resolved except **BSC key custody (§10.6)**, which is needed at
 > deploy time (Phase 1) and does not block starting the backend refactor.
@@ -125,12 +131,18 @@ Today there is **one** `P2PTradeService` (`main.go:184`) with scalar `chainID` +
 3. **Per-chain `P2PEscrowService` registry** — `map[int64]*P2PEscrowService`, each built
    from `blockchainService.ClientForChainID(id)` (registry already returns a BSC client;
    `main.go:69` already uses `ClientForNetwork`). Method bodies unchanged.
-4. **Per-chain `P2PTradeService` (the gating refactor, decision §4.7).** Resolve escrow +
-   chainID + version by ad/trade `ChainID`; multiplex in `P2PHandler` — including the
-   **admin dispute path** (`AdminResolveDispute`/`ConfirmAdminResolveDispute`,
-   `p2p_handler.go:1389,1417`), which today routes through the same single service and
-   would land a BSC `adminResolve` tx on Sonic. **Test:** sign + `ecrecover` a voucher on
-   *each* chain's domain (catches the version/chainId-mismatch class).
+4. **Per-chain `P2PTradeService` (the gating refactor, decision §4.7 — Option B).** Replace
+   the scalar `escrow`/`chainID`/`eip712Version` with the `P2PEscrowRegistry`; every
+   escrow-touching op resolves `(escrow, domainChainID, version)` from the **loaded
+   entity's `ChainID`** via `registry.Resolve(chainID)`. The registry stores `escrow` as
+   the **`P2PEscrowAdapter` interface** (so tests inject mocks) and the **RPC-probed**
+   domainChainID (honoring the eth_chainId invariant). `buildVoucherTypedData(ad)` stamps
+   that chain's domain. CreateAd + pool ops (no entity chain yet) use a `defaultChainID`
+   (Sonic) until Plan 5 adds an explicit `chainId`. The admin dispute path
+   (`AdminResolveDispute`/`ConfirmAdminResolveDispute`) loads the trade → resolves by its
+   chain like every other trade-scoped op. **Test:** a voucher signed for each chain's
+   domain `ecrecover`s to the seller; resolving an unconfigured chain errors (no Sonic
+   fallback).
 5. **Build a per-chain `eth_chainId` boot-probe LOOP** (net-new — today's probe at
    `main.go:172-184` is Sonic-only, no loop). Probe each active chain's RPC, feed the
    **RPC-reported** chainID into *its* domain (preserve the CLAUDE.md invariant), warn on
