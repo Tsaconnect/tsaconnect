@@ -2058,3 +2058,43 @@ func TestReconcileTrade_UnconfiguredChain_FailsLoud(t *testing.T) {
 		t.Errorf("status = %q after failed reconcile, want unchanged 'pending_payment'", after.Status)
 	}
 }
+
+// ─── CreateAd chain/asset validation ──────────────────────────────────────────
+
+// TestCreateAd_RejectsUnconfiguredChain: an ad on chain 56 must be rejected
+// when the registry (chain 146 only) has no escrow for chain 56.
+func TestCreateAd_RejectsUnconfiguredChain(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db) // registry: chain 146 only
+	sellerID := uuid.New()
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	params := makeCreateAdParams(pmID)
+	params.ChainID = 56 // BSC — not in the allow-all FromMap registry
+
+	_, err := svc.CreateAd(context.Background(), sellerID, "0x1234567890123456789012345678901234567890", params)
+	if err == nil {
+		t.Fatal("CreateAd with unconfigured chain 56 must return an error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Errorf("error = %v, want ErrInvalidParams", err)
+	}
+}
+
+// TestCreateAd_RejectsCuratedAssetMismatch: verify AssetAllowed rejects
+// MCGP on BSC via the registry directly (curated registry wiring into newService
+// is heavy; the registry-level test in p2p_escrow_registry_test.go is the
+// authoritative curation test per Plan 5 guidance).
+func TestCreateAd_RejectsCuratedAssetMismatch(t *testing.T) {
+	// Build a registry directly with BSC (chain 56) allowing only USDT/USDC.
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		56: {service: NewP2PEscrowServiceForChain(nil, nil, "0xBSC"), eip712Version: "2", domainChainID: 56, assets: []string{"USDT", "USDC"}},
+	}}
+	// Confirm MCGP is denied on BSC and USDT is allowed.
+	if reg.AssetAllowed(56, "MCGP") {
+		t.Error("MCGP must NOT be allowed on BSC")
+	}
+	if !reg.AssetAllowed(56, "USDT") {
+		t.Error("USDT must be allowed on BSC")
+	}
+}

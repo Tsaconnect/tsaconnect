@@ -558,6 +558,8 @@ type createAdRequest struct {
 	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"required,min=1"`
 	Terms            string   `json:"terms"`
 	SellerAddress    string   `json:"sellerAddress" binding:"required"`
+	// ChainID selects the P2P chain. Omit (or send 0) to default to Sonic.
+	ChainID int64 `json:"chainId"`
 }
 
 func (h *P2PHandler) CreateAd(c *gin.Context) {
@@ -611,6 +613,7 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		MaxLimit:         req.MaxLimit,
 		PaymentMethodIDs: pmIDs,
 		Terms:            req.Terms,
+		ChainID:          req.ChainID,
 	})
 	if mapServiceError(c, err) {
 		return
@@ -850,6 +853,11 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 	if seller := c.Query("sellerId"); seller != "" {
 		if sid, err := uuid.Parse(seller); err == nil {
 			f.SellerID = sid
+		}
+	}
+	if cid := c.Query("chainId"); cid != "" {
+		if n, err := strconv.ParseInt(cid, 10, 64); err == nil {
+			f.ChainID = n
 		}
 	}
 	if f.Status == "" {
