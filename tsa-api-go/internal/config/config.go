@@ -265,6 +265,42 @@ func Load() *Config {
 	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
 	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
 
+	// ── Per-chain P2P registry ────────────────────────────────────────────
+	// Sonic is always present (its escrow is preset/overridable above). BSC is
+	// added only when its escrow address is configured (dormant-by-default).
+	cfg.P2PChains = map[int64]P2PChainConfig{
+		cfg.SonicChainID: {
+			ChainID:       cfg.SonicChainID,
+			ChainKey:      "sonic",
+			EscrowAddress: cfg.P2PEscrowAddress,
+			EIP712Version: cfg.P2PEscrowEIP712Version,
+			Assets:        []string{"MCGP"},
+		},
+	}
+
+	bscNetwork := strings.ToLower(strings.TrimSpace(getEnv("BSC_NETWORK", "testnet")))
+	bscPreset, okBSC := bscPresets[bscNetwork]
+	if !okBSC {
+		log.Printf("[config] BSC_NETWORK=%q is unknown; falling back to 'testnet'", bscNetwork)
+		bscNetwork = "testnet"
+		bscPreset = bscPresets["testnet"]
+	}
+	bscEscrow := getEnv("P2P_ESCROW_ADDRESS_BSC", bscPreset.p2pEscrow)
+	if bscEscrow != "" {
+		cfg.P2PChains[bscPreset.chainID] = P2PChainConfig{
+			ChainID:       bscPreset.chainID,
+			ChainKey:      "bsc",
+			EscrowAddress: bscEscrow,
+			EIP712Version: getEnv("P2P_ESCROW_EIP712_VERSION_BSC", bscPreset.eip712Version),
+			Assets:        []string{"USDT", "USDC"},
+		}
+		log.Printf("[config] P2P chains enabled: sonic(%d) + bsc(%d, network=%s, escrow=%s)",
+			cfg.SonicChainID, bscPreset.chainID, bscNetwork, bscEscrow)
+	} else {
+		log.Printf("[config] P2P chains enabled: sonic(%d) only — BSC dormant (no escrow for BSC_NETWORK=%s)",
+			cfg.SonicChainID, bscNetwork)
+	}
+
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
