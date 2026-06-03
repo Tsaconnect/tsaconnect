@@ -1461,6 +1461,38 @@ func TestPrepareRelease_NotifiesBothParties(t *testing.T) {
 	}
 }
 
+// TestPrepareRelease_UnconfiguredChain_FailsLoud locks the Option-B safety
+// property: a trade whose ChainID isn't in the escrow registry must error out
+// of PrepareRelease (never default to another chain, never flip the trade to
+// releasing). Guards the resolve-before-mutation ordering.
+func TestPrepareRelease_UnconfiguredChain_FailsLoud(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)        // registry has chain 146 only
+	sellerID := uuid.New()
+	_, sellerAddr := newSellerKey(t)
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	trade := &models.P2PTrade{
+		ID: uuid.New(), AdID: uuid.New(), SellerID: sellerID, BuyerID: uuid.New(),
+		Token: "USDT", ChainID: 56, // BSC — NOT configured in the test registry
+		Funding: models.P2PTradeFundingPooled,
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPaid, OpenTxHash: "0xopen",
+		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	if _, err := svc.PrepareRelease(context.Background(), trade.ID, sellerID, sellerAddr); err == nil {
+		t.Fatalf("PrepareRelease on unconfigured chain 56 must error, got nil")
+	}
+	// And the trade must NOT have been flipped to releasing (resolve happens first).
+	var after models.P2PTrade
+	db.First(&after, "id = ?", trade.ID)
+	if after.Status != models.P2PTradeStatusPaid {
+		t.Errorf("status = %q after failed PrepareRelease, want still 'paid' (no mutation before fail-loud)", after.Status)
+	}
+}
+
 // TestConfirmRelease_BuyAd_DoesNotCreditRemaining locks the invariant that
 // releasing a buy-ad trade permanently consumes capacity: reserved is
 // decremented to zero but remaining is NOT re-credited. This guards against
