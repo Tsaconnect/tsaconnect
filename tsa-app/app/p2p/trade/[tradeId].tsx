@@ -36,7 +36,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -82,6 +82,7 @@ const STAGES: { key: P2PTrade['status']; label: string }[] = [
 
 const TradeDetailScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
+  const insets = useSafeAreaInsets();
   const { tradeId } = useLocalSearchParams<{ tradeId: string }>();
   const { currentUser } = useAuth();
   const user = currentUser as { id?: string } | null;
@@ -633,7 +634,11 @@ const TradeDetailScreen: React.FC = () => {
               alignItems: 'flex-end',
               gap: spacing.sm,
               paddingHorizontal: spacing.md,
-              paddingVertical: spacing.sm,
+              paddingTop: spacing.sm,
+              // Add the bottom safe-area inset so the input clears the phone's
+              // gesture bar / nav buttons (the screen's SafeAreaView only insets
+              // the top, since the composer is docked outside the scroll area).
+              paddingBottom: spacing.sm + insets.bottom,
               backgroundColor: colors.surface,
               borderTopWidth: 1,
               borderTopColor: colors.hairline,
