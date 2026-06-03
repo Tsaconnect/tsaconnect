@@ -223,16 +223,26 @@ type P2PEscrowService struct {
 	cfg             *config.Config
 }
 
-// NewP2PEscrowService constructs a service bound to the Sonic chain client.
-// The contract address is read from Config.P2PEscrowAddress; an empty
-// address is allowed (feature dormant) and surfaces as errors at call time
-// rather than panicking at startup.
-func NewP2PEscrowService(client *blockchain.EVMClient, cfg *config.Config) *P2PEscrowService {
+// NewP2PEscrowServiceForChain builds an escrow adapter bound to an explicit
+// escrow contract address (one per chain). `cfg` may be nil in tests that only
+// exercise address-dependent paths.
+func NewP2PEscrowServiceForChain(client *blockchain.EVMClient, cfg *config.Config, escrowAddress string) *P2PEscrowService {
 	return &P2PEscrowService{
 		client:          client,
-		contractAddress: cfg.P2PEscrowAddress,
+		contractAddress: escrowAddress,
 		cfg:             cfg,
 	}
+}
+
+// NewP2PEscrowService is the legacy single-chain constructor — binds the Sonic
+// escrow from cfg.P2PEscrowAddress. Retained for callers not yet migrated to
+// the per-chain registry (see Plan 2/3).
+func NewP2PEscrowService(client *blockchain.EVMClient, cfg *config.Config) *P2PEscrowService {
+	addr := ""
+	if cfg != nil {
+		addr = cfg.P2PEscrowAddress
+	}
+	return NewP2PEscrowServiceForChain(client, cfg, addr)
 }
 
 // ContractAddress returns the configured P2PEscrow contract address. Empty
