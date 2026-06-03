@@ -37,9 +37,9 @@ import {
 } from '@/components/ui';
 import { useTheme } from '@/theme';
 import { useAuth } from '../../../AuthContext/AuthContext';
-import type { ChainKey } from '../../../constants/chains';
 import {
   tradesApi,
+  p2pChainKey,
   unsignedTxToTxLike,
   type P2PTrade,
 } from '../../../services/p2p';
@@ -224,7 +224,7 @@ const DisputeWizardScreen: React.FC = () => {
 
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), callerAddress);
 
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
       broadcastHash = resp.hash;
 
       const conf = await tradesApi.confirmRaiseDispute(trade.id, resp.hash);

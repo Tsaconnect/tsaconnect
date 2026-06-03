@@ -54,10 +54,12 @@ import {
 } from '@/components/ui';
 import {
   adminP2pApi,
+  tradesApi,
+  p2pChainKey,
   unsignedTxToTxLike,
   type P2PDispute,
+  type P2PTrade,
 } from '../../../services/p2p';
-import type { ChainKey } from '../../../constants/chains';
 import {
   broadcastTransaction,
   getActiveWallet,
@@ -77,6 +79,7 @@ const ResolveDisputeScreen: React.FC = () => {
   const isAdmin = !!role && ADMIN_ROLES.has(role.toLowerCase());
 
   const [dispute, setDispute] = useState<P2PDispute | null>(null);
+  const [trade, setTrade] = useState<P2PTrade | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -91,11 +94,17 @@ const ResolveDisputeScreen: React.FC = () => {
       return;
     }
     setError(false);
-    const res = await adminP2pApi.getDispute(String(tradeId));
-    if (res.success && res.data) {
-      setDispute(res.data);
+    const [disputeRes, tradeRes] = await Promise.all([
+      adminP2pApi.getDispute(String(tradeId)),
+      tradesApi.get(String(tradeId)),
+    ]);
+    if (disputeRes.success && disputeRes.data) {
+      setDispute(disputeRes.data);
     } else {
       setError(true);
+    }
+    if (tradeRes.success && tradeRes.data) {
+      setTrade(tradeRes.data);
     }
     setLoading(false);
   }, [tradeId, isAdmin]);
@@ -127,7 +136,7 @@ const ResolveDisputeScreen: React.FC = () => {
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), adminAddress);
 
       setActing('Broadcasting…');
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      const resp = await broadcastTransaction(p2pChainKey(trade?.chainId), signed);
       broadcastHash = resp.hash;
 
       setActing('Confirming…');
@@ -154,7 +163,7 @@ const ResolveDisputeScreen: React.FC = () => {
     } finally {
       setActing('');
     }
-  }, [acting, dispute, resolution, note, toast]);
+  }, [acting, dispute, trade, resolution, note, toast]);
 
   // ─── Role gate ──────────────────────────────────────────────────────────
   if (!roleLoading && !isAdmin) {

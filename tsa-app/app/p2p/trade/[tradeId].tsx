@@ -55,7 +55,7 @@ import {
 } from '@/components/ui';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
-import { MAINNET_CHAINS, TESTNET_CHAINS, type ChainKey } from '../../../constants/chains';
+import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';
 import { useTradeRealtime } from '../../../hooks/useTradeRealtime';
@@ -63,6 +63,8 @@ import { useNotifications } from '../../../contexts/NotificationContext';
 import {
   formatTokenAmount,
   messagesApi,
+  p2pChainKey,
+  p2pTokenDecimals,
   ratingsApi,
   tradesApi,
   type P2PDispute,
@@ -73,7 +75,6 @@ import {
 import { broadcastTransaction, getActiveWallet, signTransaction } from '../../../services/wallet';
 import { getAuthHeaders } from '../../../services/walletApi';
 
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
 // only backstops dropped/missed events and system messages (which emit none).
 const SAFETY_POLL_INTERVAL_MS = 30000;
@@ -320,7 +321,7 @@ const TradeDetailScreen: React.FC = () => {
     );
   }
 
-  const tokenDecimals = TOKEN_DECIMALS[trade.token] ?? 18;
+  const tokenDecimals = p2pTokenDecimals(trade.chainId, trade.token);
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
@@ -375,7 +376,7 @@ const TradeDetailScreen: React.FC = () => {
       const signed = await signTransaction(toTxLike(prep.data.unsignedTx), sellerAddress);
 
       startActing('Broadcasting…');
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
       broadcastHash = resp.hash;
 
       startActing('Confirming…');
@@ -406,7 +407,7 @@ const TradeDetailScreen: React.FC = () => {
       const signed = await signTransaction(toTxLike(prep.data.unsignedTx), callerAddress);
 
       startActing('Broadcasting…');
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
       broadcastHash = resp.hash;
 
       startActing('Confirming…');
