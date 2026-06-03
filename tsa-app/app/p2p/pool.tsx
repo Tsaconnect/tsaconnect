@@ -32,12 +32,12 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { ChainKey } from '../../constants/chains';
 import {
   formatTokenAmount,
+  p2pChainKey,
+  p2pTokenDecimals,
   parseTokenAmount,
   poolApi,
-  TOKEN_DECIMALS,
   unsignedTxToTxLike,
 } from '../../services/p2p';
 import {
@@ -100,7 +100,8 @@ const P2PPoolScreen: React.FC = () => {
   // the right balance even if the user has multiple in-app HD wallets.
   const [wallet, setWallet] = useState<string>('');
 
-  const decimals = TOKEN_DECIMALS[token] ?? 18;
+  // TODO(Plan 7 Task 8): pool chain selector — use selected chain's chainId here.
+  const decimals = p2pTokenDecimals(undefined, token);
 
   const loadBalance = useCallback(async () => {
     setLoadingBal(true);
@@ -269,7 +270,8 @@ const P2PPoolScreen: React.FC = () => {
     setStage('Signing approve…');
     const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
     setStage('Broadcasting approve…');
-    await broadcastTransaction('sonic' as ChainKey, signed);
+    // TODO(Plan 7 Task 8): pool chain selector — route to selected chain.
+    await broadcastTransaction(p2pChainKey(undefined), signed);
     // No backend confirm step for approve — it's a token-contract allowance
     // bump. The subsequent deposit's transferFrom is what actually moves
     // funds; if approve hasn't mined by the time deposit broadcasts, the
@@ -307,7 +309,8 @@ const P2PPoolScreen: React.FC = () => {
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), w);
 
       setStage('Broadcasting…');
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      // TODO(Plan 7 Task 8): pool chain selector — route to selected chain.
+      const resp = await broadcastTransaction(p2pChainKey(undefined), signed);
       broadcastHash = resp.hash;
 
       setStage('Confirming…');

@@ -35,6 +35,8 @@ import {
   formatFiat,
   formatTokenAmount,
   hasSufficientAllowance,
+  p2pChainKey,
+  p2pTokenDecimals,
   parseTokenAmount,
   previewFiatFromToken,
   unsignedTxToTxLike,
@@ -49,7 +51,6 @@ import {
   getActiveWallet,
   signTransaction,
 } from '../../../services/wallet';
-import type { ChainKey } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
 import { useTheme } from '@/theme';
@@ -136,9 +137,9 @@ const AdDetailScreen: React.FC = () => {
   const tokenSupported = ad ? P2P_TOKEN_DECIMALS[ad.token] !== undefined : false;
   // The sell/deposit path NEVER uses this fallback: it's gated by `tokenSupported`
   // (an unknown token blocks the sell flow entirely), so base-unit math always
-  // uses a known decimals value. The 18 fallback is display-only for the sell-ad
+  // uses a known decimals value. The 6 fallback is display-only for the sell-ad
   // (buy) path, where no base-unit deposit math runs.
-  const tokenDecimals = ad ? (P2P_TOKEN_DECIMALS[ad.token] ?? 18) : 6;
+  const tokenDecimals = ad ? p2pTokenDecimals(ad.chainId, ad.token) : 6;
 
   // For sell-ads: preview token amount the buyer receives.
   const tokenPreview = useMemo(() => {
@@ -209,8 +210,8 @@ const AdDetailScreen: React.FC = () => {
       setSubmitStage('Signing transaction…');
       const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), buyerAddress);
 
-      setSubmitStage('Broadcasting to Sonic…');
-      const txResp = await broadcastTransaction('sonic' as ChainKey, signed);
+      setSubmitStage('Broadcasting…');
+      const txResp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
       const txHash = txResp.hash;
 
       setSubmitStage('Confirming on chain…');
@@ -298,7 +299,7 @@ const AdDetailScreen: React.FC = () => {
           unsignedTxToTxLike(approveRes.data.unsignedTx),
           sellerAddress,
         );
-        const approveTxResp = await broadcastTransaction('sonic' as ChainKey, approveSigned);
+        const approveTxResp = await broadcastTransaction(p2pChainKey(ad.chainId), approveSigned);
         const approveTxHash = approveTxResp.hash;
 
         // Wait for the approve tx to be mined before calling open — the
@@ -352,8 +353,8 @@ const AdDetailScreen: React.FC = () => {
       setSubmitStage('Signing deposit transaction…');
       const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), sellerAddress);
 
-      setSubmitStage('Broadcasting to Sonic…');
-      const txResp = await broadcastTransaction('sonic' as ChainKey, signed);
+      setSubmitStage('Broadcasting…');
+      const txResp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
       const txHash = txResp.hash;
 
       setSubmitStage('Confirming on chain…');

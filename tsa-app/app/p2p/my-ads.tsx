@@ -8,11 +8,11 @@ import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { ChainKey } from '../../constants/chains';
 import {
   adsApi,
   formatTokenAmount,
-  TOKEN_DECIMALS,
+  p2pChainKey,
+  p2pTokenDecimals,
   unsignedTxToTxLike,
   type P2PAd,
 } from '../../services/p2p';
@@ -122,7 +122,7 @@ const MyAdsScreen: React.FC = () => {
       const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
-      const resp = await broadcastTransaction('sonic' as ChainKey, signed);
+      const resp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
       broadcastHash = resp.hash;
       const conf = await adsApi.confirmCancel(ad.id, resp.hash);
       if (!conf.success) throw new Error(conf.message || 'Confirm failed');
@@ -266,7 +266,7 @@ const AdCard: React.FC<{
   onCancel: (ad: P2PAd) => void;
 }> = ({ ad, busy, onTogglePause, onCancel }) => {
   const { spacing } = useTheme();
-  const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
+  const decimals = p2pTokenDecimals(ad.chainId, ad.token);
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const reserved = formatTokenAmount(ad.reserved, decimals, 2);
   const total = formatTokenAmount(ad.amount, decimals, 2);
