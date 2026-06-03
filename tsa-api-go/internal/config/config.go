@@ -26,7 +26,7 @@ type chainPreset struct {
 	eip712Version   string
 }
 
-// sonicPresets holds the canonical contract deployment for each network.
+// sonicPresets holds the canonical Sonic P2P deployment for each network.
 // To flip the server between testnet and mainnet, set SONIC_NETWORK and
 // restart — no other env vars need to change. Individual addresses can
 // still be overridden via the legacy SONIC_RPC_URL / *_TOKEN_ADDRESS /
@@ -260,7 +260,7 @@ func Load() *Config {
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
 	// you need to point at a hot-fix deployment.
-	cfg.P2PEscrowAddress = getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow)
+	cfg.P2PEscrowAddress = strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow))
 	// Must match the deployed contract's EIP-712 domain version (moves in
 	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
 	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
@@ -285,7 +285,7 @@ func Load() *Config {
 		bscNetwork = "testnet"
 		bscPreset = bscPresets["testnet"]
 	}
-	bscEscrow := getEnv("P2P_ESCROW_ADDRESS_BSC", bscPreset.p2pEscrow)
+	bscEscrow := strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS_BSC", bscPreset.p2pEscrow))
 	if bscEscrow != "" {
 		cfg.P2PChains[bscPreset.chainID] = P2PChainConfig{
 			ChainID:       bscPreset.chainID,

@@ -52,6 +52,32 @@ func TestLoad_BSCEnabledWhenEscrowConfigured(t *testing.T) {
 	}
 }
 
+func TestLoad_BSCUnknownNetworkFallsBackToTestnet(t *testing.T) {
+	t.Setenv("BSC_NETWORK", "garbage")
+	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "0x00000000000000000000000000000000000bsc01")
+	cfg := Load()
+	if _, ok := cfg.P2PChains[97]; !ok {
+		t.Fatalf("expected BSC testnet (97) after unknown-network fallback, got %+v", cfg.P2PChains)
+	}
+	if _, mainnet := cfg.P2PChains[56]; mainnet {
+		t.Errorf("unknown BSC_NETWORK must not select mainnet (56)")
+	}
+}
+
+func TestLoad_BSCVersionEnvOverride(t *testing.T) {
+	t.Setenv("BSC_NETWORK", "testnet")
+	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "0x00000000000000000000000000000000000bsc01")
+	t.Setenv("P2P_ESCROW_EIP712_VERSION_BSC", "7")
+	cfg := Load()
+	bsc, ok := cfg.P2PChains[97]
+	if !ok {
+		t.Fatalf("expected BSC testnet (97), got %+v", cfg.P2PChains)
+	}
+	if bsc.EIP712Version != "7" {
+		t.Errorf("bsc EIP712Version = %q, want 7 (env override)", bsc.EIP712Version)
+	}
+}
+
 // The legacy scalar fields still mirror the Sonic entry (back-compat for
 // consumers not yet migrated to P2PChains).
 func TestLoad_LegacyScalarsMirrorSonic(t *testing.T) {
