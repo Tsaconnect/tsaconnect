@@ -1419,6 +1419,48 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	}
 }
 
+// TestPrepareRelease_NotifiesBothParties locks the both-parties notification on
+// release-start: the seller (releasing) AND the buyer ("funds on the way") each
+// get a P2PTradeReleasing event. Release-start was previously a seller-only emit.
+func TestPrepareRelease_NotifiesBothParties(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, bus := newService(t, db)
+	sellerID := uuid.New()
+	buyerID := uuid.New()
+	_, sellerAddr := newSellerKey(t)
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	trade := &models.P2PTrade{
+		ID: uuid.New(), AdID: uuid.New(), SellerID: sellerID, BuyerID: buyerID,
+		Token: "USDT", ChainID: 146, Funding: models.P2PTradeFundingPooled,
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPaid, OpenTxHash: "0xopen",
+		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	if _, err := svc.PrepareRelease(context.Background(), trade.ID, sellerID, sellerAddr); err != nil {
+		t.Fatalf("PrepareRelease: %v", err)
+	}
+	var sellerNotified, buyerNotified bool
+	for _, e := range bus.published {
+		if e.Type == events.P2PTradeReleasing {
+			if e.UserID == sellerID {
+				sellerNotified = true
+			}
+			if e.UserID == buyerID {
+				buyerNotified = true
+			}
+		}
+	}
+	if !sellerNotified {
+		t.Errorf("expected seller to receive P2PTradeReleasing")
+	}
+	if !buyerNotified {
+		t.Errorf("expected buyer to receive P2PTradeReleasing (release-start heads-up)")
+	}
+}
+
 // TestConfirmRelease_BuyAd_DoesNotCreditRemaining locks the invariant that
 // releasing a buy-ad trade permanently consumes capacity: reserved is
 // decremented to zero but remaining is NOT re-credited. This guards against

@@ -1311,6 +1311,16 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		}
 		s.audit(ctx, models.P2PAuditTradeReleasing, &sellerID, &trade.AdID, &trade.ID, nil)
 		s.emit(events.P2PTradeReleasing, sellerID, "Releasing USDT…", "", map[string]any{"tradeId": trade.ID})
+		// Notify the buyer too — they should know their funds are on the way as
+		// soon as the seller starts releasing, not only once it confirms. (The
+		// other lifecycle steps already notify both parties; release-start was
+		// the one seller-only emit.) Message is side-aware: on a buy-ad the
+		// on-chain buyer is the merchant receiving the depositor's crypto.
+		buyerReleasingMsg := "The seller is releasing your USDT — it should arrive shortly."
+		if trade.Funding == models.P2PTradeFundingDepositedByTaker {
+			buyerReleasingMsg = "The seller is releasing the crypto — it should arrive shortly."
+		}
+		s.emit(events.P2PTradeReleasing, trade.BuyerID, "Release in progress", buyerReleasingMsg, map[string]any{"tradeId": trade.ID})
 	} else {
 		// Retry path: trade was already Releasing. Bump updated_at so the
 		// chain reconciler's stale-release rollback window resets — protects
