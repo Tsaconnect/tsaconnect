@@ -7,7 +7,7 @@ import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { formatTokenAmount, tradesApi, type P2PTrade } from '../../services/p2p';
+import { formatTokenAmount, p2pTokenDecimals, tradesApi, type P2PTrade } from '../../services/p2p';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { useTheme } from '@/theme';
 import {
@@ -23,8 +23,6 @@ import {
   StatusPill,
   Text,
 } from '@/components/ui';
-
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 
 type Role = 'all' | 'buyer' | 'seller';
 type Bucket = 'active' | 'done';
@@ -174,7 +172,7 @@ const MyTradesScreen: React.FC = () => {
 
 const TradeCard: React.FC<{ trade: P2PTrade; userId?: string }> = ({ trade, userId }) => {
   const { colors, spacing } = useTheme();
-  const decimals = TOKEN_DECIMALS[trade.token] ?? 18;
+  const decimals = p2pTokenDecimals(trade.chainId, trade.token);
   const amount = formatTokenAmount(trade.tokenAmount, decimals, 4);
   // Derive the viewer's role per-trade (the list can mix both in the "All" view).
   const viewerRole: 'buyer' | 'seller' = trade.buyerId === userId ? 'buyer' : 'seller';
