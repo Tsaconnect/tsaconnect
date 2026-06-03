@@ -905,7 +905,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return nil, nil, err
 	}
 
-	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1063,9 +1063,9 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	// caller only supplies fiat (keeps the path usable fiat-first).
 	var tokenAmount, fiatAmount *big.Int
 	if strings.TrimSpace(params.TokenAmount) != "" {
-		tokenAmount, fiatAmount, err = computeFiatFromToken(params.TokenAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+		tokenAmount, fiatAmount, err = computeFiatFromToken(params.TokenAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
 	} else {
-		tokenAmount, fiatAmount, err = computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.Token))
+		tokenAmount, fiatAmount, err = computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
 	}
 	if err != nil {
 		return nil, nil, err
@@ -2687,7 +2687,7 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 		if !okR || rem.Cmp(amount) < 0 {
 			continue // not enough capacity
 		}
-		_, fiat, err := computeFiatFromToken(p.Amount, ad.Rate, tokenDecimalsFor(ad.Token))
+		_, fiat, err := computeFiatFromToken(p.Amount, ad.Rate, tokenDecimalsFor(ad.ChainID, ad.Token))
 		if err != nil {
 			continue
 		}
@@ -3498,11 +3498,21 @@ func stringifyUUIDs(ids []uuid.UUID) datatypes.JSONSlice[string] {
 	return datatypes.JSONSlice[string](out)
 }
 
-// tokenDecimalsFor returns the on-chain decimals for the Phase-1 token set.
-// Phase 2 will replace this with a DB-backed registry, but for the three
-// tokens we ship the lookup is constant.
-func tokenDecimalsFor(symbol string) int {
-	switch strings.ToUpper(symbol) {
+// tokenDecimalsFor returns the on-chain ERC-20 decimals for a token on a given
+// chain. Stablecoins differ by chain family: Sonic USDT/USDC are 6 decimals,
+// the Binance-Peg BSC USDT/USDC are 18. MCGP (Sonic-only) is 18. Unknown chains
+// fall back to the Sonic-style assumption (6 for stables) — the only configured
+// P2P chains are Sonic (146/14601) and BSC (56/97).
+func tokenDecimalsFor(chainID int64, symbol string) int {
+	sym := strings.ToUpper(symbol)
+	switch chainID {
+	case 56, 97: // BSC mainnet / testnet
+		switch sym {
+		case "USDT", "USDC":
+			return 18
+		}
+	}
+	switch sym {
 	case "USDT", "USDC":
 		return 6
 	case "MCGP":
