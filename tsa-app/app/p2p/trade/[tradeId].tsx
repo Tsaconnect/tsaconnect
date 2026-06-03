@@ -31,11 +31,13 @@ import {
   Alert,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   ScrollView,
   TextInput,
   View,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import {
@@ -49,10 +51,11 @@ import {
   Spinner,
   StatusPill,
   Text,
+  useToast,
 } from '@/components/ui';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
-import type { ChainKey } from '../../../constants/chains';
+import { MAINNET_CHAINS, TESTNET_CHAINS, type ChainKey } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';
 import { useTradeRealtime } from '../../../hooks/useTradeRealtime';
@@ -505,6 +508,13 @@ const TradeDetailScreen: React.FC = () => {
                 </Text>
               )}
             </SummaryLine>
+            {/* On-chain release receipt — both buyer and seller can verify the
+                released tokens on the block explorer. */}
+            {trade.status === 'released' && !!trade.releaseTxHash && (
+              <SummaryLine label="Transaction">
+                <SettlementTxLink chainId={trade.chainId} txHash={trade.releaseTxHash} />
+              </SummaryLine>
+            )}
           </Card>
 
           {!isTerminal && (
@@ -948,6 +958,52 @@ const MessageBubble: React.FC<{ message: P2PMessage; isMine: boolean }> = ({
   );
 };
 
+// On-chain settlement receipt: truncated tx hash that opens the block explorer
+// on tap, plus a copy affordance. Shown to BOTH parties on a released trade so
+// either can independently verify the released tokens on-chain.
+const SettlementTxLink: React.FC<{ chainId: number; txHash: string }> = ({ chainId, txHash }) => {
+  const { colors, spacing } = useTheme();
+  const toast = useToast();
+  // Reconciler-repaired release: no real tx hash to show. Be honest rather than
+  // render a broken link / copy a useless "reconciled" string.
+  if (!isTxHash(txHash)) {
+    return (
+      <Text variant="bodySm" weight="600" color="textSecondary">
+        Settled (reconciled)
+      </Text>
+    );
+  }
+  const url = explorerTxUrl(chainId, txHash);
+  const short = `${txHash.slice(0, 6)}…${txHash.slice(-4)}`;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+      <PressableScale
+        onPress={() => {
+          if (url) Linking.openURL(url).catch(() => toast.error('Could not open the explorer'));
+        }}
+        disabled={!url}
+        accessibilityRole="link"
+        accessibilityLabel="View release transaction on the block explorer"
+      >
+        <Text variant="bodySm" weight="600" color={url ? 'accent' : 'textSecondary'} numeric>
+          {short}
+        </Text>
+      </PressableScale>
+      <PressableScale
+        onPress={async () => {
+          await Clipboard.setStringAsync(txHash);
+          toast.success('Transaction hash copied');
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Copy transaction hash"
+        hitSlop={8}
+      >
+        <Icon name="copy" size={14} color={colors.textMuted} />
+      </PressableScale>
+    </View>
+  );
+};
+
 const SummaryLine: React.FC<{ label: string; children: React.ReactNode }> = ({
   label,
   children,
@@ -1050,6 +1106,24 @@ function toTxLike(tx: UnsignedTx) {
     gasPrice: tx.gasPrice,
     chainId: tx.chainId ? Number(tx.chainId) : undefined,
   };
+}
+
+// A real 32-byte tx hash. The chain reconciler repairs a dropped confirm with a
+// "reconciled" marker (not a hash), so guard against building a broken link.
+function isTxHash(s: string): boolean {
+  return /^0x[0-9a-fA-F]{64}$/.test(s);
+}
+
+// Build a block-explorer tx URL from the trade's chainId. Scans both mainnet
+// and testnet registries (the trade carries an explicit chainId, which may
+// differ from the app's currently-active network). Returns null if unknown.
+function explorerTxUrl(chainId: number, txHash: string): string | null {
+  if (!isTxHash(txHash)) return null;
+  const chain = [
+    ...Object.values(MAINNET_CHAINS),
+    ...Object.values(TESTNET_CHAINS),
+  ].find((c) => c.chainId === chainId);
+  return chain ? `${chain.explorerUrl}/tx/${txHash}` : null;
 }
 
 function formatRelative(iso: string): string {
