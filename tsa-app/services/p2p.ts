@@ -19,6 +19,7 @@
 
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
+import { getChainByChainId, type ChainKey } from '../constants/chains';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -840,12 +841,32 @@ export function previewFiatFromToken(
 /**
  * Token decimals lookup for the small whitelist of P2P-supported tokens.
  * Falls back to 18 (ERC-20 default) for anything unknown.
+ *
+ * @deprecated Use `p2pTokenDecimals(chainId, symbol)` for per-chain accuracy.
+ *   This map is kept for the tokenSupported guard in ad/[adId].tsx (key-existence
+ *   check) and for legacy code paths that have no chainId context.
  */
 export const TOKEN_DECIMALS: Record<string, number> = {
   USDT: 6,
   USDC: 6,
   MCGP: 18,
 };
+
+/** On-chain decimals for a token on a chain. BSC (56/97) USDT/USDC are 18;
+ *  Sonic (146/14601) USDT/USDC are 6; MCGP is 18. */
+export function p2pTokenDecimals(chainId: number | undefined, symbol: string): number {
+  const sym = (symbol || '').toUpperCase();
+  if (chainId === 56 || chainId === 97) {
+    if (sym === 'USDT' || sym === 'USDC') return 18;
+  }
+  if (sym === 'USDT' || sym === 'USDC') return 6;
+  return 18; // MCGP + default
+}
+
+/** ChainKey for a P2P entity's chainId; falls back to 'sonic'. */
+export function p2pChainKey(chainId: number | undefined): ChainKey {
+  return (chainId && getChainByChainId(chainId)?.key) || 'sonic';
+}
 
 /**
  * Adapt the backend's UnsignedTx (hex without 0x prefix; chainId as string)

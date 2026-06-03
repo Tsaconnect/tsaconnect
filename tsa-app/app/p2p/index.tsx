@@ -10,6 +10,7 @@ import {
   adsApi,
   distinctAdProviders,
   formatTokenAmount,
+  p2pTokenDecimals,
   type P2PAd,
 } from '../../services/p2p';
 import { useUserRole } from '../../hooks/useUserRole';
@@ -34,7 +35,6 @@ import {
   Text,
 } from '@/components/ui';
 
-const TOKEN_DECIMALS: Record<string, number> = { USDT: 6, USDC: 6, MCGP: 18 };
 const TOKENS = ['USDT', 'USDC', 'MCGP'];
 
 const P2PMarketScreen: React.FC = () => {
@@ -262,7 +262,7 @@ const P2PMarketScreen: React.FC = () => {
 
 const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide }) => {
   const { colors, spacing } = useTheme();
-  const decimals = TOKEN_DECIMALS[ad.token] ?? 18;
+  const decimals = p2pTokenDecimals(ad.chainId, ad.token);
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
   const isFloat = ad.rateType === 'float';
   const isStale = !!ad.rateStale;
