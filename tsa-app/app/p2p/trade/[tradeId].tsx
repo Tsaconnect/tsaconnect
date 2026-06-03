@@ -65,6 +65,7 @@ import {
   messagesApi,
   ratingsApi,
   tradesApi,
+  type P2PDispute,
   type P2PMessage,
   type P2PTrade,
   type UnsignedTx,
@@ -97,6 +98,9 @@ const TradeDetailScreen: React.FC = () => {
   const [composerText, setComposerText] = useState('');
   const [composerImage, setComposerImage] = useState<string | null>(null);
   const [rated, setRated] = useState(false);
+  // Dispute for this trade — fetched lazily on a resolved trade so we can show
+  // the on-chain resolution tx (resolveTxHash lives on the dispute, not trade).
+  const [dispute, setDispute] = useState<P2PDispute | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   // Chat is collapsed by default — it's secondary to the trade actions. The
@@ -265,6 +269,19 @@ const TradeDetailScreen: React.FC = () => {
       if (fresh.length) setUnread((n) => n + fresh.length);
     }
   }, [loading, messages, chatOpen, user?.id]);
+
+  // On a resolved trade, fetch the dispute once to surface its on-chain
+  // resolution tx (both parties can then verify the admin settlement).
+  useEffect(() => {
+    if (trade?.status !== 'resolved' || !tradeId) return;
+    let cancelled = false;
+    tradesApi.getDispute(String(tradeId)).then((res) => {
+      if (!cancelled && res.success && res.data) setDispute(res.data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [trade?.status, tradeId]);
 
   if (loading || !trade) {
     return (
@@ -508,11 +525,21 @@ const TradeDetailScreen: React.FC = () => {
                 </Text>
               )}
             </SummaryLine>
-            {/* On-chain release receipt — both buyer and seller can verify the
-                released tokens on the block explorer. */}
+            {/* On-chain receipts — both buyer and seller can independently
+                verify funding + settlement on the block explorer. */}
+            {!!trade.openTxHash && isTxHash(trade.openTxHash) && (
+              <SummaryLine label="Escrow tx">
+                <SettlementTxLink chainId={trade.chainId} txHash={trade.openTxHash} />
+              </SummaryLine>
+            )}
             {trade.status === 'released' && !!trade.releaseTxHash && (
-              <SummaryLine label="Transaction">
+              <SummaryLine label="Release tx">
                 <SettlementTxLink chainId={trade.chainId} txHash={trade.releaseTxHash} />
+              </SummaryLine>
+            )}
+            {trade.status === 'resolved' && !!dispute?.resolveTxHash && (
+              <SummaryLine label="Resolution tx">
+                <SettlementTxLink chainId={trade.chainId} txHash={dispute.resolveTxHash} />
               </SummaryLine>
             )}
           </Card>
