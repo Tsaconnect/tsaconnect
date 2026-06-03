@@ -2010,3 +2010,51 @@ func TestCreateAd_RPCFailureNoLongerSilent(t *testing.T) {
 		t.Fatalf("expected ErrInvalidParams when ReadBalance errors, got %v", err)
 	}
 }
+
+func TestTokenDecimalsFor_PerChain(t *testing.T) {
+	cases := []struct {
+		chainID int64
+		symbol  string
+		want    int
+	}{
+		{146, "USDT", 6}, {146, "USDC", 6}, {146, "MCGP", 18}, // Sonic mainnet
+		{14601, "USDT", 6},                                     // Sonic testnet
+		{56, "USDT", 18}, {56, "USDC", 18},                     // BSC mainnet (Binance-Peg = 18)
+		{97, "USDT", 18}, {97, "USDC", 18},                     // BSC testnet
+		{146, "WTF", 18},                                       // unknown symbol → 18
+	}
+	for _, c := range cases {
+		if got := tokenDecimalsFor(c.chainID, c.symbol); got != c.want {
+			t.Errorf("tokenDecimalsFor(%d,%q) = %d, want %d", c.chainID, c.symbol, got, c.want)
+		}
+	}
+}
+
+// TestReconcileTrade_UnconfiguredChain_FailsLoud locks §8.5: a non-terminal
+// trade whose ChainID isn't in the escrow registry must error out of
+// reconciliation (never read the wrong chain's escrow and orphan-reclaim it).
+func TestReconcileTrade_UnconfiguredChain_FailsLoud(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db) // registry has chain 146 only
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	trade := &models.P2PTrade{
+		ID: uuid.New(), AdID: uuid.New(), SellerID: uuid.New(), BuyerID: uuid.New(),
+		Token: "USDT", ChainID: 56, // BSC — not configured in the test registry
+		Funding: models.P2PTradeFundingPooled,
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPendingPayment,
+		ExpiresAt: now.Add(-time.Hour), CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now,
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	if _, err := svc.ReconcileTrade(context.Background(), trade.ID); err == nil {
+		t.Fatalf("ReconcileTrade on unconfigured chain 56 must error, got nil")
+	}
+	// The trade must NOT have been orphan-reclaimed/cancelled by mis-reading Sonic.
+	var after models.P2PTrade
+	db.First(&after, "id = ?", trade.ID)
+	if after.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("status = %q after failed reconcile, want unchanged 'pending_payment'", after.Status)
+	}
+}
