@@ -79,14 +79,14 @@ func main() {
 
 	// Initialize the P2P escrow adapter (separate contract; safe to no-op
 	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
+	// Kept only for the on-chain owner log below; the trade service now resolves
+	// escrow per-chain via the registry.
 	p2pEscrowService := services.NewP2PEscrowService(p2pSonicClient, cfg)
 
 	// Per-chain escrow registry (Sonic + any enabled BSC). Boot verification
-	// (eth_chainId + bytecode per chain) runs inside the constructor. The single
-	// p2pEscrowService above stays wired to the trade service until Plan 3
-	// migrates it to this registry.
+	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
+	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
-	_ = p2pEscrowRegistry // consumed by the trade service in Plan 3
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -147,29 +147,13 @@ func main() {
 		merchantStats *services.MerchantStatsService
 	)
 	if cfg.P2PEscrowAddress != "" && p2pSonicClient != nil {
-		// Trust the RPC for the chainID we put into the EIP-712 domain.
-		// Using cfg.SonicChainID here is dangerous: it's a separate env-driven
-		// value (SONIC_CHAIN_ID) that can drift from cfg.Networks[*][sonic].ChainID
-		// (the value the p2pSonicClient is actually pointing at). When they
-		// diverge, the FE signs typedData with chainId=A but the contract
-		// hashes with block.chainid=B → ecrecover returns a "fake" address
-		// and SignAd rejects every signature with
-		// "signature recovered to 0x… expected 0x…". We probe eth_chainId
-		// instead so the value going into the domain is whatever the chain
-		// itself reports.
-		probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		actualChainID, probeErr := p2pSonicClient.Client.ChainID(probeCtx)
-		probeCancel()
-		domainChainID := cfg.SonicChainID
-		if probeErr != nil {
-			log.Printf("[config] WARNING: eth_chainId probe failed on p2p Sonic RPC: %v — falling back to configured SonicChainID=%d", probeErr, cfg.SonicChainID)
-		} else {
-			domainChainID = actualChainID.Int64()
-			if domainChainID != cfg.SonicChainID {
-				log.Printf("[config] WARNING: SONIC_CHAIN_ID config=%d disagrees with RPC eth_chainId=%d — using %d (the chain's value) for EIP-712 domain so signatures stay valid", cfg.SonicChainID, domainChainID, domainChainID)
-			}
-		}
-		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowService, p2pService, eventBus, domainChainID, cfg.P2PEscrowEIP712Version)
+		// The trade service resolves escrow + EIP-712 domain (chainId, version)
+		// per entity-chain from the registry, which probes eth_chainId per chain
+		// at boot (see NewP2PEscrowRegistry / verifyP2PChainAtBoot). cfg.SonicChainID
+		// is just the default chain for entity-less ops (CreateAd, pool ops); the
+		// registry corrects the EIP-712 domain chainId to whatever the RPC reports
+		// so signatures stay valid even if SONIC_CHAIN_ID drifts from the chain.
+		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowRegistry, p2pService, eventBus, cfg.SonicChainID)
 		// Resolve token symbols against the active Sonic network so a
 		// SONIC_NETWORK=testnet boot looks up testnet token addresses
 		// instead of falling back to the mainnet defaults (which would
