@@ -10,8 +10,8 @@ func TestNewP2PEscrowServiceForChain_UsesExplicitAddress(t *testing.T) {
 }
 
 func TestP2PEscrowRegistry_For_HitAndFailLoudMiss(t *testing.T) {
-	reg := &P2PEscrowRegistry{byChain: map[int64]*P2PEscrowService{
-		146: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"),
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		146: {service: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"), eip712Version: "1"},
 	}}
 
 	got, err := reg.For(146)
@@ -25,5 +25,36 @@ func TestP2PEscrowRegistry_For_HitAndFailLoudMiss(t *testing.T) {
 	// Fail-loud: an unconfigured chain must ERROR, never default to another chain.
 	if _, err := reg.For(56); err == nil {
 		t.Errorf("For(56) on unconfigured chain returned nil error — must fail loud")
+	}
+}
+
+func TestP2PEscrowRegistry_EIP712VersionFor(t *testing.T) {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		146: {service: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"), eip712Version: "1"},
+	}}
+	v, err := reg.EIP712VersionFor(146)
+	if err != nil || v != "1" {
+		t.Errorf("EIP712VersionFor(146) = (%q,%v), want (\"1\",nil)", v, err)
+	}
+	if _, err := reg.EIP712VersionFor(56); err == nil {
+		t.Errorf("EIP712VersionFor(56) must fail loud on unconfigured chain")
+	}
+}
+
+func TestP2PEscrowRegistry_NilSafety(t *testing.T) {
+	var r *P2PEscrowRegistry
+	if _, err := r.For(146); err == nil {
+		t.Errorf("nil registry For must error, not panic/nil")
+	}
+	if ids := r.ChainIDs(); ids != nil {
+		t.Errorf("nil registry ChainIDs = %v, want nil", ids)
+	}
+	// nil bs/cfg must not panic and yields an empty (usable) registry.
+	reg := NewP2PEscrowRegistry(nil, nil)
+	if reg == nil {
+		t.Fatalf("NewP2PEscrowRegistry(nil,nil) returned nil")
+	}
+	if _, err := reg.For(146); err == nil {
+		t.Errorf("empty registry For must fail loud")
 	}
 }
