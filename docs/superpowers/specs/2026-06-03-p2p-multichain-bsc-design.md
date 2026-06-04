@@ -282,9 +282,10 @@ sites + chain-choice UI.
    upgrade (the V2 contract is relayer-ready).
 4. ✅ **MCGP on BSC: no** — `mcgpAddress = address(0)` in the BSC deploy (§6.2).
 5. ✅ **Marketplace: asset-first**, chain shown as a badge + receive-chain confirm (§4.5).
-6. ⏳ **OPEN — owner/admin key custody on BSC:** same multisig as Sonic vs chain-specific.
-   Needed at **BSC deploy time** (Phase 1), not for the backend/app build; does not block
-   starting the refactor. **Owner's call.**
+6. ✅ **Owner/admin key custody on BSC: same as Sonic** (resolved 2026-06-04). BSC reuses
+   Sonic's `OWNER_ADDRESS` / `ADMIN_ADDRESSES`; `SYSTEM_WALLET_ADDRESS` =
+   `0xaF326D5D242C9A55590540f14658adDDd3586A8d` (the backend's configured system wallet).
+   See the Plan 6 hand-off for the filled-in deploy command.
 7. ✅ **Chain-enablement:** "enabled when escrow address configured" (dormant-by-default).
 
 ---

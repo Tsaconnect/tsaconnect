@@ -7,11 +7,11 @@
 ---
 
 ## 0. Prerequisites (your decisions/assets)
-- **Key custody (§10.6):** decide OWNER / ADMIN / SYSTEM_WALLET for the BSC escrow (same multisig as Sonic, or chain-specific). These go into the deploy env below.
-- **Funded BSC deployer:** the EOA running the deploy needs **tBNB** (testnet) / **BNB** (mainnet) for gas. Set its key as `PRIVATE_KEY` (or whatever `hardhat.config.js` expects) in `smart-contracts/.env`.
+- **Key custody (§10.6) — RESOLVED: same as Sonic.** `OWNER_ADDRESS` + `ADMIN_ADDRESSES` = the exact values you used for the **Sonic** `P2PEscrowV2` deploy; `SYSTEM_WALLET_ADDRESS=0xaF326D5D242C9A55590540f14658adDDd3586A8d` (the backend's configured system wallet). These addresses aren't committed to the repo — reuse your Sonic deploy values.
+- **Funded BSC deployer:** the EOA running the deploy needs **tBNB** (testnet) / **BNB** (mainnet) for gas. Set its key as `PRIVATE_KEY` (or whatever `hardhat.config.js` expects) in `smart-contracts/.env`. *(Can't get tBNB? You can validate the whole flow on a local chain first — see the note in §1.5.)*
 - **BSC token addresses:**
   - Mainnet (known): USDT `0x55d398326f99059fF775485246999027B3197955`, USDC `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d`.
-  - **Testnet:** pick/deploy BSC-testnet USDT/USDC test tokens (faucet tokens or your own mock ERC-20s) and note their addresses — there's no canonical pair.
+  - **Testnet:** deploy 18-decimal mocks via `scripts/deploy-bsc-test-tokens.js` (§1.5) — it prints the addresses + the exact env lines. ⚠️ Must be **18 decimals** (matches real BSC + the backend's per-(chain,token) decimals) — do NOT reuse Sonic's 6-decimal mocks.
 - `BSCSCAN_API_KEY` in `.env` if you want source verification.
 
 ---
@@ -24,13 +24,26 @@ OWNER_ADDRESS=<owner> SYSTEM_WALLET_ADDRESS=<systemWallet> CHECK_ONLY=1 \
 ```
 Confirms compilation + the proxy deploy path on BSC testnet without sending config txs.
 
+## 1.5 Deploy the BSC test stablecoins (testnet only)
+```bash
+cd smart-contracts
+# MINT_TO=<tester wallet>   # optional; defaults to the deployer
+npx hardhat run scripts/deploy-bsc-test-tokens.js --network bscTestnet
+```
+Deploys 18-decimal `USDT`/`USDC` mocks + mints, and prints the addresses plus the
+exact `ACCEPTED_TOKENS=…` / `BSC_USDT_TOKEN_ADDRESS=…` / `BSC_USDC_TOKEN_ADDRESS=…`
+lines to paste into steps 2–3. **No-tBNB validation:** run the same script (and
+the escrow deploy) with `--network hardhat` or against `npx hardhat node`
+(`--network localhost`, point `BSC_TESTNET_RPC` at `http://localhost:8545`) to
+exercise the entire BSC path locally before you have testnet BNB.
+
 ## 2. Deploy to BSC testnet
 ```bash
 cd smart-contracts
-OWNER_ADDRESS=<owner> \
-ADMIN_ADDRESSES=<admin1,admin2> \
-SYSTEM_WALLET_ADDRESS=<systemWallet> \
-ACCEPTED_TOKENS=<bscTestnetUSDT>,<bscTestnetUSDC> \
+OWNER_ADDRESS=<same as your Sonic deploy> \
+ADMIN_ADDRESSES=<same as your Sonic deploy> \
+SYSTEM_WALLET_ADDRESS=0xaF326D5D242C9A55590540f14658adDDd3586A8d \
+ACCEPTED_TOKENS=<USDT from §1.5>,<USDC from §1.5> \
   npx hardhat run scripts/deploy-p2p-escrow-v2.js --network bscTestnet
 ```
 - ⚠️ **Do NOT set `MCGP_TOKEN_ADDRESS`** — MCGP is Sonic-only. With it unset, `mcgpToken` stays `address(0)` and `_feeBpsForToken` charges the standard fee (verified safe).
