@@ -23,7 +23,7 @@
 
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -42,7 +42,7 @@ import {
   unsignedTxToTxLike,
   type P2PChainInfo,
 } from '../../services/p2p';
-import { getChainByChainId } from '../../constants/chains';
+import { getChain, getChainByChainId } from '../../constants/chains';
 import {
   broadcastTransaction,
   ensureGas,
@@ -115,11 +115,19 @@ const P2PPoolScreen: React.FC = () => {
   // Enabled P2P chains, fetched from /p2p/chains. Empty = endpoint failed or
   // not yet loaded → the selector hides and everything defaults to Sonic.
   const [chains, setChains] = useState<P2PChainInfo[]>([]);
-  // The chain the pool ops target. Defaults to Sonic; threaded through every
-  // poolApi call and the broadcast/gas-guard so funds route to the picked chain.
-  const [selectedChainId, setSelectedChainId] = useState<number>(SONIC_CHAIN_IDS[0]);
+  // The chain the pool ops target. Defaults to the ACTIVE network's Sonic chain
+  // (14601 on testnet, 146 on mainnet) — NOT a hardcoded mainnet id — so the
+  // first balance read on mount targets a chain the backend actually serves
+  // (a hardcoded 146 on a testnet backend yields "no escrow configured for
+  // chain 146"). `/p2p/chains` may still refine this once it loads. Threaded
+  // through every poolApi call and the broadcast/gas-guard so funds route to
+  // the picked chain.
+  const [selectedChainId, setSelectedChainId] = useState<number>(getChain('sonic').chainId);
 
   const decimals = p2pTokenDecimals(selectedChainId, token);
+
+  // Monotonic id for in-flight balance reads; see the guard in loadBalance.
+  const balReqRef = useRef(0);
 
   // Fetch enabled chains once on mount. Graceful fallback: on failure we leave
   // `chains` empty (selector hidden) and keep the Sonic default — the screen
@@ -152,9 +160,16 @@ const P2PPoolScreen: React.FC = () => {
   );
 
   const loadBalance = useCallback(async () => {
+    // Stale-response guard: a chain switch (or the /p2p/chains refinement)
+    // fires a fresh load while a prior one is still in flight. Without this,
+    // the slower (often wrong-chain) response can land last and clobber the
+    // good result — e.g. an initial Sonic read overwriting a just-loaded BSC
+    // balance with a stale error. Only the latest request may touch state.
+    const reqId = ++balReqRef.current;
     setLoadingBal(true);
     setBalanceError(null);
     const w = wallet || (await getActiveWallet());
+    if (balReqRef.current !== reqId) return;
     if (!w) {
       setAvailable('—');
       setLocked('—');
@@ -164,6 +179,7 @@ const P2PPoolScreen: React.FC = () => {
     }
     if (!wallet) setWallet(w);
     const res = await poolApi.balance(token, w, selectedChainId);
+    if (balReqRef.current !== reqId) return;
     if (res.success && res.data) {
       setAvailable(res.data.available);
       setLocked(res.data.locked);
