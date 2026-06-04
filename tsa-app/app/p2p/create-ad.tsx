@@ -20,10 +20,12 @@ import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-n
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  chainsApi,
   formatTokenAmount,
   paymentMethodsApi,
   poolApi,
   parseTokenAmount,
+  type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
@@ -32,6 +34,7 @@ import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
+import { getChainByChainId } from '../../constants/chains';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -50,13 +53,35 @@ import {
   Text,
 } from '@/components/ui';
 
-const SUPPORTED_TOKENS = [
+// Static fallback token list — used when the backend's /p2p/chains endpoint
+// is unreachable so the screen never crashes with an empty token set.
+const FALLBACK_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
   { symbol: 'USDC', decimals: 6 },
   { symbol: 'MCGP', decimals: 18 },
-] as const;
+];
 
+type TokenEntry = { symbol: string; decimals: number };
 type RateType = 'fixed' | 'float';
+
+// Sonic chain IDs (mainnet + testnet). Used for the "Sonic-first" chain sort
+// and the pool-balance caveat copy.
+const SONIC_CHAIN_IDS = new Set([146, 14601]);
+
+/** Return true if the given chainId is Sonic (either net). */
+function isSonicChain(chainId: number): boolean {
+  return SONIC_CHAIN_IDS.has(chainId);
+}
+
+/** Sort chains: Sonic first, then ascending chainId. Stable for equal positions. */
+function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
+  return [...chains].sort((a, b) => {
+    const aS = isSonicChain(a.chainId) ? 0 : 1;
+    const bS = isSonicChain(b.chainId) ? 0 : 1;
+    if (aS !== bS) return aS - bS;
+    return a.chainId - b.chainId;
+  });
+}
 
 const CreateAdScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
@@ -72,7 +97,24 @@ const CreateAdScreen: React.FC = () => {
     supportedCurrencies.find((c) => c.code === currencyCode) ?? marketCurrency;
   const symbol = currencyConfig.symbol;
 
-  const [token, setToken] = useState<(typeof SUPPORTED_TOKENS)[number]>(SUPPORTED_TOKENS[0]);
+  // ── Chain / token data from the backend ─────────────────────────────────
+  // enabledChains: the P2P-enabled chains returned by /p2p/chains. Empty
+  // until the fetch completes; falls back to FALLBACK_TOKENS on failure.
+  const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
+  const [chainsFetched, setChainsFetched] = useState(false);
+
+  // Derive the selectable token list from the union of assets across all
+  // enabled chains, preserving decimal metadata from FALLBACK_TOKENS.
+  const availableTokens: TokenEntry[] = useMemo(() => {
+    if (!chainsFetched || enabledChains.length === 0) return FALLBACK_TOKENS;
+    const symbols = new Set(enabledChains.flatMap((c) => c.assets));
+    return Array.from(symbols).map((sym) => {
+      const fallback = FALLBACK_TOKENS.find((t) => t.symbol === sym);
+      return fallback ?? { symbol: sym, decimals: 18 };
+    });
+  }, [enabledChains, chainsFetched]);
+
+  const [token, setToken] = useState<TokenEntry>(FALLBACK_TOKENS[0]);
   const [amountInput, setAmountInput] = useState(''); // human decimal
   const [rateType, setRateType] = useState<RateType>('fixed');
   const [rateInput, setRateInput] = useState('');
@@ -97,6 +139,45 @@ const CreateAdScreen: React.FC = () => {
   // a transient pool-balance read failure — the backend re-checks).
   const [poolAvailable, setPoolAvailable] = useState<string | null>(null);
 
+  // ── Chain selector state ──────────────────────────────────────────────
+  // chainsForToken: sorted subset of enabledChains that offer the current token.
+  // selectedChainId: null when the chooser is hidden (single-chain token); the
+  // first chain in chainsForToken otherwise. undefined = not yet resolved.
+  const chainsForToken: P2PChainInfo[] = useMemo(() => {
+    if (enabledChains.length === 0) return [];
+    return sortChains(enabledChains.filter((c) => c.assets.includes(token.symbol)));
+  }, [enabledChains, token.symbol]);
+
+  const [selectedChainId, setSelectedChainId] = useState<number | undefined>(undefined);
+
+  // When the chainsForToken list changes (token switch or after fetch), reset
+  // the selected chain to the first in the sorted list.
+  useEffect(() => {
+    if (chainsForToken.length > 0) {
+      setSelectedChainId(chainsForToken[0].chainId);
+    } else {
+      // No chain data yet (before fetch or on fallback path) — leave undefined
+      // so we omit chainId from the create call and let the backend default.
+      setSelectedChainId(undefined);
+    }
+  }, [chainsForToken]);
+
+  // The chain config for display (human name, etc.). May be undefined for
+  // unknown chainIds not in CHAINS (e.g. a new chain the app doesn't yet know).
+  const selectedChainConfig = selectedChainId != null
+    ? getChainByChainId(selectedChainId)
+    : undefined;
+
+  // Show the chain chooser only when:
+  //  (a) we have a valid backend response, AND
+  //  (b) more than one chain offers the current token.
+  const showChainChooser = chainsFetched && chainsForToken.length > 1;
+
+  // Pool-balance caveat: shown when the selected chain is NOT Sonic, since the
+  // pool balance endpoint is currently Sonic-scoped (Task 8 fixes this).
+  const showPoolChainCaveat =
+    selectedChainId != null && !isSonicChain(selectedChainId);
+
   // Load all payment methods once on mount; the visible subset is filtered by
   // the selected currency below. Always clears the loading flag — a network
   // reject must not leave the PM picker spinning forever.
@@ -111,6 +192,26 @@ const CreateAdScreen: React.FC = () => {
         console.warn('[create-ad] paymentMethodsApi.list failed', err);
       } finally {
         setLoadingPms(false);
+      }
+    })();
+  }, []);
+
+  // Fetch the P2P-enabled chains + their assets on mount. On failure we
+  // degrade gracefully to the hardcoded FALLBACK_TOKENS — the screen stays
+  // functional, just without a chain chooser.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await chainsApi.list();
+        if (res.success && res.data && res.data.length > 0) {
+          setEnabledChains(res.data);
+        }
+        // On failure or empty list, leave enabledChains empty — the useMemo
+        // above falls back to FALLBACK_TOKENS automatically.
+      } catch (err) {
+        console.warn('[create-ad] chainsApi.list failed, using fallback tokens', err);
+      } finally {
+        setChainsFetched(true);
       }
     })();
   }, []);
@@ -293,6 +394,10 @@ const CreateAdScreen: React.FC = () => {
         maxLimit,
         paymentMethodIds: selectedPmIds,
         sellerAddress,
+        // selectedChainId is undefined when the fetch hasn't landed or when
+        // only one chain exists (auto-selected). Omitting it lets the backend
+        // default to Sonic, which is the correct single-chain behaviour.
+        ...(selectedChainId != null ? { chainId: selectedChainId } : {}),
       };
       const createRes = await adsApi.create(
         rateType === 'fixed'
@@ -416,8 +521,8 @@ const CreateAdScreen: React.FC = () => {
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
             Token
           </Text>
-          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-            {SUPPORTED_TOKENS.map((t) => (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+            {availableTokens.map((t) => (
               <Chip
                 key={t.symbol}
                 label={t.symbol}
@@ -426,6 +531,37 @@ const CreateAdScreen: React.FC = () => {
               />
             ))}
           </View>
+
+          {/* ── Chain ────────────────────────────────────────────────── */}
+          {showChainChooser && (
+            <>
+              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+                Network
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                {chainsForToken.map((c) => {
+                  const cfg = getChainByChainId(c.chainId);
+                  const label = cfg?.shortName ?? String(c.chainId);
+                  return (
+                    <Chip
+                      key={c.chainId}
+                      label={label}
+                      selected={selectedChainId === c.chainId}
+                      onPress={() => setSelectedChainId(c.chainId)}
+                    />
+                  );
+                })}
+              </View>
+              {showPoolChainCaveat && selectedChainConfig && (
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
+                  <Icon name="info" size={14} color={colors.textMuted} />
+                  <Text variant="caption" color="textMuted" style={{ flex: 1 }}>
+                    Pool balances are per-chain — fund your {selectedChainConfig.shortName} pool before publishing.
+                  </Text>
+                </View>
+              )}
+            </>
+          )}
 
           {/* ── Amount ───────────────────────────────────────────────── */}
           <View style={{ marginTop: spacing.lg }}>

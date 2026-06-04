@@ -8,11 +8,14 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  chainsApi,
   distinctAdProviders,
   formatTokenAmount,
   p2pTokenDecimals,
   type P2PAd,
+  type P2PChainInfo,
 } from '../../services/p2p';
+import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
@@ -35,7 +38,21 @@ import {
   Text,
 } from '@/components/ui';
 
-const TOKENS = ['USDT', 'USDC', 'MCGP'];
+// Fallback token list — used when the /p2p/chains endpoint is unreachable so
+// the marketplace still works in degraded mode.
+const FALLBACK_TOKENS = ['USDT', 'USDC', 'MCGP'];
+
+// Sonic chain IDs (mainnet + testnet) — used for the Sonic-first sort order.
+const SONIC_CHAIN_IDS = new Set([146, 14601]);
+
+function sortChainInfos(chains: P2PChainInfo[]): P2PChainInfo[] {
+  return [...chains].sort((a, b) => {
+    const aS = SONIC_CHAIN_IDS.has(a.chainId) ? 0 : 1;
+    const bS = SONIC_CHAIN_IDS.has(b.chainId) ? 0 : 1;
+    if (aS !== bS) return aS - bS;
+    return a.chainId - b.chainId;
+  });
+}
 
 const P2PMarketScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
@@ -53,9 +70,52 @@ const P2PMarketScreen: React.FC = () => {
   // max limit can accommodate this amount and up.
   const [minAmount, setMinAmount] = useState<number | null>(null);
 
+  // ── Chain / token data from the backend ─────────────────────────────────
+  const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
+  const [chainsFetched, setChainsFetched] = useState(false);
+
+  // Derive the selectable token list from the union of assets; fall back to
+  // FALLBACK_TOKENS if the endpoint hasn't responded yet or returned an error.
+  const availableTokens: string[] = React.useMemo(() => {
+    if (!chainsFetched || enabledChains.length === 0) return FALLBACK_TOKENS;
+    const symbols = new Set(enabledChains.flatMap((c) => c.assets));
+    return Array.from(symbols);
+  }, [enabledChains, chainsFetched]);
+
+  // Chain filter: null = "All chains" (omit chainId from list call).
+  const [chainFilter, setChainFilter] = useState<number | null>(null);
+
+  // The sorted chains that offer the selected token — used to populate the
+  // chain filter dropdown.
+  const chainsForToken: P2PChainInfo[] = React.useMemo(() => {
+    if (enabledChains.length === 0) return [];
+    return sortChainInfos(enabledChains.filter((c) => c.assets.includes(token)));
+  }, [enabledChains, token]);
+
+  // Fetch the enabled chains on mount; graceful fallback on failure.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await chainsApi.list();
+        if (res.success && res.data && res.data.length > 0) {
+          setEnabledChains(res.data);
+        }
+      } catch (err) {
+        console.warn('[p2p/index] chainsApi.list failed, using fallback tokens', err);
+      } finally {
+        setChainsFetched(true);
+      }
+    })();
+  }, []);
+
   const load = useCallback(async () => {
     setError(false);
-    const res = await adsApi.list({ side: adSide, token, fiatCurrency: currency.code });
+    const res = await adsApi.list({
+      side: adSide,
+      token,
+      fiatCurrency: currency.code,
+      ...(chainFilter != null ? { chainId: chainFilter } : {}),
+    });
     if (res.success && res.data) {
       setAds(res.data);
     } else {
@@ -63,7 +123,7 @@ const P2PMarketScreen: React.FC = () => {
     }
     setLoading(false);
     setRefreshing(false);
-  }, [adSide, token, currency.code]);
+  }, [adSide, token, currency.code, chainFilter]);
 
   useEffect(() => {
     load();
@@ -71,9 +131,12 @@ const P2PMarketScreen: React.FC = () => {
 
   // Clear stale filters when currency/token/side changes (the amount filter is
   // denominated in the current currency, so it can't carry across switches).
+  // Also reset chainFilter when token changes — the new token may not be on
+  // the previously-selected chain.
   useEffect(() => {
     setProviderFilter(null);
     setMinAmount(null);
+    setChainFilter(null);
   }, [currency.code, token, adSide]);
 
   const filtersActive = providerFilter != null || minAmount != null;
@@ -182,10 +245,8 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        {/* Filter row — Token always; Amount + Payment once ads load. One
-            horizontally-scrollable line so the chips stay on the same row (and
-            scroll instead of wrapping if a selected label runs long). The Token
-            picker is where a network sub-selector will live as chains grow. */}
+        {/* Filter row — Token always; Chain (when >1 chain offers the token);
+            Amount + Payment once ads load. One horizontally-scrollable line. */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -195,11 +256,22 @@ const P2PMarketScreen: React.FC = () => {
         >
           <TokenFilter
             token={token}
+            tokens={availableTokens}
             onChange={(t) => {
               setToken(t);
               setLoading(true);
             }}
           />
+          {chainsForToken.length > 1 && (
+            <ChainFilter
+              chains={chainsForToken}
+              selected={chainFilter}
+              onChange={(id) => {
+                setChainFilter(id);
+                setLoading(true);
+              }}
+            />
+          )}
           {!loading && !error && ads.length > 0 && (
             <>
               <AmountFilter
@@ -350,11 +422,23 @@ const AdCard: React.FC<{ ad: P2PAd; adSide: 'sell' | 'buy' }> = ({ ad, adSide })
               {metaText}
             </Text>
 
-            {ad.paymentMethodSummary && ad.paymentMethodSummary.length > 0 && (
+            {(ad.paymentMethodSummary && ad.paymentMethodSummary.length > 0 || ad.chainId) && (
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm }}>
-                {ad.paymentMethodSummary.slice(0, 3).map((s) => (
+                {ad.paymentMethodSummary && ad.paymentMethodSummary.slice(0, 3).map((s) => (
                   <Badge key={s.provider} label={s.label} size="sm" />
                 ))}
+                {ad.chainId && (() => {
+                  const chainLabel = getChainByChainId(ad.chainId)?.shortName;
+                  return chainLabel ? (
+                    <Badge
+                      key="chain"
+                      label={chainLabel}
+                      size="sm"
+                      color={colors.accent}
+                      background={colors.accentMuted}
+                    />
+                  ) : null;
+                })()}
               </View>
             )}
 
@@ -442,13 +526,17 @@ const OptionList: React.FC<{
   );
 };
 
-// Token (asset) selector — replaces the inline token chips. A network
-// sub-selector will live here once more chains are supported.
-const TokenFilter: React.FC<{ token: string; onChange: (t: string) => void }> = ({ token, onChange }) => (
+// Token (asset) selector. Uses the dynamically-fetched token list, falling
+// back to FALLBACK_TOKENS when the endpoint hasn't responded yet.
+const TokenFilter: React.FC<{
+  token: string;
+  tokens: string[];
+  onChange: (t: string) => void;
+}> = ({ token, tokens, onChange }) => (
   <Dropdown align="start" menuWidth={180} renderTrigger={() => <FilterChip label={token} active />}>
     {({ close }) => (
       <OptionList
-        options={TOKENS.map((t) => ({ key: t, label: t }))}
+        options={tokens.map((t) => ({ key: t, label: t }))}
         selectedKey={token}
         onPick={(t) => {
           if (t !== token) onChange(t);
@@ -458,6 +546,44 @@ const TokenFilter: React.FC<{ token: string; onChange: (t: string) => void }> = 
     )}
   </Dropdown>
 );
+
+// Chain filter — shown only when more than one chain offers the selected token.
+// null selection means "All chains".
+const ALL_CHAINS = '__all__';
+const ChainFilter: React.FC<{
+  chains: P2PChainInfo[];
+  selected: number | null;
+  onChange: (chainId: number | null) => void;
+}> = ({ chains, selected, onChange }) => {
+  const selectedLabel =
+    selected == null
+      ? 'All chains'
+      : getChainByChainId(selected)?.shortName ?? String(selected);
+  return (
+    <Dropdown
+      align="start"
+      menuWidth={200}
+      renderTrigger={() => <FilterChip label={selectedLabel} active={selected != null} />}
+    >
+      {({ close }) => (
+        <OptionList
+          options={[
+            { key: ALL_CHAINS, label: 'All chains' },
+            ...chains.map((c) => ({
+              key: String(c.chainId),
+              label: getChainByChainId(c.chainId)?.shortName ?? String(c.chainId),
+            })),
+          ]}
+          selectedKey={selected == null ? ALL_CHAINS : String(selected)}
+          onPick={(key) => {
+            onChange(key === ALL_CHAINS ? null : Number(key));
+            close();
+          }}
+        />
+      )}
+    </Dropdown>
+  );
+};
 
 // Payment-method filter (themed; replaces the legacy bottom-sheet component).
 // `null` selection means "All Payment Methods".
