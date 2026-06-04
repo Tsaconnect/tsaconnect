@@ -3130,7 +3130,10 @@ func (s *P2PTradeService) resolveTokenAddress(chainID int64, symbol string) (str
 // grant the escrow contract permission to pull `amount` of `token` on
 // their behalf. Step 1 of deposit (when current allowance < amount);
 // step 2 is PrepareDeposit.
-func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string, chainID int64) ([]byte, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -3138,11 +3141,11 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3152,15 +3155,18 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 // GetAllowance returns the seller's current ERC-20 allowance to the escrow
 // for `token`. Frontend uses it to skip the approve step when the existing
 // allowance already covers the intended deposit.
-func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, tokenSymbol string) (*big.Int, error) {
+func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, tokenSymbol string, chainID int64) (*big.Int, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3175,7 +3181,10 @@ func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, token
 // Server-side accounting is post-broadcast: balances are read on-chain via
 // ReadBalance rather than tracked separately, so a confirm step exists only
 // to verify the receipt + emit an audit log.
-func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string, chainID int64) ([]byte, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -3183,11 +3192,11 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3203,7 +3212,10 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 // the amount check, an attacker who learns another seller's pending deposit
 // txHash could submit it under their own (smaller) amount and the audit row
 // + emitted event would silently record a number the caller never intended.
-func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string) (*P2PDepositedEvent, error) {
+func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string, chainID int64) (*P2PDepositedEvent, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -3211,11 +3223,11 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 	if !ok || expected.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3241,7 +3253,10 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 
 // PrepareWithdraw builds the unsigned tx for `withdraw(token, amount)`.
 // Reverts on chain if amount exceeds the seller's available balance.
-func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string) ([]byte, error) {
+func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, amount string, chainID int64) ([]byte, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -3249,11 +3264,11 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3275,7 +3290,10 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 // ConfirmWithdraw verifies the Withdrawn event for the supplied tx hash AND
 // asserts the on-chain amount matches the caller's expected amount (same
 // rationale as ConfirmDeposit).
-func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string) (*P2PWithdrawnEvent, error) {
+func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUID, sellerAddress, tokenSymbol, expectedAmount, txHash string, chainID int64) (*P2PWithdrawnEvent, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
@@ -3283,11 +3301,11 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 	if !ok || expected.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -3315,15 +3333,18 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 // Read straight from chain — server doesn't maintain a shadow copy of the
 // per-(seller, token) ledger since the contract's accountedBalance is the
 // source of truth.
-func (s *P2PTradeService) GetPoolBalance(ctx context.Context, sellerAddress, tokenSymbol string) (*OnChainBalance, error) {
+func (s *P2PTradeService) GetPoolBalance(ctx context.Context, sellerAddress, tokenSymbol string, chainID int64) (*OnChainBalance, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(s.defaultChainID)
+	escrow, _, _, err := s.resolve(chainID)
 	if err != nil {
 		return nil, err
 	}
