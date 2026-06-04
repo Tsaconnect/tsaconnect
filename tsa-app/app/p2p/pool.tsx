@@ -89,6 +89,10 @@ interface PendingConfirm {
   /** Wallet that signed the broadcast. Confirm must reference this same
    *  wallet so the backend's on-chain `seller` cross-check passes. */
   walletAddress?: string;
+  /** Chain the tx was broadcast on. Confirm must target the same chain even
+   *  if the user switches the chain selector before retrying. Old records
+   *  lacking this field fall back to the current selectedChainId. */
+  chainId?: number;
 }
 
 const P2PPoolScreen: React.FC = () => {
@@ -183,11 +187,15 @@ const P2PPoolScreen: React.FC = () => {
         return;
       }
       const p: PendingConfirm = JSON.parse(raw);
-      setPending(p.mode === mode && p.token === token ? p : null);
+      // Show the pending record only when it matches the current (mode, token,
+      // chain) so a BSC pending doesn't surface while Sonic is selected.
+      // Back-compat: old records lack chainId → treat as matching any chain.
+      const chainMatch = !p.chainId || p.chainId === selectedChainId;
+      setPending(p.mode === mode && p.token === token && chainMatch ? p : null);
     } catch {
       setPending(null);
     }
-  }, [mode, token]);
+  }, [mode, token, selectedChainId]);
 
   useEffect(() => {
     loadBalance();
@@ -240,10 +248,14 @@ const P2PPoolScreen: React.FC = () => {
     // mismatch here means "you're trying to confirm someone else's deposit".
     const w = p.walletAddress || wallet || (await getActiveWallet());
     if (!w) throw new Error('No active wallet to confirm against.');
+    // Always confirm against the chain the tx was BROADCAST on, not the
+    // current UI selection — the user may have switched chains since the
+    // broadcast. Old records lacking chainId fall back to selectedChainId.
+    const chainForConfirm = p.chainId ?? selectedChainId;
     const conf =
       p.mode === 'deposit'
-        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w, selectedChainId)
-        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w, selectedChainId);
+        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w, chainForConfirm)
+        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w, chainForConfirm);
     if (!conf.success) {
       throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
     }
@@ -394,6 +406,7 @@ const P2PPoolScreen: React.FC = () => {
           txHash: broadcastHash,
           createdAt: Date.now(),
           walletAddress: wallet || undefined,
+          chainId: selectedChainId,
         });
         Alert.alert(
           'On-chain succeeded, server confirm failed',
