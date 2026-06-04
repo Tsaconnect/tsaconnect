@@ -118,6 +118,22 @@ func (bs *BlockchainService) TokenAddress(chain, symbol string) string {
 	return bs.TokenAddressForNetwork("mainnet", chain, symbol)
 }
 
+// TokenAddressForChainID returns the configured token address for a symbol on
+// the chain with the given numeric chainID, searching across all networks.
+func (bs *BlockchainService) TokenAddressForChainID(chainID int64, symbol string) string {
+	if bs.cfg == nil {
+		return ""
+	}
+	for _, netCfg := range bs.cfg.Networks {
+		for name, chain := range netCfg.Chains {
+			if chain.ChainID == chainID {
+				return netCfg.TokenAddresses[name+":"+symbol]
+			}
+		}
+	}
+	return ""
+}
+
 // NetworkForChainID returns the network name ("mainnet"/"testnet") and chain key for a chain ID.
 func (bs *BlockchainService) NetworkForChainID(chainID int64) (network, chainKey string, ok bool) {
 	if bs.cfg == nil {

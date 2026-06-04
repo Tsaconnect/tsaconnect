@@ -417,7 +417,7 @@ func newService(t *testing.T, db *gorm.DB) (*P2PTradeService, *mockEscrow, *mock
 	bus := &mockBus{}
 	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, bus, 146)
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
-	svc.SetTokenResolver(func(symbol string) string {
+	svc.SetTokenResolver(func(chainID int64, symbol string) string {
 		if symbol == "USDT" {
 			return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 		}
@@ -514,7 +514,7 @@ func TestCreateAd_RejectsStaleRate(t *testing.T) {
 	bus := &mockBus{}
 	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{stale: true}, bus, 146).
 		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
-	svc.SetTokenResolver(func(s string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
+	svc.SetTokenResolver(func(chainID int64, s string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
 	sellerID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
 	_, sellerAddr := newSellerKey(t)

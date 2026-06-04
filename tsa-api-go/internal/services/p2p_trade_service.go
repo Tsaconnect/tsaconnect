@@ -139,7 +139,7 @@ type P2PTradeService struct {
 	rates          RateProvider
 	bus            EventPublisher
 	clock          Clock
-	tokenResolver  func(symbol string) string
+	tokenResolver  func(chainID int64, symbol string) string
 	// messages is optional. When set, every state transition also writes a
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
 	// — internal calls go through `s.systemMsg` which guards.
@@ -183,9 +183,9 @@ func (s *P2PTradeService) WithClock(c Clock) *P2PTradeService {
 	return &cp
 }
 
-// SetTokenResolver wires a symbol → address function. Called at service
-// construction time so the service stays free of config-shape coupling.
-func (s *P2PTradeService) SetTokenResolver(f func(symbol string) string) {
+// SetTokenResolver wires a (chainID, symbol) → address function. Called at
+// service construction time so the service stays free of config-shape coupling.
+func (s *P2PTradeService) SetTokenResolver(f func(chainID int64, symbol string) string) {
 	s.tokenResolver = f
 }
 
@@ -374,7 +374,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return nil, fmt.Errorf("%w: %s is not tradeable on chain %d", ErrInvalidParams, params.Token, chainID)
 	}
 
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(params.Token))
+	tokenAddr, err := s.resolveTokenAddress(chainID, strings.ToUpper(params.Token))
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +548,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 
 	// Validate the token is supported so OpenTrade can resolve it to an
 	// address later (buy-ads skip the voucher but still settle on-chain).
-	if _, err := s.resolveTokenAddress(strings.ToUpper(params.Token)); err != nil {
+	if _, err := s.resolveTokenAddress(chainID, strings.ToUpper(params.Token)); err != nil {
 		return nil, err
 	}
 
@@ -1117,7 +1117,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		return nil, nil, err
 	}
 
-	tokenAddr, err := s.resolveTokenAddress(ad.Token)
+	tokenAddr, err := s.resolveTokenAddress(ad.ChainID, ad.Token)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3103,13 +3103,13 @@ func (s *P2PTradeService) validateAdPaymentMethod(ad *models.P2PAd, pmID uuid.UU
 	return fmt.Errorf("%w: payment method not in ad allowlist", ErrInvalidParams)
 }
 
-func (s *P2PTradeService) resolveTokenAddress(symbol string) (string, error) {
+func (s *P2PTradeService) resolveTokenAddress(chainID int64, symbol string) (string, error) {
 	sym := strings.ToUpper(symbol)
 	if strings.HasPrefix(sym, "0X") && len(sym) == 42 {
 		return symbol, nil
 	}
 	if s.tokenResolver != nil {
-		if addr := s.tokenResolver(sym); addr != "" {
+		if addr := s.tokenResolver(chainID, sym); addr != "" {
 			return addr, nil
 		}
 	}
@@ -3130,7 +3130,7 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3148,7 +3148,7 @@ func (s *P2PTradeService) GetAllowance(ctx context.Context, sellerAddress, token
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3175,7 +3175,7 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3203,7 +3203,7 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 	if !ok || expected.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3241,7 +3241,7 @@ func (s *P2PTradeService) PrepareWithdraw(ctx context.Context, sellerID uuid.UUI
 	if !ok || amt.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3275,7 +3275,7 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 	if !ok || expected.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3311,7 +3311,7 @@ func (s *P2PTradeService) GetPoolBalance(ctx context.Context, sellerAddress, tok
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: seller address", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(strings.ToUpper(tokenSymbol))
+	tokenAddr, err := s.resolveTokenAddress(s.defaultChainID, strings.ToUpper(tokenSymbol))
 	if err != nil {
 		return nil, err
 	}
@@ -3340,7 +3340,7 @@ func (s *P2PTradeService) adVoucher(ad *models.P2PAd, sellerAddrOverride string)
 	if !common.IsHexAddress(sellerAddr) {
 		return AdVoucher{}, fmt.Errorf("%w: ad seller address", ErrInvalidParams)
 	}
-	tokenAddr, err := s.resolveTokenAddress(ad.Token)
+	tokenAddr, err := s.resolveTokenAddress(ad.ChainID, ad.Token)
 	if err != nil {
 		return AdVoucher{}, err
 	}
