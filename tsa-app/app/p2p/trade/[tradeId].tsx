@@ -72,7 +72,7 @@ import {
   type P2PTrade,
   type UnsignedTx,
 } from '../../../services/p2p';
-import { broadcastTransaction, getActiveWallet, signTransaction } from '../../../services/wallet';
+import { broadcastTransaction, ensureGas, getActiveWallet, signTransaction } from '../../../services/wallet';
 import { getAuthHeaders } from '../../../services/walletApi';
 
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
@@ -368,6 +368,11 @@ const TradeDetailScreen: React.FC = () => {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
 
+      // Task 7: Gas guard before broadcasting release tx.
+      startActing('Checking gas…');
+      const hasGas = await ensureGas(p2pChainKey(trade.chainId), sellerAddress);
+      if (!hasGas) { stopActing(); return; }
+
       startActing('Preparing release tx…');
       const prep = await tradesApi.prepareRelease(trade.id, sellerAddress);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
@@ -398,6 +403,11 @@ const TradeDetailScreen: React.FC = () => {
       startActing('Loading wallet…');
       const callerAddress = await getActiveWallet();
       if (!callerAddress) throw new Error('No wallet found');
+
+      // Task 7: Gas guard before broadcasting cancel tx.
+      startActing('Checking gas…');
+      const hasGasCancel = await ensureGas(p2pChainKey(trade.chainId), callerAddress);
+      if (!hasGasCancel) { stopActing(); return; }
 
       startActing('Preparing cancel…');
       const prep = await tradesApi.prepareCancel(trade.id, callerAddress);
