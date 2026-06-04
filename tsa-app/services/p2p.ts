@@ -318,6 +318,17 @@ async function request<T>(
   }
 }
 
+// ─── Chains ─────────────────────────────────────────────────────────────────
+
+export interface P2PChainInfo {
+  chainId: number;
+  assets: string[];
+}
+
+export const chainsApi = {
+  list: () => request<P2PChainInfo[]>('GET', '/p2p/chains'),
+};
+
 // ─── Nigerian banks (Nomba-backed) ──────────────────────────────────────────
 
 export interface NgBank {

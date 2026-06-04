@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +107,26 @@ func (r *P2PEscrowRegistry) ChainIDs() []int64 {
 	for id := range r.byChain {
 		out = append(out, id)
 	}
+	return out
+}
+
+// P2PChainInfo is the public shape of an enabled P2P chain.
+type P2PChainInfo struct {
+	ChainID int64    `json:"chainId"`
+	Assets  []string `json:"assets"`
+}
+
+// Chains lists the enabled P2P chains (chainID + tradeable assets), sorted by
+// chainID for stable output.
+func (r *P2PEscrowRegistry) Chains() []P2PChainInfo {
+	if r == nil {
+		return nil
+	}
+	out := make([]P2PChainInfo, 0, len(r.byChain))
+	for id, e := range r.byChain {
+		out = append(out, P2PChainInfo{ChainID: id, Assets: e.assets})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ChainID < out[j].ChainID })
 	return out
 }
 
