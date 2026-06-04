@@ -48,9 +48,11 @@ import {
 } from '../../../services/p2p';
 import {
   broadcastTransaction,
+  ensureGas,
   getActiveWallet,
   signTransaction,
 } from '../../../services/wallet';
+import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
 import { useTheme } from '@/theme';
@@ -176,6 +178,15 @@ const AdDetailScreen: React.FC = () => {
 
   // ─── Sell-ad submit (buy crypto) ─────────────────────────────────────────
 
+  // Returns a human-readable token-standard label for a chainId.
+  // BSC (56/97) → "BEP-20"; Sonic (146/14601) → "native (Sonic)"; else chain shortName.
+  const receiveStandard = (chainId: number): string => {
+    if (chainId === 56 || chainId === 97) return 'BEP-20';
+    if (chainId === 146 || chainId === 14601) return 'native (Sonic)';
+    const chain = getChainByChainId(chainId);
+    return chain?.shortName ?? String(chainId);
+  };
+
   const handleOpenSellAd = async () => {
     if (!ad || submitting) return;
     setSubmitting(true);
@@ -184,6 +195,37 @@ const AdDetailScreen: React.FC = () => {
       const buyerAddress = await getActiveWallet();
       if (!buyerAddress) {
         throw new Error('No wallet found. Please set up a wallet first.');
+      }
+
+      // Task 6: Confirm the receive-chain token standard BEFORE signing.
+      // On a sell-ad the user pays fiat and receives crypto — surface the
+      // chain + token standard so they know what arrives in their wallet.
+      const chain = getChainByChainId(ad.chainId);
+      const chainName = chain?.name ?? `chain ${ad.chainId}`;
+      const standard = receiveStandard(ad.chainId);
+      const chainConfirmed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'Confirm receive chain',
+          `You'll receive ${ad.token} as ${standard} on ${chainName}. Make sure your destination wallet/exchange supports it.`,
+          [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Continue', onPress: () => resolve(true) },
+          ],
+        );
+      });
+      if (!chainConfirmed) {
+        setSubmitting(false);
+        setSubmitStage('');
+        return;
+      }
+
+      // Task 7: Gas guard — ensure buyer has native gas before broadcasting.
+      setSubmitStage('Checking gas…');
+      const hasGas = await ensureGas(p2pChainKey(ad.chainId), buyerAddress);
+      if (!hasGas) {
+        setSubmitting(false);
+        setSubmitStage('');
+        return;
       }
 
       setSubmitStage('Preparing openTrade transaction…');
@@ -254,6 +296,15 @@ const AdDetailScreen: React.FC = () => {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) {
         throw new Error('No wallet found. Please set up a wallet first.');
+      }
+
+      // Task 7: Gas guard — ensure seller has native gas before approve/broadcast.
+      setSubmitStage('Checking gas…');
+      const hasGasBuyAd = await ensureGas(p2pChainKey(ad.chainId), sellerAddress);
+      if (!hasGasBuyAd) {
+        setSubmitting(false);
+        setSubmitStage('');
+        return;
       }
 
       // Convert human-readable token amount to base units.

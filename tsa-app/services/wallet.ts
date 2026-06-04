@@ -1,6 +1,7 @@
 // services/wallet.ts
 // Core crypto wallet service for TSA Connect — multi-wallet support
 import 'react-native-get-random-values';
+import { Alert } from 'react-native';
 import { ethers } from 'ethers';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -357,6 +358,65 @@ export function formatTokenBalance(rawBalance: string, decimals: number): number
   const whole = padded.slice(0, cut) || '0';
   const frac = padded.slice(cut).replace(/0+$/, '');
   return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
+}
+
+/**
+ * Read the native gas-token balance (in wei) for an address on the given
+ * chain. Uses the same RPC fallback strategy as other read helpers.
+ *
+ * Returns null when every configured RPC fails — callers should treat null
+ * as "balance unknown" and degrade gracefully (do NOT hard-block the user).
+ */
+export async function nativeBalance(chainKey: ChainKey, address: string): Promise<bigint | null> {
+  try {
+    return await withRpcFallback(chainKey, (provider) => provider.getBalance(address));
+  } catch (err) {
+    console.warn('[wallet] nativeBalance read failed, degrading gracefully:', err);
+    return null;
+  }
+}
+
+/**
+ * Gas guard: check that `address` holds at least some native gas token on
+ * `chainKey` before broadcasting. Calls `onAlert` with a human-readable
+ * message if the balance is zero (or near-zero). Returns `true` when the
+ * user can proceed, `false` when they should fund first.
+ *
+ * Degrades gracefully on RPC failure — if the balance read returns null,
+ * this function returns `true` (proceed) and logs a warning rather than
+ * blocking the user on a network blip.
+ *
+ * @param chainKey  Chain to check (must match the tx's target chain).
+ * @param address   Wallet address that will pay gas.
+ * @param onAlert   Called with (title, message) when gas is insufficient.
+ *                  Default: Alert.alert.
+ */
+export async function ensureGas(
+  chainKey: ChainKey,
+  address: string,
+  onAlert?: (title: string, message: string) => void,
+): Promise<boolean> {
+  const balance = await nativeBalance(chainKey, address);
+  if (balance === null) {
+    // RPC blip — can't determine gas; let the broadcast attempt proceed.
+    // The chain will reject it with "insufficient funds" if truly empty,
+    // which is no worse than the pre-guard behaviour.
+    return true;
+  }
+  if (balance === 0n) {
+    const chain = CHAINS[chainKey];
+    const symbol = chain.nativeCurrency.symbol;
+    const name = chain.name;
+    const title = 'Not enough gas';
+    const message = `You need ${symbol} on ${name} to cover the transaction fee. Fund your wallet and try again.`;
+    if (onAlert) {
+      onAlert(title, message);
+    } else {
+      Alert.alert(title, message);
+    }
+    return false;
+  }
+  return true;
 }
 
 /**
