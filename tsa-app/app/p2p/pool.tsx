@@ -33,15 +33,19 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
+  chainsApi,
   formatTokenAmount,
   p2pChainKey,
   p2pTokenDecimals,
   parseTokenAmount,
   poolApi,
   unsignedTxToTxLike,
+  type P2PChainInfo,
 } from '../../services/p2p';
+import { getChainByChainId } from '../../constants/chains';
 import {
   broadcastTransaction,
+  ensureGas,
   getActiveWallet,
   signTransaction,
 } from '../../services/wallet';
@@ -64,6 +68,11 @@ const TOKENS = ['USDT', 'USDC', 'MCGP'] as const;
 type Token = typeof TOKENS[number];
 
 type Mode = 'deposit' | 'withdraw';
+
+// Sonic chain IDs (mainnet + testnet) — the pool screen defaults to Sonic so
+// existing single-chain behavior is preserved when the chains endpoint is
+// unreachable or hasn't loaded yet.
+const SONIC_CHAIN_IDS = [146, 14601];
 
 // AsyncStorage key for stashing a tx that broadcast successfully but whose
 // server-side confirm failed. One record per (mode, token); a new broadcast
@@ -99,9 +108,44 @@ const P2PPoolScreen: React.FC = () => {
   // poolApi calls thread this through so the backend gas-estimates against
   // the right balance even if the user has multiple in-app HD wallets.
   const [wallet, setWallet] = useState<string>('');
+  // Enabled P2P chains, fetched from /p2p/chains. Empty = endpoint failed or
+  // not yet loaded → the selector hides and everything defaults to Sonic.
+  const [chains, setChains] = useState<P2PChainInfo[]>([]);
+  // The chain the pool ops target. Defaults to Sonic; threaded through every
+  // poolApi call and the broadcast/gas-guard so funds route to the picked chain.
+  const [selectedChainId, setSelectedChainId] = useState<number>(SONIC_CHAIN_IDS[0]);
 
-  // TODO(Plan 7 Task 8): pool chain selector — use selected chain's chainId here.
-  const decimals = p2pTokenDecimals(undefined, token);
+  const decimals = p2pTokenDecimals(selectedChainId, token);
+
+  // Fetch enabled chains once on mount. Graceful fallback: on failure we leave
+  // `chains` empty (selector hidden) and keep the Sonic default — the screen
+  // stays fully functional for the current single-chain behavior.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await chainsApi.list();
+      if (cancelled || !res.success || !res.data || res.data.length === 0) return;
+      const list = res.data;
+      setChains(list);
+      // Prefer Sonic; otherwise fall back to the first enabled chain so the
+      // selected chain is always one the backend actually serves.
+      setSelectedChainId((prev) => {
+        if (list.some((c) => c.chainId === prev)) return prev;
+        const sonic = list.find((c) => SONIC_CHAIN_IDS.includes(c.chainId));
+        return (sonic ?? list[0]).chainId;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Label a chain for the selector — prefer the constants' shortName, else the
+  // chains endpoint can't supply a name so fall back to "Chain <id>".
+  const chainLabel = useCallback(
+    (chainId: number) => getChainByChainId(chainId)?.shortName ?? `Chain ${chainId}`,
+    [],
+  );
 
   const loadBalance = useCallback(async () => {
     setLoadingBal(true);
@@ -115,7 +159,7 @@ const P2PPoolScreen: React.FC = () => {
       return;
     }
     if (!wallet) setWallet(w);
-    const res = await poolApi.balance(token, w);
+    const res = await poolApi.balance(token, w, selectedChainId);
     if (res.success && res.data) {
       setAvailable(res.data.available);
       setLocked(res.data.locked);
@@ -127,7 +171,7 @@ const P2PPoolScreen: React.FC = () => {
       setBalanceError(res.message || 'Could not read pool balance');
     }
     setLoadingBal(false);
-  }, [token, wallet]);
+  }, [token, wallet, selectedChainId]);
 
   // Restore any pending confirm for the current (mode, token) so the
   // recovery banner re-appears if the user navigated away mid-failure.
@@ -198,8 +242,8 @@ const P2PPoolScreen: React.FC = () => {
     if (!w) throw new Error('No active wallet to confirm against.');
     const conf =
       p.mode === 'deposit'
-        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w)
-        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w);
+        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w, selectedChainId)
+        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w, selectedChainId);
     if (!conf.success) {
       throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
     }
@@ -244,7 +288,7 @@ const P2PPoolScreen: React.FC = () => {
   const runApproveIfNeeded = async (amountBaseUnits: string, walletAddress: string): Promise<void> => {
     if (mode !== 'deposit') return;
     setStage('Checking allowance…');
-    const aRes = await poolApi.allowance(token, walletAddress);
+    const aRes = await poolApi.allowance(token, walletAddress, selectedChainId);
     if (aRes.success && aRes.data) {
       try {
         if (BigInt(aRes.data.allowance) >= BigInt(amountBaseUnits)) {
@@ -256,7 +300,7 @@ const P2PPoolScreen: React.FC = () => {
       }
     }
     setStage('Preparing approve…');
-    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits, walletAddress);
+    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits, walletAddress, selectedChainId);
     if (!aPrep.success || !aPrep.data) {
       throw new Error(statusAwareError(aPrep.status, aPrep.message) || 'Prepare approve failed');
     }
@@ -270,8 +314,7 @@ const P2PPoolScreen: React.FC = () => {
     setStage('Signing approve…');
     const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
     setStage('Broadcasting approve…');
-    // TODO(Plan 7 Task 8): pool chain selector — route to selected chain.
-    await broadcastTransaction(p2pChainKey(undefined), signed);
+    await broadcastTransaction(p2pChainKey(selectedChainId), signed);
     // No backend confirm step for approve — it's a token-contract allowance
     // bump. The subsequent deposit's transferFrom is what actually moves
     // funds; if approve hasn't mined by the time deposit broadcasts, the
@@ -292,6 +335,14 @@ const P2PPoolScreen: React.FC = () => {
       amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
       if (amountBaseUnits === '0') throw new Error('Amount must be greater than zero.');
 
+      // Gas guard (Task 7): make sure the wallet holds the selected chain's
+      // native token before we sign/broadcast anything — both the approve and
+      // the deposit/withdraw tx pay gas on this chain. Bails with a fund-your-
+      // wallet prompt rather than letting the tx fail mid-flow.
+      setStage('Checking gas…');
+      const hasGas = await ensureGas(p2pChainKey(selectedChainId), w);
+      if (!hasGas) return; // `finally` resets submitting/stage.
+
       // For deposits, ensure the seller has approved the escrow first.
       // Withdrawals don't need an allowance.
       await runApproveIfNeeded(amountBaseUnits, w);
@@ -299,8 +350,8 @@ const P2PPoolScreen: React.FC = () => {
       setStage('Preparing transaction…');
       const prep =
         mode === 'deposit'
-          ? await poolApi.prepareDeposit(token, amountBaseUnits, w)
-          : await poolApi.prepareWithdraw(token, amountBaseUnits, w);
+          ? await poolApi.prepareDeposit(token, amountBaseUnits, w, selectedChainId)
+          : await poolApi.prepareWithdraw(token, amountBaseUnits, w, selectedChainId);
       if (!prep.success || !prep.data) {
         throw new Error(statusAwareError(prep.status, prep.message) || 'Prepare failed');
       }
@@ -309,8 +360,7 @@ const P2PPoolScreen: React.FC = () => {
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), w);
 
       setStage('Broadcasting…');
-      // TODO(Plan 7 Task 8): pool chain selector — route to selected chain.
-      const resp = await broadcastTransaction(p2pChainKey(undefined), signed);
+      const resp = await broadcastTransaction(p2pChainKey(selectedChainId), signed);
       broadcastHash = resp.hash;
 
       setStage('Confirming…');
@@ -418,6 +468,24 @@ const P2PPoolScreen: React.FC = () => {
                 />
               </View>
             </AccentCard>
+          )}
+
+          {chains.length > 1 && (
+            <>
+              <Text variant="bodySm" color="textSecondary" weight="600" style={{ marginBottom: spacing.sm }}>
+                Network
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
+                {chains.map((c) => (
+                  <Chip
+                    key={c.chainId}
+                    label={chainLabel(c.chainId)}
+                    selected={selectedChainId === c.chainId}
+                    onPress={() => setSelectedChainId(c.chainId)}
+                  />
+                ))}
+              </View>
+            </>
           )}
 
           <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg }}>

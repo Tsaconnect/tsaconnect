@@ -659,7 +659,7 @@ func TestPrepareDeposit_HappyPath(t *testing.T) {
 	svc, _, _ := newService(t, db)
 	sellerID := uuid.New()
 	_, sellerAddr := newSellerKey(t)
-	raw, err := svc.PrepareDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000000")
+	raw, err := svc.PrepareDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000000", 146)
 	if err != nil {
 		t.Fatalf("PrepareDeposit: %v", err)
 	}
@@ -680,7 +680,7 @@ func TestPrepareDeposit_RejectsBadAmount(t *testing.T) {
 	sellerID := uuid.New()
 	_, sellerAddr := newSellerKey(t)
 	for _, bad := range []string{"", "0", "-1", "not-a-number"} {
-		if _, err := svc.PrepareDeposit(context.Background(), sellerID, sellerAddr, "USDT", bad); err == nil {
+		if _, err := svc.PrepareDeposit(context.Background(), sellerID, sellerAddr, "USDT", bad, 0); err == nil {
 			t.Errorf("amount=%q expected reject, got nil", bad)
 		}
 	}
@@ -692,7 +692,7 @@ func TestPrepareWithdraw_RejectsExceedingAvailable(t *testing.T) {
 	esc.balance = OnChainBalance{Available: big.NewInt(50), Locked: big.NewInt(0)}
 	sellerID := uuid.New()
 	_, sellerAddr := newSellerKey(t)
-	_, err := svc.PrepareWithdraw(context.Background(), sellerID, sellerAddr, "USDT", "100")
+	_, err := svc.PrepareWithdraw(context.Background(), sellerID, sellerAddr, "USDT", "100", 0)
 	if !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams, got %v", err)
 	}
@@ -708,7 +708,7 @@ func TestConfirmDeposit_VerifiesEventAndAudits(t *testing.T) {
 		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
 		Amount: big.NewInt(500),
 	}
-	ev, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "500", "0xabc")
+	ev, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "500", "0xabc", 146)
 	if err != nil {
 		t.Fatalf("ConfirmDeposit: %v", err)
 	}
@@ -736,12 +736,32 @@ func TestGetPoolBalance_ReadsFromChain(t *testing.T) {
 	svc, esc, _ := newService(t, db)
 	esc.balance = OnChainBalance{Available: big.NewInt(123), Locked: big.NewInt(45)}
 	_, sellerAddr := newSellerKey(t)
-	bal, err := svc.GetPoolBalance(context.Background(), sellerAddr, "USDT")
+	bal, err := svc.GetPoolBalance(context.Background(), sellerAddr, "USDT", 0)
 	if err != nil {
 		t.Fatalf("GetPoolBalance: %v", err)
 	}
 	if bal.Available.Cmp(big.NewInt(123)) != 0 || bal.Locked.Cmp(big.NewInt(45)) != 0 {
 		t.Errorf("balance mismatch: %+v", bal)
+	}
+}
+
+// TestPoolOps_UnconfiguredChain_FailsLoud locks the Plan 7 Task 8 safety
+// property: a pool op targeting a chainID that isn't in the escrow registry
+// must error (never silently fall back to the default chain). Mirrors
+// TestPrepareRelease_UnconfiguredChain_FailsLoud for the seller pool surface.
+func TestPoolOps_UnconfiguredChain_FailsLoud(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db) // registry has chain 146 only
+	esc.balance = OnChainBalance{Available: big.NewInt(123), Locked: big.NewInt(0)}
+	sellerID := uuid.New()
+	_, sellerAddr := newSellerKey(t)
+	const bsc = int64(56) // not configured in the test registry
+
+	if _, err := svc.GetPoolBalance(context.Background(), sellerAddr, "USDT", bsc); err == nil {
+		t.Errorf("GetPoolBalance on unconfigured chain %d must error, got nil", bsc)
+	}
+	if _, err := svc.PrepareDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000000", bsc); err == nil {
+		t.Errorf("PrepareDeposit on unconfigured chain %d must error, got nil", bsc)
 	}
 }
 
@@ -863,7 +883,7 @@ func TestConfirmDeposit_RejectsAmountMismatch(t *testing.T) {
 	}
 	// User intended 1000 but the on-chain event says 500 — the receipt
 	// belongs to a different tx (or was tampered with). Must reject.
-	_, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000", "0xabc")
+	_, err := svc.ConfirmDeposit(context.Background(), sellerID, sellerAddr, "USDT", "1000", "0xabc", 0)
 	if !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams, got %v", err)
 	}
@@ -879,7 +899,7 @@ func TestConfirmWithdraw_RejectsAmountMismatch(t *testing.T) {
 		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
 		Amount: big.NewInt(50),
 	}
-	_, err := svc.ConfirmWithdraw(context.Background(), sellerID, sellerAddr, "USDT", "100", "0xabc")
+	_, err := svc.ConfirmWithdraw(context.Background(), sellerID, sellerAddr, "USDT", "100", "0xabc", 0)
 	if !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams, got %v", err)
 	}
@@ -1467,14 +1487,14 @@ func TestPrepareRelease_NotifiesBothParties(t *testing.T) {
 // releasing). Guards the resolve-before-mutation ordering.
 func TestPrepareRelease_UnconfiguredChain_FailsLoud(t *testing.T) {
 	db := setupTradeDB(t)
-	svc, _, _ := newService(t, db)        // registry has chain 146 only
+	svc, _, _ := newService(t, db) // registry has chain 146 only
 	sellerID := uuid.New()
 	_, sellerAddr := newSellerKey(t)
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	trade := &models.P2PTrade{
 		ID: uuid.New(), AdID: uuid.New(), SellerID: sellerID, BuyerID: uuid.New(),
 		Token: "USDT", ChainID: 56, // BSC — NOT configured in the test registry
-		Funding: models.P2PTradeFundingPooled,
+		Funding:     models.P2PTradeFundingPooled,
 		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
 		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPaid, OpenTxHash: "0xopen",
 		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
@@ -2018,10 +2038,10 @@ func TestTokenDecimalsFor_PerChain(t *testing.T) {
 		want    int
 	}{
 		{146, "USDT", 6}, {146, "USDC", 6}, {146, "MCGP", 18}, // Sonic mainnet
-		{14601, "USDT", 6},                                     // Sonic testnet
-		{56, "USDT", 18}, {56, "USDC", 18},                     // BSC mainnet (Binance-Peg = 18)
-		{97, "USDT", 18}, {97, "USDC", 18},                     // BSC testnet
-		{146, "WTF", 18},                                       // unknown symbol → 18
+		{14601, "USDT", 6},                 // Sonic testnet
+		{56, "USDT", 18}, {56, "USDC", 18}, // BSC mainnet (Binance-Peg = 18)
+		{97, "USDT", 18}, {97, "USDC", 18}, // BSC testnet
+		{146, "WTF", 18}, // unknown symbol → 18
 	}
 	for _, c := range cases {
 		if got := tokenDecimalsFor(c.chainID, c.symbol); got != c.want {
@@ -2040,7 +2060,7 @@ func TestReconcileTrade_UnconfiguredChain_FailsLoud(t *testing.T) {
 	trade := &models.P2PTrade{
 		ID: uuid.New(), AdID: uuid.New(), SellerID: uuid.New(), BuyerID: uuid.New(),
 		Token: "USDT", ChainID: 56, // BSC — not configured in the test registry
-		Funding: models.P2PTradeFundingPooled,
+		Funding:     models.P2PTradeFundingPooled,
 		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300",
 		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPendingPayment,
 		ExpiresAt: now.Add(-time.Hour), CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now,

@@ -503,50 +503,83 @@ export interface PoolBalance {
 // the user's registered primary. On confirm endpoints the backend cross-
 // checks the address against the on-chain event's `seller` so a caller
 // can't credit themselves with another wallet's deposit.
+//
+// Every pool op also takes an optional `chainId`. Omitting it (or passing
+// undefined) defaults to Sonic server-side — back-compat with the
+// single-chain behavior. Pass the pool screen's selected chain to fund/
+// withdraw a pool on a specific chain (Plan 7 Task 8).
 export const poolApi = {
-  /** Read (available, locked) pool balance for a wallet. */
-  balance: (token: string, walletAddress: string) =>
-    request<PoolBalance>('GET', '/p2p/balance', undefined, { query: { token, address: walletAddress } }),
+  /** Read (available, locked) pool balance for a wallet on a chain. */
+  balance: (token: string, walletAddress: string, chainId?: number) =>
+    request<PoolBalance>('GET', '/p2p/balance', undefined, {
+      query: { token, address: walletAddress, ...(chainId ? { chainId } : {}) },
+    }),
 
   /** Read the wallet's current ERC-20 allowance to the escrow contract.
    *  Used to skip the approve step when an existing allowance covers the
    *  intended deposit. */
-  allowance: (token: string, walletAddress: string) =>
-    request<{ allowance: string }>('GET', '/p2p/allowance', undefined, { query: { token, address: walletAddress } }),
+  allowance: (token: string, walletAddress: string, chainId?: number) =>
+    request<{ allowance: string }>('GET', '/p2p/allowance', undefined, {
+      query: { token, address: walletAddress, ...(chainId ? { chainId } : {}) },
+    }),
 
   /** Prepare the unsigned ERC-20 approve(escrow, amount) tx. Returns the
    *  current allowance alongside so the frontend can decide whether to
    *  broadcast the approve or skip straight to deposit. */
-  prepareApprove: (token: string, amount: string, walletAddress: string) =>
+  prepareApprove: (token: string, amount: string, walletAddress: string, chainId?: number) =>
     request<{ unsignedTx: UnsignedTx; currentAllowance: string }>(
       'POST',
       '/p2p/deposits/approve',
-      { token, amount, walletAddress },
+      { token, amount, walletAddress, ...(chainId ? { chainId } : {}) },
     ),
 
-  prepareDeposit: (token: string, amount: string, walletAddress: string) =>
-    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', { token, amount, walletAddress }),
+  prepareDeposit: (token: string, amount: string, walletAddress: string, chainId?: number) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/deposits', {
+      token,
+      amount,
+      walletAddress,
+      ...(chainId ? { chainId } : {}),
+    }),
 
   /** Confirm a deposit tx. The backend cross-checks that the on-chain event
    *  amount matches `amount` and seller matches `walletAddress` — submit the
    *  same values you prepared with. */
-  confirmDeposit: (token: string, amount: string, txHash: string, walletAddress: string) =>
+  confirmDeposit: (
+    token: string,
+    amount: string,
+    txHash: string,
+    walletAddress: string,
+    chainId?: number,
+  ) =>
     request<{ token: string; amount: string }>('POST', '/p2p/deposits/confirm', {
       token,
       amount,
       txHash,
       walletAddress,
+      ...(chainId ? { chainId } : {}),
     }),
 
-  prepareWithdraw: (token: string, amount: string, walletAddress: string) =>
-    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/withdrawals', { token, amount, walletAddress }),
+  prepareWithdraw: (token: string, amount: string, walletAddress: string, chainId?: number) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/withdrawals', {
+      token,
+      amount,
+      walletAddress,
+      ...(chainId ? { chainId } : {}),
+    }),
 
-  confirmWithdraw: (token: string, amount: string, txHash: string, walletAddress: string) =>
+  confirmWithdraw: (
+    token: string,
+    amount: string,
+    txHash: string,
+    walletAddress: string,
+    chainId?: number,
+  ) =>
     request<{ token: string; amount: string }>('POST', '/p2p/withdrawals/confirm', {
       token,
       amount,
       txHash,
       walletAddress,
+      ...(chainId ? { chainId } : {}),
     }),
 };
 

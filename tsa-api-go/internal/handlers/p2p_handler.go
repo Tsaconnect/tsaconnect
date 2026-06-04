@@ -358,6 +358,9 @@ type poolMoveRequest struct {
 	Token         string `json:"token" binding:"required"`
 	Amount        string `json:"amount" binding:"required"`
 	WalletAddress string `json:"walletAddress" binding:"required"`
+	// ChainID selects the pool's chain. 0 (omitted by the current app) defaults
+	// to Sonic in the service for back-compat.
+	ChainID int64 `json:"chainId"`
 }
 
 // confirmPoolMoveRequest carries the tx hash plus the original amount and
@@ -371,6 +374,8 @@ type confirmPoolMoveRequest struct {
 	Token         string `json:"token" binding:"required"`
 	Amount        string `json:"amount" binding:"required"`
 	WalletAddress string `json:"walletAddress" binding:"required"`
+	// ChainID selects the pool's chain. 0 (omitted) defaults to Sonic.
+	ChainID int64 `json:"chainId"`
 }
 
 // PrepareApprove returns the unsigned ERC-20 approve tx the seller must
@@ -392,11 +397,11 @@ func (h *P2PHandler) PrepareApprove(c *gin.Context) {
 	// active-wallet field after the multi-wallet refactor.
 	log.Printf("[p2p PrepareApprove] user=%s registeredWallet=%s requestWallet=%q token=%s amount=%s",
 		user.ID, user.WalletAddress, req.WalletAddress, req.Token, req.Amount)
-	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareApprove(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.ChainID)
 	if mapServiceError(c, err) {
 		return
 	}
-	allowance, allowanceErr := h.trade.GetAllowance(c.Request.Context(), req.WalletAddress, req.Token)
+	allowance, allowanceErr := h.trade.GetAllowance(c.Request.Context(), req.WalletAddress, req.Token, req.ChainID)
 	allowanceStr := "0"
 	if allowanceErr == nil && allowance != nil {
 		allowanceStr = allowance.String()
@@ -424,7 +429,8 @@ func (h *P2PHandler) GetAllowance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token and address query params are required"})
 		return
 	}
-	allowance, err := h.trade.GetAllowance(c.Request.Context(), address, token)
+	chainID, _ := strconv.ParseInt(c.Query("chainId"), 10, 64)
+	allowance, err := h.trade.GetAllowance(c.Request.Context(), address, token, chainID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -449,7 +455,7 @@ func (h *P2PHandler) PrepareDeposit(c *gin.Context) {
 	// wallet field and that the address matches what was funded on chain.
 	log.Printf("[p2p PrepareDeposit] user=%s registeredWallet=%s requestWallet=%q token=%s amount=%s",
 		user.ID, user.WalletAddress, req.WalletAddress, req.Token, req.Amount)
-	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.ChainID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -469,7 +475,7 @@ func (h *P2PHandler) ConfirmDeposit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ev, err := h.trade.ConfirmDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash)
+	ev, err := h.trade.ConfirmDeposit(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash, req.ChainID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -492,7 +498,7 @@ func (h *P2PHandler) PrepareWithdraw(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	raw, err := h.trade.PrepareWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount)
+	raw, err := h.trade.PrepareWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.ChainID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -512,7 +518,7 @@ func (h *P2PHandler) ConfirmWithdraw(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ev, err := h.trade.ConfirmWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash)
+	ev, err := h.trade.ConfirmWithdraw(c.Request.Context(), user.ID, req.WalletAddress, req.Token, req.Amount, req.TxHash, req.ChainID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -539,7 +545,8 @@ func (h *P2PHandler) GetPoolBalance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "token and address query params are required"})
 		return
 	}
-	bal, err := h.trade.GetPoolBalance(c.Request.Context(), address, token)
+	chainID, _ := strconv.ParseInt(c.Query("chainId"), 10, 64)
+	bal, err := h.trade.GetPoolBalance(c.Request.Context(), address, token, chainID)
 	if mapServiceError(c, err) {
 		return
 	}
