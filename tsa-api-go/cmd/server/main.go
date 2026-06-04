@@ -154,19 +154,11 @@ func main() {
 		// registry corrects the EIP-712 domain chainId to whatever the RPC reports
 		// so signatures stay valid even if SONIC_CHAIN_ID drifts from the chain.
 		p2pTradeSvc = services.NewP2PTradeService(config.DB, p2pEscrowRegistry, p2pService, eventBus, cfg.SonicChainID)
-		// Resolve token symbols against the active Sonic network so a
-		// SONIC_NETWORK=testnet boot looks up testnet token addresses
-		// instead of falling back to the mainnet defaults (which would
-		// build a deposit() call against the wrong contract — the user's
-		// testnet wallet has zero balance there, surfacing as a confusing
-		// "ERC20: transfer amount exceeds balance" gas-estimate revert).
-		network := cfg.SonicNetwork
-		if network == "" {
-			network = "mainnet"
-		}
-		p2pTradeSvc.SetTokenResolver(func(symbol string) string {
-			addr := blockchainService.TokenAddressForNetwork(network, "sonic", symbol)
-			log.Printf("[p2p tokenResolver] symbol=%s network=%s -> %s", symbol, network, addr)
+		// Resolve token symbols by the trade/ad's chainID so that a BSC
+		// trade resolves to the BSC token address, not the Sonic one.
+		p2pTradeSvc.SetTokenResolver(func(chainID int64, symbol string) string {
+			addr := blockchainService.TokenAddressForChainID(chainID, symbol)
+			log.Printf("[p2p tokenResolver] chainID=%d symbol=%s -> %s", chainID, symbol, addr)
 			return addr
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)

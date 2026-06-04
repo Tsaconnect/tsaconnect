@@ -340,7 +340,7 @@ func newRig(t *testing.T) *rig {
 	bus := &mockBus{}
 	trade := services.NewP2PTradeService(db, services.NewP2PEscrowRegistryFromMap(map[int64]services.P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, bus, 146)
 	trade = trade.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
-	trade.SetTokenResolver(func(s string) string {
+	trade.SetTokenResolver(func(chainID int64, s string) string {
 		if s == "USDT" {
 			return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 		}
