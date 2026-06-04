@@ -173,8 +173,8 @@ const CreateAdScreen: React.FC = () => {
   //  (b) more than one chain offers the current token.
   const showChainChooser = chainsFetched && chainsForToken.length > 1;
 
-  // Pool-balance caveat: shown when the selected chain is NOT Sonic, since the
-  // pool balance endpoint is currently Sonic-scoped (Task 8 fixes this).
+  // Show a per-chain pool caveat when a non-Sonic chain is selected so the
+  // seller knows to fund that chain's pool specifically.
   const showPoolChainCaveat =
     selectedChainId != null && !isSonicChain(selectedChainId);
 
@@ -261,7 +261,7 @@ const CreateAdScreen: React.FC = () => {
         setPoolAvailable('-');
         return;
       }
-      const res = await poolApi.balance(token.symbol, walletAddr);
+      const res = await poolApi.balance(token.symbol, walletAddr, selectedChainId ?? undefined);
       if (cancelled) return;
       if (res.success && res.data) {
         setPoolAvailable(res.data.available);
@@ -272,7 +272,7 @@ const CreateAdScreen: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [token.symbol]);
+  }, [token.symbol, selectedChainId]);
 
   // Payment methods visible for the selected currency.
   const paymentMethods = useMemo(
