@@ -175,6 +175,14 @@ func (s *P2PTradeService) resolve(chainID int64) (P2PEscrowAdapter, int64, strin
 	return s.escrows.Resolve(chainID)
 }
 
+// EnabledChains returns the P2P-enabled chains for the marketplace/create-ad UI.
+func (s *P2PTradeService) EnabledChains() []P2PChainInfo {
+	if s.escrows == nil {
+		return nil
+	}
+	return s.escrows.Chains()
+}
+
 // WithClock returns a copy of the service using the supplied clock — tests
 // only. Avoids exposing a mutable field on the type.
 func (s *P2PTradeService) WithClock(c Clock) *P2PTradeService {

@@ -150,6 +150,22 @@ func unsignedTxJSON(raw []byte) any {
 	return v
 }
 
+// ─── Chains ────────────────────────────────────────────────────────────────
+
+// GetChains returns the P2P-enabled chains + their tradeable assets.
+func (h *P2PHandler) GetChains(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	chains := []services.P2PChainInfo{}
+	if h.trade != nil {
+		if cs := h.trade.EnabledChains(); cs != nil {
+			chains = cs
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": chains})
+}
+
 // ─── Payment methods ───────────────────────────────────────────────────────
 
 type createPaymentMethodRequest struct {

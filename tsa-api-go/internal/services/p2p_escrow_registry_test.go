@@ -96,6 +96,38 @@ func TestP2PEscrowRegistry_NilSafety(t *testing.T) {
 	}
 }
 
+func TestP2PEscrowRegistry_Chains(t *testing.T) {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
+		146: {service: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"), eip712Version: "1", domainChainID: 146, assets: []string{"MCGP"}},
+		56:  {service: NewP2PEscrowServiceForChain(nil, nil, "0xBSC"), eip712Version: "2", domainChainID: 56, assets: []string{"USDT", "USDC"}},
+	}}
+
+	chains := reg.Chains()
+	if len(chains) != 2 {
+		t.Fatalf("Chains() len = %d, want 2", len(chains))
+	}
+	// Sorted by chainId ascending: 56 first, 146 second.
+	if chains[0].ChainID != 56 {
+		t.Errorf("chains[0].ChainID = %d, want 56", chains[0].ChainID)
+	}
+	if chains[1].ChainID != 146 {
+		t.Errorf("chains[1].ChainID = %d, want 146", chains[1].ChainID)
+	}
+	// Assets are passed through unmodified.
+	if len(chains[0].Assets) != 2 {
+		t.Errorf("chains[0] (BSC) assets = %v, want [USDT USDC]", chains[0].Assets)
+	}
+	if len(chains[1].Assets) != 1 || chains[1].Assets[0] != "MCGP" {
+		t.Errorf("chains[1] (Sonic) assets = %v, want [MCGP]", chains[1].Assets)
+	}
+
+	// nil registry must return nil (not panic).
+	var r *P2PEscrowRegistry
+	if r.Chains() != nil {
+		t.Errorf("nil registry Chains() must return nil")
+	}
+}
+
 func TestP2PEscrowRegistry_AssetAllowed(t *testing.T) {
 	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
 		146: {service: NewP2PEscrowServiceForChain(nil, nil, "0xSonic"), eip712Version: "1", domainChainID: 146, assets: []string{"USDT", "USDC", "MCGP"}},

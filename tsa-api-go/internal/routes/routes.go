@@ -350,6 +350,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		p2pGroup := api.Group("/p2p")
 		p2pGroup.Use(auth)
 		{
+			p2pGroup.GET("/chains", p2p.GetChains)
 			p2pGroup.GET("/payment-methods", p2p.ListPaymentMethods)
 			p2pGroup.POST("/payment-methods", idem, p2p.CreatePaymentMethod)
 			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
