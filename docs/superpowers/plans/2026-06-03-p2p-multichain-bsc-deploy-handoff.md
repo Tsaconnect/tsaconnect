@@ -56,10 +56,11 @@ Set on the API server and restart:
 BSC_NETWORK=testnet
 P2P_ESCROW_ADDRESS_BSC=<proxy address from step 2>
 # P2P_ESCROW_EIP712_VERSION_BSC defaults to "2" — only set if it differs
-# If the BSC testnet token addresses differ from the bscPresets defaults,
-# also override them (the bscPresets testnet token fields ship empty):
-BSC_USDT_TOKEN_ADDRESS=<bscTestnetUSDT>
-BSC_USDC_TOKEN_ADDRESS=<bscTestnetUSDC>
+# BSC testnet token addresses — these populate cfg.Networks["testnet"]
+# ["bsc:USDT"/"bsc:USDC"], which the chain-aware P2P token resolver reads.
+# Use the mock addresses printed by §1.5:
+BSC_TESTNET_USDT_ADDRESS=<USDT from §1.5>
+BSC_TESTNET_USDC_ADDRESS=<USDC from §1.5>
 ```
 Until `P2P_ESCROW_ADDRESS_BSC` is set, BSC is omitted from `Config.P2PChains` (dormant) and the app/API behave exactly as today (Sonic-only).
 

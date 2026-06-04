@@ -5,7 +5,9 @@
 //
 // Mints a large balance to the deployer (and to MINT_TO, if set, e.g. a tester
 // wallet). Feed the printed addresses into the escrow deploy's ACCEPTED_TOKENS
-// and the backend's BSC_USDT_TOKEN_ADDRESS / BSC_USDC_TOKEN_ADDRESS.
+// and the backend's BSC_TESTNET_USDT_ADDRESS / BSC_TESTNET_USDC_ADDRESS (these
+// populate cfg.Networks["testnet"].TokenAddresses["bsc:USDT"/"bsc:USDC"], which
+// the chain-aware P2P token resolver reads). Mainnet uses BSC_MAINNET_*.
 //
 //   npx hardhat run scripts/deploy-bsc-test-tokens.js --network bscTestnet
 //   # local validation (no tBNB): --network hardhat  or  --network localhost
@@ -39,9 +41,9 @@ async function main() {
   console.log("  USDC:", usdcAddr);
   console.log("\n--- escrow deploy ---");
   console.log(`  ACCEPTED_TOKENS=${usdtAddr},${usdcAddr}`);
-  console.log("--- backend env ---");
-  console.log(`  BSC_USDT_TOKEN_ADDRESS=${usdtAddr}`);
-  console.log(`  BSC_USDC_TOKEN_ADDRESS=${usdcAddr}`);
+  console.log("--- backend env (BSC testnet) ---");
+  console.log(`  BSC_TESTNET_USDT_ADDRESS=${usdtAddr}`);
+  console.log(`  BSC_TESTNET_USDC_ADDRESS=${usdcAddr}`);
 }
 
 main().catch((e) => {
