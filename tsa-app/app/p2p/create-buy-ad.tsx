@@ -23,8 +23,10 @@ import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-n
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
+  chainsApi,
   paymentMethodsApi,
   parseTokenAmount,
+  type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { getActiveWallet } from '../../services/wallet';
@@ -32,6 +34,7 @@ import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import { useUserRole } from '../../hooks/useUserRole';
 import CurrencySelector from '../../components/currency/CurrencySelector';
+import { getChainByChainId } from '../../constants/chains';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -47,11 +50,31 @@ import {
   Text,
 } from '@/components/ui';
 
-const SUPPORTED_TOKENS = [
+// Static fallback token list — used when the backend's /p2p/chains endpoint
+// is unreachable so the screen never crashes with an empty token set.
+const FALLBACK_TOKENS = [
   { symbol: 'USDT', decimals: 6 },
   { symbol: 'USDC', decimals: 6 },
   { symbol: 'MCGP', decimals: 18 },
-] as const;
+];
+
+type TokenEntry = { symbol: string; decimals: number };
+
+// Sonic chain IDs (mainnet + testnet).
+const SONIC_CHAIN_IDS = new Set([146, 14601]);
+
+function isSonicChain(chainId: number): boolean {
+  return SONIC_CHAIN_IDS.has(chainId);
+}
+
+function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
+  return [...chains].sort((a, b) => {
+    const aS = isSonicChain(a.chainId) ? 0 : 1;
+    const bS = isSonicChain(b.chainId) ? 0 : 1;
+    if (aS !== bS) return aS - bS;
+    return a.chainId - b.chainId;
+  });
+}
 
 const CreateBuyAdScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
@@ -65,7 +88,20 @@ const CreateBuyAdScreen: React.FC = () => {
     supportedCurrencies.find((c) => c.code === currencyCode) ?? marketCurrency;
   const symbol = currencyConfig.symbol;
 
-  const [token, setToken] = useState<(typeof SUPPORTED_TOKENS)[number]>(SUPPORTED_TOKENS[0]);
+  // ── Chain / token data from the backend ─────────────────────────────────
+  const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
+  const [chainsFetched, setChainsFetched] = useState(false);
+
+  const availableTokens: TokenEntry[] = useMemo(() => {
+    if (!chainsFetched || enabledChains.length === 0) return FALLBACK_TOKENS;
+    const symbols = new Set(enabledChains.flatMap((c) => c.assets));
+    return Array.from(symbols).map((sym) => {
+      const fallback = FALLBACK_TOKENS.find((t) => t.symbol === sym);
+      return fallback ?? { symbol: sym, decimals: 18 };
+    });
+  }, [enabledChains, chainsFetched]);
+
+  const [token, setToken] = useState<TokenEntry>(FALLBACK_TOKENS[0]);
   const [amountInput, setAmountInput] = useState(''); // human decimal — total to buy
   const [rateInput, setRateInput] = useState('');
   const [minLimitInput, setMinLimitInput] = useState('');
@@ -77,6 +113,24 @@ const CreateBuyAdScreen: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
 
+  // ── Chain selector state ──────────────────────────────────────────────
+  const chainsForToken: P2PChainInfo[] = useMemo(() => {
+    if (enabledChains.length === 0) return [];
+    return sortChains(enabledChains.filter((c) => c.assets.includes(token.symbol)));
+  }, [enabledChains, token.symbol]);
+
+  const [selectedChainId, setSelectedChainId] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (chainsForToken.length > 0) {
+      setSelectedChainId(chainsForToken[0].chainId);
+    } else {
+      setSelectedChainId(undefined);
+    }
+  }, [chainsForToken]);
+
+  const showChainChooser = chainsFetched && chainsForToken.length > 1;
+
   useEffect(() => {
     (async () => {
       try {
@@ -86,6 +140,22 @@ const CreateBuyAdScreen: React.FC = () => {
         console.warn('[create-buy-ad] paymentMethodsApi.list failed', err);
       } finally {
         setLoadingPms(false);
+      }
+    })();
+  }, []);
+
+  // Fetch enabled chains for asset-first, chain-follows selection.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await chainsApi.list();
+        if (res.success && res.data && res.data.length > 0) {
+          setEnabledChains(res.data);
+        }
+      } catch (err) {
+        console.warn('[create-buy-ad] chainsApi.list failed, using fallback tokens', err);
+      } finally {
+        setChainsFetched(true);
       }
     })();
   }, []);
@@ -146,6 +216,7 @@ const CreateBuyAdScreen: React.FC = () => {
         sellerAddress: merchantWallet,
         side: 'buy',
         terms,
+        ...(selectedChainId != null ? { chainId: selectedChainId } : {}),
       });
 
       if (!createRes.success || !createRes.data) {
@@ -217,8 +288,8 @@ const CreateBuyAdScreen: React.FC = () => {
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
             Token to buy
           </Text>
-          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-            {SUPPORTED_TOKENS.map((t) => (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+            {availableTokens.map((t) => (
               <Chip
                 key={t.symbol}
                 label={t.symbol}
@@ -227,6 +298,29 @@ const CreateBuyAdScreen: React.FC = () => {
               />
             ))}
           </View>
+
+          {/* ── Chain ────────────────────────────────────────────────── */}
+          {showChainChooser && (
+            <>
+              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+                Network
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                {chainsForToken.map((c) => {
+                  const cfg = getChainByChainId(c.chainId);
+                  const label = cfg?.shortName ?? String(c.chainId);
+                  return (
+                    <Chip
+                      key={c.chainId}
+                      label={label}
+                      selected={selectedChainId === c.chainId}
+                      onPress={() => setSelectedChainId(c.chainId)}
+                    />
+                  );
+                })}
+              </View>
+            </>
+          )}
 
           {/* ── Currency ─────────────────────────────────────────────── */}
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>

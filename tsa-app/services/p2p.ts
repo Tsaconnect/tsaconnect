@@ -399,12 +399,16 @@ export interface CreateAdInput {
   sellerAddress: string;
   /** 'sell' (default) = user sells crypto; 'buy' = merchant posts a buy-ad and will pay fiat. */
   side?: 'sell' | 'buy';
+  /** Chain the ad is published on. Omitting defaults to Sonic server-side. */
+  chainId?: number;
 }
 
 export interface ListAdsFilter {
   side?: 'sell' | 'buy';
   token?: string;
   fiatCurrency?: string;
+  /** Filter ads by chain. Omitting returns ads from all chains. */
+  chainId?: number;
   status?: P2PAd['status'];
   sellerId?: string;
   limit?: number;
