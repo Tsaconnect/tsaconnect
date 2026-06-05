@@ -187,9 +187,13 @@ const CreateAdScreen: React.FC = () => {
 
   // The chain config for display (human name, etc.). May be undefined for
   // unknown chainIds not in CHAINS (e.g. a new chain the app doesn't yet know).
-  const selectedChainConfig = selectedChainId != null
-    ? getChainByChainId(selectedChainId)
-    : undefined;
+  // Memoized: getChainByChainId returns a fresh object every call, so without
+  // this the reference changes each render and any effect depending on it (the
+  // funding-summary effect) re-runs in a loop, flickering the summary text.
+  const selectedChainConfig = useMemo(
+    () => (selectedChainId != null ? getChainByChainId(selectedChainId) : undefined),
+    [selectedChainId],
+  );
 
   // Show the chain chooser only when:
   //  (a) we have a valid backend response, AND
