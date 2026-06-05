@@ -41,7 +41,29 @@ var (
 	ErrDisputeNotFound       = errors.New("p2p: dispute not found")
 	ErrNotApplicableForBuyAd = errors.New("p2p: action not applicable for buy-ads")
 	ErrActiveTradeExists     = errors.New("p2p: you already have an active trade on this ad")
+	// ErrSellerPoolInsufficient: the maker's on-chain available balance can no
+	// longer cover this trade (they withdrew, or another trade drained the
+	// pool). Pre-checked at open so the buyer gets a clear "try another ad"
+	// (409) instead of an opaque "estimate gas (would revert)" 500.
+	ErrSellerPoolInsufficient = errors.New("p2p: seller's available balance can no longer cover this trade")
+	// ErrTradePrepareReverted: building the on-chain tx failed because it would
+	// revert (e.g. bad voucher signature, voucher expired, pool drained between
+	// the pre-check and the estimate). The client can't fix our infra but the
+	// request as-formed can't be fulfilled → 422 with the revert reason.
+	ErrTradePrepareReverted = errors.New("p2p: the trade could not be prepared on-chain")
+	// ErrChainUnavailable: a transient RPC/transport failure while preparing the
+	// tx (nonce / gas-price lookup) — retryable → 503.
+	ErrChainUnavailable = errors.New("p2p: blockchain temporarily unavailable, please retry")
 )
+
+// isChainRevert reports whether a prepare error is an on-chain revert (vs a
+// transport/RPC failure), so the two map to different HTTP statuses.
+func isChainRevert(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "revert")
+}
 
 // uint96Max is the largest amount the contract can hold for a single ad/trade
 // (`uint96` field in P2PEscrow.sol). Computed once.
@@ -1003,9 +1025,39 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Pre-check the maker's on-chain pool BEFORE the gas estimate. openTrade
+	// debits available[seller][token]; if the seller has since withdrawn or
+	// another trade drained it, the estimate reverts with "Seller balance
+	// insufficient" and surfaces as an opaque 500. Catch it here and return a
+	// clear 409 ("try another ad") instead. Best-effort: if the balance read
+	// itself fails we fall through to the prep (its revert mapping below is the
+	// backstop) rather than block a buyer on a flaky RPC.
+	if tokenAddr, terr := s.resolveTokenAddress(ad.ChainID, ad.Token); terr == nil {
+		if bal, berr := escrow.ReadBalance(ad.SellerAddress, tokenAddr); berr == nil {
+			if bal.Available.Cmp(tokenAmount) < 0 {
+				return nil, nil, fmt.Errorf("%w (maker available %s, trade needs %s base units)",
+					ErrSellerPoolInsufficient, bal.Available, tokenAmount)
+			}
+		} else {
+			log.Printf("[p2p OpenTrade] seller pool pre-check read failed (proceeding to prep): seller=%s token=%s: %v",
+				ad.SellerAddress, tokenAddr, berr)
+		}
+	}
+
 	unsignedTx, err := escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
 	if err != nil {
-		return nil, nil, fmt.Errorf("prepare openTrade: %w", err)
+		// Don't let an opaque prep failure surface as a generic 500. A revert
+		// means the on-chain openTrade would fail (bad voucher signature, or
+		// the pool drained between the pre-check and the estimate) → 422 with
+		// the reason; anything else (nonce / gas-price RPC) is transient → 503.
+		// Log with context for triage either way.
+		log.Printf("[p2p OpenTrade] prepare failed: ad=%s seller=%s token=%s amount=%s err=%v",
+			ad.ID, ad.SellerAddress, ad.Token, tokenAmount, err)
+		if isChainRevert(err) {
+			return nil, nil, fmt.Errorf("%w: %v", ErrTradePrepareReverted, err)
+		}
+		return nil, nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -1158,7 +1210,15 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	}
 	unsignedTx, err := escrow.PrepareOpenTradeWithDeposit(onChainTradeID, tokenAddr, tokenAmount, ad.SellerAddress, openerAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("prepare openTradeWithDeposit: %w", err)
+		// Map the opaque prep failure like the sell-ad path: a revert (e.g. the
+		// taker's wallet can't cover the deposit, token not accepted) → 422 with
+		// the reason; a transport/RPC error → 503. Avoids a generic 500.
+		log.Printf("[p2p openTradeWithDeposit] prepare failed: ad=%s opener=%s token=%s amount=%s err=%v",
+			ad.ID, openerAddress, ad.Token, tokenAmount, err)
+		if isChainRevert(err) {
+			return nil, nil, fmt.Errorf("%w: %v", ErrTradePrepareReverted, err)
+		}
+		return nil, nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
