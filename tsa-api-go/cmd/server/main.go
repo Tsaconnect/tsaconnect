@@ -116,7 +116,7 @@ func main() {
 	// Initialize email, push, and notification services
 	emailService := services.NewEmailService(cfg.MailjetAPIKey, cfg.MailjetSecretKey)
 	expoPush := services.NewExpoPushService(cfg.ExpoAccessToken)
-	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService, expoPush)
+	_ = services.NewNotificationService(config.DB, eventBus, wsHub, emailService, expoPush, cfg.P2PTradeLinkBase)
 
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService, p2pService)

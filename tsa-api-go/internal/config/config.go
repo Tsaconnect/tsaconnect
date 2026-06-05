@@ -115,6 +115,7 @@ type Config struct {
 	FrontendURL         string
 	AdminURL            string
 	LandingURL          string
+	P2PTradeLinkBase    string // base URL for the "View trade" CTA in P2P trade emails (empty → no button)
 	Port                string
 	Env                 string
 	CloudinaryCloudName string
@@ -235,6 +236,7 @@ func Load() *Config {
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
 		AdminURL:            getEnv("ADMIN_URL", "http://localhost:5173,https://admin.tsaconnectworld.com"),
 		LandingURL:          getEnv("LANDING_URL", "https://tsaconnectworld.com"),
+		P2PTradeLinkBase:    getEnv("P2P_TRADE_LINK_BASE", ""),
 		Port:                getEnv("PORT", "5000"),
 		Env:                 getEnv("ENV", "development"),
 		CloudinaryCloudName: getEnv("CLOUDINARY_CLOUD_NAME", ""),

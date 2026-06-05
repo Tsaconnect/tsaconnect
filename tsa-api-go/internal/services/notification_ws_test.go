@@ -88,8 +88,12 @@ func classifyTradeFrameGo(typ, tradeID string, data map[string]interface{}) stri
 func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 	db := openNotifWSTestDB(t)
 	userID := uuid.New()
+	// mute_email=1: this test exercises only the WS frame path (WS is gated by
+	// mute_notifications, which stays 0). Muting email keeps the trade-milestone
+	// email goroutine — irrelevant here and unable to load a trade from this
+	// minimal test DB — from spawning and adding timing noise to the frame read.
 	if err := db.Exec(
-		`INSERT INTO users (id, name, email, mute_notifications, mute_email) VALUES (?,?,?,0,0)`,
+		`INSERT INTO users (id, name, email, mute_notifications, mute_email) VALUES (?,?,?,0,1)`,
 		userID.String(), "Buyer", "buyer@test.local",
 	).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
@@ -106,7 +110,7 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 
 	// The bridge under test — subscribes "*" to the bus in its constructor.
 	// nil push service: this test exercises the WS frame, not Expo delivery.
-	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), nil)
+	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), nil, "")
 
 	tradeID := uuid.New().String()
 	cases := []struct {
