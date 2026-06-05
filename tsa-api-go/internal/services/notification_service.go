@@ -97,23 +97,29 @@ type NotificationService struct {
 	hub          *ws.Hub
 	emailService *EmailService
 	push         *ExpoPushService // nil → push delivery disabled
+	// Base URL for the "View trade" CTA in P2P trade emails, e.g.
+	// "https://app.tsaconnectworld.com" → links to <base>/p2p/trade/<id>.
+	// Empty → emails omit the button (still fully informative).
+	p2pTradeLinkBase string
 }
 
-func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService, push *ExpoPushService) *NotificationService {
+func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService, push *ExpoPushService, p2pTradeLinkBase string) *NotificationService {
 	ns := &NotificationService{
-		db:           db,
-		hub:          hub,
-		emailService: emailService,
-		push:         push,
+		db:               db,
+		hub:              hub,
+		emailService:     emailService,
+		push:             push,
+		p2pTradeLinkBase: p2pTradeLinkBase,
 	}
 	bus.Subscribe("*", ns.handleEvent)
 	return ns
 }
 
 func (ns *NotificationService) handleEvent(event events.Event) {
-	// Determine channel
+	// Determine channel. P2P trade milestones also email (via a dedicated
+	// role-aware composer below), so mark them "both" on the record too.
 	channel := "in_app"
-	if emailEvents[event.Type] {
+	if emailEvents[event.Type] || p2pTradeEmailEvents[event.Type] {
 		channel = "both"
 	}
 
@@ -160,16 +166,23 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		}
 	}
 
-	// Send email (if applicable and not muted)
-	if channel == "both" && !user.MuteNotifications && !user.MuteEmail {
-		go ns.emailService.Send(
-			user.Email,
-			user.Name,
-			event.Title,
-			event.Title,
-			event.Message,
-			"", "",
-		)
+	// Email delivery (if applicable and not muted).
+	if !user.MuteNotifications && !user.MuteEmail && user.Email != "" && ns.emailService != nil {
+		switch {
+		case p2pTradeEmailEvents[event.Type]:
+			// Rich, role-aware P2P trade email (loads the trade + composes per
+			// buyer/seller). Kept off the generic path so it isn't sent twice.
+			go ns.sendP2PTradeEmail(event, user)
+		case channel == "both":
+			go ns.emailService.Send(
+				user.Email,
+				user.Name,
+				event.Title,
+				event.Title,
+				event.Message,
+				"", "",
+			)
+		}
 	}
 }
 
@@ -177,6 +190,47 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 // prunes any the push service reports as dead. The push `data` carries the
 // event `type` (+ ids) so the app can deep-link on tap. Best-effort: runs in a
 // goroutine and never blocks the bus.
+// sendP2PTradeEmail loads the trade referenced by the event and sends a rich,
+// role-aware milestone email. Best-effort (logs + returns on any failure);
+// runs in its own goroutine so a slow mail send never blocks event handling.
+func (ns *NotificationService) sendP2PTradeEmail(event events.Event, user models.User) {
+	raw, ok := event.Data["tradeId"]
+	if !ok {
+		return
+	}
+	var tradeID uuid.UUID
+	switch v := raw.(type) {
+	case uuid.UUID:
+		tradeID = v
+	case string:
+		parsed, err := uuid.Parse(v)
+		if err != nil {
+			return
+		}
+		tradeID = parsed
+	default:
+		return
+	}
+
+	var trade models.P2PTrade
+	if err := ns.db.First(&trade, "id = ?", tradeID).Error; err != nil {
+		log.Printf("[NotificationService] p2p email: load trade %s: %v", tradeID, err)
+		return
+	}
+
+	content, send := buildP2PTradeEmail(event, &trade, ns.p2pTradeLinkBase)
+	if !send {
+		return
+	}
+	if err := ns.emailService.Send(
+		user.Email, user.Name,
+		content.Subject, content.Subject, content.Body,
+		content.CTAText, content.CTAURL,
+	); err != nil {
+		log.Printf("[NotificationService] p2p email to %s failed: %v", user.Email, err)
+	}
+}
+
 func (ns *NotificationService) sendPush(event events.Event) {
 	var tokens []models.DeviceToken
 	if err := ns.db.Where("user_id = ?", event.UserID).Find(&tokens).Error; err != nil {

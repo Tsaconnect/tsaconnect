@@ -120,6 +120,7 @@ P2P trading (Sonic + BSC multi-chain):
 - `BSC_NETWORK` - `"mainnet"` | `"testnet"` (default `testnet`) — selects the BSC P2P preset
 - `P2P_ESCROW_ADDRESS_BSC` - BSC P2PEscrowV2 proxy; **UNSET = BSC P2P dormant** (not added to `Config.P2PChains`)
 - `P2P_ESCROW_EIP712_VERSION_BSC` - EIP-712 domain version for BSC contract (default `"2"`)
+- `P2P_TRADE_LINK_BASE` - base URL for the "View trade" button in P2P trade-milestone emails (e.g. `https://app.tsaconnectworld.com` → `<base>/p2p/trade/<id>`). **UNSET = emails omit the button** (still fully informative). Trade milestones (opened/paid/released/cancelled/disputed/resolved/expired) email both parties via `notification_service.go`; per-message chat does not email.
 
 ## Dependencies
 
