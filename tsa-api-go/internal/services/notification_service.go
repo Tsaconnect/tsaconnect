@@ -97,19 +97,14 @@ type NotificationService struct {
 	hub          *ws.Hub
 	emailService *EmailService
 	push         *ExpoPushService // nil → push delivery disabled
-	// Base URL for the "View trade" CTA in P2P trade emails, e.g.
-	// "https://app.tsaconnectworld.com" → links to <base>/p2p/trade/<id>.
-	// Empty → emails omit the button (still fully informative).
-	p2pTradeLinkBase string
 }
 
-func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService, push *ExpoPushService, p2pTradeLinkBase string) *NotificationService {
+func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailService *EmailService, push *ExpoPushService) *NotificationService {
 	ns := &NotificationService{
-		db:               db,
-		hub:              hub,
-		emailService:     emailService,
-		push:             push,
-		p2pTradeLinkBase: p2pTradeLinkBase,
+		db:           db,
+		hub:          hub,
+		emailService: emailService,
+		push:         push,
 	}
 	bus.Subscribe("*", ns.handleEvent)
 	return ns
@@ -218,14 +213,14 @@ func (ns *NotificationService) sendP2PTradeEmail(event events.Event, user models
 		return
 	}
 
-	content, send := buildP2PTradeEmail(event, &trade, ns.p2pTradeLinkBase)
+	content, send := buildP2PTradeEmail(event, &trade)
 	if !send {
 		return
 	}
 	if err := ns.emailService.Send(
 		user.Email, user.Name,
 		content.Subject, content.Subject, content.Body,
-		content.CTAText, content.CTAURL,
+		"", "",
 	); err != nil {
 		log.Printf("[NotificationService] p2p email to %s failed: %v", user.Email, err)
 	}
