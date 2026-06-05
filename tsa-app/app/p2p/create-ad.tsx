@@ -37,6 +37,7 @@ import {
 import { ensureEscrowFunding } from '../../services/escrowFunding';
 import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
+import { decodeRevertError } from '../../services/txErrors';
 import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
@@ -447,6 +448,10 @@ const CreateAdScreen: React.FC = () => {
   const handleSubmit = async () => {
     if (!valid || submitting) return;
     setSubmitting(true);
+    // Tracks whether a deposit actually broadcast+confirmed this attempt, so the
+    // catch only tells the seller "your deposit is safe" when one really happened
+    // (an insufficient-balance / gas-estimate revert moves no funds at all).
+    let depositedThisAttempt = false;
     try {
       // 1. Resolve seller wallet address.
       setSubmitStage('Loading wallet…');
@@ -530,6 +535,9 @@ const CreateAdScreen: React.FC = () => {
           return;
         }
         // action.kind === 'proceed' → fall through to create+sign+activate.
+        // Record whether a real deposit landed this attempt (vs already-funded),
+        // so a later create/sign failure can correctly say funds are safe.
+        if (fundResult.status === 'funded') depositedThisAttempt = true;
       }
 
       // 4. Create ad (prepare phase). Funding (step 3) is already done, so the
@@ -599,16 +607,37 @@ const CreateAdScreen: React.FC = () => {
         { text: 'OK', onPress: () => router.back() },
       ]);
     } catch (err: any) {
-      // If funding already deposited successfully (a 'funded' result) but the
-      // create/sign step then failed, the deposit is safe in the seller's
-      // on-chain `available` balance — reusable on retry or reclaimable. Tell
-      // them so, rather than implying funds are stuck.
-      Alert.alert(
-        'Could not publish ad',
-        (err?.message || String(err)) +
-          '\n\nAny deposit you just made is safe in your escrow balance — retry to ' +
-          'publish, or reclaim it from My Ads.',
-      );
+      const raw = err?.message || String(err);
+      // Turn an opaque on-chain revert (e.g. the ERC20InsufficientBalance hex the
+      // backend surfaces when the wallet can't cover the deposit) into a clear,
+      // actionable message instead of raw ABI bytes.
+      const revert = decodeRevertError(raw);
+      let body: string;
+      if (revert?.kind === 'insufficient-balance') {
+        body =
+          `Your wallet doesn't have enough ${token.symbol} to back this ad. It needs ` +
+          `${formatTokenAmount(revert.needed, adDecimals, 4)} ${token.symbol}, but your wallet holds ` +
+          `${formatTokenAmount(revert.balance, adDecimals, 4)} ${token.symbol} on this network. ` +
+          `Top up your ${token.symbol}, then publish.`;
+      } else if (revert?.kind === 'insufficient-allowance') {
+        body =
+          `The escrow isn't approved to move your ${token.symbol} yet. Please try publishing ` +
+          `again — the approval is requested first.`;
+      } else if (revert?.kind === 'unknown-revert') {
+        body =
+          `The deposit can't go through right now — your wallet may be missing the ${token.symbol} ` +
+          `or the network gas needed. Check your balances and try again.`;
+      } else {
+        body = raw;
+      }
+      // Only mention a safe deposit when one actually broadcast+confirmed this
+      // attempt; an insufficient-balance / gas-estimate revert moves no funds.
+      if (depositedThisAttempt) {
+        body +=
+          '\n\nThe deposit you just made is safe in your escrow balance — retry to publish, ' +
+          'or reclaim it from My Ads.';
+      }
+      Alert.alert('Could not publish ad', body);
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -975,11 +1004,21 @@ const CreateAdScreen: React.FC = () => {
                       }}
                     >
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                        <Icon
-                          name={selected ? 'checkCircle' : 'closeCircle'}
-                          size={22}
-                          color={selected ? colors.accent : colors.textMuted}
-                        />
+                        {selected ? (
+                          <Icon name="checkCircle" size={22} color={colors.accent} />
+                        ) : (
+                          // Unselected = empty outline circle (a checkbox affordance),
+                          // not a ✕ — an X reads as "remove/error", not "tap to select".
+                          <View
+                            style={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: 11,
+                              borderWidth: 2,
+                              borderColor: colors.border,
+                            }}
+                          />
+                        )}
                         <View style={{ flex: 1 }}>
                           <Text variant="bodyMed" weight="600">
                             {m.bankName}
