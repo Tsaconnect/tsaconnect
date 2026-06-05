@@ -1,28 +1,32 @@
 // app/p2p/pool.tsx
 //
-// Seller's P2P pool management — deposit / withdraw a single token's
-// available + locked balance. Restyled onto the TSA Signature design system
-// (theme tokens + @/components/ui primitives); behavior, API calls, and the
-// sign → broadcast → confirm flows are unchanged.
+// Seller's escrow funds / reclaim screen — view a single token's available +
+// locked on-chain balance and WITHDRAW (reclaim) unsold `available` funds.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives); behavior, API calls, and the sign → broadcast → confirm flow are
+// unchanged.
+//
+// "Hide the pool" (spec 2026-06-05, Architecture §3): seller funding now happens
+// inline during ad creation (services/escrowFunding.ts), so this screen no longer
+// offers Deposit as a primary action. It narrows to "your escrow balance &
+// reclaim" — viewing available/locked and withdrawing available back to the
+// wallet. The deposit/withdraw mode toggle collapses to withdraw-only.
 //
 // Flow:
 //   1. GET /p2p/balance — current (available, locked) for the active wallet.
-//   2. Pick deposit or withdraw, enter amount, confirm.
-//   3. Backend builds an unsigned tx; we sign locally + broadcast on Sonic.
-//   4. POST /p2p/{deposits|withdrawals}/confirm with the txHash → audit row.
+//   2. Enter an amount to reclaim, confirm.
+//   3. Backend builds an unsigned withdraw tx; we sign locally + broadcast on the
+//      selected chain.
+//   4. POST /p2p/withdrawals/confirm with the txHash → audit row.
 //
-// Recovery: if broadcast lands but the server-side confirm POST fails, the
-// txHash is stashed in AsyncStorage so the user can retry the confirm step
+// Recovery: if a withdraw broadcast lands but the server-side confirm POST fails,
+// the record is stashed in the shared, non-overwriting pending store
+// (services/p2pPending, mode 'withdraw') so the user can retry the confirm step
 // without re-broadcasting (the on-chain tx already happened). Confirms are
-// idempotent server-side (same txHash → same result).
-//
-// ERC20 allowance: deposit calls `transferFrom` inside the escrow contract,
-// so the seller must approve the escrow for `amount` first. This screen
-// only handles the deposit / withdraw step; the approve flow lives in the
-// wallet manager (or the seller approves manually via their wallet UI).
+// idempotent server-side (same txHash → same result). The store is a LIST keyed
+// by txHash so a second stranded withdraw can't orphan a prior one.
 
 import { router } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -42,6 +46,12 @@ import {
   unsignedTxToTxLike,
   type P2PChainInfo,
 } from '../../services/p2p';
+import {
+  addPending,
+  listPending,
+  removePending,
+  type PendingEscrowConfirm,
+} from '../../services/p2pPending';
 import { getChain, getChainByChainId } from '../../constants/chains';
 import {
   broadcastTransaction,
@@ -59,7 +69,6 @@ import {
   Divider,
   Icon,
   PressableScale,
-  SegmentedControl,
   Spinner,
   Text,
 } from '@/components/ui';
@@ -67,37 +76,13 @@ import {
 const TOKENS = ['USDT', 'USDC', 'MCGP'] as const;
 type Token = typeof TOKENS[number];
 
-type Mode = 'deposit' | 'withdraw';
-
-// Sonic chain IDs (mainnet + testnet) — the pool screen defaults to Sonic so
-// existing single-chain behavior is preserved when the chains endpoint is
-// unreachable or hasn't loaded yet.
+// Sonic chain IDs (mainnet + testnet) — the screen defaults to Sonic so existing
+// single-chain behavior is preserved when the chains endpoint is unreachable or
+// hasn't loaded yet.
 const SONIC_CHAIN_IDS = [146, 14601];
-
-// AsyncStorage key for stashing a tx that broadcast successfully but whose
-// server-side confirm failed. One record per (mode, token); a new broadcast
-// for the same pair overwrites it (the previous tx already happened on
-// chain, so the user can manually retry the confirm at any time).
-const PENDING_KEY = 'p2p_pool_pending_v1';
-
-interface PendingConfirm {
-  mode: Mode;
-  token: Token;
-  amount: string; // base units
-  txHash: string;
-  createdAt: number;
-  /** Wallet that signed the broadcast. Confirm must reference this same
-   *  wallet so the backend's on-chain `seller` cross-check passes. */
-  walletAddress?: string;
-  /** Chain the tx was broadcast on. Confirm must target the same chain even
-   *  if the user switches the chain selector before retrying. Old records
-   *  lacking this field fall back to the current selectedChainId. */
-  chainId?: number;
-}
 
 const P2PPoolScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
-  const [mode, setMode] = useState<Mode>('deposit');
   const [token, setToken] = useState<Token>('USDT');
   const [amountInput, setAmountInput] = useState('');
   const [available, setAvailable] = useState<string>('0');
@@ -106,18 +91,21 @@ const P2PPoolScreen: React.FC = () => {
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [stage, setStage] = useState('');
-  const [pending, setPending] = useState<PendingConfirm | null>(null);
+  // Pending withdraw-confirm record (from the shared store) for the active
+  // wallet, if any. The recovery banner keys off the RECORD's own fields, not
+  // the live form, so a stranded confirm is always visible.
+  const [pending, setPending] = useState<PendingEscrowConfirm | null>(null);
   const [retrying, setRetrying] = useState(false);
-  // Active wallet — read once on mount + whenever token/mode changes; all
-  // poolApi calls thread this through so the backend gas-estimates against
-  // the right balance even if the user has multiple in-app HD wallets.
+  // Active wallet — read once on mount + whenever token changes; all poolApi
+  // calls thread this through so the backend gas-estimates against the right
+  // balance even if the user has multiple in-app HD wallets.
   const [wallet, setWallet] = useState<string>('');
   // Enabled P2P chains, fetched from /p2p/chains. Empty = endpoint failed or
   // not yet loaded → the selector hides and everything defaults to Sonic.
   const [chains, setChains] = useState<P2PChainInfo[]>([]);
-  // The chain the pool ops target. Defaults to the ACTIVE network's Sonic chain
-  // (14601 on testnet, 146 on mainnet) — NOT a hardcoded mainnet id — so the
-  // first balance read on mount targets a chain the backend actually serves
+  // The chain the reclaim ops target. Defaults to the ACTIVE network's Sonic
+  // chain (14601 on testnet, 146 on mainnet) — NOT a hardcoded mainnet id — so
+  // the first balance read on mount targets a chain the backend actually serves
   // (a hardcoded 146 on a testnet backend yields "no escrow configured for
   // chain 146"). `/p2p/chains` may still refine this once it loads. Threaded
   // through every poolApi call and the broadcast/gas-guard so funds route to
@@ -193,38 +181,32 @@ const P2PPoolScreen: React.FC = () => {
     setLoadingBal(false);
   }, [token, wallet, selectedChainId]);
 
-  // Restore any pending confirm for the current (mode, token) so the
-  // recovery banner re-appears if the user navigated away mid-failure.
+  // Restore any pending withdraw-confirm for the active wallet so the recovery
+  // banner re-appears if the user navigated away mid-failure. Keys off the
+  // RECORD (token/chainId/amount/txHash), NOT the current form selection, so a
+  // stranded confirm is always visible. Surfaces the most recent one matching
+  // the currently selected chain (else the most recent across chains) so a
+  // user on the right chain sees the actionable record first.
   const loadPending = useCallback(async () => {
-    try {
-      const raw = await AsyncStorage.getItem(PENDING_KEY);
-      if (!raw) {
-        setPending(null);
-        return;
-      }
-      const p: PendingConfirm = JSON.parse(raw);
-      // Show the pending record only when it matches the current (mode, token,
-      // chain) so a BSC pending doesn't surface while Sonic is selected.
-      // Back-compat: old records lack chainId → treat as matching any chain.
-      const chainMatch = !p.chainId || p.chainId === selectedChainId;
-      setPending(p.mode === mode && p.token === token && chainMatch ? p : null);
-    } catch {
+    const w = wallet || (await getActiveWallet());
+    if (!w) {
       setPending(null);
+      return;
     }
-  }, [mode, token, selectedChainId]);
+    const list = await listPending('withdraw', w);
+    if (list.length === 0) {
+      setPending(null);
+      return;
+    }
+    const sorted = [...list].sort((a, b) => b.createdAt - a.createdAt);
+    const onChain = sorted.find((r) => r.chainId === selectedChainId);
+    setPending(onChain ?? sorted[0]);
+  }, [wallet, selectedChainId]);
 
   useEffect(() => {
     loadBalance();
     loadPending();
   }, [loadBalance, loadPending]);
-
-  // Switching mode is a user intent change — clear the typed amount so a
-  // deposit-side value isn't silently submitted as a withdraw.
-  const handleModeChange = (next: Mode) => {
-    if (next === mode) return;
-    setMode(next);
-    setAmountInput('');
-  };
 
   const amountValid = useMemo(() => {
     const trimmed = amountInput.trim();
@@ -233,10 +215,10 @@ const P2PPoolScreen: React.FC = () => {
     return parseFloat(trimmed) > 0;
   }, [amountInput]);
 
-  // Pre-check: withdraw exceeding the on-chain available balance is the
+  // Pre-check: withdrawing more than the on-chain available balance is the
   // most common cause of a confusing post-broadcast revert. Catch it here.
   const exceedsAvailable = useMemo(() => {
-    if (mode !== 'withdraw' || !amountValid) return false;
+    if (!amountValid) return false;
     if (available === '—') return false; // unknown balance — let the server gate it
     try {
       const want = BigInt(parseTokenAmount(amountInput.trim(), decimals));
@@ -245,33 +227,18 @@ const P2PPoolScreen: React.FC = () => {
     } catch {
       return false;
     }
-  }, [mode, amountValid, amountInput, decimals, available]);
+  }, [amountValid, amountInput, decimals, available]);
 
   const canSubmit = amountValid && !submitting && !exceedsAvailable;
 
-  const persistPending = async (p: PendingConfirm | null) => {
-    if (p) {
-      await AsyncStorage.setItem(PENDING_KEY, JSON.stringify(p));
-    } else {
-      await AsyncStorage.removeItem(PENDING_KEY);
-    }
-    setPending(p);
-  };
-
-  const runConfirm = async (p: PendingConfirm): Promise<void> => {
-    // Confirm must reference the wallet that signed the original tx — the
-    // backend cross-checks against the on-chain event's `seller` field, so a
-    // mismatch here means "you're trying to confirm someone else's deposit".
+  // Run a withdraw-confirm against a stashed record's own fields. The confirm
+  // must reference the wallet that signed the original tx — the backend
+  // cross-checks against the on-chain event's `seller` field — and the chain
+  // the tx was BROADCAST on, not the current UI selection.
+  const runConfirm = async (p: PendingEscrowConfirm): Promise<void> => {
     const w = p.walletAddress || wallet || (await getActiveWallet());
     if (!w) throw new Error('No active wallet to confirm against.');
-    // Always confirm against the chain the tx was BROADCAST on, not the
-    // current UI selection — the user may have switched chains since the
-    // broadcast. Old records lacking chainId fall back to selectedChainId.
-    const chainForConfirm = p.chainId ?? selectedChainId;
-    const conf =
-      p.mode === 'deposit'
-        ? await poolApi.confirmDeposit(p.token, p.amount, p.txHash, w, chainForConfirm)
-        : await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w, chainForConfirm);
+    const conf = await poolApi.confirmWithdraw(p.token, p.amount, p.txHash, w, p.chainId);
     if (!conf.success) {
       throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
     }
@@ -282,7 +249,8 @@ const P2PPoolScreen: React.FC = () => {
     setRetrying(true);
     try {
       await runConfirm(pending);
-      await persistPending(null);
+      await removePending(pending.txHash);
+      await loadPending();
       Alert.alert('Confirmed', 'Your previous transaction has been recorded.');
       loadBalance();
     } catch (err: any) {
@@ -293,6 +261,8 @@ const P2PPoolScreen: React.FC = () => {
   };
 
   const handleDiscardPending = async () => {
+    if (!pending) return;
+    const txHash = pending.txHash;
     Alert.alert(
       'Discard pending confirmation?',
       'The on-chain transaction still happened. Keep the tx hash; you may need it for support.',
@@ -302,51 +272,12 @@ const P2PPoolScreen: React.FC = () => {
           text: 'Discard',
           style: 'destructive',
           onPress: async () => {
-            await persistPending(null);
+            await removePending(txHash);
+            await loadPending();
           },
         },
       ],
     );
-  };
-
-  // runApproveIfNeeded: deposit's first stage. Reads the current allowance,
-  // and if it's short of `amountBaseUnits`, broadcasts an approve tx so the
-  // subsequent deposit's transferFrom succeeds. Withdrawals skip this
-  // entirely (no allowance needed for the seller's own withdrawal).
-  const runApproveIfNeeded = async (amountBaseUnits: string, walletAddress: string): Promise<void> => {
-    if (mode !== 'deposit') return;
-    setStage('Checking allowance…');
-    const aRes = await poolApi.allowance(token, walletAddress, selectedChainId);
-    if (aRes.success && aRes.data) {
-      try {
-        if (BigInt(aRes.data.allowance) >= BigInt(amountBaseUnits)) {
-          return; // Allowance already covers the deposit; skip approve.
-        }
-      } catch {
-        // Allowance read returned a non-numeric — fall through to the
-        // approve flow rather than silently skipping it.
-      }
-    }
-    setStage('Preparing approve…');
-    const aPrep = await poolApi.prepareApprove(token, amountBaseUnits, walletAddress, selectedChainId);
-    if (!aPrep.success || !aPrep.data) {
-      throw new Error(statusAwareError(aPrep.status, aPrep.message) || 'Prepare approve failed');
-    }
-    // Server may have observed a sufficient allowance between the read
-    // above and the prepare call — skip if it now reports we're covered.
-    try {
-      if (BigInt(aPrep.data.currentAllowance) >= BigInt(amountBaseUnits)) {
-        return;
-      }
-    } catch {}
-    setStage('Signing approve…');
-    const signed = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
-    setStage('Broadcasting approve…');
-    await broadcastTransaction(p2pChainKey(selectedChainId), signed);
-    // No backend confirm step for approve — it's a token-contract allowance
-    // bump. The subsequent deposit's transferFrom is what actually moves
-    // funds; if approve hasn't mined by the time deposit broadcasts, the
-    // deposit will revert on chain and we surface that in the catch below.
   };
 
   const handleSubmit = async () => {
@@ -363,23 +294,15 @@ const P2PPoolScreen: React.FC = () => {
       amountBaseUnits = parseTokenAmount(amountInput.trim(), decimals);
       if (amountBaseUnits === '0') throw new Error('Amount must be greater than zero.');
 
-      // Gas guard (Task 7): make sure the wallet holds the selected chain's
-      // native token before we sign/broadcast anything — both the approve and
-      // the deposit/withdraw tx pay gas on this chain. Bails with a fund-your-
-      // wallet prompt rather than letting the tx fail mid-flow.
+      // Gas guard: make sure the wallet holds the selected chain's native token
+      // before we sign/broadcast — the withdraw tx pays gas on this chain. Bails
+      // with a fund-your-wallet prompt rather than letting the tx fail mid-flow.
       setStage('Checking gas…');
       const hasGas = await ensureGas(p2pChainKey(selectedChainId), w);
       if (!hasGas) return; // `finally` resets submitting/stage.
 
-      // For deposits, ensure the seller has approved the escrow first.
-      // Withdrawals don't need an allowance.
-      await runApproveIfNeeded(amountBaseUnits, w);
-
       setStage('Preparing transaction…');
-      const prep =
-        mode === 'deposit'
-          ? await poolApi.prepareDeposit(token, amountBaseUnits, w, selectedChainId)
-          : await poolApi.prepareWithdraw(token, amountBaseUnits, w, selectedChainId);
+      const prep = await poolApi.prepareWithdraw(token, amountBaseUnits, w, selectedChainId);
       if (!prep.success || !prep.data) {
         throw new Error(statusAwareError(prep.status, prep.message) || 'Prepare failed');
       }
@@ -393,43 +316,45 @@ const P2PPoolScreen: React.FC = () => {
 
       setStage('Confirming…');
       await runConfirm({
-        mode,
+        mode: 'withdraw',
         token,
+        chainId: selectedChainId,
         amount: amountBaseUnits,
         txHash: resp.hash,
-        createdAt: Date.now(),
         walletAddress: w,
+        createdAt: Date.now(),
       });
 
       Alert.alert(
-        mode === 'deposit' ? 'Deposit confirmed' : 'Withdrawal confirmed',
-        `${amountInput} ${token} ${mode === 'deposit' ? 'added to' : 'removed from'} your pool.`,
+        'Withdrawal confirmed',
+        `${amountInput} ${token} removed from your escrow pool.`,
       );
       setAmountInput('');
-      await persistPending(null);
       loadBalance();
     } catch (err: any) {
       const detail = err?.message || String(err);
       if (broadcastHash) {
-        // The on-chain side happened. Stash so the user can retry the
-        // confirm without re-broadcasting. There's no automatic deposit
-        // reconciler on the backend — only trades are reconciled — so
-        // recovery is user-initiated via the banner at the top of the screen.
-        await persistPending({
-          mode,
+        // The on-chain side happened. Stash (non-overwriting, keyed by txHash)
+        // so the user can retry the confirm without re-broadcasting. There's no
+        // automatic withdraw reconciler on the backend — only trades are
+        // reconciled — so recovery is user-initiated via the banner at the top
+        // of the screen.
+        await addPending({
+          mode: 'withdraw',
           token,
+          chainId: selectedChainId,
           amount: amountBaseUnits,
           txHash: broadcastHash,
+          walletAddress: wallet || (await getActiveWallet()) || '',
           createdAt: Date.now(),
-          walletAddress: wallet || undefined,
-          chainId: selectedChainId,
         });
+        await loadPending();
         Alert.alert(
           'On-chain succeeded, server confirm failed',
           `Tx ${broadcastHash}\n\n${detail}\n\nUse the "Retry confirm" button on this screen to record it. Funds are safe in the contract.`,
         );
       } else {
-        Alert.alert(mode === 'deposit' ? 'Deposit failed' : 'Withdrawal failed', detail);
+        Alert.alert('Withdrawal failed', detail);
       }
     } finally {
       setSubmitting(false);
@@ -438,11 +363,7 @@ const P2PPoolScreen: React.FC = () => {
   };
 
   const fmt = (v: string) => (v === '—' ? '—' : `${formatTokenAmount(v, decimals, 4)} ${token}`);
-  const submitLabel = submitting
-    ? stage || 'Working…'
-    : mode === 'deposit'
-      ? 'Deposit'
-      : 'Withdraw';
+  const submitLabel = submitting ? stage || 'Working…' : 'Reclaim funds';
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -455,11 +376,11 @@ const P2PPoolScreen: React.FC = () => {
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="title1" weight="700">
-            P2P Pool
+            Escrow funds
           </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
-            Funds you deposit here back your published ads. Available balance is
-            withdrawable any time; locked balance is reserved against open trades.
+            Reclaim funds from your escrow pool. Available is withdrawable anytime;
+            locked is reserved against open trades.
           </Text>
 
           {pending && (
@@ -471,7 +392,7 @@ const P2PPoolScreen: React.FC = () => {
                 </Text>
               </View>
               <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-                Your last {pending.mode} broadcast on chain but the server
+                Your last withdrawal broadcast on chain but the server
                 couldn&apos;t record it. The funds moved correctly; retry to
                 update your pool balance.
               </Text>
@@ -563,19 +484,8 @@ const P2PPoolScreen: React.FC = () => {
             )}
           </Card>
 
-          <View style={{ marginBottom: spacing.lg }}>
-            <SegmentedControl
-              segments={[
-                { key: 'deposit', label: 'Deposit' },
-                { key: 'withdraw', label: 'Withdraw' },
-              ]}
-              value={mode}
-              onChange={(k) => handleModeChange(k as Mode)}
-            />
-          </View>
-
           <AmountInput
-            label={`Amount (${token})`}
+            label={`Amount to reclaim (${token})`}
             placeholder="0.00"
             symbol={token}
             symbolPosition="suffix"
@@ -587,24 +497,24 @@ const P2PPoolScreen: React.FC = () => {
                 : undefined
             }
             onMax={
-              mode === 'withdraw' && available !== '—'
+              available !== '—'
                 ? () => setAmountInput(formatTokenAmount(available, decimals, decimals))
                 : undefined
             }
             maxLabel="Use full balance"
           />
 
-          {mode === 'deposit' && (
-            <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm, lineHeight: 16 }}>
-              You&apos;ll sign two transactions: an ERC-20 approve (skipped if your
-              existing allowance is sufficient) followed by the deposit itself.
-            </Text>
-          )}
+          <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm, lineHeight: 16 }}>
+            Reclaiming withdraws from your available escrow balance back to your
+            wallet. Locked funds are reserved against open trades and can&apos;t be
+            withdrawn until those trades settle. To fund a new ad, deposit happens
+            automatically when you publish it.
+          </Text>
 
           <Button
             title={submitLabel}
-            variant={mode === 'deposit' ? 'primary' : 'secondary'}
-            leftIcon={mode === 'deposit' ? 'plus' : 'wallet'}
+            variant="primary"
+            leftIcon="wallet"
             loading={submitting}
             disabled={!canSubmit}
             onPress={handleSubmit}

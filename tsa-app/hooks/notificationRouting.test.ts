@@ -23,8 +23,11 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ type: 'p2p.trade.paid' })).toBe('/p2p/my-trades');
   });
 
-  it('routes capital movement to the pool', () => {
-    expect(routeForNotification({ type: 'p2p.deposit.confirmed' })).toBe('/p2p/pool');
+  it('routes deposit confirmed to my-ads (funding context)', () => {
+    expect(routeForNotification({ type: 'p2p.deposit.confirmed' })).toBe('/p2p/my-ads');
+  });
+
+  it('routes withdraw confirmed to the pool (reclaim screen)', () => {
     expect(routeForNotification({ type: 'p2p.withdraw.confirmed' })).toBe('/p2p/pool');
   });
 

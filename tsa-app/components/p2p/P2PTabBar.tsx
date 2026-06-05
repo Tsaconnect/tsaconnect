@@ -28,7 +28,6 @@ const TABS: Tab[] = [
   { label: 'Orders', route: '/p2p/my-trades', icon: 'receipt-outline', iconActive: 'receipt' },
   { label: 'Ads', route: '/p2p/my-ads', icon: 'pricetags-outline', iconActive: 'pricetags' },
   { label: 'Banks', route: '/p2p/payment-methods', icon: 'card-outline', iconActive: 'card' },
-  { label: 'Pool', route: '/p2p/pool', icon: 'wallet-outline', iconActive: 'wallet' },
 ];
 
 function normalize(p: string): string {
