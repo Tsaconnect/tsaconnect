@@ -35,8 +35,6 @@ var p2pTradeEmailEvents = map[string]bool{
 type p2pEmailContent struct {
 	Subject string
 	Body    string
-	CTAText string
-	CTAURL  string
 }
 
 // p2pTokenDecimalsForChain mirrors the per-(chain) decimals used across the
@@ -86,7 +84,11 @@ func shortTradeRef(id uuid.UUID) string {
 // tailored to whether the recipient (event.UserID) is the trade's buyer or
 // seller. Returns (content, true) when an email should be sent; (zero, false)
 // when the event isn't an email milestone or the recipient isn't a party.
-func buildP2PTradeEmail(event events.Event, trade *models.P2PTrade, linkBase string) (p2pEmailContent, bool) {
+//
+// No CTA button: the app is mobile-only with no universal/app-link setup, so a
+// link in an email can't reliably open the trade. The body tells the user to
+// open the app instead.
+func buildP2PTradeEmail(event events.Event, trade *models.P2PTrade) (p2pEmailContent, bool) {
 	if trade == nil || !p2pTradeEmailEvents[event.Type] {
 		return p2pEmailContent{}, false
 	}
@@ -169,12 +171,6 @@ func buildP2PTradeEmail(event events.Event, trade *models.P2PTrade, linkBase str
 		return p2pEmailContent{}, false
 	}
 
-	body += fmt.Sprintf(" (Trade reference: %s)", shortTradeRef(trade.ID))
-
-	c := p2pEmailContent{Subject: subject, Body: body}
-	if base := strings.TrimRight(strings.TrimSpace(linkBase), "/"); base != "" {
-		c.CTAText = "View trade"
-		c.CTAURL = fmt.Sprintf("%s/p2p/trade/%s", base, trade.ID)
-	}
-	return c, true
+	body += fmt.Sprintf(" Open the TSA Connect app to view it. (Trade reference: %s)", shortTradeRef(trade.ID))
+	return p2pEmailContent{Subject: subject, Body: body}, true
 }

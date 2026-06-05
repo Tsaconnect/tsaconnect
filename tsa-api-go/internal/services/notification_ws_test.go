@@ -110,7 +110,7 @@ func TestNotificationServicePushesP2PFramesForCockpit(t *testing.T) {
 
 	// The bridge under test — subscribes "*" to the bus in its constructor.
 	// nil push service: this test exercises the WS frame, not Expo delivery.
-	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), nil, "")
+	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), nil)
 
 	tradeID := uuid.New().String()
 	cases := []struct {
