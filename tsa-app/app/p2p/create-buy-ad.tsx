@@ -417,11 +417,21 @@ const CreateBuyAdScreen: React.FC = () => {
                       }}
                     >
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                        <Icon
-                          name={selected ? 'checkCircle' : 'closeCircle'}
-                          size={22}
-                          color={selected ? colors.accent : colors.textMuted}
-                        />
+                        {selected ? (
+                          <Icon name="checkCircle" size={22} color={colors.accent} />
+                        ) : (
+                          // Unselected = empty outline circle (a checkbox affordance),
+                          // not a ✕ — an X reads as "remove/error", not "tap to select".
+                          <View
+                            style={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: 11,
+                              borderWidth: 2,
+                              borderColor: colors.border,
+                            }}
+                          />
+                        )}
                         <View style={{ flex: 1 }}>
                           <Text variant="bodyMed" weight="600">
                             {m.bankName}
