@@ -45,6 +45,7 @@ import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getChainByChainId } from '../../constants/chains';
+import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -295,6 +296,50 @@ const CreateAdScreen: React.FC = () => {
         setPoolAvailable(res.data.available);
       } else {
         setPoolAvailable('-');
+      }
+    })();
+  }, [token.symbol, selectedChainId]);
+
+  // Spendable WALLET balance of the selected token on the selected chain, for
+  // the ACTIVE wallet — the exact balance the deposit's transferFrom pulls from.
+  // Surfaced so the seller can confirm they actually hold the token (and on the
+  // right chain/wallet) before publishing. Read via the same RPC-backed
+  // /wallet/balances the wallet screen uses; best-effort + stale-guarded; never
+  // blocks publish. `walletBalanceHuman` is a human-decimal string ('-' = read
+  // failed, null = loading / no chain yet).
+  const [walletBalanceHuman, setWalletBalanceHuman] = useState<string | null>(null);
+  const [activeWalletAddr, setActiveWalletAddr] = useState<string>('');
+  const walletBalReqRef = useRef(0);
+  useEffect(() => {
+    const reqId = ++walletBalReqRef.current;
+    setWalletBalanceHuman(null);
+    (async () => {
+      const addr = await getActiveWallet();
+      if (walletBalReqRef.current !== reqId) return;
+      setActiveWalletAddr(addr ?? '');
+      if (!addr || selectedChainId == null) {
+        // No wallet, or no resolved chain yet — leave loading; the chain
+        // selector / wallet setup is the next thing the user sees.
+        setWalletBalanceHuman(addr ? null : '-');
+        return;
+      }
+      const chainKey = getChainByChainId(selectedChainId)?.key;
+      try {
+        const res = await getWalletBalances(selectedChainId, addr);
+        if (walletBalReqRef.current !== reqId) return;
+        if (res.success && res.data) {
+          const entry = normalizeWalletBalances(res.data, chainKey).find(
+            (e) => e.symbol.toUpperCase() === token.symbol.toUpperCase(),
+          );
+          // entry present → real balance (incl. a genuine "0"); entry absent →
+          // token isn't registered for balance reads on this chain, which is
+          // "unknown", not "0" — don't imply an empty wallet.
+          setWalletBalanceHuman(entry ? entry.balance : '-');
+        } else {
+          setWalletBalanceHuman('-');
+        }
+      } catch {
+        if (walletBalReqRef.current === reqId) setWalletBalanceHuman('-');
       }
     })();
   }, [token.symbol, selectedChainId]);
@@ -823,6 +868,42 @@ const CreateAdScreen: React.FC = () => {
               value={amountInput}
               onChangeText={setAmountInput}
             />
+            {/* Spendable wallet balance for the ACTIVE wallet on the selected
+                chain — the exact balance the deposit pulls from. Lets the seller
+                confirm they hold the token (right chain + right wallet) and warns
+                when it can't cover the ad, instead of a post-publish revert. */}
+            {(() => {
+              if (walletBalanceHuman == null) {
+                return (
+                  <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
+                    Checking wallet balance…
+                  </Text>
+                );
+              }
+              if (walletBalanceHuman === '-') {
+                return (
+                  <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm }}>
+                    Wallet balance unavailable
+                  </Text>
+                );
+              }
+              const walNum = parseFloat(walletBalanceHuman) || 0;
+              const amtNum = parseFloat(amountInput || '0') || 0;
+              const low = amtNum > 0 && walNum < amtNum;
+              const short = activeWalletAddr
+                ? ` · ${activeWalletAddr.slice(0, 6)}…${activeWalletAddr.slice(-4)}`
+                : '';
+              return (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}>
+                  <Icon name="wallet" size={14} color={low ? colors.danger : colors.textMuted} />
+                  <Text variant="caption" color={low ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
+                    Wallet: {walNum.toLocaleString(undefined, { maximumFractionDigits: 4 })} {token.symbol}
+                    {short}
+                    {low ? ` — not enough to back ${amountInput} ${token.symbol}` : ''}
+                  </Text>
+                </View>
+              );
+            })()}
             {/* Allowance-aware funding summary: tells the seller exactly what
                 publishing will do (no deposit when `available` already covers
                 the ad; otherwise the shortfall deposit + whether an approval is
