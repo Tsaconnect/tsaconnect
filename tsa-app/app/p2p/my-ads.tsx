@@ -174,6 +174,37 @@ const MyAdsScreen: React.FC = () => {
           />
         </View>
 
+        {/* Entry point to the escrow-funds (reclaim/withdraw) screen — the
+            standalone Pool tab is gone (spec: hide-the-pool, Architecture 3),
+            so My Ads is where a seller reaches their on-chain escrow balance.
+            Passive indicator is kept bounded: rather than firing N balance
+            reads (this list only has per-ad remaining/reserved, not the
+            seller's pool available/locked), we show a static subtitle that
+            explains the available/locked semantics and invites a tap to
+            manage. */}
+        {!roleLoading && isMerchant && (
+          <PressableScale
+            onPress={() => router.push('/p2p/pool')}
+            style={{ marginTop: spacing.lg }}
+          >
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="wallet" size={24} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Escrow funds
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Available is withdrawable; locked is reserved against open trades — tap to
+                    manage.
+                  </Text>
+                </View>
+                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+              </View>
+            </AccentCard>
+          </PressableScale>
+        )}
+
         {/* Mirrors the marketplace-side banner: non-merchants reading their
             (empty) My Ads list get a one-tap path to onboarding instead of
             hitting a 403 inside the create-ad flow. */}

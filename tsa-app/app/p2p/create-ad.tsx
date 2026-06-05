@@ -1,21 +1,26 @@
 // app/p2p/create-ad.tsx
 //
-// Pool/voucher publish flow:
+// Self-funding sell-ad publish flow ("hide the pool", spec 2026-06-05):
 //
-//   1. POST /p2p/ads → returns { ad (pending), typedData }
-//   2. signTypedData(typedData) using the user's local wallet — off-chain,
-//      no gas, no broadcast
-//   3. POST /p2p/ads/:id/sign with the signature → ad goes active
+//   1. Resolve the seller wallet ONCE (with the verifyWalletKey pre-flight).
+//   2. ensureEscrowFunding(...) — top up the seller's on-chain `available`
+//      balance to cover THIS ad (approve + deposit + confirm as needed) on the
+//      ad's selected chain. Skipped with no gas when `available` already covers.
+//   3. POST /p2p/ads → returns { ad (pending), typedData }
+//   4. signTypedData(typedData) using the same wallet — off-chain, no gas.
+//   5. POST /p2p/ads/:id/sign with the signature → ad goes active.
 //
-// Capital is locked at the user-balance level via a separate deposit flow
-// (see app/p2p/deposit.tsx). Publishing an ad never moves on-chain funds.
+// Funding runs FIRST so a published ad is always backed; if the deposit
+// confirms but create/sign fails, the funds are safe in `available`. If the
+// deposit broadcasts but its confirm POST fails, a recovery banner (keyed off
+// the stashed RECORD) lets the seller retry the confirm without re-broadcasting.
 //
 // Restyled onto the TSA Signature design system (@/theme + @/components/ui).
-// Visual/UX only — the EIP-712 voucher signing flow, field validation,
-// payment-method selection, and fixed/float rate logic are unchanged.
+// The EIP-712 voucher signing flow, field validation, payment-method
+// selection, and fixed/float rate logic are unchanged.
 
 import { router } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -25,9 +30,13 @@ import {
   paymentMethodsApi,
   poolApi,
   parseTokenAmount,
+  p2pTokenDecimals,
   type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
+import { ensureEscrowFunding } from '../../services/escrowFunding';
+import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
+import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
 import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/wallet';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
@@ -133,11 +142,25 @@ const CreateAdScreen: React.FC = () => {
   const [floatSupported, setFloatSupported] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState<string>('');
-  // Pool available balance for the selected token. Surfaced inline so the
-  // seller can see whether their pool can back the ad before they sign.
-  // `null` = not yet loaded; `'-'` = load failed (we don't block submit on
-  // a transient pool-balance read failure — the backend re-checks).
+  // On-chain `available` balance for the selected token+chain. Seeds the
+  // funding-summary math (shortfall = adAmount − available) so the seller sees
+  // exactly what will happen before they publish. `null` = not yet loaded;
+  // `'-'` = load failed (we don't block submit on a transient read failure —
+  // ensureEscrowFunding re-reads the authoritative balance at publish time).
   const [poolAvailable, setPoolAvailable] = useState<string | null>(null);
+
+  // Recovery: any deposit that broadcast on-chain but whose server-side confirm
+  // failed is stashed (services/p2pPending.ts) and surfaced as a banner. Keyed
+  // off the RECORD's own {token, chainId, amount, txHash}, NOT the live form —
+  // a stranded deposit must be visible even if the seller re-selects a
+  // different token/chain. There is no server-side deposit reconciler.
+  const [pendingDeposits, setPendingDeposits] = useState<PendingEscrowConfirm[]>([]);
+  const [retryingTxHash, setRetryingTxHash] = useState<string | null>(null);
+
+  // Monotonic id for in-flight pool-balance reads — a chain/token switch
+  // mid-fetch must not let a slower wrong-chain response clobber the latest
+  // one and seed the shortfall math with the wrong chain's balance.
+  const balReqRef = useRef(0);
 
   // ── Chain selector state ──────────────────────────────────────────────
   // chainsForToken: sorted subset of enabledChains that offer the current token.
@@ -172,11 +195,6 @@ const CreateAdScreen: React.FC = () => {
   //  (a) we have a valid backend response, AND
   //  (b) more than one chain offers the current token.
   const showChainChooser = chainsFetched && chainsForToken.length > 1;
-
-  // Show a per-chain pool caveat when a non-Sonic chain is selected so the
-  // seller knows to fund that chain's pool specifically.
-  const showPoolChainCaveat =
-    selectedChainId != null && !isSonicChain(selectedChainId);
 
   // Load all payment methods once on mount; the visible subset is filtered by
   // the selected currency below. Always clears the loading flag — a network
@@ -248,31 +266,50 @@ const CreateAdScreen: React.FC = () => {
     if (!floatSupported && rateType === 'float') setRateType('fixed');
   }, [floatSupported, rateType]);
 
-  // Refresh the pool balance whenever the token selection changes. Doesn't
-  // block submit on failure — the backend's CreateAd does an authoritative
-  // ReadBalance check anyway. This is a UX hint.
+  // Refresh the on-chain `available` balance whenever the token or chain
+  // changes. This seeds the funding-summary shortfall math, so it MUST be
+  // pinned to the chain it was read on: a chain switch mid-fetch fires a fresh
+  // read while a prior one is still in flight, and without the monotonic
+  // balReqRef guard the slower (wrong-chain) response could land last and seed
+  // the shortfall against the wrong chain's balance. Only the latest request
+  // may touch state. Doesn't block submit on failure — ensureEscrowFunding
+  // re-reads the authoritative balance at publish time.
   useEffect(() => {
-    let cancelled = false;
+    const reqId = ++balReqRef.current;
     setPoolAvailable(null);
     (async () => {
       const walletAddr = await getActiveWallet();
-      if (cancelled) return;
+      if (balReqRef.current !== reqId) return;
       if (!walletAddr) {
         setPoolAvailable('-');
         return;
       }
       const res = await poolApi.balance(token.symbol, walletAddr, selectedChainId ?? undefined);
-      if (cancelled) return;
+      if (balReqRef.current !== reqId) return;
       if (res.success && res.data) {
         setPoolAvailable(res.data.available);
       } else {
         setPoolAvailable('-');
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, [token.symbol, selectedChainId]);
+
+  // Surface any stranded deposit-confirm for the active wallet on mount (and
+  // after a pending-confirm result). Reads by RECORD, not by the live form, so
+  // a deposit broadcast on a chain/token the seller has since navigated away
+  // from is still visible and retryable.
+  const refreshPendingDeposits = React.useCallback(async () => {
+    const walletAddr = await getActiveWallet();
+    if (!walletAddr) {
+      setPendingDeposits([]);
+      return;
+    }
+    setPendingDeposits(await listPending('deposit', walletAddr));
+  }, []);
+
+  useEffect(() => {
+    refreshPendingDeposits();
+  }, [refreshPendingDeposits]);
 
   // Payment methods visible for the selected currency.
   const paymentMethods = useMemo(
@@ -317,26 +354,87 @@ const CreateAdScreen: React.FC = () => {
     return Math.abs(pct) <= MAX_FLOAT_OFFSET_PCT;
   }, [rateType, floatOffsetPctInput]);
 
-  // Block submit when the requested ad amount exceeds the seller's pool —
-  // the backend would reject anyway with ErrInvalidParams. This is a
-  // UX-side gate so we don't ask the user to sign a voucher we know is
-  // going to fail. Unknown pool balance ("-") doesn't block (let the
-  // server be authoritative).
-  const exceedsPool = useMemo(() => {
-    if (!poolAvailable || poolAvailable === '-') return false;
-    if (!/^\d+(\.\d+)?$/.test(amountInput.trim())) return false;
+  // Per-chain decimals for the selected token+chain. Used for ALL funding math
+  // (shortfall parse, deposit amount, confirm amount, and display) — NEVER
+  // token.decimals, which is the chain-blind hardcoded-6 FALLBACK value and
+  // would under-fund an 18-dec BSC deposit by 1e12 (spec "Review fixes" §1).
+  const adDecimals = p2pTokenDecimals(selectedChainId, token.symbol);
+
+  // The ad amount in base units, or null when the human input isn't a clean
+  // positive decimal. Drives both the funding summary and the deposit amount.
+  const adAmountBaseUnits = useMemo(() => {
+    const trimmed = amountInput.trim();
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) return null;
     try {
-      const want = BigInt(parseTokenAmount(amountInput.trim(), token.decimals));
-      const have = BigInt(poolAvailable);
-      return want > have;
+      const base = parseTokenAmount(trimmed, adDecimals);
+      return base === '0' ? null : base;
     } catch {
-      return false;
+      return null;
     }
-  }, [amountInput, poolAvailable, token.decimals]);
+  }, [amountInput, adDecimals]);
+
+  // Allowance-aware funding summary computed before submit (spec "Review
+  // fixes" §6/§7): shortfall ≤ 0 → already covered (no deposit); else we'll
+  // deposit the shortfall, and we only promise an approval when the current
+  // allowance doesn't already cover it. `null` until the inputs are valid.
+  const [fundingSummary, setFundingSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFundingSummary(null);
+    if (adAmountBaseUnits == null) return;
+    if (poolAvailable == null) return; // balance still loading
+    (async () => {
+      const sym = token.symbol;
+      const need = BigInt(adAmountBaseUnits);
+      const have = poolAvailable && poolAvailable !== '-' ? BigInt(poolAvailable) : 0n;
+      const shortfall = need > have ? need - have : 0n;
+      const lockedHuman = formatTokenAmount(adAmountBaseUnits, adDecimals, 4);
+      const chainName = selectedChainConfig?.shortName ?? 'the selected network';
+
+      if (shortfall <= 0n) {
+        const haveHuman = formatTokenAmount(have.toString(), adDecimals, 4);
+        if (!cancelled) {
+          setFundingSummary(
+            `This ad locks ${lockedHuman} ${sym} in escrow, already covered by your ` +
+              `${haveHuman} available — no deposit needed.`,
+          );
+        }
+        return;
+      }
+
+      const depositHuman = formatTokenAmount(shortfall.toString(), adDecimals, 4);
+
+      // Only promise an approval when the live allowance doesn't already cover
+      // the shortfall. A read failure / non-numeric allowance falls back to
+      // the conservative "one approval + one deposit" wording.
+      let needsApprove = true;
+      if (selectedChainId != null) {
+        try {
+          const aRes = await poolApi.allowance(sym, await getActiveWallet() ?? '', selectedChainId);
+          if (aRes.success && aRes.data) {
+            needsApprove = BigInt(aRes.data.allowance) < shortfall;
+          }
+        } catch {
+          // keep the conservative default
+        }
+      }
+      if (cancelled) return;
+      const steps = needsApprove
+        ? `one approval + one deposit on ${chainName}`
+        : `one deposit on ${chainName}`;
+      setFundingSummary(
+        `This ad locks ${lockedHuman} ${sym} in escrow. You'll deposit ${depositHuman} ${sym} ` +
+          `now (${steps}).`,
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [adAmountBaseUnits, poolAvailable, adDecimals, token.symbol, selectedChainId, selectedChainConfig]);
 
   const valid =
     parseFloat(amountInput || '0') > 0 &&
-    !exceedsPool &&
     selectedPmIds.length > 0 &&
     (rateType === 'fixed'
       ? parseFloat(rateInput || '0') > 0
@@ -375,16 +473,66 @@ const CreateAdScreen: React.FC = () => {
         );
       }
 
-      // 2. Convert human inputs to base units / canonical strings.
-      const tokenAmount = parseTokenAmount(amountInput, token.decimals);
+      // 2. Convert human inputs to base units / canonical strings. Decimals
+      // MUST come from p2pTokenDecimals(selectedChainId, …) — NOT token.decimals
+      // (the chain-blind hardcoded-6 FALLBACK value), or an 18-dec BSC deposit
+      // would be under-funded by 1e12 (spec "Review fixes" §1).
+      const tokenAmount = parseTokenAmount(amountInput, adDecimals);
       const minLimit = minLimitInput.trim() ? minLimitInput.trim() : undefined;
       const maxLimit = maxLimitInput.trim() ? maxLimitInput.trim() : undefined;
 
-      // 3. Create ad (prepare phase). Fixed mode sends rate; float mode
-      // Step 1: ask the backend to create the ad in `pending` state. The
-      // server stamps the voucher fields and returns an EIP-712 typed-data
-      // payload for the seller to sign. No on-chain tx at publish time —
-      // the only gas the seller pays is a one-off deposit (separate flow).
+      // 3. Fund the seller's on-chain `available` to cover THIS ad before we
+      // create+sign+activate, so a published ad is always backed. ensureFunding
+      // is a real on-chain broadcast (approve+deposit as needed), so it must
+      // never run on an unresolved/defaulted chain: a deposit on the wrong
+      // chain would desync the voucher domain. Require a concrete chainId
+      // (spec "Review fixes" §2) — selectedChainId is undefined for a
+      // single-chain token or before /p2p/chains lands; in either case we'd be
+      // about to deposit something, so block until a chain is resolved.
+      const preflight = fundingPreflight({
+        amountBaseUnits: tokenAmount,
+        available: poolAvailable,
+        selectedChainId,
+        chainsFetched,
+      });
+      if (preflight.kind === 'block') {
+        throw new Error(preflight.message);
+      }
+      if (preflight.kind === 'fund') {
+        const fundResult = await ensureEscrowFunding({
+          token: token.symbol,
+          chainId: preflight.chainId,
+          amountBaseUnits: tokenAmount,
+          walletAddress: sellerAddress,
+          onStage: setSubmitStage,
+          onGasAlert: (m) => Alert.alert('Need gas', m),
+        });
+        const action = publishActionForFunding(fundResult);
+        if (action.kind === 'abort') {
+          // Nothing signed, nothing dangling (e.g. no native gas) — stop cleanly.
+          return;
+        }
+        if (action.kind === 'recover') {
+          // The deposit is on-chain & safe in `available`, but the confirm POST
+          // failed. Do NOT publish an unbacked ad — surface the recovery banner
+          // and let the seller retry the confirm, then re-publish.
+          await refreshPendingDeposits();
+          Alert.alert(
+            'Deposit sent — confirm pending',
+            'Your deposit broadcast on-chain and your funds are safe in escrow, but ' +
+              'the server could not record it yet. Use “Retry confirm” at the top of ' +
+              'the screen, then publish again.',
+          );
+          return;
+        }
+        // action.kind === 'proceed' → fall through to create+sign+activate.
+      }
+
+      // 4. Create ad (prepare phase). Funding (step 3) is already done, so the
+      // ad's `available` balance is guaranteed to back it. Ask the backend to
+      // create the ad in `pending` state; the server stamps the voucher fields
+      // and returns an EIP-712 typed-data payload for the seller to sign.
+      // Fixed mode sends the literal rate; float mode sends the offset bps.
       setSubmitStage('Building voucher…');
       const basePayload = {
         token: token.symbol,
@@ -413,7 +561,7 @@ const CreateAdScreen: React.FC = () => {
       }
       const { ad, typedData } = createRes.data;
 
-      // Step 2: sign the voucher off-chain via EIP-712. No gas, no broadcast.
+      // 5. Sign the voucher off-chain via EIP-712. No gas, no broadcast.
       // Pin signing to sellerAddress so the signature is guaranteed to
       // recover to the wallet the ad declares — otherwise a stale active
       // wallet (or a switch between create + sign) makes the backend reject
@@ -426,8 +574,8 @@ const CreateAdScreen: React.FC = () => {
         sellerAddress,
       );
 
-      // Step 3: submit the signature back. Server verifies the recovered
-      // signer matches `sellerAddress` and flips the ad to `active`.
+      // 6. Submit the signature back. Server verifies the recovered signer
+      // matches `sellerAddress` and flips the ad to `active`.
       setSubmitStage('Activating ad…');
       const signRes = await adsApi.sign(ad.id, signature, sellerAddress);
       if (!signRes.success || !signRes.data) {
@@ -447,10 +595,48 @@ const CreateAdScreen: React.FC = () => {
         { text: 'OK', onPress: () => router.back() },
       ]);
     } catch (err: any) {
-      Alert.alert('Could not publish ad', err?.message || String(err));
+      // If funding already deposited successfully (a 'funded' result) but the
+      // create/sign step then failed, the deposit is safe in the seller's
+      // on-chain `available` balance — reusable on retry or reclaimable. Tell
+      // them so, rather than implying funds are stuck.
+      Alert.alert(
+        'Could not publish ad',
+        (err?.message || String(err)) +
+          '\n\nAny deposit you just made is safe in your escrow balance — retry to ' +
+          'publish, or reclaim it from My Ads.',
+      );
     } finally {
       setSubmitting(false);
       setSubmitStage('');
+    }
+  };
+
+  // Retry a stranded deposit-confirm. Confirms against the RECORD's own fields
+  // (token/amount/txHash/wallet/chain) — never the live form — so a deposit
+  // broadcast on a chain/token the seller has since left is still recoverable.
+  // No re-broadcast: the on-chain deposit already happened; this only records
+  // it server-side (confirmDeposit is idempotent).
+  const handleRetryConfirm = async (rec: PendingEscrowConfirm) => {
+    if (retryingTxHash) return;
+    setRetryingTxHash(rec.txHash);
+    try {
+      const conf = await poolApi.confirmDeposit(
+        rec.token,
+        rec.amount,
+        rec.txHash,
+        rec.walletAddress,
+        rec.chainId,
+      );
+      if (!conf.success) {
+        throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
+      }
+      await removePending(rec.txHash);
+      await refreshPendingDeposits();
+      Alert.alert('Confirmed', 'Your deposit has been recorded. You can publish now.');
+    } catch (err: any) {
+      Alert.alert('Retry failed', err?.message || 'Server still cannot record this deposit.');
+    } finally {
+      setRetryingTxHash(null);
     }
   };
 
@@ -481,13 +667,6 @@ const CreateAdScreen: React.FC = () => {
     return message || 'Server rejected the request';
   }
 
-  const poolHint =
-    poolAvailable && poolAvailable !== '-'
-      ? `Pool: ${formatTokenAmount(poolAvailable, token.decimals, 4)} ${token.symbol}`
-      : poolAvailable === '-'
-        ? 'Pool unavailable'
-        : undefined;
-
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
@@ -502,10 +681,56 @@ const CreateAdScreen: React.FC = () => {
             Create sell ad
           </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-            You&apos;re offering {token.symbol} for {currencyCode}. Publishing is off-chain — you&apos;ll
-            sign a voucher to authorise trades. Funds are drawn from your pool balance (deposit
-            first via the Pool screen).
+            You&apos;re offering {token.symbol} for {currencyCode}. We&apos;ll lock the amount in
+            escrow as part of publishing — depositing only what isn&apos;t already covered — then
+            you sign a voucher to authorise trades.
           </Text>
+
+          {/* ── Recovery banner ──────────────────────────────────────────
+              A deposit that broadcast on-chain but whose server confirm
+              failed. Keyed off the stashed RECORD's own fields (token / chain
+              / amount / txHash), never the live form, so a stranded deposit is
+              always visible. "Retry confirm" records it server-side without
+              re-broadcasting (the on-chain deposit already happened). */}
+          {pendingDeposits.map((rec) => {
+            const recChain = getChainByChainId(rec.chainId);
+            const recDecimals = p2pTokenDecimals(rec.chainId, rec.token);
+            const amtHuman = formatTokenAmount(rec.amount, recDecimals, 4);
+            const isRetrying = retryingTxHash === rec.txHash;
+            return (
+              <AccentCard
+                key={rec.txHash}
+                railColor={colors.danger}
+                padding="md"
+                style={{ marginTop: spacing.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Icon name="warning" size={18} color={colors.danger} />
+                  <Text variant="bodyMed" weight="700" color="danger">
+                    Deposit confirm pending
+                  </Text>
+                </View>
+                <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                  A {amtHuman} {rec.token} deposit on {recChain?.shortName ?? `chain ${rec.chainId}`}{' '}
+                  broadcast on-chain but the server couldn&apos;t record it. Your funds are safe in
+                  escrow — retry to record it, then publish.
+                </Text>
+                <Text variant="caption" color="textMuted" numeric numberOfLines={1} style={{ marginTop: spacing.sm }}>
+                  tx {rec.txHash}
+                </Text>
+                <View style={{ marginTop: spacing.md }}>
+                  <Button
+                    title={isRetrying ? 'Retrying…' : 'Retry confirm'}
+                    size="sm"
+                    fullWidth={false}
+                    loading={isRetrying}
+                    disabled={!!retryingTxHash}
+                    onPress={() => handleRetryConfirm(rec)}
+                  />
+                </View>
+              </AccentCard>
+            );
+          })}
 
           {/* ── Currency ─────────────────────────────────────────────── */}
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
@@ -552,14 +777,6 @@ const CreateAdScreen: React.FC = () => {
                   );
                 })}
               </View>
-              {showPoolChainCaveat && selectedChainConfig && (
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
-                  <Icon name="info" size={14} color={colors.textMuted} />
-                  <Text variant="caption" color="textMuted" style={{ flex: 1 }}>
-                    Pool balances are per-chain — fund your {selectedChainConfig.shortName} pool before publishing.
-                  </Text>
-                </View>
-              )}
             </>
           )}
 
@@ -572,22 +789,19 @@ const CreateAdScreen: React.FC = () => {
               symbolPosition="suffix"
               value={amountInput}
               onChangeText={setAmountInput}
-              onMax={
-                poolAvailable && poolAvailable !== '-'
-                  ? () =>
-                      setAmountInput(
-                        formatTokenAmount(poolAvailable!, token.decimals, token.decimals),
-                      )
-                  : undefined
-              }
-              maxLabel="Use pool"
-              helper={exceedsPool ? undefined : poolHint}
-              error={
-                exceedsPool
-                  ? `Exceeds your pool balance. Deposit more ${token.symbol} via the Pool screen.`
-                  : undefined
-              }
             />
+            {/* Allowance-aware funding summary: tells the seller exactly what
+                publishing will do (no deposit when `available` already covers
+                the ad; otherwise the shortfall deposit + whether an approval is
+                needed). Computed async from the on-chain balance + allowance. */}
+            {fundingSummary && (
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
+                <Icon name="info" size={14} color={colors.accent} />
+                <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                  {fundingSummary}
+                </Text>
+              </View>
+            )}
           </View>
 
           {/* ── Rate type ────────────────────────────────────────────── */}

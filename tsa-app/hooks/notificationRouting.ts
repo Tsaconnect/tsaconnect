@@ -20,8 +20,11 @@ export function routeForNotification(data: NotificationData | null | undefined):
   if (type.startsWith('p2p.trade.') || type === 'p2p.message.new') {
     return data.tradeId ? `/p2p/trade/${data.tradeId}` : '/p2p/my-trades';
   }
-  // P2P capital movement → the seller pool.
-  if (type === 'p2p.deposit.confirmed' || type === 'p2p.withdraw.confirmed') {
+  // P2P capital movement → funding context (deposit) or reclaim screen (withdraw).
+  if (type === 'p2p.deposit.confirmed') {
+    return '/p2p/my-ads';
+  }
+  if (type === 'p2p.withdraw.confirmed') {
     return '/p2p/pool';
   }
   return null;
