@@ -118,9 +118,17 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrInvalidTransition),
 		errors.Is(err, services.ErrAdHasOpenTrades),
 		errors.Is(err, services.ErrDisputeAlreadyOpen),
-		errors.Is(err, services.ErrActiveTradeExists):
+		errors.Is(err, services.ErrActiveTradeExists),
+		errors.Is(err, services.ErrSellerPoolInsufficient):
+		// 409: well-formed but conflicts with current state — incl. a maker
+		// whose pool can no longer back the trade (buyer should pick another ad).
 		status = http.StatusConflict
-	case errors.Is(err, services.ErrRateStale):
+	case errors.Is(err, services.ErrTradePrepareReverted):
+		// The on-chain tx would revert — request as-formed can't be fulfilled.
+		// The message carries the underlying revert reason.
+		status = http.StatusUnprocessableEntity
+	case errors.Is(err, services.ErrRateStale),
+		errors.Is(err, services.ErrChainUnavailable):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, services.ErrPhase2Migration):
 		// Legacy lock-on-publish surface invoked by a stale caller. Map to

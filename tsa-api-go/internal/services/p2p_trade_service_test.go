@@ -35,6 +35,7 @@ type mockEscrow struct {
 	preparedTxs     []string
 
 	// Per-method error injection — set to override the success default.
+	openTradeErr       error // PrepareOpenTradeWithVoucher / WithDeposit failure injection
 	verifyDepositErr   error
 	verifyWithdrawnErr error
 	verifyCancelledErr error
@@ -143,6 +144,9 @@ func (m *mockEscrow) PrepareCancelVoucher(seller string, v AdVoucher) ([]byte, e
 	return []byte(`{"tx":"cancelVoucher"}`), nil
 }
 func (m *mockEscrow) PrepareOpenTradeWithVoucher(tradeId [32]byte, v AdVoucher, sig []byte, buyer string, amount *big.Int) ([]byte, error) {
+	if m.openTradeErr != nil {
+		return nil, m.openTradeErr
+	}
 	m.preparedTxs = append(m.preparedTxs, "openTrade")
 	sigCopy := make([]byte, len(sig))
 	copy(sigCopy, sig)
@@ -817,6 +821,99 @@ func TestOpenTrade_HappyPath(t *testing.T) {
 	}
 	if len(raw) == 0 {
 		t.Fatalf("expected unsigned tx")
+	}
+}
+
+// setupSignedAd creates + signs an ad with a funded pool, then returns the ad
+// id, payment-method id, and the escrow mock so the caller can mutate the pool
+// balance / inject a prepare error before opening a trade.
+func setupSignedAd(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, adID, pmID uuid.UUID) {
+	t.Helper()
+	db := setupTradeDB(t)
+	svc, esc, _ = newService(t, db)
+	sellerID := uuid.New()
+	pmID = seedPaymentMethod(t, db, sellerID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)} // funded at create+sign time
+	key, sellerAddr := newSellerKey(t)
+	res, err := svc.CreateAd(context.Background(), sellerID, sellerAddr, makeCreateAdParams(pmID))
+	if err != nil {
+		t.Fatalf("CreateAd: %v", err)
+	}
+	var hash [32]byte
+	copy(hash[:], common.FromHex(res.Ad.VoucherHash))
+	sig := signVoucherForTest(t, hash, key)
+	if _, err := svc.SignAd(context.Background(), res.Ad.ID, sellerID, sellerAddr, sig); err != nil {
+		t.Fatalf("SignAd: %v", err)
+	}
+	return svc, esc, res.Ad.ID, pmID
+}
+
+// A buyer opening a trade on a maker whose pool can no longer cover it (e.g. the
+// seller withdrew after posting) gets a clear ErrSellerPoolInsufficient (→409),
+// caught by the pre-check before the gas estimate — not an opaque 500.
+func TestOpenTrade_RejectsInsufficientSellerPool(t *testing.T) {
+	svc, esc, adID, pmID := setupSignedAd(t)
+	// Seller drained the pool after posting the ad.
+	esc.balance = OnChainBalance{Available: big.NewInt(1), Locked: big.NewInt(0)}
+
+	_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+	if !errors.Is(err, ErrSellerPoolInsufficient) {
+		t.Fatalf("expected ErrSellerPoolInsufficient, got %v", err)
+	}
+}
+
+// A prepare REVERT (the pool passes the pre-check but the estimate still
+// reverts — e.g. bad voucher signature) maps to ErrTradePrepareReverted (→422),
+// preserving the revert reason; a TRANSPORT failure maps to ErrChainUnavailable
+// (→503). Neither is an opaque 500.
+func TestOpenTrade_MapsPrepareFailures(t *testing.T) {
+	t.Run("revert -> ErrTradePrepareReverted", func(t *testing.T) {
+		svc, esc, adID, pmID := setupSignedAd(t)
+		esc.openTradeErr = errors.New("estimate gas (would revert): execution reverted: Bad voucher signature")
+		_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+		if !errors.Is(err, ErrTradePrepareReverted) {
+			t.Fatalf("expected ErrTradePrepareReverted, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "Bad voucher signature") {
+			t.Errorf("revert reason should be preserved in the message, got %q", err.Error())
+		}
+	})
+	t.Run("transport -> ErrChainUnavailable", func(t *testing.T) {
+		svc, esc, adID, pmID := setupSignedAd(t)
+		esc.openTradeErr = errors.New("get nonce: failed to get nonce for 0xbeef: connection refused")
+		_, _, err := svc.OpenTrade(context.Background(), adID, uuid.New(), "0xbeef",
+			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+		if !errors.Is(err, ErrChainUnavailable) {
+			t.Fatalf("expected ErrChainUnavailable, got %v", err)
+		}
+	})
+}
+
+func TestIsChainRevert(t *testing.T) {
+	reverts := []string{
+		"estimate gas (would revert): execution reverted: Seller balance insufficient",
+		"execution reverted: Bad voucher signature",
+		"prepare openTrade: estimate gas (would revert): 0x...",
+	}
+	for _, s := range reverts {
+		if !isChainRevert(errors.New(s)) {
+			t.Errorf("isChainRevert(%q) = false, want true", s)
+		}
+	}
+	transport := []string{
+		"get nonce: connection refused",
+		"suggest gas price: i/o timeout",
+		"dial tcp: no route to host",
+	}
+	for _, s := range transport {
+		if isChainRevert(errors.New(s)) {
+			t.Errorf("isChainRevert(%q) = true, want false", s)
+		}
+	}
+	if isChainRevert(nil) {
+		t.Error("isChainRevert(nil) should be false")
 	}
 }
 
