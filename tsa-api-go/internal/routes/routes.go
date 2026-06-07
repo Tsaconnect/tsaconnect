@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -101,6 +101,30 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminRewards.POST("/reward-flags", rfh.CreateRewardFlag)
 			adminRewards.POST("/reward-flags/:id/clear", rfh.ClearRewardFlag)
 			adminRewards.GET("/reward-eligibility/:userId", rfh.GetRewardEligibility)
+		}
+	}
+
+	// Admin reward-distribution routes (fee/TP overhaul SP6) — build + publish
+	// cumulative merkle roots. Funds-adjacent (the root authorizes MCGP claims),
+	// so restricted to true admin roles on top of AdminAuth, like reward-flags.
+	if rdh != nil {
+		adminDist := api.Group("/admin/reward-distributions")
+		adminDist.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminDist.GET("", rdh.ListDistributions)
+			adminDist.POST("/publish", rdh.PublishDistribution)
+			adminDist.POST("/confirm", rdh.ConfirmPublish)
+		}
+	}
+
+	// User reward-claim data (fee/TP overhaul SP6) — the authed user's proof +
+	// cumulative amount for the latest published epoch, so the app can build the
+	// claim(account, cumulative, proof) tx. Returns empty/ineligible cleanly.
+	if rdh != nil {
+		rewardsGroup := api.Group("/rewards")
+		rewardsGroup.Use(auth)
+		{
+			rewardsGroup.GET("/claim-data", rdh.GetClaimData)
 		}
 	}
 

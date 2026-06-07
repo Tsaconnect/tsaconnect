@@ -66,6 +66,10 @@ func AutoMigrate() error {
 		// SP7 — claim-eligibility gate (anti-sybil + KYC). An ACTIVE reward_flags
 		// row makes a user claim-ineligible (SP6 excludes them from merkle roots).
 		&models.RewardFlag{},
+		// SP6 — root-publisher: published cumulative merkle epochs + per-(epoch,
+		// user) leaf/proof rows. Additive and dormant until an admin publishes.
+		&models.RewardDistribution{},
+		&models.RewardDistributionEntry{},
 		&models.RefreshToken{},
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},
