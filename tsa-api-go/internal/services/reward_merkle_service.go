@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,30 @@ type RewardMerkleService struct {
 	// chainID is the chain the distributor is deployed on (stamped into the
 	// user's claim tx and the unsigned setMerkleRoot tx).
 	chainID int64
+
+	// claimedReader optionally reads the distributor's on-chain claimed[account].
+	// When wired (production, via SetClaimedReader), ClaimDataForUser /
+	// PrepareClaimForUser gate Included/unsignedTx on REMAINING claimable
+	// (cumulativeAmount > claimed[account]) so a fully-claimed user is no longer
+	// handed a tx that would revert "MCGP: nothing to claim". nil (tests / no RPC)
+	// ⇒ membership-only gating, the prior behavior. A read failure is treated as
+	// "assume claimable" (fail-open) so an RPC blip never hides a real claim.
+	claimedReader claimedOfReader
+}
+
+// SetClaimedReader wires the optional on-chain claimed[account] reader so claim
+// data is gated on remaining-claimable (cumulative − claimed), not just tree
+// membership. Additive: leaving it unset preserves the membership-only behavior.
+// nil-safe; a typed-nil reader is normalized to "unset".
+func (s *RewardMerkleService) SetClaimedReader(reader claimedOfReader) {
+	if s == nil {
+		return
+	}
+	if reader == nil || isNilClaimedReader(reader) {
+		s.claimedReader = nil
+		return
+	}
+	s.claimedReader = reader
 }
 
 // claimEligibilityChecker is the SP7 surface SP6 needs: decide who may be
@@ -624,6 +649,29 @@ func (s *RewardMerkleService) ClaimDataForUser(ctx context.Context, userID uuid.
 		return nil, fmt.Errorf("load claim entry for %s: %w", userID, err)
 	}
 
+	// Gate on REMAINING claimable, not just tree membership. The contract pays
+	// cumulativeAmount − claimed[account] and REVERTS "MCGP: nothing to claim" when
+	// that is 0 (a fully-claimed user). Without this check the app keeps the Claim
+	// button active and broadcasts a guaranteed-revert tx (the user pays gas for
+	// nothing). When a claimed reader is wired, compare cumulative vs on-chain
+	// claimed[account] and report Included=false (nothing to claim) once fully
+	// claimed. A read failure is fail-open (assume claimable) so an RPC blip never
+	// hides a legitimately-claimable user. nil reader ⇒ membership-only (prior
+	// behavior, used by tests / RPC-less envs).
+	if s.claimedReader != nil {
+		cumulative, ok := new(big.Int).SetString(entry.CumulativeBaseUnits, 10)
+		if !ok {
+			return nil, fmt.Errorf("parse cumulative %q for %s", entry.CumulativeBaseUnits, userID)
+		}
+		if claimed, cerr := s.claimedReader.ClaimedOf(ctx, s.distributorAddress, entry.Account); cerr == nil {
+			// remaining = cumulative − claimed; <= 0 ⇒ nothing left to claim.
+			if cumulative.Cmp(claimed) <= 0 {
+				return out, nil // Included stays false — fully claimed
+			}
+		}
+		// cerr != nil ⇒ fail-open: fall through and treat as claimable.
+	}
+
 	var proof []string
 	if err := json.Unmarshal([]byte(entry.Proof), &proof); err != nil {
 		return nil, fmt.Errorf("decode proof for %s: %w", userID, err)
@@ -661,6 +709,85 @@ func (s *RewardMerkleService) PrepareSetMerkleRoot(rootHex string) ([]byte, erro
 		return nil, fmt.Errorf("pack setMerkleRoot: %w", err)
 	}
 	return data, nil
+}
+
+// PreparedClaim is the unsigned claim(account, cumulativeAmount, proof) tx for a
+// user, returned by PrepareClaimForUser alongside the underlying ClaimData. The
+// app signs Tx client-side and broadcasts (the backend holds no key — mirrors
+// the P2P PrepareDeposit and SP6 PrepareSetMerkleRoot pattern).
+type PreparedClaim struct {
+	// Claimable is the underlying SP6 claim data (cumulative, proof, account,
+	// merkleRoot, included flag, …). Included=false ⇒ Tx is nil (nothing to claim).
+	Claimable *ClaimData `json:"claimData"`
+
+	// Tx is the unsigned claim(account, cumulative, proof) tx the app signs +
+	// broadcasts. nil when the user has nothing claimable on the live root
+	// (Claimable.Included=false) — the app shows "nothing to claim".
+	Tx *blockchainUnsignedTx `json:"unsignedTx,omitempty"`
+}
+
+// blockchainUnsignedTx mirrors blockchain.UnsignedTx without importing the
+// blockchain package into services (services must not depend on handlers/
+// blockchain transport types). The JSON tags match blockchain.UnsignedTx so the
+// app sees one consistent unsigned-tx shape across P2P, reward-publish, and
+// reward-claim.
+type blockchainUnsignedTx struct {
+	To      string `json:"to"`
+	Value   string `json:"value"`
+	Data    string `json:"data"`
+	ChainID string `json:"chainId"`
+}
+
+// PrepareClaimForUser builds the UNSIGNED claim(account, cumulativeAmount, proof)
+// tx the app signs + broadcasts to the distributor, sourced from the latest
+// PUBLISHED epoch (the root live on-chain) via ClaimDataForUser. This is purely a
+// convenience over /rewards/claim-data — the same cumulative+proof, pre-encoded
+// into the exact claim calldata so the app doesn't have to ABI-encode it itself.
+// The established codebase pattern is backend-prepared unsigned txs (P2P
+// PrepareDeposit, SP6 PrepareSetMerkleRoot), so we mirror it here.
+//
+// Returns Tx=nil (cleanly, no error) when the user isn't claimable on the live
+// root (ineligible / zero / no published epoch). The backend never signs or
+// broadcasts; PendingNextEpoch on the embedded ClaimData still flags a newer
+// unconfirmed epoch so the app can hint "more rewards pending".
+func (s *RewardMerkleService) PrepareClaimForUser(ctx context.Context, userID uuid.UUID) (*PreparedClaim, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("reward merkle service not initialized")
+	}
+	data, err := s.ClaimDataForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := &PreparedClaim{Claimable: data}
+	if !data.Included {
+		return out, nil // nothing to claim on the live root — no tx to sign
+	}
+
+	account := common.HexToAddress(data.Account)
+	cumulative, ok := new(big.Int).SetString(data.CumulativeAmountBaseUnits, 10)
+	if !ok {
+		return nil, fmt.Errorf("parse cumulative %q for claim", data.CumulativeAmountBaseUnits)
+	}
+	proof := make([][32]byte, 0, len(data.Proof))
+	for _, p := range data.Proof {
+		b, perr := parseBytes32(p)
+		if perr != nil {
+			return nil, fmt.Errorf("parse proof element %q: %w", p, perr)
+		}
+		proof = append(proof, b)
+	}
+
+	calldata, err := parsedRewardDistributorABI.Pack("claim", account, cumulative, proof)
+	if err != nil {
+		return nil, fmt.Errorf("pack claim: %w", err)
+	}
+	out.Tx = &blockchainUnsignedTx{
+		To:      s.distributorAddress,
+		Value:   "0",
+		Data:    common.Bytes2Hex(calldata),
+		ChainID: strconv.FormatInt(s.chainID, 10),
+	}
+	return out, nil
 }
 
 // MarkPublished records that the admin confirmed the setMerkleRoot tx on-chain.

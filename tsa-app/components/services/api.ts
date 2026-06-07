@@ -29,6 +29,84 @@ export interface UploadResponse {
   height?: number;
 }
 
+// ==================== SP8 REWARDS / TP-LEVELS ====================
+// Mirrors GET /api/rewards/summary + GET /api/rewards/prepare-claim from the
+// Go backend (reward_summary_handler.go). Shapes are authoritative — see the
+// backend's RewardSummary / ClaimData / PreparedClaim structs.
+
+export type LadderStatus = 'earned' | 'in_progress' | 'locked';
+
+/** One rung of the fixed 15-level TP ladder. Always all 15 rows present. */
+export interface LadderLevel {
+  level: number;
+  thresholdTP: number;
+  rewardUsd: number;
+  /** Physical prize from L6+; '' for cash-only rungs. */
+  prize: string;
+  status: LadderStatus;
+}
+
+/** TP earned at one generation depth. Always 11 dense rows (gen 0..10). */
+export interface GenerationEarning {
+  generation: number;
+  earnedTp: number;
+}
+
+/** A physical prize the user has crossed the threshold for, awaiting fulfilment. */
+export interface PrizeDueItem {
+  level: number;
+  prize: string;
+  status: string;
+}
+
+/** Full TP-screen dashboard payload (data of GET /api/rewards/summary). */
+export interface RewardSummary {
+  tpBalance: number;
+  claimableMcgp: number;
+  totalClaimedMcgp: number;
+  currentLevel: number;
+  /** Threshold of the NEXT rung; 0 at the top of the ladder. */
+  nextLevelThresholdTP: number;
+  /** [0,1]; 1.0 at the top of the ladder. */
+  progressToNext: number;
+  levels: LadderLevel[];
+  perGeneration: GenerationEarning[];
+  globalPoolShareTp: number;
+  prizesDue: PrizeDueItem[];
+}
+
+/** SP6 claim proof for the latest PUBLISHED epoch (data.claimData). */
+export interface RewardClaimData {
+  /** false ⇒ nothing claimable on the live root (ineligible / zero / no epoch). */
+  included: boolean;
+  /** A newer epoch is built but not yet on-chain — tell the user to retry shortly. */
+  pendingNextEpoch?: boolean;
+  epoch: number;
+  account?: string;
+  /** Exact `cumulativeAmount` arg (18-dec base units, decimal string). */
+  cumulativeAmountBaseUnits?: string;
+  proof?: string[];
+  leaf?: string;
+  merkleRoot?: string;
+  distributorAddress?: string;
+  chainId?: number;
+}
+
+/** Backend-prepared unsigned claim(account, cumulative, proof) tx.
+ *  Only {to,value,data,chainId} — nonce/gas are filled client-side before signing. */
+export interface RewardUnsignedTx {
+  to: string;
+  value: string;
+  data: string;
+  chainId: string;
+}
+
+/** data of GET /api/rewards/prepare-claim. unsignedTx is null when nothing is claimable. */
+export interface PreparedClaim {
+  claimData: RewardClaimData;
+  unsignedTx: RewardUnsignedTx | null;
+}
+
 //Category
 export interface Category {
   id: string;
@@ -693,6 +771,46 @@ class APIService {
       return {
         success: false,
         message: error.message || 'Failed to fetch cashback earnings.',
+      };
+    }
+  }
+
+  // ==================== SP8 REWARDS / TP-LEVELS ====================
+
+  // Full TP-screen dashboard: balance, ladder, per-generation, prizes, claimable.
+  async getRewardSummary(): Promise<ApiResponse<RewardSummary>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/rewards/summary`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<RewardSummary>(response);
+    } catch (error: any) {
+      console.error('Get reward summary error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch reward summary.',
+      };
+    }
+  }
+
+  // Backend-prepared unsigned claim(account, cumulative, proof) tx + the proof.
+  // unsignedTx is null when there is nothing claimable (ineligible / zero /
+  // no published epoch / dormant distributor) — the app shows "nothing to claim".
+  async prepareRewardClaim(): Promise<ApiResponse<PreparedClaim>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/rewards/prepare-claim`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<PreparedClaim>(response);
+    } catch (error: any) {
+      console.error('Prepare reward claim error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to prepare reward claim.',
       };
     }
   }
@@ -1818,6 +1936,15 @@ export async function submitMerchantRequest(data: {
 
 // Create singleton instance
 export const api = new APIService();
+
+// SP8 rewards convenience barrel — thin named wrappers so screens can import a
+// focused surface (`rewardsApi.summary()`) instead of the whole APIService.
+export const rewardsApi = {
+  /** GET /api/rewards/summary — the full TP-levels dashboard. */
+  summary: () => api.getRewardSummary(),
+  /** GET /api/rewards/prepare-claim — proof + unsigned claim tx (or null). */
+  prepareClaim: () => api.prepareRewardClaim(),
+};
 
 // Optional: Create a hook version for React components
 export const useApi = () => {

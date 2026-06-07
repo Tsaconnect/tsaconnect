@@ -11,7 +11,7 @@ import React, { useEffect, useState } from 'react';
 import { View, ScrollView, Share, Alert, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import { useTheme } from '@/theme';
+import { useTheme, formatNumber } from '@/theme';
 import {
   AccentCard,
   AmountText,
@@ -23,7 +23,7 @@ import {
   Surface,
   Text,
 } from '@/components/ui';
-import api from '../components/services/api';
+import api, { rewardsApi, type RewardSummary } from '../components/services/api';
 
 const TradeAndEarnScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -31,15 +31,17 @@ const TradeAndEarnScreen: React.FC = () => {
   const [tpBalance, setTpBalance] = useState(0);
   const [cashbackBalance, setCashbackBalance] = useState(0);
   const [totalReferrals, setTotalReferrals] = useState(0);
+  const [summary, setSummary] = useState<RewardSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = async () => {
     try {
-      const [profileRes, tpRes, referralsRes, cashbackRes] = await Promise.all([
+      const [profileRes, tpRes, referralsRes, cashbackRes, summaryRes] = await Promise.all([
         api.getProfile(),
         api.getTPBalance(),
         api.getReferrals(),
         api.getCashbackBalance(),
+        rewardsApi.summary(),
       ]);
 
       if (profileRes.success && profileRes.data) {
@@ -53,6 +55,12 @@ const TradeAndEarnScreen: React.FC = () => {
       }
       if (cashbackRes.success && cashbackRes.data) {
         setCashbackBalance(cashbackRes.data.cashbackBalance || 0);
+      }
+      if (summaryRes.success && summaryRes.data) {
+        setSummary(summaryRes.data);
+        // The summary settles pending accrual server-side, so prefer its
+        // (more current) TP balance for the hero when available.
+        setTpBalance(summaryRes.data.tpBalance);
       }
     } catch (error) {
       console.error('Error fetching trade & earn data:', error);
@@ -166,6 +174,65 @@ const TradeAndEarnScreen: React.FC = () => {
             </View>
           </View>
         </AccentCard>
+
+        {/* Rewards & TP Levels — entry point into the full SP8 dashboard */}
+        <PressableScale onPress={() => router.push('/rewards')} style={{ marginTop: spacing.lg }}>
+          <Card padding="lg">
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: radius.md,
+                  backgroundColor: colors.accentMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginRight: spacing.md,
+                }}
+              >
+                <Icon name="trendingUp" size={22} color={colors.accent} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700">
+                  Rewards &amp; TP Levels
+                </Text>
+                <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                  {summary
+                    ? `Level ${summary.currentLevel} · ${formatNumber(summary.claimableMcgp, { maximumFractionDigits: 4 })} MCGP to claim`
+                    : 'View your level ladder, earnings & claim rewards'}
+                </Text>
+              </View>
+              <Icon name="chevronRight" size={22} color={colors.textMuted} />
+            </View>
+
+            {!!summary && !!summary.nextLevelThresholdTP && (
+              <>
+                <View
+                  style={{
+                    height: 6,
+                    borderRadius: radius.pill,
+                    backgroundColor: colors.surfaceAlt,
+                    overflow: 'hidden',
+                    marginTop: spacing.md,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: `${Math.max(0, Math.min(1, summary.progressToNext)) * 100}%`,
+                      height: '100%',
+                      borderRadius: radius.pill,
+                      backgroundColor: colors.accent,
+                    }}
+                  />
+                </View>
+                <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                  {Math.round(summary.progressToNext * 100)}% to Level {summary.currentLevel + 1} (
+                  {formatNumber(summary.nextLevelThresholdTP)} TP)
+                </Text>
+              </>
+            )}
+          </Card>
+        </PressableScale>
 
         {/* Stats Row */}
         <Card padding="lg" style={{ marginTop: spacing.lg, marginBottom: spacing['2xl'] }}>
@@ -290,7 +357,7 @@ const TradeAndEarnScreen: React.FC = () => {
           <Divider inset={74} />
 
           <PressableScale
-            onPress={() => router.push('/referrals')}
+            onPress={() => router.push('/rewards')}
             style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}
           >
             <View
@@ -395,7 +462,8 @@ const TradeAndEarnScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* TP Conversion Rates */}
+        {/* How TP Is Earned — short explainer; the live per-generation
+            breakdown, level ladder & claim now live on the Rewards screen. */}
         <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
           How TP Is Earned
         </Text>
@@ -413,28 +481,30 @@ const TradeAndEarnScreen: React.FC = () => {
               Split across you + 10 generations of upline
             </Text>
           </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg }}>
             <Icon name="bolt" size={16} color={colors.accent} />
             <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
               Credited instantly after each transaction
             </Text>
           </View>
-          <View
+
+          <PressableScale
+            onPress={() => router.push('/rewards')}
             style={{
               flexDirection: 'row',
-              alignItems: 'flex-start',
-              backgroundColor: colors.accentMuted,
-              padding: spacing.md,
-              borderRadius: radius.sm,
-              marginTop: spacing.xs,
+              alignItems: 'center',
+              justifyContent: 'center',
               gap: spacing.sm,
+              backgroundColor: colors.accentMuted,
+              paddingVertical: spacing.md,
+              borderRadius: radius.sm,
             }}
           >
-            <Icon name="info" size={14} color={colors.accent} />
-            <Text variant="caption" color="accent" style={{ flex: 1 }}>
-              Every time you trade, swap, purchase products/services, or send via Instant Pay, the system fees are split into TP and distributed to you and your upline network.
+            <Icon name="trendingUp" size={16} color={colors.accent} />
+            <Text variant="bodySm" weight="700" color="accent">
+              See your TP levels &amp; per-generation earnings
             </Text>
-          </View>
+          </PressableScale>
         </Card>
 
         {/* How It Works */}

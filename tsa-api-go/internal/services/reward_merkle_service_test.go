@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,12 +101,12 @@ func TestFloorToBaseUnits_DeterministicAndFloored(t *testing.T) {
 		mcgp float64
 		want string
 	}{
-		{100, "100000000000000000000"},        // exact 100 MCGP
-		{0, "0"},                               // zero
-		{-5, "0"},                              // negative → 0
-		{0.000000000000000001, "1"},            // 1 base unit
-		{1.5, "1500000000000000000"},           // 1.5 MCGP
-		{75, "75000000000000000000"},           // matches vector C
+		{100, "100000000000000000000"}, // exact 100 MCGP
+		{0, "0"},                       // zero
+		{-5, "0"},                      // negative → 0
+		{0.000000000000000001, "1"},    // 1 base unit
+		{1.5, "1500000000000000000"},   // 1.5 MCGP
+		{75, "75000000000000000000"},   // matches vector C
 	}
 	for _, tc := range cases {
 		got := floorToBaseUnits(tc.mcgp).String()
@@ -619,3 +621,176 @@ func TestPrepareSetMerkleRoot_PacksCalldata(t *testing.T) {
 		t.Fatalf("packed root = %x, want %x", got, want)
 	}
 }
+
+// TestPrepareClaimForUser_EncodesClaimTx asserts PrepareClaimForUser builds a
+// well-formed unsigned claim(account, cumulative, proof) tx for a published,
+// included user — the selector is claim's, the To/ChainID target the
+// distributor, and the embedded ClaimData matches /rewards/claim-data. An
+// excluded user gets a nil Tx (nothing to claim).
+func TestPrepareClaimForUser_EncodesClaimTx(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	included := mkMerkleUser(t, db, walletA, 100)
+	excluded := mkMerkleUser(t, db, walletB, 250)
+
+	elig := &fakeEligibility{eligible: map[uuid.UUID]bool{included: true, excluded: false}}
+	const dist = "0xdist0000000000000000000000000000000000a1"
+	svc := NewRewardMerkleService(db, elig, dist, 146)
+
+	build, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if err := svc.MarkPublished(context.Background(), build.Distribution.Epoch, "0xtxhash"); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+
+	prep, err := svc.PrepareClaimForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("prepare claim (included): %v", err)
+	}
+	if prep.Claimable == nil || !prep.Claimable.Included {
+		t.Fatalf("expected included claim data, got %+v", prep.Claimable)
+	}
+	if prep.Tx == nil {
+		t.Fatalf("expected an unsigned claim tx for an included user")
+	}
+	if prep.Tx.To != dist {
+		t.Errorf("tx.To = %s, want distributor %s", prep.Tx.To, dist)
+	}
+	if prep.Tx.ChainID != "146" {
+		t.Errorf("tx.ChainID = %s, want 146", prep.Tx.ChainID)
+	}
+	if prep.Tx.Value != "0" {
+		t.Errorf("tx.Value = %s, want 0", prep.Tx.Value)
+	}
+	// The calldata must begin with the claim() 4-byte selector and decode back to
+	// the same account + cumulative the claim data advertises.
+	data := common.FromHex(prep.Tx.Data)
+	if len(data) < 4 {
+		t.Fatalf("calldata too short: %d bytes", len(data))
+	}
+	method, err := parsedRewardDistributorABI.MethodById(data[:4])
+	if err != nil || method.Name != "claim" {
+		t.Fatalf("calldata selector is not claim(): method=%v err=%v", method, err)
+	}
+	args, err := method.Inputs.Unpack(data[4:])
+	if err != nil {
+		t.Fatalf("unpack claim args: %v", err)
+	}
+	gotAcct := args[0].(common.Address)
+	gotCum := args[1].(*big.Int)
+	if gotAcct != common.HexToAddress(walletA) {
+		t.Errorf("claim account = %s, want %s", gotAcct.Hex(), walletA)
+	}
+	wantCum, _ := new(big.Int).SetString(prep.Claimable.CumulativeAmountBaseUnits, 10)
+	if gotCum.Cmp(wantCum) != 0 {
+		t.Errorf("claim cumulative = %s, want %s", gotCum, wantCum)
+	}
+
+	// Excluded user: no tx to sign.
+	prepExcl, err := svc.PrepareClaimForUser(context.Background(), excluded)
+	if err != nil {
+		t.Fatalf("prepare claim (excluded): %v", err)
+	}
+	if prepExcl.Tx != nil {
+		t.Errorf("excluded user should get a nil unsigned tx, got %+v", prepExcl.Tx)
+	}
+	if prepExcl.Claimable == nil || prepExcl.Claimable.Included {
+		t.Errorf("excluded user claim data should be included=false")
+	}
+}
+
+// fakeClaimedReader is a claimedOfReader returning a fixed claimed[account]
+// keyed by lower-cased account hex (and an optional read error).
+type fakeClaimedReader struct {
+	claimed map[string]*big.Int
+	err     error
+}
+
+func (f *fakeClaimedReader) ClaimedOf(_ context.Context, _ string, account string) (*big.Int, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if v, ok := f.claimed[strings.ToLower(account)]; ok {
+		return v, nil
+	}
+	return big.NewInt(0), nil
+}
+
+// TestClaimData_GatesOnRemainingClaimable asserts that with an on-chain claimed
+// reader wired, a fully-claimed user is reported NOT claimable (Included=false,
+// Tx=nil) — so the app stops building a guaranteed-revert claim() — while a
+// partially-claimed user stays claimable, and a reader error fails OPEN.
+func TestClaimData_GatesOnRemainingClaimable(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	included := mkMerkleUser(t, db, walletA, 100) // cumulative 100e18
+
+	elig := &fakeEligibility{eligible: map[uuid.UUID]bool{included: true}}
+	const dist = "0xdist0000000000000000000000000000000000a1"
+	svc := NewRewardMerkleService(db, elig, dist, 146)
+
+	build, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if err := svc.MarkPublished(context.Background(), build.Distribution.Epoch, "0xtxhash"); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+
+	cumulative := mustBig(t, "100000000000000000000") // 100 MCGP base units
+
+	// (1) Fully claimed (claimed == cumulative) ⇒ nothing left ⇒ not claimable.
+	svc.SetClaimedReader(&fakeClaimedReader{claimed: map[string]*big.Int{
+		strings.ToLower(walletA): new(big.Int).Set(cumulative),
+	}})
+	cd, err := svc.ClaimDataForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("claim data (fully claimed): %v", err)
+	}
+	if cd.Included {
+		t.Fatalf("fully-claimed user must NOT be claimable (would revert 'nothing to claim')")
+	}
+	prep, err := svc.PrepareClaimForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("prepare (fully claimed): %v", err)
+	}
+	if prep.Tx != nil {
+		t.Fatalf("fully-claimed user must get a nil unsigned tx, got %+v", prep.Tx)
+	}
+
+	// (2) Partially claimed (claimed < cumulative) ⇒ still claimable.
+	half := new(big.Int).Div(cumulative, big.NewInt(2))
+	svc.SetClaimedReader(&fakeClaimedReader{claimed: map[string]*big.Int{
+		strings.ToLower(walletA): half,
+	}})
+	cd2, err := svc.ClaimDataForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("claim data (partial): %v", err)
+	}
+	if !cd2.Included {
+		t.Fatalf("partially-claimed user must remain claimable")
+	}
+
+	// (3) Reader error ⇒ fail OPEN (treat as claimable) so an RPC blip can't hide
+	// a legitimate claim.
+	svc.SetClaimedReader(&fakeClaimedReader{err: errReadFail})
+	cd3, err := svc.ClaimDataForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("claim data (reader error): %v", err)
+	}
+	if !cd3.Included {
+		t.Fatalf("a claimed-read error must fail open (still claimable)")
+	}
+
+	// (4) No reader (nil) ⇒ membership-only, prior behavior preserved.
+	svc.SetClaimedReader(nil)
+	cd4, err := svc.ClaimDataForUser(context.Background(), included)
+	if err != nil {
+		t.Fatalf("claim data (no reader): %v", err)
+	}
+	if !cd4.Included {
+		t.Fatalf("with no claimed reader, membership-only gating must keep the user claimable")
+	}
+}
+
+var errReadFail = errors.New("rpc read failed")

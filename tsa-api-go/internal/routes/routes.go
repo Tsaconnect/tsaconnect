@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -117,14 +117,24 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
-	// User reward-claim data (fee/TP overhaul SP6) — the authed user's proof +
-	// cumulative amount for the latest published epoch, so the app can build the
-	// claim(account, cumulative, proof) tx. Returns empty/ineligible cleanly.
-	if rdh != nil {
+	// User reward routes (fee/TP overhaul SP6 + SP8) — all auth'd, all returning
+	// empty/ineligible cleanly rather than erroring:
+	//   - /claim-data    (SP6): the authed user's proof + cumulative amount for the
+	//     latest published epoch — the CANONICAL claim source.
+	//   - /summary       (SP8): the full TP-screen dashboard payload.
+	//   - /prepare-claim (SP8): the UNSIGNED claim(account, cumulative, proof) tx,
+	//     a convenience over /claim-data matching the prepared-unsigned-tx pattern.
+	if rdh != nil || rsh != nil {
 		rewardsGroup := api.Group("/rewards")
 		rewardsGroup.Use(auth)
 		{
-			rewardsGroup.GET("/claim-data", rdh.GetClaimData)
+			if rdh != nil {
+				rewardsGroup.GET("/claim-data", rdh.GetClaimData)
+			}
+			if rsh != nil {
+				rewardsGroup.GET("/summary", rsh.GetRewardSummary)
+				rewardsGroup.GET("/prepare-claim", rsh.PrepareClaim)
+			}
 		}
 	}
 
