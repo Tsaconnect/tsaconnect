@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // ServiceContact ABI — subset of functions and events we interact with
@@ -73,8 +75,13 @@ func NewServiceContactService(client *blockchain.EVMClient, cfg *config.Config) 
 // like MCGP are not supported by this contract design — adding them would
 // transfer dust through the splits. Don't change this without a contract
 // redesign that derives per-token fees from on-chain prices.
+//
+// The $0.10 flat now comes from the service_contact fee_config row (seeded to
+// FlatAmountUSD = 0.10). It is scaled to 6-decimal units; 0.10 * 1e6 == 100000
+// exactly, so the on-chain amount is unchanged from the previous literal.
 func (s *ServiceContactService) GetFeeAmount() *big.Int {
-	return big.NewInt(100000)
+	flatUSD, _ := FeeFlatUSD(models.FeatureServiceContact, "USDC")
+	return big.NewInt(int64(math.Round(flatUSD * 1e6)))
 }
 
 // PreparePayContactFee encodes the payContactFee call and builds an UnsignedTx.

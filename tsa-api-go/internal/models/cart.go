@@ -54,6 +54,18 @@ const (
 )
 
 // GetFeeConfig returns the fee schedule for the frontend.
+//
+// SP1 NOTE (fee-config migration): this still reads the hardcoded constants
+// rather than the services.FeeConfigService. The models package cannot import
+// services (services imports models — that would be an import cycle), so the
+// buyer-facing quote/display sites live here on constants by design for SP1.
+// The seed in services.DefaultFeeConfigs() is pinned to these same constants
+// and TestSeedMatchesCartConstants guards that equality, so today there is no
+// quote-vs-charge divergence. FOLLOW-UP: before any admin fee edit is exercised
+// in production, migrate this display + CalculateCartSummary's gas fee to read
+// through a service-backed path (e.g. compute the quote in the cart handler via
+// services.FeeFlatUSD / FeeRate, not in the model) so the buyer quote and the
+// charge share one source of truth.
 func GetFeeConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"merchantFeeBPS":       MerchantFeeBPS,
@@ -249,7 +261,15 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 	summary.PlatformFee = 0
 
 	// Gas fee: $0.10 flat per order (for on-chain escrow approval)
-	// 0 if cart is empty, $0.10 if there are items
+	// 0 if cart is empty, $0.10 if there are items.
+	//
+	// SP1 NOTE: this is the buyer-facing pre-checkout quote and reads the
+	// GasFeeUSD constant, while the actual charge (PrepareApprove /
+	// orderSystemFeeUSD) reads services.FeeFlatUSD(FeatureProduct, token). The
+	// constant equals the seed (guarded by TestSeedMatchesCartConstants), so
+	// they agree today. They will DIVERGE once an admin edits the product flat
+	// fee via the admin API. See GetFeeConfig's follow-up note: migrate this
+	// quote to a service-backed path before any admin fee edit is exercised.
 	if len(items) > 0 {
 		summary.GasFee = GasFeeUSD
 	}
