@@ -355,7 +355,10 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		return
 	}
 
-	if err := DistributeTPEarnings(config.DB, user.ID, "service_contact", payment.ID, 0.10); err != nil {
+	// System fee for TP distribution = the $0.10 contact fee, read from the
+	// service_contact fee_config row (seeded to FlatAmountUSD = 0.10).
+	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol)
+	if err := DistributeTPEarnings(config.DB, user.ID, "service_contact", payment.ID, contactFeeUSD); err != nil {
 		log.Printf("TP distribution failed for service contact %s: %v", payment.ID, err)
 	}
 

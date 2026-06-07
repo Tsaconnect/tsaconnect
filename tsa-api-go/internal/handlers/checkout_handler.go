@@ -166,14 +166,17 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 
 // --- Fee calculation (big.Int) ---
 
-// CalculatePlatformFee returns 2% merchant fee for non-MCGP tokens, 0 for MCGP.
-// This fee is baked into the listing price — the merchant pays it, not the buyer.
+// CalculatePlatformFee returns the merchant fee (2% for non-MCGP tokens, 0 for
+// MCGP) read from the unified fee-config service. This fee is baked into the
+// listing price — the merchant pays it, not the buyer.
+//
+// The rate comes from the product_merchant fee_config row (seeded to
+// models.MerchantFeeBPS, MCGP-exempt). MCGP resolves to bps=0/exempt, which
+// produces the same zero fee as the previous explicit MCGP branch.
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
-	if strings.ToUpper(token) == "MCGP" {
-		return big.NewInt(0)
-	}
-	// 2% = productAmount * 200 / 10000
-	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(models.MerchantFeeBPS)))
+	bps, _ := services.FeeRate(models.FeatureProductMerchant, token)
+	// fee = productAmount * bps / 10000
+	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(bps)))
 	fee.Div(fee, big.NewInt(10000))
 	return fee
 }
@@ -530,10 +533,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 // For MCGP orders, the buyer pays no platform fee or gas fee, so TP distributes 0.
 func orderSystemFeeUSD(order *models.Order) float64 {
 	platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
-	if strings.ToUpper(order.Token) == "MCGP" {
-		return platformFeeFloat
-	}
-	return platformFeeFloat + models.GasFeeUSD
+	// Flat per-order gas fee comes from the product fee_config row
+	// (seeded to models.GasFeeUSD, MCGP-exempt). MCGP returns flat=0,
+	// preserving the previous MCGP branch that added no gas fee.
+	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token)
+	return platformFeeFloat + gasFeeUSD
 }
 
 // getOrderForEscrow is a shared helper for prepare-approve and prepare-escrow.
@@ -599,11 +603,15 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 
 	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
 
-	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee
+	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee.
+	// The flat gas fee comes from the product fee_config row (seeded to
+	// models.GasFeeUSD, MCGP-exempt). MCGP resolves to flat=0, preserving the
+	// previous behavior where MCGP orders added no gas fee.
 	approveAmount := new(big.Int).Set(totalAmount)
 	if strings.ToUpper(order.Token) != "MCGP" {
+		gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token)
 		decimals := 6
-		gasFeeStr := fmt.Sprintf("%.0f", models.GasFeeUSD*math.Pow10(decimals))
+		gasFeeStr := fmt.Sprintf("%.0f", gasFeeUSD*math.Pow10(decimals))
 		gasFeeWei, _ := new(big.Int).SetString(gasFeeStr, 10)
 		approveAmount.Add(approveAmount, gasFeeWei)
 	}

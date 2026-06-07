@@ -41,6 +41,10 @@ func main() {
 		log.Fatalf("Failed to auto-migrate database: %v", err)
 	}
 
+	// Initialize the unified fee-rate config (seeds defaults if the table is
+	// empty) and assign the process-wide singleton used by fee call sites.
+	feeConfigService := services.InitFeeConfigService(config.DB)
+
 	// Get underlying sql.DB for health check and cleanup
 	sqlDB, err := config.DB.DB()
 	if err != nil {
@@ -127,6 +131,7 @@ func main() {
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
+	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService)
 
 	// Nomba — used for the Nigerian bank directory + name enquiry today,
 	// and the auto-payout path in Phase 2. Returns nil when credentials
@@ -223,7 +228,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch)
 
 	// Configure HTTP server
 	port := cfg.Port
