@@ -229,6 +229,21 @@ type Config struct {
 	// The settlement job is GATED on FeeModelV2Enabled — dormant until cutover.
 	GlobalPoolSettleInterval time.Duration
 
+	// Fee/TP overhaul (SP7) — claim-eligibility velocity heuristic tunables.
+	//
+	// The heuristic auto-flags a referrer whose DIRECT downline grew by more
+	// than RewardVelocityMaxSignups within RewardVelocityWindow. It is cheap +
+	// bounded (a single indexed COUNT over users referred by one referrer in a
+	// time window — never a full-graph scan). An auto-flag writes an advisory
+	// RewardFlag{source:auto} that gates the claim until an admin clears it.
+	//
+	// RewardVelocityEnabled gates the whole heuristic so it can be disabled
+	// without code change (REWARD_VELOCITY_ENABLED=false). The KYC + admin-flag
+	// + cycle gates in IsClaimEligible are independent of this flag.
+	RewardVelocityEnabled    bool
+	RewardVelocityMaxSignups int
+	RewardVelocityWindow     time.Duration
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -384,6 +399,18 @@ func Load() *Config {
 	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
 	// SP4 global-pool settlement cadence — default daily.
 	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
+
+	// SP7 claim-eligibility velocity heuristic. ON by default (advisory auto-
+	// flags only gate the CLAIM, never accrual). Tunable + disable-able via env:
+	//   REWARD_VELOCITY_ENABLED      — set false to turn the heuristic off entirely
+	//   REWARD_VELOCITY_MAX_SIGNUPS  — direct-downline signups allowed per window
+	//   REWARD_VELOCITY_WINDOW       — Go duration string (e.g. "24h", "1h")
+	// Default: >20 direct referrals in 24h trips an advisory flag. Sensible for
+	// an early-stage platform with few users — a genuine power-referrer above it
+	// is simply reviewed + cleared by an admin.
+	cfg.RewardVelocityEnabled = getEnvBool("REWARD_VELOCITY_ENABLED", true)
+	cfg.RewardVelocityMaxSignups = int(getEnvInt64("REWARD_VELOCITY_MAX_SIGNUPS", 20))
+	cfg.RewardVelocityWindow = getEnvDuration("REWARD_VELOCITY_WINDOW", 24*time.Hour)
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public

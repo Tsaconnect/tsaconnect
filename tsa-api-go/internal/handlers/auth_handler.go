@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -203,6 +204,24 @@ func (h *Handlers) Signup(c *gin.Context) {
 			"message": "Internal server error",
 		})
 		return
+	}
+
+	// SP7 anti-sybil: when this signup used a referral code, run the cheap,
+	// bounded velocity heuristic against the REFERRER. If their direct downline
+	// grew past the configured threshold in the window, an advisory
+	// RewardFlag{source:auto} is written for admin review (it gates the
+	// referrer's MCGP claim until cleared — never blocks accrual or this signup).
+	// Best-effort + async: a failed/disabled scan must never break account
+	// creation. Captured by value (referredBy is a pointer into the local user).
+	if referredBy != nil && h.EligibilityService != nil {
+		referrerID := *referredBy
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := h.EligibilityService.RunVelocityScan(ctx, referrerID); err != nil {
+				log.Printf("[sp7] velocity scan for referrer %s failed (advisory, ignored): %v", referrerID, err)
+			}
+		}()
 	}
 
 	// Send email verification OTP

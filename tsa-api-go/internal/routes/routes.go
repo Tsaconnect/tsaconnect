@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -88,6 +88,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		adminFeeConfig.GET("", fch.ListFeeConfigs)
 		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)
+	}
+
+	// Admin claim-eligibility routes (fee/TP overhaul SP7) — anti-sybil reward
+	// flags + per-user eligibility review. Funds-/payout-adjacent (a flag gates
+	// MCGP claims), so restricted to true admin roles on top of AdminAuth.
+	if rfh != nil {
+		adminRewards := api.Group("/admin")
+		adminRewards.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminRewards.GET("/reward-flags", rfh.ListRewardFlags)
+			adminRewards.POST("/reward-flags", rfh.CreateRewardFlag)
+			adminRewards.POST("/reward-flags/:id/clear", rfh.ClearRewardFlag)
+			adminRewards.GET("/reward-eligibility/:userId", rfh.GetRewardEligibility)
+		}
 	}
 
 	// KYC routes
