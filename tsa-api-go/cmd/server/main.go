@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
@@ -136,6 +137,32 @@ func main() {
 	// path to River.
 	scheduler := jobs.NewScheduler()
 
+	// Fee/TP overhaul v2 — SP5 payout-computation engine. Turns accrued TP +
+	// cashback into a per-user claimable-MCGP ledger. It settles the user's
+	// pending global share (SP4) via feeDistributionService, locks rewardUSD→MCGP
+	// at the CURRENT OTC price (otcService, deferred when unavailable so a bad
+	// rate is never locked), and emits tp.level.up on the event bus for SP8.
+	// Constructed unconditionally; the periodic job below is GATED on the flag.
+	rewardService := services.NewRewardService(
+		config.DB,
+		eventBus,
+		feeDistributionService,
+		services.MCGPPriceFromOTC(otcService),
+	)
+
+	// Bridge SP3 accrual → SP5 processing: every settled fee marks its TP/cashback
+	// recipients dirty so the reward processor recomputes them on its next tick.
+	// Without this the dirty set is always empty and the processor does nothing,
+	// leaving the whole reward feature inert (no level rewards, cashback
+	// conversions, or prizes) even with FEE_MODEL_V2_ENABLED on. Best-effort: a
+	// failed mark only defers the reward to the user's next genuine activity (the
+	// reward computation is idempotent and self-healing), so we log and move on.
+	feeDistributionService.SetDirtyHook(func(ctx context.Context, userID uuid.UUID) {
+		if err := rewardService.MarkUserDirty(ctx, userID); err != nil {
+			log.Printf("[fee-v2] mark-dirty failed for user=%s (reward deferred to next activity): %v", userID, err)
+		}
+	})
+
 	// Initialize email, push, and notification services
 	emailService := services.NewEmailService(cfg.MailjetAPIKey, cfg.MailjetSecretKey)
 	expoPush := services.NewExpoPushService(cfg.ExpoAccessToken)
@@ -239,8 +266,16 @@ func main() {
 		interval := cfg.GlobalPoolSettleIntervalOrDefault()
 		scheduler.Register(jobs.NewGlobalPoolSettler(feeDistributionService, interval))
 		log.Printf("[fee-v2] global-pool settler registered (interval=%s)", interval)
+
+		// SP5 — payout computation. Processes users with recent TP/cashback
+		// activity (dirty-flagged, not a blind full scan): settles their pending
+		// global share, awards newly-crossed cumulative level rewards, converts
+		// cashback USD→MCGP at the locked OTC price, records L6+ prize_due rows,
+		// and accumulates the per-user claimable-MCGP balance SP6 will publish.
+		scheduler.Register(jobs.NewRewardProcessorJob(rewardService, time.Minute, 500))
+		log.Printf("[fee-v2] reward processor registered (interval=1m)")
 	} else {
-		log.Printf("[fee-v2] global-pool settler dormant: FEE_MODEL_V2_ENABLED=false")
+		log.Printf("[fee-v2] global-pool settler + reward processor dormant: FEE_MODEL_V2_ENABLED=false")
 	}
 
 	// Backfill any pending transactions that already have a txHash.

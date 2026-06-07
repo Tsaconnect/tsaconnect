@@ -57,6 +57,12 @@ func AutoMigrate() error {
 		// GlobalTPPool index columns and users.last_settled_global_index are
 		// added by AutoMigrate on the existing structs above / models.User.
 		&models.GlobalTPEpoch{},
+		// SP5 — payout computation: per-user claimable-MCGP ledger + checkpoints.
+		// Additive and dormant until FEE_MODEL_V2_ENABLED cutover.
+		&models.RewardEntry{},
+		&models.RewardClaimable{},
+		&models.UserRewardState{},
+		&models.PrizeDue{},
 		&models.RefreshToken{},
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},
