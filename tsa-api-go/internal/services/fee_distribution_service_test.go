@@ -63,6 +63,7 @@ func setupFeeDistTestDB(t *testing.T) *gorm.DB {
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
 			cashback_balance REAL DEFAULT 0,
+			last_settled_global_index INTEGER,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
@@ -111,7 +112,18 @@ func setupFeeDistTestDB(t *testing.T) *gorm.DB {
 			singleton INTEGER PRIMARY KEY,
 			accrued_usd REAL NOT NULL DEFAULT 0,
 			accrued_tp REAL NOT NULL DEFAULT 0,
+			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
+			indexed_tp REAL NOT NULL DEFAULT 0,
 			updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE global_tp_epochs (
+			id TEXT PRIMARY KEY,
+			epoch_at DATETIME NOT NULL,
+			delta_tp REAL NOT NULL,
+			user_count INTEGER NOT NULL,
+			per_user_scaled INTEGER NOT NULL,
+			index_after_scaled INTEGER NOT NULL,
+			created_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE global_tp_accruals (
 			id TEXT PRIMARY KEY,

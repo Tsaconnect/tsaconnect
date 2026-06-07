@@ -55,6 +55,7 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
 			cashback_balance REAL DEFAULT 0,
+			last_settled_global_index INTEGER,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
@@ -241,7 +242,10 @@ func addFeeV2Tables(t *testing.T, db *gorm.DB) {
 		)`,
 		`CREATE TABLE IF NOT EXISTS global_tp_pool (
 			singleton INTEGER PRIMARY KEY, accrued_usd REAL NOT NULL DEFAULT 0,
-			accrued_tp REAL NOT NULL DEFAULT 0, updated_at DATETIME NOT NULL
+			accrued_tp REAL NOT NULL DEFAULT 0,
+			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
+			indexed_tp REAL NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS global_tp_accruals (
 			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,

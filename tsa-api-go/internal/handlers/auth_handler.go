@@ -174,8 +174,30 @@ func (h *Handlers) Signup(c *gin.Context) {
 		user.SetProfilePhoto(&models.ProfilePhoto{URL: req.ProfilePhoto})
 	}
 
-	if err := config.DB.Create(&user).Error; err != nil {
-		log.Printf("Signup insert error: %v", err)
+	// SP4 — global-pool new-user-fairness anchor. Seed the user's settlement
+	// checkpoint to the cumulative index AT JOIN TIME so they share only
+	// global-pool epochs settled AFTER they signed up (owed 0 for prior epochs).
+	//
+	// This read+insert MUST be one transaction: a plain SELECT of the index
+	// followed by a SEPARATE INSERT is a TOCTOU race against
+	// SettleGlobalPoolEpoch — an epoch folded between the two would exclude this
+	// not-yet-inserted user from its denominator yet seed them a pre-fold
+	// checkpoint, letting them claim a share of an epoch they were excluded from
+	// (retroactive windfall + over-distribution). CreateUserWithGlobalCheckpoint
+	// reads the index and inserts the user in one txn that locks the same pool row
+	// the settler locks, so the two serialize and the seeded checkpoint always
+	// matches the user's first eligible epoch's denominator boundary.
+	//
+	// Nil-safe: if the fee engine isn't wired, fall back to a plain insert (a NULL
+	// checkpoint is treated as earn-from-origin, the pre-SP4 incumbent rule).
+	var createErr error
+	if h.FeeService != nil {
+		createErr = h.FeeService.CreateUserWithGlobalCheckpoint(c.Request.Context(), &user)
+	} else {
+		createErr = config.DB.Create(&user).Error
+	}
+	if createErr != nil {
+		log.Printf("Signup insert error: %v", createErr)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Internal server error",

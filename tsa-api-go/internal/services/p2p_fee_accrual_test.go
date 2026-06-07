@@ -68,6 +68,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
 			cashback_balance REAL DEFAULT 0,
+			last_settled_global_index INTEGER,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
@@ -91,7 +92,10 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE global_tp_pool (
 			singleton INTEGER PRIMARY KEY, accrued_usd REAL DEFAULT 0,
-			accrued_tp REAL DEFAULT 0, updated_at DATETIME
+			accrued_tp REAL DEFAULT 0,
+			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
+			indexed_tp REAL NOT NULL DEFAULT 0,
+			updated_at DATETIME
 		)`,
 		`CREATE TABLE global_tp_accruals (
 			id TEXT PRIMARY KEY, source_type TEXT, source_id TEXT, reason TEXT,
