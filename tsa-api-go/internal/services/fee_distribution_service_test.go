@@ -604,3 +604,107 @@ func TestFeatureFlag_OffMeansEngineNotInvoked(t *testing.T) {
 		t.Fatalf("flag OFF must not credit TP; got %v", got)
 	}
 }
+
+// --- SP3→SP5 dirty-hook bridge (SP5 finding #1) ---
+
+// TestOnFeeSettled_DirtyHookMarksAllRecipients asserts the onDirty hook fires
+// exactly once per DISTINCT recipient whose tp_balance or cashback_balance moved
+// — gen0..gen10 TP recipients plus the gen1 upline cashback recipient — and
+// never for global-pool-only generations. This is the bridge that was missing
+// (MarkUserDirty was never called by any accrual path), which left the reward
+// processor's dirty set permanently empty.
+func TestOnFeeSettled_DirtyHookMarksAllRecipients(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+
+	got := map[uuid.UUID]int{}
+	svc.SetDirtyHook(func(_ context.Context, uid uuid.UUID) { got[uid]++ })
+
+	users := buildFeeChain(t, db, 11) // gen0 + gen1..gen10, all active
+	ev := FeeEvent{
+		Feature:    models.FeatureP2P,
+		Token:      "USDT",
+		FeeUSD:     100.0,
+		UserID:     users[0].ID,
+		SourceType: "p2p_release",
+		SourceID:   uuid.New(),
+	}
+	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
+		t.Fatalf("OnFeeSettled: %v", err)
+	}
+
+	// All 11 chain users got TP (gen0 also got buyer cashback, gen1 also got
+	// upline cashback) — each must be marked dirty EXACTLY once (deduped).
+	for gen, u := range users {
+		if got[u.ID] != 1 {
+			t.Fatalf("gen %d user marked dirty %d times, want exactly 1", gen, got[u.ID])
+		}
+	}
+	if len(got) != len(users) {
+		t.Fatalf("marked %d distinct users dirty, want %d", len(got), len(users))
+	}
+}
+
+// TestOnFeeSettled_DirtyHookSkipsGlobalOnlyAndDuplicates asserts (1) a generation
+// routed entirely to the global pool (no live ancestor) is NOT marked dirty —
+// only users whose own balance changed are — and (2) a duplicate settled fee
+// (idempotent guard no-op) fires the hook for NO ONE.
+func TestOnFeeSettled_DirtyHookSkipsGlobalOnlyAndDuplicates(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+
+	got := map[uuid.UUID]int{}
+	svc.SetDirtyHook(func(_ context.Context, uid uuid.UUID) { got[uid]++ })
+
+	// Lone user: no uplines, so gen1..gen10 TP + the 10% upline cashback all route
+	// to the global pool. Only gen0 (the user) has a balance change.
+	user := mkFeeUser(t, db, "solo"+uuidShort(), nil, models.AccountStatusActive)
+	ev := FeeEvent{
+		Feature:    models.FeatureP2P,
+		Token:      "USDT",
+		FeeUSD:     50.0,
+		UserID:     user.ID,
+		SourceType: "p2p_release",
+		SourceID:   uuid.New(),
+	}
+	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
+		t.Fatalf("OnFeeSettled: %v", err)
+	}
+	if len(got) != 1 || got[user.ID] != 1 {
+		t.Fatalf("lone user: want only the user marked once, got %v", got)
+	}
+
+	// Re-settle the SAME source: idempotent guard no-ops, hook fires for no one.
+	before := got[user.ID]
+	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
+		t.Fatalf("OnFeeSettled (dup): %v", err)
+	}
+	if got[user.ID] != before {
+		t.Fatalf("duplicate settle must not re-mark dirty; before=%d after=%d", before, got[user.ID])
+	}
+}
+
+// TestOnFeeSettled_NilDirtyHookSafe asserts a settled fee with NO hook wired
+// (the engine's default, and the FEE_MODEL_V2-off / pre-SP5 state) still
+// distributes correctly and does not panic.
+func TestOnFeeSettled_NilDirtyHookSafe(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+	// No SetDirtyHook call — onDirty stays nil.
+
+	user := mkFeeUser(t, db, "nohook"+uuidShort(), nil, models.AccountStatusActive)
+	ev := FeeEvent{
+		Feature:    models.FeatureP2P,
+		Token:      "USDT",
+		FeeUSD:     20.0,
+		UserID:     user.ID,
+		SourceType: "checkout",
+		SourceID:   uuid.New(),
+	}
+	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
+		t.Fatalf("OnFeeSettled with nil hook: %v", err)
+	}
+	if got := tpBalance(t, db, user.ID); !approx(got, 20.0*TPPoolShare*models.GenerationPercentages[0]) {
+		t.Fatalf("nil hook must still distribute TP; got %v", got)
+	}
+}

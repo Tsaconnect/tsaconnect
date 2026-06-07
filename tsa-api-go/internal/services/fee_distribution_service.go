@@ -44,6 +44,18 @@ type FeeDistributionService struct {
 	// 1.0 (1 TP = $1 of pool value); tunable via config so level pacing can be
 	// retuned without code changes.
 	tpPerUSD float64
+
+	// onDirty, when set, is invoked once per DISTINCT recipient whose tp_balance
+	// or cashback_balance changed in a settled fee event (gen0..gen10 TP
+	// recipients + buyer/upline cashback recipients). It is the SP3→SP5 bridge:
+	// main.go wires it to RewardService.MarkUserDirty so the SP5 reward processor
+	// picks the user up on its next tick. Called AFTER the distribution tx commits
+	// (so a rolled-back distribution never marks anyone dirty) and BEST-EFFORT (a
+	// failed mark only delays a reward to the user's next genuine activity — the
+	// reward computation is itself idempotent and self-healing, so a dropped mark
+	// is never a lost reward). nil by default — the engine stays usable (and unit-
+	// testable) without the reward service wired.
+	onDirty func(ctx context.Context, userID uuid.UUID)
 }
 
 // NewFeeDistributionService builds the engine. tpPerUSD <= 0 falls back to 1.0
@@ -61,6 +73,18 @@ func NewFeeDistributionService(db *gorm.DB, graph *ReferralGraphService, tpPerUS
 
 // TPPerUSD exposes the minting rate in effect (for tests / diagnostics).
 func (s *FeeDistributionService) TPPerUSD() float64 { return s.tpPerUSD }
+
+// SetDirtyHook wires the SP3→SP5 bridge: a callback invoked once per distinct
+// recipient touched by a settled fee event (see the onDirty field doc). main.go
+// passes RewardService.MarkUserDirty here so accrual flags users for the reward
+// processor. nil-safe both ways — passing nil clears the hook, and the engine
+// works fine without it.
+func (s *FeeDistributionService) SetDirtyHook(fn func(ctx context.Context, userID uuid.UUID)) {
+	if s == nil {
+		return
+	}
+	s.onDirty = fn
+}
 
 // Split constants for the uniform 50 / 10 / 10 / 30 fee accounting (design §2).
 const (
@@ -168,6 +192,13 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 		byGen[a.Generation] = a
 	}
 
+	// Distinct recipients whose tp_balance/cashback_balance actually changed this
+	// run — fed to the onDirty (SP3→SP5) hook AFTER the tx commits so the reward
+	// processor picks them up. Only populated on a fresh (non-duplicate)
+	// distribution; a duplicate no-op marks no one. Global-pool routing touches no
+	// individual user's balance, so global-only generations are not added here.
+	recipients := make(map[uuid.UUID]struct{}, MaxTPGenerations+2)
+
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		split := ComputeSplit(ev.FeeUSD)
 
@@ -214,6 +245,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 				if err := s.creditTP(tx, ev.UserID, ev, gen, pct, shareUSD); err != nil {
 					return err
 				}
+				recipients[ev.UserID] = struct{}{}
 				continue
 			}
 
@@ -222,6 +254,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 				if err := s.creditTP(tx, anc.UserID, ev, gen, pct, shareUSD); err != nil {
 					return err
 				}
+				recipients[anc.UserID] = struct{}{}
 				continue
 			}
 
@@ -238,6 +271,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 			if err := s.creditCashback(tx, ev.UserID, ev.UserID, ev, split.BuyerCashbackUSD); err != nil {
 				return err
 			}
+			recipients[ev.UserID] = struct{}{}
 		}
 
 		// (3b) Upline cashback (10%) → the direct (gen-1) ancestor if present
@@ -248,6 +282,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 				if err := s.creditCashback(tx, gen1.UserID, ev.UserID, ev, split.UplineCashbackUSD); err != nil {
 					return err
 				}
+				recipients[gen1.UserID] = struct{}{}
 			} else {
 				if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonUplineCashback, -1, split.UplineCashbackUSD); err != nil {
 					return err
@@ -271,7 +306,30 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 	if errors.Is(err, errAlreadyDistributed) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Distribution committed: bridge to SP5. Mark every touched recipient dirty so
+	// the reward processor recomputes their level rewards / cashback conversion.
+	// Best-effort and post-commit: a failed/dropped mark only defers a reward to
+	// the user's next genuine activity (the reward computation is idempotent and
+	// self-healing), so we log and continue rather than failing the settled fee.
+	s.markRecipientsDirty(ctx, recipients)
+	return nil
+}
+
+// markRecipientsDirty invokes the onDirty hook (when wired) once per recipient.
+// Best-effort: the hook is the SP3→SP5 bridge (RewardService.MarkUserDirty); a
+// panic or slow mark must never corrupt the already-committed distribution, so
+// each call is isolated. No-op when no hook is wired or no recipients changed.
+func (s *FeeDistributionService) markRecipientsDirty(ctx context.Context, recipients map[uuid.UUID]struct{}) {
+	if s.onDirty == nil || len(recipients) == 0 {
+		return
+	}
+	for uid := range recipients {
+		s.onDirty(ctx, uid)
+	}
 }
 
 // creditTP writes one TPEarning row and atomically increments the recipient's
