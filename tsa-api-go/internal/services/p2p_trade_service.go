@@ -169,6 +169,15 @@ type P2PTradeService struct {
 	// floatOffsetMaxBps caps the absolute basis-point offset a seller can
 	// publish on a float-rate ad. 0 (or unset) means use defaultFloatOffsetMaxBps.
 	floatOffsetMaxBps int
+
+	// fees is the fee/TP v2 engine (SP3). Optional/nil-safe: wired via
+	// SetFeeService from main.go. P2P is a NEW fee-settled integration — it
+	// did not call the TP engine before. Every release transition (ConfirmRelease,
+	// reconciler auto-release, adminResolve→buyer) accrues the realized on-chain
+	// fee through accrueP2PReleaseFee, gated on feeV2Enabled so the flag-off path
+	// is a no-op (preserving today's "P2P does not accrue TP" behavior).
+	fees         *FeeDistributionService
+	feeV2Enabled bool
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -244,6 +253,92 @@ func (s *P2PTradeService) floatOffsetCap() int {
 		return defaultFloatOffsetMaxBps
 	}
 	return s.floatOffsetMaxBps
+}
+
+// SetFeeService wires the fee/TP v2 engine (SP3) plus the v2-enabled gate.
+// Called once at construction from main.go. v2Enabled is captured here (rather
+// than holding a *config.Config) to keep the trade service free of config-shape
+// coupling. When v2Enabled is false (the default) accrueP2PReleaseFee is a
+// no-op — P2P keeps its pre-SP3 behavior of not accruing TP at all.
+func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled bool) {
+	s.fees = svc
+	s.feeV2Enabled = v2Enabled
+}
+
+// accrueP2PReleaseFee is the SINGLE seam through which all three P2P release
+// transitions (ConfirmRelease, reconciler auto-release, adminResolve→buyer)
+// accrue the realized on-chain platform fee into the fee/TP v2 engine. Routing
+// every release through one helper closes the auto-release / admin-resolve gap
+// the design §3 calls out (those paths have no user confirm and previously did
+// no TP accounting at all).
+//
+// Idempotency: OnFeeSettled is keyed on (SourceType="p2p_release", SourceID=
+// trade.ID), so a confirm + a later reconciler pass for the SAME trade accrue
+// exactly once — the second is a guard-row no-op.
+//
+// Durability caveat (SP3 audit): on the LIVE user-confirm paths (ConfirmRelease,
+// ConfirmAdminResolveDispute) the trade is committed terminal BEFORE this fires,
+// and ReconcileTrade early-returns on terminal trades — so the reconciler will
+// NOT re-drive a dropped accrual here. EnqueueFeeSettled's bounded retry +
+// alert (fee_v2_settle_failed_total) is the current backstop against a transient
+// failure; a true durable outbox is the Phase-2 fix. The reconciler-triggered
+// release paths (reconcileToReleased/reconcileToResolved) ARE self-healing
+// because the trade stays non-terminal until the reconcile commits.
+//
+// Fee→USD: feeBaseUnits is the on-chain fee in the settlement token's base
+// units; we divide by 10^decimals (per-chain via tokenDecimalsFor) and treat
+// the settlement token (USDT/USDC) as ~$1, mirroring the handlers' established
+// weiToUSDFloat convention. Run async (EnqueueFeeSettled) so it never blocks
+// the release confirm or a reconciler tick.
+//
+// gen0 / buyer-cashback recipient is trade.BuyerID — the party that receives
+// crypto and bears the fee (the buyer on a sell-ad; the receiving merchant on a
+// buy-ad, which is exactly who trade.BuyerID labels in the release emits).
+func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUnits *big.Int) {
+	if !s.feeV2Enabled || s.fees == nil {
+		return
+	}
+	if trade == nil || feeBaseUnits == nil || feeBaseUnits.Sign() <= 0 {
+		return
+	}
+	feeUSD := baseUnitsToUSD(feeBaseUnits, tokenDecimalsFor(trade.ChainID, trade.Token))
+	if feeUSD <= 0 {
+		return
+	}
+	s.fees.EnqueueFeeSettled(FeeEvent{
+		Feature:    models.FeatureP2P,
+		Token:      trade.Token,
+		FeeUSD:     feeUSD,
+		UserID:     trade.BuyerID,
+		SourceType: "p2p_release",
+		SourceID:   trade.ID,
+	})
+}
+
+// onChainTradeFee derives the platform fee (base units) from a view-read trade:
+// fee = Amount · FeeBps / 10000. The reconciler has no TradeReleased event to
+// read FeeToSystem from, so it reconstructs the fee from the on-chain trade
+// fields. Returns nil when the trade is absent or carries no amount/fee.
+func onChainTradeFee(t *OnChainP2PTrade) *big.Int {
+	if t == nil || t.Amount == nil || t.FeeBps == 0 {
+		return nil
+	}
+	fee := new(big.Int).Mul(t.Amount, big.NewInt(int64(t.FeeBps)))
+	return fee.Quo(fee, big.NewInt(10000))
+}
+
+// baseUnitsToUSD converts an on-chain token amount (base units) to a USD float,
+// treating the settlement token as a ~$1 stablecoin (the P2P settlement tokens
+// are USDT/USDC). Mirrors handlers.weiToUSDFloat. amount/10^decimals.
+func baseUnitsToUSD(amount *big.Int, decimals int) float64 {
+	if amount == nil || amount.Sign() <= 0 {
+		return 0
+	}
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	fAmount := new(big.Float).SetInt(amount)
+	fDiv := new(big.Float).SetInt(divisor)
+	result, _ := new(big.Float).Quo(fAmount, fDiv).Float64()
+	return result
 }
 
 // systemMsg is the nil-safe gateway for system message writes. Failures here
@@ -1573,6 +1668,10 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	trade.Status = models.P2PTradeStatusReleased
 	trade.ReleaseTxHash = txHash
 	trade.ReleasedAt = &now
+	// Accrue the realized on-chain fee into the fee/TP v2 engine (flag-gated,
+	// async, idempotent on p2p_release/trade.ID). The event carries the exact
+	// fee that hit-chain.
+	s.accrueP2PReleaseFee(&trade, ev.FeeToSystem)
 	s.audit(ctx, models.P2PAuditTradeReleased, &sellerID, &trade.AdID, &trade.ID, map[string]any{
 		"txHash":        txHash,
 		"funding":       trade.Funding,
@@ -2072,6 +2171,15 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 	trade.Status = models.P2PTradeStatusResolved
 	trade.ResolvedByAdmin = &adminID
 
+	// adminResolve that RELEASES to the buyer is a release transition: the fee
+	// was charged on chain (ev.FeeToSystem). Accrue it through the same seam as
+	// ConfirmRelease (flag-gated, async, idempotent). The refund-to-seller
+	// branch charges no fee (FeeToSystem == 0) so the helper no-ops; gate on
+	// ReleasedToBuyer for clarity.
+	if ev.ReleasedToBuyer {
+		s.accrueP2PReleaseFee(&trade, ev.FeeToSystem)
+	}
+
 	s.audit(ctx, models.P2PAuditTradeResolved, &adminID, &trade.AdID, &trade.ID, map[string]any{
 		"txHash":          txHash,
 		"funding":         trade.Funding,
@@ -2221,13 +2329,20 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// auditing and side-aware messaging.
 	funding := onchain.Funding
 
+	// Realized on-chain fee for the release/resolve paths. The reconciler has no
+	// TradeReleased event to read FeeToSystem from, so derive it from the view:
+	// fee = Amount · FeeBps / 10000. Passed into the release/resolve transitions
+	// so they accrue the SAME fee the live confirm paths would (closing the
+	// auto-release / admin-resolve gap, design §3). Idempotent on trade.ID.
+	onChainFee := onChainTradeFee(onchain)
+
 	switch onchain.Status {
 	case OnChainP2PStatusReleased:
-		return s.reconcileToReleased(ctx, &trade, funding)
+		return s.reconcileToReleased(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusCancelled:
 		return s.reconcileToCancelled(ctx, &trade, funding)
 	case OnChainP2PStatusResolved:
-		return s.reconcileToResolved(ctx, &trade, funding)
+		return s.reconcileToResolved(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusDisputed:
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
@@ -2307,7 +2422,7 @@ func isTerminalTradeStatus(s string) bool {
 // deposited-by-taker buy-ad the JIT deposit moved to the merchant. `funding`
 // is the on-chain truth, used here only for side-aware messaging/audit — never
 // to credit an on-chain pool (that movement already happened on chain).
-func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
+func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models.P2PTrade, funding uint8, onChainFee *big.Int) (ReconcileResult, error) {
 	now := s.clock.Now()
 	from := trade.Status
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -2346,6 +2461,11 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	// Accrue the realized on-chain fee — same seam as the live ConfirmRelease,
+	// closing the auto-release accounting gap (design §3). Idempotent on
+	// p2p_release/trade.ID, so a later live confirm (or a repeat reconcile pass)
+	// for the same trade is a no-op.
+	s.accrueP2PReleaseFee(trade, onChainFee)
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusReleased,
 		"funding": funding,
@@ -2518,7 +2638,7 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 // did NOT go to the buyer) is funding-agnostic at the DB level — it restores
 // only off-chain capacity, never an on-chain pool. `funding` is the on-chain
 // truth, recorded for audit.
-func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
+func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models.P2PTrade, funding uint8, onChainFee *big.Int) (ReconcileResult, error) {
 	// Resolved depends on the admin's refundBuyer choice. The off-chain
 	// dispute row records the admin's intent.
 	//
@@ -2587,6 +2707,13 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 	})
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	// A resolve that RELEASED to the buyer (refundBuyer here == ReleasedToBuyer
+	// on chain) charged a fee — accrue it via the same seam as the live
+	// adminResolve path. The refund-to-seller branch charged no fee. Idempotent
+	// on p2p_release/trade.ID.
+	if refundBuyer {
+		s.accrueP2PReleaseFee(trade, onChainFee)
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusResolved,

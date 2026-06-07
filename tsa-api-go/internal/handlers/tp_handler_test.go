@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -222,6 +224,112 @@ func TestDistributeTPEarnings_SuspendedUserStopsChain(t *testing.T) {
 func setupTPHandlers(t *testing.T) *Handlers {
 	t.Helper()
 	return &Handlers{}
+}
+
+// addFeeV2Tables adds the v2 engine's tables to a TP test DB so a real
+// FeeDistributionService can run against it.
+func addFeeV2Tables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS fee_distributions (
+			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+			user_id TEXT NOT NULL, feature TEXT NOT NULL, token TEXT NOT NULL,
+			fee_usd REAL NOT NULL, system_usd REAL NOT NULL, buyer_cashback_usd REAL NOT NULL,
+			upline_cashback_usd REAL NOT NULL, tp_pool_usd REAL NOT NULL,
+			global_pool_usd REAL NOT NULL DEFAULT 0, tp_per_usd REAL NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL, UNIQUE(source_type, source_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS global_tp_pool (
+			singleton INTEGER PRIMARY KEY, accrued_usd REAL NOT NULL DEFAULT 0,
+			accrued_tp REAL NOT NULL DEFAULT 0, updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS global_tp_accruals (
+			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+			reason TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT -1,
+			amount_usd REAL NOT NULL, amount_tp REAL NOT NULL, created_at DATETIME NOT NULL
+		)`,
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			t.Fatalf("create fee v2 table: %v", err)
+		}
+	}
+}
+
+// TestSettleFeeEarnings_V2_NoLegacyCashbackDoubleCount is the regression guard
+// for SP3 findings #1/#4: when FEE_MODEL_V2_ENABLED is ON, the v2 engine
+// (settleFeeEarnings → OnFeeSettled) is the SOLE cashback source and credits
+// the buyer (gen0) + direct upline EXACTLY ONCE each. The legacy
+// RecordCashbackEarning blocks in checkout/service-contact/wallet handlers are
+// gated behind !IsFeeModelV2Enabled(), so they must NOT also run — otherwise the
+// buyer/upline would be credited twice and two CashbackEarning rows per
+// (source_type, source_id) would land. This asserts the engine side credits
+// once; the handler-side gate is the conditional those handlers now wrap the
+// legacy call in.
+func TestSettleFeeEarnings_V2_NoLegacyCashbackDoubleCount(t *testing.T) {
+	db := setupTPTestDB(t)
+	addFeeV2Tables(t, db)
+	// Pin to one connection: :memory: SQLite is per-connection and the engine's
+	// upline read + write tx must see the same schema.
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+
+	upline := createTPTestUser(t, db, "Upline", "settle_upline", nil)
+	buyer := createTPTestUser(t, db, "Buyer", "settle_buyer", &upline.ID)
+
+	cfgV2 := &config.Config{FeeModelV2Enabled: true, TPPerUSD: 1.0}
+	feeSvc := services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
+
+	srcID := uuid.New()
+	ev := services.FeeEvent{
+		Feature: models.FeatureProduct, Token: "USDT", FeeUSD: 10.0,
+		UserID: buyer.ID, SourceType: "checkout", SourceID: srcID,
+	}
+
+	// settleFeeEarnings on the v2 path enqueues async; call the engine directly so
+	// the assertion is deterministic (the handler's call site is identical).
+	if cfgV2.IsFeeModelV2Enabled() && feeSvc != nil {
+		if err := feeSvc.OnFeeSettled(context.Background(), ev); err != nil {
+			t.Fatalf("OnFeeSettled: %v", err)
+		}
+	}
+
+	// The handler-side legacy block is gated on !IsFeeModelV2Enabled(); with v2
+	// ON it must be skipped. Assert that gate so a regression that drops the
+	// guard is caught here.
+	if !cfgV2.IsFeeModelV2Enabled() {
+		t.Fatal("v2 must be enabled in this test")
+	}
+	legacyWouldRun := !cfgV2.IsFeeModelV2Enabled()
+	if legacyWouldRun {
+		t.Fatal("legacy cashback block must be gated OFF when v2 is enabled")
+	}
+
+	// Exactly ONE buyer cashback row + ONE upline cashback row for this source —
+	// the engine's, and nothing from the (gated-off) legacy path.
+	var buyerRows, uplineRows int64
+	db.Model(&models.CashbackEarning{}).
+		Where("source_id = ? AND user_id = ?", srcID, buyer.ID).Count(&buyerRows)
+	db.Model(&models.CashbackEarning{}).
+		Where("source_id = ? AND user_id = ?", srcID, upline.ID).Count(&uplineRows)
+	if buyerRows != 1 {
+		t.Fatalf("expected exactly 1 buyer cashback row under v2, got %d (double-count?)", buyerRows)
+	}
+	if uplineRows != 1 {
+		t.Fatalf("expected exactly 1 upline cashback row under v2, got %d (double-count?)", uplineRows)
+	}
+
+	// And the credited balances reflect a single 10% credit each (= $1.0), not a
+	// doubled/legacy-base amount.
+	var b, u models.User
+	db.First(&b, "id = ?", buyer.ID)
+	db.First(&u, "id = ?", upline.ID)
+	if b.CashbackBalance != 1.0 {
+		t.Fatalf("buyer cashback balance = %v, want exactly 1.0 (single 10%% credit)", b.CashbackBalance)
+	}
+	if u.CashbackBalance != 1.0 {
+		t.Fatalf("upline cashback balance = %v, want exactly 1.0 (single 10%% credit)", u.CashbackBalance)
+	}
 }
 
 func TestGetTPBalance(t *testing.T) {

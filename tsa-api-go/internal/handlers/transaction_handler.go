@@ -583,7 +583,16 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 		},
 	})
 
-	if err := DistributeTPEarnings(config.DB, user.ID, "swap", tx.ID, feeUSD); err != nil {
+	// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine when
+	// FEE_MODEL_V2_ENABLED is on (idempotent on swap/tx.ID), legacy otherwise.
+	if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
+		Feature:    models.FeatureSwap,
+		Token:      body.FromAsset,
+		FeeUSD:     feeUSD,
+		UserID:     user.ID,
+		SourceType: "swap",
+		SourceID:   tx.ID,
+	}); err != nil {
 		log.Printf("TP distribution failed for swap %s: %v", tx.ID, err)
 	}
 

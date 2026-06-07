@@ -10,22 +10,41 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/gorm"
 )
 
-// GenerationPercentages defines the TP distribution % for each generation (0=self, 1-10=upline).
-var GenerationPercentages = []float64{
-	0.354, // gen 0: self
-	0.177, // gen 1: direct referrer
-	0.142, // gen 2
-	0.106, // gen 3
-	0.071, // gen 4
-	0.057, // gen 5
-	0.042, // gen 6
-	0.028, // gen 7
-	0.014, // gen 8
-	0.007, // gen 9
-	0.004, // gen 10
+// GenerationPercentages defines the TP distribution % for each generation
+// (0=self, 1-10=upline). The canonical ladder now lives in the models package
+// (models.GenerationPercentages) so the legacy engine here and the v2
+// FeeDistributionService share one source of truth without an import cycle.
+// This alias keeps every existing reference (handlers.GenerationPercentages)
+// unchanged.
+var GenerationPercentages = models.GenerationPercentages
+
+// settleFeeEarnings is the single fee-settled chokepoint for the fiat/on-chain
+// fee call sites (checkout, service-contact, swap, wallet-send). It centralizes
+// the v1↔v2 branch so each site has exactly ONE call:
+//
+//   - When the fee/TP v2 model is ON (cfg.IsFeeModelV2Enabled()) AND the v2
+//     engine is wired, it hands the realized fee to the FeeDistributionService
+//     async (EnqueueFeeSettled) — the new 50/10/10/30 split + route-and-continue
+//     TP walk + global-pool accrual. The (SourceType, SourceID) pair is the
+//     engine's idempotency key, mirroring the existing TPDistributedAt guard.
+//   - Otherwise it preserves the EXACT legacy behavior: DistributeTPEarnings
+//     with the same (userID, sourceType, sourceID, feeUSD). No behavior change
+//     when the flag is off.
+//
+// It returns the legacy DistributeTPEarnings error only on the legacy path
+// (callers already log it); the v2 path is fire-and-forget + idempotent, so it
+// returns nil. svc/cfg are nil-safe so callers that haven't wired the engine
+// still compile and fall through to legacy.
+func settleFeeEarnings(svc *services.FeeDistributionService, cfg *config.Config, db *gorm.DB, ev services.FeeEvent) error {
+	if cfg.IsFeeModelV2Enabled() && svc != nil {
+		svc.EnqueueFeeSettled(ev)
+		return nil
+	}
+	return DistributeTPEarnings(db, ev.UserID, ev.SourceType, ev.SourceID, ev.FeeUSD)
 }
 
 // DistributeTPEarnings distributes TP to the source user and up to 10 generations of upline.
