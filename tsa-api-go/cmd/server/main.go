@@ -45,6 +45,13 @@ func main() {
 	// empty) and assign the process-wide singleton used by fee call sites.
 	feeConfigService := services.InitFeeConfigService(config.DB)
 
+	// Referral-graph service (SP2 of the fee/TP overhaul): single-query,
+	// cycle-safe upline/downline traversal over users.referred_by. Additive —
+	// SP3's TP engine and the TP/referrals UI consume it; existing behavior is
+	// unchanged. Constructed here so it's available for wiring into handlers.
+	referralGraphService := services.NewReferralGraphService(config.DB)
+	_ = referralGraphService
+
 	// Get underlying sql.DB for health check and cleanup
 	sqlDB, err := config.DB.DB()
 	if err != nil {
