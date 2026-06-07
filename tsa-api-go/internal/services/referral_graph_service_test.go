@@ -53,6 +53,7 @@ func setupReferralGraphTestDB(t *testing.T) *gorm.DB {
 		mute_email INTEGER DEFAULT 0,
 		tp_balance REAL DEFAULT 0,
 		cashback_balance REAL DEFAULT 0,
+		last_settled_global_index INTEGER,
 		email_verified INTEGER DEFAULT 0,
 		deleted_at DATETIME,
 		created_at DATETIME,

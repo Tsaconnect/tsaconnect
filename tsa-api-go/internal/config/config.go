@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // chainPreset bundles every value that has to flip together for one chain's
@@ -221,6 +222,13 @@ type Config struct {
 	// PACING (see design §3), not the reward ratio.
 	TPPerUSD float64
 
+	// GlobalPoolSettleInterval is the cadence of the SP4 global-pool settlement
+	// epoch (SettleGlobalPoolEpoch folds the pool delta into the cumulative
+	// index once per interval). DEFAULT 24h (daily). Tunable via
+	// FEE_GLOBAL_POOL_SETTLE_INTERVAL (a Go duration string, e.g. "1h", "15m").
+	// The settlement job is GATED on FeeModelV2Enabled — dormant until cutover.
+	GlobalPoolSettleInterval time.Duration
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -374,6 +382,8 @@ func Load() *Config {
 	// 1 TP = $1 of pool value; tunable without code change.
 	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
 	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
+	// SP4 global-pool settlement cadence — default daily.
+	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
@@ -522,6 +532,17 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// getEnvDuration parses a Go duration env var (e.g. "24h", "15m", "1h30m"). An
+// unset, unparseable, or non-positive value yields the fallback.
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := time.ParseDuration(strings.TrimSpace(value)); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
 // getEnvBool parses a boolean env var. Accepts the strconv.ParseBool set
 // (1/t/T/TRUE/true/0/f/F/FALSE/false …). An unset or unparseable value yields
 // the fallback.
@@ -551,6 +572,16 @@ func (c *Config) TPPerUSDOrDefault() float64 {
 		return 1.0
 	}
 	return c.TPPerUSD
+}
+
+// GlobalPoolSettleIntervalOrDefault returns the SP4 settlement cadence, falling
+// back to 24h (daily) when unset or non-positive so the job always has a sane
+// tick period.
+func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
+	if c == nil || c.GlobalPoolSettleInterval <= 0 {
+		return 24 * time.Hour
+	}
+	return c.GlobalPoolSettleInterval
 }
 
 // parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries

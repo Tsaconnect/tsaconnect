@@ -53,6 +53,10 @@ func AutoMigrate() error {
 		&models.FeeDistribution{},
 		&models.GlobalTPPool{},
 		&models.GlobalTPAccrual{},
+		// SP4 — global-pool cumulative-index settlement ledger. The new
+		// GlobalTPPool index columns and users.last_settled_global_index are
+		// added by AutoMigrate on the existing structs above / models.User.
+		&models.GlobalTPEpoch{},
 		&models.RefreshToken{},
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},

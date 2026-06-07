@@ -229,6 +229,20 @@ func main() {
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient, merchantStats)
 
+	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
+	// share into the per-user cumulative index once per epoch (default daily,
+	// FEE_GLOBAL_POOL_SETTLE_INTERVAL). GATED on FEE_MODEL_V2_ENABLED: while the
+	// flag is off the SP3 accrual path never runs, the pool stays empty, and
+	// there's nothing to settle — so the worker is simply not registered
+	// (dormant until cutover), independent of whether P2P is configured.
+	if cfg.IsFeeModelV2Enabled() {
+		interval := cfg.GlobalPoolSettleIntervalOrDefault()
+		scheduler.Register(jobs.NewGlobalPoolSettler(feeDistributionService, interval))
+		log.Printf("[fee-v2] global-pool settler registered (interval=%s)", interval)
+	} else {
+		log.Printf("[fee-v2] global-pool settler dormant: FEE_MODEL_V2_ENABLED=false")
+	}
+
 	// Backfill any pending transactions that already have a txHash.
 	// These were submitted before the receipt-polling goroutine was added.
 	go handlers.BackfillPendingTransactions(blockchainService)
