@@ -47,6 +47,12 @@ func AutoMigrate() error {
 		&models.PrivateSaleSubmission{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},
+		// Fee/TP overhaul v2 (SP3) — additive tables for the new engine. The
+		// *_legacy archive tables are created on demand by ResetForV2Cutover,
+		// not here.
+		&models.FeeDistribution{},
+		&models.GlobalTPPool{},
+		&models.GlobalTPAccrual{},
 		&models.RefreshToken{},
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},

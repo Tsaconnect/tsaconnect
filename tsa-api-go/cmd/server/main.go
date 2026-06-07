@@ -50,6 +50,18 @@ func main() {
 	// SP3's TP engine and the TP/referrals UI consume it; existing behavior is
 	// unchanged. Constructed here so it's available for wiring into handlers.
 	referralGraphService := services.NewReferralGraphService(config.DB)
+
+	// Fee/TP overhaul v2 engine (SP3). Constructed unconditionally so Stage 2
+	// can wire OnFeeSettled into the fee-settled paths, but GATED by
+	// cfg.IsFeeModelV2Enabled() — while the flag is off (default) the legacy
+	// handlers.DistributeTPEarnings path stays live and callers must not invoke
+	// this engine. TP minting rate comes from cfg (default 1 TP = $1).
+	feeDistributionService := services.NewFeeDistributionService(config.DB, referralGraphService, cfg.TPPerUSDOrDefault())
+	if cfg.IsFeeModelV2Enabled() {
+		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=true — new fee/TP engine ACTIVE (tpPerUSD=%.4f)", cfg.TPPerUSDOrDefault())
+	} else {
+		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=false — legacy TP path live; v2 engine constructed but dormant")
+	}
 	_ = referralGraphService
 
 	// Get underlying sql.DB for health check and cleanup
@@ -134,6 +146,14 @@ func main() {
 	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
+
+	// Wire the fee/TP v2 engine (SP3) into the fiat/on-chain fee-settled
+	// handlers. Each site routes through handlers.settleFeeEarnings, which only
+	// uses this engine when cfg.IsFeeModelV2Enabled(); while the flag is off the
+	// legacy DistributeTPEarnings path stays live (nil here would be equivalent).
+	h.FeeService = feeDistributionService
+	ch.FeeService = feeDistributionService
+	sch.FeeService = feeDistributionService
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
@@ -174,6 +194,12 @@ func main() {
 			return addr
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
+		// Wire the fee/TP v2 engine (SP3) — P2P is a NEW fee-settled integration.
+		// Every release transition (ConfirmRelease, reconciler auto-release,
+		// adminResolve→buyer) accrues the realized on-chain fee through a single
+		// seam, gated on the flag. While FEE_MODEL_V2_ENABLED is off this is a
+		// no-op and P2P keeps its pre-SP3 behavior of not accruing TP.
+		p2pTradeSvc.SetFeeService(feeDistributionService, cfg.IsFeeModelV2Enabled())
 		// Chat service — system messages auto-emitted on every trade
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)

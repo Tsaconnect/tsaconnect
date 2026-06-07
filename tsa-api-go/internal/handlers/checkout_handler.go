@@ -29,6 +29,9 @@ type CheckoutHandler struct {
 	EscrowService     *services.EscrowService
 	EventBus          *events.Bus
 	otcService        *services.OTCService
+	// FeeService is the fee/TP v2 engine (SP3). Optional/nil-safe: wired from
+	// main.go. Used only when cfg.IsFeeModelV2Enabled() via settleFeeEarnings.
+	FeeService *services.FeeDistributionService
 }
 
 // NewCheckoutHandler creates a new CheckoutHandler.
@@ -1227,7 +1230,24 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 
 	if order.TPDistributedAt == nil {
 		systemFeeUSD := orderSystemFeeUSD(&order)
-		if err := DistributeTPEarnings(config.DB, order.BuyerID, "checkout", order.ID, systemFeeUSD); err != nil {
+		// Centralized v1↔v2 fee settlement. When FEE_MODEL_V2_ENABLED is on the
+		// realized order fee is handed to the new engine (async, idempotent on
+		// checkout/order.ID); otherwise the legacy DistributeTPEarnings path runs
+		// unchanged. tp_distributed_at is stamped as a secondary site-level guard,
+		// but it is NOT the authoritative record of v2 distribution: the
+		// FeeDistribution guard row (keyed checkout/order.ID) is, and the
+		// completed-order status transition already prevents re-entry here. On the
+		// v2 path the enqueue retries + alerts on permanent failure
+		// (fee_v2_settle_failed_total), so a stamped-but-undistributed window
+		// requires all retries to fail — surfaced loudly rather than silent.
+		if err := settleFeeEarnings(ch.FeeService, ch.Config, config.DB, services.FeeEvent{
+			Feature:    models.FeatureProduct,
+			Token:      order.Token,
+			FeeUSD:     systemFeeUSD,
+			UserID:     order.BuyerID,
+			SourceType: "checkout",
+			SourceID:   order.ID,
+		}); err != nil {
 			log.Printf("TP distribution failed for order %s: %v", order.ID, err)
 		} else {
 			if err := config.DB.Model(&order).Update("tp_distributed_at", now).Error; err != nil {
@@ -1235,8 +1255,15 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 			}
 		}
 
-		// Record cashback for buyer (0.5% of productAmount) — matches ProductEscrow BUYER_CASHBACK_BPS
-		if strings.ToUpper(order.Token) != "MCGP" {
+		// Legacy cashback (v1 ONLY). Under FEE_MODEL_V2_ENABLED the v2 engine's
+		// OnFeeSettled already credits the 10% buyer + 10% upline cashback (and
+		// writes the CashbackEarning rows) as part of settleFeeEarnings above, so
+		// running these legacy calls too would DOUBLE-credit cashback_balance and
+		// land a second CashbackEarning row per (source_type, source_id). Gate on
+		// !v2 so the v2 split is the sole cashback source when the flag is on —
+		// mirroring the v1↔v2 branch settleFeeEarnings applies to TP.
+		if !ch.Config.IsFeeModelV2Enabled() && strings.ToUpper(order.Token) != "MCGP" {
+			// Record cashback for buyer (0.5% of productAmount) — matches ProductEscrow BUYER_CASHBACK_BPS
 			productUSD := weiToUSDFloat(order.ProductAmount, order.Token)
 			buyerCashbackUSD := productUSD * 0.005
 			if err := RecordCashbackEarning(config.DB, order.BuyerID, order.SellerID, "checkout", order.ID, buyerCashbackUSD, order.EscrowTxHash); err != nil {

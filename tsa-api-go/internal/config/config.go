@@ -206,6 +206,21 @@ type Config struct {
 	P2PTrustedMinCompletion  float64
 	P2PTrustedMinAgeDays     int
 
+	// Fee/TP overhaul (SP3) feature flag + tunables.
+	//
+	// FeeModelV2Enabled gates the new FeeDistributionService engine. Default
+	// FALSE: while off, the legacy handlers.DistributeTPEarnings path stays the
+	// live path and nothing changes in production. Flip to true (env
+	// FEE_MODEL_V2_ENABLED=true) at the deliberate cutover. Read it via
+	// Config.IsFeeModelV2Enabled() rather than poking the field directly so the
+	// gate has one chokepoint.
+	FeeModelV2Enabled bool
+
+	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
+	// mints. DEFAULT 1 (1 TP = $1). Tunable via FEE_TP_PER_USD; it sets level
+	// PACING (see design §3), not the reward ratio.
+	TPPerUSD float64
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -354,6 +369,12 @@ func Load() *Config {
 	cfg.P2PTrustedMinCompletion = getEnvFloat64("P2P_TRUSTED_MIN_COMPLETION", 0.95)
 	cfg.P2PTrustedMinAgeDays = int(getEnvInt64("P2P_TRUSTED_MIN_AGE_DAYS", 30))
 
+	// Fee/TP overhaul (SP3). Engine OFF by default so production keeps the
+	// legacy TP path until the deliberate cutover. TP minting rate defaults to
+	// 1 TP = $1 of pool value; tunable without code change.
+	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
+	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
+
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
 	// RPC URLs are used as defaults so the service boots without paid keys;
@@ -499,6 +520,37 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// getEnvBool parses a boolean env var. Accepts the strconv.ParseBool set
+// (1/t/T/TRUE/true/0/f/F/FALSE/false …). An unset or unparseable value yields
+// the fallback.
+func getEnvBool(key string, fallback bool) bool {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// IsFeeModelV2Enabled is the single chokepoint for the fee/TP v2 gate. While it
+// returns false the legacy handlers.DistributeTPEarnings path is live and the
+// new FeeDistributionService engine must not be invoked.
+func (c *Config) IsFeeModelV2Enabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.FeeModelV2Enabled
+}
+
+// TPPerUSDOrDefault returns the configured TP minting rate, falling back to 1.0
+// (1 TP = $1) when unset or non-positive so the engine always has a sane rate.
+func (c *Config) TPPerUSDOrDefault() float64 {
+	if c == nil || c.TPPerUSD <= 0 {
+		return 1.0
+	}
+	return c.TPPerUSD
 }
 
 // parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries
