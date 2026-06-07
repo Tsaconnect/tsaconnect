@@ -207,6 +207,47 @@ func main() {
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.
 	rfh := handlers.NewRewardFlagHandler(config.DB, rewardEligibilityService)
 
+	// SP6 root-publisher — turns the eligible (SP7) subset of SP5's per-user
+	// claimable-MCGP balances into a CUMULATIVE merkle root the admin publishes
+	// on-chain via MCGPRewardDistributor.setMerkleRoot (admin-signed; no backend
+	// key). Dormant when REWARD_DISTRIBUTOR_ADDRESS is unset (publish errors
+	// clearly, user claim-data returns empty). chainID = Sonic (same chain as MCGP).
+	rewardMerkleService := services.NewRewardMerkleService(
+		config.DB,
+		rewardEligibilityService,
+		cfg.RewardDistributorAddress,
+		cfg.SonicChainID,
+	)
+	if rewardMerkleService.IsConfigured() {
+		log.Printf("[sp6] reward distributor ready: %s (chainID=%d)", cfg.RewardDistributorAddress, cfg.SonicChainID)
+
+		// SP6 reward reconciler + treasury monitor (design §5 SP6 bullet + §9):
+		// once a minute, compares the published claimable ledger against on-chain
+		// claimed[]/MCGP balance for the live root — logs reward_reconciler_drift_total
+		// on a ledger-below-chain regression and reward_treasury_short_total when
+		// the distributor can't cover outstanding claims (never partial-silent).
+		// Read-only (no key). Registered only when an RPC client + MCGP token are
+		// available so it can actually read the chain; Reconcile no-ops until an
+		// admin publishes the first root. Mirrors the P2P chain reconciler.
+		mcgpToken := blockchainService.TokenAddressForChainID(cfg.SonicChainID, "MCGP")
+		if mcgpToken == "" {
+			mcgpToken = cfg.MCGPTokenAddress
+		}
+		var rewardChainReader services.RewardChainReader
+		if sonicClient != nil && mcgpToken != "" {
+			rewardChainReader = services.NewRewardChainReader(sonicClient.Client, mcgpToken)
+		}
+		if rewardChainReader != nil {
+			scheduler.Register(jobs.NewRewardReconciler(rewardMerkleService, rewardChainReader, mcgpToken, time.Minute))
+			log.Printf("[sp6] reward reconciler registered (interval=1m, mcgp=%s)", mcgpToken)
+		} else {
+			log.Printf("[sp6] reward reconciler dormant: no sonic RPC client or MCGP token address — cannot read on-chain claims/treasury")
+		}
+	} else {
+		log.Printf("[sp6] reward distributor dormant: REWARD_DISTRIBUTOR_ADDRESS not set")
+	}
+	rdh := handlers.NewRewardDistributionHandler(rewardMerkleService)
+
 	// Nomba — used for the Nigerian bank directory + name enquiry today,
 	// and the auto-payout path in Phase 2. Returns nil when credentials
 	// are absent; the handler then declines bank/resolve requests with a
@@ -330,7 +371,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh)
 
 	// Configure HTTP server
 	port := cfg.Port

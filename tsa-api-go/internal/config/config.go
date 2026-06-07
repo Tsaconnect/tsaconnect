@@ -139,6 +139,13 @@ type Config struct {
 	ServiceContractAddress string
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
+
+	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
+	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
+	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
+	// admin publish endpoint errors clearly, user claim-data returns empty). On
+	// Sonic, same chain as MCGP.
+	RewardDistributorAddress string
 	// P2PEscrowEIP712Version is the voucher domain `version` matching the
 	// deployed P2PEscrow (see chainPreset.eip712Version). Stamped into the
 	// typed-data the app signs.
@@ -296,6 +303,8 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
+	// SP6 reward distributor — UNSET keeps root-publishing dormant.
+	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
 	// you need to point at a hot-fix deployment.
 	cfg.P2PEscrowAddress = strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow))
