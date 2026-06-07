@@ -586,6 +586,15 @@ func TestProcessUserRewards_LevelUpEventEmitted(t *testing.T) {
 		if mcgp, _ := ev.Data["mcgpAmount"].(float64); mcgp <= 0 {
 			t.Fatalf("event missing mcgpAmount: %+v", ev.Data)
 		}
+		// SP8 §7: the notification dispatcher delivers Title/Message to in-app +
+		// push + email — both must be non-empty (an empty body is the bug the
+		// level-up notification fix addresses).
+		if ev.Title == "" {
+			t.Fatalf("level-up event Title is empty: %+v", ev)
+		}
+		if ev.Message == "" {
+			t.Fatalf("level-up event Message is empty (push/email body would be blank): %+v", ev)
+		}
 	}
 	if !seen[1] || !seen[2] {
 		t.Fatalf("expected level-up events for L1 and L2, got %v", seen)

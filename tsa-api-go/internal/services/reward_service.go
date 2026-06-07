@@ -356,9 +356,10 @@ func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level i
 
 	prize := models.PrizeForLevel(level)
 	levelUp := events.Event{
-		Type:   events.TPLevelUp,
-		UserID: userID,
-		Title:  "Level up",
+		Type:    events.TPLevelUp,
+		UserID:  userID,
+		Title:   fmt.Sprintf("You reached Level %d!", level),
+		Message: levelUpMessage(level, mcgp, prize),
 		Data: map[string]interface{}{
 			"level":          level,
 			"rewardUsd":      rewardUSD,
@@ -378,6 +379,19 @@ func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level i
 	}
 
 	return mcgp, &levelUp, prizeEvent, nil
+}
+
+// levelUpMessage composes the user-facing body for a TPLevelUp notification
+// (in-app + push + email all read Event.Message). It names the MCGP reward the
+// level unlocked, and the physical prize for L6+ rungs. Kept here so the
+// reward-engine owns the copy and the generic notification dispatcher (the "*"
+// subscriber) can deliver it unchanged across in-app / WS / push / email.
+func levelUpMessage(level int, mcgp float64, prize string) string {
+	base := fmt.Sprintf("You crossed Level %d and earned %.4f MCGP, claimable from your rewards screen.", level, mcgp)
+	if prize != "" {
+		base += fmt.Sprintf(" You also unlocked a prize: %s.", prize)
+	}
+	return base
 }
 
 // recordPrizeDue records a manual-fulfilment physical-prize obligation

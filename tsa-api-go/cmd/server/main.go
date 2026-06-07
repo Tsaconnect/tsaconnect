@@ -218,6 +218,12 @@ func main() {
 		cfg.RewardDistributorAddress,
 		cfg.SonicChainID,
 	)
+	// rewardChainReader is the read-only on-chain reader for the distributor's
+	// claimed[]/MCGP balanceOf. It's lifted out of the IsConfigured block so the
+	// SAME reader feeds BOTH the SP6 reconciler AND the SP8 summary's claimed
+	// adapter (totalClaimedMCGP). Built only when a distributor + RPC client +
+	// MCGP token are all present; nil otherwise.
+	var rewardChainReader services.RewardChainReader
 	if rewardMerkleService.IsConfigured() {
 		log.Printf("[sp6] reward distributor ready: %s (chainID=%d)", cfg.RewardDistributorAddress, cfg.SonicChainID)
 
@@ -233,7 +239,6 @@ func main() {
 		if mcgpToken == "" {
 			mcgpToken = cfg.MCGPTokenAddress
 		}
-		var rewardChainReader services.RewardChainReader
 		if sonicClient != nil && mcgpToken != "" {
 			rewardChainReader = services.NewRewardChainReader(sonicClient.Client, mcgpToken)
 		}
@@ -247,6 +252,32 @@ func main() {
 		log.Printf("[sp6] reward distributor dormant: REWARD_DISTRIBUTOR_ADDRESS not set")
 	}
 	rdh := handlers.NewRewardDistributionHandler(rewardMerkleService)
+
+	// Gate claim-data / prepare-claim on REMAINING claimable (cumulative − on-chain
+	// claimed[account]) so a fully-claimed user is no longer handed a claim tx that
+	// reverts "MCGP: nothing to claim" (and pays gas for it). Additive: when no
+	// chain reader is available the merkle service keeps its membership-only
+	// behavior. SetClaimedReader is nil-safe.
+	rewardMerkleService.SetClaimedReader(rewardChainReader)
+
+	// SP8 user-facing reward summary — the read-aggregator behind GET
+	// /api/rewards/summary (the app's TP screen) + the prepare-claim convenience.
+	// refresher = rewardService so a read folds the pending SP4 global share AND
+	// awards newly-crossed levels before the level/claimable are computed (the
+	// refresh is best-effort: a deferred conversion never hides accrual). pending =
+	// feeDistributionService surfaces the not-yet-settled global-pool share. claimed
+	// = an on-chain adapter over rewardChainReader.ClaimedOf so totalClaimedMCGP is
+	// the user's real already-claimed amount and the hero claimable is reported NET
+	// (cumulative − claimed) — the "Reward earned" figure drops after a claim and the
+	// "Already claimed" row appears. NewOnChainClaimedReader returns nil (⇒ gross
+	// cumulative, as before) when the distributor/RPC/token aren't all configured.
+	rewardSummaryService := services.NewRewardSummaryService(
+		config.DB,
+		rewardService,
+		feeDistributionService,
+		services.NewOnChainClaimedReader(config.DB, rewardChainReader, cfg.RewardDistributorAddress),
+	)
+	rsh := handlers.NewRewardSummaryHandler(rewardSummaryService, rewardMerkleService)
 
 	// Nomba — used for the Nigerian bank directory + name enquiry today,
 	// and the auto-payout path in Phase 2. Returns nil when credentials
@@ -371,7 +402,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh)
 
 	// Configure HTTP server
 	port := cfg.Port
