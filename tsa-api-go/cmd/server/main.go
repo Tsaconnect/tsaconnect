@@ -58,6 +58,22 @@ func main() {
 	// handlers.DistributeTPEarnings path stays live and callers must not invoke
 	// this engine. TP minting rate comes from cfg (default 1 TP = $1).
 	feeDistributionService := services.NewFeeDistributionService(config.DB, referralGraphService, cfg.TPPerUSDOrDefault())
+
+	// SP7 — claim-eligibility gate (anti-sybil + KYC). TP keeps accruing for
+	// everyone (SP3/SP5 unchanged); this service decides who may CLAIM (be in
+	// SP6's merkle root): KYC-verified + not admin/auto-flagged + no self-referral
+	// or referral cycle. It reuses the SP2 cycle-safe Uplines walk for cycle
+	// detection. The bounded velocity heuristic auto-flags suspicious referral
+	// surges for admin review; thresholds + on/off come from cfg. Constructed
+	// unconditionally so SP6 + the admin tools + the signup hook can consume it.
+	rewardEligibilityService := services.NewRewardEligibilityService(config.DB, referralGraphService)
+	rewardEligibilityService.SetVelocityConfig(
+		cfg.RewardVelocityEnabled,
+		cfg.RewardVelocityMaxSignups,
+		cfg.RewardVelocityWindow,
+	)
+	log.Printf("[sp7] claim-eligibility gate ready (velocity heuristic enabled=%t, max=%d/%s)",
+		cfg.RewardVelocityEnabled, cfg.RewardVelocityMaxSignups, cfg.RewardVelocityWindow)
 	if cfg.IsFeeModelV2Enabled() {
 		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=true — new fee/TP engine ACTIVE (tpPerUSD=%.4f)", cfg.TPPerUSDOrDefault())
 	} else {
@@ -181,11 +197,15 @@ func main() {
 	h.FeeService = feeDistributionService
 	ch.FeeService = feeDistributionService
 	sch.FeeService = feeDistributionService
+	// SP7 — make the claim-eligibility gate available to the signup velocity hook.
+	h.EligibilityService = rewardEligibilityService
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService)
+	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.
+	rfh := handlers.NewRewardFlagHandler(config.DB, rewardEligibilityService)
 
 	// Nomba — used for the Nigerian bank directory + name enquiry today,
 	// and the auto-payout path in Phase 2. Returns nil when credentials
@@ -310,7 +330,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh)
 
 	// Configure HTTP server
 	port := cfg.Port

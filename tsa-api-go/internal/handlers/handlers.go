@@ -20,6 +20,11 @@ type Handlers struct {
 	// main.go after construction. Fee-settled sites route through
 	// settleFeeEarnings, which only uses it when cfg.IsFeeModelV2Enabled().
 	FeeService *services.FeeDistributionService
+
+	// EligibilityService is the SP7 claim-eligibility gate. Optional/nil-safe:
+	// wired from main.go. Signup uses it to run the bounded velocity heuristic on
+	// the referrer (best-effort, advisory) when a referred user joins.
+	EligibilityService *services.RewardEligibilityService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
