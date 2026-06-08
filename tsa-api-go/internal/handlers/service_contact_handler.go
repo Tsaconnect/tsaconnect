@@ -362,7 +362,8 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 	// service_contact fee_config row (seeded to FlatAmountUSD = 0.10).
 	// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine when
 	// the flag is on, legacy DistributeTPEarnings otherwise.
-	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol)
+	// Documented-GLOBAL (chainID nil) — Sonic-only service-contact flow (§6).
+	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol, nil)
 	providerID := provider.ID
 	if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
 		Feature:    models.FeatureServiceContact,

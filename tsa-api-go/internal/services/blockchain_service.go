@@ -134,6 +134,31 @@ func (bs *BlockchainService) TokenAddressForChainID(chainID int64, symbol string
 	return ""
 }
 
+// ChainIDForName resolves a chain NAME (e.g. "ethereum", "polygon", "sonic")
+// to its numeric chain ID, preferring mainnet then any other configured
+// network. Returns (id, true) on a hit. Used to thread a chainID into the
+// per-chain fee lookup (configurable-FeeManager design §6) when a call site
+// only has the human chain name (e.g. withdrawal's body.Network).
+func (bs *BlockchainService) ChainIDForName(name string) (int64, bool) {
+	if bs.cfg == nil || name == "" {
+		return 0, false
+	}
+	if net, ok := bs.cfg.Networks["mainnet"]; ok {
+		if chain, ok := net.Chains[name]; ok {
+			return chain.ChainID, true
+		}
+	}
+	for network, netCfg := range bs.cfg.Networks {
+		if network == "mainnet" {
+			continue
+		}
+		if chain, ok := netCfg.Chains[name]; ok {
+			return chain.ChainID, true
+		}
+	}
+	return 0, false
+}
+
 // NetworkForChainID returns the network name ("mainnet"/"testnet") and chain key for a chain ID.
 func (bs *BlockchainService) NetworkForChainID(chainID int64) (network, chainKey string, ok bool) {
 	if bs.cfg == nil {

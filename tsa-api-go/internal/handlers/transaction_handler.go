@@ -464,7 +464,9 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 
 	// Check balance (including swap fee). Rate from the swap fee_config row
 	// (seeded to 10 bps = 0.1%). float64(10)/10000 is bit-identical to 0.001.
-	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset)
+	// Internal asset swap operates on off-chain balances with no single chain
+	// context, so it reads the documented-GLOBAL row (chainID nil) — design §6.
+	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset, nil)
 	fee := body.Amount * (float64(swapBps) / 10000.0)
 	totalDeduction := body.Amount + fee
 	if fromAssetDoc.Balance < totalDeduction {
@@ -676,7 +678,16 @@ func (h *Handlers) checkWithdrawalLimits(userID uuid.UUID, amount float64, asset
 func (h *Handlers) calculateWithdrawalFees(assetSymbol string, network string, amount float64) map[string]float64 {
 	// Platform fee rate from the withdrawal fee_config row (seeded to 50 bps =
 	// 0.5%). float64(50)/10000 is bit-identical to the previous 0.005 literal.
-	bps, _ := services.FeeRate(models.FeatureWithdrawal, assetSymbol)
+	// Thread the chainID resolved from the withdrawal's network so a per-chain
+	// override applies (design §6); nil falls back to the global row when the
+	// network name is unknown/empty.
+	var chainID *int64
+	if h.BlockchainService != nil {
+		if id, ok := h.BlockchainService.ChainIDForName(network); ok {
+			chainID = &id
+		}
+	}
+	bps, _ := services.FeeRate(models.FeatureWithdrawal, assetSymbol, chainID)
 	platformFee := amount * (float64(bps) / 10000.0)
 
 	// Mock network fees based on network

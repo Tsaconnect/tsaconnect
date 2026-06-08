@@ -177,7 +177,10 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 // models.MerchantFeeBPS, MCGP-exempt). MCGP resolves to bps=0/exempt, which
 // produces the same zero fee as the previous explicit MCGP branch.
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
-	bps, _ := services.FeeRate(models.FeatureProductMerchant, token)
+	// Product settlement is Sonic-only with no per-call chain context here, so
+	// this reads the documented-GLOBAL (chainID nil) product_merchant row —
+	// design §6.
+	bps, _ := services.FeeRate(models.FeatureProductMerchant, token, nil)
 	// fee = productAmount * bps / 10000
 	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(bps)))
 	fee.Div(fee, big.NewInt(10000))
@@ -536,7 +539,8 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 // For MCGP orders, the buyer pays no platform fee or gas fee, so TP distributes 0.
 // This is the LEGACY (v1) bundle: 2% merchant platform fee + $0.10 gas fee.
 func orderSystemFeeUSD(order *models.Order) float64 {
-	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token)
+	// Product gas flat — documented-GLOBAL (chainID nil), Sonic-only flow (§6).
+	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token, nil)
 	return orderMerchantFeeUSD(order) + gasFeeUSD
 }
 
@@ -617,7 +621,8 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 	// previous behavior where MCGP orders added no gas fee.
 	approveAmount := new(big.Int).Set(totalAmount)
 	if strings.ToUpper(order.Token) != "MCGP" {
-		gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token)
+		// Documented-GLOBAL (chainID nil), Sonic-only product flow (§6).
+		gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token, nil)
 		decimals := 6
 		gasFeeStr := fmt.Sprintf("%.0f", gasFeeUSD*math.Pow10(decimals))
 		gasFeeWei, _ := new(big.Int).SetString(gasFeeStr, 10)
