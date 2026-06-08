@@ -77,6 +77,16 @@ func DefaultFeeConfigs() []models.FeeConfig {
 		{Feature: models.FeatureOTC, TokenSymbol: models.FeeTokenAny, BPS: 50},
 		{Feature: models.FeatureP2P, TokenSymbol: models.FeeTokenAny, BPS: 50},
 		{Feature: models.FeatureP2PPlatform, TokenSymbol: models.FeeTokenAny, BPS: 100},
+		// Forward-looking rows for features that don't exist as Go-side flows yet
+		// (design §2). Harmless: no current call site computes a fee from them, so
+		// seeding them changes no charged fee. They give the v2 split table (and the
+		// admin API) a rate to read once the features are built. Rates are the
+		// PRE-cutover placeholders; the OTC→2% / allswap·spot→3% / product-gas→0.5%
+		// rate flips are cutover-time admin changes (see the spec runbook), NOT done
+		// here so current charged fees are unchanged.
+		{Feature: models.FeatureSpot, TokenSymbol: models.FeeTokenAny, BPS: 10},
+		{Feature: models.FeatureInstantPay, TokenSymbol: models.FeeTokenAny, BPS: 50},
+		{Feature: models.FeatureInstantTransfer, TokenSymbol: models.FeeTokenAny, BPS: 200},
 	}
 
 	out := make([]models.FeeConfig, 0, len(defs))

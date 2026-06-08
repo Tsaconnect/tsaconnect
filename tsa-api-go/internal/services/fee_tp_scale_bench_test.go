@@ -126,6 +126,7 @@ func setupScaleBenchDB(b *testing.B) *gorm.DB {
 			system_usd REAL NOT NULL,
 			buyer_cashback_usd REAL NOT NULL,
 			upline_cashback_usd REAL NOT NULL,
+			provider_cashback_usd REAL NOT NULL DEFAULT 0,
 			tp_pool_usd REAL NOT NULL,
 			global_pool_usd REAL NOT NULL DEFAULT 0,
 			tp_per_usd REAL NOT NULL DEFAULT 1,

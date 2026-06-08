@@ -534,13 +534,18 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 
 // orderSystemFeeUSD computes the USD-denominated system fee for TP distribution.
 // For MCGP orders, the buyer pays no platform fee or gas fee, so TP distributes 0.
+// This is the LEGACY (v1) bundle: 2% merchant platform fee + $0.10 gas fee.
 func orderSystemFeeUSD(order *models.Order) float64 {
-	platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
-	// Flat per-order gas fee comes from the product fee_config row
-	// (seeded to models.GasFeeUSD, MCGP-exempt). MCGP returns flat=0,
-	// preserving the previous MCGP branch that added no gas fee.
 	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token)
-	return platformFeeFloat + gasFeeUSD
+	return orderMerchantFeeUSD(order) + gasFeeUSD
+}
+
+// orderMerchantFeeUSD is the 2% MERCHANT platform fee in USD ONLY — the carved
+// fee the v2 engine settles under FeatureProductMerchant. It excludes the buyer's
+// stablecoin gas (a separate 100%-system fee that must not generate TP/cashback).
+// For MCGP orders order.PlatformFee is zero, so this returns 0.
+func orderMerchantFeeUSD(order *models.Order) float64 {
+	return weiToUSDFloat(order.PlatformFee, order.Token)
 }
 
 // getOrderForEscrow is a shared helper for prepare-approve and prepare-escrow.
@@ -1229,21 +1234,34 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 	}
 
 	if order.TPDistributedAt == nil {
-		systemFeeUSD := orderSystemFeeUSD(&order)
+		// v1 (legacy) settles on the BUNDLED system fee (2% merchant + $0.10 gas).
+		// v2 carves the two apart: the 2% MERCHANT platform fee carries the
+		// product_merchant split (cashback + TP); the buyer's stablecoin gas is a
+		// SEPARATE 100%-system fee that must NOT generate TP/cashback. We feed the
+		// merchant fee here; the gas component is intentionally not settled into the
+		// engine (it would only ever credit system, producing no recipients).
+		var feeUSD float64
+		feeFeature := models.FeatureProduct
+		if ch.Config.IsFeeModelV2Enabled() {
+			feeFeature = models.FeatureProductMerchant
+			feeUSD = orderMerchantFeeUSD(&order)
+		} else {
+			feeUSD = orderSystemFeeUSD(&order)
+		}
 		// Centralized v1↔v2 fee settlement. When FEE_MODEL_V2_ENABLED is on the
-		// realized order fee is handed to the new engine (async, idempotent on
+		// realized merchant fee is handed to the new engine (async, idempotent on
 		// checkout/order.ID); otherwise the legacy DistributeTPEarnings path runs
-		// unchanged. tp_distributed_at is stamped as a secondary site-level guard,
-		// but it is NOT the authoritative record of v2 distribution: the
-		// FeeDistribution guard row (keyed checkout/order.ID) is, and the
-		// completed-order status transition already prevents re-entry here. On the
-		// v2 path the enqueue retries + alerts on permanent failure
+		// unchanged on the bundled system fee. tp_distributed_at is stamped as a
+		// secondary site-level guard, but it is NOT the authoritative record of v2
+		// distribution: the FeeDistribution guard row (keyed checkout/order.ID) is,
+		// and the completed-order status transition already prevents re-entry here.
+		// On the v2 path the enqueue retries + alerts on permanent failure
 		// (fee_v2_settle_failed_total), so a stamped-but-undistributed window
 		// requires all retries to fail — surfaced loudly rather than silent.
 		if err := settleFeeEarnings(ch.FeeService, ch.Config, config.DB, services.FeeEvent{
-			Feature:    models.FeatureProduct,
+			Feature:    feeFeature,
 			Token:      order.Token,
-			FeeUSD:     systemFeeUSD,
+			FeeUSD:     feeUSD,
 			UserID:     order.BuyerID,
 			SourceType: "checkout",
 			SourceID:   order.ID,

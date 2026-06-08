@@ -294,33 +294,29 @@ func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled b
 // gen0 / buyer-cashback recipient is trade.BuyerID — the party that receives
 // crypto and bears the fee (the buyer on a sell-ad; the receiving merchant on a
 // buy-ad, which is exactly who trade.BuyerID labels in the release emits).
+//
+// ── DISABLED under the COMPLETE per-feature split model (design §2, final PM
+// clarification) ──
+//
+// The on-chain 0.5% P2P fee charged at release IS the BUYER GAS: 100% system,
+// NO TP and NO cashback (FeatureGas {1.0, 0,0,0, 0.0}). Accruing it here would
+// only ever credit "system" — producing no recipients and no TP — so feeding it
+// to the engine is pointless and, worse, the prior wiring keyed it as
+// FeatureP2P and minted TP/cashback that this model says it must NOT.
+//
+// The P2P platform's TP/cashback is meant to come from a SEPARATE 1% PLATFORM
+// fee (FeatureP2PPlatform, the carved {0.50,0.15,0.15,0.00,0.20} split) that is
+// NOT collected anywhere today. Until that 1% platform fee exists on chain and a
+// settle path feeds it, P2P release accrues NOTHING. This method is kept as an
+// explicit, documented no-op (rather than deleted) so all four release call
+// sites compile unchanged and the re-wiring point is obvious: when the 1%
+// platform fee lands, settle it under FeatureP2PPlatform from its own seam.
 func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUnits *big.Int) {
-	if !s.feeV2Enabled || s.fees == nil {
-		return
-	}
-	if trade == nil || feeBaseUnits == nil || feeBaseUnits.Sign() <= 0 {
-		return
-	}
-	// MCGP is fee-exempt by design (spec §2: "MCGP-paid txns stay fee-exempt").
-	// Defense-in-depth: baseUnitsToUSD treats the settlement token as a ~$1
-	// stablecoin, so if a misconfigured on-chain mcgpToken ever routed an MCGP
-	// trade here, we'd mis-mint a non-$1 token's base units as USD. Refuse to
-	// accrue any fee for an MCGP trade, full stop.
-	if strings.ToUpper(trade.Token) == "MCGP" {
-		return
-	}
-	feeUSD := baseUnitsToUSD(feeBaseUnits, tokenDecimalsFor(trade.ChainID, trade.Token))
-	if feeUSD <= 0 {
-		return
-	}
-	s.fees.EnqueueFeeSettled(FeeEvent{
-		Feature:    models.FeatureP2P,
-		Token:      trade.Token,
-		FeeUSD:     feeUSD,
-		UserID:     trade.BuyerID,
-		SourceType: "p2p_release",
-		SourceID:   trade.ID,
-	})
+	// Intentionally a no-op. See the doc comment above: the on-chain P2P fee is
+	// buyer gas (100% system, no TP); P2P TP would come from a 1% platform fee
+	// that is not collected today. Re-wire here under FeatureP2PPlatform once it is.
+	_ = trade
+	_ = feeBaseUnits
 }
 
 // onChainTradeFee derives the platform fee (base units) from a view-read trade:

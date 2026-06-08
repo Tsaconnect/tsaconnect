@@ -585,8 +585,20 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 
 	// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine when
 	// FEE_MODEL_V2_ENABLED is on (idempotent on swap/tx.ID), legacy otherwise.
+	//
+	// Feature mapping: this is the platform's INTERNAL asset-to-asset exchange on
+	// its own books (not the LiFi cross-chain bridge, which is "allswap", nor a
+	// fiat<->crypto OTC desk). The best-fit v2 split feature is therefore "spot"
+	// (the internal spot exchange). spot/otc/allswap/instant_pay all share the same
+	// 70/30 no-cashback split, so the split is identical regardless; FeatureSpot is
+	// chosen for the most accurate audit/feature labelling. The FeeUSD itself is the
+	// rate-config swap fee (live rate unchanged at cutover-time, per the runbook).
+	swapSplitFeature := models.FeatureSwap
+	if h.Config.IsFeeModelV2Enabled() {
+		swapSplitFeature = models.FeatureSpot
+	}
 	if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
-		Feature:    models.FeatureSwap,
+		Feature:    swapSplitFeature,
 		Token:      body.FromAsset,
 		FeeUSD:     feeUSD,
 		UserID:     user.ID,
