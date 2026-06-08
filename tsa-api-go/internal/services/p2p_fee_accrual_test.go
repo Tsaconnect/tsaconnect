@@ -383,6 +383,47 @@ func TestP2PFee_AdminResolve_AccruesOnlyOnReleaseToBuyer(t *testing.T) {
 	})
 }
 
+// (c2) accrueP2PReleaseFee no-ops for an MCGP trade (FIX-BEFORE-MERGE A, spec §2:
+//      MCGP is fee-exempt by design). Even with the v2 flag ON and a positive fee,
+//      an MCGP-token trade must accrue NOTHING — defense-in-depth so a
+//      misconfigured on-chain mcgpToken can't make baseUnitsToUSD mis-mint a
+//      non-$1 token's base units as USD. A non-MCGP control trade DOES accrue.
+func TestP2PFee_AccrueReleaseFee_NoOpForMCGP(t *testing.T) {
+	db := setupP2PFeeDB(t)
+	svc, _, _ := newP2PFeeService(t, db, true) // flag ON
+
+	buyer := mkP2PUser(t, db, "mcgp_buyer", nil)
+	seller := mkP2PUser(t, db, "mcgp_seller", nil)
+	adID := seedAd(t, db, seller.ID, "0", "1000000")
+
+	// MCGP trade with a real positive fee — must be a no-op.
+	mcgpTrade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+	db.Model(&models.P2PTrade{}).Where("id = ?", mcgpTrade.ID).Update("token", "MCGP")
+	var mt models.P2PTrade
+	db.First(&mt, "id = ?", mcgpTrade.ID)
+	fee := big.NewInt(5000) // positive fee
+
+	svc.accrueP2PReleaseFee(&mt, fee)
+	// Lower-case + mixed-case guard too (strings.ToUpper).
+	mt.Token = "mcgp"
+	svc.accrueP2PReleaseFee(&mt, fee)
+
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, mcgpTrade.ID); got != 0 {
+		t.Fatalf("MCGP trade must accrue NOTHING; found %d guard rows", got)
+	}
+
+	// Control: a USDT trade with the SAME amount DOES accrue (proves the no-op is
+	// MCGP-specific, not a broken seam).
+	usdtTrade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+	var ut models.P2PTrade
+	db.First(&ut, "id = ?", usdtTrade.ID) // token defaults to USDT in seedPaidTrade
+	svc.accrueP2PReleaseFee(&ut, fee)
+	if got := waitForGuard(t, db, usdtTrade.ID, 1); got != 1 {
+		t.Fatalf("control USDT trade should accrue 1 guard row, got %d", got)
+	}
+}
+
 // (d) SetFeeService(svc, false) makes ALL release paths a no-op — preserving the
 //     pre-SP3 "P2P does not accrue TP" behavior even with a wired engine.
 func TestP2PFee_FlagOff_NoAccrualOnAnyPath(t *testing.T) {

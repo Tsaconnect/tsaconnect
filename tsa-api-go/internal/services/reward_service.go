@@ -174,6 +174,18 @@ func (s *RewardService) ProcessUserRewards(ctx context.Context, userID uuid.UUID
 			"deferring conversions (no rate locked), will retry: %v", userID, priceErr)
 	}
 
+	// Defense-in-depth cutover FLOOR (BLOCKER 1, design §3 "cutover keyed on
+	// settlement timestamp"): only convert cashback_earnings rows created AT OR
+	// AFTER the latest cutover. Belt-and-suspenders with the reset's DELETE of the
+	// live pre-cutover cashback rows — even if a stray pre-cutover row survived (a
+	// missed delete, a late settlement landing an old-dated row), it can never be
+	// re-minted into MCGP. If no cutover has run this is the zero time, so EVERY
+	// row qualifies and pre-cutover behavior is byte-for-byte unchanged.
+	cutoverFloor, cutoverErr := CutoverTimestamp(ctx, s.db)
+	if cutoverErr != nil {
+		return res, fmt.Errorf("read cutover floor for %s: %w", userID, cutoverErr)
+	}
+
 	// Collect level-up events to publish AFTER the tx commits (don't emit on a
 	// rolled-back tx).
 	var levelUps []events.Event
@@ -228,7 +240,7 @@ func (s *RewardService) ProcessUserRewards(ctx context.Context, userID uuid.UUID
 		// (d) Convert not-yet-converted cashback rows (one entry per row). Each
 		// conversion needs the price; if unavailable, defer ALL of them.
 		if priceOK {
-			converted, mcgp, err := s.convertPendingCashback(tx, userID, priceUSD)
+			converted, mcgp, err := s.convertPendingCashback(tx, userID, priceUSD, cutoverFloor)
 			if err != nil {
 				return err
 			}
@@ -236,7 +248,7 @@ func (s *RewardService) ProcessUserRewards(ctx context.Context, userID uuid.UUID
 			res.MCGPCredited += mcgp
 		} else {
 			// Only mark deferred if there is actually pending cashback to convert.
-			pending, err := s.hasPendingCashback(tx, userID)
+			pending, err := s.hasPendingCashback(tx, userID, cutoverFloor)
 			if err != nil {
 				return err
 			}
@@ -432,10 +444,17 @@ func (s *RewardService) recordPrizeDue(tx *gorm.DB, userID uuid.UUID, level int,
 // does not yet have a RewardEntry (kind=cashback, source_id=row.id) into MCGP at
 // the locked price, one entry per row (idempotent per row). Returns the count
 // converted and the MCGP credited.
-func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, priceUSD float64) (int, float64, error) {
+//
+// cutoverFloor is the v2-cutover settlement-timestamp FLOOR (BLOCKER 1
+// defense-in-depth, design §3): only rows with created_at >= cutoverFloor are
+// eligible, so a stray pre-cutover cashback row that survived the reset's DELETE
+// can never be re-minted. A zero-value floor (no cutover has run) admits every
+// row, preserving pre-cutover behavior exactly.
+func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, priceUSD float64, cutoverFloor time.Time) (int, float64, error) {
 	var pending []models.CashbackEarning
 	if err := tx.
 		Where("user_id = ?", userID).
+		Where("created_at >= ?", cutoverFloor).
 		Where("id NOT IN (?)",
 			tx.Model(&models.RewardEntry{}).
 				Select("source_id").
@@ -484,11 +503,14 @@ func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, pr
 
 // hasPendingCashback reports whether the user has any positive CashbackEarning
 // row not yet converted to a RewardEntry — used to decide whether a
-// price-unavailable run actually deferred work (and must stay dirty).
-func (s *RewardService) hasPendingCashback(tx *gorm.DB, userID uuid.UUID) (bool, error) {
+// price-unavailable run actually deferred work (and must stay dirty). Applies
+// the SAME cutover floor as convertPendingCashback so a pre-cutover row (which
+// the converter would skip) never marks the run deferred.
+func (s *RewardService) hasPendingCashback(tx *gorm.DB, userID uuid.UUID, cutoverFloor time.Time) (bool, error) {
 	var n int64
 	err := tx.Model(&models.CashbackEarning{}).
 		Where("user_id = ? AND amount_usd > 0", userID).
+		Where("created_at >= ?", cutoverFloor).
 		Where("id NOT IN (?)",
 			tx.Model(&models.RewardEntry{}).
 				Select("source_id").
