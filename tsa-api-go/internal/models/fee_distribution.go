@@ -37,12 +37,18 @@ type FeeDistribution struct {
 	Feature    string    `gorm:"size:48;not null" json:"feature"`
 	Token      string    `gorm:"size:16;not null" json:"token"`
 
-	// Split components, all in USD. They sum to FeeUSD.
-	FeeUSD            float64 `gorm:"not null" json:"feeUsd"`
-	SystemUSD         float64 `gorm:"not null" json:"systemUsd"`         // 50% — treasury retains, recorded only
-	BuyerCashbackUSD  float64 `gorm:"not null" json:"buyerCashbackUsd"`  // 10% — buyer cashback
-	UplineCashbackUSD float64 `gorm:"not null" json:"uplineCashbackUsd"` // 10% — direct-upline cashback (or global pool)
-	TPPoolUSD         float64 `gorm:"not null" json:"tpPoolUsd"`         // 30% — distributed gen0..gen10 (+ global pool)
+	// Split components, all in USD. Their per-feature fractions vary (the engine's
+	// featureSplits table is the source of truth); the comments below name the
+	// component, not a fixed percentage. SystemUSD + BuyerCashbackUSD +
+	// UplineCashbackUSD + ProviderCashbackUSD + TPPoolUSD == FeeUSD for every
+	// feature (where GlobalPoolUSD is the slice of Upline+TP that fell through to
+	// the global pool and is therefore already counted inside those columns).
+	FeeUSD              float64 `gorm:"not null" json:"feeUsd"`
+	SystemUSD           float64 `gorm:"not null" json:"systemUsd"`              // treasury retains, recorded only
+	BuyerCashbackUSD    float64 `gorm:"not null" json:"buyerCashbackUsd"`       // transacting-user cashback
+	UplineCashbackUSD   float64 `gorm:"not null" json:"uplineCashbackUsd"`      // direct-upline cashback (or global pool)
+	ProviderCashbackUSD float64 `gorm:"not null;default:0" json:"providerCashbackUsd"` // service-provider cashback (service_contact only)
+	TPPoolUSD           float64 `gorm:"not null" json:"tpPoolUsd"`              // TP pool, distributed gen0..gen10 (+ global pool)
 
 	// GlobalPoolUSD is the portion of this event routed to the global pool
 	// (missing-ancestor TP shares + missing-upline cashback). Recorded for audit.

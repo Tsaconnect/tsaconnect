@@ -17,8 +17,22 @@ const (
 	FeatureOTC             = "otc"              // OTC fee (0.5%)
 	FeatureSwap            = "swap"             // internal asset swap fee (0.1% today)
 	FeatureWithdrawal      = "withdrawal"       // on-chain withdrawal platform fee (0.5%)
-	FeatureP2P             = "p2p"              // P2P/PM buyer fee (0.5%, on-chain)
-	FeatureP2PPlatform     = "p2p_platform"     // P2P/PM platform/merchant fee (1%, on-chain)
+	FeatureP2P             = "p2p"              // P2P/PM buyer fee (0.5%, on-chain) — this IS the buyer gas (100% system, no TP)
+	FeatureP2PPlatform     = "p2p_platform"     // P2P/PM platform/merchant fee (1%, on-chain) — carries the carved split/TP
+
+	// Fee features carved out by the v2 fee/TP split model (design §2). Some of
+	// these name product-side features that don't have their own Go-side rate
+	// math yet (spot/instant_pay/instant_transfer are forward-looking SP1 rows);
+	// they exist so the per-feature split table (services.splitFor) can key on
+	// them and the engine can route TP/cashback correctly per feature.
+	FeatureSpot            = "spot"             // internal asset-to-asset swap on platform books (3% at cutover)
+	FeatureAllswap         = "allswap"          // LiFi cross-chain bridge/swap (3% at cutover)
+	FeatureInstantPay      = "instant_pay"      // instant-pay crypto (0.5%) — forward-looking
+	FeatureInstantTransfer = "instant_transfer" // instant fiat transfer (2%) — forward-looking
+	// FeatureGas is the buyer's stablecoin gas component on product/p2p/service
+	// flows (0.5%). It is 100% system with NO TP — it must never generate cashback
+	// or TP, so it carries its own split row.
+	FeatureGas = "gas"
 )
 
 // FeeTokenAny is the wildcard token symbol meaning "applies to any token"

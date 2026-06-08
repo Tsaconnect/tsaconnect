@@ -236,7 +236,8 @@ func addFeeV2Tables(t *testing.T, db *gorm.DB) {
 			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
 			user_id TEXT NOT NULL, feature TEXT NOT NULL, token TEXT NOT NULL,
 			fee_usd REAL NOT NULL, system_usd REAL NOT NULL, buyer_cashback_usd REAL NOT NULL,
-			upline_cashback_usd REAL NOT NULL, tp_pool_usd REAL NOT NULL,
+			upline_cashback_usd REAL NOT NULL, provider_cashback_usd REAL NOT NULL DEFAULT 0,
+			tp_pool_usd REAL NOT NULL,
 			global_pool_usd REAL NOT NULL DEFAULT 0, tp_per_usd REAL NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL, UNIQUE(source_type, source_id)
 		)`,
@@ -285,8 +286,10 @@ func TestSettleFeeEarnings_V2_NoLegacyCashbackDoubleCount(t *testing.T) {
 	feeSvc := services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
 
 	srcID := uuid.New()
+	// The v2 checkout hook settles the 2% MERCHANT fee under FeatureProductMerchant
+	// (the carved {0.50,0.15,0.15,0.00,0.20} split). Buyer + upline each get 15%.
 	ev := services.FeeEvent{
-		Feature: models.FeatureProduct, Token: "USDT", FeeUSD: 10.0,
+		Feature: models.FeatureProductMerchant, Token: "USDT", FeeUSD: 10.0,
 		UserID: buyer.ID, SourceType: "checkout", SourceID: srcID,
 	}
 
@@ -323,16 +326,16 @@ func TestSettleFeeEarnings_V2_NoLegacyCashbackDoubleCount(t *testing.T) {
 		t.Fatalf("expected exactly 1 upline cashback row under v2, got %d (double-count?)", uplineRows)
 	}
 
-	// And the credited balances reflect a single 10% credit each (= $1.0), not a
-	// doubled/legacy-base amount.
+	// And the credited balances reflect a single 15% credit each (= $1.5), not a
+	// doubled/legacy-base amount (product_merchant carved split: buyer 15%, upline 15%).
 	var b, u models.User
 	db.First(&b, "id = ?", buyer.ID)
 	db.First(&u, "id = ?", upline.ID)
-	if b.CashbackBalance != 1.0 {
-		t.Fatalf("buyer cashback balance = %v, want exactly 1.0 (single 10%% credit)", b.CashbackBalance)
+	if b.CashbackBalance != 1.5 {
+		t.Fatalf("buyer cashback balance = %v, want exactly 1.5 (single 15%% credit)", b.CashbackBalance)
 	}
-	if u.CashbackBalance != 1.0 {
-		t.Fatalf("upline cashback balance = %v, want exactly 1.0 (single 10%% credit)", u.CashbackBalance)
+	if u.CashbackBalance != 1.5 {
+		t.Fatalf("upline cashback balance = %v, want exactly 1.5 (single 15%% credit)", u.CashbackBalance)
 	}
 }
 

@@ -613,10 +613,16 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 			// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine
 			// when FEE_MODEL_V2_ENABLED is on (idempotent on req.TxType/walletTx.ID),
 			// legacy DistributeTPEarnings otherwise. Feature maps the wallet tx type
-			// to a fee feature: a swap is FeatureSwap; a raw send is a withdrawal.
+			// to a fee feature: a raw send is a withdrawal (70/30, now earns TP); a
+			// swap is the internal spot exchange (FeatureSpot, 70/30) under v2. The
+			// legacy path ignores Feature (DistributeTPEarnings uses only FeeUSD), so
+			// FeatureSwap is preserved there for behavior-identical v1 fees.
 			feeFeature := models.FeatureWithdrawal
 			if req.TxType == models.TxTypeSwap {
 				feeFeature = models.FeatureSwap
+				if h.Config.IsFeeModelV2Enabled() {
+					feeFeature = models.FeatureSpot
+				}
 			}
 			if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
 				Feature:    feeFeature,

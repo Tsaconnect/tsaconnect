@@ -12,15 +12,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// ─── P2P ↔ fee/TP v2 integration tests (SP3 audit, finding #2) ──────────────
+// ─── P2P ↔ fee/TP v2 integration tests ──────────────────────────────────────
 //
-// These cover the P2P fee-accrual seam that the unit tests stopped short of:
-// accrueP2PReleaseFee wiring a REAL FeeDistributionService through ConfirmRelease,
-// the reconciler auto-release path, and admin-resolve — including the flag gate,
-// the refundBuyer/ReleasedToBuyer gating, and idempotency across the
-// confirm/reconcile race. The engine internals are covered by
-// fee_distribution_service_test.go; here we assert the P2P boundary feeds it
-// exactly once, only on fee-bearing transitions, and never when the flag is off.
+// COMPLETE per-feature split model (design §2, final PM clarification): the
+// on-chain 0.5% P2P fee charged at release IS the BUYER GAS — 100% system, NO TP
+// and NO cashback. P2P's TP/cashback is meant to come from a SEPARATE 1% PLATFORM
+// fee (FeatureP2PPlatform) that is NOT collected today. So accrueP2PReleaseFee is
+// now an explicit NO-OP and NO P2P release transition accrues anything — even
+// with the v2 flag ON, a wired engine, and a positive on-chain fee.
+//
+// These tests lock that contract: ConfirmRelease, the reconciler auto-release
+// path, and admin-resolve-to-buyer all settle ZERO into the engine (no guard row,
+// no TP, no cashback), across both flag states. They are the regression guard for
+// the day the 1% platform fee lands and re-wires P2P TP under FeatureP2PPlatform.
 
 // setupP2PFeeDB builds an in-memory SQLite DB carrying BOTH the P2P trade tables
 // AND the fee-distribution tables, on a single pinned connection (an in-memory
@@ -86,7 +90,8 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE fee_distributions (
 			id TEXT PRIMARY KEY, source_type TEXT, source_id TEXT, user_id TEXT,
 			feature TEXT, token TEXT, fee_usd REAL, system_usd REAL,
-			buyer_cashback_usd REAL, upline_cashback_usd REAL, tp_pool_usd REAL,
+			buyer_cashback_usd REAL, upline_cashback_usd REAL,
+			provider_cashback_usd REAL DEFAULT 0, tp_pool_usd REAL,
 			global_pool_usd REAL DEFAULT 0, tp_per_usd REAL DEFAULT 1, created_at DATETIME,
 			UNIQUE(source_type, source_id)
 		)`,
@@ -232,9 +237,11 @@ func waitForGuard(t *testing.T, db *gorm.DB, tradeID uuid.UUID, want int64) int6
 	return n
 }
 
-// (a) ConfirmRelease accrues exactly one p2p_release guard row keyed on trade.ID,
-//     and credits the buyer (gen0) + upline through the real engine.
-func TestP2PFee_ConfirmRelease_AccruesOnce(t *testing.T) {
+// (a) ConfirmRelease (v2 flag ON, positive on-chain fee) accrues NOTHING under
+//
+//	the per-feature split model: the P2P fee is buyer gas (100% system, no TP),
+//	and the carved P2P TP would come from a 1% platform fee not collected today.
+func TestP2PFee_ConfirmRelease_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db, true)
 
@@ -244,7 +251,7 @@ func TestP2PFee_ConfirmRelease_AccruesOnce(t *testing.T) {
 	adID := seedAd(t, db, seller.ID, "0", "1000000")
 	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000") // 1.0 USDT (6 dp)
 
-	// Fee = 0.5% of amount = 5000 base units → $0.005.
+	// Fee = 0.5% of amount = 5000 base units → $0.005 (a real positive fee).
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
 	toBuyer := new(big.Int).Sub(tokenAmt, fee)
@@ -254,40 +261,26 @@ func TestP2PFee_ConfirmRelease_AccruesOnce(t *testing.T) {
 		t.Fatalf("ConfirmRelease: %v", err)
 	}
 
-	if got := waitForGuard(t, db, trade.ID, 1); got != 1 {
-		t.Fatalf("expected exactly 1 p2p_release guard row, got %d", got)
+	// No guard row, no TP, no cashback — P2P release no longer accrues.
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, trade.ID); got != 0 {
+		t.Fatalf("P2P release must accrue NOTHING; found %d guard rows", got)
 	}
-
-	// The guard's FeeUSD must equal baseUnitsToUSD(fee, 6 decimals) = 0.005.
-	var fd models.FeeDistribution
-	if err := db.First(&fd, "source_id = ?", trade.ID).Error; err != nil {
-		t.Fatalf("load guard: %v", err)
-	}
-	wantUSD := baseUnitsToUSD(fee, tokenDecimalsFor(146, "USDT"))
-	if d := fd.FeeUSD - wantUSD; d > 1e-9 || d < -1e-9 {
-		t.Fatalf("guard FeeUSD = %v, want %v", fd.FeeUSD, wantUSD)
-	}
-
-	// Buyer (gen0) and upline (gen1) cashback must be credited by the engine.
 	var b, u models.User
 	db.First(&b, "id = ?", buyer.ID)
 	db.First(&u, "id = ?", upline.ID)
-	if b.CashbackBalance <= 0 {
-		t.Errorf("buyer cashback not credited: %v", b.CashbackBalance)
+	if b.CashbackBalance != 0 || b.TPBalance != 0 {
+		t.Errorf("buyer must get no TP/cashback from P2P release: tp=%v cb=%v", b.TPBalance, b.CashbackBalance)
 	}
-	if u.CashbackBalance <= 0 {
-		t.Errorf("upline cashback not credited: %v", u.CashbackBalance)
-	}
-	// gen0 buyer TP credited too.
-	if b.TPBalance <= 0 {
-		t.Errorf("buyer TP not credited: %v", b.TPBalance)
+	if u.CashbackBalance != 0 || u.TPBalance != 0 {
+		t.Errorf("upline must get no TP/cashback from P2P release: tp=%v cb=%v", u.TPBalance, u.CashbackBalance)
 	}
 }
 
-// (b) reconcileToReleased after a missed confirm accrues the same fee, and a
-//     second accrual for the same trade is a guard-row no-op (idempotency across
-//     the confirm/reconcile race).
-func TestP2PFee_ReconcileRelease_IdempotentWithConfirm(t *testing.T) {
+// (b) The reconciler auto-release path also accrues NOTHING, and a direct
+//
+//	accrueP2PReleaseFee call (the seam) is a documented no-op.
+func TestP2PFee_ReconcileRelease_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db, true)
 
@@ -296,136 +289,58 @@ func TestP2PFee_ReconcileRelease_IdempotentWithConfirm(t *testing.T) {
 	adID := seedAd(t, db, seller.ID, "0", "1000000")
 	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
 
-	// Chain reports Released with Amount + FeeBps; the reconciler reconstructs the
-	// fee as Amount·FeeBps/10000.
+	// Chain reports Released with Amount + FeeBps.
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	esc.onChainTrade = &OnChainP2PTrade{
 		Amount: tokenAmt, FeeBps: 50, Funding: models.P2PTradeFundingPooled,
 		Status: OnChainP2PStatusReleased, Exists: true,
 	}
 
-	// Missed confirm → reconciler drives the release and accrues the fee.
+	// Missed confirm → reconciler drives the release. It must NOT accrue.
 	if _, err := svc.ReconcileTrade(context.Background(), trade.ID); err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
 	}
-	if got := waitForGuard(t, db, trade.ID, 1); got != 1 {
-		t.Fatalf("reconcile should accrue 1 guard row, got %d", got)
-	}
-
-	// Simulate the confirm/reconcile race: fire the SAME accrual again directly
-	// (as a late live confirm or a second reconcile pass would). The engine's
-	// (source_type, source_id) guard must make it a no-op — still exactly 1 row.
+	// Also fire the seam directly with a positive fee — still a no-op.
 	expFee := onChainTradeFee(esc.onChainTrade)
 	var rel models.P2PTrade
 	db.First(&rel, "id = ?", trade.ID)
 	svc.accrueP2PReleaseFee(&rel, expFee)
-	// A repeat reconcile is a terminal early-return, also a no-op.
-	if _, err := svc.ReconcileTrade(context.Background(), trade.ID); err != nil {
-		t.Fatalf("second ReconcileTrade: %v", err)
-	}
-	// Give any async accrual a moment, then assert still exactly one.
+
 	time.Sleep(200 * time.Millisecond)
-	if got := guardRows(t, db, trade.ID); got != 1 {
-		t.Fatalf("idempotency across confirm/reconcile failed: %d guard rows, want 1", got)
+	if got := guardRows(t, db, trade.ID); got != 0 {
+		t.Fatalf("reconcile auto-release must accrue NOTHING, got %d guard rows", got)
 	}
 }
 
-// (c) reconcileToResolved / admin-resolve accrues ONLY on refundBuyer/
-//     ReleasedToBuyer=true, and no-ops on the seller-refund branch.
-func TestP2PFee_AdminResolve_AccruesOnlyOnReleaseToBuyer(t *testing.T) {
-	t.Run("released-to-buyer accrues", func(t *testing.T) {
-		db := setupP2PFeeDB(t)
-		svc, esc, _ := newP2PFeeService(t, db, true)
-		buyer := mkP2PUser(t, db, "arb_buyer", nil)
-		seller := mkP2PUser(t, db, "arb_seller", nil)
-		adID := seedAd(t, db, seller.ID, "0", "1000000")
-		trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-		// Disputed precondition for ConfirmAdminResolveDispute.
-		db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("status", models.P2PTradeStatusDisputed)
-
-		tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-		fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
-		moved := new(big.Int).Sub(tokenAmt, fee)
-		esc.resolvedEvent = &P2PTradeResolvedEvent{
-			TradeID: HashID(trade.ID), ReleasedToBuyer: true, AmountMoved: moved, FeeToSystem: fee,
-		}
-
-		if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xres"); err != nil {
-			t.Fatalf("ConfirmAdminResolveDispute(release): %v", err)
-		}
-		if got := waitForGuard(t, db, trade.ID, 1); got != 1 {
-			t.Fatalf("release-to-buyer admin-resolve should accrue 1 guard row, got %d", got)
-		}
-	})
-
-	t.Run("refund-to-seller does not accrue", func(t *testing.T) {
-		db := setupP2PFeeDB(t)
-		svc, esc, _ := newP2PFeeService(t, db, true)
-		buyer := mkP2PUser(t, db, "ars_buyer", nil)
-		seller := mkP2PUser(t, db, "ars_seller", nil)
-		adID := seedAd(t, db, seller.ID, "0", "1000000")
-		trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-		db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("status", models.P2PTradeStatusDisputed)
-
-		// Seller-refund: ReleasedToBuyer=false, zero movement, zero fee.
-		esc.resolvedEvent = &P2PTradeResolvedEvent{
-			TradeID: HashID(trade.ID), ReleasedToBuyer: false,
-			AmountMoved: big.NewInt(0), FeeToSystem: big.NewInt(0),
-		}
-		if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xres2"); err != nil {
-			t.Fatalf("ConfirmAdminResolveDispute(refund): %v", err)
-		}
-		// No fee was charged on a seller-refund → no guard row, ever.
-		time.Sleep(200 * time.Millisecond)
-		if got := guardRows(t, db, trade.ID); got != 0 {
-			t.Fatalf("seller-refund must NOT accrue a fee, got %d guard rows", got)
-		}
-	})
-}
-
-// (c2) accrueP2PReleaseFee no-ops for an MCGP trade (FIX-BEFORE-MERGE A, spec §2:
-//      MCGP is fee-exempt by design). Even with the v2 flag ON and a positive fee,
-//      an MCGP-token trade must accrue NOTHING — defense-in-depth so a
-//      misconfigured on-chain mcgpToken can't make baseUnitsToUSD mis-mint a
-//      non-$1 token's base units as USD. A non-MCGP control trade DOES accrue.
-func TestP2PFee_AccrueReleaseFee_NoOpForMCGP(t *testing.T) {
+// (c) admin-resolve-to-buyer (a release transition charging an on-chain fee) also
+//
+//	accrues NOTHING under the new model.
+func TestP2PFee_AdminResolve_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, _, _ := newP2PFeeService(t, db, true) // flag ON
-
-	buyer := mkP2PUser(t, db, "mcgp_buyer", nil)
-	seller := mkP2PUser(t, db, "mcgp_seller", nil)
+	svc, esc, _ := newP2PFeeService(t, db, true)
+	buyer := mkP2PUser(t, db, "arb_buyer", nil)
+	seller := mkP2PUser(t, db, "arb_seller", nil)
 	adID := seedAd(t, db, seller.ID, "0", "1000000")
+	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("status", models.P2PTradeStatusDisputed)
 
-	// MCGP trade with a real positive fee — must be a no-op.
-	mcgpTrade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-	db.Model(&models.P2PTrade{}).Where("id = ?", mcgpTrade.ID).Update("token", "MCGP")
-	var mt models.P2PTrade
-	db.First(&mt, "id = ?", mcgpTrade.ID)
-	fee := big.NewInt(5000) // positive fee
-
-	svc.accrueP2PReleaseFee(&mt, fee)
-	// Lower-case + mixed-case guard too (strings.ToUpper).
-	mt.Token = "mcgp"
-	svc.accrueP2PReleaseFee(&mt, fee)
-
-	time.Sleep(200 * time.Millisecond)
-	if got := guardRows(t, db, mcgpTrade.ID); got != 0 {
-		t.Fatalf("MCGP trade must accrue NOTHING; found %d guard rows", got)
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
+	moved := new(big.Int).Sub(tokenAmt, fee)
+	esc.resolvedEvent = &P2PTradeResolvedEvent{
+		TradeID: HashID(trade.ID), ReleasedToBuyer: true, AmountMoved: moved, FeeToSystem: fee,
 	}
 
-	// Control: a USDT trade with the SAME amount DOES accrue (proves the no-op is
-	// MCGP-specific, not a broken seam).
-	usdtTrade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-	var ut models.P2PTrade
-	db.First(&ut, "id = ?", usdtTrade.ID) // token defaults to USDT in seedPaidTrade
-	svc.accrueP2PReleaseFee(&ut, fee)
-	if got := waitForGuard(t, db, usdtTrade.ID, 1); got != 1 {
-		t.Fatalf("control USDT trade should accrue 1 guard row, got %d", got)
+	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xres"); err != nil {
+		t.Fatalf("ConfirmAdminResolveDispute(release): %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, trade.ID); got != 0 {
+		t.Fatalf("release-to-buyer admin-resolve must accrue NOTHING, got %d guard rows", got)
 	}
 }
 
-// (d) SetFeeService(svc, false) makes ALL release paths a no-op — preserving the
-//     pre-SP3 "P2P does not accrue TP" behavior even with a wired engine.
+// (d) With the flag OFF, ALL release paths are a no-op too (unchanged contract).
 func TestP2PFee_FlagOff_NoAccrualOnAnyPath(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db, false) // flag OFF

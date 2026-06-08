@@ -363,11 +363,13 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 	// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine when
 	// the flag is on, legacy DistributeTPEarnings otherwise.
 	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol)
+	providerID := provider.ID
 	if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
 		Feature:    models.FeatureServiceContact,
 		Token:      tokenSymbol,
 		FeeUSD:     contactFeeUSD,
 		UserID:     user.ID,
+		ProviderID: &providerID, // service_contact carries a 10% provider cashback
 		SourceType: "service_contact",
 		SourceID:   payment.ID,
 	}); err != nil {

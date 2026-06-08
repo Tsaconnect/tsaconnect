@@ -26,26 +26,78 @@ Every platform fee splits **50% system / 10% buyer / 10% direct upline / 30% Tra
 
 ---
 
-## 2. Fee model (uniform 50 / 20 / 30)
+## 2. Fee model (COMPLETE per-feature split — final PM clarification)
 
-Each fee `F` (collected to the system wallet in its tx currency, as today) is *accounted off-chain* as: **50% system · 10% buyer · 10% direct-upline (gen-1) · 30% TP pool**.
+The uniform 50/10/10/30 split is **superseded**. Each fee `F` (collected to the
+system wallet in its tx currency, as today) is *accounted off-chain* with a
+**per-feature** split into five components: **{System, Buyer, Upline, Provider, TP}**.
+Every row's shares are FRACTIONS of `F` and **MUST sum to exactly 1.0** — boot-validated
+in `services.init()` over `featureSplits`, exactly like `models.GenerationPercentages == 1.0`.
+A zero component credits nothing (the 70/30 rows generate no cashback; gas credits only
+system → no TP, no recipients). MCGP-paid txns stay fee-exempt where they are today.
 
-**Per-feature rates** (produce `F`); MCGP-paid txns stay fee-exempt where they are today:
+**The COMPLETE per-feature split table** (shares of the fee `F`):
 
-| Feature | Fee | Notes |
-|---|---|---|
-| Product (buyer) | 0.5% stable / 0% MCGP | |
-| Product merchant (platform) | 2% | merchant-side |
-| Service — contact reveal | $0.10 | |
-| Service — other (fixed) | 0.5% | |
-| OTC | 0.5% | |
-| Allswap (LiFi) | 3% | active; confirm integrator-fee mechanics |
-| P2P & PM (buyer) | 0.5% | on-chain fee → systemWallet; TP accounted off-chain at release |
-| P2P & PM (platform/merchant) | 1% | |
-| On-chain withdrawal (crypto) | 0.5% | |
-| Spot · Instant-pay-crypto · Instant-transfer-fiat | 0.5% / 0.5% / 2% | ⚠️ **features don't exist — OUT OF SCOPE; fee config ready for when built** |
+| Feature | Fee | Type | System | Buyer | Upline | Provider | TP |
+|---|---|---|---|---|---|---|---|
+| `product_merchant` | 2% | carved | 0.50 | 0.15 | 0.15 | 0.00 | 0.20 |
+| `p2p_platform` | 1% | carved | 0.50 | 0.15 | 0.15 | 0.00 | 0.20 |
+| `service_contact` | $0.10 | carved + provider | 0.50 | 0.10 | 0.10 | 0.10 | 0.20 |
+| `instant_transfer` | 2% | carved | 0.75 | 0.0625 | 0.0625 | 0.00 | 0.125 |
+| `otc` | 2% | 70/30 no-cashback | 0.70 | 0.00 | 0.00 | 0.00 | 0.30 |
+| `spot` | 3% | 70/30 | 0.70 | 0.00 | 0.00 | 0.00 | 0.30 |
+| `allswap` | 3% | 70/30 | 0.70 | 0.00 | 0.00 | 0.00 | 0.30 |
+| `instant_pay` | 0.5% | 70/30 | 0.70 | 0.00 | 0.00 | 0.00 | 0.30 |
+| `withdrawal` | 0.5% | 70/30 | 0.70 | 0.00 | 0.00 | 0.00 | 0.30 |
+| `gas` (buyer stablecoin gas on product/p2p/service) | 0.5% | 100% system, no TP | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 |
 
-**SP1 — unified fee-rate config (rates ONLY).** Collapse the 5+ hardcoded rate sites (`cart.go`, `transaction_handler.go`, `service_contact_service.go`, on-chain P2P) into one `fee_config` table + service (feature × token, MCGP-exempt flag) + admin API. The **50/20/30 accounting that writes TP/cashback is SP3's job, not SP1** (avoid the hidden coupling).
+**TP distribution is UNCHANGED.** The TP component (`split.TP · F`) is distributed
+across gen0–gen10 via the EXISTING declining `models.GenerationPercentages` ladder
+(gen0 35.4% … gen10 0.2%, including the transacting user / buyer at gen0); only the
+*fraction of the fee that becomes the TP pool* changes per feature. `TP-per-USD = 1`.
+Route-and-continue on inactive/missing ancestors, global-pool fallback, idempotency —
+all as in §3, unchanged.
+
+**Implementation (SP3).** `services.splitFor(feature) FeeShares` returns the row;
+`ComputeSplit(feature, F)` produces the USD breakdown; `OnFeeSettled` credits buyer/
+upline/provider cashback (USD, MCGP at payout) for the non-zero components and
+distributes the TP pool. An unknown feature defaults to the `product_merchant` split
+(and logs). `FeeEvent` carries an optional `ProviderID` for the provider cashback
+(only `service_contact` uses it today).
+
+**Hook routing (which feature each live hook settles):**
+- **checkout (ConfirmReceipt)** → `product_merchant` on the **2% merchant platform fee**
+  (NOT the bundled system+gas). The buyer's stablecoin **gas is a separate 100%-system
+  fee** (`gas` split) and must NOT generate TP — it is intentionally not fed to the engine.
+- **service_contact** → `service_contact`, `FeeUSD=$0.10`, `UserID=requester`,
+  `ProviderID=` the service provider's user id (gets the 10% provider cashback).
+- **CreateSwap (internal asset-to-asset swap on platform books)** → `spot` (best fit:
+  not the LiFi `allswap` bridge, not the fiat `otc` desk; spot/otc/allswap/instant_pay
+  share the same 70/30 split so the split is identical regardless). Same mapping for the
+  wallet-handler swap branch.
+- **wallet withdrawal (SubmitTransaction)** → `withdrawal` (70/30). The accrual is **KEPT**;
+  it now earns TP.
+- **P2P release** (`ConfirmRelease` + reconciler auto-release + `adminResolve→buyer`) →
+  **accrual REMOVED.** The on-chain 0.5% P2P fee charged at release **IS the buyer gas**
+  (100% system, no TP). P2P's TP/cashback would come from a **separate 1% platform fee**
+  (`p2p_platform`, the carved split) that is **NOT collected on chain today**. So
+  `accrueP2PReleaseFee` is an explicit no-op; re-wire it under `p2p_platform` from its own
+  seam when the 1% platform fee lands.
+
+**Rate changes happen AT CUTOVER (admin, not in code).** SP1's seeded LIVE rates are kept
+behavior-preserving here so current charged fees do not change. The following are
+**cutover-time admin `fee_config` edits**, NOT code changes (changing them now would alter
+fees currently charged):
+- **OTC**: 0.5% → **2%**
+- **allswap / spot**: → **3%**
+- **product buyer gas**: → **0.5%** (the `gas` 100%-system fee)
+- (Forward-looking `spot`/`instant_pay`/`instant_transfer` rows are seeded as harmless
+  placeholders — no live flow computes a fee from them yet.)
+
+**Per-feature conservation invariant.** For any settled fee, `Σ(System + Buyer + Upline +
+Provider + TP credits, incl. global-pool routing) == FeeUSD` exactly (tested per feature).
+
+**SP1 — unified fee-rate config (rates ONLY).** Collapse the 5+ hardcoded rate sites (`cart.go`, `transaction_handler.go`, `service_contact_service.go`, on-chain P2P) into one `fee_config` table + service (feature × token, MCGP-exempt flag) + admin API. The **per-feature split accounting that writes TP/cashback is SP3's job, not SP1** (avoid the hidden coupling).
 
 ---
 
