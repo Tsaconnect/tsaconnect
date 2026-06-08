@@ -9,17 +9,27 @@ const ACCOUNTS = RAW_PK ? [RAW_PK.startsWith("0x") ? RAW_PK : "0x" + RAW_PK] : [
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.24",
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200,
+    compilers: [
+      {
+        version: "0.8.24",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+          // OpenZeppelin v5 deps (used by P2PEscrowPool) emit Cancun opcodes
+          // (mcopy/tstore). Sonic's EVM supports Cancun on both mainnet and
+          // testnet, so this is safe.
+          evmVersion: "cancun",
+        },
       },
-      // OpenZeppelin v5 deps (used by P2PEscrowPool) emit Cancun opcodes
-      // (mcopy/tstore). Sonic's EVM supports Cancun on both mainnet and
-      // testnet, so this is safe.
-      evmVersion: "cancun",
-    },
+    ],
+    // NOTE: P2PEscrowV3 previously needed a per-file `runs: 1` optimizer override to fit
+    // under the 24576-byte EIP-170 limit (it landed 12 bytes under). After converting its
+    // revert strings to custom errors (audit finding #3) the deployed bytecode dropped to
+    // ~23.2KB at the standard runs=200 profile (~1.3KB headroom), so the override was
+    // removed: V3 now shares the SAME optimizer profile as every other contract, which
+    // also eliminates the runs=1 runtime-gas penalty on every openTrade/release.
   },
   networks: {
     sonicTestnet: {
