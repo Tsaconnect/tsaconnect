@@ -96,6 +96,21 @@ type P2PChainConfig struct {
 	Assets        []string // e.g. ["MCGP"] on Sonic, ["USDT","USDC"] on BSC
 }
 
+// FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
+// FeeManager admin flow + drift reconciler resolve by chainID (design §3/§5/§10).
+// The FeeManager is the on-chain SOURCE OF TRUTH for every fee rate; the backend
+// builds unsigned setRate txs against Address and reads back rateFor to confirm.
+//
+// Address is EMPTY until a FeeManager is deployed to that chain — an empty
+// address keeps the whole flow DORMANT for that chain (Load omits it from
+// FeeManagerChains, the admin endpoints surface "not configured", and the drift
+// reconciler no-ops), exactly like the BSC P2P escrow dormant-by-default pattern.
+type FeeManagerChainConfig struct {
+	ChainID  int64
+	ChainKey string // blockchainService chain key: "sonic", "bsc"
+	Address  string // FeeManager proxy address on this chain
+}
+
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
 type ChainConfig struct {
 	Name           string
@@ -156,6 +171,15 @@ type Config struct {
 	// its escrow address is configured (dormant-by-default). Later refactors
 	// resolve escrow/domain/version by trade.ChainID from this map.
 	P2PChains map[int64]P2PChainConfig
+
+	// FeeManagerChains is the per-chain FeeManager registry keyed by chainID
+	// (configurable-FeeManager design §3/§5/§10), assembled in Load() from
+	// FEE_MANAGER_ADDRESS_SONIC / FEE_MANAGER_ADDRESS_BSC. A chain appears here
+	// ONLY when its FeeManager address is configured — UNSET keeps the admin
+	// set-fee flow + drift reconciler DORMANT for that chain (dormant-by-default,
+	// like the BSC P2P escrow). The admin endpoints stay 409-gated on
+	// FEE_MODEL_V2_ENABLED regardless of this map.
+	FeeManagerChains map[int64]FeeManagerChainConfig
 
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
@@ -348,6 +372,32 @@ func Load() *Config {
 	} else {
 		log.Printf("[config] P2P chains enabled: sonic(%d) only — BSC dormant (no escrow for BSC_NETWORK=%s)",
 			cfg.SonicChainID, bscNetwork)
+	}
+
+	// ── Per-chain FeeManager registry (configurable-FeeManager design §3) ──
+	// DORMANT-BY-DEFAULT: a chain is registered only when its FeeManager address
+	// is configured. Sonic uses the Sonic chainID active for this boot; BSC uses
+	// the BSC preset chainID. UNSET addresses keep the admin set-fee flow + drift
+	// reconciler dormant for that chain (the endpoints surface "not configured").
+	cfg.FeeManagerChains = map[int64]FeeManagerChainConfig{}
+	if fmSonic := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_SONIC", "")); fmSonic != "" {
+		cfg.FeeManagerChains[cfg.SonicChainID] = FeeManagerChainConfig{
+			ChainID:  cfg.SonicChainID,
+			ChainKey: "sonic",
+			Address:  fmSonic,
+		}
+	}
+	if fmBSC := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")); fmBSC != "" {
+		cfg.FeeManagerChains[bscPreset.chainID] = FeeManagerChainConfig{
+			ChainID:  bscPreset.chainID,
+			ChainKey: "bsc",
+			Address:  fmBSC,
+		}
+	}
+	if len(cfg.FeeManagerChains) == 0 {
+		log.Printf("[config] FeeManager dormant: no FEE_MANAGER_ADDRESS_* configured — admin set-fee flow + drift reconciler off")
+	} else {
+		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
 	}
 
 	// Mailjet email service

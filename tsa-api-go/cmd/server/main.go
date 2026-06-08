@@ -204,6 +204,35 @@ func main() {
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService, cfg)
+
+	// Configurable-FeeManager admin set-fee flow + drift reconciler (design
+	// §5/§10). DORMANT-BY-DEFAULT: a multi-chain FeeManager reader is built only
+	// over the configured FeeManagerChains that also have a reachable RPC client.
+	// With no FeeManager chain configured the reader is nil → the admin endpoints
+	// surface "not configured" and the reconciler no-ops (gated like other dormant
+	// integrations). The endpoints stay 409-gated on FEE_MODEL_V2_ENABLED too.
+	var feeManagerReader services.FeeManagerChainReader
+	if len(cfg.FeeManagerChains) > 0 {
+		rpcByChain := map[int64]services.FeeManagerRPCClient{}
+		for chainID := range cfg.FeeManagerChains {
+			client, _ := blockchainService.ClientForChainID(chainID)
+			if client != nil && client.Client != nil {
+				rpcByChain[chainID] = client.Client
+			}
+		}
+		feeManagerReader = services.NewMultiChainFeeManagerReaderFromClients(rpcByChain)
+	}
+	feeRateIntentService := services.NewFeeRateIntentService(config.DB, cfg, feeManagerReader)
+	fah := handlers.NewFeeAdminHandler(cfg, feeRateIntentService, feeConfigService, feeManagerReader)
+	if len(cfg.FeeManagerChains) > 0 && feeManagerReader != nil {
+		// Hourly fee-rate drift reconciler (design §10): FeeManager (truth) vs the
+		// fee_config replica; refresh-on-drift (chain wins) + alert; keep
+		// last-known-good on RPC failure. No escrow-getter (A1) — only FeeManager↔replica.
+		scheduler.Register(jobs.NewFeeManagerReconciler(feeConfigService, cfg, feeManagerReader, time.Hour))
+		log.Printf("[fee-manager] drift reconciler registered (interval=1h, chains=%d)", len(cfg.FeeManagerChains))
+	} else {
+		log.Printf("[fee-manager] dormant: no FeeManager chain configured with a reachable RPC — admin set-fee flow + drift reconciler off")
+	}
 	// BLOCKER 3 — runnable fee/TP v2 cutover reset. Super-admin-gated route
 	// (RequireP2PAdmin) + confirm-phrase guard. Run BEFORE the FEE_MODEL_V2_ENABLED
 	// flip per the runbook in fee_distribution_reset.go.
@@ -417,7 +446,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, ftch)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, ftch, fah)
 
 	// Configure HTTP server
 	port := cfg.Port
