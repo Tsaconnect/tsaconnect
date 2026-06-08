@@ -13,9 +13,33 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
+
+// cartQuoteToken is the representative non-MCGP settlement token used to quote a
+// cart before the buyer picks the order token at checkout. The merchant/gas
+// fee_config rows are token-wildcard, so any non-MCGP token resolves the same
+// rate; only MCGP is exempt (and MCGP is never the cart-quote token).
+const cartQuoteToken = "USDC"
+
+// cartFeeLookups binds the fee-config service reads into the models package so
+// the cart QUOTE reads the EXACT rate the on-chain CHARGE reads (design §6,
+// B5/I8). The merchant component uses services.FeeRate(FeatureProductMerchant,
+// …) — the same call CalculatePlatformFee makes; the gas component uses
+// services.FeeFlatUSD(FeatureProduct, …) — the same call PrepareApprove makes.
+// Both pass nil chainID (documented-global, Sonic-only product flow, design §6).
+func cartFeeLookups() *models.CartFeeLookups {
+	return &models.CartFeeLookups{
+		MerchantBPS: func(token string) (int, bool) {
+			return services.FeeRate(models.FeatureProductMerchant, token, nil)
+		},
+		GasFlatUSD: func(token string) (float64, bool) {
+			return services.FeeFlatUSD(models.FeatureProduct, token, nil)
+		},
+	}
+}
 
 // getActiveCart retrieves the active cart for a user, or returns nil.
 func getActiveCart(userID uuid.UUID) (*models.Cart, error) {
@@ -32,7 +56,7 @@ func recalcAndSave(cart *models.Cart) error {
 	coupon := cart.GetAppliedCoupon()
 	currentSummary := cart.GetSummary()
 
-	summary := models.CalculateCartSummary(items, coupon, currentSummary.Shipping)
+	summary := models.CalculateCartSummary(items, coupon, currentSummary.Shipping, cartQuoteToken, cartFeeLookups())
 	cart.SetSummary(summary)
 
 	now := time.Now()
@@ -843,7 +867,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
 		"summary":         cart.GetSummary(),
-		"feeConfig":       models.GetFeeConfig(),
+		"feeConfig":       models.GetFeeConfig(cartFeeLookups()),
 		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
 		"billingAddress":  cart.BillingAddress,

@@ -40,6 +40,7 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"","type":"bytes32"}],"name":"voucherFilled","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"","type":"bytes32"}],"name":"voucherCancelled","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"tradeId","type":"bytes32"}],"name":"getTrade","outputs":[{"name":"seller","type":"address"},{"name":"buyer","type":"address"},{"name":"token","type":"address"},{"name":"amount","type":"uint256"},{"name":"createdAt","type":"uint256"},{"name":"status","type":"uint8"},{"name":"funding","type":"uint8"},{"name":"feeBps","type":"uint16"},{"name":"autoReleaseAt","type":"uint256"},{"name":"voucherHash","type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"","type":"bytes32"}],"name":"trades","outputs":[{"name":"seller","type":"address"},{"name":"buyer","type":"address"},{"name":"token","type":"address"},{"name":"amount","type":"uint96"},{"name":"createdAt","type":"uint40"},{"name":"autoReleaseAt","type":"uint40"},{"name":"status","type":"uint8"},{"name":"funding","type":"uint8"},{"name":"feeBps","type":"uint16"},{"name":"platformFeeBpsSnapshot","type":"uint16"},{"name":"gasFeeBpsSnapshot","type":"uint16"},{"name":"voucherHash","type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
@@ -535,6 +536,46 @@ func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
 	}
 	t.Exists = t.Status != OnChainP2PStatusNone
 	return t, nil
+}
+
+// ReadTradePlatformFeeBps reads the trade's SNAPSHOTTED platform-fee bps from the
+// V3 escrow's public `trades(bytes32)` mapping getter (design §8 / §7.1). V3
+// snapshots platformFeeBps at openTrade; getTrade still returns only the legacy
+// feeBps for ABI back-compat, so the snapshot is read here from the struct getter.
+//
+// Returns 0 when:
+//   - the escrow PREDATES V3 (the `trades` getter has the old field layout and
+//     the decode returns no snapshot slot), OR
+//   - the trade was opened by V2 (snapshot bytes are zero).
+//
+// A 0 result is the documented "no platform accrual" signal: accrueP2PReleaseFee
+// stays a no-op until V3 is deployed and a trade carries a non-zero snapshot.
+// found=false means the read failed (RPC/decode) — the caller treats it as 0.
+func (s *P2PEscrowService) ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool) {
+	if err := s.requireConfigured(); err != nil {
+		return 0, false
+	}
+	data, err := parsedP2PEscrowABI.Pack("trades", tradeId)
+	if err != nil {
+		return 0, false
+	}
+	out, err := s.callContract(data)
+	if err != nil {
+		return 0, false
+	}
+	vals, err := parsedP2PEscrowABI.Unpack("trades", out)
+	if err != nil || len(vals) != 12 {
+		// Pre-V3 escrow: the trades getter returns a different arity → no snapshot.
+		return 0, false
+	}
+	// V3 struct getter order: seller, buyer, token, amount, createdAt,
+	// autoReleaseAt, status, funding, feeBps, platformFeeBpsSnapshot,
+	// gasFeeBpsSnapshot, voucherHash. Index 9 is the platform snapshot.
+	bps, ok := vals[9].(uint16)
+	if !ok {
+		return 0, false
+	}
+	return bps, true
 }
 
 // HashVoucher delegates to the contract's `hashVoucher` view to compute the

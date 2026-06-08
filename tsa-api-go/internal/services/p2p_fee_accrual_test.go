@@ -14,17 +14,16 @@ import (
 
 // ─── P2P ↔ fee/TP v2 integration tests ──────────────────────────────────────
 //
-// COMPLETE per-feature split model (design §2, final PM clarification): the
-// on-chain 0.5% P2P fee charged at release IS the BUYER GAS — 100% system, NO TP
-// and NO cashback. P2P's TP/cashback is meant to come from a SEPARATE 1% PLATFORM
-// fee (FeatureP2PPlatform) that is NOT collected today. So accrueP2PReleaseFee is
-// now an explicit NO-OP and NO P2P release transition accrues anything — even
-// with the v2 flag ON, a wired engine, and a positive on-chain fee.
+// P2P 1% PLATFORM accrual from the V3 snapshot (design §8, B7). The on-chain GAS
+// fee charged at release is buyer gas (100% system, NO TP/cashback) and is NOT
+// accrued. P2P's TP/cashback comes from the SEPARATE 1% PLATFORM fee that
+// P2PEscrowV3 SNAPSHOTS into the trade (platformFeeBpsSnapshot). accrueP2PReleaseFee
+// reads that snapshot and settles it under FeatureP2PPlatform for the buyer.
 //
-// These tests lock that contract: ConfirmRelease, the reconciler auto-release
-// path, and admin-resolve-to-buyer all settle ZERO into the engine (no guard row,
-// no TP, no cashback), across both flag states. They are the regression guard for
-// the day the 1% platform fee lands and re-wires P2P TP under FeatureP2PPlatform.
+// Until V3 is deployed the snapshot is 0 (pre-V3 escrow / V2-opened trade), so
+// accrueP2PReleaseFee is a documented NO-OP — these "no accrual" cases lock that
+// safe-to-merge behavior. The non-zero-snapshot case proves the accrual fires
+// the moment V3 lands; idempotency + the flag-off no-op are also locked.
 
 // setupP2PFeeDB builds an in-memory SQLite DB carrying BOTH the P2P trade tables
 // AND the fee-distribution tables, on a single pinned connection (an in-memory
@@ -237,10 +236,12 @@ func waitForGuard(t *testing.T, db *gorm.DB, tradeID uuid.UUID, want int64) int6
 	return n
 }
 
-// (a) ConfirmRelease (v2 flag ON, positive on-chain fee) accrues NOTHING under
+// (a) ConfirmRelease (v2 flag ON, positive on-chain GAS fee) accrues NOTHING
 //
-//	the per-feature split model: the P2P fee is buyer gas (100% system, no TP),
-//	and the carved P2P TP would come from a 1% platform fee not collected today.
+//	when the platform-fee SNAPSHOT is 0 (pre-V3 / V2-opened trade — the default
+//	mock). The gas fee is buyer gas (system-only) and is not accrued; the platform
+//	leg is gated on a non-zero V3 snapshot. This is the safe-to-merge-before-V3
+//	contract.
 func TestP2PFee_ConfirmRelease_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db, true)
@@ -392,5 +393,123 @@ func TestP2PFee_FlagOff_NoAccrualOnAnyPath(t *testing.T) {
 	db.First(&b, "id = ?", buyer.ID)
 	if b.TPBalance != 0 || b.CashbackBalance != 0 {
 		t.Fatalf("flag OFF must not credit TP/cashback; got tp=%v cb=%v", b.TPBalance, b.CashbackBalance)
+	}
+}
+
+// (e) With a NON-ZERO V3 platform snapshot, ConfirmRelease accrues the 1%
+//
+//	platform fee under FeatureP2PPlatform (the carved split → buyer/upline
+//	cashback + TP), keyed (p2p_release, trade.ID). Idempotent: a direct second
+//	accrueP2PReleaseFee call is a guard no-op.
+func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
+	db := setupP2PFeeDB(t)
+	svc, esc, _ := newP2PFeeService(t, db, true)
+	// V3 escrow reports a 100-bps (1%) platform snapshot for the trade.
+	esc.platformFeeBpsSnapshot = 100
+
+	upline := mkP2PUser(t, db, "psupline", nil)
+	buyer := mkP2PUser(t, db, "psbuyer", &upline.ID) // buyer = gen0, upline = gen1
+	seller := mkP2PUser(t, db, "psseller", nil)
+	adID := seedAd(t, db, seller.ID, "0", "1000000")
+	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000") // 1.0 USDT (6 dp)
+
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	gasFee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
+	toBuyer := new(big.Int).Sub(tokenAmt, gasFee)
+	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID), AmountToBuyer: toBuyer, FeeToSystem: gasFee}
+
+	if _, err := svc.ConfirmRelease(context.Background(), trade.ID, seller.ID, "0xrel"); err != nil {
+		t.Fatalf("ConfirmRelease: %v", err)
+	}
+
+	// Platform fee = 1% of 1.0 USDT = $0.01 → exactly one guard row.
+	if got := waitForGuard(t, db, trade.ID, 1); got != 1 {
+		t.Fatalf("want 1 p2p_release guard row, got %d", got)
+	}
+	var fd models.FeeDistribution
+	if err := db.Where("source_type = ? AND source_id = ?", "p2p_release", trade.ID).First(&fd).Error; err != nil {
+		t.Fatalf("load guard: %v", err)
+	}
+	if fd.Feature != models.FeatureP2PPlatform {
+		t.Errorf("feature=%q want p2p_platform", fd.Feature)
+	}
+	// 1% of $1.00 = $0.01.
+	if fd.FeeUSD < 0.00999 || fd.FeeUSD > 0.01001 {
+		t.Errorf("platform feeUSD=%v want 0.01", fd.FeeUSD)
+	}
+	// Carved split credits buyer cashback (15% of $0.01) — proves it is NOT the
+	// gas (system-only) feature.
+	if fd.BuyerCashbackUSD <= 0 {
+		t.Errorf("carved p2p_platform split must credit buyer cashback; got %v", fd.BuyerCashbackUSD)
+	}
+
+	// Idempotency: fire the seam directly again — guard no-op, still one row.
+	var rel models.P2PTrade
+	db.First(&rel, "id = ?", trade.ID)
+	svc.accrueP2PReleaseFee(&rel, gasFee)
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, trade.ID); got != 1 {
+		t.Fatalf("idempotency broken: want 1 guard row, got %d", got)
+	}
+}
+
+// (f) The reconciler auto-release path with a non-zero snapshot accrues once,
+//
+//	and the chain reconciler must NOT re-accrue (idempotent on (p2p_release,
+//	trade.ID)).
+func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
+	db := setupP2PFeeDB(t)
+	svc, esc, _ := newP2PFeeService(t, db, true)
+	esc.platformFeeBpsSnapshot = 100 // 1% V3 snapshot
+
+	buyer := mkP2PUser(t, db, "rcpsbuyer", nil)
+	seller := mkP2PUser(t, db, "rcpsseller", nil)
+	adID := seedAd(t, db, seller.ID, "0", "1000000")
+	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	esc.onChainTrade = &OnChainP2PTrade{
+		Amount: tokenAmt, FeeBps: 50, Funding: models.P2PTradeFundingPooled,
+		Status: OnChainP2PStatusReleased, Exists: true,
+	}
+
+	// First reconcile drives the release → accrues the platform fee once.
+	if _, err := svc.ReconcileTrade(context.Background(), trade.ID); err != nil {
+		t.Fatalf("ReconcileTrade: %v", err)
+	}
+	if got := waitForGuard(t, db, trade.ID, 1); got != 1 {
+		t.Fatalf("want 1 guard row after reconcile, got %d", got)
+	}
+
+	// A second reconcile pass (trade now terminal) must NOT re-accrue.
+	_, _ = svc.ReconcileTrade(context.Background(), trade.ID)
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, trade.ID); got != 1 {
+		t.Fatalf("reconciler re-accrued: want 1 guard row, got %d", got)
+	}
+}
+
+// (g) flag OFF with a non-zero snapshot is STILL a no-op (byte-for-byte legacy).
+func TestP2PFee_PlatformSnapshot_FlagOff_NoAccrual(t *testing.T) {
+	db := setupP2PFeeDB(t)
+	svc, esc, _ := newP2PFeeService(t, db, false) // flag OFF
+	esc.platformFeeBpsSnapshot = 100              // snapshot present but flag off
+
+	buyer := mkP2PUser(t, db, "psoffbuyer", nil)
+	seller := mkP2PUser(t, db, "psoffseller", nil)
+	adID := seedAd(t, db, seller.ID, "0", "1000000")
+	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	gasFee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
+	toBuyer := new(big.Int).Sub(tokenAmt, gasFee)
+	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID), AmountToBuyer: toBuyer, FeeToSystem: gasFee}
+
+	if _, err := svc.ConfirmRelease(context.Background(), trade.ID, seller.ID, "0xrel"); err != nil {
+		t.Fatalf("ConfirmRelease: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := guardRows(t, db, trade.ID); got != 0 {
+		t.Fatalf("flag OFF must accrue nothing even with a snapshot; got %d guard rows", got)
 	}
 }

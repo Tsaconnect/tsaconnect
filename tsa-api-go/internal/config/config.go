@@ -206,6 +206,19 @@ type Config struct {
 	LiFiIntegratorID   string
 	LiFiIntegratorFee  string
 
+	// AllSwap server-verified settle (design §8, I8). The backend re-queries LiFi
+	// to recompute the integrator fee, then rejects a client-supplied fee that
+	// deviates by more than AllSwapFeeDeviationMax (fraction, default 0.10 = 10%).
+	// When LiFi is unreachable it does NOT trust the client or charge 0: it
+	// charges AllSwapConservativeFeeBps of the from-amount (default 350 = 3.5% vs
+	// the nominal 3%) and emits a warning metric.
+	AllSwapFeeDeviationMax  float64
+	AllSwapConservativeFeeBps int
+	// AllSwapNominalFeeBps is the integrator fee the backend recomputes when LiFi
+	// is reachable but the response carries no usable fee figure (default 300 =
+	// 3%). It is the verified-fee basis, never the client value.
+	AllSwapNominalFeeBps int
+
 	// Open Exchange Rates configuration
 	OpenExchangeRatesAppID string
 	SupportedCurrencies     []string
@@ -420,6 +433,11 @@ func Load() *Config {
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
+
+	// AllSwap server-verified settle thresholds (design §8, I8).
+	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
+	cfg.AllSwapConservativeFeeBps = int(getEnvFloat64("ALLSWAP_CONSERVATIVE_FEE_BPS", 350))
+	cfg.AllSwapNominalFeeBps = int(getEnvFloat64("ALLSWAP_NOMINAL_FEE_BPS", 300))
 
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
 	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")
@@ -649,6 +667,34 @@ func (c *Config) IsFeeModelV2Enabled() bool {
 		return false
 	}
 	return c.FeeModelV2Enabled
+}
+
+// AllSwapFeeDeviationMaxOrDefault returns the configured max client-fee
+// deviation (fraction), defaulting to 0.10 (10%) when unset/invalid.
+func (c *Config) AllSwapFeeDeviationMaxOrDefault() float64 {
+	if c == nil || c.AllSwapFeeDeviationMax <= 0 {
+		return 0.10
+	}
+	return c.AllSwapFeeDeviationMax
+}
+
+// AllSwapConservativeFeeBpsOrDefault returns the conservative fee bps charged
+// when LiFi is unreachable (never 0, never the client value), default 350 (3.5%).
+func (c *Config) AllSwapConservativeFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapConservativeFeeBps <= 0 {
+		return 350
+	}
+	return c.AllSwapConservativeFeeBps
+}
+
+// AllSwapNominalFeeBpsOrDefault returns the nominal integrator fee bps used as
+// the verified-fee basis when LiFi is reachable but reports no usable fee figure,
+// default 300 (3%).
+func (c *Config) AllSwapNominalFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapNominalFeeBps <= 0 {
+		return 300
+	}
+	return c.AllSwapNominalFeeBps
 }
 
 // TPPerUSDOrDefault returns the configured TP minting rate, falling back to 1.0

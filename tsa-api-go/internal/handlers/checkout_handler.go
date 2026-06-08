@@ -173,9 +173,10 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 // MCGP) read from the unified fee-config service. This fee is baked into the
 // listing price — the merchant pays it, not the buyer.
 //
-// The rate comes from the product_merchant fee_config row (seeded to
-// models.MerchantFeeBPS, MCGP-exempt). MCGP resolves to bps=0/exempt, which
-// produces the same zero fee as the previous explicit MCGP branch.
+// The rate comes from the product_merchant fee_config row (seeded to 200 bps,
+// MCGP-exempt). MCGP resolves to bps=0/exempt, which produces the same zero fee
+// as the previous explicit MCGP branch. This is the SAME read the cart quote
+// (CalculateCartSummary's MerchantFee) makes, so quote == charge (design §6).
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
 	// Product settlement is Sonic-only with no per-call chain context here, so
 	// this reads the documented-GLOBAL (chainID nil) product_merchant row —
@@ -616,9 +617,10 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
 
 	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee.
-	// The flat gas fee comes from the product fee_config row (seeded to
-	// models.GasFeeUSD, MCGP-exempt). MCGP resolves to flat=0, preserving the
-	// previous behavior where MCGP orders added no gas fee.
+	// The flat gas fee comes from the product fee_config row (seeded to $0.10,
+	// MCGP-exempt). MCGP resolves to flat=0, preserving the previous behavior
+	// where MCGP orders added no gas fee. This is the SAME read the cart quote
+	// (CalculateCartSummary's GasFee) makes, so quote == charge (design §6).
 	approveAmount := new(big.Int).Set(totalAmount)
 	if strings.ToUpper(order.Token) != "MCGP" {
 		// Documented-GLOBAL (chainID nil), Sonic-only product flow (§6).

@@ -269,7 +269,7 @@ func TestFlagOffUnaffected(t *testing.T) {
 		token   string
 		wantBPS int
 	}{
-		{models.FeatureProductMerchant, "USDC", models.MerchantFeeBPS},
+		{models.FeatureProductMerchant, "USDC", 200},
 		{models.FeatureWithdrawal, "BTC", 50},
 		{models.FeatureSwap, "ETH", 10},
 		{models.FeatureP2P, "USDT", 50},

@@ -90,9 +90,9 @@ func TestRateForSeededValues(t *testing.T) {
 		wantFlat  float64
 		wantFound bool
 	}{
-		{models.FeatureProductMerchant, "USDC", models.MerchantFeeBPS, 0, true}, // 200 bps = 2%
+		{models.FeatureProductMerchant, "USDC", 200, 0, true}, // 200 bps = 2%
 		{models.FeatureProductMerchant, "USDT", 200, 0, true},
-		{models.FeatureProduct, "USDC", 0, models.GasFeeUSD, true}, // 0% + $0.10 flat
+		{models.FeatureProduct, "USDC", 0, 0.10, true}, // 0% + $0.10 flat
 		{models.FeatureServiceContact, "USDC", 0, 0.10, true},      // $0.10 flat
 		{models.FeatureWithdrawal, "BTC", 50, 0, true},             // 0.5%
 		{models.FeatureSwap, "ETH", 10, 0, true},                   // 0.1%
@@ -237,7 +237,7 @@ func TestBehaviorPreservation_ProductMerchantFee(t *testing.T) {
 		if c.token == "MCGP" {
 			want = big.NewInt(0)
 		} else {
-			want = new(big.Int).Mul(c.amount, big.NewInt(int64(models.MerchantFeeBPS)))
+			want = new(big.Int).Mul(c.amount, big.NewInt(200)) // 200 bps = 2%
 			want.Div(want, big.NewInt(10000))
 		}
 		got := productMerchantFee(svc, c.amount, c.token)
@@ -284,13 +284,13 @@ func TestBehaviorPreservation_ServiceContactFlat(t *testing.T) {
 func TestBehaviorPreservation_ProductGasFee(t *testing.T) {
 	svc, _ := newSeededService(t)
 
-	// Non-MCGP: flat == GasFeeUSD ($0.10); 6dp wei == 100000.
+	// Non-MCGP: flat == $0.10; 6dp wei == 100000.
 	_, flat, _, _ := svc.RateFor(models.FeatureProduct, "USDC", nil)
-	if flat != models.GasFeeUSD {
-		t.Errorf("product gas flat=%v, want %v", flat, models.GasFeeUSD)
+	if flat != 0.10 {
+		t.Errorf("product gas flat=%v, want 0.10", flat)
 	}
 	gotWei := int64(math.Round(flat * 1e6))
-	wantWei := int64(math.Round(models.GasFeeUSD * 1e6))
+	wantWei := int64(100000)
 	if gotWei != wantWei {
 		t.Errorf("product gas wei=%d, want %d", gotWei, wantWei)
 	}
@@ -302,19 +302,14 @@ func TestBehaviorPreservation_ProductGasFee(t *testing.T) {
 	}
 }
 
-// TestSeedMatchesCartConstants is the guard the cart.go SP1 notes rely on.
-//
-// models.CalculateCartSummary (the buyer-facing quote) and models.GetFeeConfig
-// (the displayed fee schedule) still read the hardcoded constants because the
-// models package cannot import services (import cycle). The actual on-chain
-// CHARGE reads the fee_config service. Those two sources agree ONLY while the
-// seed equals the constants. This test fails loudly if anyone changes one
-// without the other — turning the silent quote-vs-charge divergence finding #2
-// names into a build break instead of a production money bug.
-//
-// (Note: an admin editing a row at runtime still creates divergence — that is
-// the documented FOLLOW-UP in cart.go, out of scope for SP1's behavior-
-// preserving refactor. This guard only covers the source-of-truth seed.)
+// TestSeedMatchesCartConstants is the source-of-truth guard for the migrated
+// product fees. After the §6 cart-quote fix, models.CalculateCartSummary (the
+// buyer quote) and models.GetFeeConfig (the displayed schedule) BOTH read the
+// fee-config service via injected lookups — the same rows the on-chain CHARGE
+// reads — so quote == charge by construction. This test pins the seeded
+// product/product_merchant rows to the expected production values; the dedicated
+// quote==charge regression (TestCartQuoteEqualsCharge) proves the cart math
+// matches these reads.
 func TestSeedMatchesCartConstants(t *testing.T) {
 	svc, _ := newSeededService(t)
 
@@ -323,20 +318,19 @@ func TestSeedMatchesCartConstants(t *testing.T) {
 		t.Errorf("product bps=%d, want 0 (cart buyer PlatformFee is 0)", bps)
 	}
 
-	// Per-order flat gas fee — CalculateCartSummary uses models.GasFeeUSD and
-	// GetFeeConfig reports it as gasFeeUSD.
-	if flat, _ := FeeFlatUSD(models.FeatureProduct, "USDC", nil); flat != models.GasFeeUSD {
-		t.Errorf("product flat=%v, want GasFeeUSD=%v", flat, models.GasFeeUSD)
+	// Per-order flat gas fee — the cart GasFee + PrepareApprove both read this.
+	if flat, _ := FeeFlatUSD(models.FeatureProduct, "USDC", nil); flat != 0.10 {
+		t.Errorf("product flat=%v, want 0.10", flat)
 	}
 
-	// Merchant fee — GetFeeConfig reports merchantFeeBPS = models.MerchantFeeBPS.
-	if bps, _ := FeeRate(models.FeatureProductMerchant, "USDC", nil); bps != models.MerchantFeeBPS {
-		t.Errorf("product_merchant bps=%d, want MerchantFeeBPS=%d", bps, models.MerchantFeeBPS)
+	// Merchant fee — the cart MerchantFee + CalculatePlatformFee both read this.
+	if bps, _ := FeeRate(models.FeatureProductMerchant, "USDC", nil); bps != 200 {
+		t.Errorf("product_merchant bps=%d, want 200", bps)
 	}
 
-	// MCGP merchant fee — GetFeeConfig reports mcgpMerchantFeeBPS = 0; the
-	// product_merchant row is MCGP-exempt, so MCGP resolves to bps=0/exempt.
-	if bps, exempt := FeeRate(models.FeatureProductMerchant, "MCGP", nil); bps != models.MCGPMerchantFeeBPS || !exempt {
-		t.Errorf("MCGP product_merchant bps=%d exempt=%v, want %d/true", bps, exempt, models.MCGPMerchantFeeBPS)
+	// MCGP merchant fee — the product_merchant row is MCGP-exempt, so MCGP
+	// resolves to bps=0/exempt (cart MerchantFee → $0 for MCGP).
+	if bps, exempt := FeeRate(models.FeatureProductMerchant, "MCGP", nil); bps != 0 || !exempt {
+		t.Errorf("MCGP product_merchant bps=%d exempt=%v, want 0/true", bps, exempt)
 	}
 }
