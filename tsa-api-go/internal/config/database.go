@@ -23,6 +23,15 @@ func ConnectDB(cfg *Config) (*gorm.DB, error) {
 }
 
 func AutoMigrate() error {
+	// fee_configs gained a nullable chain_id column and the unique index moved
+	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
+	// chain-specific override can coexist with the NULL global row
+	// (configurable-FeeManager design §4). AutoMigrate adds the new column +
+	// index but never drops the obsolete one, and the old 2-col UNIQUE would
+	// reject the new per-chain rows — so drop it explicitly first. Existing rows
+	// keep chain_id = NULL (the legacy global), so this is a safe backfill.
+	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token")
+
 	if err := DB.AutoMigrate(
 		&models.User{},
 		&models.Asset{},
@@ -35,6 +44,7 @@ func AutoMigrate() error {
 		&models.WalletTransaction{},
 		&models.SupportedToken{},
 		&models.FeeConfig{},
+		&models.FeeRateIntent{},
 		&models.VerificationLog{},
 		&models.Order{},
 		&models.Deposit{},

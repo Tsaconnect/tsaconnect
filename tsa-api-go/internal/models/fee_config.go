@@ -52,9 +52,16 @@ const FeeTokenAny = "*"
 // fee-exempt. The service applies this by returning exempt=true (and zero
 // rates) whenever the looked-up token is MCGP and the matching row is flagged.
 type FeeConfig struct {
-	ID            uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Feature       string    `gorm:"size:32;not null;uniqueIndex:idx_fee_config_feature_token" json:"feature"`
-	TokenSymbol   string    `gorm:"size:16;not null;uniqueIndex:idx_fee_config_feature_token" json:"tokenSymbol"`
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Feature     string    `gorm:"size:32;not null;uniqueIndex:idx_fee_config_feature_token_chain" json:"feature"`
+	TokenSymbol string    `gorm:"size:16;not null;uniqueIndex:idx_fee_config_feature_token_chain" json:"tokenSymbol"`
+	// ChainID scopes the row to a single chain. NULL = the legacy GLOBAL row:
+	// the default for a (feature, token) used when no chain-specific row exists,
+	// and the only row backend-charged fees (which don't yet thread chain) ever
+	// read. A non-NULL ChainID is that chain's override of the global default.
+	// (Configurable-FeeManager design §4: fee_config is the READ REPLICA of the
+	// confirmed on-chain rates; the chain dimension mirrors the FeeManager keys.)
+	ChainID       *int64    `gorm:"uniqueIndex:idx_fee_config_feature_token_chain" json:"chainId,omitempty"`
 	BPS           int       `gorm:"not null;default:0" json:"bps"`
 	FlatAmountUSD float64   `gorm:"not null;default:0" json:"flatAmountUsd"`
 	MCGPExempt    bool      `gorm:"not null;default:false" json:"mcgpExempt"`

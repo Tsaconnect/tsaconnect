@@ -28,10 +28,13 @@ func setupFeeConfigHandlerDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	// chain_id mirrors the configurable-FeeManager design §4 migration (nullable;
+	// NULL = legacy global row).
 	if err := db.Exec(`CREATE TABLE fee_configs (
 		id TEXT PRIMARY KEY,
 		feature TEXT NOT NULL,
 		token_symbol TEXT NOT NULL,
+		chain_id INTEGER,
 		bps INTEGER NOT NULL DEFAULT 0,
 		flat_amount_usd REAL NOT NULL DEFAULT 0,
 		mcgp_exempt INTEGER NOT NULL DEFAULT 0,
