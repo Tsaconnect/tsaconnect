@@ -202,6 +202,10 @@ func main() {
 	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
+	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
+	// the verified integrator fee, flag-gated on FEE_MODEL_V2_ENABLED.
+	slh.Config = cfg
+	slh.FeeService = feeDistributionService
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService, cfg)
 

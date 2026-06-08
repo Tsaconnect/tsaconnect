@@ -78,11 +78,11 @@ type feeDefault struct {
 // DefaultFeeConfigs returns the canonical seed set. Each value is pinned to the
 // current production behavior so seeding an empty table changes no fee math:
 //
-//   - product_merchant: models.MerchantFeeBPS (200 = 2%), MCGP-exempt
-//     (CalculatePlatformFee returns 0 for MCGP today).
+//   - product_merchant: 200 bps (2%), MCGP-exempt (CalculatePlatformFee returns
+//     0 for MCGP today). This is the merchant rate the cart quote AND the
+//     on-chain charge both resolve through this service (design §6).
 //   - product: buyer pays 0% platform fee today (CartSummary.PlatformFee = 0);
-//     a flat per-order gas fee of models.GasFeeUSD ($0.10) applies for non-MCGP
-//     orders, MCGP-exempt.
+//     a flat per-order gas fee of $0.10 applies for non-MCGP orders, MCGP-exempt.
 //   - service_contact: $0.10 flat (on-chain feeAmount = 100000 @ 6dp); MCGP
 //     unsupported by the contract today, so it is left exempt.
 //   - withdrawal: 0.5% platform fee (transaction_handler.calculateWithdrawalFees).
@@ -93,11 +93,15 @@ type feeDefault struct {
 //     rows are informational/forward-looking and do not affect current behavior.
 func DefaultFeeConfigs() []models.FeeConfig {
 	defs := []feeDefault{
-		// Product merchant fee — 2% baked into listing price, MCGP exempt.
-		{Feature: models.FeatureProductMerchant, TokenSymbol: models.FeeTokenAny, BPS: models.MerchantFeeBPS, MCGPExempt: true},
+		// Product merchant fee — 2% (200 bps) baked into listing price, MCGP exempt.
+		// This is the single source of truth for the merchant rate; the cart quote
+		// (CalculateCartSummary) and the on-chain charge (CalculatePlatformFee) both
+		// resolve it here, so quote == charge (design §6).
+		{Feature: models.FeatureProductMerchant, TokenSymbol: models.FeeTokenAny, BPS: 200, MCGPExempt: true},
 		// Buyer product platform fee — 0% today, plus a flat $0.10 gas fee per
-		// order for non-MCGP. The flat component is MCGP-exempt.
-		{Feature: models.FeatureProduct, TokenSymbol: models.FeeTokenAny, BPS: 0, FlatUSD: models.GasFeeUSD, MCGPExempt: true},
+		// order for non-MCGP. The flat component is MCGP-exempt. The cart quote and
+		// the PrepareApprove charge both read this flat (design §6).
+		{Feature: models.FeatureProduct, TokenSymbol: models.FeeTokenAny, BPS: 0, FlatUSD: 0.10, MCGPExempt: true},
 		// Service contact reveal — $0.10 flat. MCGP unsupported by the contract.
 		{Feature: models.FeatureServiceContact, TokenSymbol: models.FeeTokenAny, FlatUSD: 0.10, MCGPExempt: true},
 		// Withdrawal — 0.5% platform fee.

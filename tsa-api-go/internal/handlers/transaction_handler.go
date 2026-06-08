@@ -15,6 +15,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/gorm"
 )
 
 // GetTransactions returns paginated, filtered transactions.
@@ -395,19 +396,70 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	})
 	tx.Fees = feesJSON
 
-	if err := config.DB.Create(&tx).Error; err != nil {
+	newBalance := asset.Balance - totalDeduction
+	newUSDValue := newBalance * price
+
+	// Fee-v2 accrual (design §8, B5/I7): the 0.5% platform fee is recorded as a
+	// FeeEvent IN THE SAME DB TRANSACTION as the tx-create + balance deduction, so
+	// the fee can NEVER be deducted without the accrual being recorded (no
+	// treasury leak). SourceType "withdrawal" + SourceID tx.ID is distinct from
+	// any on-chain send path (wallet_handler uses its own source), so a withdrawal
+	// touching both never double-settles. The whole accrual is gated on
+	// IsFeeModelV2Enabled — flag OFF → byte-for-byte legacy (no FeeEvent written).
+	platformFeeUSD := platformFee * price
+	feeEvent := services.FeeEvent{
+		Feature:    models.FeatureWithdrawal,
+		Token:      body.AssetSymbol,
+		FeeUSD:     platformFeeUSD,
+		UserID:     user.ID,
+		SourceType: "withdrawal",
+		SourceID:   tx.ID,
+	}
+
+	// Resolve uplines OUTSIDE the write tx (the recursive-CTE read must not
+	// contend with the write tx on a single-connection pool). Only on the v2
+	// path; nil/empty on the flag-off path keeps the legacy behavior untouched.
+	var byGen map[int]services.Ancestor
+	feeV2 := h.Config != nil && h.Config.IsFeeModelV2Enabled() && h.FeeService != nil && platformFeeUSD > 0
+	if feeV2 {
+		var err error
+		byGen, err = h.FeeService.ResolveUplines(c.Request.Context(), user.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to resolve fee distribution"})
+			return
+		}
+	}
+	recipients := make(map[uuid.UUID]struct{})
+
+	if err := config.DB.Transaction(func(dbtx *gorm.DB) error {
+		if err := dbtx.Create(&tx).Error; err != nil {
+			return fmt.Errorf("create withdrawal: %w", err)
+		}
+		if err := dbtx.Model(&asset).Updates(map[string]interface{}{
+			"balance":    newBalance,
+			"usd_value":  newUSDValue,
+			"updated_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("deduct balance: %w", err)
+		}
+		// In-tx accrual: a settlement failure here rolls back the deduction.
+		if feeV2 {
+			if err := feeAccrualInTx(c.Request.Context(), h.FeeService, h.Config, dbtx, feeEvent, byGen, recipients); err != nil {
+				return fmt.Errorf("accrue withdrawal fee: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Printf("Withdrawal tx failed for user %s: %v", user.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create withdrawal"})
 		return
 	}
 
-	// Update asset balance
-	newBalance := asset.Balance - totalDeduction
-	newUSDValue := newBalance * price
-	config.DB.Model(&asset).Updates(map[string]interface{}{
-		"balance":    newBalance,
-		"usd_value":  newUSDValue,
-		"updated_at": now,
-	})
+	// Distribution committed atomically with the deduction; bridge to SP5 AFTER
+	// the tx commits (best-effort, idempotent).
+	if feeV2 {
+		h.FeeService.MarkRecipientsDirty(c.Request.Context(), recipients)
+	}
 
 	h.EventBus.Publish(events.Event{
 		Type:    events.TransactionPending,
