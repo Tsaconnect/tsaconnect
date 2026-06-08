@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,6 +118,21 @@ func (s *FeeDistributionService) SettleGlobalPoolEpoch(ctx context.Context) (Glo
 
 		foldedScaled := perUserScaled * userCount
 		foldedTP := float64(foldedScaled) / float64(models.GlobalTPIndexScale)
+
+		// OVERFLOW GUARD: the cumulative index is a monotonically-increasing int64.
+		// If pool.PerUserIndexScaled + perUserScaled would exceed math.MaxInt64 the
+		// addition wraps NEGATIVE, which silently bricks SP4 forever:
+		// SettleUserGlobalShare computes owedScaled = currentIndex − checkpoint, and
+		// a wrapped (now-smaller, possibly negative) index makes every owed value
+		// <= 0, so NO user is ever credited again — a silent ledger corruption. Refuse
+		// to fold and surface a loud ops alert instead, leaving the delta in the pool
+		// and the index intact. (perUserScaled > 0 here, guarded above.)
+		if pool.PerUserIndexScaled > math.MaxInt64-perUserScaled {
+			log.Printf("[fee-settlement] global_index_overflow_total=1 ALERT currentIndex=%d perUserScaled=%d userCount=%d (cumulative per-user index would overflow int64 — refusing to fold; SP4 distribution halted until the index scale/units are remediated)",
+				pool.PerUserIndexScaled, perUserScaled, userCount)
+			return fmt.Errorf("global TP index overflow: currentIndex=%d + perUserScaled=%d would exceed int64 max; refusing to advance the index to avoid wrapping the ledger negative",
+				pool.PerUserIndexScaled, perUserScaled)
+		}
 		newIndex := pool.PerUserIndexScaled + perUserScaled
 
 		if err := tx.Model(&models.GlobalTPPool{}).
