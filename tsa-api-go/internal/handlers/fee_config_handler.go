@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -19,11 +20,12 @@ import (
 type FeeConfigHandler struct {
 	DB      *gorm.DB
 	Service *services.FeeConfigService
+	Config  *config.Config
 }
 
 // NewFeeConfigHandler creates a FeeConfigHandler.
-func NewFeeConfigHandler(db *gorm.DB, svc *services.FeeConfigService) *FeeConfigHandler {
-	return &FeeConfigHandler{DB: db, Service: svc}
+func NewFeeConfigHandler(db *gorm.DB, svc *services.FeeConfigService, cfg *config.Config) *FeeConfigHandler {
+	return &FeeConfigHandler{DB: db, Service: svc, Config: cfg}
 }
 
 // ListFeeConfigs handles GET /api/admin/fee-config — returns all fee_config rows
@@ -55,7 +57,20 @@ type updateFeeConfigRequest struct {
 
 // UpdateFeeConfig handles PUT /api/admin/fee-config/:id — updates bps, flat
 // amount, and/or active flag for a single row, then invalidates the cache.
+//
+// FLAG ISOLATION (FIX-BEFORE-MERGE B): fee-rate edits are REJECTED while
+// FEE_MODEL_V2_ENABLED is OFF. The SP1 fee_config table only becomes the single
+// source of truth at the v2 cutover; until then the cart quote still reads the
+// hardcoded fee CONSTANTS, so mutating a config row would make the quote (from
+// constants) and the charge (from config) diverge. Rates are immutable until the
+// cutover — change the constants in code pre-cutover, the config post-cutover.
 func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
+	if h.Config != nil && !h.Config.IsFeeModelV2Enabled() {
+		utils.ErrorResponse(c, http.StatusConflict,
+			"Fee rates are immutable until the v2 cutover (FEE_MODEL_V2_ENABLED is off): the cart quote still reads the hardcoded fee constants, so editing the config now would diverge the quote from the charge.")
+		return
+	}
+
 	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid fee config ID")

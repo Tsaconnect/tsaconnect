@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, ftch *handlers.FeeTPCutoverHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -88,6 +88,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		adminFeeConfig.GET("", fch.ListFeeConfigs)
 		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)
+	}
+
+	// Admin fee/TP v2 cutover-reset (BLOCKER 3). DESTRUCTIVE: archives+deletes
+	// the legacy tp/cashback ledgers, zeroes balances, and clears ALL v2 reward
+	// state. Gated by the strictest admin middleware (RequireP2PAdmin —
+	// admin / super_admin only) on top of AdminAuth, plus a confirm-phrase guard
+	// in the handler. Run STRICTLY BEFORE flipping FEE_MODEL_V2_ENABLED.
+	if ftch != nil {
+		adminFeeTP := api.Group("/admin/fee-tp")
+		adminFeeTP.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminFeeTP.POST("/cutover-reset", ftch.CutoverReset)
+		}
 	}
 
 	// Admin claim-eligibility routes (fee/TP overhaul SP7) — anti-sybil reward

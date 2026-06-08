@@ -203,7 +203,11 @@ func main() {
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
-	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService)
+	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService, cfg)
+	// BLOCKER 3 — runnable fee/TP v2 cutover reset. Super-admin-gated route
+	// (RequireP2PAdmin) + confirm-phrase guard. Run BEFORE the FEE_MODEL_V2_ENABLED
+	// flip per the runbook in fee_distribution_reset.go.
+	ftch := handlers.NewFeeTPCutoverHandler(config.DB)
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.
 	rfh := handlers.NewRewardFlagHandler(config.DB, rewardEligibilityService)
 
@@ -402,7 +406,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, ftch)
 
 	// Configure HTTP server
 	port := cfg.Port

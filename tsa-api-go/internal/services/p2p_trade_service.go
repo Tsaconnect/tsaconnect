@@ -301,6 +301,14 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 	if trade == nil || feeBaseUnits == nil || feeBaseUnits.Sign() <= 0 {
 		return
 	}
+	// MCGP is fee-exempt by design (spec §2: "MCGP-paid txns stay fee-exempt").
+	// Defense-in-depth: baseUnitsToUSD treats the settlement token as a ~$1
+	// stablecoin, so if a misconfigured on-chain mcgpToken ever routed an MCGP
+	// trade here, we'd mis-mint a non-$1 token's base units as USD. Refuse to
+	// accrue any fee for an MCGP trade, full stop.
+	if strings.ToUpper(trade.Token) == "MCGP" {
+		return
+	}
 	feeUSD := baseUnitsToUSD(feeBaseUnits, tokenDecimalsFor(trade.ChainID, trade.Token))
 	if feeUSD <= 0 {
 		return
