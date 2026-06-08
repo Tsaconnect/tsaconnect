@@ -116,7 +116,18 @@ type confirmPublishRequest struct {
 
 // ConfirmPublish handles POST /api/admin/reward-distributions/confirm — records
 // that the admin confirmed the setMerkleRoot tx on-chain (status → published).
+//
+// FINDING #3: the admin-supplied txHash is no longer trusted blindly. When an
+// on-chain verifier is wired, MarkPublished requires the tx to have mined
+// successfully AND the distributor's live root to equal this epoch's expected
+// root before publishing; a wrong/early/failed hash is rejected (422) and the
+// epoch stays unpublished, so a bad confirmation can't strand the epoch's claims.
 func (h *RewardDistributionHandler) ConfirmPublish(c *gin.Context) {
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	if h.merkle == nil || !h.merkle.IsConfigured() {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Reward distributor not configured")
 		return
@@ -127,7 +138,17 @@ func (h *RewardDistributionHandler) ConfirmPublish(c *gin.Context) {
 		return
 	}
 	if err := h.merkle.MarkPublished(c.Request.Context(), req.Epoch, req.TxHash); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to confirm publish")
+		switch {
+		case errors.Is(err, services.ErrPublishVerificationFailed):
+			// On-chain verification rejected the confirmation — the root was not
+			// (correctly) set by this tx. Leave the epoch unpublished; the admin must
+			// re-confirm with the mined txHash that actually set this epoch's root.
+			utils.ErrorResponse(c, http.StatusUnprocessableEntity, "On-chain verification failed: the txHash did not set this epoch's root on-chain (epoch left unpublished)")
+		case strings.Contains(err.Error(), "not found"):
+			utils.ErrorResponse(c, http.StatusNotFound, "Epoch not found")
+		default:
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to confirm publish")
+		}
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Distribution published", gin.H{"epoch": req.Epoch})

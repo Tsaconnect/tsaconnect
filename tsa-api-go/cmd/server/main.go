@@ -264,6 +264,17 @@ func main() {
 	// behavior. SetClaimedReader is nil-safe.
 	rewardMerkleService.SetClaimedReader(rewardChainReader)
 
+	// VERIFY a setMerkleRoot confirmation ON-CHAIN before flipping an epoch to
+	// "published" (finding #3): ConfirmPublish/MarkPublished require the supplied
+	// txHash to have mined successfully AND the distributor's live root to equal the
+	// epoch's expected root, so a wrong/early/failed hash can't strand a whole
+	// epoch's claims. The SAME rewardChainReader (an *evmRewardChainReader, which
+	// also satisfies RewardPublishVerifier) is reused. Additive + nil-safe: with no
+	// chain reader wired the prior trust-the-admin-hash behavior is preserved.
+	if pv, ok := rewardChainReader.(services.RewardPublishVerifier); ok {
+		rewardMerkleService.SetPublishVerifier(pv)
+	}
+
 	// SP8 user-facing reward summary — the read-aggregator behind GET
 	// /api/rewards/summary (the app's TP screen) + the prepare-claim convenience.
 	// refresher = rewardService so a read folds the pending SP4 global share AND

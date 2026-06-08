@@ -365,6 +365,39 @@ const RewardsScreen: React.FC = () => {
     }
   }, [loadClaimState]);
 
+  // Refresh used specifically AFTER a broadcast (confirmed or unconfirmed).
+  // Finding #4: refreshAll only re-resolves the claim CTA inside the
+  // summary-success branch, so if summary() fails right after a claim the CTA
+  // stays stale on 'claimable' (and the user could re-trigger a now-reverting
+  // claim). Here, if the summary fetch fails, we still re-resolve the claim
+  // state from the prior claimable value — prepare-claim is the source of truth
+  // for the CTA and will correctly move it off 'claimable' once the claim
+  // landed. We surface a soft notice but rely on the full-screen ErrorState /
+  // pull-to-refresh for the worst case.
+  const refreshAfterClaim = useCallback(
+    async (priorClaimableMcgp: number) => {
+      const summaryRes = await rewardsApi.summary();
+      const earningsRes = await api.getTPEarnings(1, 15).catch(() => null);
+
+      if (summaryRes.success && summaryRes.data) {
+        setSummary(summaryRes.data);
+        setLoadError(false);
+        await loadClaimState(summaryRes.data.claimableMcgp);
+      } else {
+        // Summary fetch failed AFTER the broadcast — don't leave the CTA stale.
+        // Re-resolve the claim state from the prior claimable figure so it
+        // reflects the post-claim reality even though the hero numbers are
+        // momentarily out of date.
+        await loadClaimState(priorClaimableMcgp);
+        toast.error('Claim processed, but we could not refresh your balance. Pull to refresh.');
+      }
+      if (earningsRes?.success && earningsRes.data?.earnings) {
+        setEarnings(earningsRes.data.earnings as TPEarningRow[]);
+      }
+    },
+    [loadClaimState, toast],
+  );
+
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -411,7 +444,26 @@ const RewardsScreen: React.FC = () => {
         return;
       }
 
+      // The tx is on-chain regardless, so always offer the explorer link.
       setLastClaimHash({ hash: result.txHash, chainId: Number(claimTx.chainId) });
+
+      // Prior claimable, used to re-resolve the CTA if the post-claim summary
+      // fetch fails (Finding #4). `summary` is always set when the claim CTA is
+      // reachable; fall back to 0 defensively for the type-narrowing.
+      const priorClaimable = summary?.claimableMcgp ?? 0;
+
+      if (!result.confirmed) {
+        // Broadcast but NOT confirmed: either the tx reverted (status 0) or we
+        // couldn't observe the receipt (timeout/RPC). Do NOT claim success —
+        // tell the user it was submitted and the screen will catch up. The
+        // refresh below reconciles the CTA against true on-chain state.
+        toast.error(
+          'Claim submitted but not yet confirmed. Check the transaction and refresh in a moment.',
+        );
+        await refreshAfterClaim(priorClaimable);
+        return;
+      }
+
       // Be precise: the MCGP is paid to the registered claim account. Only say
       // "your wallet" when that account is the user's active wallet.
       toast.success(
@@ -420,7 +472,7 @@ const RewardsScreen: React.FC = () => {
           : 'Reward claimed — MCGP is on its way to your wallet.',
       );
       // Refresh so claimable/claimed reflect the new on-chain state.
-      await refreshAll();
+      await refreshAfterClaim(priorClaimable);
     } catch (err: any) {
       // Wrong wallet — the claim pays the registered account; tell the user to
       // switch to it (no broadcast happened).
@@ -451,7 +503,7 @@ const RewardsScreen: React.FC = () => {
       setClaiming(false);
       setClaimStage('');
     }
-  }, [claimTx, claiming, toast, refreshAll]);
+  }, [claimTx, claiming, toast, refreshAll, refreshAfterClaim, summary]);
 
   const openTxExplorer = useCallback(() => {
     if (!lastClaimHash) return;

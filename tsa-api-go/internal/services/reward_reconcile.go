@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -73,6 +74,21 @@ type RewardChainReader interface {
 	ClaimedOf(ctx context.Context, distributor, account string) (*big.Int, error)
 	// MCGPBalanceOf returns the MCGP balanceOf(distributor) (base units).
 	MCGPBalanceOf(ctx context.Context, distributor string) (*big.Int, error)
+}
+
+// RewardPublishVerifier is the read-only on-chain surface MarkPublished needs to
+// VERIFY a setMerkleRoot confirmation before flipping an epoch to "published"
+// (finding #3): a wrong/early/failed txHash must NOT strand a whole epoch's
+// claims. Kept narrow + injectable (separate from RewardChainReader so the
+// reconciler's tests/fakes are untouched). *evmRewardChainReader satisfies both.
+type RewardPublishVerifier interface {
+	// TxSucceeded reports whether the tx mined with receipt status == 1. Returns
+	// an error if the receipt can't be fetched (not mined / unknown hash / RPC
+	// failure) so the caller can refuse the confirmation rather than trust it.
+	TxSucceeded(ctx context.Context, txHash string) (bool, error)
+	// OnChainMerkleRoot reads the distributor's current merkleRoot() as 0x-prefixed
+	// lowercase hex, so the caller can require it equals the epoch's expected root.
+	OnChainMerkleRoot(ctx context.Context, distributor string) (string, error)
 }
 
 // RewardReconcileResult is one reconcile pass's outcome (for logging/tests).
@@ -187,9 +203,12 @@ func (s *RewardMerkleService) Reconcile(ctx context.Context, reader RewardChainR
 
 // rpcCaller is the read-only RPC surface the reward chain reader needs (the
 // *ethclient.Client embedded in blockchain.EVMClient satisfies it). An interface
-// keeps NewRewardChainReader injectable for tests.
+// keeps NewRewardChainReader injectable for tests. CallContract drives the
+// claimed[]/balanceOf/merkleRoot eth_calls; TransactionReceipt drives the
+// publish-verification receipt-status check (finding #3).
 type rpcCaller interface {
 	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
 }
 
 // evmRewardChainReader reads the distributor's claimed[]/MCGP balanceOf via
@@ -250,6 +269,49 @@ func (r *evmRewardChainReader) MCGPBalanceOf(ctx context.Context, distributor st
 		return nil, fmt.Errorf("balanceOf returned unexpected type %T", vals[0])
 	}
 	return v, nil
+}
+
+// TxSucceeded fetches the tx receipt and reports status == 1 (finding #3). A
+// missing/unmined/failed receipt yields (false, err) — the caller must refuse the
+// publish confirmation rather than trust an unverified hash.
+func (r *evmRewardChainReader) TxSucceeded(ctx context.Context, txHash string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	h := strings.TrimSpace(txHash)
+	if h == "" {
+		return false, fmt.Errorf("empty tx hash")
+	}
+	receipt, err := r.caller.TransactionReceipt(ctx, common.HexToHash(h))
+	if err != nil {
+		return false, fmt.Errorf("fetch receipt for %s: %w", h, err)
+	}
+	if receipt == nil {
+		return false, fmt.Errorf("nil receipt for %s (not mined?)", h)
+	}
+	return receipt.Status == types.ReceiptStatusSuccessful, nil
+}
+
+// OnChainMerkleRoot reads merkleRoot() on the distributor and returns it as
+// 0x-prefixed lowercase hex (finding #3), so MarkPublished can require the
+// on-chain root equals the epoch's expected root before publishing.
+func (r *evmRewardChainReader) OnChainMerkleRoot(ctx context.Context, distributor string) (string, error) {
+	data, err := parsedRewardDistributorABI.Pack("merkleRoot")
+	if err != nil {
+		return "", fmt.Errorf("pack merkleRoot: %w", err)
+	}
+	out, err := r.call(ctx, distributor, data)
+	if err != nil {
+		return "", fmt.Errorf("merkleRoot() call: %w", err)
+	}
+	vals, err := parsedRewardDistributorABI.Unpack("merkleRoot", out)
+	if err != nil || len(vals) == 0 {
+		return "", fmt.Errorf("decode merkleRoot: %w", err)
+	}
+	root, ok := vals[0].([32]byte)
+	if !ok {
+		return "", fmt.Errorf("merkleRoot returned unexpected type %T", vals[0])
+	}
+	return "0x" + common.Bytes2Hex(root[:]), nil
 }
 
 // call performs a read-only eth_call against `to` with a short timeout.

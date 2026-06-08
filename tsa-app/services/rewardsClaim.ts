@@ -27,6 +27,11 @@ export interface ClaimBroadcastResult {
   txHash: string;
   /** ChainKey the tx was broadcast on (for explorer links). */
   chainKey: ChainKey;
+  /** True only when the tx mined with a successful receipt (status === 1).
+   *  ethers v6 `wait()` RESOLVES (does not throw) on a revert (status === 0)
+   *  and the receipt can be null if it never mined — callers MUST gate the
+   *  success UX on this, not merely on having a txHash. */
+  confirmed: boolean;
 }
 
 /** Raised when the wallet that controls the registered claim `account` is not the
@@ -74,7 +79,10 @@ function chainKeyForId(chainId: number): ChainKey {
 
 /**
  * Complete, sign, and broadcast the prepared claim tx. Returns the broadcast
- * hash. Throws on any failure — the caller maps these to UX:
+ * hash plus a `confirmed` flag — the caller MUST gate the success UX on
+ * `confirmed`, because a broadcast hash alone does NOT mean the claim landed
+ * (the tx can revert on-chain, which ethers v6 `wait()` resolves rather than
+ * throws). Throws on any failure — the caller maps these to UX:
  *   - WrongWalletError      the active wallet isn't the registered claim account
  *   - ClaimWouldRevertError estimateGas reverted ⇒ nothing to claim (no broadcast)
  *   - other Error           no wallet, RPC, or chain rejection
@@ -181,15 +189,27 @@ export async function broadcastRewardClaim(
   onStage?.('Broadcasting…');
   const resp = await broadcastTransaction(chainKey, signed);
 
-  // Wait for one confirmation so the post-claim summary refresh reflects the
-  // new on-chain claimed amount. Non-fatal if the wait times out — the hash is
-  // already on-chain and the reconcile/refresh will catch up.
+  // Wait for one confirmation and INSPECT the receipt — a broadcast hash alone
+  // doesn't mean the claim succeeded. ethers v6 `wait()` RESOLVES (does NOT
+  // throw) when the tx reverts (`receipt.status === 0`), and the receipt can be
+  // null if it never mined within the wait. So we mirror ServiceDetail's
+  // pattern (Fix #7): a null receipt or `status === 0` is a FAILURE, surfaced
+  // via `confirmed:false` so the caller never shows a false "claimed" toast.
+  // A thrown wait (timeout/RPC blip) is the one ambiguous case: the tx is
+  // already on-chain, so we treat it as unconfirmed rather than failed — the
+  // reconcile/refresh will reflect the true state.
   onStage?.('Confirming…');
   try {
-    await resp.wait(1);
+    const receipt = await resp.wait(1);
+    if (!receipt || receipt.status === 0) {
+      return { txHash: resp.hash, chainKey, confirmed: false };
+    }
+    return { txHash: resp.hash, chainKey, confirmed: true };
   } catch (err) {
+    // The tx is broadcast but we couldn't confirm it (timeout/RPC). Don't claim
+    // success — report it unconfirmed so the caller shows a softer "submitted,
+    // check shortly" message and the summary refresh corrects the UI.
     console.warn('[rewardsClaim] confirmation wait failed (tx already broadcast):', err);
+    return { txHash: resp.hash, chainKey, confirmed: false };
   }
-
-  return { txHash: resp.hash, chainKey };
 }

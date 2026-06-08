@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -406,6 +407,121 @@ func TestSettleGlobalPoolEpoch_NoOp_ZeroDelta(t *testing.T) {
 	}
 	if n := countEpochs(t, db); n != 1 {
 		t.Fatalf("extra epoch row on zero-delta re-run: %d, want 1", n)
+	}
+}
+
+// OVERFLOW GUARD (finding #2): the cumulative int64 index must never wrap. When
+// the current index is so close to math.MaxInt64 that adding this epoch's
+// perUserScaled would overflow, the settler MUST refuse to fold (returning an
+// error + ops alert) rather than silently wrapping the index NEGATIVE — a wrap
+// would make every future owedScaled <= 0 and permanently halt all TP
+// distribution. The pool/index must be left untouched so the condition surfaces.
+func TestSettleGlobalPoolEpoch_OverflowGuard(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+	ctx := context.Background()
+
+	// One user so perUserScaled == deltaScaled (no division dust to reason about).
+	u := mkFeeUser(t, db, "ovf"+uuidShort(), nil, models.AccountStatusActive)
+
+	// Seed a pool whose accrued TP folds to a positive perUserScaled, then pin the
+	// index one notch below the boundary so this fold would overflow. 10 TP over one
+	// user => perUserScaled = 10 * GlobalTPIndexScale. Set the index to MaxInt64 -
+	// perUserScaled + 1, so currentIndex > MaxInt64 - perUserScaled triggers the guard.
+	const poolTP = 10.0
+	seedGlobalPool(t, db, poolTP)
+	perUserScaled := int64(poolTP * float64(models.GlobalTPIndexScale))
+	pinnedIndex := int64(math.MaxInt64) - perUserScaled + 1 // one past the safe boundary
+	if err := db.Model(&models.GlobalTPPool{}).
+		Where("singleton = ?", models.GlobalTPPoolSingletonID).
+		Update("per_user_index_scaled", pinnedIndex).Error; err != nil {
+		t.Fatalf("pin index: %v", err)
+	}
+	// Anchor the user's checkpoint at the pinned index so a non-zero pending below
+	// could ONLY come from the (refused) fold — not from the synthetic history we
+	// pinned for the boundary setup.
+	if err := db.Model(&models.User{}).Where("id = ?", u.ID).
+		Update("last_settled_global_index", pinnedIndex).Error; err != nil {
+		t.Fatalf("anchor user checkpoint: %v", err)
+	}
+
+	res, err := svc.SettleGlobalPoolEpoch(ctx)
+	if err == nil {
+		t.Fatalf("expected overflow guard to error, got Settled=%v (index would have wrapped negative)", res.Settled)
+	}
+	if res.Settled {
+		t.Fatalf("overflow epoch must not be marked settled")
+	}
+
+	// The index must be UNCHANGED (no wrap, no advance) and no epoch row written —
+	// the ledger is left intact for ops to remediate.
+	if got := globalIndex(t, db); got != pinnedIndex {
+		t.Fatalf("index changed on overflow: got %d, want %d (must stay pinned, never wrap)", got, pinnedIndex)
+	}
+	if got := globalIndex(t, db); got <= 0 {
+		t.Fatalf("index wrapped non-positive on overflow: %d", got)
+	}
+	if n := countEpochs(t, db); n != 0 {
+		t.Fatalf("epoch row written on overflow: %d, want 0", n)
+	}
+	// No user is credited — the user's pending share is unaffected by the refused fold.
+	if pending, err := svc.PendingUserGlobalShare(ctx, u.ID); err != nil {
+		t.Fatalf("pending after overflow: %v", err)
+	} else if pending != 0 {
+		t.Fatalf("user credited from a refused overflow fold: pending=%v, want 0", pending)
+	}
+}
+
+// NORMAL ACCRUAL IS UNAFFECTED by the overflow guard: a fold whose resulting
+// index stays comfortably below math.MaxInt64 settles exactly as before. This
+// pins the guard to the true boundary (it must not reject legitimate folds).
+func TestSettleGlobalPoolEpoch_OverflowGuard_NormalAccrualUnaffected(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+	ctx := context.Background()
+
+	u := mkFeeUser(t, db, "ok"+uuidShort(), nil, models.AccountStatusActive)
+
+	// Pin the index to the LAST safe value: currentIndex == MaxInt64 - perUserScaled
+	// must still fold (the guard rejects only currentIndex > MaxInt64 - perUserScaled).
+	const poolTP = 10.0
+	seedGlobalPool(t, db, poolTP)
+	perUserScaled := int64(poolTP * float64(models.GlobalTPIndexScale))
+	pinnedIndex := int64(math.MaxInt64) - perUserScaled // exactly the safe boundary
+	if err := db.Model(&models.GlobalTPPool{}).
+		Where("singleton = ?", models.GlobalTPPoolSingletonID).
+		Update("per_user_index_scaled", pinnedIndex).Error; err != nil {
+		t.Fatalf("pin index: %v", err)
+	}
+	// Anchor the user's checkpoint at the pinned index so this epoch's credit is
+	// exactly the folded share (poolTP), not the synthetic full-index history we
+	// pinned for the boundary setup.
+	if err := db.Model(&models.User{}).Where("id = ?", u.ID).
+		Update("last_settled_global_index", pinnedIndex).Error; err != nil {
+		t.Fatalf("anchor user checkpoint: %v", err)
+	}
+
+	res, err := svc.SettleGlobalPoolEpoch(ctx)
+	if err != nil {
+		t.Fatalf("boundary-safe fold must succeed, got error: %v", err)
+	}
+	if !res.Settled {
+		t.Fatalf("expected boundary-safe epoch to settle")
+	}
+	if got := globalIndex(t, db); got != int64(math.MaxInt64) {
+		t.Fatalf("index = %d, want MaxInt64 (%d) after the last safe fold", got, int64(math.MaxInt64))
+	}
+	if got := globalIndex(t, db); got <= 0 {
+		t.Fatalf("index wrapped non-positive: %d", got)
+	}
+
+	// The user is credited the folded share as usual — guard does not suppress it.
+	credited, err := svc.SettleUserGlobalShare(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("settle user: %v", err)
+	}
+	if !approx(credited, poolTP) {
+		t.Fatalf("credited = %v, want %v (normal accrual unaffected by the guard)", credited, poolTP)
 	}
 }
 

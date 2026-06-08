@@ -55,6 +55,16 @@ type RewardMerkleService struct {
 	// ⇒ membership-only gating, the prior behavior. A read failure is treated as
 	// "assume claimable" (fail-open) so an RPC blip never hides a real claim.
 	claimedReader claimedOfReader
+
+	// publishVerifier optionally verifies a setMerkleRoot confirmation ON-CHAIN
+	// before MarkPublished flips an epoch to "published" (finding #3): the supplied
+	// txHash must have mined successfully AND the distributor's live merkleRoot must
+	// equal the epoch's expected root. When wired (production, via
+	// SetPublishVerifier) a wrong/early/failed hash is REJECTED — the epoch stays
+	// unpublished — so a bad confirmation can't strand a whole epoch's claims behind
+	// a root that was never (or wrongly) set on-chain. nil (tests / no RPC) ⇒ the
+	// prior trust-the-admin-hash behavior, preserved for dormant/dev environments.
+	publishVerifier RewardPublishVerifier
 }
 
 // SetClaimedReader wires the optional on-chain claimed[account] reader so claim
@@ -70,6 +80,35 @@ func (s *RewardMerkleService) SetClaimedReader(reader claimedOfReader) {
 		return
 	}
 	s.claimedReader = reader
+}
+
+// SetPublishVerifier wires the optional on-chain publish verifier so MarkPublished
+// VERIFIES a setMerkleRoot confirmation (tx mined OK + on-chain root == the
+// epoch's expected root) before flipping an epoch to "published" (finding #3).
+// Additive: leaving it unset preserves the prior trust-the-admin-hash behavior
+// for dormant/dev environments. nil-safe; a typed-nil verifier is normalized to
+// "unset".
+func (s *RewardMerkleService) SetPublishVerifier(v RewardPublishVerifier) {
+	if s == nil {
+		return
+	}
+	if v == nil || isNilPublishVerifier(v) {
+		s.publishVerifier = nil
+		return
+	}
+	s.publishVerifier = v
+}
+
+// isNilPublishVerifier detects a typed-nil RewardPublishVerifier (e.g. a nil
+// *evmRewardChainReader boxed into the interface) so SetPublishVerifier stores a
+// true "unset" rather than a live verifier wrapping a nil reader.
+func isNilPublishVerifier(v RewardPublishVerifier) bool {
+	switch t := v.(type) {
+	case *evmRewardChainReader:
+		return t == nil
+	default:
+		return false
+	}
 }
 
 // claimEligibilityChecker is the SP7 surface SP6 needs: decide who may be
@@ -790,16 +829,73 @@ func (s *RewardMerkleService) PrepareClaimForUser(ctx context.Context, userID uu
 	return out, nil
 }
 
-// MarkPublished records that the admin confirmed the setMerkleRoot tx on-chain.
+// ErrPublishVerificationFailed is returned by MarkPublished when the on-chain
+// verifier rejects the supplied confirmation (tx not successful, or the live
+// distributor root doesn't match the epoch's expected root). The epoch is left
+// UNPUBLISHED — callers surface a clear "confirmation rejected" error and the
+// admin must re-confirm with the correct, mined txHash that actually set this
+// epoch's root.
+var ErrPublishVerificationFailed = errors.New("reward publish verification failed")
+
+// MarkPublished records that the admin confirmed the setMerkleRoot tx on-chain,
+// flipping the epoch to "published" so its root becomes the live claim source.
+//
+// FINDING #3: when an on-chain publish verifier is wired (production), the
+// admin-supplied txHash is VERIFIED before the flip — a wrong/early/failed hash
+// must not strand a whole epoch's claims behind a root that was never (or
+// wrongly) set on-chain. The verification requires BOTH:
+//
+//	(a) the tx mined with receipt status == 1 (the setMerkleRoot tx succeeded); and
+//	(b) the distributor's live merkleRoot() EQUALS this epoch's expected root.
+//
+// Only then is the status flipped. On any verification failure the epoch is left
+// unpublished and ErrPublishVerificationFailed is returned. When no verifier is
+// wired (tests / dormant / no RPC) the prior trust-the-hash behavior is preserved
+// so dev environments keep working.
 func (s *RewardMerkleService) MarkPublished(ctx context.Context, epoch int64, txHash string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("reward merkle service not initialized")
 	}
+	txHash = strings.TrimSpace(txHash)
+
+	// Load the epoch first so we know its expected root to assert against on-chain
+	// (and to fail fast on an unknown epoch before touching the chain).
+	var dist models.RewardDistribution
+	if err := s.db.WithContext(ctx).
+		Where("epoch = ?", epoch).First(&dist).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("epoch %d not found", epoch)
+		}
+		return fmt.Errorf("load epoch %d: %w", epoch, err)
+	}
+
+	// On-chain verification (finding #3) — only when a verifier is wired.
+	if s.publishVerifier != nil {
+		ok, err := s.publishVerifier.TxSucceeded(ctx, txHash)
+		if err != nil {
+			return fmt.Errorf("%w: epoch %d tx %s receipt unavailable: %v", ErrPublishVerificationFailed, epoch, txHash, err)
+		}
+		if !ok {
+			return fmt.Errorf("%w: epoch %d tx %s did not succeed on-chain (receipt status != 1)", ErrPublishVerificationFailed, epoch, txHash)
+		}
+
+		onChainRoot, err := s.publishVerifier.OnChainMerkleRoot(ctx, s.distributorAddress)
+		if err != nil {
+			return fmt.Errorf("%w: epoch %d read on-chain merkleRoot failed: %v", ErrPublishVerificationFailed, epoch, err)
+		}
+		// Compare normalized (lowercase, 0x-prefixed). The expected root is the
+		// epoch's stored MerkleRoot; the on-chain getter returns lowercase 0x-hex.
+		if !equalHexRoot(onChainRoot, dist.MerkleRoot) {
+			return fmt.Errorf("%w: epoch %d on-chain root %s != expected %s (wrong/early txHash — epoch left unpublished)",
+				ErrPublishVerificationFailed, epoch, onChainRoot, dist.MerkleRoot)
+		}
+	}
+
 	res := s.db.WithContext(ctx).Model(&models.RewardDistribution{}).
 		Where("epoch = ?", epoch).
 		Updates(map[string]interface{}{
 			"status":     models.RewardDistributionStatusPublished,
-			"tx_hash":    strings.TrimSpace(txHash),
+			"tx_hash":    txHash,
 			"updated_at": time.Now(),
 		})
 	if res.Error != nil {
@@ -809,6 +905,15 @@ func (s *RewardMerkleService) MarkPublished(ctx context.Context, epoch int64, tx
 		return fmt.Errorf("epoch %d not found", epoch)
 	}
 	return nil
+}
+
+// equalHexRoot compares two 0x-prefixed bytes32 hex roots case-insensitively,
+// tolerating a missing 0x prefix on either side.
+func equalHexRoot(a, b string) bool {
+	norm := func(s string) string {
+		return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "0x"))
+	}
+	return norm(a) == norm(b)
 }
 
 // ─── hex helpers ─────────────────────────────────────────────────────────────
