@@ -58,6 +58,20 @@ type updateFeeConfigRequest struct {
 // UpdateFeeConfig handles PUT /api/admin/fee-config/:id — updates bps, flat
 // amount, and/or active flag for a single row, then invalidates the cache.
 //
+// SUPERSEDED LEGACY SAVE PATH — NOT a sanctioned post-cutover writer. This
+// handler writes fee_configs directly from admin INPUT (DB.Updates below) and
+// invalidates the cache the moment the admin clicks save (Invalidate below).
+// That "invalidate on save" is exactly the quote-ahead-of-chain (replica-leads-
+// chain) pattern the configurable-FeeManager design §4 CQRS rule REMOVES: the
+// replica must lag CONFIRMED chain truth, never lead it (see
+// FeeConfigService.RefreshFromConfirmedRate, the ONLY sanctioned writer from
+// chain truth). The full intent → on-chain setRate → confirm flow that replaces
+// this handler is deferred to task #43 (design §13); at that cutover, retire
+// UpdateFeeConfig's direct-write + Invalidate-on-save in favor of the
+// confirm-driven RefreshFromConfirmedRate. It is non-firing in production today
+// only because of the flag guard below — do not treat it as a green light to
+// write the replica from admin input.
+//
 // FLAG ISOLATION (FIX-BEFORE-MERGE B): fee-rate edits are REJECTED while
 // FEE_MODEL_V2_ENABLED is OFF. The SP1 fee_config table only becomes the single
 // source of truth at the v2 cutover; until then the cart quote still reads the
@@ -123,12 +137,17 @@ func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
 		return
 	}
 
+	// LEGACY direct write from admin input — superseded by the confirm-driven
+	// RefreshFromConfirmedRate (task #43). See the function doc above.
 	if err := h.DB.Model(&row).Updates(updates).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update fee config")
 		return
 	}
 
-	// Refresh the in-memory cache so the new rate takes effect immediately.
+	// LEGACY invalidate-on-save — the replica-leads-chain pattern the design §4
+	// CQRS rule removes; superseded by RefreshFromConfirmedRate (task #43). See
+	// the function doc above. Refreshes the in-memory cache so the edit takes
+	// effect immediately (only reachable while FEE_MODEL_V2_ENABLED is ON).
 	if h.Service != nil {
 		if err := h.Service.Invalidate(); err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Fee config updated but cache refresh failed")

@@ -1,30 +1,33 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // chainPreset bundles every value that has to flip together for one chain's
 // P2P deployment (Sonic or BSC). Flipping piecemeal makes the EIP-712 voucher
 // domain mismatch what the contract recovers, so every signature gets rejected.
 type chainPreset struct {
-	rpcURL          string
-	chainID         int64
-	usdcAddress     string
-	usdtAddress     string
-	mcgpAddress     string
-	p2pEscrow       string
+	rpcURL      string
+	chainID     int64
+	usdcAddress string
+	usdtAddress string
+	mcgpAddress string
+	p2pEscrow   string
 	// eip712Version is the EIP-712 domain `version` string the deployed
 	// P2PEscrow at p2pEscrow was initialized with. It MUST move in lockstep
 	// with p2pEscrow: v1 deployed "1", the two-sided v2 deployed "2". The
 	// backend stamps this into the voucher typed-data the app signs; a value
 	// that disagrees with the on-chain contract makes ecrecover resolve to a
 	// wrong address and rejects every sell-ad signature.
-	eip712Version   string
+	eip712Version string
 }
 
 // sonicPresets holds the canonical Sonic P2P deployment for each network.
@@ -96,6 +99,36 @@ type P2PChainConfig struct {
 	Assets        []string // e.g. ["MCGP"] on Sonic, ["USDT","USDC"] on BSC
 }
 
+// FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
+// FeeManager admin flow + drift reconciler resolve by chainID (design §3/§5/§10).
+// The FeeManager is the on-chain SOURCE OF TRUTH for every fee rate; the backend
+// builds unsigned setRate txs against Address and reads back rateFor to confirm.
+//
+// Address is EMPTY until a FeeManager is deployed to that chain — an empty
+// address keeps the whole flow DORMANT for that chain (Load omits it from
+// FeeManagerChains, the admin endpoints surface "not configured", and the drift
+// reconciler no-ops), exactly like the BSC P2P escrow dormant-by-default pattern.
+type FeeManagerChainConfig struct {
+	ChainID  int64
+	ChainKey string // blockchainService chain key: "sonic", "bsc"
+	Address  string // FeeManager proxy address on this chain
+}
+
+// validateFeeManagerAddress rejects a FEE_MANAGER_ADDRESS_* env value that is
+// not a syntactically valid 20-byte hex address, or that is the zero address.
+// common.HexToAddress NEVER errors — it silently pads/truncates — so the admin
+// set-fee flow could otherwise build setRate txs against a wrong/zero contract.
+// Returns a descriptive error; the caller fails the boot loudly (design §6).
+func validateFeeManagerAddress(envName, addr string) error {
+	if !common.IsHexAddress(addr) {
+		return fmt.Errorf("%s=%q is not a valid hex address (common.HexToAddress would silently pad/truncate it); fix or unset it", envName, addr)
+	}
+	if common.HexToAddress(addr) == (common.Address{}) {
+		return fmt.Errorf("%s=%q resolves to the zero address; a FeeManager address must be non-zero", envName, addr)
+	}
+	return nil
+}
+
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
 type ChainConfig struct {
 	Name           string
@@ -157,6 +190,15 @@ type Config struct {
 	// resolve escrow/domain/version by trade.ChainID from this map.
 	P2PChains map[int64]P2PChainConfig
 
+	// FeeManagerChains is the per-chain FeeManager registry keyed by chainID
+	// (configurable-FeeManager design §3/§5/§10), assembled in Load() from
+	// FEE_MANAGER_ADDRESS_SONIC / FEE_MANAGER_ADDRESS_BSC. A chain appears here
+	// ONLY when its FeeManager address is configured — UNSET keeps the admin
+	// set-fee flow + drift reconciler DORMANT for that chain (dormant-by-default,
+	// like the BSC P2P escrow). The admin endpoints stay 409-gated on
+	// FEE_MODEL_V2_ENABLED regardless of this map.
+	FeeManagerChains map[int64]FeeManagerChainConfig
+
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
 	// right Networks[…] map for sonic-side lookups reads this rather than
@@ -178,13 +220,26 @@ type Config struct {
 	PersonaWebhookSecret string
 
 	// LiFi swap aggregator
-	LiFiAPIKey         string
-	LiFiIntegratorID   string
-	LiFiIntegratorFee  string
+	LiFiAPIKey        string
+	LiFiIntegratorID  string
+	LiFiIntegratorFee string
+
+	// AllSwap server-verified settle (design §8, I8). The backend re-queries LiFi
+	// to recompute the integrator fee, then rejects a client-supplied fee that
+	// deviates by more than AllSwapFeeDeviationMax (fraction, default 0.10 = 10%).
+	// When LiFi is unreachable it does NOT trust the client or charge 0: it
+	// charges AllSwapConservativeFeeBps of the from-amount (default 350 = 3.5% vs
+	// the nominal 3%) and emits a warning metric.
+	AllSwapFeeDeviationMax    float64
+	AllSwapConservativeFeeBps int
+	// AllSwapNominalFeeBps is the integrator fee the backend recomputes when LiFi
+	// is reachable but the response carries no usable fee figure (default 300 =
+	// 3%). It is the verified-fee basis, never the client value.
+	AllSwapNominalFeeBps int
 
 	// Open Exchange Rates configuration
 	OpenExchangeRatesAppID string
-	SupportedCurrencies     []string
+	SupportedCurrencies    []string
 
 	// Currencies routed through Bybit P2P (others use OER)
 	BybitP2PCurrencies []string
@@ -210,9 +265,9 @@ type Config struct {
 	NombaAccountID    string
 
 	// P2P merchant-reputation thresholds for the "Trusted" badge.
-	P2PTrustedMinReleased    int64
-	P2PTrustedMinCompletion  float64
-	P2PTrustedMinAgeDays     int
+	P2PTrustedMinReleased   int64
+	P2PTrustedMinCompletion float64
+	P2PTrustedMinAgeDays    int
 
 	// Fee/TP overhaul (SP3) feature flag + tunables.
 	//
@@ -350,6 +405,43 @@ func Load() *Config {
 			cfg.SonicChainID, bscNetwork)
 	}
 
+	// ── Per-chain FeeManager registry (configurable-FeeManager design §3) ──
+	// DORMANT-BY-DEFAULT: a chain is registered only when its FeeManager address
+	// is configured. Sonic uses the Sonic chainID active for this boot; BSC uses
+	// the BSC preset chainID. UNSET addresses keep the admin set-fee flow + drift
+	// reconciler dormant for that chain (the endpoints surface "not configured").
+	// A configured FEE_MANAGER_ADDRESS_* MUST be a syntactically valid, non-zero
+	// hex address. common.HexToAddress silently pads/truncates a malformed value
+	// (e.g. "0x123" → 0x0000…0123, or extra nibbles dropped), which would make the
+	// admin set-fee flow build setRate txs against the WRONG contract and the drift
+	// reconciler read a phantom rate. Fail LOUDLY at boot instead (design §6).
+	cfg.FeeManagerChains = map[int64]FeeManagerChainConfig{}
+	if fmSonic := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_SONIC", "")); fmSonic != "" {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_SONIC", fmSonic); err != nil {
+			log.Fatalf("[config] %v", err)
+		}
+		cfg.FeeManagerChains[cfg.SonicChainID] = FeeManagerChainConfig{
+			ChainID:  cfg.SonicChainID,
+			ChainKey: "sonic",
+			Address:  fmSonic,
+		}
+	}
+	if fmBSC := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")); fmBSC != "" {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", fmBSC); err != nil {
+			log.Fatalf("[config] %v", err)
+		}
+		cfg.FeeManagerChains[bscPreset.chainID] = FeeManagerChainConfig{
+			ChainID:  bscPreset.chainID,
+			ChainKey: "bsc",
+			Address:  fmBSC,
+		}
+	}
+	if len(cfg.FeeManagerChains) == 0 {
+		log.Printf("[config] FeeManager dormant: no FEE_MANAGER_ADDRESS_* configured — admin set-fee flow + drift reconciler off")
+	} else {
+		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
+	}
+
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
@@ -370,6 +462,11 @@ func Load() *Config {
 	cfg.LiFiAPIKey = os.Getenv("LIFI_API_KEY")
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
+
+	// AllSwap server-verified settle thresholds (design §8, I8).
+	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
+	cfg.AllSwapConservativeFeeBps = int(getEnvFloat64("ALLSWAP_CONSERVATIVE_FEE_BPS", 350))
+	cfg.AllSwapNominalFeeBps = int(getEnvFloat64("ALLSWAP_NOMINAL_FEE_BPS", 300))
 
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
 	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")
@@ -555,7 +652,7 @@ func getEnvFloat64(key string, fallback float64) float64 {
 func getEnvInt64(key string, fallback int64) int64 {
 	if value, exists := os.LookupEnv(key); exists {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return parsed
+			return parsed
 		}
 	}
 	return fallback
@@ -599,6 +696,34 @@ func (c *Config) IsFeeModelV2Enabled() bool {
 		return false
 	}
 	return c.FeeModelV2Enabled
+}
+
+// AllSwapFeeDeviationMaxOrDefault returns the configured max client-fee
+// deviation (fraction), defaulting to 0.10 (10%) when unset/invalid.
+func (c *Config) AllSwapFeeDeviationMaxOrDefault() float64 {
+	if c == nil || c.AllSwapFeeDeviationMax <= 0 {
+		return 0.10
+	}
+	return c.AllSwapFeeDeviationMax
+}
+
+// AllSwapConservativeFeeBpsOrDefault returns the conservative fee bps charged
+// when LiFi is unreachable (never 0, never the client value), default 350 (3.5%).
+func (c *Config) AllSwapConservativeFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapConservativeFeeBps <= 0 {
+		return 350
+	}
+	return c.AllSwapConservativeFeeBps
+}
+
+// AllSwapNominalFeeBpsOrDefault returns the nominal integrator fee bps used as
+// the verified-fee basis when LiFi is reachable but reports no usable fee figure,
+// default 300 (3%).
+func (c *Config) AllSwapNominalFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapNominalFeeBps <= 0 {
+		return 300
+	}
+	return c.AllSwapNominalFeeBps
 }
 
 // TPPerUSDOrDefault returns the configured TP minting rate, falling back to 1.0
@@ -646,7 +771,7 @@ func splitAndTrim(s, sep string) []string {
 	for _, part := range strings.Split(s, sep) {
 		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
-		result = append(result, trimmed)
+			result = append(result, trimmed)
 		}
 	}
 	return result

@@ -15,6 +15,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/gorm"
 )
 
 // GetTransactions returns paginated, filtered transactions.
@@ -395,19 +396,70 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	})
 	tx.Fees = feesJSON
 
-	if err := config.DB.Create(&tx).Error; err != nil {
+	newBalance := asset.Balance - totalDeduction
+	newUSDValue := newBalance * price
+
+	// Fee-v2 accrual (design §8, B5/I7): the 0.5% platform fee is recorded as a
+	// FeeEvent IN THE SAME DB TRANSACTION as the tx-create + balance deduction, so
+	// the fee can NEVER be deducted without the accrual being recorded (no
+	// treasury leak). SourceType "withdrawal" + SourceID tx.ID is distinct from
+	// any on-chain send path (wallet_handler uses its own source), so a withdrawal
+	// touching both never double-settles. The whole accrual is gated on
+	// IsFeeModelV2Enabled — flag OFF → byte-for-byte legacy (no FeeEvent written).
+	platformFeeUSD := platformFee * price
+	feeEvent := services.FeeEvent{
+		Feature:    models.FeatureWithdrawal,
+		Token:      body.AssetSymbol,
+		FeeUSD:     platformFeeUSD,
+		UserID:     user.ID,
+		SourceType: "withdrawal",
+		SourceID:   tx.ID,
+	}
+
+	// Resolve uplines OUTSIDE the write tx (the recursive-CTE read must not
+	// contend with the write tx on a single-connection pool). Only on the v2
+	// path; nil/empty on the flag-off path keeps the legacy behavior untouched.
+	var byGen map[int]services.Ancestor
+	feeV2 := h.Config != nil && h.Config.IsFeeModelV2Enabled() && h.FeeService != nil && platformFeeUSD > 0
+	if feeV2 {
+		var err error
+		byGen, err = h.FeeService.ResolveUplines(c.Request.Context(), user.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to resolve fee distribution"})
+			return
+		}
+	}
+	recipients := make(map[uuid.UUID]struct{})
+
+	if err := config.DB.Transaction(func(dbtx *gorm.DB) error {
+		if err := dbtx.Create(&tx).Error; err != nil {
+			return fmt.Errorf("create withdrawal: %w", err)
+		}
+		if err := dbtx.Model(&asset).Updates(map[string]interface{}{
+			"balance":    newBalance,
+			"usd_value":  newUSDValue,
+			"updated_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("deduct balance: %w", err)
+		}
+		// In-tx accrual: a settlement failure here rolls back the deduction.
+		if feeV2 {
+			if err := feeAccrualInTx(c.Request.Context(), h.FeeService, h.Config, dbtx, feeEvent, byGen, recipients); err != nil {
+				return fmt.Errorf("accrue withdrawal fee: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Printf("Withdrawal tx failed for user %s: %v", user.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create withdrawal"})
 		return
 	}
 
-	// Update asset balance
-	newBalance := asset.Balance - totalDeduction
-	newUSDValue := newBalance * price
-	config.DB.Model(&asset).Updates(map[string]interface{}{
-		"balance":    newBalance,
-		"usd_value":  newUSDValue,
-		"updated_at": now,
-	})
+	// Distribution committed atomically with the deduction; bridge to SP5 AFTER
+	// the tx commits (best-effort, idempotent).
+	if feeV2 {
+		h.FeeService.MarkRecipientsDirty(c.Request.Context(), recipients)
+	}
 
 	h.EventBus.Publish(events.Event{
 		Type:    events.TransactionPending,
@@ -464,7 +516,9 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 
 	// Check balance (including swap fee). Rate from the swap fee_config row
 	// (seeded to 10 bps = 0.1%). float64(10)/10000 is bit-identical to 0.001.
-	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset)
+	// Internal asset swap operates on off-chain balances with no single chain
+	// context, so it reads the documented-GLOBAL row (chainID nil) — design §6.
+	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset, nil)
 	fee := body.Amount * (float64(swapBps) / 10000.0)
 	totalDeduction := body.Amount + fee
 	if fromAssetDoc.Balance < totalDeduction {
@@ -676,7 +730,16 @@ func (h *Handlers) checkWithdrawalLimits(userID uuid.UUID, amount float64, asset
 func (h *Handlers) calculateWithdrawalFees(assetSymbol string, network string, amount float64) map[string]float64 {
 	// Platform fee rate from the withdrawal fee_config row (seeded to 50 bps =
 	// 0.5%). float64(50)/10000 is bit-identical to the previous 0.005 literal.
-	bps, _ := services.FeeRate(models.FeatureWithdrawal, assetSymbol)
+	// Thread the chainID resolved from the withdrawal's network so a per-chain
+	// override applies (design §6); nil falls back to the global row when the
+	// network name is unknown/empty.
+	var chainID *int64
+	if h.BlockchainService != nil {
+		if id, ok := h.BlockchainService.ChainIDForName(network); ok {
+			chainID = &id
+		}
+	}
+	bps, _ := services.FeeRate(models.FeatureWithdrawal, assetSymbol, chainID)
 	platformFee := amount * (float64(bps) / 10000.0)
 
 	// Mock network fees based on network

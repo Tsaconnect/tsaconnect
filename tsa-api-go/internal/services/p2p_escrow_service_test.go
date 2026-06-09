@@ -640,6 +640,55 @@ func TestReadTrade_Decodes10FieldLayout(t *testing.T) {
 	}
 }
 
+// TestTradesGetter_DecodesV3SnapshotLayout guards the V3 public trades(bytes32)
+// getter decode used by ReadTradePlatformFeeBps. The struct getter returns the
+// fields in DECLARATION order — seller, buyer, token, amount, createdAt,
+// autoReleaseAt, status, funding, feeBps, platformFeeBpsSnapshot,
+// gasFeeBpsSnapshot, voucherHash — which DIFFERS from getTrade's order. A wrong
+// index would mis-read the platform snapshot (index 9). 12 fields total.
+func TestTradesGetter_DecodesV3SnapshotLayout(t *testing.T) {
+	method, ok := parsedP2PEscrowABI.Methods["trades"]
+	if !ok {
+		t.Fatalf("trades not in parsed ABI")
+	}
+	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
+	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
+	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
+	amount := big.NewInt(123_456)         // uint96
+	createdAt := big.NewInt(1_700_000_000) // uint40
+	autoReleaseAt := big.NewInt(1_700_000_900)
+	status := uint8(OnChainP2PStatusReleased)
+	funding := uint8(1)
+	feeBps := uint16(0)               // V3 sets feeBps=0 for new trades
+	platformBps := uint16(100)        // 1% platform snapshot — what we read
+	gasBps := uint16(50)              // 0.5% gas snapshot
+	voucherHash := HashID(uuid.New())
+
+	packed, err := method.Outputs.Pack(seller, buyer, token, amount, createdAt, autoReleaseAt, status, funding, feeBps, platformBps, gasBps, voucherHash)
+	if err != nil {
+		t.Fatalf("pack trades outputs: %v", err)
+	}
+	vals, err := method.Outputs.Unpack(packed)
+	if err != nil || len(vals) != 12 {
+		t.Fatalf("unpack trades: %v len=%d", err, len(vals))
+	}
+	// Index 9 is the platform snapshot — the field ReadTradePlatformFeeBps reads.
+	got, ok := vals[9].(uint16)
+	if !ok {
+		t.Fatalf("platform snapshot not uint16: %T", vals[9])
+	}
+	if got != platformBps {
+		t.Errorf("platformFeeBpsSnapshot = %d, want %d (index 9)", got, platformBps)
+	}
+	// Sanity: index 8 is the (now-zero) legacy feeBps, index 10 the gas snapshot.
+	if vals[8].(uint16) != feeBps {
+		t.Errorf("feeBps = %d, want %d (index 8)", vals[8].(uint16), feeBps)
+	}
+	if vals[10].(uint16) != gasBps {
+		t.Errorf("gasFeeBpsSnapshot = %d, want %d (index 10)", vals[10].(uint16), gasBps)
+	}
+}
+
 // TestBalanceOf_OutputUnpackOrder pins the (available, locked) tuple ordering
 // of the new view. A wrong-order ABI string would swap them and silently
 // invert the seller's withdrawable amount.

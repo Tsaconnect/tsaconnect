@@ -114,6 +114,10 @@ type P2PEscrowAdapter interface {
 
 	// Views — used by reconciler + voucher-state checks.
 	ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
+	// ReadTradePlatformFeeBps reads the V3-snapshotted platform-fee bps for a
+	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
+	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
+	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
 	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)
@@ -295,28 +299,71 @@ func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled b
 // crypto and bears the fee (the buyer on a sell-ad; the receiving merchant on a
 // buy-ad, which is exactly who trade.BuyerID labels in the release emits).
 //
-// ── DISABLED under the COMPLETE per-feature split model (design §2, final PM
-// clarification) ──
+// ── P2P 1% PLATFORM accrual from the V3 snapshot (design §8, B7) ──
 //
-// The on-chain 0.5% P2P fee charged at release IS the BUYER GAS: 100% system,
-// NO TP and NO cashback (FeatureGas {1.0, 0,0,0, 0.0}). Accruing it here would
-// only ever credit "system" — producing no recipients and no TP — so feeding it
-// to the engine is pointless and, worse, the prior wiring keyed it as
-// FeatureP2P and minted TP/cashback that this model says it must NOT.
+// The on-chain GAS fee (the legacy feeBps / feeBaseUnits passed in) is buyer gas
+// — 100% system, NO TP/cashback — so it is NOT what gets accrued here. P2P's
+// TP/cashback comes from the SEPARATE 1% PLATFORM fee, which P2PEscrowV3
+// SNAPSHOTS into the trade as platformFeeBpsSnapshot at openTrade.
 //
-// The P2P platform's TP/cashback is meant to come from a SEPARATE 1% PLATFORM
-// fee (FeatureP2PPlatform, the carved {0.50,0.15,0.15,0.00,0.20} split) that is
-// NOT collected anywhere today. Until that 1% platform fee exists on chain and a
-// settle path feeds it, P2P release accrues NOTHING. This method is kept as an
-// explicit, documented no-op (rather than deleted) so all four release call
-// sites compile unchanged and the re-wiring point is obvious: when the 1%
-// platform fee lands, settle it under FeatureP2PPlatform from its own seam.
+// This reads that snapshot from the escrow (ReadTradePlatformFeeBps), computes
+// the platform-fee USD from the trade's token amount, and settles it under
+// FeatureP2PPlatform (the carved {0.50,0.15,0.15,0.00,0.20} split) for the buyer
+// (gen0 — the party that receives crypto and bears the fee). The on-chain gas
+// fee (feeBaseUnits) is deliberately NOT accrued.
+//
+// SAFE TO MERGE BEFORE V3: until V3 is deployed, ReadTradePlatformFeeBps returns
+// 0 (pre-V3 escrow / V2-opened trade) → this is a documented no-op, exactly as
+// before. The flag check + the wiring fire real accrual the moment V3 lands.
+//
+// Gating: no-op unless s.feeV2Enabled AND a wired fee engine. Idempotency:
+// OnFeeSettled is keyed (SourceType="p2p_release", SourceID=trade.ID), so a
+// confirm + a later reconciler pass for the SAME trade accrue exactly once — the
+// second is a guard-row no-op, so the chain reconciler does NOT re-accrue. Run
+// async (EnqueueFeeSettled) so it never blocks the release confirm / reconcile.
 func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUnits *big.Int) {
-	// Intentionally a no-op. See the doc comment above: the on-chain P2P fee is
-	// buyer gas (100% system, no TP); P2P TP would come from a 1% platform fee
-	// that is not collected today. Re-wire here under FeatureP2PPlatform once it is.
-	_ = trade
-	_ = feeBaseUnits
+	_ = feeBaseUnits // the on-chain gas fee is system-only; not accrued here.
+
+	if !s.feeV2Enabled || s.fees == nil || trade == nil {
+		return
+	}
+
+	// Resolve the escrow for the trade's chain (fail-loud — never Sonic fallback).
+	esc, _, _, err := s.resolve(trade.ChainID)
+	if err != nil || esc == nil {
+		log.Printf("[p2p accrue] trade=%s: resolve chain %d: %v", trade.ID, trade.ChainID, err)
+		return
+	}
+
+	// Read the V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
+	platformBps, found := esc.ReadTradePlatformFeeBps(HashID(trade.ID))
+	if !found || platformBps == 0 {
+		return
+	}
+
+	// platform fee (base units) = amount · platformBps / 10000.
+	amount, ok := new(big.Int).SetString(trade.TokenAmount, 10)
+	if !ok || amount.Sign() <= 0 {
+		return
+	}
+	platformFee := new(big.Int).Mul(amount, big.NewInt(int64(platformBps)))
+	platformFee.Quo(platformFee, big.NewInt(10000))
+
+	feeUSD := baseUnitsToUSD(platformFee, tokenDecimalsFor(trade.ChainID, trade.Token))
+	if feeUSD <= 0 {
+		return
+	}
+
+	// gen0 / buyer-cashback recipient is trade.BuyerID — the party that receives
+	// crypto and bears the fee (buyer on a sell-ad; receiving merchant on a buy-ad).
+	s.fees.EnqueueFeeSettled(FeeEvent{
+		Feature:    models.FeatureP2PPlatform,
+		Token:      trade.Token,
+		FeeUSD:     feeUSD,
+		UserID:     trade.BuyerID,
+		SourceType: "p2p_release",
+		SourceID:   trade.ID,
+	})
 }
 
 // onChainTradeFee derives the platform fee (base units) from a view-read trade:
