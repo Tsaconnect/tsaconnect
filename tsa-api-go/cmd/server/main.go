@@ -237,6 +237,16 @@ func main() {
 	} else {
 		log.Printf("[fee-manager] dormant: no FeeManager chain configured with a reachable RPC — admin set-fee flow + drift reconciler off")
 	}
+
+	// I1 boot guard — the double-pay interlock (design §9 step 4). If
+	// FEE_MODEL_V2_ENABLED is ON, EVERY configured escrow MUST have already
+	// stopped splitting on-chain (legacySplitEnabled==false) AND be wired to a
+	// FeeManager (feeManager!=0x0); otherwise the same fee is split BOTH on-chain
+	// (legacy escrow) AND off-chain (v2 engine) — a double-pay. With the flag OFF,
+	// or with no escrow addresses configured, the guard is a NO-OP (the flag-OFF
+	// behavior is unchanged). A failure is FATAL (fail-safe boot).
+	verifyEscrowCutoverReady(cfg, blockchainService)
+
 	// BLOCKER 3 — runnable fee/TP v2 cutover reset. Super-admin-gated route
 	// (RequireP2PAdmin) + confirm-phrase guard. Run BEFORE the FEE_MODEL_V2_ENABLED
 	// flip per the runbook in fee_distribution_reset.go.
@@ -497,6 +507,59 @@ func main() {
 	}
 
 	log.Println("Server exited gracefully")
+}
+
+// verifyEscrowCutoverReady is the I1 double-pay boot interlock (design §9 step
+// 4). When FEE_MODEL_V2_ENABLED is ON it reads each configured escrow's
+// legacySplitEnabled() + feeManager() on-chain and FATALLY aborts the boot if any
+// escrow still splits on-chain (legacySplitEnabled==true) OR is not yet wired to
+// a FeeManager (feeManager==0x0) — that combination double-pays the fee (on-chain
+// split + off-chain v2 engine). When the flag is OFF, or no escrow addresses are
+// configured, this is a NO-OP (flag-OFF behavior is byte-for-byte unchanged).
+func verifyEscrowCutoverReady(cfg *config.Config, bs *services.BlockchainService) {
+	flagOn := cfg.IsFeeModelV2Enabled()
+	if !flagOn {
+		return // flag OFF — no-op, preserves legacy behavior exactly.
+	}
+
+	// Assemble the configured escrows the backend knows about: P2P per-chain
+	// (from the P2P registry), plus the Sonic-fixed Product + ServiceContact
+	// escrows. Unconfigured (empty) addresses are skipped inside the guard.
+	var escrows []services.EscrowRef
+	for chainID, p := range cfg.P2PChains {
+		if p.EscrowAddress != "" {
+			escrows = append(escrows, services.EscrowRef{Label: "p2p", ChainID: chainID, Address: p.EscrowAddress})
+		}
+	}
+	if cfg.ProductEscrowAddress != "" {
+		escrows = append(escrows, services.EscrowRef{Label: "product", ChainID: cfg.SonicChainID, Address: cfg.ProductEscrowAddress})
+	}
+	if cfg.ServiceContractAddress != "" {
+		escrows = append(escrows, services.EscrowRef{Label: "service-contact", ChainID: cfg.SonicChainID, Address: cfg.ServiceContractAddress})
+	}
+	if len(escrows) == 0 {
+		return // no escrows configured — dormant, nothing to verify.
+	}
+
+	// Build a per-chain RPC reader over the chains the escrows live on.
+	rpcByChain := map[int64]services.FeeManagerRPCClient{}
+	for _, e := range escrows {
+		if _, ok := rpcByChain[e.ChainID]; ok {
+			continue
+		}
+		client, _ := bs.ClientForChainID(e.ChainID)
+		if client != nil && client.Client != nil {
+			rpcByChain[e.ChainID] = client.Client
+		}
+	}
+	reader := services.NewEscrowCutoverReaderFromClients(rpcByChain)
+
+	if err := services.VerifyEscrowCutoverReady(context.Background(), reader, escrows, flagOn); err != nil {
+		// FATAL: do NOT boot with the v2 engine active while an escrow still
+		// splits on-chain — that double-pays every fee.
+		log.Fatalf("[fee-v2] BOOT ABORTED — %v", err)
+	}
+	log.Printf("[fee-v2] escrow cutover guard PASSED: %d escrow(s) verified not-splitting + FeeManager-wired", len(escrows))
 }
 
 // verifyEscrowAdmin logs the escrow contract's on-chain owner on startup so

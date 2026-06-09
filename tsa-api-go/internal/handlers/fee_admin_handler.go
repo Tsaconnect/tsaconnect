@@ -19,10 +19,6 @@ func parseChainID(s string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 }
 
-// flatUnitsUSD converts the contract's uint64 1e6-unit flat to a float USD value
-// (the FeeConfig.FlatAmountUSD representation RefreshFromConfirmedRate expects).
-func flatUnitsUSD(units uint64) float64 { return float64(units) / 1e6 }
-
 // FeeAdminHandler serves the admin configurable-FeeManager set-fee flow (design
 // §5): author a desired-rate intent, plan the unsigned FeeManager.setRate tx(s),
 // confirm a broadcast tx (verify receipt + read-back THEN refresh the replica +
@@ -261,15 +257,14 @@ func (h *FeeAdminHandler) Confirm(c *gin.Context) {
 	}
 
 	// Verified — write the replica from the CONFIRMED on-chain value (chain truth,
-	// not admin input) and advance the state machine.
-	if err := h.feeCfg.RefreshFromConfirmedRate(intent.Feature, intent.Token, &req.ChainID,
-		onchain.BPS, flatUnitsUSD(onchain.FlatUSD), onchain.MCGPExempt, onchain.Active); err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Verified on-chain but failed to refresh the replica")
-		return
-	}
-	applied, serr := h.intents.ConfirmChain(id, req.ChainID)
+	// not admin input) AND advance the intent state machine ATOMICALLY in one DB
+	// transaction (findings #3 + #7): the replica write and the state advance
+	// commit or roll back together (the cache can never hold a rate the intent
+	// never advanced to), and the global-summary advance uses a compare-and-swap
+	// so concurrent per-chain confirms can't race it to a wrong value.
+	applied, serr := h.intents.ConfirmAndApply(h.feeCfg, id, req.ChainID, onchain)
 	if serr != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Replica refreshed but failed to advance intent state")
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Verified on-chain but failed to apply (replica + intent state rolled back together)")
 		return
 	}
 

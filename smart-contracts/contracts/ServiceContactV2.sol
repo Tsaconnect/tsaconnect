@@ -17,7 +17,9 @@ import "./interfaces/IFeeManager.sol";
 ///         `legacySplitEnabled` split gate (see
 ///         docs/superpowers/specs/2026-06-08-configurable-feemanager-design.md §3.1 / §7.3).
 ///         The proxy address and full V1 storage layout are preserved; `feeManager` /
-///         `legacySplitEnabled` / `tokenSymbol` are APPENDED before `__gap` (which shrinks 48 → 45).
+///         `legacySplitEnabled` / `tokenSymbol` are APPENDED before `__gap` (which shrinks 48 → 46;
+///         `feeManager` (address) + `legacySplitEnabled` (bool) pack into one slot, `tokenSymbol`
+///         takes one → 2 new slots).
 ///
 /// @dev    IMPORTANT (§7.3 / I2): `feeAmount` stays > 0. Zeroing it would brick `payContactFee` at
 ///         the `require(fee >= MIN_FEE_AMOUNT)` guard. The split is zeroed via the `legacySplitEnabled`
@@ -143,13 +145,14 @@ contract ServiceContactV2 is
         emit ContactFeePaid(msg.sender, serviceProvider, token, fee, requesterUpline);
     }
 
-    /// @notice Set the per-token fee. Pass 0 to clear (effectively disables payment in that token
-    ///         even if it remains in the acceptedTokens whitelist).
+    /// @notice Set the per-token fee. The fee can NEVER be zeroed — it must stay >= MIN_FEE_AMOUNT
+    ///         (§7.3 / I2). A zero fee would brick `payContactFee` for everyone at the
+    ///         `require(fee >= MIN_FEE_AMOUNT)` guard.
     /// @dev    To DISABLE the on-chain split (D5 cutover) use `setLegacySplitEnabled(false)` — do NOT
-    ///         zero `feeAmount` (that bricks payContactFee at the MIN_FEE_AMOUNT require).
+    ///         attempt to zero `feeAmount` (rejected here, and it would brick payContactFee anyway).
     function setFeeAmount(address token, uint256 newFeeAmount) external onlyOwner {
         require(token != address(0), "Invalid token");
-        require(newFeeAmount == 0 || newFeeAmount >= MIN_FEE_AMOUNT, "Fee below minimum");
+        require(newFeeAmount >= MIN_FEE_AMOUNT, "Fee below minimum");
         uint256 oldAmount = feeAmounts[token];
         feeAmounts[token] = newFeeAmount;
         emit FeeAmountUpdated(token, oldAmount, newFeeAmount);

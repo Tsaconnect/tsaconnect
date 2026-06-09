@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -23,6 +24,14 @@ func setupIntentTestDB(t *testing.T) *gorm.DB {
 	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
+	}
+	// An in-memory SQLite database is PER-CONNECTION: a multi-statement
+	// transaction that grabs a second pooled connection would see an empty DB
+	// ("no such table"). Cap the pool to 1 so the DDL below and every later tx
+	// share the one connection. (Test-only; mirrors the standard sqlite-:memory:
+	// fix.)
+	if sqlDB, derr := db.DB(); derr == nil {
+		sqlDB.SetMaxOpenConns(1)
 	}
 	if err := db.Exec(`CREATE TABLE fee_rate_intents (
 		id TEXT PRIMARY KEY,
@@ -305,5 +314,138 @@ func TestCancelOnlyWhileNotApplied(t *testing.T) {
 	}
 	if err := svc.Cancel(intent2.ID); err == nil {
 		t.Fatalf("cancel of an applied intent should fail")
+	}
+}
+
+// feeConfigOverIntentDB builds a FeeConfigService backed by the SAME DB as the
+// intent service (the fee_configs table created by setupIntentTestDB). It does
+// NOT seed (the table starts empty) so the replica-write/rollback assertions are
+// unambiguous.
+func feeConfigOverIntentDB(db *gorm.DB) *FeeConfigService {
+	return &FeeConfigService{db: db, cache: map[string]models.FeeConfig{}, lastKnownGood: map[string]models.FeeConfig{}}
+}
+
+func feeConfigRowCount(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var n int64
+	if err := db.Model(&models.FeeConfig{}).Count(&n).Error; err != nil {
+		t.Fatalf("count fee_configs: %v", err)
+	}
+	return n
+}
+
+// TestConfirmAndApply_AtomicRollback (finding #3): a forced failure in the intent
+// STATE advance must roll back the fee_config replica write made earlier in the
+// SAME transaction — the cache must never hold a rate the intent never advanced
+// to. WriteReplicaRowTx runs FIRST inside the tx; we force confirmChainTx to fail
+// by confirming a CANCELLED intent (a deterministic, realistic state-advance
+// error that fires AFTER the replica write within the same tx).
+func TestConfirmAndApply_AtomicRollback(t *testing.T) {
+	db := setupIntentTestDB(t)
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC), nil)
+	feeCfg := feeConfigOverIntentDB(db)
+
+	intent, err := svc.Create(models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true}, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if n := feeConfigRowCount(t, db); n != 0 {
+		t.Fatalf("precondition: fee_configs should be empty, got %d", n)
+	}
+	// Cancel the intent so the in-tx state advance (confirmChainTx) errors AFTER
+	// WriteReplicaRowTx has already written the replica row inside the tx.
+	if err := svc.Cancel(intent.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	applied, cerr := svc.ConfirmAndApply(feeCfg, intent.ID, sonicC, FeeManagerRate{BPS: 50, Active: true})
+	if cerr == nil {
+		t.Fatalf("expected ConfirmAndApply to fail for a cancelled intent")
+	}
+	if applied {
+		t.Fatalf("applied should be false on failure")
+	}
+
+	// The replica write must have rolled back — NO fee_config row persisted, and
+	// the live cache must NOT hold the rate either.
+	if n := feeConfigRowCount(t, db); n != 0 {
+		t.Fatalf("replica write was NOT rolled back: fee_configs has %d rows, want 0", n)
+	}
+	feeCfg.mu.RLock()
+	cacheLen := len(feeCfg.cache)
+	feeCfg.mu.RUnlock()
+	if cacheLen != 0 {
+		t.Fatalf("cache holds %d rows after a rolled-back confirm, want 0", cacheLen)
+	}
+}
+
+// TestConfirmAndApply_HappyPath: a confirmed single-chain intent writes the
+// replica AND advances the state to applied, both committed together.
+func TestConfirmAndApply_HappyPath(t *testing.T) {
+	db := setupIntentTestDB(t)
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC), nil)
+	feeCfg := feeConfigOverIntentDB(db)
+
+	intent, _ := svc.Create(models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true}, nil)
+
+	applied, err := svc.ConfirmAndApply(feeCfg, intent.ID, sonicC, FeeManagerRate{BPS: 50, Active: true})
+	if err != nil {
+		t.Fatalf("ConfirmAndApply: %v", err)
+	}
+	if !applied {
+		t.Fatalf("single in-scope chain should be fully applied")
+	}
+	// Replica row written + cache loaded.
+	if n := feeConfigRowCount(t, db); n != 1 {
+		t.Fatalf("expected 1 replica row, got %d", n)
+	}
+	bps, _, _, found := feeCfg.RateFor(models.FeatureWithdrawal, "USDT", &[]int64{sonicC}[0])
+	if !found || bps != 50 {
+		t.Fatalf("cache RateFor = %d found=%v, want 50/true", bps, found)
+	}
+	g, _ := svc.Get(intent.ID)
+	if g.State != models.FeeRateIntentApplied {
+		t.Fatalf("intent state = %s, want applied", g.State)
+	}
+}
+
+// TestConfirmChain_ConcurrentConvergesToApplied (finding #7): two concurrent
+// per-chain confirms on a two-chain intent must converge to `applied` (not get
+// stuck at partially_applied or race the summary to a wrong value). The
+// compare-and-swap on the global summary row makes the advance race-safe.
+func TestConfirmChain_ConcurrentConvergesToApplied(t *testing.T) {
+	db := setupIntentTestDB(t)
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC, bscC), nil)
+
+	// Global default scopes BOTH chains (no per-chain override).
+	intent, _ := svc.Create(models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true}, nil)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	chains := []int64{sonicC, bscC}
+	wg.Add(2)
+	for i, ch := range chains {
+		go func(i int, ch int64) {
+			defer wg.Done()
+			_, errs[i] = svc.ConfirmChain(intent.ID, ch)
+		}(i, ch)
+	}
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent confirm[%d] error: %v", i, e)
+		}
+	}
+
+	// After BOTH chains confirm, the summary must be `applied` — never stuck at
+	// partially_applied, never an inconsistent state.
+	g, _ := svc.Get(intent.ID)
+	if g.State != models.FeeRateIntentApplied {
+		t.Fatalf("after concurrent confirms state = %s, want applied", g.State)
+	}
+	// Both per-chain markers must be applied.
+	if done, _ := svc.InScopeChainsConfirmed(g, -1); !done {
+		t.Fatalf("not all in-scope chains marked confirmed after concurrent confirms")
 	}
 }

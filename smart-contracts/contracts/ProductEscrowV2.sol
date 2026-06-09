@@ -16,7 +16,9 @@ import "./interfaces/IFeeManager.sol";
 ///         `legacySplitEnabled` split gate (see
 ///         docs/superpowers/specs/2026-06-08-configurable-feemanager-design.md §3.1 / §7.2).
 ///         The proxy address and full V1 storage layout are preserved; `feeManager` /
-///         `legacySplitEnabled` / `tokenSymbol` are APPENDED before `__gap` (which shrinks 47 → 44).
+///         `legacySplitEnabled` / `tokenSymbol` are APPENDED before `__gap` (which shrinks 47 → 45;
+///         `feeManager` (address) + `legacySplitEnabled` (bool) pack into one slot, `tokenSymbol`
+///         takes one → 2 new slots).
 ///
 ///         `_calculatePlatformFee` reads the merchant bps from `rateFor("product_merchant", sym)` and the
 ///         flat gas component from `rateFor("product", sym).flatUSD`, clamped to `MAX_PLATFORM_FEE_BPS`

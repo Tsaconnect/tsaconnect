@@ -160,8 +160,16 @@ func (s *FeeRateIntentService) UpdateState(id uuid.UUID, state models.FeeRateInt
 // (design §4 resolution, the chain dimension on the off-chain authoring side).
 // found=false when neither a chain override nor a global row exists.
 func (s *FeeRateIntentService) Resolve(feature, token string, chainID int64) (FeeManagerRate, bool, error) {
+	return s.resolveTx(s.db, feature, token, chainID)
+}
+
+// resolveTx is Resolve over a specific DB handle. Passing the open transaction
+// keeps every read inside confirmChainTx on the SAME connection — critical when
+// the pool is capped to one connection (a separate s.db read would then deadlock
+// against the connection the tx already holds).
+func (s *FeeRateIntentService) resolveTx(db *gorm.DB, feature, token string, chainID int64) (FeeManagerRate, bool, error) {
 	var override models.FeeRateIntent
-	err := s.db.Where("feature = ? AND token = ? AND chain_id = ?", feature, token, chainID).
+	err := db.Where("feature = ? AND token = ? AND chain_id = ?", feature, token, chainID).
 		First(&override).Error
 	if err == nil {
 		return rateFromIntent(override), true, nil
@@ -170,7 +178,7 @@ func (s *FeeRateIntentService) Resolve(feature, token string, chainID int64) (Fe
 		return FeeManagerRate{}, false, err
 	}
 	var global models.FeeRateIntent
-	err = s.db.Where("feature = ? AND token = ? AND chain_id IS NULL", feature, token).
+	err = db.Where("feature = ? AND token = ? AND chain_id IS NULL", feature, token).
 		First(&global).Error
 	if err == nil {
 		return rateFromIntent(global), true, nil
@@ -317,11 +325,62 @@ func ratesEqual(a, b FeeManagerRate) bool {
 	return a.BPS == b.BPS && a.FlatUSD == b.FlatUSD && a.MCGPExempt == b.MCGPExempt && a.Active == b.Active
 }
 
+// ConfirmAndApply atomically (a) writes the CONFIRMED on-chain rate into the
+// fee_config read replica AND (b) advances the intent state machine for one
+// chain, in a SINGLE database transaction (findings #3 + #7). The fee_admin
+// handler has already verified the receipt status==1 AND read back rateFor ==
+// the resolved intent BEFORE calling this — this method only performs the two
+// writes, which MUST commit/roll back together so the cache can never hold a
+// rate the intent never advanced to (#3), and the global-summary state advance
+// uses a compare-and-swap on the intent row so concurrent per-chain confirms
+// can't race the summary to a wrong value (#7).
+//
+// `onchain` is the verified on-chain rate (chain truth, never admin input). On
+// success the FeeConfigService cache is reloaded AFTER commit (so a rollback
+// leaves the cache untouched). Returns (applied=true) iff this confirmation
+// brought ALL in-scope chains to applied.
+func (s *FeeRateIntentService) ConfirmAndApply(feeCfg *FeeConfigService, intentID uuid.UUID, chainID int64, onchain FeeManagerRate) (applied bool, err error) {
+	if feeCfg == nil {
+		return false, fmt.Errorf("ConfirmAndApply: nil fee config service")
+	}
+	global, err := s.Get(intentID)
+	if err != nil {
+		return false, err
+	}
+
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// (1) Write the replica row INSIDE this tx so it commits/rolls back with
+		// the state advance (#3). Use the verified on-chain value.
+		if werr := feeCfg.WriteReplicaRowTx(tx, global.Feature, global.Token, &chainID,
+			onchain.BPS, flatUnitsToUSD(onchain.FlatUSD), onchain.MCGPExempt, onchain.Active); werr != nil {
+			return werr
+		}
+		// (2) Advance the intent state machine in the SAME tx.
+		a, serr := s.confirmChainTx(tx, intentID, chainID)
+		if serr != nil {
+			return serr
+		}
+		applied = a
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// Reload the cache from the now-committed replica (refreshes last-known-good
+	// on success). Done AFTER commit so a rolled-back tx never leaves a stale
+	// rate in the cache (#3). A reload failure is non-fatal — the next Load /
+	// reconciler self-heals; the confirmed write already committed.
+	if lerr := feeCfg.Load(); lerr != nil {
+		return applied, fmt.Errorf("confirmed + state advanced but cache reload failed (self-heals on next load): %w", lerr)
+	}
+	return applied, nil
+}
+
 // ConfirmChain advances the intent state machine after a single chain's
-// FeeManager.setRate has been VERIFIED on-chain (design §5). The fee_admin
-// handler has already (a) verified the receipt status==1 AND (b) read back
-// rateFor == the resolved intent, and (c) written the fee_config replica via
-// RefreshFromConfirmedRate — ConfirmChain only moves the state machine.
+// FeeManager.setRate has been VERIFIED on-chain (design §5). Kept for callers /
+// tests that advance state independently; the production confirm path uses
+// ConfirmAndApply to couple the replica write with the state advance atomically.
 //
 // State transitions (per the design §5 machine):
 //
@@ -329,17 +388,34 @@ func ratesEqual(a, b FeeManagerRate) bool {
 //	partially_applied --all in-scope chains confirmed--> applied
 //
 // "in-scope chains" = the configured FeeManagerChains for which Resolve finds a
-// rate. A chain's confirmation is recorded by setting that chain's override row
-// to `applied` (or, when the chain rides the global default with no override row,
-// by counting it as covered once its rateFor matches — tracked via confirmedChainIDs).
-// The GLOBAL row's State is the aggregate the admin reads (pending →
-// partially_applied → applied).
+// rate. The GLOBAL row's State is the aggregate the admin reads.
 //
 // Returns (applied=true) iff this confirmation brought ALL in-scope chains to
 // applied (the intent is fully done).
 func (s *FeeRateIntentService) ConfirmChain(intentID uuid.UUID, chainID int64) (applied bool, err error) {
-	global, err := s.Get(intentID)
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		a, e := s.confirmChainTx(tx, intentID, chainID)
+		applied = a
+		return e
+	})
 	if err != nil {
+		return false, err
+	}
+	return applied, nil
+}
+
+// confirmChainTx is the transactional core of the state advance, run inside the
+// caller's tx. It (a) flips/creates this chain's per-chain override marker to
+// `applied`, and (b) advances the GLOBAL summary row via a COMPARE-AND-SWAP
+// (UpdateState ... WHERE state = <expected>) so two concurrent per-chain
+// confirms can never both read pending and clobber the summary (#7). The global
+// row is also re-read inside the tx (not the pre-tx snapshot) so the CAS sees
+// the latest committed state.
+func (s *FeeRateIntentService) confirmChainTx(tx *gorm.DB, intentID uuid.UUID, chainID int64) (bool, error) {
+	// Re-read the global row INSIDE the tx (a row a concurrent confirm may have
+	// already advanced) so the CAS below compares against fresh state.
+	var global models.FeeRateIntent
+	if err := tx.First(&global, "id = ?", intentID).Error; err != nil {
 		return false, err
 	}
 	if global.State == models.FeeRateIntentApplied {
@@ -350,9 +426,9 @@ func (s *FeeRateIntentService) ConfirmChain(intentID uuid.UUID, chainID int64) (
 	}
 
 	// Resolve the effective rate for this chain so a default-riding chain (no
-	// override row) gets a persisted per-chain marker carrying the same value —
-	// resolution is unchanged (override == global) but coverage becomes durable.
-	resolved, found, rerr := s.Resolve(global.Feature, global.Token, chainID)
+	// override row) gets a persisted per-chain marker carrying the same value.
+	// Read via the tx (single-connection-pool safe).
+	resolved, found, rerr := s.resolveTx(tx, global.Feature, global.Token, chainID)
 	if rerr != nil {
 		return false, rerr
 	}
@@ -360,43 +436,41 @@ func (s *FeeRateIntentService) ConfirmChain(intentID uuid.UUID, chainID int64) (
 		return false, fmt.Errorf("chain %d is not in scope for intent %s", chainID, intentID)
 	}
 
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		// Upsert this chain's override row in the `applied` state. If it already
-		// exists (an explicit override), just flip it applied; otherwise create a
-		// marker row equal to the resolved (global) rate so multi-chain default
-		// rollouts have durable per-chain coverage.
-		var existing models.FeeRateIntent
-		qerr := tx.Where("feature = ? AND token = ? AND chain_id = ?", global.Feature, global.Token, chainID).
-			First(&existing).Error
-		switch {
-		case qerr == nil:
-			return tx.Model(&models.FeeRateIntent{}).
-				Where("id = ?", existing.ID).
-				Update("state", models.FeeRateIntentApplied).Error
-		case qerr == gorm.ErrRecordNotFound:
-			cid := chainID
-			return tx.Create(&models.FeeRateIntent{
-				ID:         uuid.New(),
-				Feature:    global.Feature,
-				Token:      global.Token,
-				ChainID:    &cid,
-				BPS:        resolved.BPS,
-				FlatUSD:    flatUnitsToUSD(resolved.FlatUSD),
-				MCGPExempt: resolved.MCGPExempt,
-				Active:     resolved.Active,
-				State:      models.FeeRateIntentApplied,
-			}).Error
-		default:
-			return qerr
+	// Upsert this chain's override row in the `applied` state.
+	var existing models.FeeRateIntent
+	qerr := tx.Where("feature = ? AND token = ? AND chain_id = ?", global.Feature, global.Token, chainID).
+		First(&existing).Error
+	switch {
+	case qerr == nil:
+		if err := tx.Model(&models.FeeRateIntent{}).
+			Where("id = ?", existing.ID).
+			Update("state", models.FeeRateIntentApplied).Error; err != nil {
+			return false, err
 		}
-	})
-	if err != nil {
-		return false, err
+	case qerr == gorm.ErrRecordNotFound:
+		cid := chainID
+		if err := tx.Create(&models.FeeRateIntent{
+			ID:         uuid.New(),
+			Feature:    global.Feature,
+			Token:      global.Token,
+			ChainID:    &cid,
+			BPS:        resolved.BPS,
+			FlatUSD:    flatUnitsToUSD(resolved.FlatUSD),
+			MCGPExempt: resolved.MCGPExempt,
+			Active:     resolved.Active,
+			State:      models.FeeRateIntentApplied,
+		}).Error; err != nil {
+			return false, err
+		}
+	default:
+		return false, qerr
 	}
 
 	// The global row advances to partially_applied on the first confirm and
 	// applied only when EVERY in-scope chain has an applied per-chain marker.
-	allDone, derr := s.InScopeChainsConfirmed(global, chainID)
+	// Evaluate coverage INSIDE the tx (over the just-written override row) so a
+	// concurrent confirm's marker is visible per the tx isolation level.
+	allDone, derr := s.inScopeChainsConfirmedTx(tx, &global, chainID)
 	if derr != nil {
 		return false, derr
 	}
@@ -404,8 +478,40 @@ func (s *FeeRateIntentService) ConfirmChain(intentID uuid.UUID, chainID int64) (
 	if allDone {
 		next = models.FeeRateIntentApplied
 	}
-	if err := s.UpdateState(global.ID, next); err != nil {
-		return false, err
+	// Compare-and-swap the GLOBAL summary state: only advance from the state we
+	// observed (#7). A concurrent confirm that already moved it past `expected`
+	// fails the WHERE and we re-read to converge. Never DOWNGRADE applied →
+	// partially_applied: if another confirm already set applied, leave it.
+	expected := global.State
+	res := tx.Model(&models.FeeRateIntent{}).
+		Where("id = ? AND state = ?", global.ID, expected).
+		Update("state", next)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	if res.RowsAffected == 0 {
+		// A concurrent confirm advanced the summary first. Re-read and reconcile:
+		// recompute coverage over the now-committed-in-tx markers and set the
+		// correct terminal state, again via CAS-from-current.
+		var cur models.FeeRateIntent
+		if err := tx.First(&cur, "id = ?", global.ID).Error; err != nil {
+			return false, err
+		}
+		if cur.State == models.FeeRateIntentApplied {
+			return true, nil
+		}
+		done2, derr2 := s.inScopeChainsConfirmedTx(tx, &cur, chainID)
+		if derr2 != nil {
+			return false, derr2
+		}
+		if done2 {
+			if err := tx.Model(&models.FeeRateIntent{}).
+				Where("id = ? AND state <> ?", cur.ID, models.FeeRateIntentApplied).
+				Update("state", models.FeeRateIntentApplied).Error; err != nil {
+				return false, err
+			}
+		}
+		return done2, nil
 	}
 	return allDone, nil
 }
@@ -423,12 +529,20 @@ func (s *FeeRateIntentService) ConfirmChain(intentID uuid.UUID, chainID int64) (
 // therefore require an explicit confirm for EACH in-scope chain; coverage is the
 // AND over all in-scope chains of "has an applied override row OR == justConfirmed".
 func (s *FeeRateIntentService) InScopeChainsConfirmed(global *models.FeeRateIntent, justConfirmed int64) (bool, error) {
+	return s.inScopeChainsConfirmedTx(s.db, global, justConfirmed)
+}
+
+// inScopeChainsConfirmedTx is InScopeChainsConfirmed run over a specific DB
+// handle (a transaction) so coverage is evaluated against the markers written
+// EARLIER IN THE SAME TX (the just-flipped per-chain override). Passing s.db
+// gives the original non-transactional behavior.
+func (s *FeeRateIntentService) inScopeChainsConfirmedTx(db *gorm.DB, global *models.FeeRateIntent, justConfirmed int64) (bool, error) {
 	if s.cfg == nil || len(s.cfg.FeeManagerChains) == 0 {
 		return false, nil
 	}
 	// Load all sibling rows for this (feature, token).
 	var rows []models.FeeRateIntent
-	if err := s.db.Where("feature = ? AND token = ?", global.Feature, global.Token).
+	if err := db.Where("feature = ? AND token = ?", global.Feature, global.Token).
 		Find(&rows).Error; err != nil {
 		return false, err
 	}
@@ -443,8 +557,9 @@ func (s *FeeRateIntentService) InScopeChainsConfirmed(global *models.FeeRateInte
 	confirmed := map[int64]bool{justConfirmed: true}
 
 	for chainID := range s.cfg.FeeManagerChains {
-		// In scope? Resolve a rate for this chain.
-		_, found, err := s.Resolve(global.Feature, global.Token, chainID)
+		// In scope? Resolve a rate for this chain (over the same DB handle so a
+		// capped single-connection pool inside a tx can't deadlock).
+		_, found, err := s.resolveTx(db, global.Feature, global.Token, chainID)
 		if err != nil {
 			return false, err
 		}

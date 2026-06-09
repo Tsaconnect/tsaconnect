@@ -19,9 +19,20 @@ import (
 )
 
 // cartQuoteToken is the representative non-MCGP settlement token used to quote a
-// cart before the buyer picks the order token at checkout. The merchant/gas
-// fee_config rows are token-wildcard, so any non-MCGP token resolves the same
-// rate; only MCGP is exempt (and MCGP is never the cart-quote token).
+// cart BEFORE the buyer picks the order token at checkout. The cart is
+// token-agnostic until checkout, so threading the order's real settlement token
+// into the summary here is not possible — the token doesn't exist yet.
+//
+// WILDCARD-ONLY ASSUMPTION (design §5, finding #5b): this hardcoded quote token
+// is SAFE only because the product/product_merchant fee is wildcard-only — every
+// non-MCGP token resolves the exact same rate, so the quote (at USDC) provably
+// equals the eventual on-chain charge (at the order's real token). That
+// invariant is ENFORCED, not assumed: FeeConfigService rejects a per-token
+// (non-"*") product fee row at seed/load/refresh (productFeeWildcardOnly), so a
+// per-token override that could diverge the quote from the charge can never
+// exist. MCGP exemption is the wildcard row's mcgpExempt flag (MCGP order → gas
+// $0); MCGP is never the cart-quote token. The checkout CHARGE path
+// (CalculatePlatformFee, FeeFlatUSD) already uses the order's real token.
 const cartQuoteToken = "USDC"
 
 // cartFeeLookups binds the fee-config service reads into the models package so

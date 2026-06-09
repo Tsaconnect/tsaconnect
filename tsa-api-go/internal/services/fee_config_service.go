@@ -176,6 +176,12 @@ func (s *FeeConfigService) seedIfEmpty() error {
 		return nil
 	}
 	for _, fc := range DefaultFeeConfigs() {
+		// #5b guard: never seed a per-token product fee row (the seed set is all
+		// wildcard today; this guards a future edit that would silently let the
+		// cart quote diverge from the charge).
+		if productFeeWildcardOnly(fc.Feature, fc.TokenSymbol) {
+			return errProductPerTokenOverride(fc.Feature, fc.TokenSymbol)
+		}
 		if err := s.db.Create(&fc).Error; err != nil {
 			log.Printf("[FeeConfig] failed to seed %s/%s: %v", fc.Feature, fc.TokenSymbol, err)
 		}
@@ -198,6 +204,14 @@ func (s *FeeConfigService) Load() error {
 	}
 	cache := make(map[string]models.FeeConfig, len(rows))
 	for _, r := range rows {
+		// #5b guard: a per-token product fee row would make the token-agnostic
+		// cart quote diverge from the per-token charge. Reject at load (a row this
+		// shape should never be written — RefreshFromConfirmedRate refuses it — so
+		// finding one means a hand-edited/corrupt DB; fail loudly rather than serve
+		// a quote that can mismatch the charge).
+		if productFeeWildcardOnly(r.Feature, r.TokenSymbol) {
+			return errProductPerTokenOverride(r.Feature, r.TokenSymbol)
+		}
 		cache[cacheKey(r.Feature, r.TokenSymbol, r.ChainID)] = r
 	}
 	s.mu.Lock()
@@ -357,6 +371,33 @@ func chainLabel(chainID *int64) string {
 	return strconv.FormatInt(*chainID, 10)
 }
 
+// productFeeWildcardOnly reports whether (feature, token) violates the product
+// fee wildcard-only invariant (design §5, finding #5b). The cart QUOTE is
+// computed before the buyer picks a settlement token, so it resolves the product
+// fee against a representative token (cartQuoteToken = "USDC"). For the quote to
+// provably equal the eventual on-chain CHARGE (which uses the order's real
+// token), the product/product_merchant fee MUST be wildcard-only — a per-token
+// (non-"*") override would let the quote (resolved at USDC) diverge from a charge
+// in a different token. We therefore REJECT any non-wildcard product fee row at
+// seed/load/refresh. MCGP exemption is expressed via the wildcard row's
+// mcgpExempt flag, NOT a per-token MCGP row, so this does not break MCGP.
+func productFeeWildcardOnly(feature, token string) bool {
+	switch feature {
+	case models.FeatureProduct, models.FeatureProductMerchant:
+		return strings.ToUpper(strings.TrimSpace(token)) != models.FeeTokenAny
+	default:
+		return false
+	}
+}
+
+// errProductPerTokenOverride is returned by the write/load guards when a
+// per-token product fee override is encountered (design §5, finding #5b).
+func errProductPerTokenOverride(feature, token string) error {
+	return fmt.Errorf(
+		"fee_config: per-token override (%s) for %q is forbidden — the product fee must be wildcard-only (%q) so the token-agnostic cart quote provably equals the on-chain charge (design §5/#5b); express MCGP exemption via the wildcard row's mcgpExempt flag instead",
+		token, feature, models.FeeTokenAny)
+}
+
 // RefreshFromConfirmedRate writes a CONFIRMED on-chain rate into the fee_config
 // read replica and refreshes the in-memory cache + last-known-good for that key
 // (configurable-FeeManager design §4/§5).
@@ -378,11 +419,40 @@ func (s *FeeConfigService) RefreshFromConfirmedRate(feature, token string, chain
 	if s.db == nil {
 		return nil
 	}
+	if err := s.WriteReplicaRowTx(s.db, feature, token, chainID, bps, flatUSD, mcgpExempt, active); err != nil {
+		return err
+	}
+
+	// Reload the whole cache from the now-updated replica (also refreshes
+	// last-known-good on success). Replica written from confirmed chain truth →
+	// cache invalidated. This is the correct invalidation point (post-confirm),
+	// NOT on admin save.
+	return s.Load()
+}
+
+// WriteReplicaRowTx upserts ONE confirmed (feature, token, chain) replica row
+// using the supplied *gorm.DB — pass an open transaction handle to fold the
+// replica write into a LARGER transaction (so it commits/rolls back atomically
+// with the intent state advance — finding #3). It does NOT reload the in-memory
+// cache: the caller MUST call Load() AFTER the outer transaction commits, so a
+// rollback leaves the cache untouched (the cache would otherwise hold a rate the
+// DB rolled back). RefreshFromConfirmedRate is the convenience wrapper that runs
+// this against s.db and then reloads.
+func (s *FeeConfigService) WriteReplicaRowTx(tx *gorm.DB, feature, token string, chainID *int64, bps uint16, flatUSD float64, mcgpExempt, active bool) error {
+	if tx == nil {
+		return fmt.Errorf("WriteReplicaRowTx: nil tx")
+	}
 	upperToken := strings.ToUpper(strings.TrimSpace(token))
+
+	// #5b guard: a product fee must be wildcard-only so the token-agnostic cart
+	// quote can never diverge from the per-token charge.
+	if productFeeWildcardOnly(feature, upperToken) {
+		return errProductPerTokenOverride(feature, upperToken)
+	}
 
 	// Upsert the (feature, token, chain) replica row.
 	var existing models.FeeConfig
-	q := s.db.Where("feature = ? AND token_symbol = ?", feature, upperToken)
+	q := tx.Where("feature = ? AND token_symbol = ?", feature, upperToken)
 	if chainID == nil {
 		q = q.Where("chain_id IS NULL")
 	} else {
@@ -397,7 +467,7 @@ func (s *FeeConfigService) RefreshFromConfirmedRate(feature, token string, chain
 			"mcgp_exempt":     mcgpExempt,
 			"active":          active,
 		}
-		if err := s.db.Model(&models.FeeConfig{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+		if err := tx.Model(&models.FeeConfig{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
 			return fmt.Errorf("refresh replica update: %w", err)
 		}
 	case err == gorm.ErrRecordNotFound:
@@ -411,18 +481,13 @@ func (s *FeeConfigService) RefreshFromConfirmedRate(feature, token string, chain
 			MCGPExempt:    mcgpExempt,
 			Active:        active,
 		}
-		if err := s.db.Create(&row).Error; err != nil {
+		if err := tx.Create(&row).Error; err != nil {
 			return fmt.Errorf("refresh replica create: %w", err)
 		}
 	default:
 		return fmt.Errorf("refresh replica lookup: %w", err)
 	}
-
-	// Reload the whole cache from the now-updated replica (also refreshes
-	// last-known-good on success). Replica written from confirmed chain truth →
-	// cache invalidated. This is the correct invalidation point (post-confirm),
-	// NOT on admin save.
-	return s.Load()
+	return nil
 }
 
 // All returns all cached active rows (used by tests / diagnostics).

@@ -676,5 +676,12 @@ func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, boo
 		return 0, false
 	}
 	usd := parseFloatOr0(parsed.Estimate.FromAmountUSD)
+	// A 200 with a malformed/empty/zero fromAmountUSD must NOT yield (0, true):
+	// that would silently route a verifiedFeeUSD=0 down the "reachable" path and
+	// accrue a $0 fee. Treat it as unreachable so the caller applies the
+	// conservative configured default instead (design §8, I8 — never silent $0).
+	if usd <= 0 {
+		return 0, false
+	}
 	return usd, true
 }
