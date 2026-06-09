@@ -167,6 +167,17 @@ func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error
 	return result, nil
 }
 
+// SeedPriceForTest pre-loads the price cache for a single symbol so test code
+// (and offline/dev paths) can resolve a deterministic price without a network
+// call. The cache key mirrors GetPrices([]string{symbol}) — the lone symbol —
+// and the entry is far-future so it never expires mid-test. Test-only helper.
+func (ps *PriceService) SeedPriceForTest(symbol string, pd PriceData) {
+	ps.cache.Store(symbol, &cacheEntry{
+		data:      map[string]PriceData{symbol: pd},
+		expiresAt: time.Now().Add(24 * time.Hour),
+	})
+}
+
 // GetHistoricalPrice fetches historical price data for a symbol over the specified number of days.
 func (ps *PriceService) GetHistoricalPrice(symbol string, days int) ([]PricePoint, error) {
 	upper := strings.ToUpper(symbol)

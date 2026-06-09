@@ -303,123 +303,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 	recipients := make(map[uuid.UUID]struct{}, MaxTPGenerations+2)
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		split := ComputeSplit(ev.Feature, ev.FeeUSD)
-
-		// (1) Idempotency guard. ON CONFLICT DO NOTHING then check RowsAffected
-		// so a duplicate is a clean no-op on both PostgreSQL and SQLite.
-		guard := models.FeeDistribution{
-			ID:                  uuid.New(),
-			SourceType:          ev.SourceType,
-			SourceID:            ev.SourceID,
-			UserID:              ev.UserID,
-			Feature:             ev.Feature,
-			Token:               ev.Token,
-			FeeUSD:              ev.FeeUSD,
-			SystemUSD:           split.SystemUSD,
-			BuyerCashbackUSD:    split.BuyerCashbackUSD,
-			UplineCashbackUSD:   split.UplineCashbackUSD,
-			ProviderCashbackUSD: split.ProviderCashbackUSD,
-			TPPoolUSD:           split.TPPoolUSD,
-			TPPerUSD:            s.tpPerUSD,
-			CreatedAt:           time.Now(),
-		}
-		res := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "source_type"}, {Name: "source_id"}},
-			DoNothing: true,
-		}).Create(&guard)
-		if res.Error != nil {
-			return fmt.Errorf("insert fee guard (%s/%s): %w", ev.SourceType, ev.SourceID, res.Error)
-		}
-		if res.RowsAffected == 0 {
-			// Already distributed — idempotent no-op.
-			return errAlreadyDistributed
-		}
-
-		// (2) Distribute the 30% TP pool across gen0..gen10.
-		var globalPoolUSD float64
-		for gen := 0; gen <= MaxTPGenerations; gen++ {
-			pct := models.GenerationPercentages[gen]
-			shareUSD := split.TPPoolUSD * pct
-			if shareUSD <= 0 {
-				continue
-			}
-
-			if gen == 0 {
-				// gen0 is always the transacting user.
-				if err := s.creditTP(tx, ev.UserID, ev, gen, pct, shareUSD); err != nil {
-					return err
-				}
-				recipients[ev.UserID] = struct{}{}
-				continue
-			}
-
-			anc, ok := byGen[gen]
-			if ok && anc.Active {
-				if err := s.creditTP(tx, anc.UserID, ev, gen, pct, shareUSD); err != nil {
-					return err
-				}
-				recipients[anc.UserID] = struct{}{}
-				continue
-			}
-
-			// No live ancestor at this generation: route the share to the
-			// global pool and CONTINUE (do not stop the climb).
-			if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonTPGeneration, gen, shareUSD); err != nil {
-				return err
-			}
-			globalPoolUSD += shareUSD
-		}
-
-		// (3a) Buyer cashback (split.Buyer · F) → the transacting user (USD).
-		// Zero for the 70/30 trades and gas — those credit no buyer cashback.
-		if split.BuyerCashbackUSD > 0 {
-			if err := s.creditCashback(tx, ev.UserID, ev.UserID, ev, split.BuyerCashbackUSD); err != nil {
-				return err
-			}
-			recipients[ev.UserID] = struct{}{}
-		}
-
-		// (3b) Upline cashback (split.Upline · F) → the direct (gen-1) ancestor if
-		// present AND active; otherwise route to the global pool. Zero for the
-		// 70/30 trades and gas.
-		if split.UplineCashbackUSD > 0 {
-			gen1, ok := byGen[1]
-			if ok && gen1.Active {
-				if err := s.creditCashback(tx, gen1.UserID, ev.UserID, ev, split.UplineCashbackUSD); err != nil {
-					return err
-				}
-				recipients[gen1.UserID] = struct{}{}
-			} else {
-				if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonUplineCashback, -1, split.UplineCashbackUSD); err != nil {
-					return err
-				}
-				globalPoolUSD += split.UplineCashbackUSD
-			}
-		}
-
-		// (3c) Provider cashback (split.Provider · F) → the service provider
-		// (FeeEvent.ProviderID). Only service_contact carries a non-zero provider
-		// share today; the cashback is recorded in USD here (the SP5 reward rail
-		// converts it to MCGP, like all other cashback). When the split's provider
-		// component is 0, or no ProviderID is supplied, credit nothing — there is
-		// no global-pool fallback for the provider share (unlike upline).
-		if split.ProviderCashbackUSD > 0 && ev.ProviderID != nil && *ev.ProviderID != uuid.Nil {
-			if err := s.creditCashback(tx, *ev.ProviderID, ev.UserID, ev, split.ProviderCashbackUSD); err != nil {
-				return err
-			}
-			recipients[*ev.ProviderID] = struct{}{}
-		}
-
-		// (4) Stamp the total global-pool routing on the guard row for audit.
-		if globalPoolUSD > 0 {
-			if err := tx.Model(&models.FeeDistribution{}).
-				Where("id = ?", guard.ID).
-				Update("global_pool_usd", globalPoolUSD).Error; err != nil {
-				return fmt.Errorf("stamp global pool on guard: %w", err)
-			}
-		}
-
-		return nil
+		return s.distributeWithinTx(tx, ev, byGen, recipients)
 	})
 
 	if errors.Is(err, errAlreadyDistributed) {
@@ -435,6 +319,191 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 	// the user's next genuine activity (the reward computation is idempotent and
 	// self-healing), so we log and continue rather than failing the settled fee.
 	s.markRecipientsDirty(ctx, recipients)
+	return nil
+}
+
+// SettleInTx runs the FULL fee settlement (guard insert + split + TP/cashback +
+// global-pool accrual) INSIDE a caller-supplied transaction, synchronously. It
+// is the leak-proof seam (design §8, B5/I7): a caller that deducts a balance and
+// records the fee accrual in ONE config.DB.Transaction can call this so the fee
+// can NEVER be deducted without the accrual being recorded — if SettleInTx
+// errors, the caller's whole transaction (balance deduction included) rolls
+// back. Idempotent on (SourceType, SourceID): a duplicate is a clean no-op
+// (errAlreadyDistributed is swallowed). Returns an error only on a genuine
+// failure so the caller can roll back.
+//
+// byGen is resolved by the caller OUTSIDE the tx (the recursive-CTE upline read
+// must not contend with the write tx for a single-connection pool — same rule as
+// OnFeeSettled). recipients is populated with the touched users; the caller
+// fires the SP5 dirty hook AFTER its tx commits (markRecipientsDirty). nil-safe
+// in the FeeUSD<=0 / nil-source guard ways OnFeeSettled is.
+func (s *FeeDistributionService) SettleInTx(tx *gorm.DB, ev FeeEvent, byGen map[int]Ancestor, recipients map[uuid.UUID]struct{}) error {
+	if s == nil {
+		return fmt.Errorf("fee distribution service not initialized")
+	}
+	if ev.FeeUSD <= 0 {
+		return nil // nothing to distribute (e.g. MCGP-exempt)
+	}
+	if ev.SourceID == uuid.Nil {
+		return fmt.Errorf("fee event missing source id (type=%q)", ev.SourceType)
+	}
+	err := s.distributeWithinTx(tx, ev, byGen, recipients)
+	if errors.Is(err, errAlreadyDistributed) {
+		return nil
+	}
+	return err
+}
+
+// ResolveUplines resolves the gen1..gen10 upline path for a user, indexed by
+// generation. Exposed so callers of SettleInTx can do the upline read OUTSIDE
+// their write transaction (the recursive-CTE read must not contend with the
+// write tx on a single-connection pool — see OnFeeSettled step 0).
+func (s *FeeDistributionService) ResolveUplines(ctx context.Context, userID uuid.UUID) (map[int]Ancestor, error) {
+	if s == nil || s.graph == nil {
+		return nil, fmt.Errorf("fee distribution service not initialized")
+	}
+	uplines, err := s.graph.Uplines(ctx, userID, MaxTPGenerations)
+	if err != nil {
+		return nil, fmt.Errorf("resolve uplines for %s: %w", userID, err)
+	}
+	byGen := make(map[int]Ancestor, len(uplines))
+	for _, a := range uplines {
+		byGen[a.Generation] = a
+	}
+	return byGen, nil
+}
+
+// MarkRecipientsDirty is the exported post-commit SP5 bridge for SettleInTx
+// callers (OnFeeSettled calls the unexported markRecipientsDirty directly). Fire
+// AFTER the caller's transaction commits.
+func (s *FeeDistributionService) MarkRecipientsDirty(ctx context.Context, recipients map[uuid.UUID]struct{}) {
+	if s == nil {
+		return
+	}
+	s.markRecipientsDirty(ctx, recipients)
+}
+
+// distributeWithinTx is the shared settlement body used by both OnFeeSettled
+// (its own tx) and SettleInTx (a caller's tx). Returns errAlreadyDistributed
+// (sentinel) when the guard already exists so the wrapper can treat it as an
+// idempotent no-op.
+func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, byGen map[int]Ancestor, recipients map[uuid.UUID]struct{}) error {
+	split := ComputeSplit(ev.Feature, ev.FeeUSD)
+
+	// (1) Idempotency guard. ON CONFLICT DO NOTHING then check RowsAffected
+	// so a duplicate is a clean no-op on both PostgreSQL and SQLite.
+	guard := models.FeeDistribution{
+		ID:                  uuid.New(),
+		SourceType:          ev.SourceType,
+		SourceID:            ev.SourceID,
+		UserID:              ev.UserID,
+		Feature:             ev.Feature,
+		Token:               ev.Token,
+		FeeUSD:              ev.FeeUSD,
+		SystemUSD:           split.SystemUSD,
+		BuyerCashbackUSD:    split.BuyerCashbackUSD,
+		UplineCashbackUSD:   split.UplineCashbackUSD,
+		ProviderCashbackUSD: split.ProviderCashbackUSD,
+		TPPoolUSD:           split.TPPoolUSD,
+		TPPerUSD:            s.tpPerUSD,
+		CreatedAt:           time.Now(),
+	}
+	res := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "source_type"}, {Name: "source_id"}},
+		DoNothing: true,
+	}).Create(&guard)
+	if res.Error != nil {
+		return fmt.Errorf("insert fee guard (%s/%s): %w", ev.SourceType, ev.SourceID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Already distributed — idempotent no-op.
+		return errAlreadyDistributed
+	}
+
+	// (2) Distribute the 30% TP pool across gen0..gen10.
+	var globalPoolUSD float64
+	for gen := 0; gen <= MaxTPGenerations; gen++ {
+		pct := models.GenerationPercentages[gen]
+		shareUSD := split.TPPoolUSD * pct
+		if shareUSD <= 0 {
+			continue
+		}
+
+		if gen == 0 {
+			// gen0 is always the transacting user.
+			if err := s.creditTP(tx, ev.UserID, ev, gen, pct, shareUSD); err != nil {
+				return err
+			}
+			recipients[ev.UserID] = struct{}{}
+			continue
+		}
+
+		anc, ok := byGen[gen]
+		if ok && anc.Active {
+			if err := s.creditTP(tx, anc.UserID, ev, gen, pct, shareUSD); err != nil {
+				return err
+			}
+			recipients[anc.UserID] = struct{}{}
+			continue
+		}
+
+		// No live ancestor at this generation: route the share to the
+		// global pool and CONTINUE (do not stop the climb).
+		if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonTPGeneration, gen, shareUSD); err != nil {
+			return err
+		}
+		globalPoolUSD += shareUSD
+	}
+
+	// (3a) Buyer cashback (split.Buyer · F) → the transacting user (USD).
+	// Zero for the 70/30 trades and gas — those credit no buyer cashback.
+	if split.BuyerCashbackUSD > 0 {
+		if err := s.creditCashback(tx, ev.UserID, ev.UserID, ev, split.BuyerCashbackUSD); err != nil {
+			return err
+		}
+		recipients[ev.UserID] = struct{}{}
+	}
+
+	// (3b) Upline cashback (split.Upline · F) → the direct (gen-1) ancestor if
+	// present AND active; otherwise route to the global pool. Zero for the
+	// 70/30 trades and gas.
+	if split.UplineCashbackUSD > 0 {
+		gen1, ok := byGen[1]
+		if ok && gen1.Active {
+			if err := s.creditCashback(tx, gen1.UserID, ev.UserID, ev, split.UplineCashbackUSD); err != nil {
+				return err
+			}
+			recipients[gen1.UserID] = struct{}{}
+		} else {
+			if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonUplineCashback, -1, split.UplineCashbackUSD); err != nil {
+				return err
+			}
+			globalPoolUSD += split.UplineCashbackUSD
+		}
+	}
+
+	// (3c) Provider cashback (split.Provider · F) → the service provider
+	// (FeeEvent.ProviderID). Only service_contact carries a non-zero provider
+	// share today; the cashback is recorded in USD here (the SP5 reward rail
+	// converts it to MCGP, like all other cashback). When the split's provider
+	// component is 0, or no ProviderID is supplied, credit nothing — there is
+	// no global-pool fallback for the provider share (unlike upline).
+	if split.ProviderCashbackUSD > 0 && ev.ProviderID != nil && *ev.ProviderID != uuid.Nil {
+		if err := s.creditCashback(tx, *ev.ProviderID, ev.UserID, ev, split.ProviderCashbackUSD); err != nil {
+			return err
+		}
+		recipients[*ev.ProviderID] = struct{}{}
+	}
+
+	// (4) Stamp the total global-pool routing on the guard row for audit.
+	if globalPoolUSD > 0 {
+		if err := tx.Model(&models.FeeDistribution{}).
+			Where("id = ?", guard.ID).
+			Update("global_pool_usd", globalPoolUSD).Error; err != nil {
+			return fmt.Errorf("stamp global pool on guard: %w", err)
+		}
+	}
+
 	return nil
 }
 

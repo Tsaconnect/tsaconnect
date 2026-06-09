@@ -68,6 +68,12 @@ type mockEscrow struct {
 	// Buy-ad / JIT verify fixtures + error injection.
 	verifyOpenedDepositErr error
 	openedDepositEvent     *P2PTradeOpenedWithDepositEvent
+
+	// platformFeeBpsSnapshot is the V3-snapshotted platform-fee bps returned by
+	// ReadTradePlatformFeeBps. 0 (the default) models a pre-V3 escrow / V2-opened
+	// trade → accrueP2PReleaseFee no-ops. platformFeeFound toggles the found flag.
+	platformFeeBpsSnapshot uint16
+	platformFeeFound       bool
 }
 
 type depositArgs struct {
@@ -267,6 +273,12 @@ func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 		return m.onChainTrade, nil
 	}
 	return &OnChainP2PTrade{Status: OnChainP2PStatusNone}, nil
+}
+func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
+	if m.platformFeeBpsSnapshot != 0 {
+		return m.platformFeeBpsSnapshot, true
+	}
+	return 0, m.platformFeeFound
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {

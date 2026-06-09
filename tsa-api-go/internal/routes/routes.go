@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, ftch *handlers.FeeTPCutoverHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, ftch *handlers.FeeTPCutoverHandler, fah *handlers.FeeAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -88,6 +88,24 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		adminFeeConfig.GET("", fch.ListFeeConfigs)
 		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)
+	}
+
+	// Admin configurable-FeeManager set-fee flow (design §5) — author a desired-
+	// rate intent, plan the unsigned FeeManager.setRate tx(s), confirm a broadcast
+	// tx (verify receipt + read-back THEN refresh the replica + advance the intent
+	// state machine), cancel an unapplied intent. On-chain-rate authority +
+	// funds-adjacent, so restricted to true admin roles (RequireP2PAdmin) on top of
+	// AdminAuth, like reward-distributions. Every endpoint also 409s while
+	// FEE_MODEL_V2_ENABLED is OFF (the handler's v2 gate).
+	if fah != nil {
+		adminFees := api.Group("/admin/fees")
+		adminFees.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminFees.POST("/intent", fah.CreateIntent)
+			adminFees.POST("/plan", fah.Plan)
+			adminFees.POST("/confirm", fah.Confirm)
+			adminFees.DELETE("/intent/:id", fah.CancelIntent)
+		}
 	}
 
 	// Admin fee/TP v2 cutover-reset (BLOCKER 3). DESTRUCTIVE: archives+deletes
@@ -331,6 +349,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			lifiGroup.GET("/tokens/all", slh.GetAllChainTokens)
 			lifiGroup.GET("/token", slh.GetToken)
 			lifiGroup.GET("/quote", slh.GetQuote)
+			// AllSwap server-verified settle (design §8, I8): authenticated user,
+			// NOT super-admin. Backend re-queries LiFi + accrues the verified fee.
+			lifiGroup.POST("/settle", slh.SettleAllSwap)
 		}
 	}
 

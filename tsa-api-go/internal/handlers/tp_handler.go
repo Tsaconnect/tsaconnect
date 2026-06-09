@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -45,6 +46,32 @@ func settleFeeEarnings(svc *services.FeeDistributionService, cfg *config.Config,
 		return nil
 	}
 	return DistributeTPEarnings(db, ev.UserID, ev.SourceType, ev.SourceID, ev.FeeUSD)
+}
+
+// feeAccrualInTx is the LEAK-PROOF v2 settlement seam (design §8, B5/I7). It
+// runs the full fee settlement (guard + split + TP/cashback) INSIDE the caller's
+// transaction so a balance deduction can never commit without the accrual being
+// recorded — if settlement errors, the caller's whole tx (the deduction
+// included) rolls back. Returns (dirty-recipients, error); the caller fires
+// MarkRecipientsDirty AFTER its tx commits.
+//
+// FLAG-GATED: when cfg.IsFeeModelV2Enabled() is OFF (or svc is nil) this is a
+// pure no-op — it writes NOTHING and returns (nil, nil), so the legacy path is
+// byte-for-byte preserved. The CALLER chooses whether to run the legacy
+// DistributeTPEarnings on the flag-off path (the on-chain send path historically
+// did not, so withdrawal preserves that — no FeeEvent, no TP — when off).
+//
+// The upline graph is read here OUTSIDE the tx the caller will open (the
+// recursive-CTE read must not contend with the write tx on a single-connection
+// pool). Callers therefore call this to GET byGen + a settle closure is not how
+// it works; instead this resolves uplines then returns a closure to run inside
+// the tx. To keep call sites simple it instead exposes the two pieces the
+// withdrawal handler wires explicitly.
+func feeAccrualInTx(ctx context.Context, svc *services.FeeDistributionService, cfg *config.Config, tx *gorm.DB, ev services.FeeEvent, byGen map[int]services.Ancestor, recipients map[uuid.UUID]struct{}) error {
+	if cfg == nil || !cfg.IsFeeModelV2Enabled() || svc == nil {
+		return nil // flag OFF → byte-for-byte legacy (no FeeEvent, no accrual)
+	}
+	return svc.SettleInTx(tx, ev, byGen, recipients)
 }
 
 // DistributeTPEarnings distributes TP to the source user and up to 10 generations of upline.

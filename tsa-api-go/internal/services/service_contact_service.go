@@ -80,7 +80,10 @@ func NewServiceContactService(client *blockchain.EVMClient, cfg *config.Config) 
 // FlatAmountUSD = 0.10). It is scaled to 6-decimal units; 0.10 * 1e6 == 100000
 // exactly, so the on-chain amount is unchanged from the previous literal.
 func (s *ServiceContactService) GetFeeAmount() *big.Int {
-	flatUSD, _ := FeeFlatUSD(models.FeatureServiceContact, "USDC")
+	// Service-contact flat is a Sonic-only, documented-GLOBAL row (chainID nil) —
+	// design §6/§7.3 (the service-contact flat is mirrored on confirm, not
+	// per-chain threaded on the backend hot-path).
+	flatUSD, _ := FeeFlatUSD(models.FeatureServiceContact, "USDC", nil)
 	return big.NewInt(int64(math.Round(flatUSD * 1e6)))
 }
 

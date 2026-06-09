@@ -1185,7 +1185,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 
 // GetFeeConfig handles GET /api/fees - returns the platform fee schedule.
 func (h *Handlers) GetFeeConfig(c *gin.Context) {
-	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig())
+	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig(cartFeeLookups()))
 }
 
 // GetMarketplaceProducts handles GET /api/products/public/marketplace - public marketplace listing with sorting.

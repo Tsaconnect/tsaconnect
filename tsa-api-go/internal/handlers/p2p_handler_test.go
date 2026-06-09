@@ -186,6 +186,9 @@ func (m *mockEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
 	}
 	return &services.OnChainP2PTrade{Status: services.OnChainP2PStatusNone}, nil
 }
+func (m *mockEscrow) ReadTradePlatformFeeBps(_ [32]byte) (uint16, bool) {
+	return 0, false // pre-V3 default: no platform snapshot → accrual no-op
+}
 func (m *mockEscrow) ReadBalance(_, _ string) (*services.OnChainBalance, error) {
 	avail := m.balance.Available
 	if avail == nil {

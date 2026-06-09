@@ -13,9 +13,44 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
+
+// cartQuoteToken is the representative non-MCGP settlement token used to quote a
+// cart BEFORE the buyer picks the order token at checkout. The cart is
+// token-agnostic until checkout, so threading the order's real settlement token
+// into the summary here is not possible — the token doesn't exist yet.
+//
+// WILDCARD-ONLY ASSUMPTION (design §5, finding #5b): this hardcoded quote token
+// is SAFE only because the product/product_merchant fee is wildcard-only — every
+// non-MCGP token resolves the exact same rate, so the quote (at USDC) provably
+// equals the eventual on-chain charge (at the order's real token). That
+// invariant is ENFORCED, not assumed: FeeConfigService rejects a per-token
+// (non-"*") product fee row at seed/load/refresh (productFeeWildcardOnly), so a
+// per-token override that could diverge the quote from the charge can never
+// exist. MCGP exemption is the wildcard row's mcgpExempt flag (MCGP order → gas
+// $0); MCGP is never the cart-quote token. The checkout CHARGE path
+// (CalculatePlatformFee, FeeFlatUSD) already uses the order's real token.
+const cartQuoteToken = "USDC"
+
+// cartFeeLookups binds the fee-config service reads into the models package so
+// the cart QUOTE reads the EXACT rate the on-chain CHARGE reads (design §6,
+// B5/I8). The merchant component uses services.FeeRate(FeatureProductMerchant,
+// …) — the same call CalculatePlatformFee makes; the gas component uses
+// services.FeeFlatUSD(FeatureProduct, …) — the same call PrepareApprove makes.
+// Both pass nil chainID (documented-global, Sonic-only product flow, design §6).
+func cartFeeLookups() *models.CartFeeLookups {
+	return &models.CartFeeLookups{
+		MerchantBPS: func(token string) (int, bool) {
+			return services.FeeRate(models.FeatureProductMerchant, token, nil)
+		},
+		GasFlatUSD: func(token string) (float64, bool) {
+			return services.FeeFlatUSD(models.FeatureProduct, token, nil)
+		},
+	}
+}
 
 // getActiveCart retrieves the active cart for a user, or returns nil.
 func getActiveCart(userID uuid.UUID) (*models.Cart, error) {
@@ -32,7 +67,7 @@ func recalcAndSave(cart *models.Cart) error {
 	coupon := cart.GetAppliedCoupon()
 	currentSummary := cart.GetSummary()
 
-	summary := models.CalculateCartSummary(items, coupon, currentSummary.Shipping)
+	summary := models.CalculateCartSummary(items, coupon, currentSummary.Shipping, cartQuoteToken, cartFeeLookups())
 	cart.SetSummary(summary)
 
 	now := time.Now()
@@ -843,7 +878,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
 		"summary":         cart.GetSummary(),
-		"feeConfig":       models.GetFeeConfig(),
+		"feeConfig":       models.GetFeeConfig(cartFeeLookups()),
 		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
 		"billingAddress":  cart.BillingAddress,

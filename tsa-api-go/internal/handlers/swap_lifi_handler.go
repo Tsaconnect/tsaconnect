@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,6 +14,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
@@ -70,6 +76,18 @@ type SwapLiFiHandler struct {
 	apiKey          string
 	integratorID    string
 	integratorFee   string
+
+	// Config + FeeService wire the server-verified AllSwap settle (design §8, I8).
+	// Optional/nil-safe: when Config is nil the settle endpoint returns "not
+	// configured" and the v2 accrual is gated on cfg.IsFeeModelV2Enabled().
+	Config     *config.Config
+	FeeService *services.FeeDistributionService
+
+	// requeryQuoteUSD re-queries LiFi for the supplied route and returns the
+	// from-amount USD value LiFi reports (estimate.fromAmountUSD). Split out as a
+	// field so tests can inject a deterministic / unreachable LiFi without HTTP.
+	// reachable=false means LiFi could not be reached (→ conservative default).
+	requeryQuoteUSD func(p settleQuoteParams) (fromAmountUSD float64, reachable bool)
 }
 
 // NewSwapLiFiHandler creates a production SwapLiFiHandler.
@@ -82,13 +100,15 @@ type SwapLiFiHandler struct {
 // to be registered on portal.li.fi with a fee wallet configured; quoting
 // with an unregistered integrator + fee returns a 400 from LiFi.
 func NewSwapLiFiHandler(apiKey, integratorID, integratorFee string) *SwapLiFiHandler {
-	return &SwapLiFiHandler{
+	h := &SwapLiFiHandler{
 		tokenCache:    make(map[string]tokenCacheEntry),
 		lifiBaseURL:   defaultLiFiBaseURL,
 		apiKey:        apiKey,
 		integratorID:  integratorID,
 		integratorFee: integratorFee,
 	}
+	h.requeryQuoteUSD = h.liveRequeryQuoteUSD
+	return h
 }
 
 // lifiGet performs a GET against the LiFi base URL and forwards the
@@ -473,4 +493,195 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 	}
 
 	c.Data(resp.StatusCode, "application/json", body)
+}
+
+// ── AllSwap server-verified settle (design §8, I8) ──────────────────────────
+
+// settleQuoteParams is the route the client claims it swapped on, used to
+// re-query LiFi server-side.
+type settleQuoteParams struct {
+	FromChain  string
+	ToChain    string
+	FromToken  string
+	ToToken    string
+	FromAmount string
+}
+
+// allSwapSettleRequest is the body of POST /api/swap/lifi/settle. The client
+// supplies the route + amounts + (optionally) the fee it believes it paid; the
+// backend NEVER trusts ClientFeeUSD — it re-queries LiFi and accrues the VERIFIED
+// fee, rejecting a forged ClientFeeUSD that deviates too far.
+type allSwapSettleRequest struct {
+	QuoteID      string  `json:"quoteId" binding:"required"`
+	FromToken    string  `json:"fromToken" binding:"required"`
+	ToToken      string  `json:"toToken" binding:"required"`
+	FromAmount   string  `json:"fromAmount" binding:"required"`
+	ToAmount     string  `json:"toAmount"`
+	ChainID      int64   `json:"chainId"`
+	ToChainID    int64   `json:"toChainId"`
+	ClientFeeUSD float64 `json:"clientFeeUsd"`
+}
+
+// SettleAllSwap handles POST /api/swap/lifi/settle (authenticated user — NOT
+// super-admin). The backend RE-QUERIES LiFi for the supplied route, recomputes
+// the integrator-fee USD, then (design §8, I8):
+//
+//   - 422 if the client-supplied fee deviates by more than the configured
+//     threshold (default 10%) from the re-queried fee (anti-forgery — a client
+//     must never be able to shrink the fee routed to the v2 pool).
+//   - if LiFi is unreachable, it does NOT charge 0 and does NOT trust the client:
+//     it charges a conservative configured default (default 3.5% vs nominal 3%)
+//     and emits a warning metric.
+//   - accrues a FeeEvent{Feature: allswap, SourceType: "allswap", SourceID:
+//     quoteId} with the VERIFIED fee (never the client value), gated on the flag.
+//     Idempotent on (allswap, quoteId).
+func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if h.Config == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "AllSwap settle not configured")
+		return
+	}
+
+	var req allSwapSettleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "quoteId, fromToken, toToken and fromAmount are required")
+		return
+	}
+
+	// Re-query LiFi for the from-amount USD on the supplied route. The integrator
+	// fee is a percentage of the from-amount value; the verified fee is
+	// fromAmountUSD × the integrator-fee rate.
+	fromAmountUSD, reachable := h.requeryQuoteUSD(settleQuoteParams{
+		FromChain:  strconv.FormatInt(req.ChainID, 10),
+		ToChain:    strconv.FormatInt(orChain(req.ToChainID, req.ChainID), 10),
+		FromToken:  req.FromToken,
+		ToToken:    req.ToToken,
+		FromAmount: req.FromAmount,
+	})
+
+	var verifiedFeeUSD float64
+	if reachable {
+		// Verified fee = fromAmountUSD × nominal integrator rate (bps).
+		feeRate := float64(h.Config.AllSwapNominalFeeBpsOrDefault()) / 10000.0
+		verifiedFeeUSD = fromAmountUSD * feeRate
+
+		// Anti-forgery: reject a client-supplied fee that deviates beyond the
+		// threshold from the verified figure. A zero/absent ClientFeeUSD is the
+		// "client made no claim" case — we still accrue the verified fee, no reject.
+		if req.ClientFeeUSD > 0 && verifiedFeeUSD > 0 {
+			dev := math.Abs(req.ClientFeeUSD-verifiedFeeUSD) / verifiedFeeUSD
+			if dev > h.Config.AllSwapFeeDeviationMaxOrDefault() {
+				utils.ErrorResponse(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+					"fee deviation %.1f%% exceeds the %.1f%% threshold (client=%.6f verified=%.6f)",
+					dev*100, h.Config.AllSwapFeeDeviationMaxOrDefault()*100, req.ClientFeeUSD, verifiedFeeUSD))
+				return
+			}
+		}
+	} else {
+		// LiFi unreachable: do NOT charge 0 and do NOT trust the client. Charge a
+		// conservative configured default of the from-amount value. We need a USD
+		// basis even without LiFi — fall back to treating the from-amount as its
+		// face value (the AllSwap from-token is typically a stablecoin; this is a
+		// deliberately conservative over-estimate, not the client number).
+		face := parseFloatOr0(req.FromAmount)
+		consRate := float64(h.Config.AllSwapConservativeFeeBpsOrDefault()) / 10000.0
+		verifiedFeeUSD = face * consRate
+		log.Printf("[allswap] ALERT allswap_lifi_unreachable_total=1 LiFi unreachable for quote %s — "+
+			"charging conservative %d bps (=$%.6f), NOT the client value",
+			req.QuoteID, h.Config.AllSwapConservativeFeeBpsOrDefault(), verifiedFeeUSD)
+	}
+
+	// Idempotency key (allswap, quoteId). The quoteId is a string; derive a
+	// deterministic UUID so a repeat settle for the same quote is a guard-row
+	// no-op in the engine.
+	sourceID := deterministicUUID("allswap:" + req.QuoteID)
+
+	// Accrue the VERIFIED fee (never the client value), flag-gated. With the flag
+	// OFF this writes NOTHING — byte-for-byte no AllSwap accrual (AllSwap is a new
+	// fee-settled integration that did not accrue before).
+	if h.Config.IsFeeModelV2Enabled() && h.FeeService != nil && verifiedFeeUSD > 0 {
+		h.FeeService.EnqueueFeeSettled(services.FeeEvent{
+			Feature:    models.FeatureAllswap,
+			Token:      strings.ToUpper(req.FromToken),
+			FeeUSD:     verifiedFeeUSD,
+			UserID:     user.ID,
+			SourceType: "allswap",
+			SourceID:   sourceID,
+		})
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "AllSwap fee settled", gin.H{
+		"quoteId":        req.QuoteID,
+		"verifiedFeeUsd": verifiedFeeUSD,
+		"lifiReachable":  reachable,
+	})
+}
+
+// orChain returns primary when non-zero, else fallback (same-chain swaps omit
+// toChainId).
+func orChain(primary, fallback int64) int64 {
+	if primary != 0 {
+		return primary
+	}
+	return fallback
+}
+
+// parseFloatOr0 parses a decimal string, returning 0 on error.
+func parseFloatOr0(s string) float64 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0
+	}
+	return f
+}
+
+// deterministicUUID derives a stable UUIDv5 from a key so (allswap, quoteId)
+// maps to the same SourceID across retries — the engine's idempotency guard.
+func deterministicUUID(key string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(key))
+}
+
+// liveRequeryQuoteUSD re-queries LiFi /quote for the supplied route and returns
+// the from-amount USD (estimate.fromAmountUSD). reachable=false on any transport
+// or decode failure so the caller falls back to the conservative default.
+func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, bool) {
+	q := fmt.Sprintf("/quote?fromChain=%s&toChain=%s&fromToken=%s&toToken=%s&fromAmount=%s&slippage=%s",
+		p.FromChain, p.ToChain, p.FromToken, p.ToToken, p.FromAmount, lifiDefaultSlippage)
+	if h.integratorID != "" && h.integratorFee != "" {
+		q += "&fee=" + h.integratorFee + "&integrator=" + h.integratorID
+	}
+
+	resp, err := h.lifiGet(liFiHTTPClient, q)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, false
+	}
+	var parsed struct {
+		Estimate struct {
+			FromAmountUSD string `json:"fromAmountUSD"`
+		} `json:"estimate"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, false
+	}
+	usd := parseFloatOr0(parsed.Estimate.FromAmountUSD)
+	// A 200 with a malformed/empty/zero fromAmountUSD must NOT yield (0, true):
+	// that would silently route a verifiedFeeUSD=0 down the "reachable" path and
+	// accrue a $0 fee. Treat it as unreachable so the caller applies the
+	// conservative configured default instead (design §8, I8 — never silent $0).
+	if usd <= 0 {
+		return 0, false
+	}
+	return usd, true
 }

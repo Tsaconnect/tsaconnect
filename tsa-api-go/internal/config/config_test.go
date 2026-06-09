@@ -5,6 +5,38 @@ import (
 	"testing"
 )
 
+// A malformed FEE_MANAGER_ADDRESS_* must be rejected at load (design §6) — the
+// validation helper is the testable seam (Load itself log.Fatals on a bad value,
+// which can't be asserted in-process).
+func TestValidateFeeManagerAddress(t *testing.T) {
+	valid := []string{
+		"0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
+		"0x0000000000000000000000000000000000000001",
+		// 40 hex chars without the 0x prefix is a legitimately valid address —
+		// HexToAddress parses it exactly, no silent pad/truncate.
+		"6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
+	}
+	for _, a := range valid {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_SONIC", a); err != nil {
+			t.Errorf("validateFeeManagerAddress(%q) unexpected error: %v", a, err)
+		}
+	}
+
+	invalid := map[string]string{
+		"too short":     "0x123",
+		"not hex":       "0xZZZZ000000000000000000000000000000000000",
+		"garbage":       "not-an-address",
+		"too long":      "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415dAB",
+		"zero address":  "0x0000000000000000000000000000000000000000",
+		"empty padding": "0x0",
+	}
+	for name, a := range invalid {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", a); err == nil {
+			t.Errorf("%s: validateFeeManagerAddress(%q) = nil, want error", name, a)
+		}
+	}
+}
+
 // Sonic is always in the registry; BSC is dormant when no escrow is configured.
 func TestLoad_SonicAlways_BSCDormantByDefault(t *testing.T) {
 	t.Setenv("SONIC_NETWORK", "testnet")
