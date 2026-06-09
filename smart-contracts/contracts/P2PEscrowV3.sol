@@ -31,7 +31,8 @@ interface IPermit2 {
 ///         A1 live-read fee model (see docs/superpowers/specs/2026-06-08-configurable-feemanager-design.md
 ///         §3.1 / §7.1). The proxy address and full storage layout from V2 are preserved; the new
 ///         `feeManager` / `legacySplitEnabled` / `tokenSymbol` slots are APPENDED before `__gap`
-///         (which shrinks 50 → 47), and the `Trade` struct gains two `uint16` snapshot fields that
+///         (which shrinks 50 → 48; `feeManager` (address) + `legacySplitEnabled` (bool) pack into
+///         one slot, `tokenSymbol` takes one → 2 new slots), and the `Trade` struct gains two `uint16` snapshot fields that
 ///         pack into the existing slot-D free bytes (no per-trade slot shift, `voucherHash` stays put).
 ///
 ///         openTrade/openTradeWithDeposit/permit2 variants LIVE-READ the platform + gas bps from the

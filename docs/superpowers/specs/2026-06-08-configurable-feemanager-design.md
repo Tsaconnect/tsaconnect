@@ -228,15 +228,15 @@ Current layout facts (P2PEscrowV2.sol): `feeBps` at **line 103**, `disputeFeeBps
    ```solidity
    // (existing slots 0..N unchanged: feeBps@103, disputeFeeBps, paymentWindow, autoReleaseWindow,
    //  trustedForwarder, permit2, autoReleaseOptIn mapping)
-   address public feeManager;            // +1 slot
-   bool    public legacySplitEnabled;    // packs with the next bool-ish but give it its own slot for clarity (+1)
+   address public feeManager;            // packs with legacySplitEnabled into one slot (20B + 1B < 32B)
+   bool    public legacySplitEnabled;    // packs into feeManager's slot (no extra slot)
    mapping(address => string) public tokenSymbol;  // +1 slot
    // platformFeeBps/gasFeeBps are NOT stored as contract state — they are READ from FeeManager
    // at openTrade and SNAPSHOTTED into the Trade (below). This is the A1 correction to the
    // review's "add platformFeeBps/gasFeeBps state" wording: there is no cached escrow copy to drift.
-   uint256[47] private __gap;            // was [50]; minus 3 new slots = 47
+   uint256[48] private __gap;            // was [50]; minus 2 new slots = 48
    ```
-   **Slot math:** 3 new single-slot vars (`feeManager`, `legacySplitEnabled`, `tokenSymbol` mapping head) → `__gap` shrinks `50 → 47`. `MAX_FEE_BPS=500` stays; add `MAX_PLATFORM_FEE_BPS = 300` and `MAX_GAS_FEE_BPS = 300` as `constant`s (no slot cost) so a FeeManager misconfig can't strand a trade (closes B8 escrow-cap).
+   **Slot math:** `feeManager` (address, 20B) + `legacySplitEnabled` (bool, 1B) **pack into one slot**; `tokenSymbol` (mapping head) takes one → 2 new slots → `__gap` shrinks `50 → 48`. `MAX_FEE_BPS=500` stays; add `MAX_PLATFORM_FEE_BPS = 300` and `MAX_GAS_FEE_BPS = 300` as `constant`s (no slot cost) so a FeeManager misconfig can't strand a trade (closes B8 escrow-cap).
 2. **Trade struct — add two snapshot fields.** The `Trade` is stored in `mapping(bytes32 => Trade) public trades` (line 99); each `Trade` occupies its own keccak-derived slots, so **extending the struct does not collide with contract-level slots or the `__gap`** — it only grows each trade's own slot footprint. Current packing: slot A = `seller`(20) ; slot B = `buyer`(20); slot C = `token`(20)+`amount`uint96(12)=32 packed; slot D = `createdAt`u40 + `autoReleaseAt`u40 + `status`u8 + `funding`u8 + `feeBps`u16 (= 12 bytes, packs into one slot with room); slot E = `voucherHash`. Add:
    ```solidity
    struct Trade {
@@ -281,7 +281,7 @@ Current facts: constants `PLATFORM_FEE_BPS=200`, `BUYER_CASHBACK_BPS=50`, `UPLIN
    token.safeTransfer(order.seller, sellerAmount);
    ```
    Deployed `legacySplitEnabled = true` → byte-for-byte today. Flipped `false` at cutover → 100% to system, off-chain engine becomes sole splitter. **Reversible** by flipping back (closes I5 + B6). The `BUYER_CASHBACK_BPS`/`UPLINE_FEE_BPS` constants stay (still referenced by the legacy branch); they are simply not used when the bool is false. `AUTO_REFUND_*` splits are untouched (not a platform-fee split).
-3. **Storage / slot math:** add `feeManager` (+1), `legacySplitEnabled` (+1), `tokenSymbol` mapping (+1) above the gap → `__gap` shrinks `47 → 44`. Add `MAX_PLATFORM_FEE_BPS = 300` `constant` cap. PR includes the storage-layout slot-diff.
+3. **Storage / slot math:** add `feeManager` (address) + `legacySplitEnabled` (bool) — which **pack into one slot** (20B + 1B < 32B) — plus `tokenSymbol` mapping (+1) above the gap → 2 new slots → `__gap` shrinks `47 → 45`. Add `MAX_PLATFORM_FEE_BPS = 300` `constant` cap. PR includes the storage-layout slot-diff.
 
 ### 7.3 ServiceContact → **ServiceContactV2** (closes I2)
 
@@ -304,7 +304,7 @@ Current facts: `MIN_FEE_AMOUNT = 10000` (line 34); split constants `PROVIDER_BPS
    ```
    Deployed `true` → today's behavior. Flipped `false` at cutover → whole fee to system; the off-chain engine performs the provider(25%)/caller(12.5%)/upline(12.5%) split (it already models the 10%-from-`ProviderID` provider cut). Reversible.
 3. **Rate live-read:** if FeeManager governs the service-contact flat, `setFeeAmount` is driven from a confirmed `rateFor("service_contact", sym).flatUSD` — but the on-chain `feeAmounts[token]` remains the value `payContactFee` charges (the contract can't `eth_call` cross-contract for a *flat token amount* cheaply per call without decimals context, so for ServiceContact the flat is *synced* into `feeAmounts` on confirm, while the **split** is governed by the bool). This is the one feature where the rate is mirrored rather than live-read — documented because the flat is token-denominated, not bps. The mirror is still single-write (FeeManager) → confirm → `setFeeAmount` is part of the *same* plan only for service_contact; the drift risk is bounded because `feeAmount` is a flat the cache and chain both read back on confirm.
-4. **Storage / slot math:** add `feeManager` (+1), `legacySplitEnabled` (+1), `tokenSymbol` mapping (+1) above the gap → `__gap` shrinks `48 → 45`. PR includes the storage-layout slot-diff.
+4. **Storage / slot math:** add `feeManager` (address) + `legacySplitEnabled` (bool) — which **pack into one slot** (20B + 1B < 32B) — plus `tokenSymbol` mapping (+1) above the gap → 2 new slots → `__gap` shrinks `48 → 46`. PR includes the storage-layout slot-diff.
 
 ---
 
@@ -368,7 +368,7 @@ Other:
   - P2P live-read snapshot: open after `setRate` change → snapshot reflects new rate; in-flight trade unaffected by a *subsequent* `setRate` (closes I3 / M1-style).
   - P2P open in the pre-wire window (`feeManager == 0`) → snapshots legacy `feeBps`, not 0.
   - `legacySplitEnabled` branch for Product + Service: `true` reproduces today's split exactly; `false` sends 100% to system; flipping back restores. ServiceContact: assert `feeAmount` stays > 0 and `payContactFee` does **not** revert when `legacySplitEnabled = false` (closes I2).
-  - **Storage-layout slot-diff** (`hardhat-storage-layout` / `forge inspect storage-layout`) captured in the PR for all three upgrades, asserting the exact `__gap` shrink (P2P 50→47, Product 47→44, Service 48→45) and the Trade-struct append packing into slot D (closes M2, B7-tooling).
+  - **Storage-layout slot-diff** (`hardhat-storage-layout` / `forge inspect storage-layout`) captured in the PR for all three upgrades, asserting the exact `__gap` shrink (P2P 50→48, Product 47→45, Service 48→46 — `feeManager` address + `legacySplitEnabled` bool pack into one slot, `tokenSymbol` takes one → 2 new slots each) and the Trade-struct append packing into slot D (closes M2, B7-tooling).
   - Escrow `MAX_*` caps revert a misconfigured snapshot.
 - **Backend:** read-replica cache + per-chain default/override resolution; **`cart quote == charge`** regression (closes B5/I8); the set-fee tx builder produces correct calldata per chain (encode → broadcast on a fork → read-back → reconciler in sync); `confirm` verify (happy + 422 reject leaving replica untouched); drift reconciler refreshes replica from chain and alerts; **cold-start/RPC-down → seed default, non-zero, alert** (closes B2/B3/I4).
 - **Collection:** withdrawal accrues in the same DB tx (no leak) + idempotent + flag-gated; allswap rejects a forged client fee (>10% deviation) and uses a conservative default when LiFi is down, accruing the verified fee; P2P-1% reads the snapshot, idempotent, reconciler doesn't re-accrue.
@@ -412,7 +412,7 @@ Phase 1 backend can proceed against testnet in parallel with Phase 2 contract wo
 - **B3 ($0-fee fallback / backend-fee scope):** Closed by the **§11 fallback ladder** (cache → last-known-good → seed default → clamp, never 0/unbounded, loud alert) and by keeping backend-charged rates on the FeeManager *as config/transparency with no on-chain enforcer* (D2/I4). Cold-start test mandated.
 - **B5 (collection not wired — withdrawal/cart):** Closed in §6/§8 — `CreateWithdrawal` emits `FeeEvent` **in the same DB tx** as the deduction (distinct `SourceType`), and `CalculateCartSummary` reads `FeeFlatUSD(FeatureProduct, token)` replacing the `cart.go:274` `GasFeeUSD` constant; quote==charge regression test.
 - **B6 (escrow setters):** Closed by **D5 `legacySplitEnabled` bool** — escrows have no admin-called rate setter (they live-read); the *split* is gated by an owner-settable bool (deployed `true` = today; `false` = 100%-to-system + off-chain split), making the upgrade reversible and decoupled from timing (also closes I1/I5). Exact storage + settle-path branch specified per escrow in §7.1–§7.3.
-- **B7 (P2P V3 storage):** Closed in §7.1 — exact V3 layout: `feeManager`/`legacySplitEnabled`/`tokenSymbol` appended before `__gap` (50→47), `Trade` gains `platformFeeBpsSnapshot`+`gasFeeBpsSnapshot` packing into existing slot-D free bytes, `feeBps` kept for old-trade back-compat, `_settleRelease` (line 400) + `adminResolve` (line 463) rewritten to sum both snapshots with a `feeBps` fallback. Storage-layout slot-diff + upgrade-preserves-snapshot test mandated.
+- **B7 (P2P V3 storage):** Closed in §7.1 — exact V3 layout: `feeManager`/`legacySplitEnabled`/`tokenSymbol` appended before `__gap` (50→48; address+bool pack into one slot, mapping takes one → 2 new slots), `Trade` gains `platformFeeBpsSnapshot`+`gasFeeBpsSnapshot` packing into existing slot-D free bytes, `feeBps` kept for old-trade back-compat, `_settleRelease` (line 400) + `adminResolve` (line 463) rewritten to sum both snapshots with a `feeBps` fallback. Storage-layout slot-diff + upgrade-preserves-snapshot test mandated.
 - **B8 (multisig/caps/timelock):** Closed by D7/§3/§14 — owner = Gnosis Safe (provisioning + signer-recovery), `MAX_BPS` enforced in-contract (`require(bps <= MAX_BPS)`), 6h `TimelockController` with justification, and escrow `MAX_PLATFORM_FEE_BPS`/`MAX_GAS_FEE_BPS` caps so a misconfig can't strand funds.
 
 **Important**

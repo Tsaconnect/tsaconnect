@@ -665,16 +665,23 @@ describe("FeeManager ⇄ Escrows (A1 live-read + legacySplitEnabled)", () => {
       expect(await ctx.token.balanceOf(ctx.provider.address)).to.equal(provider2 + providerAmt);
     });
 
-    it("payContactFee still requires fee >= MIN_FEE_AMOUNT (feeAmount must not be zeroed)", async () => {
+    it("setFeeAmount(0) REVERTS (§7.3/I2 — the fee can never be zeroed); a configured fee still lets payContactFee succeed with legacySplitEnabled=false", async () => {
       const ctx = await setupService();
       await ctx.escrow.connect(ctx.owner).setLegacySplitEnabled(false);
-      // Owner zeroes the fee (allowed by setFeeAmount) — payContactFee must then revert, proving
-      // why §7.3 keeps feeAmount > 0 and disables the split via the bool instead.
-      await ctx.escrow.connect(ctx.owner).setFeeAmount(await ctx.token.getAddress(), 0);
+
+      // Owner may NOT zero the fee — setFeeAmount now enforces fee >= MIN_FEE_AMOUNT, so a 0 fee
+      // (which would brick payContactFee for everyone) is rejected at the setter (§7.3 / I2).
+      await expect(
+        ctx.escrow.connect(ctx.owner).setFeeAmount(await ctx.token.getAddress(), 0)
+      ).to.be.revertedWith("Fee below minimum");
+      // The previously-configured fee is untouched.
+      expect(await ctx.escrow.feeAmounts(await ctx.token.getAddress())).to.equal(FEE);
+
+      // And with the configured fee, payContactFee still succeeds (legacySplitEnabled = false).
       await ctx.token.connect(ctx.caller).approve(await ctx.escrow.getAddress(), FEE);
       await expect(
         ctx.escrow.connect(ctx.caller).payContactFee(ctx.provider.address, ctx.upline.address, await ctx.token.getAddress())
-      ).to.be.revertedWith("Fee not configured for token");
+      ).to.emit(ctx.escrow, "ContactFeePaid");
     });
   });
 });

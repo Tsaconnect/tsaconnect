@@ -461,6 +461,60 @@ func TestLiFiHandler_ForwardsAPIKeyHeader(t *testing.T) {
 	}
 }
 
+// A LiFi 200 with a malformed/empty/zero fromAmountUSD must NOT yield (usd>0, true):
+// returning reachable=true with usd=0 would silently accrue a $0 verified fee on the
+// "reachable" path. The fix forces reachable=false so the settle path applies the
+// conservative configured default instead (design §8, I8 — never a silent $0).
+func TestLiveRequeryQuoteUSD_Malformed200_NotReachable(t *testing.T) {
+	cases := map[string]string{
+		"empty fromAmountUSD": `{"estimate":{"fromAmountUSD":""}}`,
+		"zero fromAmountUSD":  `{"estimate":{"fromAmountUSD":"0"}}`,
+		"missing estimate":    `{}`,
+		"non-numeric":         `{"estimate":{"fromAmountUSD":"abc"}}`,
+		"empty object":        `{"estimate":{}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK) // a 200 — but malformed payload
+				w.Write([]byte(body))
+			}))
+			defer mockLiFi.Close()
+
+			h := newTestLiFiHandler(mockLiFi.URL)
+			usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+				FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
+			})
+			if reachable {
+				t.Fatalf("malformed 200 must yield reachable=false, got reachable=true usd=%v", usd)
+			}
+			if usd != 0 {
+				t.Fatalf("malformed 200 must yield usd=0, got %v", usd)
+			}
+		})
+	}
+}
+
+// A well-formed 200 with a positive fromAmountUSD stays reachable=true (the fix
+// only flips the zero/malformed case, not the happy path).
+func TestLiveRequeryQuoteUSD_Valid200_Reachable(t *testing.T) {
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"estimate":{"fromAmountUSD":"123.45"}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	usd, reachable := h.liveRequeryQuoteUSD(settleQuoteParams{
+		FromChain: "56", ToChain: "56", FromToken: "0xabc", ToToken: "0xdef", FromAmount: "1000000",
+	})
+	if !reachable || usd != 123.45 {
+		t.Fatalf("valid 200 want (123.45,true), got (%v,%v)", usd, reachable)
+	}
+}
+
 func TestGetQuote_LiFiUnreachable_Returns502(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
