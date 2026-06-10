@@ -163,6 +163,10 @@ func TestRewardSummary_FullShape_EarningsLevelCrossedPendingClaim(t *testing.T) 
 	if sum.CurrentLevel != 3 {
 		t.Errorf("currentLevel = %d, want 3", sum.CurrentLevel)
 	}
+	// Hero rank name reflects CurrentLevel (L3 == "Trader").
+	if sum.CurrentLevelName != "Trader" {
+		t.Errorf("currentLevelName = %q, want Trader", sum.CurrentLevelName)
+	}
 	if !approxEq(sum.NextLevelThresholdTP, 1000) {
 		t.Errorf("nextLevelThresholdTP = %v, want 1000", sum.NextLevelThresholdTP)
 	}
@@ -203,6 +207,16 @@ func TestRewardSummary_FullShape_EarningsLevelCrossedPendingClaim(t *testing.T) 
 	}
 	if l6.Prize != models.PrizeForLevel(6) || l6.Prize == "" {
 		t.Errorf("L6 prize = %q, want %q", l6.Prize, models.PrizeForLevel(6))
+	}
+	// Every rung carries the PM rank name (spot-check L1/L6/L15 exact values).
+	if got := findLadderLevel(sum.Levels, 1).Name; got != "Beginner" {
+		t.Errorf("L1 name = %q, want Beginner", got)
+	}
+	if l6.Name != "Ambassador" {
+		t.Errorf("L6 name = %q, want Ambassador", l6.Name)
+	}
+	if got := findLadderLevel(sum.Levels, 15).Name; got != "Icon" {
+		t.Errorf("L15 name = %q, want Icon", got)
 	}
 
 	// Per-generation: 11 rows (0..10), gen0=60, gen1=50, gen2=40, rest 0; gen=-1
@@ -306,6 +320,10 @@ func TestRewardSummary_IneligibleSeesAccrualClaimableGated(t *testing.T) {
 	if sum.CurrentLevel != 0 {
 		t.Errorf("currentLevel = %d, want 0 (below L1)", sum.CurrentLevel)
 	}
+	// Below L1 there is no rank yet, so the hero name is empty.
+	if sum.CurrentLevelName != "" {
+		t.Errorf("currentLevelName = %q, want empty below L1", sum.CurrentLevelName)
+	}
 	if !approxEq(sum.NextLevelThresholdTP, 1) {
 		t.Errorf("nextLevelThresholdTP = %v, want 1 (L1)", sum.NextLevelThresholdTP)
 	}
@@ -363,6 +381,10 @@ func TestRewardSummary_PrizesDueAndTopOfLadder(t *testing.T) {
 	if sum.CurrentLevel != models.TPLevelCount {
 		t.Errorf("currentLevel = %d, want %d", sum.CurrentLevel, models.TPLevelCount)
 	}
+	// Top of ladder rank name is the PM L15 name "Icon".
+	if sum.CurrentLevelName != "Icon" {
+		t.Errorf("currentLevelName = %q, want Icon at top of ladder", sum.CurrentLevelName)
+	}
 	// Top of ladder: no next threshold, progress saturated to 1.0.
 	if sum.NextLevelThresholdTP != 0 {
 		t.Errorf("nextLevelThresholdTP = %v, want 0 at top of ladder", sum.NextLevelThresholdTP)
@@ -385,5 +407,9 @@ func TestRewardSummary_PrizesDueAndTopOfLadder(t *testing.T) {
 	}
 	if sum.PrizesDue[0].Prize != models.PrizeForLevel(6) {
 		t.Errorf("prizeDue prize = %q, want %q", sum.PrizesDue[0].Prize, models.PrizeForLevel(6))
+	}
+	// The prize row carries the L6 rank name "Ambassador".
+	if sum.PrizesDue[0].Name != "Ambassador" {
+		t.Errorf("prizeDue name = %q, want Ambassador", sum.PrizesDue[0].Name)
 	}
 }

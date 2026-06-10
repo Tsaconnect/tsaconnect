@@ -98,6 +98,7 @@ const (
 // LadderLevel is one rung of the 15-level reward ladder in the summary.
 type LadderLevel struct {
 	Level       int     `json:"level"`
+	Name        string  `json:"name"`
 	ThresholdTP float64 `json:"thresholdTP"`
 	RewardUSD   float64 `json:"rewardUsd"`
 	Prize       string  `json:"prize"`
@@ -115,6 +116,7 @@ type GenerationEarning struct {
 // PrizeDueItem is one L6+ physical-prize obligation in the summary.
 type PrizeDueItem struct {
 	Level  int    `json:"level"`
+	Name   string `json:"name"`
 	Prize  string `json:"prize"`
 	Status string `json:"status"`
 }
@@ -136,6 +138,11 @@ type RewardSummary struct {
 	// CurrentLevel is the highest level whose threshold tp_balance meets (0 below
 	// L1).
 	CurrentLevel int `json:"currentLevel"`
+
+	// CurrentLevelName is the PM-defined rank name for CurrentLevel (e.g.
+	// "Ambassador" at L6), empty when CurrentLevel == 0 (below L1). Lets the app
+	// hero show the rank name alongside the number.
+	CurrentLevelName string `json:"currentLevelName"`
 
 	// NextLevelThresholdTP is the threshold of the next level up (0 when already
 	// at the top of the ladder).
@@ -217,6 +224,7 @@ func (s *RewardSummaryService) Summary(ctx context.Context, userID uuid.UUID) (*
 
 	// Level + progress, from the REUSED tp_level ladder.
 	out.CurrentLevel = models.LevelFor(user.TPBalance)
+	out.CurrentLevelName = models.NameForLevel(out.CurrentLevel) // "" when CurrentLevel == 0
 	out.NextLevelThresholdTP = nextLevelThreshold(out.CurrentLevel)
 	out.ProgressToNext = progressToNext(user.TPBalance, out.CurrentLevel)
 	out.Levels = buildLadder(out.CurrentLevel)
@@ -305,7 +313,7 @@ func (s *RewardSummaryService) prizesDue(ctx context.Context, userID uuid.UUID) 
 	}
 	out := make([]PrizeDueItem, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, PrizeDueItem{Level: r.Level, Prize: r.Prize, Status: r.Status})
+		out = append(out, PrizeDueItem{Level: r.Level, Name: models.NameForLevel(r.Level), Prize: r.Prize, Status: r.Status})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Level < out[j].Level })
 	return out, nil
@@ -330,6 +338,7 @@ func buildLadder(currentLevel int) []LadderLevel {
 		}
 		out = append(out, LadderLevel{
 			Level:       l.Level,
+			Name:        l.Name,
 			ThresholdTP: l.ThresholdTP,
 			RewardUSD:   l.RewardUSD,
 			Prize:       l.Prize,

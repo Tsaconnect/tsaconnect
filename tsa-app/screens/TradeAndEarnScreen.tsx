@@ -198,7 +198,11 @@ const TradeAndEarnScreen: React.FC = () => {
                 </Text>
                 <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
                   {summary
-                    ? `Level ${summary.currentLevel} · ${formatNumber(summary.claimableMcgp, { maximumFractionDigits: 4 })} MCGP to claim`
+                    ? `${
+                        summary.currentLevel > 0
+                          ? summary.currentLevelName || `Level ${summary.currentLevel}`
+                          : 'No level yet'
+                      } · ${formatNumber(summary.claimableMcgp, { maximumFractionDigits: 4 })} MCGP to claim`
                     : 'View your level ladder, earnings & claim rewards'}
                 </Text>
               </View>
@@ -226,8 +230,10 @@ const TradeAndEarnScreen: React.FC = () => {
                   />
                 </View>
                 <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
-                  {Math.round(summary.progressToNext * 100)}% to Level {summary.currentLevel + 1} (
-                  {formatNumber(summary.nextLevelThresholdTP)} TP)
+                  {Math.round(summary.progressToNext * 100)}% to{' '}
+                  {summary.levels.find((l) => l.level === summary.currentLevel + 1)?.name ||
+                    `Level ${summary.currentLevel + 1}`}{' '}
+                  ({formatNumber(summary.nextLevelThresholdTP)} TP)
                 </Text>
               </>
             )}
