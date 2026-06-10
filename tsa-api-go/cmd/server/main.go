@@ -101,15 +101,19 @@ func main() {
 	priceService := services.NewPriceService()
 	blockchainService := services.NewBlockchainService(cfg)
 
-	// Initialize escrow service (sonic chain client)
-	sonicClient := blockchainService.ClientForChain("sonic")
-	// P2P talks to whichever Sonic network SONIC_NETWORK selected. The
-	// other Sonic-side services (product escrow, service-contact, OTC)
-	// use mainnet-fixed addresses and stay on the mainnet client.
-	p2pSonicClient := blockchainService.ClientForNetwork(cfg.SonicNetwork, "sonic")
-	if p2pSonicClient == nil {
-		p2pSonicClient = sonicClient
+	// Initialize escrow service (sonic chain client). All Sonic-side services
+	// (escrow, product-escrow, service-contact, OTC, P2P) follow SONIC_NETWORK:
+	// resolve the client for the selected network so testnet operation actually
+	// talks to testnet, falling back to the mainnet client if the selected
+	// network has no sonic chain configured. (Previously ClientForChain pinned
+	// these to mainnet — correct on mainnet, but it made SONIC_NETWORK=testnet a
+	// no-op for the escrow stack; the configurable-FeeManager cutover needs the
+	// whole Sonic stack on one network so the boot guard checks the right chain.)
+	sonicClient := blockchainService.ClientForNetwork(cfg.SonicNetwork, "sonic")
+	if sonicClient == nil {
+		sonicClient = blockchainService.ClientForChain("sonic")
 	}
+	p2pSonicClient := sonicClient
 	if p2pSonicClient != nil {
 		log.Printf("[config] P2P sonic client: network=%s chainID=%d", cfg.SonicNetwork, p2pSonicClient.ChainID())
 	}
