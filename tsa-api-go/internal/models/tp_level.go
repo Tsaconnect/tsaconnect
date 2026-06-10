@@ -41,6 +41,11 @@ type TPLevel struct {
 	// Prize is the physical-prize label for L6+ (empty for L1..L5). Recorded as
 	// a prize_due row + admin notification; never auto-paid.
 	Prize string
+
+	// Name is the PM-defined rank name for this level (e.g. L1 "Beginner", L6
+	// "Ambassador", L15 "Icon"). Surfaced in the reward summary + level-up
+	// notification copy so users see the rank, not just a number.
+	Name string
 }
 
 // tpLevels is the materialized 15-level ladder. Index 0 == Level 1.
@@ -61,6 +66,26 @@ var physicalPrizeLabels = map[int]string{
 	15: "Gift", // top of the ladder; PM image trails off — keep a non-empty label
 }
 
+// levelNames are the PM-defined rank names for every level 1..15 (exact copy
+// from the PM). Surfaced in the reward summary + level-up notification copy.
+var levelNames = map[int]string{
+	1:  "Beginner",
+	2:  "Explorer",
+	3:  "Trader",
+	4:  "Connector",
+	5:  "Influencer",
+	6:  "Ambassador",
+	7:  "Elite",
+	8:  "Executive",
+	9:  "Director",
+	10: "Legend",
+	11: "Visionary",
+	12: "Sovereign",
+	13: "Titan",
+	14: "Pinnacle",
+	15: "Icon",
+}
+
 // buildTPLevels materializes the deterministic ladder once at package init.
 func buildTPLevels() []TPLevel {
 	levels := make([]TPLevel, 0, TPLevelCount)
@@ -71,6 +96,7 @@ func buildTPLevels() []TPLevel {
 			ThresholdTP: threshold,
 			RewardUSD:   threshold / 100.0,
 			Prize:       physicalPrizeLabels[n],
+			Name:        levelNames[n],
 		})
 		threshold *= 10.0
 	}
@@ -125,6 +151,16 @@ func PrizeForLevel(n int) string {
 		return ""
 	}
 	return tpLevels[n-1].Prize
+}
+
+// NameForLevel returns the PM-defined rank name for level n (e.g. L1
+// "Beginner", L6 "Ambassador", L15 "Icon"), empty for an out-of-range level
+// (n < 1 or n > TPLevelCount). Mirrors PrizeForLevel.
+func NameForLevel(n int) string {
+	if n < 1 || n > TPLevelCount {
+		return ""
+	}
+	return tpLevels[n-1].Name
 }
 
 // LevelHasPhysicalPrize reports whether level n carries a physical prize (L6+).

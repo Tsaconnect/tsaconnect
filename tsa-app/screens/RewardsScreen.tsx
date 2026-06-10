@@ -192,11 +192,11 @@ const LadderRow: React.FC<{ level: LadderLevel; isLast: boolean }> = ({ level, i
           </Text>
         </View>
 
-        {/* Threshold + prize */}
+        {/* Name (title) + threshold / prize / reward */}
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
-            <Text variant="bodyMed" weight="700">
-              {formatNumber(level.thresholdTP)} TP
+            <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>
+              {level.name || `Level ${level.level}`}
             </Text>
             {!!level.prize && (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
@@ -208,7 +208,8 @@ const LadderRow: React.FC<{ level: LadderLevel; isLast: boolean }> = ({ level, i
             )}
           </View>
           <Text variant="caption" color="textSecondary" style={{ marginTop: 2 }}>
-            Reward {formatFiat(level.rewardUsd, 'USD', { maximumFractionDigits: level.rewardUsd < 1 ? 4 : 2 })}
+            {formatNumber(level.thresholdTP)} TP · Reward{' '}
+            {formatFiat(level.rewardUsd, 'USD', { maximumFractionDigits: level.rewardUsd < 1 ? 4 : 2 })}
           </Text>
         </View>
 
@@ -220,7 +221,7 @@ const LadderRow: React.FC<{ level: LadderLevel; isLast: boolean }> = ({ level, i
   );
 };
 
-const PrizeDueRow: React.FC<{ item: PrizeDueItem }> = ({ item }) => {
+const PrizeDueRow: React.FC<{ item: PrizeDueItem; levelName?: string }> = ({ item, levelName }) => {
   const { colors, spacing } = useTheme();
   return (
     <View
@@ -237,7 +238,7 @@ const PrizeDueRow: React.FC<{ item: PrizeDueItem }> = ({ item }) => {
           {item.prize}
         </Text>
         <Text variant="caption" color="textMuted">
-          Level {item.level}
+          {levelName ? `Level ${item.level} · ${levelName}` : `Level ${item.level}`}
         </Text>
       </View>
       <Badge
@@ -526,6 +527,15 @@ const RewardsScreen: React.FC = () => {
     [summary],
   );
 
+  // Label for the NEXT rung in the hero progress copy — prefer its rank name,
+  // falling back to "Level N" when the ladder hasn't supplied a name.
+  const nextLevelLabel = useMemo(() => {
+    if (!summary) return '';
+    const next = summary.currentLevel + 1;
+    const rung = summary.levels.find((l) => l.level === next);
+    return rung?.name ? `Level ${next} · ${rung.name}` : `Level ${next}`;
+  }, [summary]);
+
   // ── Render: loading / error ─────────────────────────────────────────────────
 
   if (loading) {
@@ -636,8 +646,10 @@ const RewardsScreen: React.FC = () => {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
               <Icon name="trendingUp" size={16} color={colors.accent} />
-              <Text variant="bodyMed" weight="700">
-                Level {summary.currentLevel}
+              <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>
+                {summary.currentLevel > 0
+                  ? `Level ${summary.currentLevel}${summary.currentLevelName ? ` · ${summary.currentLevelName}` : ''}`
+                  : 'No level yet'}
               </Text>
             </View>
             <Text variant="caption" color="textSecondary">
@@ -650,7 +662,7 @@ const RewardsScreen: React.FC = () => {
           <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
             {atTop
               ? 'You have reached the highest TP level.'
-              : `${Math.round(summary.progressToNext * 100)}% to Level ${summary.currentLevel + 1}`}
+              : `${Math.round(summary.progressToNext * 100)}% to ${nextLevelLabel}`}
           </Text>
         </AccentCard>
 
@@ -710,7 +722,7 @@ const RewardsScreen: React.FC = () => {
             </Text>
             {summary.prizesDue.map((p, i) => (
               <React.Fragment key={`${p.level}-${i}`}>
-                <PrizeDueRow item={p} />
+                <PrizeDueRow item={p} levelName={summary.levels.find((l) => l.level === p.level)?.name} />
                 {i < summary.prizesDue.length - 1 && <Divider />}
               </React.Fragment>
             ))}

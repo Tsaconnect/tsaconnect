@@ -82,9 +82,9 @@ const (
 	// to TPPrizeDue for manual physical-prize fulfilment.
 	//
 	// TPLevelUp fires once per newly-crossed reward level. UserID is the user who
-	// crossed; Data carries: "level" (int), "rewardUsd" (float64), "mcgpAmount"
-	// (float64, the locked MCGP), "rateUsdPerMcgp" (float64), "prize" (string,
-	// empty for L1..L5).
+	// crossed; Data carries: "level" (int), "levelName" (string, the PM rank name
+	// e.g. "Ambassador"), "rewardUsd" (float64), "mcgpAmount" (float64, the locked
+	// MCGP), "rateUsdPerMcgp" (float64), "prize" (string, empty for L1..L5).
 	TPLevelUp = "tp.level.up"
 
 	// TPPrizeDue fires once per crossed L6+ level so admin ops can fulfil the

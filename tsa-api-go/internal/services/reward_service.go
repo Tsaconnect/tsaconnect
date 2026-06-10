@@ -367,13 +367,15 @@ func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level i
 	}
 
 	prize := models.PrizeForLevel(level)
+	name := models.NameForLevel(level)
 	levelUp := events.Event{
 		Type:    events.TPLevelUp,
 		UserID:  userID,
-		Title:   fmt.Sprintf("You reached Level %d!", level),
-		Message: levelUpMessage(level, mcgp, prize),
+		Title:   levelUpTitle(level, name),
+		Message: levelUpMessage(level, name, mcgp, prize),
 		Data: map[string]interface{}{
 			"level":          level,
+			"levelName":      name,
 			"rewardUsd":      rewardUSD,
 			"mcgpAmount":     mcgp,
 			"rateUsdPerMcgp": priceUSD,
@@ -393,13 +395,29 @@ func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level i
 	return mcgp, &levelUp, prizeEvent, nil
 }
 
+// levelUpTitle composes the user-facing title for a TPLevelUp notification. It
+// includes the PM-defined rank name when known (e.g. "You reached TP Level 6 —
+// Ambassador!") so the push/email shows the rank, not just a number; falls back
+// to the bare level for an unknown/out-of-range level.
+func levelUpTitle(level int, name string) string {
+	if name != "" {
+		return fmt.Sprintf("You reached TP Level %d — %s!", level, name)
+	}
+	return fmt.Sprintf("You reached TP Level %d!", level)
+}
+
 // levelUpMessage composes the user-facing body for a TPLevelUp notification
-// (in-app + push + email all read Event.Message). It names the MCGP reward the
-// level unlocked, and the physical prize for L6+ rungs. Kept here so the
-// reward-engine owns the copy and the generic notification dispatcher (the "*"
-// subscriber) can deliver it unchanged across in-app / WS / push / email.
-func levelUpMessage(level int, mcgp float64, prize string) string {
-	base := fmt.Sprintf("You crossed Level %d and earned %.4f MCGP, claimable from your rewards screen.", level, mcgp)
+// (in-app + push + email all read Event.Message). It names the rank, the MCGP
+// reward the level unlocked, and the physical prize for L6+ rungs. Kept here so
+// the reward-engine owns the copy and the generic notification dispatcher (the
+// "*" subscriber) can deliver it unchanged across in-app / WS / push / email.
+func levelUpMessage(level int, name string, mcgp float64, prize string) string {
+	var base string
+	if name != "" {
+		base = fmt.Sprintf("You crossed TP Level %d — %s — and earned %.4f MCGP, claimable from your rewards screen.", level, name, mcgp)
+	} else {
+		base = fmt.Sprintf("You crossed TP Level %d and earned %.4f MCGP, claimable from your rewards screen.", level, mcgp)
+	}
 	if prize != "" {
 		base += fmt.Sprintf(" You also unlocked a prize: %s.", prize)
 	}

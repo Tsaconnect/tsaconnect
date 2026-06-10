@@ -39,6 +39,8 @@ export type LadderStatus = 'earned' | 'in_progress' | 'locked';
 /** One rung of the fixed 15-level TP ladder. Always all 15 rows present. */
 export interface LadderLevel {
   level: number;
+  /** Human-facing rank name for this rung (e.g. "Beginner", "Icon"). */
+  name: string;
   thresholdTP: number;
   rewardUsd: number;
   /** Physical prize from L6+; '' for cash-only rungs. */
@@ -65,6 +67,8 @@ export interface RewardSummary {
   claimableMcgp: number;
   totalClaimedMcgp: number;
   currentLevel: number;
+  /** Rank name of the current level; absent/empty at level 0 (no rank yet). */
+  currentLevelName?: string;
   /** Threshold of the NEXT rung; 0 at the top of the ladder. */
   nextLevelThresholdTP: number;
   /** [0,1]; 1.0 at the top of the ladder. */

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -575,7 +576,7 @@ func TestProcessUserRewards_LevelUpEventEmitted(t *testing.T) {
 	if len(prizeEmit) != 0 {
 		t.Fatalf("prize events = %d, want 0 (below L6)", len(prizeEmit))
 	}
-	// Event payload carries the level + locked MCGP.
+	// Event payload carries the level + level name + locked MCGP.
 	seen := map[int]bool{}
 	for _, ev := range levelUps {
 		lvl, _ := ev.Data["level"].(int)
@@ -585,6 +586,18 @@ func TestProcessUserRewards_LevelUpEventEmitted(t *testing.T) {
 		}
 		if mcgp, _ := ev.Data["mcgpAmount"].(float64); mcgp <= 0 {
 			t.Fatalf("event missing mcgpAmount: %+v", ev.Data)
+		}
+		// The PM rank name must ride along in Data AND surface in the Title/Message
+		// the notification dispatcher delivers (so push/email show the rank).
+		wantName := models.NameForLevel(lvl)
+		if gotName, _ := ev.Data["levelName"].(string); gotName != wantName || gotName == "" {
+			t.Fatalf("level %d Data[levelName] = %q, want %q", lvl, gotName, wantName)
+		}
+		if !strings.Contains(ev.Title, wantName) {
+			t.Fatalf("level %d Title %q missing name %q", lvl, ev.Title, wantName)
+		}
+		if !strings.Contains(ev.Message, wantName) {
+			t.Fatalf("level %d Message %q missing name %q", lvl, ev.Message, wantName)
 		}
 		// SP8 §7: the notification dispatcher delivers Title/Message to in-app +
 		// push + email — both must be non-empty (an empty body is the bug the
@@ -598,6 +611,13 @@ func TestProcessUserRewards_LevelUpEventEmitted(t *testing.T) {
 	}
 	if !seen[1] || !seen[2] {
 		t.Fatalf("expected level-up events for L1 and L2, got %v", seen)
+	}
+	// Spot-check exact PM names for L1 and L2.
+	if got := models.NameForLevel(1); got != "Beginner" {
+		t.Fatalf("L1 name = %q, want Beginner", got)
+	}
+	if got := models.NameForLevel(2); got != "Explorer" {
+		t.Fatalf("L2 name = %q, want Explorer", got)
 	}
 }
 
