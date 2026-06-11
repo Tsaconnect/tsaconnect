@@ -435,7 +435,7 @@ const TradeAndEarnScreen: React.FC = () => {
               </Text>
             </View>
             <Text variant="bodySm" color="textSecondary">
-              Paid to you and your direct upline in dollars instantly for every purchase, service order, swap, and Instant Pay — debited from system fees even if it&apos;s $0.00001.
+              You and your direct upline each earn cashback, split equally, on every product purchase, service order, and P2P trade — carved from the platform fee (even on the tiniest fees) and claimable as MCGP.
             </Text>
           </View>
 
