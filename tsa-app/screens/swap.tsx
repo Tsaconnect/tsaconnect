@@ -64,6 +64,22 @@ function fromWei(wei: string, d: number, show = 6): string {
   } catch { return '0'; }
 }
 
+// Native-token gas estimate (Sonic = S, 18 decimals) for the approve + swap txs.
+// Each tx's max cost is gasLimit * gasPrice (wei); we sum them and format.
+function estimateGasFee(
+  approveTx: { gasLimit: string; gasPrice: string } | null | undefined,
+  swapTx: { gasLimit: string; gasPrice: string },
+): string | null {
+  try {
+    const cost = (tx: { gasLimit: string; gasPrice: string }) =>
+      BigInt(tx.gasLimit || '0') * BigInt(tx.gasPrice || '0');
+    let total = cost(swapTx);
+    if (approveTx) total += cost(approveTx);
+    if (total <= BigInt(0)) return null;
+    return fromWei(total.toString(), 18, 6);
+  } catch { return null; }
+}
+
 // ── Token Badge ── (per-token brand color from config)
 const TokenBadge = ({ token, size = 40 }: { token: TokenInfo; size?: number }) => (
   <View
@@ -167,6 +183,10 @@ const SwapScreen = () => {
   const [txHash, setTxHash] = useState('');
   const [status, setStatus] = useState('');
   const [pickerFor, setPickerFor] = useState<'from' | 'to' | null>(null);
+  // Prepared swap (fetched on Review so the confirm screen can show real gas).
+  const [prepared, setPrepared] = useState<Awaited<ReturnType<typeof prepareSwap>>['data'] | null>(null);
+  const [gasFee, setGasFee] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fromToken = TOKENS[fromSymbol];
@@ -227,6 +247,8 @@ const SwapScreen = () => {
   }, []);
 
   useEffect(() => {
+    // Any input change invalidates a previously-prepared swap + its gas estimate.
+    setPrepared(null); setGasFee(null);
     fetchPrice(direction, amount, fromToken.decimals);
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [amount, direction, fromToken.decimals, fetchPrice]);
@@ -269,6 +291,26 @@ const SwapScreen = () => {
     return null;
   };
 
+  // Prepare the swap up front (on Review) so the confirm screen can show the
+  // real network gas fee instead of hiding it until after the user signs.
+  const goToConfirm = async () => {
+    const e = validate();
+    if (e) { setError(e); return; }
+    setError(''); setPreparing(true);
+    try {
+      const params = direction === 'buy'
+        ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
+        : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
+      const prep = await prepareSwap(direction, { ...params, slippageBps: 50 });
+      if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare swap');
+      setPrepared(prep.data);
+      setGasFee(estimateGasFee(prep.data.approveTx, prep.data.swapTx));
+      setScreen('confirm');
+    } catch (err: any) {
+      setError(err.message || 'Failed to prepare swap.');
+    } finally { setPreparing(false); }
+  };
+
   const handleSwap = async () => {
 
     setScreen('signing'); setError('');
@@ -277,11 +319,16 @@ const SwapScreen = () => {
         ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
         : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
 
-      setStatus('Preparing swap...');
-      const prep = await prepareSwap(direction, { ...params, slippageBps: 50 });
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare');
+      // Reuse the txs prepared on the confirm step; only re-prepare if missing.
+      let prepData = prepared;
+      if (!prepData) {
+        setStatus('Preparing swap...');
+        const prep = await prepareSwap(direction, { ...params, slippageBps: 50 });
+        if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare');
+        prepData = prep.data;
+      }
 
-      const { approveTx, swapTx } = prep.data;
+      const { approveTx, swapTx } = prepData;
 
       if (approveTx) {
         setStatus('Approving tokens...');
@@ -429,10 +476,15 @@ const SwapScreen = () => {
             <Text variant="bodySm" color="textSecondary">Slippage</Text>
             <Text variant="bodySm" weight="600">0.5%</Text>
           </View>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">Network fee (est.)</Text>
+            <Text variant="bodySm" weight="600">{gasFee ? `~${gasFee} S` : '—'}</Text>
+          </View>
         </Card>
 
         <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
-          Two transactions: token approval + swap execution.
+          Two transactions: token approval + swap execution. Gas is paid in S and
+          may vary with network conditions.
         </Text>
         <Button
           title="Confirm Swap"
@@ -622,9 +674,10 @@ const SwapScreen = () => {
 
           {/* Action */}
           <Button
-            title="Review Swap"
-            onPress={() => { const e = validate(); if (e) setError(e); else { setError(''); setScreen('confirm'); } }}
-            disabled={!amount || priceLoading || !!priceErr}
+            title={preparing ? 'Calculating fees…' : 'Review Swap'}
+            onPress={goToConfirm}
+            loading={preparing}
+            disabled={!amount || priceLoading || preparing || !!priceErr}
             style={{ marginTop: spacing.xl }}
           />
         </ScrollView>

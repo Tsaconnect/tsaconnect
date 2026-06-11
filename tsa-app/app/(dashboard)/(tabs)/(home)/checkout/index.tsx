@@ -340,7 +340,10 @@ const CheckoutScreen = () => {
   };
   const feeConfig = cartData?.feeConfig;
   const isMCGP = selectedToken === 'MCGP';
-  const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.1);
+  // Never fabricate a gas fee: fall back to 0 (not a hardcoded estimate) so the
+  // total stays honest if the backend omits the fee. The Gas Fee row only shows
+  // when there's a real positive value.
+  const gasFee = isMCGP ? 0 : (summary.gasFee || feeConfig?.gasFeeUSD || 0);
 
   useEffect(() => {
     let cancelled = false;
