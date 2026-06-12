@@ -44,7 +44,7 @@ import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-import { getChainByChainId } from '../../constants/chains';
+import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
 import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import {
@@ -79,6 +79,10 @@ type RateType = 'fixed' | 'float';
 // and the pool-balance caveat copy.
 const SONIC_CHAIN_IDS = new Set([146, 14601]);
 
+// P2P/PM platform fee charged to the merchant on a successful trade. Mirrors
+// the on-chain FeatureP2PPlatform rate (1%) — kept in sync by review.
+const P2P_PLATFORM_FEE_PCT = 0.01;
+
 /** Return true if the given chainId is Sonic (either net). */
 function isSonicChain(chainId: number): boolean {
   return SONIC_CHAIN_IDS.has(chainId);
@@ -95,7 +99,7 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 }
 
 const CreateAdScreen: React.FC = () => {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
 
   // Currency for THIS ad is a local form field. We seed it from the P2P market
   // currency (do not mutate the hook's setCurrency here), then resolve the full
@@ -842,18 +846,14 @@ const CreateAdScreen: React.FC = () => {
                 Network
               </Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                {chainsForToken.map((c) => {
-                  const cfg = getChainByChainId(c.chainId);
-                  const label = cfg?.shortName ?? String(c.chainId);
-                  return (
-                    <Chip
-                      key={c.chainId}
-                      label={label}
-                      selected={selectedChainId === c.chainId}
-                      onPress={() => setSelectedChainId(c.chainId)}
-                    />
-                  );
-                })}
+                {chainsForToken.map((c) => (
+                  <Chip
+                    key={c.chainId}
+                    label={getNetworkDisplayName(c.chainId)}
+                    selected={selectedChainId === c.chainId}
+                    onPress={() => setSelectedChainId(c.chainId)}
+                  />
+                ))}
               </View>
             </>
           )}
@@ -1144,10 +1144,33 @@ const CreateAdScreen: React.FC = () => {
                 value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
               />
               <SummaryRow
-                label="Fee on release"
-                value={token.symbol === 'MCGP' ? '0% (MCGP)' : '0.5%'}
+                label="Platform fee (1%)"
+                value={`${((parseFloat(amountInput) || 0) * P2P_PLATFORM_FEE_PCT).toLocaleString(undefined, {
+                  maximumFractionDigits: 4,
+                })} ${token.symbol}`}
               />
             </SummaryCard>
+
+            {/* Merchant fee disclosure — the seller (you) is charged 1% only on
+                a successfully completed trade. Mirrors FeatureP2PPlatform (1%). */}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: spacing.sm,
+                marginTop: spacing.md,
+                backgroundColor: colors.infoBg,
+                borderRadius: radius.sm,
+                padding: spacing.md,
+              }}
+            >
+              <Icon name="info" size={16} color={colors.info} />
+              <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                A 1% platform fee is charged to you (the merchant) only when a trade completes —
+                on USDT, USDC and MCGP alike. It is split instantly into the system fee, cashback
+                to the buyer and their direct upline, and Trade Points.
+              </Text>
+            </View>
           </Card>
 
           {/* ── Publish ──────────────────────────────────────────────── */}
