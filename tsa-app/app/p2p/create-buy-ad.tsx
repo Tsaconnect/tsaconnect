@@ -34,7 +34,7 @@ import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import { useUserRole } from '../../hooks/useUserRole';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-import { getChainByChainId } from '../../constants/chains';
+import { getNetworkDisplayName } from '../../constants/chains';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -77,7 +77,7 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 }
 
 const CreateBuyAdScreen: React.FC = () => {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
   const { isMerchant, loading: roleLoading } = useUserRole();
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
@@ -306,18 +306,14 @@ const CreateBuyAdScreen: React.FC = () => {
                 Network
               </Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                {chainsForToken.map((c) => {
-                  const cfg = getChainByChainId(c.chainId);
-                  const label = cfg?.shortName ?? String(c.chainId);
-                  return (
-                    <Chip
-                      key={c.chainId}
-                      label={label}
-                      selected={selectedChainId === c.chainId}
-                      onPress={() => setSelectedChainId(c.chainId)}
-                    />
-                  );
-                })}
+                {chainsForToken.map((c) => (
+                  <Chip
+                    key={c.chainId}
+                    label={getNetworkDisplayName(c.chainId)}
+                    selected={selectedChainId === c.chainId}
+                    onPress={() => setSelectedChainId(c.chainId)}
+                  />
+                ))}
               </View>
             </>
           )}
@@ -461,6 +457,28 @@ const CreateBuyAdScreen: React.FC = () => {
               textAlignVertical="top"
               inputStyle={{ minHeight: 88 }}
             />
+          </View>
+
+          {/* Merchant fee disclosure — as the ad poster (merchant) you are
+              charged 1% only on a successfully completed trade. Mirrors the
+              on-chain FeatureP2PPlatform rate (1%). */}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'flex-start',
+              gap: spacing.sm,
+              marginTop: spacing.lg,
+              backgroundColor: colors.infoBg,
+              borderRadius: radius.sm,
+              padding: spacing.md,
+            }}
+          >
+            <Icon name="info" size={16} color={colors.info} />
+            <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+              A 1% platform fee is charged to you (the merchant) only when a trade completes — on
+              USDT, USDC and MCGP alike. It is split instantly into the system fee, cashback to the
+              buyer and their direct upline, and Trade Points.
+            </Text>
           </View>
 
           {/* ── Publish ──────────────────────────────────────────────── */}
