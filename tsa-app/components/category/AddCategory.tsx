@@ -35,6 +35,10 @@ import {
 const TYPE_OPTIONS: PickerItem[] = [
   { id: "Product", label: "Product" },
   { id: "Service", label: "Service" },
+  // "Both" lets a same-titled category serve both sections (e.g. "Generators"
+  // for a generator product AND a generator-repair service). Listings stay in
+  // their own marketplace section — the type filter prevents cross-leakage.
+  { id: "Both", label: "Both (Product & Service)" },
 ];
 
 const AddCategoryScreen = () => {
