@@ -2,7 +2,7 @@
 //
 // P2P marketplace — browse sell-ads (user buys crypto) and buy-ads (user sells
 // crypto to a merchant). Restyled onto the TSA Signature design system.
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -61,7 +61,11 @@ const P2PMarketScreen: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(false);
-  const [adSide, setAdSide] = useState<'sell' | 'buy'>('sell');
+  // Optional deep-link intent from the marketplace P2P heading: ?side=buy means
+  // "I want to BUY crypto" → browse sell-ads (adSide 'sell'); ?side=sell means
+  // "I want to SELL crypto" → browse buy-ads (adSide 'buy').
+  const { side: sideParam } = useLocalSearchParams<{ side?: string }>();
+  const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
   const { isMerchant, role, loading: roleLoading } = useUserRole();
   const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();

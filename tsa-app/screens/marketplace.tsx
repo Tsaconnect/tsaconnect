@@ -194,8 +194,8 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'products', label: 'Products' },
     { key: 'services', label: 'Services' },
     { key: 'trade', label: 'Trade & Earn' },
-    { key: 'fundfiat', label: 'Buy USDT' },
-    { key: 'send', label: 'Sell USDT' },
+    { key: 'p2p', label: 'P2P' },
+    { key: 'pm', label: 'PM' },
   ];
 
   // ── Loading ──
@@ -430,21 +430,125 @@ const MarketplaceScreen: React.FC = () => {
         )}
 
         {selectedTab === 'trade' && <TradeAndEarnScreen />}
-        {(selectedTab === 'fundfiat' || selectedTab === 'send') && (
-          <View style={{ paddingHorizontal: spacing['2xl'] }}>
-            <EmptyState
-              icon="clock"
-              title="Coming Soon"
-              subtitle={
-                selectedTab === 'fundfiat'
-                  ? 'P2P Buy USDT will be available soon. Stay tuned!'
-                  : 'P2P Sell USDT will be available soon. Stay tuned!'
-              }
-            />
-          </View>
+
+        {selectedTab === 'p2p' && (
+          <BuySellSection
+            heading="P2P"
+            tag="Individual"
+            subtitle="Trade crypto peer-to-peer with other individuals. Funds are escrowed on-chain until release."
+            onBuy={() => router.push('/p2p?side=buy')}
+            onSell={() => router.push('/p2p?side=sell')}
+          />
+        )}
+
+        {selectedTab === 'pm' && (
+          <BuySellSection
+            heading="PM"
+            tag="Corporate"
+            subtitle="Trade with corporate market makers for larger, faster fills."
+            comingSoon
+          />
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+};
+
+// ── P2P / PM Buy|Sell section ────────────────────────────────────────────────
+// A heading ("P2P · Individual" / "PM · Corporate") over two Buy / Sell action
+// cards. P2P is live and deep-links into the /p2p marketplace with the right
+// side preselected; PM is corporate and not yet implemented (coming-soon).
+const BuySellSection: React.FC<{
+  heading: string;
+  tag: string;
+  subtitle: string;
+  onBuy?: () => void;
+  onSell?: () => void;
+  comingSoon?: boolean;
+}> = ({ heading, tag, subtitle, onBuy, onSell, comingSoon }) => {
+  const { colors, spacing, radius } = useTheme();
+
+  const ActionCard: React.FC<{ side: 'buy' | 'sell'; onPress?: () => void }> = ({ side, onPress }) => {
+    const isBuy = side === 'buy';
+    const tint = isBuy ? colors.success : colors.danger;
+    const tintBg = isBuy ? colors.successBg : colors.dangerBg;
+    const card = (
+      <Card padding="lg" style={{ flex: 1, opacity: comingSoon ? 0.6 : 1 }}>
+        <View
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: radius.md,
+            backgroundColor: tintBg,
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: spacing.sm,
+          }}
+        >
+          <Icon name={isBuy ? 'arrowDown' : 'arrowUp'} size={20} color={tint} />
+        </View>
+        <Text variant="bodyMed" weight="700">
+          {isBuy ? 'Buy' : 'Sell'}
+        </Text>
+        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+          {isBuy ? 'Pay fiat, get crypto' : 'Sell crypto for fiat'}
+        </Text>
+      </Card>
+    );
+    if (comingSoon || !onPress) return <View style={{ flex: 1 }}>{card}</View>;
+    return (
+      <PressableScale style={{ flex: 1 }} onPress={onPress}>
+        {card}
+      </PressableScale>
+    );
+  };
+
+  return (
+    <View style={{ paddingHorizontal: spacing.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
+        <Text variant="title2" weight="700">
+          {heading}
+        </Text>
+        <View
+          style={{
+            paddingHorizontal: spacing.sm,
+            paddingVertical: 2,
+            borderRadius: radius.pill,
+            backgroundColor: colors.surfaceAlt,
+          }}
+        >
+          <Text variant="caption" weight="600" color="textSecondary">
+            {tag}
+          </Text>
+        </View>
+        {comingSoon && (
+          <View
+            style={{
+              paddingHorizontal: spacing.sm,
+              paddingVertical: 2,
+              borderRadius: radius.pill,
+              backgroundColor: colors.warningBg,
+            }}
+          >
+            <Text variant="caption" weight="600" style={{ color: colors.warning }}>
+              Coming soon
+            </Text>
+          </View>
+        )}
+      </View>
+      <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
+        {subtitle}
+      </Text>
+      <View style={{ flexDirection: 'row', gap: spacing.md }}>
+        <ActionCard side="buy" onPress={onBuy} />
+        <ActionCard side="sell" onPress={onSell} />
+      </View>
+      {comingSoon && (
+        <Text variant="caption" color="textMuted" style={{ marginTop: spacing.md, textAlign: 'center' }}>
+          PM (corporate) trading isn’t available yet — stay tuned.
+        </Text>
+      )}
+    </View>
   );
 };
 
