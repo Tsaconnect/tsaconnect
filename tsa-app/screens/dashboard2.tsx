@@ -242,7 +242,7 @@ const Dashboard: React.FC = () => {
 
         {/* TP & Cashback Summary */}
         {(tpBalance > 0 || cashbackBalance > 0) && (
-          <PressableScale onPress={() => router.push('/easyswap')} style={{ marginTop: spacing.md }}>
+          <PressableScale onPress={() => router.push('/cashback')} style={{ marginTop: spacing.md }}>
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
                 <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>

@@ -320,6 +320,51 @@ func (h *Handlers) GetCashbackEarnings(c *gin.Context) {
 	})
 }
 
+// GetCashbackSummary handles GET /api/users/cashback-summary (auth required).
+// Returns the user's cashback total plus a per-activity breakdown (grouped by
+// SourceType) so the app can render "your earnings for each activity". The
+// SourceType → friendly-label mapping is done client-side; here we just
+// aggregate the ledger so the figures are exact (not page-limited).
+func (h *Handlers) GetCashbackSummary(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+
+	type activityRow struct {
+		SourceType string  `json:"sourceType"`
+		TotalUsd   float64 `json:"totalUsd"`
+		Count      int64   `json:"count"`
+	}
+
+	var byActivity []activityRow
+	config.DB.Model(&models.CashbackEarning{}).
+		Select("source_type, COALESCE(SUM(amount_usd), 0) AS total_usd, COUNT(*) AS count").
+		Where("user_id = ?", user.ID).
+		Group("source_type").
+		Order("total_usd DESC").
+		Scan(&byActivity)
+
+	if byActivity == nil {
+		byActivity = []activityRow{}
+	}
+
+	var totalEarned float64
+	for _, a := range byActivity {
+		totalEarned += a.TotalUsd
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"cashbackBalance": user.CashbackBalance,
+			"totalEarnedUsd":  totalEarned,
+			"byActivity":      byActivity,
+		},
+	})
+}
+
 // RecordCashbackEarning creates a cashback earning record and updates user balance.
 // Called by handlers when on-chain cashback is paid.
 func RecordCashbackEarning(db *gorm.DB, userID uuid.UUID, sourceUserID uuid.UUID, sourceType string, sourceID uuid.UUID, amountUSD float64, txHash string) error {

@@ -70,6 +70,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.GET("/tp-earnings", h.GetTPEarnings)
 		userGroup.GET("/cashback-balance", h.GetCashbackBalance)
 		userGroup.GET("/cashback-earnings", h.GetCashbackEarnings)
+		userGroup.GET("/cashback-summary", h.GetCashbackSummary)
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
