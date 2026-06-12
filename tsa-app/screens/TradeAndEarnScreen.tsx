@@ -245,7 +245,7 @@ const TradeAndEarnScreen: React.FC = () => {
           <View style={{ flexDirection: 'row' }}>
             <PressableScale
               style={{ flex: 1, alignItems: 'center' }}
-              onPress={() => router.push('/marketplace')}
+              onPress={() => router.push('/cashback')}
             >
               <View
                 style={{
@@ -333,7 +333,7 @@ const TradeAndEarnScreen: React.FC = () => {
 
         <Surface elevation="sm" style={{ marginBottom: spacing.lg, overflow: 'hidden' }}>
           <PressableScale
-            onPress={() => router.push('/marketplace')}
+            onPress={() => router.push('/cashback')}
             style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}
           >
             <View
@@ -354,7 +354,7 @@ const TradeAndEarnScreen: React.FC = () => {
                 Cashback
               </Text>
               <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
-                Earn instant dollar cashback on purchases &amp; services
+                Earn cashback on purchases, services &amp; P2P — claimable as MCGP
               </Text>
             </View>
             <Icon name="chevronRight" size={22} color={colors.textMuted} />

@@ -779,6 +779,24 @@ class APIService {
     }
   }
 
+  // Get per-activity cashback summary (grouped by source type, exact totals)
+  async getCashbackSummary(): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/cashback-summary`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+
+      return this.handleResponse<any>(response);
+    } catch (error: any) {
+      console.error('Get cashback summary error:', error);
+      return {
+        success: false,
+        message: error.message || 'Failed to fetch cashback summary.',
+      };
+    }
+  }
+
   // ==================== SP8 REWARDS / TP-LEVELS ====================
 
   // Full TP-screen dashboard: balance, ladder, per-generation, prizes, claimable.

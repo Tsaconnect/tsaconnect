@@ -47,6 +47,10 @@ export default function Layout() {
           options={{ headerShown: false }}
         />
         <Stack.Screen
+          name="cashback"
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen
           name="transfer"
           options={{ title: "Transfer" }}
         />
