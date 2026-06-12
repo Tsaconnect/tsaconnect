@@ -84,6 +84,9 @@ export default function SubcategorySellersScreen() {
     searchQuery,
     sort: sortOption,
     limit: 20,
+    // Filter to the section being browsed so a "Both" category doesn't leak
+    // services into the product list (or vice-versa).
+    type: isService ? 'Service' : 'Product',
   });
 
   const baseHeaderOptions = useMemo(

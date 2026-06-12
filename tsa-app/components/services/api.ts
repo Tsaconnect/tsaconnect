@@ -1347,11 +1347,13 @@ class APIService {
   // Get products by category tree
   async getProductsByCategoryTree(
     categoryId: string,
-    includeSubcategories: boolean = true
+    includeSubcategories: boolean = true,
+    type?: 'Product' | 'Service'
   ): Promise<ApiResponse<{ products: Product[]; mainCategory: any; groupedBySubcategory: any; statistics: any }>> {
     try {
+      const typeQuery = type ? `&type=${type}` : '';
       const response = await fetch(
-        `${API_BASE_URL}/products/public/category/tree/${categoryId}?includeSubcategories=${includeSubcategories}`,
+        `${API_BASE_URL}/products/public/category/tree/${categoryId}?includeSubcategories=${includeSubcategories}${typeQuery}`,
         {
           method: 'GET',
           headers: {
