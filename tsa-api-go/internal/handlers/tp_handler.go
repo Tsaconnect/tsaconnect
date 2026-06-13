@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,81 +9,41 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/gorm"
 )
 
-// GenerationPercentages defines the TP distribution % for each generation (0=self, 1-10=upline).
-var GenerationPercentages = []float64{
-	0.354, // gen 0: self
-	0.177, // gen 1: direct referrer
-	0.142, // gen 2
-	0.106, // gen 3
-	0.071, // gen 4
-	0.057, // gen 5
-	0.042, // gen 6
-	0.028, // gen 7
-	0.014, // gen 8
-	0.007, // gen 9
-	0.004, // gen 10
+// settleFeeEarnings is the single fee-settled chokepoint for the fiat/on-chain
+// fee call sites (checkout, service-contact, swap, wallet-send). It hands the
+// realized fee to the FeeDistributionService async (EnqueueFeeSettled) — the
+// 50/10/10/30 split + route-and-continue TP walk + global-pool accrual. The
+// (SourceType, SourceID) pair is the engine's idempotency key, mirroring the
+// existing TPDistributedAt guard.
+//
+// It is fire-and-forget + idempotent, so it returns nil. svc is nil-safe (a
+// no-op) so callers that haven't wired the engine still compile.
+func settleFeeEarnings(svc *services.FeeDistributionService, ev services.FeeEvent) error {
+	if svc != nil {
+		svc.EnqueueFeeSettled(ev)
+	}
+	return nil
 }
 
-// DistributeTPEarnings distributes TP to the source user and up to 10 generations of upline.
-// systemFeeUSD is the total system fee in USD from the transaction.
-func DistributeTPEarnings(db *gorm.DB, sourceUserID uuid.UUID, sourceType string, sourceID uuid.UUID, systemFeeUSD float64) error {
-	if systemFeeUSD <= 0 {
+// feeAccrualInTx is the LEAK-PROOF settlement seam (design §8, B5/I7). It runs
+// the full fee settlement (guard + split + TP/cashback) INSIDE the caller's
+// transaction so a balance deduction can never commit without the accrual being
+// recorded — if settlement errors, the caller's whole tx (the deduction
+// included) rolls back. The caller fires MarkRecipientsDirty AFTER its tx commits.
+//
+// svc is nil-safe (a no-op) so a caller that hasn't wired the engine still
+// compiles. The upline graph is read by the caller OUTSIDE the tx (the
+// recursive-CTE read must not contend with the write tx on a single-connection
+// pool); byGen is passed in.
+func feeAccrualInTx(svc *services.FeeDistributionService, tx *gorm.DB, ev services.FeeEvent, byGen map[int]services.Ancestor, recipients map[uuid.UUID]struct{}) error {
+	if svc == nil {
 		return nil
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		currentUserID := sourceUserID
-
-		for gen := 0; gen < len(GenerationPercentages); gen++ {
-			if gen > 0 {
-				var prevUser models.User
-				if err := tx.Select("referred_by").First(&prevUser, "id = ?", currentUserID).Error; err != nil {
-					return fmt.Errorf("load user %s at gen %d: %w", currentUserID, gen, err)
-				}
-				if prevUser.ReferredBy == nil {
-					break
-				}
-
-				var referrer models.User
-				if err := tx.Select("id, account_status").First(&referrer, "id = ?", *prevUser.ReferredBy).Error; err != nil {
-					return fmt.Errorf("load referrer %s at gen %d: %w", *prevUser.ReferredBy, gen, err)
-				}
-				if referrer.AccountStatus != models.AccountStatusActive {
-					break
-				}
-
-				currentUserID = referrer.ID
-			}
-
-			pct := GenerationPercentages[gen]
-			tpEarned := systemFeeUSD * pct
-
-			earning := models.TPEarning{
-				ID:           uuid.New(),
-				UserID:       currentUserID,
-				SourceUserID: sourceUserID,
-				SourceType:   sourceType,
-				SourceID:     sourceID,
-				Generation:   gen,
-				FeeAmountUSD: systemFeeUSD,
-				Percentage:   pct,
-				TPEarned:     tpEarned,
-				CreatedAt:    time.Now(),
-			}
-			if err := tx.Create(&earning).Error; err != nil {
-				return err
-			}
-
-			if err := tx.Model(&models.User{}).Where("id = ?", currentUserID).
-				Update("tp_balance", gorm.Expr("tp_balance + ?", tpEarned)).Error; err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
+	return svc.SettleInTx(tx, ev, byGen, recipients)
 }
 
 // GetTPBalance handles GET /api/users/tp-balance (auth required).
@@ -270,6 +229,51 @@ func (h *Handlers) GetCashbackEarnings(c *gin.Context) {
 			"total":    total,
 			"page":     page,
 			"limit":    limit,
+		},
+	})
+}
+
+// GetCashbackSummary handles GET /api/users/cashback-summary (auth required).
+// Returns the user's cashback total plus a per-activity breakdown (grouped by
+// SourceType) so the app can render "your earnings for each activity". The
+// SourceType → friendly-label mapping is done client-side; here we just
+// aggregate the ledger so the figures are exact (not page-limited).
+func (h *Handlers) GetCashbackSummary(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+
+	type activityRow struct {
+		SourceType string  `json:"sourceType"`
+		TotalUsd   float64 `json:"totalUsd"`
+		Count      int64   `json:"count"`
+	}
+
+	var byActivity []activityRow
+	config.DB.Model(&models.CashbackEarning{}).
+		Select("source_type, COALESCE(SUM(amount_usd), 0) AS total_usd, COUNT(*) AS count").
+		Where("user_id = ?", user.ID).
+		Group("source_type").
+		Order("total_usd DESC").
+		Scan(&byActivity)
+
+	if byActivity == nil {
+		byActivity = []activityRow{}
+	}
+
+	var totalEarned float64
+	for _, a := range byActivity {
+		totalEarned += a.TotalUsd
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"cashbackBalance": user.CashbackBalance,
+			"totalEarnedUsd":  totalEarned,
+			"byActivity":      byActivity,
 		},
 	})
 }

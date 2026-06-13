@@ -1,17 +1,33 @@
+// app/merchants/profile/index.tsx
+//
+// Merchant profile — avatar/name/role header, account-settings menu, referral
+// copy, and logout. Restyled onto the TSA Signature design system (@/theme +
+// @/components/ui primitives).
+//
+// VISUAL/STRUCTURAL restyle ONLY: token fetch (api.getStoredToken), profile
+// fetch (api.getProfile), referral copy (expo-clipboard), email-verification
+// (api.sendVerificationEmail), KYC + logout (api.clearAuth) handlers, all
+// Alert/console messaging, the auth gate (redirect to /login), and every
+// navigation route are preserved verbatim.
 import api from '@/components/services/api';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import {
-    View,
-    Text,
-    StyleSheet,
-
-    Alert,
-    Pressable
-} from 'react-native';
+import { Alert, ScrollView, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard'; // Updated import
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import {
+    AccentCard,
+    Button,
+    Card,
+    Icon,
+    IconName,
+    PressableScale,
+    Text,
+} from '@/components/ui';
+
 const MerchantProfileScreen = () => {
+    const { colors, spacing, radius } = useTheme();
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [token, setToken] = useState<string | null>(null);
@@ -120,126 +136,95 @@ const MerchantProfileScreen = () => {
     };
 
     return (
-        <SafeAreaView style={styles.container}>
-            <View style={styles.header}>
-                <View style={styles.profileImageContainer}>
-                    <View style={styles.placeholderImage}>
-                        <Text style={styles.placeholderText}>{getUserInitials(user?.name)}</Text>
-                    </View>
-                </View>
-                <Text style={styles.userName}>{user?.name}</Text>
-                <Text style={styles.userRole}>{user?.role.toUpperCase()}</Text>
-            </View>
-
-            <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Account Settings</Text>
-                <Pressable style={styles.menuItem}>
-                    <Text style={styles.menuItemText}>Edit Profile</Text>
-                </Pressable>
-                <Pressable style={styles.menuItem}>
-                    <Text style={styles.menuItemText}>Security & Privacy</Text>
-                </Pressable>
-                <Pressable style={styles.menuItem}>
-                    <Text style={styles.menuItemText}>Notifications</Text>
-                </Pressable>
-                {/* Optional: Add referral code section if needed */}
-                {user?.referralCode && (
-                    <Pressable
-                        style={styles.menuItem}
-                        onPress={copyToClipboard}
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+            <ScrollView
+                contentContainerStyle={{
+                    padding: spacing.lg,
+                    paddingBottom: spacing['4xl'],
+                    flexGrow: 1,
+                }}
+            >
+                {/* Profile header */}
+                <AccentCard padding="xl" style={{ alignItems: 'center', marginBottom: spacing['2xl'] }}>
+                    <View
+                        style={{
+                            width: 100,
+                            height: 100,
+                            borderRadius: radius.pill,
+                            backgroundColor: colors.accent,
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            marginBottom: spacing.lg,
+                        }}
                     >
-                        <Text style={styles.menuItemText}>
-                            Copy Referral Code: {user.referralCode}
+                        <Text variant="display" weight="700" style={{ color: colors.onAccent }}>
+                            {getUserInitials(user?.name)}
                         </Text>
-                    </Pressable>
-                )}
-            </View>
+                    </View>
+                    <Text variant="title2" weight="700" align="center">
+                        {user?.name}
+                    </Text>
+                    {user?.role && (
+                        <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.xs }}>
+                            {user.role.toUpperCase()}
+                        </Text>
+                    )}
+                </AccentCard>
 
-            <Pressable onPress={handleLogout} style={styles.logoutButton}>
-                <Text style={styles.logoutButtonText}>Log Out</Text>
-            </Pressable>
+                {/* Account settings */}
+                <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                    ACCOUNT SETTINGS
+                </Text>
+                <View style={{ gap: spacing.sm }}>
+                    <MenuRow icon="user" label="Edit Profile" />
+                    <MenuRow icon="shield" label="Security & Privacy" />
+                    <MenuRow icon="notifications" label="Notifications" />
+                    {/* Optional: Add referral code section if needed */}
+                    {user?.referralCode && (
+                        <MenuRow
+                            icon="copy"
+                            label={`Copy Referral Code: ${user.referralCode}`}
+                            onPress={copyToClipboard}
+                        />
+                    )}
+                </View>
+
+                {/* Logout */}
+                <View style={{ flex: 1 }} />
+                <Button
+                    title="Log Out"
+                    variant="danger"
+                    leftIcon="close"
+                    onPress={handleLogout}
+                    style={{ marginTop: spacing['2xl'] }}
+                />
+            </ScrollView>
         </SafeAreaView>
     );
 };
 
-const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#F9FAFB',
-    },
-    header: {
-        alignItems: 'center',
-        paddingVertical: 40,
-        backgroundColor: '#FFFFFF',
-        borderBottomWidth: 1,
-        borderBottomColor: '#E5E7EB',
-    },
-    profileImageContainer: {
-        marginBottom: 16,
-    },
-    placeholderImage: {
-        width: 100,
-        height: 100,
-        borderRadius: 50,
-        backgroundColor: '#3B82F6',
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    placeholderText: {
-        color: '#FFFFFF',
-        fontSize: 32,
-        fontWeight: '700',
-    },
-    userName: {
-        fontSize: 24,
-        fontWeight: '600',
-        color: '#111827',
-    },
-    userRole: {
-        fontSize: 14,
-        color: '#6B7280',
-        marginTop: 4,
-    },
-    section: {
-        marginTop: 24,
-        paddingHorizontal: 16,
-    },
-    sectionTitle: {
-        fontSize: 13,
-        fontWeight: '600',
-        color: '#9CA3AF',
-        textTransform: 'uppercase',
-        letterSpacing: 0.5,
-        marginBottom: 12,
-        marginLeft: 4,
-    },
-    menuItem: {
-        backgroundColor: '#FFFFFF',
-        paddingVertical: 16,
-        paddingHorizontal: 16,
-        borderRadius: 12,
-        marginBottom: 8,
-        borderWidth: 1,
-        borderColor: '#F3F4F6',
-    },
-    menuItemText: {
-        fontSize: 16,
-        color: '#374151',
-        fontWeight: '500',
-    },
-    logoutButton: {
-        margin: 16,
-        marginTop: 'auto',
-        backgroundColor: '#FEE2E2',
-        paddingVertical: 16,
-        borderRadius: 12,
-        alignItems: 'center',
-    },
-    logoutButtonText: {
-        color: '#DC2626',
-        fontSize: 16,
-        fontWeight: '600',
-    },
-});
+// Tappable settings row built on Card + PressableScale (mirrors the menu rows on
+// the migrated wallet/p2p screens). `onPress` is optional so static rows match
+// the legacy screen's non-navigating items exactly.
+const MenuRow: React.FC<{ icon: IconName; label: string; onPress?: () => void }> = ({
+    icon,
+    label,
+    onPress,
+}) => {
+    const { colors, spacing } = useTheme();
+    return (
+        <PressableScale onPress={onPress} disabled={!onPress}>
+            <Card padding="md">
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                    <Icon name={icon} size={20} color={colors.textSecondary} />
+                    <Text variant="bodyMed" weight="500" style={{ flex: 1 }} numberOfLines={1}>
+                        {label}
+                    </Text>
+                    {onPress && <Icon name="chevronRight" size={18} color={colors.textMuted} />}
+                </View>
+            </Card>
+        </PressableScale>
+    );
+};
 
 export default MerchantProfileScreen;

@@ -1,45 +1,26 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+// components/common/CartIconBadge.tsx
+//
+// Cart icon with an overlaid unread-count badge. Migrated onto the TSA Signature
+// design system (theme tokens + @/components/ui primitives). The props interface,
+// exports (including the re-exported useCartCount), the CartContext wiring, the
+// navigation route (`/cart`), the default color/size props, and the 99+ count
+// formatting are all preserved verbatim — this is a visual / structural restyle
+// only.
+import React from 'react';
+import { View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useAuth } from '@/AuthContext/AuthContext';
-import { cartService } from '@/components/services/cart';
+import { useTheme } from '@/theme';
+import { Icon, PressableScale, Text } from '@/components/ui';
+import { useCartCount } from '@/contexts/CartContext';
+
+// Re-exported for backward compatibility. The count now lives in CartContext so
+// every badge shares one value and one (event-driven) refresh instead of each
+// running its own poll. Requires <CartProvider> to be mounted (see app/_layout).
+export { useCartCount };
 
 interface CartIconBadgeProps {
   color?: string;
   size?: number;
-}
-
-export function useCartCount() {
-  const [cartCount, setCartCount] = useState(0);
-  const { token } = useAuth();
-
-  const refresh = useCallback(async () => {
-    if (!token) {
-      setCartCount(0);
-      return;
-    }
-    try {
-      cartService.setToken(token);
-      const count = await cartService.getCartItemCount();
-      setCartCount(count);
-    } catch {
-      // silent
-    }
-  }, [token]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  // Refresh on a short interval so badge stays current across screens
-  useEffect(() => {
-    if (!token) return;
-    const interval = setInterval(refresh, 10000);
-    return () => clearInterval(interval);
-  }, [token, refresh]);
-
-  return { cartCount, refreshCartCount: refresh };
 }
 
 export default function CartIconBadge({
@@ -48,48 +29,40 @@ export default function CartIconBadge({
 }: CartIconBadgeProps) {
   const router = useRouter();
   const { cartCount } = useCartCount();
+  const { colors, radius } = useTheme();
 
   return (
-    <TouchableOpacity
-      style={styles.container}
+    <PressableScale
       onPress={() => router.push('/cart')}
-      activeOpacity={0.7}
+      style={{ padding: 6, position: 'relative' }}
     >
-      <Ionicons name="cart-outline" size={size} color={color} />
+      <Icon name="cart" size={size} color={color} />
       {cartCount > 0 && (
-        <View style={styles.badge}>
-          <Text style={styles.badgeText}>
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            backgroundColor: colors.danger,
+            borderRadius: radius.pill,
+            minWidth: 18,
+            height: 18,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: 4,
+            borderWidth: 1.5,
+            borderColor: '#FFF',
+          }}
+        >
+          <Text
+            variant="overline"
+            weight="700"
+            style={{ color: '#FFF', fontSize: 10, lineHeight: 12, letterSpacing: 0 }}
+          >
             {cartCount > 99 ? '99+' : cartCount}
           </Text>
         </View>
       )}
-    </TouchableOpacity>
+    </PressableScale>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    padding: 6,
-    position: 'relative',
-  },
-  badge: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    backgroundColor: '#DC2626',
-    borderRadius: 10,
-    minWidth: 18,
-    height: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1.5,
-    borderColor: '#FFF',
-  },
-  badgeText: {
-    color: '#FFF',
-    fontSize: 10,
-    fontWeight: '700',
-    lineHeight: 12,
-  },
-});

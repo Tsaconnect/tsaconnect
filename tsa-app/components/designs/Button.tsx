@@ -1,14 +1,21 @@
+// components/designs/Button.tsx
+//
+// Legacy product-card button set (CircleButton, RectButton, SellerButton,
+// RatingButton) used by components/designs/productcard.tsx + designs/index.tsx.
+// Migrated onto the TSA Signature design system (theme tokens via useTheme() +
+// @/components/ui primitives). Every export, prop, the `...props`-spread-into-style
+// behavior (callers pass positional ViewStyle props like right/top/bottom/left),
+// the absolute positioning, and the rating/title rendering are preserved verbatim
+// — this is a visual / structural restyle only.
 import React from "react";
 import {
-  TouchableOpacity,
-  View,
-  Text,
   Image,
   ImageSourcePropType,
   ViewStyle,
   TextStyle,
 } from "react-native";
-import { COLORS, SHADOWS, SIZES } from "../../constants";
+import { useTheme } from "@/theme";
+import { PressableScale, Text } from "@/components/ui";
 
 // Type definitions for each component's props
 type CircleButtonProps = {
@@ -39,17 +46,22 @@ export const CircleButton: React.FC<CircleButtonProps> = ({
   handlePress,
   ...props
 }) => {
+  const { colors, radius } = useTheme();
   return (
-    <TouchableOpacity
+    <PressableScale
       style={{
         width: 30,
         height: 30,
-        backgroundColor: COLORS.white,
+        backgroundColor: colors.surface,
         position: "absolute",
-        borderRadius: SIZES.extraLarge,
+        borderRadius: radius.pill,
         alignItems: "center",
         justifyContent: "center",
-        ...SHADOWS.light,
+        shadowColor: colors.textSecondary,
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.22,
+        shadowRadius: 2.22,
+        elevation: 3,
         ...props,
       }}
       onPress={handlePress}
@@ -59,7 +71,7 @@ export const CircleButton: React.FC<CircleButtonProps> = ({
         resizeMode="contain"
         style={{ width: 24, height: 24 }}
       />
-    </TouchableOpacity>
+    </PressableScale>
   );
 };
 
@@ -71,13 +83,14 @@ export const RectButton: React.FC<RectButtonProps> = ({
   title,
   ...props
 }) => {
+  const { colors, radius, spacing } = useTheme();
   return (
-    <TouchableOpacity
+    <PressableScale
       style={{
-        backgroundColor: COLORS.lightButton,
-        borderRadius: SIZES.medium,
+        backgroundColor: colors.accentHover,
+        borderRadius: radius.md,
         minWidth: minWidth,
-        padding: SIZES.base,
+        padding: spacing.sm,
         ...props,
       }}
       onPress={handlePress}
@@ -85,13 +98,14 @@ export const RectButton: React.FC<RectButtonProps> = ({
       <Text
         style={{
           fontSize: fontSize,
+          lineHeight: Math.round(fontSize * 1.3),
           textAlign: "center",
-          color: COLORS.black,
+          color: colors.textPrimary,
         }}
       >
         {title}
       </Text>
-    </TouchableOpacity>
+    </PressableScale>
   );
 };
 
@@ -100,23 +114,28 @@ export const SellerButton: React.FC<SellerButtonProps> = ({
   handlePress,
   ...props
 }) => {
+  const { colors, radius } = useTheme();
   return (
-    <TouchableOpacity
+    <PressableScale
       style={{
-        backgroundColor: COLORS.white,
+        backgroundColor: colors.surface,
         position: "absolute",
-        borderRadius: SIZES.base,
+        borderRadius: radius.sm,
         alignItems: "center",
         justifyContent: "center",
-        ...SHADOWS.light,
+        shadowColor: colors.textSecondary,
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.22,
+        shadowRadius: 2.22,
+        elevation: 3,
         ...props,
       }}
       onPress={handlePress}
     >
-      <Text style={{ padding: 5, fontSize: 11, fontWeight: "500" }}>
+      <Text weight="500" style={{ padding: 5, fontSize: 11, lineHeight: 14 }}>
         Best seller
       </Text>
-    </TouchableOpacity>
+    </PressableScale>
   );
 };
 
@@ -126,29 +145,35 @@ export const RatingButton: React.FC<RatingButtonProps> = ({
   handlePress,
   ...props
 }) => {
+  const { colors, radius } = useTheme();
   return (
-    <TouchableOpacity
+    <PressableScale
       style={{
-        backgroundColor: COLORS.white,
+        backgroundColor: colors.surface,
         position: "absolute",
-        borderRadius: SIZES.base,
+        borderRadius: radius.sm,
         alignItems: "center",
         justifyContent: "center",
-        ...SHADOWS.light,
+        shadowColor: colors.textSecondary,
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.22,
+        shadowRadius: 2.22,
+        elevation: 3,
         ...props,
       }}
       onPress={handlePress}
     >
       <Text
+        weight="500"
         style={{
           padding: 5,
           fontSize: 14,
-          fontWeight: "500",
-          color: COLORS.primary,
+          lineHeight: 18,
+          color: colors.accent,
         }}
       >
         *{rating.toFixed(1)}
       </Text>
-    </TouchableOpacity>
+    </PressableScale>
   );
 };

@@ -1,14 +1,15 @@
+// components/common/AuthorizationModal.tsx
+//
+// Authorization (PIN/biometric) modal — gates sensitive actions (e.g. sending
+// funds). Restyled onto the TSA Signature design system (@/theme +
+// @/components/ui): the legacy RN Modal + hardcoded COLORS chrome is replaced by
+// the Sheet primitive, tokenized typography/spacing, and primitive controls.
+// SECURITY: all auth logic is preserved verbatim — the biometric/PIN gating,
+// PIN attempt counting (3-strikes lockout), verifyPin/authenticateWithBiometric
+// calls, and the onAuthorized/onCancel callbacks (and props/exports) are
+// unchanged. Visual/structural restyle only.
 import React, { useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Modal,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View } from 'react-native';
 import {
   authenticateWithBiometric,
   getBiometricType,
@@ -16,16 +17,19 @@ import {
   isBiometricAvailable,
   verifyPin,
 } from '../../services/localAuth';
-
-const COLORS = {
-  primary: '#D4AF37',
-  dark: '#1a1a1a',
-  gray: '#666',
-  lightGray: '#e0e0e0',
-  danger: '#DC3545',
-  white: '#fff',
-  overlay: 'rgba(0,0,0,0.5)',
-};
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  Input,
+  PressableScale,
+  Sheet,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 interface AuthorizationModalProps {
   visible: boolean;
@@ -44,6 +48,8 @@ export default function AuthorizationModal({
   onAuthorized,
   onCancel,
 }: AuthorizationModalProps) {
+  const { colors, spacing } = useTheme();
+
   const [method, setMethod] = useState<AuthMethod>('choose');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -121,43 +127,68 @@ export default function AuthorizationModal({
     setError(`Incorrect PIN. ${3 - attempts} attempts remaining.`);
   };
 
-  const renderChoose = () => (
-    <View style={styles.methodContainer}>
-      {bioAvailable && (
-        <TouchableOpacity style={styles.methodButton} onPress={handleBiometric}>
-          <Ionicons
-            name={bioType === 'Face ID' ? 'scan' : 'finger-print'}
-            size={28}
-            color={COLORS.primary}
-          />
-          <Text style={styles.methodText}>Use {bioType}</Text>
-        </TouchableOpacity>
-      )}
+  const renderMethodTile = (
+    icon: 'fingerprint' | 'scan' | 'keypad',
+    label: string,
+    onPress: () => void
+  ) => (
+    <PressableScale onPress={onPress}>
+      <Card padding="md">
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+          <View
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: colors.accentMuted,
+            }}
+          >
+            <Icon name={icon} size={24} color={colors.accent} />
+          </View>
+          <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
+            {label}
+          </Text>
+          <Icon name="chevronRight" size={18} color={colors.textMuted} />
+        </View>
+      </Card>
+    </PressableScale>
+  );
 
-      {pinAvailable && (
-        <TouchableOpacity style={styles.methodButton} onPress={() => setMethod('pin')}>
-          <Ionicons name="keypad" size={28} color={COLORS.primary} />
-          <Text style={styles.methodText}>Use PIN</Text>
-        </TouchableOpacity>
-      )}
+  const renderChoose = () => (
+    <View style={{ gap: spacing.md, marginTop: spacing.sm }}>
+      {bioAvailable &&
+        renderMethodTile(
+          bioType === 'Face ID' ? 'scan' : 'fingerprint',
+          `Use ${bioType}`,
+          handleBiometric
+        )}
+
+      {pinAvailable && renderMethodTile('keypad', 'Use PIN', () => setMethod('pin'))}
 
       {!bioAvailable && !pinAvailable && (
-        <View style={styles.emptyState}>
-          <Ionicons name="shield-checkmark-outline" size={28} color={COLORS.primary} />
-          <Text style={styles.emptyTitle}>Authorization unavailable</Text>
-          <Text style={styles.emptyText}>
-            Set up app PIN or biometrics in Settings before sending funds.
-          </Text>
-        </View>
+        <EmptyState
+          icon="shield"
+          title="Authorization unavailable"
+          subtitle="Set up app PIN or biometrics in Settings before sending funds."
+        />
       )}
     </View>
   );
 
   const renderPin = () => (
-    <View style={styles.inputContainer}>
-      <Text style={styles.inputLabel}>Enter your 4-digit PIN</Text>
-      <TextInput
-        style={styles.pinInput}
+    <View style={{ alignItems: 'center', marginTop: spacing.sm, gap: spacing.lg }}>
+      <Text variant="bodySm" color="textSecondary" align="center">
+        Enter your 4-digit PIN
+      </Text>
+      <Input
+        containerStyle={{ width: 220 }}
+        inputStyle={{
+          textAlign: 'center',
+          fontSize: 28,
+          letterSpacing: 12,
+        }}
         value={pinValue}
         onChangeText={(text) => {
           setPinValue(text);
@@ -169,158 +200,46 @@ export default function AuthorizationModal({
         maxLength={4}
         secureTextEntry
         autoFocus
-        placeholder="...."
-        placeholderTextColor="#ccc"
+        placeholder="••••"
       />
-      {loading && <ActivityIndicator color={COLORS.primary} style={styles.loader} />}
-      <TouchableOpacity onPress={() => setMethod('choose')} style={styles.backButton}>
-        <Text style={styles.backText}>Try another method</Text>
-      </TouchableOpacity>
+      {loading && <Spinner inline />}
+      <Button
+        title="Try another method"
+        variant="ghost"
+        size="sm"
+        fullWidth={false}
+        onPress={() => setMethod('choose')}
+      />
     </View>
   );
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
-      <View style={styles.overlay}>
-        <View style={styles.modal}>
-          <View style={styles.header}>
-            <Text style={styles.title}>{title}</Text>
-            <TouchableOpacity
-              onPress={onCancel}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Ionicons name="close" size={24} color={COLORS.gray} />
-            </TouchableOpacity>
-          </View>
+    <Sheet visible={visible} onClose={onCancel} title={title}>
+      <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+        {description && (
+          <Text variant="bodySm" color="textSecondary">
+            {description}
+          </Text>
+        )}
 
-          {description && <Text style={styles.description}>{description}</Text>}
-
-          {error !== '' && (
-            <View style={styles.errorContainer}>
-              <Ionicons name="alert-circle" size={16} color={COLORS.danger} />
-              <Text style={styles.errorText}>{error}</Text>
+        {error !== '' && (
+          <AccentCard
+            railColor={colors.danger}
+            padding="md"
+            style={{ backgroundColor: colors.dangerBg }}
+          >
+            <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+              <Icon name="dispute" size={16} color={colors.danger} />
+              <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                {error}
+              </Text>
             </View>
-          )}
+          </AccentCard>
+        )}
 
-          {method === 'choose' && renderChoose()}
-          {method === 'pin' && renderPin()}
-        </View>
+        {method === 'choose' && renderChoose()}
+        {method === 'pin' && renderPin()}
       </View>
-    </Modal>
+    </Sheet>
   );
 }
-
-const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: COLORS.overlay,
-    justifyContent: 'flex-end',
-  },
-  modal: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 40,
-    minHeight: 300,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: COLORS.dark,
-  },
-  description: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginBottom: 20,
-  },
-  errorContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff5f5',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 16,
-  },
-  errorText: {
-    color: COLORS.danger,
-    fontSize: 13,
-    marginLeft: 8,
-    flex: 1,
-  },
-  methodContainer: {
-    gap: 12,
-    marginTop: 8,
-  },
-  methodButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: COLORS.lightGray,
-    gap: 14,
-  },
-  methodText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.dark,
-  },
-  emptyState: {
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: COLORS.lightGray,
-    borderRadius: 14,
-    padding: 20,
-    gap: 8,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.dark,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: COLORS.gray,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  inputContainer: {
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  pinInput: {
-    fontSize: 32,
-    fontWeight: '700',
-    textAlign: 'center',
-    letterSpacing: 16,
-    width: 200,
-    borderBottomWidth: 2,
-    borderBottomColor: COLORS.primary,
-    paddingVertical: 8,
-    color: COLORS.dark,
-  },
-  loader: {
-    marginTop: 12,
-  },
-  backButton: {
-    marginTop: 20,
-  },
-  backText: {
-    fontSize: 14,
-    color: COLORS.primary,
-    fontWeight: '500',
-  },
-});

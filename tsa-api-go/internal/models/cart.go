@@ -30,42 +30,88 @@ type CartItem struct {
 
 // CartSummary holds aggregated cart totals.
 // Buyer pays 0% platform fee. The 2% merchant fee is baked into listing price.
-// Buyer only pays a flat gas fee ($0.10) per order for on-chain transaction costs.
+// Buyer only pays a flat gas fee per order for on-chain transaction costs.
+//
+// MerchantFee/GasFee are the two surfaced fee line items (design §6): the
+// percent merchant component (FeatureProductMerchant, MCGP-exempt → $0) and the
+// flat gas component (FeatureProduct flat). Both are sourced from the unified
+// fee-config service via the injected lookups (see CartFeeLookups), so the cart
+// QUOTE equals the on-chain CHARGE.
 type CartSummary struct {
 	TotalItems    int     `json:"totalItems"`
 	TotalQuantity int     `json:"totalQuantity"`
 	Subtotal      float64 `json:"subtotal"`
 	Shipping      float64 `json:"shipping"`
 	GasFee        float64 `json:"gasFee"`
+	MerchantFee   float64 `json:"merchantFee"` // percent merchant component (informational; baked into listing price)
 	PlatformFee   float64 `json:"platformFee"` // 0 for buyer — merchant fee is in listing price
 	Discount      float64 `json:"discount"`
 	Total         float64 `json:"total"`
 }
 
-// Fee configuration — matches smart contract ProductEscrow.sol constants.
-// Merchant fee (2%) is baked into the listing price. Buyer pays 0% platform fee.
+// Fee configuration — split/display constants still referenced by GetFeeConfig.
+// The merchant rate (FeatureProductMerchant) and the flat gas fee
+// (FeatureProduct) are NO LONGER hardcoded here: they are resolved through the
+// fee-config service so the buyer quote and the on-chain charge share one source
+// of truth (design §6). The remaining constants describe the on-chain split that
+// has no service-backed row yet.
 const (
-	MerchantFeeBPS     = 200 // 2% merchant fee per transaction
-	MCGPMerchantFeeBPS = 0   // 0% for MCGP
-	BuyerCashbackBPS   = 50  // 0.5% cashback to buyer
-	UplineFeeBPS       = 50  // 0.5% bonus to upline
-	SystemFeeBPS       = 100 // 1% to system wallet (remainder of 2%)
-	GasFeeUSD          = 0.10 // $0.10 flat gas fee per order, goes to system wallet
+	BuyerCashbackBPS = 50  // 0.5% cashback to buyer
+	UplineFeeBPS     = 50  // 0.5% bonus to upline
+	SystemFeeBPS     = 100 // 1% to system wallet (remainder of 2%)
 )
 
+// CartFeeLookups injects the fee-config service reads into the models package.
+// The models package cannot import services (services imports models — that
+// would be an import cycle), so the cart handler threads these wrappers in (they
+// are services.FeeRate / services.FeeFlatUSD bound to FeatureProductMerchant /
+// FeatureProduct). This is the same injection pattern CalculatePlatformFee uses
+// from the handlers package, lifted into a struct so the cart QUOTE reads the
+// EXACT rate the on-chain CHARGE reads — quote == charge (design §6, B5/I8).
+//
+// A nil CartFeeLookups (or nil funcs) means "no fee" — never a hardcoded
+// fallback that could disagree with the service.
+type CartFeeLookups struct {
+	// MerchantBPS resolves the percent merchant component for the settlement
+	// token: services.FeeRate(FeatureProductMerchant, token, nil). Returns
+	// (bps, exempt).
+	MerchantBPS func(token string) (bps int, exempt bool)
+	// GasFlatUSD resolves the flat gas component for the settlement token:
+	// services.FeeFlatUSD(FeatureProduct, token, nil). Returns (flatUSD, exempt).
+	GasFlatUSD func(token string) (flatUSD float64, exempt bool)
+}
+
 // GetFeeConfig returns the fee schedule for the frontend.
-func GetFeeConfig() map[string]interface{} {
+//
+// The merchant rate and the flat gas fee are now sourced from the fee-config
+// service via the injected lookups (design §6), so the displayed schedule, the
+// buyer quote (CalculateCartSummary), and the on-chain charge share one source
+// of truth — no hardcoded constant that could drift after an admin edit. A nil
+// lookups (or nil funcs) reports zero for the migrated fields rather than a
+// stale constant. The non-MCGP token "USDC" is used as the representative
+// settlement token for the displayed (token-agnostic) schedule.
+func GetFeeConfig(fees *CartFeeLookups) map[string]interface{} {
+	merchantBPS := 0
+	gasFeeUSD := 0.0
+	if fees != nil {
+		if fees.MerchantBPS != nil {
+			merchantBPS, _ = fees.MerchantBPS("USDC")
+		}
+		if fees.GasFlatUSD != nil {
+			gasFeeUSD, _ = fees.GasFlatUSD("USDC")
+		}
+	}
 	return map[string]interface{}{
-		"merchantFeeBPS":       MerchantFeeBPS,
-		"mcgpMerchantFeeBPS":   MCGPMerchantFeeBPS,
+		"merchantFeeBPS":       merchantBPS,
+		"mcgpMerchantFeeBPS":   0, // product_merchant row is MCGP-exempt
 		"buyerCashbackBPS":     BuyerCashbackBPS,
 		"uplineFeeBPS":         UplineFeeBPS,
 		"systemFeeBPS":         SystemFeeBPS,
-		"merchantFeePercent":   float64(MerchantFeeBPS) / 100.0,   // 2.0
+		"merchantFeePercent":   float64(merchantBPS) / 100.0,
 		"buyerCashbackPercent": float64(BuyerCashbackBPS) / 100.0, // 0.5
 		"uplineFeePercent":     float64(UplineFeeBPS) / 100.0,     // 0.5
-		"gasFeeUSD":            GasFeeUSD,                          // 0.10
-		"buyerPlatformFee":     0,                                  // buyer pays 0% platform fee
+		"gasFeeUSD":            gasFeeUSD,
+		"buyerPlatformFee":     0, // buyer pays 0% platform fee
 	}
 }
 
@@ -232,9 +278,22 @@ func (c *Cart) SetAppliedCoupon(ac *AppliedCoupon) {
 }
 
 // CalculateCartSummary computes the cart summary from deserialized items and coupon.
-// Buyer pays 0% platform fee — the 2% merchant fee is baked into listing prices.
-// Buyer only pays a flat $0.10 gas fee per order for on-chain costs.
-func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShipping float64) CartSummary {
+// Buyer pays 0% platform fee — the merchant fee is baked into listing prices.
+// Buyer only pays a flat gas fee per order for on-chain costs.
+//
+// token is the settlement token for the eventual order (USDC/USDT/MCGP); fees
+// injects the fee-config service reads (nil chain = global). Both fee line items
+// are resolved through fees so the cart QUOTE equals the on-chain CHARGE (design
+// §6, B5/I8):
+//
+//   - GasFee     — the flat gas component, FeeFlatUSD(FeatureProduct, token).
+//     MCGP resolves exempt → $0 (mirrors PrepareApprove adding no gas for MCGP).
+//   - MerchantFee — the percent merchant component (informational; the buyer does
+//     not pay it on top — it is baked into the listing price). MCGP-exempt → $0.
+//
+// A nil fees (or nil func) yields a $0 component rather than a hardcoded
+// fallback that could disagree with the service.
+func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShipping float64, token string, fees *CartFeeLookups) CartSummary {
 	summary := CartSummary{
 		TotalItems: len(items),
 		Shipping:   currentShipping,
@@ -245,13 +304,26 @@ func CalculateCartSummary(items []CartItem, coupon *AppliedCoupon, currentShippi
 		summary.Subtotal += item.Price * float64(item.Quantity)
 	}
 
-	// Buyer platform fee is 0% — merchant absorbs the 2% in listing price
+	// Buyer platform fee is 0% — merchant absorbs the merchant fee in listing price.
 	summary.PlatformFee = 0
 
-	// Gas fee: $0.10 flat per order (for on-chain escrow approval)
-	// 0 if cart is empty, $0.10 if there are items
-	if len(items) > 0 {
-		summary.GasFee = GasFeeUSD
+	if len(items) > 0 && fees != nil {
+		// Flat gas fee per order (for on-chain escrow approval). Read from the
+		// SAME service the charge reads (FeatureProduct flat); MCGP → exempt $0.
+		if fees.GasFlatUSD != nil {
+			if flat, exempt := fees.GasFlatUSD(token); !exempt {
+				summary.GasFee = flat
+			}
+		}
+		// Percent merchant component, surfaced as an informational line item
+		// (FeatureProductMerchant). It is baked into the listing price, so it is
+		// NOT added to Total — but it is computed from the same rate the charge
+		// uses so the quote and charge agree. MCGP → exempt $0.
+		if fees.MerchantBPS != nil {
+			if bps, exempt := fees.MerchantBPS(token); !exempt {
+				summary.MerchantFee = summary.Subtotal * (float64(bps) / 10000.0)
+			}
+		}
 	}
 
 	// Apply discount if coupon is applied

@@ -1,18 +1,26 @@
-import { View, Text } from "react-native";
-import React from "react";
-import { COLORS } from "../../constants/theme";
+// components/buttons/Dots.tsx
+//
+// Onboarding pager dots indicator — the inactive dot rendered between/around
+// the active page marker (see ./Progress.tsx). Migrated onto the TSA Signature
+// design system: theme tokens (colors / spacing / radius) via useTheme instead
+// of the legacy constants/theme COLORS. No props/exports changed — consumers
+// (Progress.tsx) still render <Dots /> with no arguments.
+import React from 'react';
+import { View } from 'react-native';
+import { useTheme } from '@/theme';
 
 const Dots = () => {
+  const { colors, spacing, radius } = useTheme();
   return (
     <View
       style={{
-        backgroundColor: COLORS.gray,
-        width: 10,
-        height: 10,
-        borderRadius: 50 / 2,
-        margin: 5,
+        backgroundColor: colors.textSecondary,
+        width: spacing.md - 2,
+        height: spacing.md - 2,
+        borderRadius: radius.pill,
+        margin: spacing.xs + 1,
       }}
-    ></View>
+    />
   );
 };
 

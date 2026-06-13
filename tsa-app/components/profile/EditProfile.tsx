@@ -1,21 +1,25 @@
+// components/profile/EditProfile.tsx
+//
+// Edit-profile form (avatar picker + name/username/phone/address fields + save).
+// Migrated onto the TSA Signature design system (theme tokens via useTheme() +
+// @/components/ui primitives). The component name, props, exports, hook order,
+// image-picker flow, token handling, updateProfile payload shape, AuthContext
+// refresh, alerts, and the `/profile` navigation are all preserved verbatim —
+// this is a visual / structural restyle only.
 import React, { useState } from 'react';
 import {
-  StyleSheet,
   View,
-  Text,
   TouchableOpacity,
-  TextInput,
   Alert,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
   Image,
-  ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { COLORS } from '../../constants';
 import PhoneInput from 'react-native-international-phone-number';
-import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '@/theme';
+import { Button, Icon, Input, Text } from '@/components/ui';
 import { useAuth } from '../../AuthContext/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
 import apiService from '../services/api';
@@ -37,6 +41,7 @@ const COUNTRY_TO_CCA2: Record<string, string> = {
 const EditProfileScreen = ({ user }) => {
   const { token, setCurrentUser } = useAuth();
   const router = useRouter();
+  const { colors, spacing, radius, fonts, type } = useTheme();
   const defaultCca2 = COUNTRY_TO_CCA2[user.country] || 'NG';
 
   const [name, setName] = useState(user.name || '');
@@ -143,52 +148,82 @@ const EditProfileScreen = ({ user }) => {
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.container}
+      style={{ flex: 1, backgroundColor: colors.background }}
     >
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      <ScrollView contentContainerStyle={{ padding: spacing.xl, paddingBottom: spacing['4xl'] }}>
         {/* Avatar Section */}
-        <View style={styles.avatarContainer}>
-          <TouchableOpacity onPress={pickImageAsync} style={styles.avatarWrapper}>
+        <View style={{ alignItems: 'center', marginBottom: spacing['2xl'] }}>
+          <TouchableOpacity
+            onPress={pickImageAsync}
+            style={{ width: 90, height: 90, borderRadius: 45, position: 'relative' }}
+          >
             {profileImage ? (
-              <Image source={{ uri: profileImage }} style={styles.avatar} />
+              <Image
+                source={{ uri: profileImage }}
+                style={{ width: 90, height: 90, borderRadius: 45 }}
+              />
             ) : (
-              <View style={styles.avatarFallback}>
-                <Text style={styles.avatarInitial}>
+              <View
+                style={{
+                  width: 90,
+                  height: 90,
+                  borderRadius: 45,
+                  backgroundColor: colors.accent,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 32, fontFamily: fonts['700'], color: colors.onAccent }}>
                   {user.name?.[0]?.toUpperCase()}
                 </Text>
               </View>
             )}
-            <View style={styles.cameraIcon}>
-              <Ionicons name="camera" size={14} color="#666" />
+            <View
+              style={{
+                position: 'absolute',
+                bottom: 0,
+                right: 0,
+                width: 28,
+                height: 28,
+                borderRadius: 14,
+                backgroundColor: colors.surface,
+                alignItems: 'center',
+                justifyContent: 'center',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 1 },
+                shadowOpacity: 0.2,
+                shadowRadius: 2,
+                elevation: 3,
+              }}
+            >
+              <Icon name="camera" size={14} color={colors.textSecondary} />
             </View>
           </TouchableOpacity>
         </View>
 
         {/* Full Name */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Full Name</Text>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="Your Name"
-          />
-        </View>
+        <Input
+          label="Full Name"
+          value={name}
+          onChangeText={setName}
+          placeholder="Your Name"
+          containerStyle={{ marginBottom: spacing.lg }}
+        />
 
         {/* Username */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Username</Text>
-          <TextInput
-            style={styles.input}
-            value={username}
-            onChangeText={setUsername}
-            placeholder="Username"
-          />
-        </View>
+        <Input
+          label="Username"
+          value={username}
+          onChangeText={setUsername}
+          placeholder="Username"
+          containerStyle={{ marginBottom: spacing.lg }}
+        />
 
         {/* Phone Number */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Phone Number</Text>
+        <View style={{ marginBottom: spacing.lg }}>
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+            Phone Number
+          </Text>
           <PhoneInput
             value={phoneNumber}
             onChangePhoneNumber={setPhoneNumber}
@@ -199,135 +234,39 @@ const EditProfileScreen = ({ user }) => {
             phoneInputStyles={{
               container: {
                 borderWidth: 1.5,
-                borderColor: '#e0e0e0',
-                borderRadius: 10,
-                backgroundColor: '#fff',
+                borderColor: colors.border,
+                borderRadius: radius.md,
+                backgroundColor: colors.surface,
               },
               input: {
-                fontSize: 15,
-                color: '#333',
+                fontSize: type.body.fontSize,
+                color: colors.textPrimary,
               },
             }}
           />
         </View>
 
         {/* Address */}
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Address</Text>
-          <TextInput
-            style={styles.input}
-            value={address}
-            onChangeText={setAddress}
-            placeholder="Your Address"
-            multiline
-          />
-        </View>
+        <Input
+          label="Address"
+          value={address}
+          onChangeText={setAddress}
+          placeholder="Your Address"
+          multiline
+          containerStyle={{ marginBottom: spacing.lg }}
+        />
 
         {/* Save Button */}
-        <TouchableOpacity
-          style={[styles.button, saving && styles.buttonDisabled]}
+        <Button
+          title="Save Changes"
           onPress={handleUpdate}
+          loading={saving}
           disabled={saving}
-        >
-          {saving ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Save Changes</Text>
-          )}
-        </TouchableOpacity>
+          style={{ marginTop: spacing.sm }}
+        />
       </ScrollView>
     </KeyboardAvoidingView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  scrollContent: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  avatarContainer: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  avatarWrapper: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    position: 'relative',
-  },
-  avatar: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-  },
-  avatarFallback: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarInitial: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#fff',
-  },
-  cameraIcon: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 2,
-    elevation: 3,
-  },
-  fieldGroup: {
-    marginBottom: 16,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: '#666',
-    marginBottom: 6,
-  },
-  input: {
-    borderWidth: 1.5,
-    borderColor: '#e0e0e0',
-    borderRadius: 10,
-    padding: 12,
-    paddingHorizontal: 14,
-    fontSize: 15,
-    color: '#333',
-    backgroundColor: '#fff',
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 50,
-    borderRadius: 12,
-    marginTop: 8,
-  },
-  buttonDisabled: {
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-});
 
 export default EditProfileScreen;

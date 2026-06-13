@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -53,6 +55,7 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			mute_email INTEGER DEFAULT 0,
 			tp_balance REAL DEFAULT 0,
 			cashback_balance REAL DEFAULT 0,
+			last_settled_global_index INTEGER,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
@@ -112,116 +115,104 @@ func createTPTestUser(t *testing.T, db *gorm.DB, name, username string, referred
 	return user
 }
 
-func TestDistributeTPEarnings_ThreeUserChain(t *testing.T) {
-	db := setupTPTestDB(t)
-
-	userA := createTPTestUser(t, db, "Alice", "alice", nil)
-	userB := createTPTestUser(t, db, "Bob", "bob", &userA.ID)
-	userC := createTPTestUser(t, db, "Charlie", "charlie", &userB.ID)
-
-	sourceID := uuid.New()
-	systemFee := 2.10
-
-	err := DistributeTPEarnings(db, userC.ID, "checkout", sourceID, systemFee)
-	if err != nil {
-		t.Fatalf("DistributeTPEarnings failed: %v", err)
-	}
-
-	var earnings []models.TPEarning
-	db.Order("generation ASC").Find(&earnings)
-	if len(earnings) != 3 {
-		t.Fatalf("expected 3 tp_earnings rows, got %d", len(earnings))
-	}
-
-	if earnings[0].UserID != userC.ID || earnings[0].Generation != 0 {
-		t.Errorf("gen 0: expected userC, got user %s gen %d", earnings[0].UserID, earnings[0].Generation)
-	}
-	expectedTP0 := systemFee * 0.354
-	if diff := earnings[0].TPEarned - expectedTP0; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("gen 0 TP: expected %f, got %f", expectedTP0, earnings[0].TPEarned)
-	}
-
-	if earnings[1].UserID != userB.ID || earnings[1].Generation != 1 {
-		t.Errorf("gen 1: expected userB, got user %s gen %d", earnings[1].UserID, earnings[1].Generation)
-	}
-	expectedTP1 := systemFee * 0.177
-	if diff := earnings[1].TPEarned - expectedTP1; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("gen 1 TP: expected %f, got %f", expectedTP1, earnings[1].TPEarned)
-	}
-
-	if earnings[2].UserID != userA.ID || earnings[2].Generation != 2 {
-		t.Errorf("gen 2: expected userA, got user %s gen %d", earnings[2].UserID, earnings[2].Generation)
-	}
-	expectedTP2 := systemFee * 0.142
-	if diff := earnings[2].TPEarned - expectedTP2; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("gen 2 TP: expected %f, got %f", expectedTP2, earnings[2].TPEarned)
-	}
-
-	var updatedA, updatedB, updatedC models.User
-	db.First(&updatedA, "id = ?", userA.ID)
-	db.First(&updatedB, "id = ?", userB.ID)
-	db.First(&updatedC, "id = ?", userC.ID)
-
-	if diff := updatedC.TPBalance - expectedTP0; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("userC tp_balance: expected %f, got %f", expectedTP0, updatedC.TPBalance)
-	}
-	if diff := updatedB.TPBalance - expectedTP1; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("userB tp_balance: expected %f, got %f", expectedTP1, updatedB.TPBalance)
-	}
-	if diff := updatedA.TPBalance - expectedTP2; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("userA tp_balance: expected %f, got %f", expectedTP2, updatedA.TPBalance)
-	}
-}
-
-func TestDistributeTPEarnings_NoReferrer(t *testing.T) {
-	db := setupTPTestDB(t)
-
-	user := createTPTestUser(t, db, "Solo", "solo", nil)
-
-	sourceID := uuid.New()
-	systemFee := 0.10
-
-	err := DistributeTPEarnings(db, user.ID, "service_contact", sourceID, systemFee)
-	if err != nil {
-		t.Fatalf("DistributeTPEarnings failed: %v", err)
-	}
-
-	var earnings []models.TPEarning
-	db.Find(&earnings)
-	if len(earnings) != 1 {
-		t.Fatalf("expected 1 tp_earnings row, got %d", len(earnings))
-	}
-	if earnings[0].Generation != 0 {
-		t.Errorf("expected generation 0, got %d", earnings[0].Generation)
-	}
-}
-
-func TestDistributeTPEarnings_SuspendedUserStopsChain(t *testing.T) {
-	db := setupTPTestDB(t)
-
-	userA := createTPTestUser(t, db, "Alice", "alice2", nil)
-	userB := createTPTestUser(t, db, "Bob", "bob2", &userA.ID)
-	db.Model(&userB).Update("account_status", models.AccountStatusSuspended)
-	userC := createTPTestUser(t, db, "Charlie", "charlie2", &userB.ID)
-
-	sourceID := uuid.New()
-	err := DistributeTPEarnings(db, userC.ID, "checkout", sourceID, 2.10)
-	if err != nil {
-		t.Fatalf("DistributeTPEarnings failed: %v", err)
-	}
-
-	var earnings []models.TPEarning
-	db.Find(&earnings)
-	if len(earnings) != 1 {
-		t.Fatalf("expected 1 tp_earnings row (chain stopped at suspended), got %d", len(earnings))
-	}
-}
-
 // ---------- HTTP handler endpoint tests ----------
 
 func setupTPHandlers(t *testing.T) *Handlers {
 	t.Helper()
 	return &Handlers{}
+}
+
+// addFeeV2Tables adds the v2 engine's tables to a TP test DB so a real
+// FeeDistributionService can run against it.
+func addFeeV2Tables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS fee_distributions (
+			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+			user_id TEXT NOT NULL, feature TEXT NOT NULL, token TEXT NOT NULL,
+			fee_usd REAL NOT NULL, system_usd REAL NOT NULL, buyer_cashback_usd REAL NOT NULL,
+			upline_cashback_usd REAL NOT NULL, provider_cashback_usd REAL NOT NULL DEFAULT 0,
+			tp_pool_usd REAL NOT NULL,
+			global_pool_usd REAL NOT NULL DEFAULT 0, tp_per_usd REAL NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL, UNIQUE(source_type, source_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS global_tp_pool (
+			singleton INTEGER PRIMARY KEY, accrued_usd REAL NOT NULL DEFAULT 0,
+			accrued_tp REAL NOT NULL DEFAULT 0,
+			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
+			indexed_tp REAL NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS global_tp_accruals (
+			id TEXT PRIMARY KEY, source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+			reason TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT -1,
+			amount_usd REAL NOT NULL, amount_tp REAL NOT NULL, created_at DATETIME NOT NULL
+		)`,
+	}
+	for _, s := range stmts {
+		if err := db.Exec(s).Error; err != nil {
+			t.Fatalf("create fee v2 table: %v", err)
+		}
+	}
+}
+
+// TestSettleFeeEarnings_CreditsCashbackOnce is the regression guard for SP3
+// findings #1/#4: the fee engine (settleFeeEarnings → OnFeeSettled) is the SOLE
+// cashback source and credits the buyer (gen0) + direct upline EXACTLY ONCE
+// each. (The legacy on-chain RecordCashbackEarning blocks that used to run
+// alongside it have been removed with the v1 retirement, so there is no longer a
+// double-credit path — this locks the single-credit invariant.)
+func TestSettleFeeEarnings_CreditsCashbackOnce(t *testing.T) {
+	db := setupTPTestDB(t)
+	addFeeV2Tables(t, db)
+	// Pin to one connection: :memory: SQLite is per-connection and the engine's
+	// upline read + write tx must see the same schema.
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+
+	upline := createTPTestUser(t, db, "Upline", "settle_upline", nil)
+	buyer := createTPTestUser(t, db, "Buyer", "settle_buyer", &upline.ID)
+
+	feeSvc := services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
+
+	srcID := uuid.New()
+	// The checkout hook settles the 2% MERCHANT fee under FeatureProductMerchant
+	// (the carved {0.50,0.15,0.15,0.00,0.20} split). Buyer + upline each get 15%.
+	ev := services.FeeEvent{
+		Feature: models.FeatureProductMerchant, Token: "USDT", FeeUSD: 10.0,
+		UserID: buyer.ID, SourceType: "checkout", SourceID: srcID,
+	}
+
+	// settleFeeEarnings enqueues async; call the engine directly so the assertion
+	// is deterministic (the handler's call site is identical).
+	if err := feeSvc.OnFeeSettled(context.Background(), ev); err != nil {
+		t.Fatalf("OnFeeSettled: %v", err)
+	}
+
+	// Exactly ONE buyer cashback row + ONE upline cashback row for this source.
+	var buyerRows, uplineRows int64
+	db.Model(&models.CashbackEarning{}).
+		Where("source_id = ? AND user_id = ?", srcID, buyer.ID).Count(&buyerRows)
+	db.Model(&models.CashbackEarning{}).
+		Where("source_id = ? AND user_id = ?", srcID, upline.ID).Count(&uplineRows)
+	if buyerRows != 1 {
+		t.Fatalf("expected exactly 1 buyer cashback row under v2, got %d (double-count?)", buyerRows)
+	}
+	if uplineRows != 1 {
+		t.Fatalf("expected exactly 1 upline cashback row under v2, got %d (double-count?)", uplineRows)
+	}
+
+	// And the credited balances reflect a single 15% credit each (= $1.5), not a
+	// doubled/legacy-base amount (product_merchant carved split: buyer 15%, upline 15%).
+	var b, u models.User
+	db.First(&b, "id = ?", buyer.ID)
+	db.First(&u, "id = ?", upline.ID)
+	if b.CashbackBalance != 1.5 {
+		t.Fatalf("buyer cashback balance = %v, want exactly 1.5 (single 15%% credit)", b.CashbackBalance)
+	}
+	if u.CashbackBalance != 1.5 {
+		t.Fatalf("upline cashback balance = %v, want exactly 1.5 (single 15%% credit)", u.CashbackBalance)
+	}
 }
 
 func TestGetTPBalance(t *testing.T) {

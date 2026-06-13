@@ -1,7 +1,14 @@
-// Simple inline SearchBar component
+// components/common/SearchBar.tsx
+//
+// Inline debounced search bar used across marketplace / seller / product lists.
+// Migrated onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives). The props interface, exports, debounce effect (same hook order),
+// onSearch wiring, clear behavior, and all TextInput props are preserved
+// verbatim — this is a visual / structural restyle only.
 import React, { useState, useEffect } from 'react';
-import { View, TextInput, StyleSheet, TouchableOpacity } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { View } from 'react-native';
+import { useTheme } from '@/theme';
+import { Icon, Input, PressableScale } from '@/components/ui';
 
 interface SearchBarProps {
   placeholder?: string;
@@ -16,6 +23,7 @@ export const SearchBar = ({
   debounceDelay = 300,
   initialValue = ''
 }: SearchBarProps) => {
+  const { colors, spacing } = useTheme();
   const [query, setQuery] = useState(initialValue);
 
   useEffect(() => {
@@ -32,54 +40,22 @@ export const SearchBar = ({
   };
 
   return (
-    <View style={searchStyles.container}>
-      <View style={searchStyles.searchContainer}>
-        <Ionicons name="search" size={20} color="#999" style={searchStyles.searchIcon} />
-        <TextInput
-          style={searchStyles.input}
-          placeholder={placeholder}
-          placeholderTextColor="#999"
-          value={query}
-          onChangeText={setQuery}
-          returnKeyType="search"
-          autoCorrect={false}
-        />
-        {query.length > 0 && (
-          <TouchableOpacity onPress={handleClear} style={searchStyles.clearButton}>
-            <Ionicons name="close-circle" size={20} color="#999" />
-          </TouchableOpacity>
-        )}
-      </View>
+    <View style={{ marginBottom: spacing.md, marginHorizontal: spacing.lg }}>
+      <Input
+        placeholder={placeholder}
+        value={query}
+        onChangeText={setQuery}
+        returnKeyType="search"
+        autoCorrect={false}
+        leftAdornment={<Icon name="search" size={20} color={colors.textMuted} />}
+        rightAdornment={
+          query.length > 0 ? (
+            <PressableScale onPress={handleClear} hitSlop={8}>
+              <Icon name="closeCircle" size={20} color={colors.textMuted} />
+            </PressableScale>
+          ) : undefined
+        }
+      />
     </View>
   );
 };
-
-const searchStyles = StyleSheet.create({
-  container: {
-    marginBottom: 16,
-  },
-  searchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    marginHorizontal: 16,
-  },
-  searchIcon: {
-    marginRight: 12,
-  },
-  input: {
-    flex: 1,
-    fontSize: 16,
-    color: '#333',
-    padding: 0,
-  },
-  clearButton: {
-    padding: 4,
-    marginLeft: 8,
-  },
-});

@@ -610,22 +610,25 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 			}
 		}
 		if systemFeeUSD > 0 {
-			if err := DistributeTPEarnings(config.DB, user.ID, req.TxType, walletTx.ID, systemFeeUSD); err != nil {
+			// Fee settlement (see settleFeeEarnings): idempotent on
+			// req.TxType/walletTx.ID. Feature maps the wallet tx type to a fee
+			// feature: a raw send is a withdrawal (70/30, earns TP); a swap is the
+			// internal spot exchange (FeatureSpot, 70/30).
+			feeFeature := models.FeatureWithdrawal
+			if req.TxType == models.TxTypeSwap {
+				feeFeature = models.FeatureSpot
+			}
+			if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
+				Feature:    feeFeature,
+				Token:      tokenUpper,
+				FeeUSD:     systemFeeUSD,
+				UserID:     user.ID,
+				SourceType: req.TxType,
+				SourceID:   walletTx.ID,
+			}); err != nil {
 				log.Printf("TP distribution failed for %s tx %s: %v", req.TxType, walletTx.ID, err)
 			}
 
-			// Record cashback: 25% of system fee back to user, 25% to direct upline
-			buyerCashbackUSD := systemFeeUSD * 0.25
-			if err := RecordCashbackEarning(config.DB, user.ID, user.ID, req.TxType, walletTx.ID, buyerCashbackUSD, walletTx.TxHash); err != nil {
-				log.Printf("Cashback recording failed for user on %s tx %s: %v", req.TxType, walletTx.ID, err)
-			}
-
-			if user.ReferredBy != nil {
-				uplineCashbackUSD := systemFeeUSD * 0.25
-				if err := RecordCashbackEarning(config.DB, *user.ReferredBy, user.ID, req.TxType, walletTx.ID, uplineCashbackUSD, walletTx.TxHash); err != nil {
-					log.Printf("Cashback recording failed for upline on %s tx %s: %v", req.TxType, walletTx.ID, err)
-				}
-			}
 		}
 	}
 

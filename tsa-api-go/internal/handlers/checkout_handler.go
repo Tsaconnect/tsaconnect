@@ -29,6 +29,9 @@ type CheckoutHandler struct {
 	EscrowService     *services.EscrowService
 	EventBus          *events.Bus
 	otcService        *services.OTCService
+	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
+	// main.go. Used via settleFeeEarnings.
+	FeeService *services.FeeDistributionService
 }
 
 // NewCheckoutHandler creates a new CheckoutHandler.
@@ -166,14 +169,21 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 
 // --- Fee calculation (big.Int) ---
 
-// CalculatePlatformFee returns 2% merchant fee for non-MCGP tokens, 0 for MCGP.
-// This fee is baked into the listing price — the merchant pays it, not the buyer.
+// CalculatePlatformFee returns the merchant fee (2% for non-MCGP tokens, 0 for
+// MCGP) read from the unified fee-config service. This fee is baked into the
+// listing price — the merchant pays it, not the buyer.
+//
+// The rate comes from the product_merchant fee_config row (seeded to 200 bps,
+// MCGP-exempt). MCGP resolves to bps=0/exempt, which produces the same zero fee
+// as the previous explicit MCGP branch. This is the SAME read the cart quote
+// (CalculateCartSummary's MerchantFee) makes, so quote == charge (design §6).
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
-	if strings.ToUpper(token) == "MCGP" {
-		return big.NewInt(0)
-	}
-	// 2% = productAmount * 200 / 10000
-	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(models.MerchantFeeBPS)))
+	// Product settlement is Sonic-only with no per-call chain context here, so
+	// this reads the documented-GLOBAL (chainID nil) product_merchant row —
+	// design §6.
+	bps, _ := services.FeeRate(models.FeatureProductMerchant, token, nil)
+	// fee = productAmount * bps / 10000
+	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(bps)))
 	fee.Div(fee, big.NewInt(10000))
 	return fee
 }
@@ -528,12 +538,19 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 
 // orderSystemFeeUSD computes the USD-denominated system fee for TP distribution.
 // For MCGP orders, the buyer pays no platform fee or gas fee, so TP distributes 0.
+// This is the LEGACY (v1) bundle: 2% merchant platform fee + $0.10 gas fee.
 func orderSystemFeeUSD(order *models.Order) float64 {
-	platformFeeFloat := weiToUSDFloat(order.PlatformFee, order.Token)
-	if strings.ToUpper(order.Token) == "MCGP" {
-		return platformFeeFloat
-	}
-	return platformFeeFloat + models.GasFeeUSD
+	// Product gas flat — documented-GLOBAL (chainID nil), Sonic-only flow (§6).
+	gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token, nil)
+	return orderMerchantFeeUSD(order) + gasFeeUSD
+}
+
+// orderMerchantFeeUSD is the 2% MERCHANT platform fee in USD ONLY — the carved
+// fee the v2 engine settles under FeatureProductMerchant. It excludes the buyer's
+// stablecoin gas (a separate 100%-system fee that must not generate TP/cashback).
+// For MCGP orders order.PlatformFee is zero, so this returns 0.
+func orderMerchantFeeUSD(order *models.Order) float64 {
+	return weiToUSDFloat(order.PlatformFee, order.Token)
 }
 
 // getOrderForEscrow is a shared helper for prepare-approve and prepare-escrow.
@@ -599,11 +616,17 @@ func (ch *CheckoutHandler) PrepareApprove(c *gin.Context) {
 
 	totalAmount, _ := new(big.Int).SetString(order.TotalAmount, 10)
 
-	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee
+	// Add gas fee to approve amount — contract collects product + shipping + platformFee + gasFee.
+	// The flat gas fee comes from the product fee_config row (seeded to $0.10,
+	// MCGP-exempt). MCGP resolves to flat=0, preserving the previous behavior
+	// where MCGP orders added no gas fee. This is the SAME read the cart quote
+	// (CalculateCartSummary's GasFee) makes, so quote == charge (design §6).
 	approveAmount := new(big.Int).Set(totalAmount)
 	if strings.ToUpper(order.Token) != "MCGP" {
+		// Documented-GLOBAL (chainID nil), Sonic-only product flow (§6).
+		gasFeeUSD, _ := services.FeeFlatUSD(models.FeatureProduct, order.Token, nil)
 		decimals := 6
-		gasFeeStr := fmt.Sprintf("%.0f", models.GasFeeUSD*math.Pow10(decimals))
+		gasFeeStr := fmt.Sprintf("%.0f", gasFeeUSD*math.Pow10(decimals))
 		gasFeeWei, _ := new(big.Int).SetString(gasFeeStr, 10)
 		approveAmount.Add(approveAmount, gasFeeWei)
 	}
@@ -1218,8 +1241,30 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 	}
 
 	if order.TPDistributedAt == nil {
-		systemFeeUSD := orderSystemFeeUSD(&order)
-		if err := DistributeTPEarnings(config.DB, order.BuyerID, "checkout", order.ID, systemFeeUSD); err != nil {
+		// v1 (legacy) settles on the BUNDLED system fee (2% merchant + $0.10 gas).
+		// v2 carves the two apart: the 2% MERCHANT platform fee carries the
+		// product_merchant split (cashback + TP); the buyer's stablecoin gas is a
+		// SEPARATE 100%-system fee that must NOT generate TP/cashback. We feed the
+		// merchant fee here; the gas component is intentionally not settled into the
+		// engine (it would only ever credit system, producing no recipients).
+		feeFeature := models.FeatureProductMerchant
+		feeUSD := orderMerchantFeeUSD(&order)
+		// Fee settlement: the realized merchant fee is handed to the engine
+		// (async, idempotent on checkout/order.ID). tp_distributed_at is stamped as
+		// a secondary site-level guard, but it is NOT the authoritative record of
+		// distribution: the FeeDistribution guard row (keyed checkout/order.ID) is,
+		// and the completed-order status transition already prevents re-entry here.
+		// The enqueue retries + alerts on permanent failure
+		// (fee_v2_settle_failed_total), so a stamped-but-undistributed window
+		// requires all retries to fail — surfaced loudly rather than silent.
+		if err := settleFeeEarnings(ch.FeeService, services.FeeEvent{
+			Feature:    feeFeature,
+			Token:      order.Token,
+			FeeUSD:     feeUSD,
+			UserID:     order.BuyerID,
+			SourceType: "checkout",
+			SourceID:   order.ID,
+		}); err != nil {
 			log.Printf("TP distribution failed for order %s: %v", order.ID, err)
 		} else {
 			if err := config.DB.Model(&order).Update("tp_distributed_at", now).Error; err != nil {
@@ -1227,25 +1272,6 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 			}
 		}
 
-		// Record cashback for buyer (0.5% of productAmount) — matches ProductEscrow BUYER_CASHBACK_BPS
-		if strings.ToUpper(order.Token) != "MCGP" {
-			productUSD := weiToUSDFloat(order.ProductAmount, order.Token)
-			buyerCashbackUSD := productUSD * 0.005
-			if err := RecordCashbackEarning(config.DB, order.BuyerID, order.SellerID, "checkout", order.ID, buyerCashbackUSD, order.EscrowTxHash); err != nil {
-				log.Printf("Cashback recording failed for buyer on order %s: %v", order.ID, err)
-			}
-
-			// Record cashback for buyer's upline (0.5% of productAmount) — matches ProductEscrow UPLINE_FEE_BPS
-			if order.BuyerUpline != "" && order.BuyerUpline != "0x0000000000000000000000000000000000000000" {
-				var uplineUser models.User
-				if err := config.DB.Where("wallet_address = ?", order.BuyerUpline).First(&uplineUser).Error; err == nil {
-					uplineCashbackUSD := productUSD * 0.005
-					if err := RecordCashbackEarning(config.DB, uplineUser.ID, order.BuyerID, "checkout", order.ID, uplineCashbackUSD, order.EscrowTxHash); err != nil {
-						log.Printf("Cashback recording failed for upline on order %s: %v", order.ID, err)
-					}
-				}
-			}
-		}
 	}
 
 	ch.EventBus.Publish(events.Event{

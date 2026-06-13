@@ -1,20 +1,29 @@
+// app/merchants/orders/[orderId].tsx
+//
+// Merchant order detail — status, buyer, shipping, product, payment breakdown,
+// lifecycle timeline, blockchain refs, and the ship / deliver / refund-decision /
+// cancel-decision / dispute action flows. Restyled onto the TSA Signature design
+// system (@/theme tokens + @/components/ui primitives).
+//
+// MERCHANT / MONEY screen: every API call (getOrderById, markOrderShipped,
+// markOrderDelivered, approveRefund/rejectRefund, approveCancelOrder/
+// submitCancelOrder/rejectCancelOrder, raiseDispute, api.uploadImage), the
+// sign+broadcast cancel flow (signAndBroadcast(prep.data.cancelTx, 'sonic')),
+// all state, effects, validation, status/role gating, navigation, and the
+// proof-image picker logic are preserved verbatim — this is a visual/structural
+// restyle only. The legacy STATUS_COLORS hex palette is replaced by semantic
+// theme tones; status strings/keys are unchanged.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
-  Text,
-  StyleSheet,
   ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
   Alert,
-  Modal,
-  TextInput,
   Linking,
   Image,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import {
@@ -32,12 +41,41 @@ import {
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
 import api from '@/components/services/api';
-import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
-
-const GOLD = '#D4AF37';
+import { formatStatus, formatDate } from '@/constants/orderStatus';
+import { useTheme } from '@/theme';
+import {
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  Divider,
+  EmptyState,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Sheet,
+  Spinner,
+  Text,
+} from '@/components/ui';
+import type { StatusTone } from '@/components/ui';
 
 // Sonic explorer for txs (the wallet currently only supports Sonic for these flows)
 const TX_EXPLORER_URL = 'https://sonicscan.org/tx/';
+
+// Map each marketplace order status onto a semantic design-system tone. Replaces
+// the legacy STATUS_COLORS hex palette; the status keys are unchanged.
+const STATUS_TONE: Record<string, StatusTone> = {
+  pending_payment: 'warning',
+  escrowed: 'info',
+  shipped: 'info',
+  delivered: 'success',
+  completed: 'success',
+  refund_requested: 'danger',
+  cancel_requested: 'warning',
+  refunded: 'neutral',
+  cancelled: 'neutral',
+};
 
 // Steps in the order lifecycle, in display order. Used by the timeline.
 type TimelineStep = {
@@ -116,7 +154,15 @@ function isValidHttpUrl(value: string): boolean {
   }
 }
 
+// Resolve a section overline label/value-row in design-system style.
+const CARD_LABEL = (text: string) => (
+  <Text variant="overline" color="textMuted" style={{ marginBottom: 0 }}>
+    {text}
+  </Text>
+);
+
 const MerchantOrderDetail = () => {
+  const { colors, spacing, radius } = useTheme();
   const { orderId } = useLocalSearchParams<{ orderId: string }>();
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -363,30 +409,48 @@ const MerchantOrderDetail = () => {
 
   if (loading) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color={GOLD} />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading order…" />
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (orderFetchFailed || !order) {
     return (
-      <View style={styles.centered}>
-        <Ionicons name="alert-circle-outline" size={64} color="#D9B68B" />
-        <Text style={styles.errorTitle}>{error || 'Order not found'}</Text>
-        <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => { setLoading(true); fetchOrder().finally(() => setLoading(false)); }}>
-            <Text style={styles.retryText}>Retry</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: '#888' }]} onPress={() => router.back()}>
-            <Text style={styles.retryText}>Go back</Text>
-          </TouchableOpacity>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
+          <EmptyState
+            icon="warning"
+            title={error || 'Order not found'}
+            subtitle="We couldn't load this order."
+            actionLabel="Retry"
+            onAction={() => { setLoading(true); fetchOrder().finally(() => setLoading(false)); }}
+          />
+          <Button
+            title="Go back"
+            variant="ghost"
+            onPress={() => router.back()}
+            style={{ marginTop: spacing.md }}
+          />
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
-  const statusColor = STATUS_COLORS[order.status] || STATUS_COLORS.cancelled;
+  const tone = STATUS_TONE[order.status] ?? 'neutral';
+  const toneColorMap: Record<StatusTone, { fg: string; bg: string }> = {
+    success: { fg: colors.success, bg: colors.successBg },
+    warning: { fg: colors.warning, bg: colors.warningBg },
+    danger: { fg: colors.danger, bg: colors.dangerBg },
+    info: { fg: colors.info, bg: colors.infoBg },
+    escrow: { fg: colors.escrow, bg: colors.escrowBg },
+    accent: { fg: colors.accent, bg: colors.accentMuted },
+    neutral: { fg: colors.textSecondary, bg: colors.surfaceAlt },
+  };
+  const statusVisual = toneColorMap[tone];
+
   const isDisputed = !!order.disputedAt;
   const canShip = !isDisputed && order.status === 'escrowed';
   const canDeliver = !isDisputed && order.status === 'shipped';
@@ -401,722 +465,703 @@ const MerchantOrderDetail = () => {
     'Unknown buyer';
   const shippingAddressParts = [order.shippingCity, order.shippingState, order.shippingCountry].filter(Boolean);
 
+  const hasActionBar =
+    !isDisputed && (canShip || canDeliver || canResolveRefund || canHandleCancel || canRaiseDispute);
+
   return (
-    <View style={{ flex: 1, backgroundColor: '#FAFAFA' }}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={24} color="#1A1A1A" />
-        </TouchableOpacity>
-        <Text style={styles.title}>Order Detail</Text>
-        <View style={{ width: 40 }} />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      {/* Header */}
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingHorizontal: spacing.sm,
+          paddingVertical: spacing.sm,
+          borderBottomWidth: 1,
+          borderBottomColor: colors.hairline,
+        }}
+      >
+        <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
+        <Text variant="title3" weight="700">
+          Order Detail
+        </Text>
+        <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={{
+          padding: spacing.lg,
+          paddingBottom: (hasActionBar || isDisputed) ? spacing['4xl'] * 3 : spacing['4xl'],
+        }}
+      >
         {/* Status card */}
-        <View style={[styles.card, styles.statusCard]}>
-          <View style={[styles.statusBadge, { backgroundColor: statusColor.bg }]}>
-            <Text style={[styles.statusText, { color: statusColor.text }]}>
-              {formatStatus(order.status)}
-            </Text>
-          </View>
-          <Text style={styles.orderIdText}>Order #{order.id.slice(0, 8)}</Text>
+        <Card style={{ marginBottom: spacing.md, alignItems: 'center' }}>
+          <Badge label={formatStatus(order.status)} color={statusVisual.fg} background={statusVisual.bg} />
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm }}>
+            Order #{order.id.slice(0, 8)}
+          </Text>
           {order.merchantApprovedRefund && (
-            <View style={styles.refundFlag}>
-              <Ionicons name="checkmark-circle" size={14} color="#16A34A" />
-              <Text style={styles.refundFlagText}>You approved this refund. Awaiting admin.</Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                backgroundColor: colors.successBg,
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.xs,
+                borderRadius: radius.sm,
+                marginTop: spacing.md,
+              }}
+            >
+              <Icon name="checkCircle" size={14} color={colors.success} />
+              <Text variant="caption" weight="600" color="success">
+                You approved this refund. Awaiting admin.
+              </Text>
             </View>
           )}
           {order.status === 'cancel_requested' && order.cancelReason && (
-            <View style={[styles.refundFlag, { backgroundColor: '#FEF3C7' }]}>
-              <Ionicons name="information-circle" size={14} color="#92400E" />
-              <Text style={[styles.refundFlagText, { color: '#92400E' }]}>
-                Buyer's reason: {order.cancelReason}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                backgroundColor: colors.warningBg,
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.xs,
+                borderRadius: radius.sm,
+                marginTop: spacing.md,
+              }}
+            >
+              <Icon name="info" size={14} color={colors.warning} />
+              <Text variant="caption" weight="600" color="warning" style={{ flex: 1 }}>
+                Buyer&apos;s reason: {order.cancelReason}
               </Text>
             </View>
           )}
-        </View>
+        </Card>
 
         {/* Buyer */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>BUYER</Text>
-          <View style={styles.rowStart}>
-            <View style={styles.avatar}>
-              <Ionicons name="person" size={18} color={GOLD} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.buyerName}>{buyerLabel}</Text>
+        <Card style={{ marginBottom: spacing.md }}>
+          {CARD_LABEL('BUYER')}
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm }}>
+            <Avatar name={buyerLabel} size={36} />
+            <View style={{ flex: 1, marginLeft: spacing.md }}>
+              <Text variant="bodyMed" weight="700">
+                {buyerLabel}
+              </Text>
               {order.buyer?.email && order.buyer?.email !== buyerLabel && (
-                <Text style={styles.muted}>{order.buyer.email}</Text>
+                <Text variant="caption" color="textMuted">
+                  {order.buyer.email}
+                </Text>
               )}
             </View>
           </View>
-        </View>
+        </Card>
 
         {/* Shipping address */}
         {shippingAddressParts.length > 0 && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>SHIP TO</Text>
-            <View style={styles.rowStart}>
-              <Ionicons name="location" size={18} color={GOLD} />
-              <Text style={{ marginLeft: 10, flex: 1, fontSize: 14, color: '#1A1A1A' }}>
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('SHIP TO')}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm }}>
+              <Icon name="nearMe" size={18} color={colors.accent} />
+              <Text variant="bodySm" style={{ marginLeft: spacing.md, flex: 1 }}>
                 {shippingAddressParts.join(', ')}
               </Text>
             </View>
-          </View>
+          </Card>
         )}
 
         {/* Product */}
         {order.product && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>PRODUCT</Text>
-            <View style={styles.rowStart}>
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('PRODUCT')}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: spacing.sm }}>
               {order.product.imageUrl ? (
-                <Image source={{ uri: order.product.imageUrl }} style={styles.productImage} />
+                <Image
+                  source={{ uri: order.product.imageUrl }}
+                  style={{ width: 56, height: 56, borderRadius: radius.sm, backgroundColor: colors.surfaceAlt }}
+                />
               ) : (
-                <View style={[styles.productImage, styles.productImagePlaceholder]}>
-                  <Ionicons name="cube-outline" size={24} color="#CCC" />
+                <View
+                  style={{
+                    width: 56,
+                    height: 56,
+                    borderRadius: radius.sm,
+                    backgroundColor: colors.surfaceAlt,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Icon name="pricetag" size={24} color={colors.textMuted} />
                 </View>
               )}
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.productName}>{order.product.name}</Text>
-                <View style={[styles.rowBetween, { marginTop: 4 }]}>
-                  <Text style={styles.muted}>Qty: {order.quantity}</Text>
-                  <Text style={styles.muted}>${order.product.price.toFixed(2)} each</Text>
+              <View style={{ flex: 1, marginLeft: spacing.md }}>
+                <Text variant="bodyMed" weight="700">
+                  {order.product.name}
+                </Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: spacing.xs }}>
+                  <Text variant="caption" color="textMuted">
+                    Qty: {order.quantity}
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    ${order.product.price.toFixed(2)} each
+                  </Text>
                 </View>
               </View>
             </View>
-          </View>
+          </Card>
         )}
 
         {/* Amounts */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>PAYMENT</Text>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Product</Text>
-            <Text>{formatTokenAmount(order.productAmount, order.token)}</Text>
+        <Card style={{ marginBottom: spacing.md }}>
+          {CARD_LABEL('PAYMENT')}
+          <View style={{ marginTop: spacing.xs }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodySm" color="textSecondary">
+                Product
+              </Text>
+              <Text variant="bodySm" numeric>
+                {formatTokenAmount(order.productAmount, order.token)}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodySm" color="textSecondary">
+                Shipping ({formatStatus(order.shippingZone || '')})
+              </Text>
+              <Text variant="bodySm" numeric>
+                {formatTokenAmount(order.shippingAmount, order.token)}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodySm" color="textSecondary">
+                Platform fee
+              </Text>
+              <Text variant="bodySm" numeric>
+                {formatTokenAmount(order.platformFee, order.token)}
+              </Text>
+            </View>
+            <Divider spacing="sm" />
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+              <Text variant="bodyMed" weight="700">
+                Total
+              </Text>
+              <Text variant="bodyMed" weight="700" color="accent" numeric>
+                {formatTokenAmount(order.totalAmount, order.token)}
+              </Text>
+            </View>
           </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Shipping ({formatStatus(order.shippingZone || '')})</Text>
-            <Text>{formatTokenAmount(order.shippingAmount, order.token)}</Text>
-          </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Platform fee</Text>
-            <Text>{formatTokenAmount(order.platformFee, order.token)}</Text>
-          </View>
-          <View style={[styles.rowBetween, styles.divider]}>
-            <Text style={styles.bold}>Total</Text>
-            <Text style={[styles.bold, { color: GOLD }]}>
-              {formatTokenAmount(order.totalAmount, order.token)}
-            </Text>
-          </View>
-        </View>
+        </Card>
 
         {/* Shipping info */}
         {(order.trackingNumber || order.notes) && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>SHIPPING INFO</Text>
-            {order.trackingNumber && (
-              <View style={styles.rowBetween}>
-                <Text style={styles.muted}>Tracking</Text>
-                <Text style={styles.bold}>{order.trackingNumber}</Text>
-              </View>
-            )}
-            {order.notes && (
-              <>
-                <Text style={[styles.muted, { marginTop: 8 }]}>Notes</Text>
-                <Text style={{ marginTop: 4 }}>{order.notes}</Text>
-              </>
-            )}
-          </View>
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('SHIPPING INFO')}
+            <View style={{ marginTop: spacing.xs }}>
+              {order.trackingNumber && (
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+                  <Text variant="bodySm" color="textSecondary">
+                    Tracking
+                  </Text>
+                  <Text variant="bodySm" weight="700" numeric>
+                    {order.trackingNumber}
+                  </Text>
+                </View>
+              )}
+              {order.notes && (
+                <>
+                  <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm }}>
+                    Notes
+                  </Text>
+                  <Text variant="bodySm" style={{ marginTop: spacing.xs }}>
+                    {order.notes}
+                  </Text>
+                </>
+              )}
+            </View>
+          </Card>
         )}
 
         {/* Timeline */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>TIMELINE</Text>
-          {timeline.map((step, i) => {
-            const isLast = i === timeline.length - 1;
-            return (
-              <View key={step.key} style={styles.timelineRow}>
-                <View style={styles.timelineLeft}>
-                  <View
-                    style={[
-                      styles.timelineDot,
-                      step.isCurrent && styles.timelineDotCurrent,
-                      step.isComplete && !step.isCurrent && styles.timelineDotComplete,
-                    ]}
-                  >
-                    {step.isComplete && <Ionicons name="checkmark" size={12} color="#FFF" />}
-                  </View>
-                  {!isLast && (
+        <Card style={{ marginBottom: spacing.md }}>
+          {CARD_LABEL('TIMELINE')}
+          <View style={{ marginTop: spacing.sm }}>
+            {timeline.map((step, i) => {
+              const isLast = i === timeline.length - 1;
+              const dotBg = step.isCurrent
+                ? colors.accent
+                : step.isComplete
+                  ? colors.success
+                  : colors.border;
+              const lineBg = step.isComplete ? colors.success : colors.border;
+              return (
+                <View key={step.key} style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+                  <View style={{ width: 28, alignItems: 'center' }}>
                     <View
-                      style={[
-                        styles.timelineLine,
-                        step.isComplete && styles.timelineLineComplete,
-                      ]}
-                    />
-                  )}
+                      style={{
+                        width: 16,
+                        height: 16,
+                        borderRadius: 8,
+                        backgroundColor: dotBg,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        marginTop: 2,
+                      }}
+                    >
+                      {step.isComplete && <Icon name="check" size={10} color={colors.onAccent} />}
+                    </View>
+                    {!isLast && (
+                      <View style={{ width: 2, flex: 1, backgroundColor: lineBg, minHeight: 18, marginTop: 2 }} />
+                    )}
+                  </View>
+                  <View style={{ flex: 1, paddingBottom: spacing.md, marginLeft: spacing.sm }}>
+                    <Text
+                      variant="bodySm"
+                      weight={step.isCurrent ? '700' : '600'}
+                      color={step.isCurrent ? 'textPrimary' : 'textMuted'}
+                    >
+                      {step.label}
+                    </Text>
+                    {step.timestamp && (
+                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                        {formatDate(step.timestamp, true)}
+                      </Text>
+                    )}
+                  </View>
                 </View>
-                <View style={styles.timelineRight}>
-                  <Text style={[styles.timelineLabel, step.isCurrent && styles.timelineLabelCurrent]}>
-                    {step.label}
-                  </Text>
-                  {step.timestamp && (
-                    <Text style={styles.timelineTime}>{formatDate(step.timestamp, true)}</Text>
-                  )}
-                </View>
-              </View>
-            );
-          })}
-        </View>
+              );
+            })}
+          </View>
+        </Card>
 
         {/* Blockchain */}
         {(order.escrowTxHash || order.releaseTxHash || order.contractOrderId) && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>BLOCKCHAIN</Text>
-            {order.contractOrderId && (
-              <View style={styles.rowBetween}>
-                <Text style={styles.muted}>Contract ID</Text>
-                <Text style={styles.hash} numberOfLines={1} ellipsizeMode="middle">
-                  {order.contractOrderId}
-                </Text>
-              </View>
-            )}
-            {order.escrowTxHash && (
-              <TouchableOpacity style={styles.txRow} onPress={() => openExplorer(order.escrowTxHash!)}>
-                <Text style={styles.muted}>Escrow tx</Text>
-                <View style={styles.txLink}>
-                  <Text style={styles.hash} numberOfLines={1} ellipsizeMode="middle">
-                    {order.escrowTxHash.slice(0, 10)}...
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('BLOCKCHAIN')}
+            <View style={{ marginTop: spacing.xs }}>
+              {order.contractOrderId && (
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+                  <Text variant="bodySm" color="textSecondary">
+                    Contract ID
                   </Text>
-                  <Ionicons name="open-outline" size={14} color={GOLD} />
-                </View>
-              </TouchableOpacity>
-            )}
-            {order.releaseTxHash && (
-              <TouchableOpacity style={styles.txRow} onPress={() => openExplorer(order.releaseTxHash!)}>
-                <Text style={styles.muted}>Release tx</Text>
-                <View style={styles.txLink}>
-                  <Text style={styles.hash} numberOfLines={1} ellipsizeMode="middle">
-                    {order.releaseTxHash.slice(0, 10)}...
+                  <Text variant="caption" numeric color="textSecondary" numberOfLines={1} ellipsizeMode="middle" style={{ maxWidth: 160 }}>
+                    {order.contractOrderId}
                   </Text>
-                  <Ionicons name="open-outline" size={14} color={GOLD} />
                 </View>
-              </TouchableOpacity>
-            )}
-          </View>
+              )}
+              {order.escrowTxHash && (
+                <PressableScale
+                  onPress={() => openExplorer(order.escrowTxHash!)}
+                  style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}
+                >
+                  <Text variant="bodySm" color="textSecondary">
+                    Escrow tx
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                    <Text variant="caption" numeric color="textSecondary">
+                      {order.escrowTxHash.slice(0, 10)}...
+                    </Text>
+                    <Icon name="arrowRight" size={14} color={colors.accent} />
+                  </View>
+                </PressableScale>
+              )}
+              {order.releaseTxHash && (
+                <PressableScale
+                  onPress={() => openExplorer(order.releaseTxHash!)}
+                  style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}
+                >
+                  <Text variant="bodySm" color="textSecondary">
+                    Release tx
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                    <Text variant="caption" numeric color="textSecondary">
+                      {order.releaseTxHash.slice(0, 10)}...
+                    </Text>
+                    <Icon name="arrowRight" size={14} color={colors.accent} />
+                  </View>
+                </PressableScale>
+              )}
+            </View>
+          </Card>
         )}
 
         {/* Delivery proof preview if exists */}
         {order.deliveryProofUrl && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>DELIVERY PROOF</Text>
-            {isValidHttpUrl(order.deliveryProofUrl) ? (
-              <Image source={{ uri: order.deliveryProofUrl }} style={styles.proofImage} resizeMode="cover" />
-            ) : (
-              <Text style={styles.muted}>{order.deliveryProofUrl}</Text>
-            )}
-          </View>
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('DELIVERY PROOF')}
+            <View style={{ marginTop: spacing.sm }}>
+              {isValidHttpUrl(order.deliveryProofUrl) ? (
+                <Image
+                  source={{ uri: order.deliveryProofUrl }}
+                  style={{ width: '100%', height: 200, borderRadius: radius.md, backgroundColor: colors.surfaceAlt }}
+                  resizeMode="cover"
+                />
+              ) : (
+                <Text variant="bodySm" color="textMuted">
+                  {order.deliveryProofUrl}
+                </Text>
+              )}
+            </View>
+          </Card>
         )}
       </ScrollView>
 
       {/* Dispute banner — overrides action bar when disputed */}
       {isDisputed && (
-        <View style={[styles.actionBar, { backgroundColor: '#FEE2E2' }]}>
-          <View style={{ flex: 1, gap: 4 }}>
-            <Text style={{ color: '#991B1B', fontWeight: '700' }}>Under admin review</Text>
-            <Text style={{ color: '#991B1B', fontSize: 12 }}>
-              {order.disputeReason
-                ? `Reason: ${order.disputeReason}`
-                : 'Actions are paused until the admin resolves this dispute.'}
-            </Text>
+        <View
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            backgroundColor: colors.dangerBg,
+            padding: spacing.lg,
+            borderTopWidth: 1,
+            borderTopColor: colors.hairline,
+          }}
+        >
+          <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+            <Icon name="dispute" size={18} color={colors.danger} />
+            <View style={{ flex: 1, gap: spacing.xs }}>
+              <Text variant="bodySm" weight="700" color="danger">
+                Under admin review
+              </Text>
+              <Text variant="caption" color="danger">
+                {order.disputeReason
+                  ? `Reason: ${order.disputeReason}`
+                  : 'Actions are paused until the admin resolves this dispute.'}
+              </Text>
+            </View>
           </View>
         </View>
       )}
 
       {/* Action bar */}
-      {!isDisputed && (canShip || canDeliver || canResolveRefund || canHandleCancel || canRaiseDispute) && (
-        <View style={styles.actionBar}>
+      {hasActionBar && (
+        <View
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            backgroundColor: colors.surface,
+            padding: spacing.lg,
+            borderTopWidth: 1,
+            borderTopColor: colors.hairline,
+            gap: spacing.sm,
+          }}
+        >
           {canShip && (
-            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: GOLD }]} onPress={() => setShipModalVisible(true)}>
-              <Ionicons name="send" size={18} color="#FFF" />
-              <Text style={styles.actionBtnText}>Mark as Shipped</Text>
-            </TouchableOpacity>
+            <Button title="Mark as Shipped" leftIcon="send" onPress={() => setShipModalVisible(true)} />
           )}
           {canDeliver && (
-            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: GOLD }]} onPress={() => setDeliverModalVisible(true)}>
-              <Ionicons name="checkmark-circle" size={18} color="#FFF" />
-              <Text style={styles.actionBtnText}>Mark as Delivered</Text>
-            </TouchableOpacity>
+            <Button title="Mark as Delivered" leftIcon="checkCircle" onPress={() => setDeliverModalVisible(true)} />
           )}
           {canResolveRefund && !order.merchantApprovedRefund && (
-            <View style={styles.refundActions}>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.refundRejectBtn]}
-                onPress={() => { setRefundNotes(''); setRefundModalVisible('reject'); }}
-              >
-                <Ionicons name="close-circle-outline" size={18} color="#DC2626" />
-                <Text style={[styles.actionBtnText, { color: '#DC2626' }]}>Reject Refund</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: '#16A34A' }]}
-                onPress={() => { setRefundNotes(''); setRefundModalVisible('approve'); }}
-              >
-                <Ionicons name="checkmark-circle-outline" size={18} color="#FFF" />
-                <Text style={styles.actionBtnText}>Approve Refund</Text>
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Reject Refund"
+                  variant="danger"
+                  leftIcon="closeCircle"
+                  onPress={() => { setRefundNotes(''); setRefundModalVisible('reject'); }}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Approve Refund"
+                  variant="success"
+                  leftIcon="checkCircle"
+                  onPress={() => { setRefundNotes(''); setRefundModalVisible('approve'); }}
+                />
+              </View>
             </View>
           )}
           {canHandleCancel && (
-            <View style={styles.refundActions}>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.refundRejectBtn]}
-                onPress={() => { setCancelNotes(''); setCancelModalVisible('reject'); }}
-              >
-                <Ionicons name="close-circle-outline" size={18} color="#DC2626" />
-                <Text style={[styles.actionBtnText, { color: '#DC2626' }]}>Reject Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionBtn, { backgroundColor: '#16A34A' }]}
-                onPress={() => { setCancelNotes(''); setCancelModalVisible('approve'); }}
-              >
-                <Ionicons name="checkmark-circle-outline" size={18} color="#FFF" />
-                <Text style={styles.actionBtnText}>Approve Cancel</Text>
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Reject Cancel"
+                  variant="danger"
+                  leftIcon="closeCircle"
+                  onPress={() => { setCancelNotes(''); setCancelModalVisible('reject'); }}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Approve Cancel"
+                  variant="success"
+                  leftIcon="checkCircle"
+                  onPress={() => { setCancelNotes(''); setCancelModalVisible('approve'); }}
+                />
+              </View>
             </View>
           )}
           {canRaiseDispute && (
-            <TouchableOpacity onPress={() => setDisputeModalVisible(true)} style={{ alignItems: 'center', paddingVertical: 6 }}>
-              <Text style={{ color: '#8B5A2B', fontSize: 13, textDecorationLine: 'underline' }}>Report to Admin</Text>
-            </TouchableOpacity>
+            <PressableScale
+              onPress={() => setDisputeModalVisible(true)}
+              style={{ alignItems: 'center', paddingVertical: spacing.xs }}
+            >
+              <Text variant="bodySm" weight="600" color="accent">
+                Report to Admin
+              </Text>
+            </PressableScale>
           )}
         </View>
       )}
 
       {/* Ship modal */}
-      <Modal visible={shipModalVisible} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Mark as Shipped</Text>
-            <Text style={styles.modalHint}>The buyer will be notified. Tracking info is optional.</Text>
+      <Sheet visible={shipModalVisible} onClose={() => setShipModalVisible(false)} title="Mark as Shipped">
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
+              The buyer will be notified. Tracking info is optional.
+            </Text>
 
-            <Text style={styles.inputLabel}>Tracking number (optional)</Text>
-            <TextInput
-              style={styles.input}
+            <Input
+              label="Tracking number (optional)"
               value={trackingNumber}
               onChangeText={setTrackingNumber}
               placeholder="e.g. 1Z999AA10123456784"
-              placeholderTextColor="#BBB"
               autoCapitalize="characters"
             />
 
-            <Text style={styles.inputLabel}>Notes (optional)</Text>
-            <TextInput
-              style={[styles.input, { height: 70 }]}
+            <Input
+              label="Notes (optional)"
               value={shipNotes}
               onChangeText={setShipNotes}
               placeholder="Courier name, expected delivery date, etc."
-              placeholderTextColor="#BBB"
               multiline
+              inputStyle={{ height: 70 }}
             />
 
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnSecondary]} onPress={() => setShipModalVisible(false)} disabled={actionLoading}>
-                <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalBtnPrimary, actionLoading && { opacity: 0.5 }]}
-                onPress={handleShip}
-                disabled={actionLoading}
-              >
-                {actionLoading ? <ActivityIndicator color="#FFF" size="small" /> : <Text style={styles.modalBtnPrimaryText}>Confirm</Text>}
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button title="Cancel" variant="secondary" onPress={() => setShipModalVisible(false)} disabled={actionLoading} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button title="Confirm" onPress={handleShip} loading={actionLoading} disabled={actionLoading} />
+              </View>
             </View>
           </View>
-        </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
 
       {/* Deliver modal — image upload */}
-      <Modal visible={deliverModalVisible} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Mark as Delivered</Text>
-            <Text style={styles.modalHint}>Upload a photo of the delivery (signed receipt, package handed to buyer, etc.).</Text>
+      <Sheet visible={deliverModalVisible} onClose={() => { setDeliverModalVisible(false); setProofImageUri(null); }} title="Mark as Delivered">
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+          <Text variant="bodySm" color="textSecondary">
+            Upload a photo of the delivery (signed receipt, package handed to buyer, etc.).
+          </Text>
 
-            {proofImageUri ? (
-              <View style={styles.proofPreviewWrap}>
-                <Image source={{ uri: proofImageUri }} style={styles.proofPreview} resizeMode="cover" />
-                <TouchableOpacity style={styles.removeProofBtn} onPress={() => setProofImageUri(null)}>
-                  <Ionicons name="close" size={18} color="#FFF" />
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.proofPickerRow}>
-                <TouchableOpacity style={styles.proofPickerBtn} onPress={captureProofPhoto}>
-                  <Ionicons name="camera" size={24} color={GOLD} />
-                  <Text style={styles.proofPickerText}>Take photo</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.proofPickerBtn} onPress={pickProofImage}>
-                  <Ionicons name="image" size={24} color={GOLD} />
-                  <Text style={styles.proofPickerText}>Choose from gallery</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+          {proofImageUri ? (
+            <View style={{ position: 'relative' }}>
+              <Image
+                source={{ uri: proofImageUri }}
+                style={{ width: '100%', height: 180, borderRadius: radius.md }}
+                resizeMode="cover"
+              />
+              <IconButton
+                icon="close"
+                accessibilityLabel="Remove proof image"
+                variant="surface"
+                size={18}
+                onPress={() => setProofImageUri(null)}
+                style={{ position: 'absolute', top: spacing.sm, right: spacing.sm, width: 32, height: 32 }}
+              />
+            </View>
+          ) : (
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <PressableScale
+                onPress={captureProofPhoto}
+                style={{
+                  flex: 1,
+                  paddingVertical: spacing.xl,
+                  paddingHorizontal: spacing.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1.5,
+                  borderStyle: 'dashed',
+                  borderColor: colors.accent,
+                  backgroundColor: colors.accentMuted,
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                }}
+              >
+                <Icon name="camera" size={24} color={colors.accent} />
+                <Text variant="caption" weight="700" color="accent" align="center">
+                  Take photo
+                </Text>
+              </PressableScale>
+              <PressableScale
+                onPress={pickProofImage}
+                style={{
+                  flex: 1,
+                  paddingVertical: spacing.xl,
+                  paddingHorizontal: spacing.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1.5,
+                  borderStyle: 'dashed',
+                  borderColor: colors.accent,
+                  backgroundColor: colors.accentMuted,
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                }}
+              >
+                <Icon name="image" size={24} color={colors.accent} />
+                <Text variant="caption" weight="700" color="accent" align="center">
+                  Choose from gallery
+                </Text>
+              </PressableScale>
+            </View>
+          )}
 
-            {uploadingProof && (
-              <View style={styles.uploadingRow}>
-                <ActivityIndicator color={GOLD} size="small" />
-                <Text style={styles.muted}>Uploading proof...</Text>
-              </View>
-            )}
+          {uploadingProof && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <Spinner inline label="Uploading proof…" />
+            </View>
+          )}
 
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalBtnSecondary]}
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="Cancel"
+                variant="secondary"
                 onPress={() => { setDeliverModalVisible(false); setProofImageUri(null); }}
                 disabled={actionLoading}
-              >
-                <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalBtnPrimary, (actionLoading || !proofImageUri) && { opacity: 0.5 }]}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                title="Confirm"
                 onPress={handleDeliver}
+                loading={actionLoading}
                 disabled={actionLoading || !proofImageUri}
-              >
-                {actionLoading ? <ActivityIndicator color="#FFF" size="small" /> : <Text style={styles.modalBtnPrimaryText}>Confirm</Text>}
-              </TouchableOpacity>
+              />
             </View>
           </View>
         </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
 
       {/* Refund decision modal */}
-      <Modal visible={!!refundModalVisible} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>
-              {refundModalVisible === 'approve' ? 'Approve Refund' : 'Reject Refund'}
-            </Text>
-            <Text style={styles.modalHint}>
+      <Sheet
+        visible={!!refundModalVisible}
+        onClose={() => setRefundModalVisible(null)}
+        title={refundModalVisible === 'approve' ? 'Approve Refund' : 'Reject Refund'}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
               {refundModalVisible === 'approve'
                 ? 'You agree to refund this buyer. An admin will finalize the refund on-chain. The order stays in refund-requested until then.'
                 : 'You disagree with the refund request. The order will return to delivered status. The buyer can contact support if they disagree.'}
             </Text>
 
-            <Text style={styles.inputLabel}>Notes for the buyer (optional)</Text>
-            <TextInput
-              style={[styles.input, { height: 90 }]}
+            <Input
+              label="Notes for the buyer (optional)"
               value={refundNotes}
               onChangeText={setRefundNotes}
               placeholder="Reason for your decision..."
-              placeholderTextColor="#BBB"
               multiline
+              inputStyle={{ height: 90 }}
             />
 
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnSecondary]} onPress={() => setRefundModalVisible(null)} disabled={actionLoading}>
-                <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtn,
-                  refundModalVisible === 'approve' ? { backgroundColor: '#16A34A' } : { backgroundColor: '#DC2626' },
-                  actionLoading && { opacity: 0.5 },
-                ]}
-                onPress={handleRefundDecision}
-                disabled={actionLoading}
-              >
-                {actionLoading ? (
-                  <ActivityIndicator color="#FFF" size="small" />
-                ) : (
-                  <Text style={styles.modalBtnPrimaryText}>{refundModalVisible === 'approve' ? 'Approve' : 'Reject'}</Text>
-                )}
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button title="Cancel" variant="secondary" onPress={() => setRefundModalVisible(null)} disabled={actionLoading} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title={refundModalVisible === 'approve' ? 'Approve' : 'Reject'}
+                  variant={refundModalVisible === 'approve' ? 'success' : 'danger'}
+                  onPress={handleRefundDecision}
+                  loading={actionLoading}
+                  disabled={actionLoading}
+                />
+              </View>
             </View>
           </View>
-        </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
 
       {/* Cancel decision modal */}
-      <Modal visible={!!cancelModalVisible} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>
-                {cancelModalVisible === 'approve' ? 'Approve Cancel Request' : 'Reject Cancel Request'}
-              </Text>
-              <Text style={styles.modalHint}>
-                {cancelModalVisible === 'approve'
-                  ? "You agree to cancel this order. You'll sign an on-chain transaction to return the buyer's funds."
-                  : 'You disagree with the cancel request. The order will return to escrowed status and you can proceed to ship.'}
-              </Text>
+      <Sheet
+        visible={!!cancelModalVisible}
+        onClose={() => setCancelModalVisible(null)}
+        title={cancelModalVisible === 'approve' ? 'Approve Cancel Request' : 'Reject Cancel Request'}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
+              {cancelModalVisible === 'approve'
+                ? "You agree to cancel this order. You'll sign an on-chain transaction to return the buyer's funds."
+                : 'You disagree with the cancel request. The order will return to escrowed status and you can proceed to ship.'}
+            </Text>
 
-              {cancelModalVisible === 'reject' && (
-                <>
-                  <Text style={styles.inputLabel}>Note to the buyer (optional)</Text>
-                  <TextInput
-                    style={[styles.input, { height: 90 }]}
-                    value={cancelNotes}
-                    onChangeText={setCancelNotes}
-                    placeholder="Why are you keeping the order active?"
-                    placeholderTextColor="#BBB"
-                    multiline
-                  />
-                </>
-              )}
+            {cancelModalVisible === 'reject' && (
+              <Input
+                label="Note to the buyer (optional)"
+                value={cancelNotes}
+                onChangeText={setCancelNotes}
+                placeholder="Why are you keeping the order active?"
+                multiline
+                inputStyle={{ height: 90 }}
+              />
+            )}
 
-              <View style={styles.modalActions}>
-                <TouchableOpacity
-                  style={[styles.modalBtn, styles.modalBtnSecondary]}
-                  onPress={() => setCancelModalVisible(null)}
-                  disabled={actionLoading}
-                >
-                  <Text style={styles.modalBtnSecondaryText}>Back</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtn,
-                    cancelModalVisible === 'approve' ? { backgroundColor: '#16A34A' } : { backgroundColor: '#DC2626' },
-                    actionLoading && { opacity: 0.5 },
-                  ]}
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button title="Back" variant="secondary" onPress={() => setCancelModalVisible(null)} disabled={actionLoading} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title={cancelModalVisible === 'approve' ? 'Approve & Sign' : 'Reject'}
+                  variant={cancelModalVisible === 'approve' ? 'success' : 'danger'}
                   onPress={handleCancelDecision}
+                  loading={actionLoading}
                   disabled={actionLoading}
-                >
-                  {actionLoading ? (
-                    <ActivityIndicator color="#FFF" size="small" />
-                  ) : (
-                    <Text style={styles.modalBtnPrimaryText}>
-                      {cancelModalVisible === 'approve' ? 'Approve & Sign' : 'Reject'}
-                    </Text>
-                  )}
-                </TouchableOpacity>
+                />
               </View>
             </View>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
 
       {/* Dispute modal */}
-      <Modal visible={disputeModalVisible} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>Report to Admin</Text>
-              <Text style={styles.modalHint}>
-                Describe the issue in detail (minimum 10 characters). An admin will review and resolve.
-              </Text>
-              <TextInput
-                style={[styles.input, { height: 110 }]}
-                value={disputeReason}
-                onChangeText={setDisputeReason}
-                placeholder="What went wrong?"
-                placeholderTextColor="#BBB"
-                multiline
-              />
-              <View style={styles.modalActions}>
-                <TouchableOpacity
-                  style={[styles.modalBtn, styles.modalBtnSecondary]}
+      <Sheet
+        visible={disputeModalVisible}
+        onClose={() => { setDisputeModalVisible(false); setDisputeReason(''); }}
+        title="Report to Admin"
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
+              Describe the issue in detail (minimum 10 characters). An admin will review and resolve.
+            </Text>
+            <Input
+              value={disputeReason}
+              onChangeText={setDisputeReason}
+              placeholder="What went wrong?"
+              multiline
+              inputStyle={{ height: 110 }}
+            />
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Cancel"
+                  variant="secondary"
                   onPress={() => { setDisputeModalVisible(false); setDisputeReason(''); }}
                   disabled={actionLoading}
-                >
-                  <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.modalBtn, styles.modalBtnPrimary, actionLoading && { opacity: 0.5 }]}
-                  onPress={submitDispute}
-                  disabled={actionLoading}
-                >
-                  {actionLoading ? (
-                    <ActivityIndicator color="#FFF" size="small" />
-                  ) : (
-                    <Text style={styles.modalBtnPrimaryText}>Submit Dispute</Text>
-                  )}
-                </TouchableOpacity>
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button title="Submit Dispute" onPress={submitDispute} loading={actionLoading} disabled={actionLoading} />
               </View>
             </View>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
-    </View>
+      </Sheet>
+    </SafeAreaView>
   );
 };
 
 export default MerchantOrderDetail;
-
-const styles = StyleSheet.create({
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
-  errorTitle: { fontSize: 16, fontWeight: '700', color: '#1A1A1A', marginTop: 16, textAlign: 'center' },
-
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#FFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  backBtn: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
-  title: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-
-  content: { padding: 16, paddingBottom: 140 },
-
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  statusCard: { alignItems: 'center' },
-  cardLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 10 },
-
-  statusBadge: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 14, marginBottom: 10 },
-  statusText: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
-  orderIdText: { fontSize: 13, color: '#666' },
-  refundFlag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#F0FDF4',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 10,
-    marginTop: 10,
-  },
-  refundFlagText: { fontSize: 12, color: '#166534', fontWeight: '600' },
-
-  rowStart: { flexDirection: 'row', alignItems: 'center' },
-  avatar: {
-    width: 36, height: 36, borderRadius: 18,
-    backgroundColor: '#FFF8E1',
-    justifyContent: 'center', alignItems: 'center',
-    marginRight: 12,
-  },
-  buyerName: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
-
-  productImage: { width: 56, height: 56, borderRadius: 8, backgroundColor: '#F0F0F0' },
-  productImagePlaceholder: { justifyContent: 'center', alignItems: 'center' },
-  productName: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
-
-  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 5 },
-  muted: { color: '#888', fontSize: 13 },
-  bold: { fontWeight: '700', color: '#1A1A1A', fontSize: 13 },
-  divider: { marginTop: 8, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#F0F0F0' },
-
-  hash: { fontSize: 12, color: '#555', fontFamily: 'monospace', maxWidth: 160 },
-  txRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6 },
-  txLink: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-
-  // Timeline
-  timelineRow: { flexDirection: 'row', alignItems: 'flex-start' },
-  timelineLeft: { width: 28, alignItems: 'center' },
-  timelineDot: {
-    width: 16, height: 16, borderRadius: 8,
-    backgroundColor: '#E0E0E0',
-    justifyContent: 'center', alignItems: 'center',
-    marginTop: 2,
-  },
-  timelineDotComplete: { backgroundColor: '#16A34A' },
-  timelineDotCurrent: { backgroundColor: GOLD },
-  timelineLine: { width: 2, flex: 1, backgroundColor: '#E0E0E0', minHeight: 18, marginTop: 2 },
-  timelineLineComplete: { backgroundColor: '#16A34A' },
-  timelineRight: { flex: 1, paddingBottom: 14, marginLeft: 8 },
-  timelineLabel: { fontSize: 13, color: '#888', fontWeight: '600' },
-  timelineLabelCurrent: { color: '#1A1A1A', fontWeight: '700' },
-  timelineTime: { fontSize: 11, color: '#AAA', marginTop: 2 },
-
-  proofImage: { width: '100%', height: 200, borderRadius: 12, backgroundColor: '#F0F0F0' },
-
-  actionBar: {
-    position: 'absolute',
-    bottom: 0, left: 0, right: 0,
-    backgroundColor: '#FFF',
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-    gap: 8,
-  },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
-  actionBtnText: { color: '#FFF', fontWeight: '700', fontSize: 15 },
-  refundActions: { flexDirection: 'row', gap: 10 },
-  refundRejectBtn: { flex: 1, backgroundColor: '#FEE2E2' },
-
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24 },
-  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginBottom: 8 },
-  modalHint: { fontSize: 13, color: '#888', marginBottom: 20, lineHeight: 18 },
-  inputLabel: { fontSize: 12, fontWeight: '700', color: '#888', marginBottom: 6, marginTop: 10 },
-  input: {
-    backgroundColor: '#F9F9F9',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: '#1A1A1A',
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  modalActions: { flexDirection: 'row', gap: 10, marginTop: 20 },
-  modalBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center' },
-  modalBtnPrimary: { backgroundColor: GOLD },
-  modalBtnPrimaryText: { color: '#FFF', fontWeight: '700', fontSize: 15 },
-  modalBtnSecondary: { backgroundColor: '#F5F5F5' },
-  modalBtnSecondaryText: { color: '#666', fontWeight: '700', fontSize: 15 },
-
-  // Delivery proof picker
-  proofPickerRow: { flexDirection: 'row', gap: 10, marginTop: 8 },
-  proofPickerBtn: {
-    flex: 1, paddingVertical: 20, paddingHorizontal: 12,
-    borderRadius: 12, borderWidth: 1.5, borderStyle: 'dashed',
-    borderColor: GOLD, backgroundColor: '#FFFBEB',
-    alignItems: 'center', gap: 6,
-  },
-  proofPickerText: { fontSize: 12, color: GOLD, fontWeight: '700', textAlign: 'center' },
-  proofPreviewWrap: { marginTop: 8, position: 'relative' },
-  proofPreview: { width: '100%', height: 180, borderRadius: 12 },
-  removeProofBtn: {
-    position: 'absolute', top: 8, right: 8,
-    width: 28, height: 28, borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  uploadingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
-
-  retryBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: GOLD,
-    borderRadius: 20,
-  },
-  retryText: { color: '#FFF', fontWeight: '700', fontSize: 14 },
-});

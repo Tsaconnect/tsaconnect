@@ -1,24 +1,31 @@
+// app/merchants/dashboard/index.tsx
+//
+// Merchant dashboard — overview/stats/quick actions: a hero total-listings card,
+// product & service KPI tiles, and recent product/service rows. Migrated onto the
+// TSA Signature design system (@/theme tokens + @/components/ui primitives).
+//
+// Behavior is unchanged: the auth-token bootstrap, the getMerchantProducts fetch,
+// the client-side product/service partition by `type`, all KPI computations, the
+// flattened single-FlatList structure, navigation routes/params, and money
+// formatting (formatPrice) are all preserved verbatim — visual/structural restyle only.
 import React, { useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
-  Image,
-} from 'react-native';
+import { View, FlatList, RefreshControl, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import api, { Product } from '../../../components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '@/contexts/CurrencyContext';
-
-const GOLD = '#D4AF37';
-const GOLD_DARK = '#8B6914';
-const HERO_BG = '#1A1A1A';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Card,
+  Icon,
+  IconName,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 type ListItem =
   | { kind: 'header' }
@@ -28,6 +35,7 @@ type ListItem =
   | { kind: 'emptySection'; copy: string };
 
 export default function MerchantDashboard() {
+  const { colors, spacing, radius } = useTheme();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [items, setItems] = useState<Product[]>([]);
@@ -73,8 +81,10 @@ export default function MerchantDashboard() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.center}>
-        <ActivityIndicator size="large" color={GOLD} />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading dashboard..." />
+        </View>
       </SafeAreaView>
     );
   }
@@ -120,70 +130,94 @@ export default function MerchantDashboard() {
     if (item.kind === 'header') {
       return (
         <View>
-          <View style={styles.header}>
-            <Text style={styles.title}>Dashboard</Text>
-            <Text style={styles.subtitle}>Welcome back, {merchantName}</Text>
+          <View style={{ marginBottom: spacing.lg }}>
+            <Text variant="title1" weight="700">
+              Dashboard
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+              Welcome back, {merchantName}
+            </Text>
           </View>
 
-          {/* Hero card — matches the user dashboard's BalanceCard vocabulary
-              (dark surface, gold accent circles) so the merchant view reads
-              as part of the same product family. */}
-          <View style={styles.hero}>
-            <View style={styles.heroHeader}>
-              <Text style={styles.heroLabel}>Total Listings</Text>
-              <View style={styles.heroBadge}>
-                <Ionicons name="trending-up" size={12} color={GOLD} />
-                <Text style={styles.heroBadgeText}>Live</Text>
-              </View>
+          {/* Hero card — the merchant overview's headline figure (total listings)
+              plus the quick-action grid. Uses the signature AccentCard rail so it
+              reads as part of the same product family as the user dashboard. */}
+          <AccentCard padding="xl" style={{ marginBottom: spacing.lg }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: spacing.sm,
+              }}
+            >
+              <Text variant="caption" color="textMuted">
+                Total Listings
+              </Text>
+              <Badge label="Live" icon="trendingUp" color={colors.accent} background={colors.accentMuted} size="sm" />
             </View>
-            <Text style={styles.heroValue}>{totalProducts + totalServices}</Text>
-            <Text style={styles.heroBreakdown}>
+            <Text variant="display" weight="700">
+              {totalProducts + totalServices}
+            </Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
               {totalProducts} product{totalProducts === 1 ? '' : 's'} · {totalServices} service{totalServices === 1 ? '' : 's'}
             </Text>
 
-            <View style={styles.heroActions}>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-around',
+                marginTop: spacing.lg,
+                paddingTop: spacing.md,
+                borderTopWidth: 1,
+                borderTopColor: colors.hairline,
+              }}
+            >
               <HeroAction
                 label="Add Product"
-                icon="add-circle-outline"
+                icon="plus"
                 onPress={() => router.push('/merchants/inventory/add' as any)}
               />
               <HeroAction
                 label="Add Service"
-                icon="briefcase-outline"
+                icon="construction"
                 onPress={() => router.push('/serviceaction?index=1' as any)}
               />
               <HeroAction
                 label="Inventory"
-                icon="list-outline"
+                icon="list"
                 onPress={() => router.push('/merchants/inventory' as any)}
               />
               <HeroAction
                 label="Orders"
-                icon="receipt-outline"
+                icon="cart"
                 onPress={() => router.push('/merchants/orders' as any)}
               />
             </View>
-          </View>
+          </AccentCard>
 
-          {/* Stat tiles — three lifting product KPIs followed by service
-              KPIs. Visually mirrors the asset-row aesthetic on the user
-              dashboard (white card, soft shadow, gold accent). */}
-          <View style={styles.statsBlock}>
-            <Text style={styles.statsBlockTitle}>Products</Text>
-            <View style={styles.statsRow}>
-              <StatTile label="Total" value={totalProducts} accent="#16A34A" />
-              <StatTile label="Active" value={activeProducts} accent="#2563EB" />
-              <StatTile label="Out of stock" value={outOfStock} accent="#F97316" />
+          {/* Stat tiles — three product KPIs followed by service KPIs. Each tile
+              is a Card with a colored top rail keyed to its semantic meaning. */}
+          <View style={{ marginBottom: spacing.xs }}>
+            <Text variant="overline" color="accent" style={{ marginBottom: spacing.sm }}>
+              PRODUCTS
+            </Text>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <StatTile label="Total" value={totalProducts} accent={colors.success} />
+              <StatTile label="Active" value={activeProducts} accent={colors.info} />
+              <StatTile label="Out of stock" value={outOfStock} accent={colors.warning} />
             </View>
 
-            <Text style={[styles.statsBlockTitle, { marginTop: 18 }]}>Services</Text>
-            <View style={styles.statsRow}>
-              <StatTile label="Total" value={totalServices} accent="#16A34A" />
-              <StatTile label="Active" value={activeServices} accent="#2563EB" />
+            <Text variant="overline" color="accent" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
+              SERVICES
+            </Text>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <StatTile label="Total" value={totalServices} accent={colors.success} />
+              <StatTile label="Active" value={activeServices} accent={colors.info} />
               <StatTile
                 label="Inactive"
                 value={Math.max(totalServices - activeServices, 0)}
-                accent="#F97316"
+                accent={colors.warning}
               />
             </View>
           </View>
@@ -192,14 +226,20 @@ export default function MerchantDashboard() {
     }
 
     if (item.kind === 'sectionTitle') {
-      return <Text style={styles.sectionTitle}>{item.title}</Text>;
+      return (
+        <Text variant="title3" weight="700" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+          {item.title}
+        </Text>
+      );
     }
 
     if (item.kind === 'emptySection') {
       return (
-        <View style={styles.emptySection}>
-          <Text style={styles.emptySectionText}>{item.copy}</Text>
-        </View>
+        <Card padding="lg" style={{ alignItems: 'center', marginBottom: spacing.sm }}>
+          <Text variant="bodySm" color="textMuted">
+            {item.copy}
+          </Text>
+        </Card>
       );
     }
 
@@ -210,9 +250,7 @@ export default function MerchantDashboard() {
       ((p as any).image && typeof (p as any).image === 'string' ? (p as any).image : null);
 
     return (
-      <TouchableOpacity
-        style={styles.row}
-        activeOpacity={0.7}
+      <PressableScale
         onPress={() => {
           if (isService) {
             router.push({
@@ -228,42 +266,57 @@ export default function MerchantDashboard() {
             router.push(`/merchants/inventory/${p.id || p._id}` as any);
           }
         }}
+        style={{ marginBottom: spacing.sm }}
       >
-        {heroImage ? (
-          <Image source={{ uri: heroImage }} style={styles.rowThumb} />
-        ) : (
-          <View style={[styles.rowThumb, styles.rowThumbPlaceholder]}>
-            <Ionicons
-              name={isService ? 'briefcase-outline' : 'cube-outline'}
-              size={22}
-              color={GOLD}
-            />
+        <Card padding="md">
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {heroImage ? (
+              <Image
+                source={{ uri: heroImage }}
+                style={{ width: 44, height: 44, borderRadius: radius.sm, backgroundColor: colors.surfaceAlt }}
+              />
+            ) : (
+              <View
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: radius.sm,
+                  backgroundColor: colors.accentMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
+              >
+                <Icon name={isService ? 'construction' : 'pricetag'} size={20} color={colors.accent} />
+              </View>
+            )}
+            <View style={{ flex: 1, marginLeft: spacing.md }}>
+              <Text variant="bodySm" weight="600" numberOfLines={1}>
+                {p.name}
+              </Text>
+              <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 2 }}>
+                {isService
+                  ? `${p.status || 'draft'} · ${p.location || 'no location'}`
+                  : `Stock ${p.stock ?? 0} · ${p.status || 'draft'}`}
+              </Text>
+            </View>
+            <Text variant="bodySm" weight="700" numeric>
+              {isService ? 'Contact fee' : formatPrice(Number(p.price ?? 0))}
+            </Text>
           </View>
-        )}
-        <View style={styles.rowBody}>
-          <Text style={styles.rowName} numberOfLines={1}>{p.name}</Text>
-          <Text style={styles.rowMeta} numberOfLines={1}>
-            {isService
-              ? `${p.status || 'draft'} · ${p.location || 'no location'}`
-              : `Stock ${p.stock ?? 0} · ${p.status || 'draft'}`}
-          </Text>
-        </View>
-        <Text style={styles.rowPrice}>
-          {isService ? 'Contact fee' : formatPrice(Number(p.price ?? 0))}
-        </Text>
-      </TouchableOpacity>
+        </Card>
+      </PressableScale>
     );
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <FlatList
         data={flat}
         keyExtractor={(item, idx) => `${item.kind}-${idx}`}
         renderItem={renderItem}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={GOLD} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
         }
         showsVerticalScrollIndicator={false}
       />
@@ -273,167 +326,48 @@ export default function MerchantDashboard() {
 
 interface HeroActionProps {
   label: string;
-  icon: keyof typeof Ionicons.glyphMap;
+  icon: IconName;
   onPress: () => void;
 }
-const HeroAction: React.FC<HeroActionProps> = ({ label, icon, onPress }) => (
-  <TouchableOpacity
-    style={styles.heroAction}
-    activeOpacity={0.7}
-    onPress={onPress}
-  >
-    <View style={styles.heroActionIcon}>
-      <Ionicons name={icon} size={18} color={GOLD} />
-    </View>
-    <Text style={styles.heroActionLabel} numberOfLines={1}>{label}</Text>
-  </TouchableOpacity>
-);
+const HeroAction: React.FC<HeroActionProps> = ({ label, icon, onPress }) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <PressableScale onPress={onPress} style={{ alignItems: 'center', flex: 1, paddingHorizontal: spacing.xs }}>
+      <View
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: radius.pill,
+          backgroundColor: colors.accentMuted,
+          justifyContent: 'center',
+          alignItems: 'center',
+          marginBottom: spacing.xs,
+        }}
+      >
+        <Icon name={icon} size={18} color={colors.accent} />
+      </View>
+      <Text variant="caption" color="textSecondary" align="center" numberOfLines={1}>
+        {label}
+      </Text>
+    </PressableScale>
+  );
+};
 
 interface StatTileProps {
   label: string;
   value: number;
   accent: string;
 }
-const StatTile: React.FC<StatTileProps> = ({ label, value, accent }) => (
-  <View style={[styles.statTile, { borderTopColor: accent }]}>
-    <Text style={styles.statTileLabel}>{label}</Text>
-    <Text style={styles.statTileValue}>{value}</Text>
-  </View>
-);
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  center: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#F5F5F7',
-  },
-
-  listContent: { paddingBottom: 40 },
-
-  header: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 12 },
-  title: { fontSize: 28, fontWeight: '800', color: '#111827' },
-  subtitle: { fontSize: 14, color: '#6B7280', marginTop: 4 },
-
-  hero: {
-    marginHorizontal: 16,
-    marginTop: 4,
-    borderRadius: 16,
-    backgroundColor: HERO_BG,
-    padding: 20,
-  },
-  heroHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-  },
-  heroLabel: { fontSize: 13, color: 'rgba(255,255,255,0.6)' },
-  heroBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(212,175,55,0.15)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  heroBadgeText: { fontSize: 11, color: GOLD, fontWeight: '700' },
-  heroValue: { fontSize: 32, fontWeight: '800', color: '#FFFFFF' },
-  heroBreakdown: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.65)',
-    marginTop: 2,
-  },
-  heroActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 18,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
-  },
-  heroAction: { alignItems: 'center', flex: 1, paddingHorizontal: 4 },
-  heroActionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(212,175,55,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  heroActionLabel: {
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.78)',
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-
-  statsBlock: { marginHorizontal: 16, marginTop: 18 },
-  statsBlockTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: GOLD_DARK,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    marginBottom: 8,
-  },
-  statsRow: { flexDirection: 'row', gap: 10 },
-  statTile: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderTopWidth: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  statTileLabel: { fontSize: 11, color: '#6B7280', marginBottom: 4 },
-  statTileValue: { fontSize: 22, fontWeight: '800', color: '#111827' },
-
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#111827',
-    paddingHorizontal: 20,
-    marginTop: 22,
-    marginBottom: 10,
-  },
-
-  emptySection: {
-    marginHorizontal: 16,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  emptySectionText: { fontSize: 13, color: '#9CA3AF' },
-
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    marginHorizontal: 16,
-    marginBottom: 8,
-    borderRadius: 12,
-  },
-  rowThumb: {
-    width: 44,
-    height: 44,
-    borderRadius: 8,
-    backgroundColor: '#F5F5F5',
-  },
-  rowThumbPlaceholder: { justifyContent: 'center', alignItems: 'center' },
-  rowBody: { flex: 1, marginLeft: 12 },
-  rowName: { fontSize: 14, fontWeight: '600', color: '#111827' },
-  rowMeta: { fontSize: 12, color: '#9CA3AF', marginTop: 2 },
-  rowPrice: { fontSize: 14, fontWeight: '700', color: '#111827' },
-});
+const StatTile: React.FC<StatTileProps> = ({ label, value, accent }) => {
+  const { spacing } = useTheme();
+  return (
+    <Card padding="md" style={{ flex: 1, borderTopWidth: 3, borderTopColor: accent }}>
+      <Text variant="caption" color="textMuted" style={{ marginBottom: spacing.xs }}>
+        {label}
+      </Text>
+      <Text variant="title2" weight="700" numeric>
+        {value}
+      </Text>
+    </Card>
+  );
+};

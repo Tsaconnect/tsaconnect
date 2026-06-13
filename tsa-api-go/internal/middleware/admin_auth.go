@@ -120,3 +120,39 @@ func AdminAuth(cfg *config.Config) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// RequireP2PAdmin restricts a route to true admin roles (admin / super_admin).
+//
+// AdminAuth above admits merchants and support — they need it for inventory,
+// support tickets, etc. P2P dispute resolution moves user funds and writes
+// to the audit ledger, so it needs the tighter gate. Apply this AFTER
+// AdminAuth has populated the user.
+func RequireP2PAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		val, ok := c.Get("user")
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false, "message": "Please authenticate",
+			})
+			return
+		}
+		user, ok := val.(models.User)
+		if !ok {
+			if p, pok := val.(*models.User); pok {
+				user = *p
+			} else {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"success": false, "message": "Please authenticate",
+				})
+				return
+			}
+		}
+		if user.Role != models.RoleAdmin && user.Role != models.RoleSuperAdmin {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"success": false, "message": "P2P admin role required",
+			})
+			return
+		}
+		c.Next()
+	}
+}

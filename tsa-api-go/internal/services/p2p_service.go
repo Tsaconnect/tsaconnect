@@ -49,8 +49,13 @@ type P2PRate struct {
 	// Stale is true when this row was served from a fallback path (Bybit failure
 	// → OER mid-market, or expired cache served because upstream is down).
 	// Frontends MUST refuse to quote money against Stale=true rows.
-	Stale     bool  `json:"stale"`
-	UpdatedAt int64 `json:"updatedAt"`
+	Stale bool `json:"stale"`
+	// FloatAnchor reports whether this currency is eligible for a float-rate
+	// anchor (it has a Bybit P2P feed), independent of whether the latest
+	// Bybit fetch succeeded. The create-ad screen uses it to gate the float
+	// rate option.
+	FloatAnchor bool  `json:"floatAnchor"`
+	UpdatedAt   int64 `json:"updatedAt"`
 }
 
 // P2PRatesResponse is the API response shape.
@@ -98,6 +103,13 @@ type P2PService struct {
 	AppID               string
 	SupportedCurrencies []string
 	bybitCurrencies     map[string]bool
+	// bybitProbeAmounts maps currency → fiat amount string passed as the
+	// `amount` filter when querying Bybit. Empty/missing → no filter.
+	// Anchoring queries to a retail-size amount (~$3–4 equivalent) yields
+	// much tighter prices because Bybit's API otherwise ranks ads by
+	// merchant tier — surfacing large-ticket whales whose pricing carries
+	// liquidity premiums and dilutes the consensus retail rate.
+	bybitProbeAmounts map[string]string
 
 	sf singleflight.Group
 
@@ -112,11 +124,13 @@ type P2PService struct {
 //	appID               — Open Exchange Rates app_id
 //	supportedCurrencies — list of currency codes to include, or "*" for all known fiat
 //	bybitCurrencies     — currencies to fetch from Bybit P2P instead of OER (e.g. ["NGN"])
+//	probeAmounts        — per-currency retail probe amounts for Bybit (e.g. {"NGN":"5000"}).
+//	                      Optional; nil/empty disables the amount filter for all currencies.
 //
 // Codes are uppercased and trimmed. Bybit currency codes that are not present
 // in the metadata table are dropped with a warning at construction time —
 // otherwise a config typo would silently produce garbage display rows.
-func NewP2PService(appID string, supportedCurrencies, bybitCurrencies []string) *P2PService {
+func NewP2PService(appID string, supportedCurrencies, bybitCurrencies []string, probeAmounts map[string]string) *P2PService {
 	supported := make([]string, 0, len(supportedCurrencies))
 	for _, c := range supportedCurrencies {
 		c = strings.ToUpper(strings.TrimSpace(c))
@@ -138,6 +152,15 @@ func NewP2PService(appID string, supportedCurrencies, bybitCurrencies []string) 
 		bybitSet[c] = true
 	}
 
+	probeSet := make(map[string]string, len(probeAmounts))
+	for k, v := range probeAmounts {
+		k = strings.ToUpper(strings.TrimSpace(k))
+		v = strings.TrimSpace(v)
+		if k != "" && v != "" {
+			probeSet[k] = v
+		}
+	}
+
 	return &P2PService{
 		HTTPClient:          &http.Client{Timeout: bybitRequestTimeout},
 		cacheTTL:            defaultCacheTTL,
@@ -146,6 +169,7 @@ func NewP2PService(appID string, supportedCurrencies, bybitCurrencies []string) 
 		AppID:               appID,
 		SupportedCurrencies: supported,
 		bybitCurrencies:     bybitSet,
+		bybitProbeAmounts:   probeSet,
 		reqCountResets:      time.Now(),
 	}
 }
@@ -259,6 +283,9 @@ func (ps *P2PService) fetchAndCache() (*RatesSnapshot, error) {
 		rates[cur] = bybitRate
 	}
 
+	// Stamp float-anchor eligibility on every row before caching.
+	rates = applyFloatAnchors(rates, ps.bybitCurrencies)
+
 	ttl := ps.cacheTTL
 	if degraded {
 		ttl = ps.degradedTTL
@@ -290,6 +317,18 @@ func markAllStale(in map[string]P2PRate) map[string]P2PRate {
 		out[k] = v
 	}
 	return out
+}
+
+// applyFloatAnchors stamps FloatAnchor on each row from the set of
+// Bybit-feed-eligible currencies. Eligibility is membership in bybitCurrencies,
+// not per-fetch success — a transient Bybit outage marks a row Stale but the
+// currency remains float-eligible. Mutates and returns the same map.
+func applyFloatAnchors(rates map[string]P2PRate, bybitCurrencies map[string]bool) map[string]P2PRate {
+	for code, row := range rates {
+		row.FloatAnchor = bybitCurrencies[code]
+		rates[code] = row
+	}
+	return rates
 }
 
 // GetRate returns the rate for a single currency.
@@ -434,8 +473,14 @@ func (ps *P2PService) isExplicitlySupported(code string) bool {
 // ──────────────────────────────────────────────
 
 const (
-	bybitP2PURL    = "https://api2.bybit.com/fiat/otc/item/online"
-	bybitUserAgent = "tsaconnect/1.0 (+https://tsaconnectworld.com)"
+	bybitP2PURL = "https://api2.bybit.com/fiat/otc/item/online"
+	// Bybit's edge (Akamai) silently drops requests with custom/identifying
+	// User-Agent strings — connection is RST'd before a response body is
+	// returned. A plausible browser UA passes the check. Keep this string
+	// updated periodically; if Bybit fetches start failing again on the
+	// "always stale" symptom, bumping the Chrome version is the first
+	// thing to try.
+	bybitUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 type bybitItem struct {
@@ -462,13 +507,19 @@ type bybitResponse struct {
 // crossed book; we accept that as-is — a slightly inverted live rate is a
 // better quote than a stale or OER mid-market substitute.
 func (ps *P2PService) fetchBybitRate(currency string) (P2PRate, error) {
-	// side=1 (SELL ads, traders selling USDT): use to derive the rate when our user *buys* USDT
-	// side=0 (BUY ads, traders buying USDT):   use to derive the rate when our user *sells* USDT
-	buyPrice, err := ps.fetchBybitSide(currency, "1")
+	// Bybit's `side` is the *ad type*, NOT the visiting user's intent:
+	//   side=0 → SELL USDT ads (ask side): high NGN prices. A user who wants
+	//            to *buy* USDT takes one of these → BinanceBuy.
+	//   side=1 → BUY USDT ads  (bid side): lower NGN prices. A user who wants
+	//            to *sell* USDT takes one of these → BinanceSell.
+	// Earlier code had the sides swapped, so sellers were being shown the
+	// ASK (~1512 NGN) instead of the BID (~1382 NGN) when creating a sell ad.
+	probeAmount := ps.bybitProbeAmounts[currency]
+	buyPrice, err := ps.fetchBybitSide(currency, "0", probeAmount)
 	if err != nil {
 		return P2PRate{}, fmt.Errorf("bybit %s buy side: %w", currency, err)
 	}
-	sellPrice, err := ps.fetchBybitSide(currency, "0")
+	sellPrice, err := ps.fetchBybitSide(currency, "1", probeAmount)
 	if err != nil {
 		return P2PRate{}, fmt.Errorf("bybit %s sell side: %w", currency, err)
 	}
@@ -490,10 +541,15 @@ func (ps *P2PService) fetchBybitRate(currency string) (P2PRate, error) {
 }
 
 // fetchBybitSide returns the median qualifying-ad price for one side of the
-// book. Filters: priceType==0 (fixed price), recentExecuteRate≥90, finishNum≥50
+// book. `side` is the *ad type* exposed by Bybit's API: "0" = SELL USDT ads
+// (asks), "1" = BUY USDT ads (bids). `amount` is an optional fiat-amount
+// filter — when non-empty, Bybit restricts results to ads whose limits
+// straddle that amount, surfacing the retail tier (tight, consensus-priced)
+// rather than the merchant-tier ranking the API returns by default.
+// Filters: priceType==0 (fixed price), recentExecuteRate≥90, finishNum≥50
 // to skip new/unreliable traders. Median of top 5 absorbs single-ad outliers.
-func (ps *P2PService) fetchBybitSide(currency, side string) (float64, error) {
-	body, err := json.Marshal(map[string]any{
+func (ps *P2PService) fetchBybitSide(currency, side, amount string) (float64, error) {
+	payload := map[string]any{
 		"userId":     "",
 		"tokenId":    "USDT",
 		"currencyId": currency,
@@ -501,7 +557,11 @@ func (ps *P2PService) fetchBybitSide(currency, side string) (float64, error) {
 		"side":       side,
 		"size":       "20",
 		"page":       "1",
-	})
+	}
+	if amount != "" {
+		payload["amount"] = amount
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return 0, fmt.Errorf("marshal request: %w", err)
 	}

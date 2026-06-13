@@ -1,55 +1,64 @@
+// app/merchants/inventory/add/index.tsx
+//
+// Add inventory product form (merchant). Restyled onto the TSA Signature design
+// system (@/theme + @/components/ui). All logic is preserved verbatim: the
+// getCategories / createProduct API calls, the expo-image-picker gallery/camera
+// flow that appends LOCAL asset URIs and builds the multipart FormData (images
+// are NOT pre-uploaded — they ride along on api.createProduct), the zone-rate
+// auto-fill math (calculateZoneRates / PACKAGE_SIZE_PRESETS), attribute
+// add/remove, the full validateForm() rule set, LocationPicker wiring, and the
+// reset + router.back() success flow. Only the chrome changed: legacy GOLD/
+// StyleSheet → tokens + primitives; the result Modal → useToast; the category
+// Modal → a Sheet keeping the rich CategoryAvatar list.
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
-  Text,
   TextInput,
   ScrollView,
-  StyleSheet,
   Image,
-  Modal,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
-  TouchableOpacity,
-  Pressable,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
-import LocationPicker from "../../../../components/common/LocationPicker";
+import LocationPicker from '../../../../components/common/LocationPicker';
 import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
-
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  bg: '#FAF9F6',
-};
+import { useTheme } from '@/theme';
+import {
+  Avatar,
+  Button,
+  Icon,
+  Input,
+  PressableScale,
+  SelectRow,
+  Sheet,
+  Spinner,
+  Text,
+  useToast,
+} from '@/components/ui';
 
 const CategoryAvatar = ({ category }: { category: any }) => {
+  const { radius } = useTheme();
   if (category.icon) {
     return (
-      <Image source={{ uri: category.icon }} style={styles.categoryItemImage} />
+      <Image
+        source={{ uri: category.icon }}
+        style={{ width: 40, height: 40, borderRadius: radius.pill }}
+      />
     );
   }
   const initial = (category.title || '?')[0].toUpperCase();
-  const bgColor = category.color || GOLD.dark;
-  return (
-    <View style={[styles.categoryItemAvatar, { backgroundColor: bgColor }]}>
-      <Text style={styles.categoryItemAvatarText}>{initial}</Text>
-    </View>
-  );
+  return <Avatar name={initial} size={40} />;
 };
 
 const AddProduct = () => {
+  const { colors, spacing, radius } = useTheme();
+  const toast = useToast();
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [isModalVisible, setIsModalVisible] = useState(false);
-  const [modalMessage, setModalMessage] = useState('');
-  const [modalType, setModalType] = useState<'success' | 'error' | 'info'>('success');
 
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
@@ -296,916 +305,562 @@ const AddProduct = () => {
     setErrors({});
   };
 
+  // Result feedback now uses the toast system; signature is preserved so every
+  // call site (validation, permission denials, success, server error) is verbatim.
   const showModal = (type: 'success' | 'error' | 'info', message: string) => {
-    setModalType(type);
-    setModalMessage(message);
-    setIsModalVisible(true);
+    toast.show(message, type);
   };
 
+  const filteredCategories = categories.filter(
+    item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase())
+  );
+
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <Text style={styles.title}>Add Product</Text>
-        <Text style={styles.subtitle}>Fill in the details to list your product</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Header */}
+          <Text variant="title1" weight="700">
+            Add Product
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            Fill in the details to list your product
+          </Text>
 
-        {/* Image Upload */}
-        <Text style={styles.sectionTitle}>
-          Photos <Text style={styles.imageCountInline}>({productImages.length}/10)</Text>
-        </Text>
-        {errors.images && <Text style={styles.errorText}>{errors.images}</Text>}
+          {/* Image Upload */}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginTop: spacing['2xl'],
+              marginBottom: spacing.md,
+            }}
+          >
+            <Text variant="title3" weight="700">
+              Photos
+            </Text>
+            <Text variant="caption" color="textMuted">
+              {productImages.length}/10
+            </Text>
+          </View>
+          {errors.images && (
+            <Text variant="caption" color="danger" style={{ marginBottom: spacing.sm }}>
+              {errors.images}
+            </Text>
+          )}
 
-        <View style={styles.imageUploadRow}>
-          <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
-            <Icon name="photo-library" size={28} color={GOLD.dark} />
-            <Text style={styles.imageUploadText}>Gallery</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.imageUploadArea} onPress={takePhoto} activeOpacity={0.7}>
-            <Icon name="camera-alt" size={28} color={GOLD.dark} />
-            <Text style={styles.imageUploadText}>Camera</Text>
-          </TouchableOpacity>
-        </View>
+          <View style={{ flexDirection: 'row', gap: spacing.md }}>
+            <PressableScale
+              onPress={pickProductImages}
+              style={{
+                flex: 1,
+                backgroundColor: colors.surface,
+                borderWidth: 1.5,
+                borderColor: colors.accent,
+                borderStyle: 'dashed',
+                borderRadius: radius.lg,
+                paddingVertical: spacing['2xl'],
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: spacing.xs,
+              }}
+            >
+              <Icon name="image" size={26} color={colors.accent} />
+              <Text variant="bodySm" weight="600" color="accent">
+                Gallery
+              </Text>
+            </PressableScale>
+            <PressableScale
+              onPress={takePhoto}
+              style={{
+                flex: 1,
+                backgroundColor: colors.surface,
+                borderWidth: 1.5,
+                borderColor: colors.accent,
+                borderStyle: 'dashed',
+                borderRadius: radius.lg,
+                paddingVertical: spacing['2xl'],
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: spacing.xs,
+              }}
+            >
+              <Icon name="camera" size={26} color={colors.accent} />
+              <Text variant="bodySm" weight="600" color="accent">
+                Camera
+              </Text>
+            </PressableScale>
+          </View>
 
-        {productImages.length > 0 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
-            {productImages.map((uri, index) => (
-              <View key={index} style={styles.imagePreviewWrapper}>
-                <Image source={{ uri }} style={styles.imagePreview} />
-                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
-                  <Icon name="close" size={16} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            ))}
-          </ScrollView>
-        )}
+          {productImages.length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={{ marginTop: spacing.md }}
+              contentContainerStyle={{ gap: spacing.sm }}
+            >
+              {productImages.map((uri, index) => (
+                <View key={index} style={{ width: 80, height: 80 }}>
+                  <Image
+                    source={{ uri }}
+                    style={{
+                      width: 80,
+                      height: 80,
+                      borderRadius: radius.md,
+                      backgroundColor: colors.surfaceAlt,
+                    }}
+                  />
+                  <PressableScale
+                    onPress={() => removeImage(index)}
+                    hitSlop={6}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove image"
+                    style={{
+                      position: 'absolute',
+                      top: -6,
+                      insetInlineEnd: -6,
+                      width: 24,
+                      height: 24,
+                      borderRadius: radius.pill,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: colors.background,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                    }}
+                  >
+                    <Icon name="close" size={14} color={colors.textPrimary} />
+                  </PressableScale>
+                </View>
+              ))}
+            </ScrollView>
+          )}
 
-        {/* Product Details */}
-        <Text style={styles.sectionTitle}>Product Details</Text>
+          {/* Product Details */}
+          <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Product Details
+          </Text>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Product Name *</Text>
-          <TextInput
-            style={[styles.input, errors.productName && styles.inputError]}
+          <Input
+            label="Product Name *"
             value={productName}
             onChangeText={setProductName}
             placeholder="e.g. Organic Honey Jar"
-            placeholderTextColor="#bbb"
             returnKeyType="next"
             onSubmitEditing={() => descriptionRef.current?.focus()}
+            error={errors.productName}
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-          {errors.productName && <Text style={styles.errorText}>{errors.productName}</Text>}
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Category *</Text>
-          {categoriesLoading ? (
-            <View style={styles.categoryLoadingRow}>
-              <ActivityIndicator size="small" color={GOLD.dark} />
-              <Text style={styles.categoryLoadingText}>Loading categories...</Text>
-            </View>
-          ) : categories.length === 0 ? (
-            <TouchableOpacity style={styles.categoryLoadingRow} onPress={fetchCategories}>
-              <Text style={styles.categoryLoadingText}>No categories found. Tap to retry.</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              activeOpacity={0.7}
-              style={[
-                styles.categorySelector,
-                errors.category && styles.inputError,
-                categoryId ? styles.categorySelectorSelected : undefined,
-              ]}
-              onPress={() => {
-                setCategorySearch('');
-                setCategoryModalVisible(true);
+          <View style={{ marginBottom: spacing.lg }}>
+            {categoriesLoading ? (
+              <View>
+                <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+                  Category *
+                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.md }}>
+                  <Spinner size="small" inline />
+                  <Text variant="bodySm" color="textMuted">
+                    Loading categories...
+                  </Text>
+                </View>
+              </View>
+            ) : categories.length === 0 ? (
+              <View>
+                <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+                  Category *
+                </Text>
+                <PressableScale onPress={fetchCategories} style={{ paddingVertical: spacing.md }}>
+                  <Text variant="bodySm" color="textMuted">
+                    No categories found. Tap to retry.
+                  </Text>
+                </PressableScale>
+              </View>
+            ) : (
+              <SelectRow
+                label="Category *"
+                value={categoryName || undefined}
+                placeholder="Select a category"
+                error={errors.category}
+                onPress={() => {
+                  setCategorySearch('');
+                  setCategoryModalVisible(true);
+                }}
+              />
+            )}
+          </View>
+
+          <View style={{ marginBottom: spacing.lg }}>
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+              Description *
+            </Text>
+            <View
+              style={{
+                borderRadius: radius.md,
+                borderWidth: 1.5,
+                borderColor: errors.description ? colors.danger : colors.border,
+                backgroundColor: colors.surface,
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.sm,
               }}
             >
-              {categoryId ? (
-                <View style={styles.categorySelectorValue}>
-                  <CategoryAvatar category={categories.find(c => (c.id || c._id) === categoryId) || { title: categoryName }} />
-                  <Text style={styles.categorySelectorText}>{categoryName}</Text>
-                </View>
-              ) : (
-                <Text style={styles.categorySelectorPlaceholder}>Select a category</Text>
-              )}
-              <Icon name="keyboard-arrow-down" size={24} color="#bbb" />
-            </TouchableOpacity>
-          )}
-          {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
-        </View>
+              <TextInput
+                ref={descriptionRef}
+                placeholder="Describe your product, quality, and what buyers can expect..."
+                placeholderTextColor={colors.textMuted}
+                numberOfLines={5}
+                multiline
+                maxLength={maxDescriptionLength}
+                value={description}
+                onChangeText={setDescription}
+                textAlignVertical="top"
+                style={{ minHeight: 110, color: colors.textPrimary, fontSize: 16 }}
+              />
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.xs }}>
+              <Text variant="caption" color={errors.description ? 'danger' : 'textMuted'} style={{ flex: 1 }}>
+                {errors.description || ''}
+              </Text>
+              <Text variant="caption" color="textMuted">
+                {description.length}/{maxDescriptionLength}
+              </Text>
+            </View>
+          </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Description *</Text>
-          <TextInput
-            ref={descriptionRef}
-            style={[styles.textArea, errors.description && styles.inputError]}
-            placeholder="Describe your product, quality, and what buyers can expect..."
-            placeholderTextColor="#bbb"
-            numberOfLines={5}
-            multiline
-            maxLength={maxDescriptionLength}
-            value={description}
-            onChangeText={setDescription}
-            textAlignVertical="top"
-          />
-          <Text style={styles.charCount}>
-            {description.length}/{maxDescriptionLength}
+          <View style={{ flexDirection: 'row', gap: spacing.md }}>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Price ($) *"
+                placeholder="0.00"
+                keyboardType="decimal-pad"
+                value={price}
+                onChangeText={setPrice}
+                error={errors.price}
+                helper={!errors.price ? '2% platform fee applies per sale' : undefined}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Stock *"
+                placeholder="0"
+                keyboardType="number-pad"
+                value={stock}
+                onChangeText={setStock}
+                error={errors.stock}
+              />
+            </View>
+          </View>
+
+          {/* Shipping Rates */}
+          <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Shipping Rates ($)
           </Text>
-          {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
-        </View>
 
-        <View style={styles.rowFields}>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Price ($) *</Text>
-            <TextInput
-              ref={priceRef}
-              style={[styles.input, errors.price && styles.inputError]}
-              placeholder="0.00"
-              placeholderTextColor="#bbb"
-              keyboardType="decimal-pad"
-              value={price}
-              onChangeText={setPrice}
-            />
-            {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
-            <Text style={styles.feeHint}>2% platform fee applies per sale</Text>
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
+            Package size (optional quick-select)
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
+            {PACKAGE_SIZE_PRESETS.map((preset) => (
+              <PressableScale
+                key={preset.key}
+                onPress={() => applyPackagePreset(preset.baseFee)}
+                style={{
+                  flex: 1,
+                  minWidth: 90,
+                  paddingVertical: spacing.sm,
+                  paddingHorizontal: spacing.sm,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surface,
+                  alignItems: 'center',
+                  gap: 2,
+                }}
+              >
+                <Text variant="caption" weight="700" align="center">
+                  {preset.label}
+                </Text>
+                <Text variant="caption" weight="600" color="accent">
+                  ${preset.baseFee}
+                </Text>
+              </PressableScale>
+            ))}
           </View>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Stock *</Text>
-            <TextInput
-              ref={stockRef}
-              style={[styles.input, errors.stock && styles.inputError]}
-              placeholder="0"
-              placeholderTextColor="#bbb"
-              keyboardType="number-pad"
-              value={stock}
-              onChangeText={setStock}
-            />
-            {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
-          </View>
-        </View>
 
-        {/* Shipping Rates */}
-        <Text style={styles.sectionTitle}>Shipping Rates ($)</Text>
-
-        <Text style={[styles.label, { marginBottom: 6 }]}>Package size (optional quick-select)</Text>
-        <View style={styles.presetRow}>
-          {PACKAGE_SIZE_PRESETS.map((preset) => (
-            <Pressable
-              key={preset.key}
-              style={styles.presetChip}
-              onPress={() => applyPackagePreset(preset.baseFee)}
-            >
-              <Text style={styles.presetLabel}>{preset.label}</Text>
-              <Text style={styles.presetDesc}>${preset.baseFee}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Base shipping fee ($)</Text>
-          <TextInput
-            style={styles.input}
+          <Input
+            label="Base shipping fee ($)"
             placeholder="e.g. 2.00"
-            placeholderTextColor="#bbb"
             keyboardType="decimal-pad"
             value={baseShippingFee}
             onChangeText={applyBaseShippingFee}
+            helper="Auto-fills the zone rates below. Edit any zone to override."
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-          <Text style={styles.helperText}>Auto-fills the zone rates below. Edit any zone to override.</Text>
-        </View>
 
-        <View style={styles.rowFields}>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Same Residential Area</Text>
-            <TextInput
-              style={[styles.input, { backgroundColor: '#f0f0f0', color: '#888' }]}
-              value="Free"
-              editable={false}
-            />
+          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Same Residential Area"
+                value="Free"
+                editable={false}
+                inputStyle={{ color: colors.textMuted } as any}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Same City"
+                placeholder="0.00"
+                keyboardType="decimal-pad"
+                value={shippingSameCity}
+                onChangeText={setShippingSameCity}
+              />
+            </View>
           </View>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Same City</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0.00"
-              placeholderTextColor="#bbb"
-              keyboardType="decimal-pad"
-              value={shippingSameCity}
-              onChangeText={setShippingSameCity}
-            />
+          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Same State"
+                placeholder="0.00"
+                keyboardType="decimal-pad"
+                value={shippingSameState}
+                onChangeText={setShippingSameState}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="Same Country"
+                placeholder="0.00"
+                keyboardType="decimal-pad"
+                value={shippingSameCountry}
+                onChangeText={setShippingSameCountry}
+              />
+            </View>
           </View>
-        </View>
-        <View style={styles.rowFields}>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Same State</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0.00"
-              placeholderTextColor="#bbb"
-              keyboardType="decimal-pad"
-              value={shippingSameState}
-              onChangeText={setShippingSameState}
-            />
+          <View style={{ flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg }}>
+            <View style={{ flex: 1 }}>
+              <Input
+                label="International"
+                placeholder="0.00"
+                keyboardType="decimal-pad"
+                value={shippingInternational}
+                onChangeText={setShippingInternational}
+              />
+            </View>
+            <View style={{ flex: 1 }} />
           </View>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>Same Country</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0.00"
-              placeholderTextColor="#bbb"
-              keyboardType="decimal-pad"
-              value={shippingSameCountry}
-              onChangeText={setShippingSameCountry}
-            />
-          </View>
-        </View>
-        <View style={styles.rowFields}>
-          <View style={styles.halfField}>
-            <Text style={styles.label}>International</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0.00"
-              placeholderTextColor="#bbb"
-              keyboardType="decimal-pad"
-              value={shippingInternational}
-              onChangeText={setShippingInternational}
-            />
-          </View>
-        </View>
 
-        {/* Contact & Location */}
-        <Text style={styles.sectionTitle}>Contact & Location</Text>
+          {/* Contact & Location */}
+          <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Contact & Location
+          </Text>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Company Name</Text>
-          <TextInput
-            ref={companyRef}
-            style={styles.input}
+          <Input
+            label="Company Name"
             value={companyName}
             onChangeText={setCompanyName}
             placeholder="Your business name"
-            placeholderTextColor="#bbb"
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-        </View>
 
-        <View style={styles.inputGroup}>
-          <LocationPicker
-            value={location}
-            onChange={setLocation}
-            required={["country", "state"]}
-          />
-          {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Phone Number *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              ref={phoneRef}
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
-              value={phoneNumber}
-              onChangeText={setPhoneNumber}
-              keyboardType="phone-pad"
-              placeholder="+234 800 000 0000"
-              placeholderTextColor="#bbb"
-              returnKeyType="next"
-              onSubmitEditing={() => emailRef.current?.focus()}
+          <View style={{ marginBottom: spacing.lg }}>
+            <LocationPicker
+              value={location}
+              onChange={setLocation}
+              required={["country", "state"]}
             />
-          </View>
-          {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Email *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              ref={emailRef}
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              placeholder="you@example.com"
-              placeholderTextColor="#bbb"
-            />
-          </View>
-          {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
-        </View>
-
-        {/* Attributes */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Attributes</Text>
-          <TouchableOpacity style={styles.addAttrBtn} onPress={handleAddAttribute}>
-            <Icon name="add" size={20} color={GOLD.dark} />
-            <Text style={styles.addAttrBtnText}>Add</Text>
-          </TouchableOpacity>
-        </View>
-
-        {attributes.length > 0 ? (
-          attributes.map((item, index) => (
-            <View key={index} style={styles.attributeRow}>
-              <TextInput
-                style={[styles.attributeInput, errors[`attr_name_${index}`] && styles.inputError]}
-                placeholder="e.g. Size"
-                placeholderTextColor="#bbb"
-                value={item.name}
-                onChangeText={(value) => handleAttributeChange(index, 'name', value)}
-              />
-              <TextInput
-                style={[styles.attributeInput, errors[`attr_value_${index}`] && styles.inputError]}
-                placeholder="e.g. Large"
-                placeholderTextColor="#bbb"
-                value={item.value}
-                onChangeText={(value) => handleAttributeChange(index, 'value', value)}
-              />
-              <TouchableOpacity onPress={() => handleRemoveAttribute(index)} style={{ padding: 6 }}>
-                <Icon name="delete-outline" size={22} color="#DC143C" />
-              </TouchableOpacity>
-            </View>
-          ))
-        ) : (
-          <Text style={styles.hintText}>Add attributes like size, color, material, etc.</Text>
-        )}
-
-        {/* Submit */}
-        {loading && (
-          <View style={{ marginTop: 16 }}>
-            <ActivityIndicator size="small" color={GOLD.dark} />
-            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
-          </View>
-        )}
-
-        <TouchableOpacity
-          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
-          onPress={createProduct}
-          disabled={loading}
-          activeOpacity={0.8}
-        >
-          <Icon name="add-shopping-cart" size={22} color="#000" />
-          <Text style={styles.submitBtnText}>Publish Product</Text>
-        </TouchableOpacity>
-
-        <Text style={styles.hintText}>Fields marked with * are required</Text>
-
-        <View style={{ height: 40 }} />
-      </ScrollView>
-
-      {/* Category Selection Modal */}
-      <Modal
-        visible={categoryModalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setCategoryModalVisible(false)}
-      >
-        <View style={styles.pickerOverlay}>
-          <Pressable style={styles.pickerOverlayDismiss} onPress={() => setCategoryModalVisible(false)} />
-          <View style={styles.pickerModal}>
-            <View style={styles.pickerModalHeader}>
-              <Text style={styles.pickerModalTitle}>Select Category</Text>
-              <TouchableOpacity onPress={() => setCategoryModalVisible(false)}>
-                <Icon name="close" size={24} color="#999" />
-              </TouchableOpacity>
-            </View>
-            <View style={styles.categorySearchContainer}>
-              <Icon name="search" size={20} color="#999" />
-              <TextInput
-                style={styles.categorySearchInput}
-                placeholder="Search categories..."
-                placeholderTextColor="#bbb"
-                value={categorySearch}
-                onChangeText={setCategorySearch}
-                autoCapitalize="none"
-              />
-              {categorySearch.length > 0 && (
-                <TouchableOpacity onPress={() => setCategorySearch('')}>
-                  <Icon name="close" size={18} color="#999" />
-                </TouchableOpacity>
-              )}
-            </View>
-            <ScrollView keyboardShouldPersistTaps="handled">
-              {categories
-                .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
-                .map((item, index) => {
-                  const itemId = item.id || item._id;
-                  const isSelected = categoryId === itemId;
-                  return (
-                    <TouchableOpacity
-                      key={itemId || index.toString()}
-                      style={[styles.categoryListItem, isSelected && styles.categoryListItemSelected]}
-                      onPress={() => {
-                        setCategoryId(itemId);
-                        setCategoryName(item.title);
-                        setErrors(prev => { const { category, ...rest } = prev; return rest; });
-                        setCategoryModalVisible(false);
-                      }}
-                    >
-                      <CategoryAvatar category={item} />
-                      <View style={styles.categoryListItemInfo}>
-                        <Text style={[styles.categoryListItemTitle, isSelected && styles.categoryListItemTitleSelected]}>
-                          {item.title}
-                        </Text>
-                        {item.description ? (
-                          <Text style={styles.categoryListItemDesc} numberOfLines={1}>{item.description}</Text>
-                        ) : null}
-                      </View>
-                      {isSelected && <Icon name="check-circle" size={22} color={GOLD.dark} />}
-                    </TouchableOpacity>
-                  );
-                })
-              }
-              {categories.filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase())).length === 0 && (
-                <View style={styles.pickerEmpty}>
-                  <Icon name="search-off" size={32} color="#bbb" />
-                  <Text style={styles.pickerEmptyText}>No categories match "{categorySearch}"</Text>
-                </View>
-              )}
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Success/Error Modal */}
-      <Modal
-        visible={isModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={[
-              styles.modalIconContainer,
-              modalType === 'success' && { backgroundColor: '#228B22' },
-              modalType === 'error' && { backgroundColor: '#DC143C' },
-              modalType === 'info' && { backgroundColor: '#FF8C00' },
-            ]}>
-              <Icon
-                name={modalType === 'success' ? 'check-circle' : modalType === 'error' ? 'error' : 'info'}
-                size={48}
-                color="#fff"
-              />
-            </View>
-            <Text style={styles.modalTitle}>
-              {modalType === 'success' ? 'Success!' : modalType === 'error' ? 'Error!' : 'Information'}
-            </Text>
-            <Text style={styles.modalMessage}>{modalMessage}</Text>
-            <TouchableOpacity style={styles.modalButton} onPress={() => setIsModalVisible(false)} activeOpacity={0.8}>
-              <Text style={styles.modalButtonText}>
-                {modalType === 'success' ? 'Continue' : 'Try Again'}
+            {errors.location && (
+              <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+                {errors.location}
               </Text>
-            </TouchableOpacity>
+            )}
           </View>
+
+          <Input
+            label="Phone Number *"
+            value={phoneNumber}
+            onChangeText={setPhoneNumber}
+            keyboardType="phone-pad"
+            placeholder="+234 800 000 0000"
+            returnKeyType="next"
+            onSubmitEditing={() => emailRef.current?.focus()}
+            leftAdornment={<Icon name="mobile" size={20} color={colors.accent} />}
+            error={errors.phoneNumber}
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
+
+          <Input
+            label="Email *"
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholder="you@example.com"
+            leftAdornment={<Icon name="send" size={20} color={colors.accent} />}
+            error={errors.email}
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
+
+          {/* Attributes */}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginTop: spacing.sm,
+              marginBottom: spacing.md,
+            }}
+          >
+            <Text variant="title3" weight="700">
+              Attributes
+            </Text>
+            <Button title="Add" leftIcon="plus" variant="secondary" size="sm" fullWidth={false} onPress={handleAddAttribute} />
+          </View>
+
+          {attributes.length > 0 ? (
+            attributes.map((item, index) => (
+              <View
+                key={index}
+                style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginBottom: spacing.sm }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Input
+                    placeholder="e.g. Size"
+                    value={item.name}
+                    onChangeText={(value) => handleAttributeChange(index, 'name', value)}
+                    error={errors[`attr_name_${index}`]}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Input
+                    placeholder="e.g. Large"
+                    value={item.value}
+                    onChangeText={(value) => handleAttributeChange(index, 'value', value)}
+                    error={errors[`attr_value_${index}`]}
+                  />
+                </View>
+                <PressableScale
+                  onPress={() => handleRemoveAttribute(index)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove attribute"
+                  style={{ height: 48, width: 32, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Icon name="trash" size={20} color={colors.danger} />
+                </PressableScale>
+              </View>
+            ))
+          ) : (
+            <Text variant="bodySm" color="textMuted" align="center" style={{ paddingVertical: spacing.sm }}>
+              Add attributes like size, color, material, etc.
+            </Text>
+          )}
+
+          {/* Submit */}
+          {loading && (
+            <View style={{ marginTop: spacing.lg }}>
+              <Spinner label="Submitting…" />
+            </View>
+          )}
+
+          <Button
+            title="Publish Product"
+            leftIcon="cart"
+            onPress={createProduct}
+            disabled={loading}
+            loading={loading}
+            size="lg"
+            style={{ marginTop: spacing['2xl'] }}
+          />
+
+          <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.md }}>
+            Fields marked with * are required
+          </Text>
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {/* Category Selection Sheet */}
+      <Sheet
+        visible={categoryModalVisible}
+        onClose={() => setCategoryModalVisible(false)}
+        title="Select Category"
+      >
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm }}>
+          <Input
+            placeholder="Search categories..."
+            value={categorySearch}
+            onChangeText={setCategorySearch}
+            autoCapitalize="none"
+            autoCorrect={false}
+            leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+            rightAdornment={
+              categorySearch.length > 0 ? (
+                <PressableScale onPress={() => setCategorySearch('')} hitSlop={8}>
+                  <Icon name="close" size={16} color={colors.textMuted} />
+                </PressableScale>
+              ) : undefined
+            }
+          />
         </View>
-      </Modal>
-    </KeyboardAvoidingView>
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.lg }}
+        >
+          {filteredCategories.map((item, index) => {
+            const itemId = item.id || item._id;
+            const isSelected = categoryId === itemId;
+            return (
+              <PressableScale
+                key={itemId || index.toString()}
+                onPress={() => {
+                  setCategoryId(itemId);
+                  setCategoryName(item.title);
+                  setErrors(prev => { const { category, ...rest } = prev; return rest; });
+                  setCategoryModalVisible(false);
+                }}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isSelected }}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.md,
+                  paddingVertical: spacing.md,
+                }}
+              >
+                <CategoryAvatar category={item} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="body" weight={isSelected ? '600' : '400'} color={isSelected ? 'accent' : 'textPrimary'}>
+                    {item.title}
+                  </Text>
+                  {item.description ? (
+                    <Text variant="caption" color="textMuted" numberOfLines={1}>
+                      {item.description}
+                    </Text>
+                  ) : null}
+                </View>
+                {isSelected && <Icon name="checkCircle" size={22} color={colors.accent} />}
+              </PressableScale>
+            );
+          })}
+          {filteredCategories.length === 0 && (
+            <View style={{ padding: spacing['3xl'], alignItems: 'center', gap: spacing.md }}>
+              <Icon name="search" size={32} color={colors.textMuted} />
+              <Text variant="bodySm" color="textMuted">
+                {`No categories match "${categorySearch}"`}
+              </Text>
+            </View>
+          )}
+        </ScrollView>
+      </Sheet>
+    </SafeAreaView>
   );
 };
 
 export default AddProduct;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD.bg,
-    paddingHorizontal: 20,
-  },
-  title: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: '#000',
-    marginTop: 20,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 4,
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  imageCountInline: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#999',
-  },
-  inputGroup: {
-    marginBottom: 16,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#555',
-    marginBottom: 6,
-  },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: '#000',
-  },
-  inputError: {
-    borderColor: '#DC143C',
-    backgroundColor: '#DC143C08',
-  },
-  errorText: {
-    fontSize: 12,
-    color: '#DC143C',
-    marginTop: 4,
-    marginLeft: 4,
-  },
-  feeHint: {
-    fontSize: 11,
-    color: '#888',
-    marginTop: 4,
-    marginLeft: 4,
-  },
-  inputWithIcon: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
-  },
-  textArea: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 15,
-    color: '#000',
-    minHeight: 120,
-  },
-  charCount: {
-    textAlign: 'right',
-    color: '#bbb',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  rowFields: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  halfField: {
-    flex: 1,
-    marginBottom: 16,
-  },
-
-  // Shipping presets
-  presetRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 14,
-    flexWrap: 'wrap',
-  },
-  presetChip: {
-    flex: 1,
-    minWidth: 90,
-    paddingVertical: 10,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    backgroundColor: '#FAFAFA',
-    alignItems: 'center',
-  },
-  presetLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1A1A1A',
-    textAlign: 'center',
-  },
-  presetDesc: {
-    fontSize: 11,
-    color: GOLD.dark,
-    marginTop: 2,
-    fontWeight: '600',
-  },
-  helperText: {
-    fontSize: 11,
-    color: '#888',
-    marginTop: 4,
-    fontStyle: 'italic',
-  },
-
-  // Image upload
-  imageUploadRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  imageUploadArea: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: GOLD.muted,
-    borderStyle: 'dashed',
-    borderRadius: 16,
-    paddingVertical: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  imageUploadText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: GOLD.dark,
-    marginTop: 6,
-  },
-  imagePreviewRow: {
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  imagePreviewWrapper: {
-    marginRight: 10,
-    position: 'relative',
-  },
-  imagePreview: {
-    width: 80,
-    height: 80,
-    borderRadius: 12,
-    backgroundColor: '#eee',
-  },
-  imageRemoveBtn: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  // Category selector
-  categorySelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-  },
-  categorySelectorSelected: {
-    borderColor: GOLD.dark + '60',
-    backgroundColor: GOLD.light,
-  },
-  categorySelectorValue: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
-  },
-  categorySelectorText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#000',
-  },
-  categorySelectorPlaceholder: {
-    fontSize: 15,
-    color: '#bbb',
-  },
-  categoryLoadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  categoryLoadingText: {
-    fontSize: 14,
-    color: '#999',
-    marginLeft: 8,
-  },
-
-  // Attributes
-  addAttrBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: GOLD.light,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  addAttrBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: GOLD.dark,
-  },
-  attributeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  attributeInput: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: '#000',
-  },
-  hintText: {
-    fontSize: 13,
-    color: '#bbb',
-    textAlign: 'center',
-    paddingVertical: 8,
-  },
-
-  // Submit
-  submitBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.primary,
-    borderRadius: 14,
-    paddingVertical: 16,
-    marginTop: 24,
-    gap: 8,
-  },
-  submitBtnText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-  },
-
-  // Category modal
-  pickerOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'flex-end',
-  },
-  pickerOverlayDismiss: {
-    flex: 1,
-  },
-  pickerModal: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: '60%',
-    paddingBottom: Platform.OS === 'ios' ? 30 : 16,
-  },
-  pickerModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-  },
-  pickerModalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#000',
-  },
-  categorySearchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F5F5F5',
-    marginHorizontal: 16,
-    marginVertical: 12,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
-    gap: 8,
-  },
-  categorySearchInput: {
-    flex: 1,
-    fontSize: 15,
-    color: '#000',
-  },
-  categoryListItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  categoryListItemSelected: {
-    backgroundColor: GOLD.light,
-  },
-  categoryItemImage: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#eee',
-  },
-  categoryItemAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  categoryItemAvatarText: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  categoryListItemInfo: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  categoryListItemTitle: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: '#333',
-  },
-  categoryListItemTitleSelected: {
-    color: GOLD.dark,
-    fontWeight: '600',
-  },
-  categoryListItemDesc: {
-    fontSize: 12,
-    color: '#bbb',
-    marginTop: 2,
-  },
-  pickerEmpty: {
-    padding: 40,
-    alignItems: 'center',
-  },
-  pickerEmptyText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: '#999',
-  },
-
-  // Result modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modalContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 28,
-    width: '100%',
-    maxWidth: 400,
-    alignItems: 'center',
-  },
-  modalIconContainer: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#000',
-    marginBottom: 8,
-  },
-  modalMessage: {
-    fontSize: 15,
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 20,
-    lineHeight: 22,
-  },
-  modalButton: {
-    backgroundColor: GOLD.primary,
-    borderRadius: 12,
-    paddingHorizontal: 28,
-    paddingVertical: 12,
-    width: '100%',
-  },
-  modalButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#000',
-    textAlign: 'center',
-  },
-});

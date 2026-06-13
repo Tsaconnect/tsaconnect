@@ -1,20 +1,28 @@
+// app/wallet/seedphrase.tsx
+//
+// Seed-phrase setup / backup / verify flow — a single screen with a step machine:
+//   loading → setup (create new OR restore from 12 words)
+//           → warning → display (reveal phrase) → verify → success
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui).
+//
+// SECURITY screen: every reveal gate and the copy behavior are preserved
+// VERBATIM — the phrase is only loaded after the user accepts the warning
+// (handleProceedToDisplay → loadMnemonic), the import/verify/backup-confirm
+// logic, BIP39 validation, secureTextEntry masking, and the
+// confirmSeedPhraseBackup / markWalletBackedUp / registerWalletAddress API
+// calls are unchanged. This is a visual/structural restyle only.
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  ActivityIndicator,
   TextInput,
+  ScrollView,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import { ethers } from 'ethers';
 import { router, useNavigation } from 'expo-router';
-import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants';
 import {
   getMnemonic,
   generateWallet,
@@ -26,6 +34,19 @@ import {
   isValidMnemonic,
 } from '../../services/wallet';
 import { confirmSeedPhraseBackup, registerWalletAddress } from '../../services/walletApi';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Button,
+  Card,
+  Chip,
+  Divider,
+  Icon,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const SEED_LENGTH = 12;
 const enWordlist = ethers.wordlists.en;
@@ -42,6 +63,7 @@ type Step = 'loading' | 'setup' | 'warning' | 'display' | 'verify' | 'success';
 
 const SeedPhrase = () => {
   const navigation = useNavigation();
+  const { colors, spacing, radius } = useTheme();
   const [step, setStep] = useState<Step>('loading');
   const [words, setWords] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -316,12 +338,17 @@ const SeedPhrase = () => {
     }
   };
 
+  const screen = { flex: 1, backgroundColor: colors.background } as const;
+  const scrollContent = { padding: spacing.lg, paddingBottom: spacing['4xl'] } as const;
+
   // Loading check
   if (step === 'loading') {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-      </View>
+      <SafeAreaView style={screen} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading…" />
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -332,633 +359,405 @@ const SeedPhrase = () => {
     const canSubmit = allFilled && !hasInvalid && !loading;
 
     return (
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
+      <SafeAreaView style={screen} edges={['top']}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.header}>
-            <Text style={styles.title}>Set up your wallet</Text>
-            <Text style={styles.subtitle}>
-              Restore an existing wallet with your 12-word recovery phrase, or create a brand-new one.
-            </Text>
-          </View>
-
-          <View style={styles.importCard}>
-            <View style={styles.importCardHeader}>
-              <View style={styles.importCardHeading}>
-                <Text style={styles.importCardTitle}>Restore existing wallet</Text>
-                <Text style={styles.importCardSubtitle}>
-                  Enter the 12 words in order. Tap a cell to start.
-                </Text>
-              </View>
-              <View style={styles.counterPill}>
-                <Text
-                  style={[
-                    styles.counterPillText,
-                    allFilled && !hasInvalid && styles.counterPillTextDone,
-                  ]}
-                >
-                  {filledCount}/{SEED_LENGTH}
-                </Text>
-              </View>
+          <ScrollView contentContainerStyle={scrollContent} keyboardShouldPersistTaps="handled">
+            <View style={{ marginBottom: spacing['2xl'] }}>
+              <Text variant="title1" weight="700" style={{ marginBottom: spacing.xs }}>
+                Set up your wallet
+              </Text>
+              <Text variant="bodySm" color="textSecondary">
+                Restore an existing wallet with your 12-word recovery phrase, or create a brand-new
+                one.
+              </Text>
             </View>
 
-            <View style={styles.toolbar}>
-              <TouchableOpacity
-                style={styles.toolbarBtn}
-                onPress={handlePasteAll}
-                disabled={loading}
+            <Card padding="lg">
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: spacing.md,
+                  marginBottom: spacing.md,
+                }}
               >
-                <Ionicons
-                  name={pasted ? 'checkmark' : 'clipboard-outline'}
-                  size={16}
-                  color={COLORS.primary}
+                <View style={{ flex: 1 }}>
+                  <Text variant="title3" weight="700" style={{ marginBottom: 2 }}>
+                    Restore existing wallet
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    Enter the 12 words in order. Tap a cell to start.
+                  </Text>
+                </View>
+                <Badge
+                  label={`${filledCount}/${SEED_LENGTH}`}
+                  size="sm"
+                  color={allFilled && !hasInvalid ? colors.success : colors.textSecondary}
+                  background={allFilled && !hasInvalid ? colors.successBg : colors.surfaceAlt}
                 />
-                <Text style={styles.toolbarBtnText}>{pasted ? 'Pasted' : 'Paste'}</Text>
-              </TouchableOpacity>
+              </View>
 
-              <TouchableOpacity
-                style={styles.toolbarBtn}
-                onPress={() => setShowWords((s) => !s)}
-                disabled={loading}
-              >
-                <Ionicons
-                  name={showWords ? 'eye-off-outline' : 'eye-outline'}
-                  size={16}
-                  color={COLORS.primary}
-                />
-                <Text style={styles.toolbarBtnText}>{showWords ? 'Hide' : 'Show'}</Text>
-              </TouchableOpacity>
-
-              {filledCount > 0 && (
-                <TouchableOpacity
-                  style={styles.toolbarBtn}
-                  onPress={handleClearAll}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.md }}>
+                <PressableScale
+                  onPress={handlePasteAll}
                   disabled={loading}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    paddingVertical: spacing.xs,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.sm,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
                 >
-                  <Ionicons name="close-circle-outline" size={16} color={COLORS.danger} />
-                  <Text style={[styles.toolbarBtnText, { color: COLORS.danger }]}>Clear</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+                  <Icon name={pasted ? 'check' : 'copy'} size={16} color={colors.accent} />
+                  <Text variant="caption" weight="600" color="accent">
+                    {pasted ? 'Pasted' : 'Paste'}
+                  </Text>
+                </PressableScale>
 
-            <View style={styles.wordInputGrid}>
-              {wordInputs.map((word, index) => {
-                const isInvalid = invalidIndices.has(index);
-                return (
-                  <View
-                    key={index}
-                    style={[
-                      styles.wordInputCell,
-                      word && !isInvalid && styles.wordInputCellFilled,
-                      isInvalid && styles.wordInputCellInvalid,
-                    ]}
+                <PressableScale
+                  onPress={() => setShowWords((s) => !s)}
+                  disabled={loading}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    paddingVertical: spacing.xs,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.sm,
+                    backgroundColor: colors.surfaceAlt,
+                  }}
+                >
+                  <Icon name={showWords ? 'eyeOff' : 'eye'} size={16} color={colors.accent} />
+                  <Text variant="caption" weight="600" color="accent">
+                    {showWords ? 'Hide' : 'Show'}
+                  </Text>
+                </PressableScale>
+
+                {filledCount > 0 && (
+                  <PressableScale
+                    onPress={handleClearAll}
+                    disabled={loading}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.xs,
+                      paddingVertical: spacing.xs,
+                      paddingHorizontal: spacing.sm,
+                      borderRadius: radius.sm,
+                      backgroundColor: colors.surfaceAlt,
+                    }}
                   >
-                    <Text style={styles.wordInputNumber}>{index + 1}</Text>
-                    <TextInput
-                      ref={(r) => {
-                        inputRefs.current[index] = r;
+                    <Icon name="closeCircle" size={16} color={colors.danger} />
+                    <Text variant="caption" weight="600" color="danger">
+                      Clear
+                    </Text>
+                  </PressableScale>
+                )}
+              </View>
+
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.lg }}>
+                {wordInputs.map((word, index) => {
+                  const isInvalid = invalidIndices.has(index);
+                  const filled = !!word && !isInvalid;
+                  const borderColor = isInvalid
+                    ? colors.danger
+                    : filled
+                      ? colors.accent
+                      : colors.border;
+                  const backgroundColor = isInvalid
+                    ? colors.dangerBg
+                    : filled
+                      ? colors.surface
+                      : colors.surfaceAlt;
+                  return (
+                    <View
+                      key={index}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        width: '31.5%',
+                        borderWidth: 1,
+                        borderColor,
+                        borderRadius: radius.sm,
+                        paddingHorizontal: spacing.sm,
+                        paddingVertical: spacing.sm,
+                        backgroundColor,
                       }}
-                      style={styles.wordInputField}
-                      value={word}
-                      onChangeText={(t) => handleWordChange(index, t)}
-                      onSubmitEditing={() => handleSubmitEditing(index)}
-                      onKeyPress={(e) => handleKeyPress(index, e)}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="off"
-                      spellCheck={false}
-                      secureTextEntry={!showWords && !!word}
-                      returnKeyType={index === SEED_LENGTH - 1 ? 'done' : 'next'}
-                      blurOnSubmit={index === SEED_LENGTH - 1}
-                      selectTextOnFocus
-                      placeholder=""
-                    />
-                  </View>
-                );
-              })}
+                    >
+                      <Text variant="caption" weight="700" color="textMuted" style={{ width: 18 }}>
+                        {index + 1}
+                      </Text>
+                      <TextInput
+                        ref={(r) => {
+                          inputRefs.current[index] = r;
+                        }}
+                        style={{
+                          flex: 1,
+                          fontSize: 14,
+                          color: colors.textPrimary,
+                          paddingVertical: 0,
+                          paddingHorizontal: spacing.xs,
+                        }}
+                        value={word}
+                        onChangeText={(t) => handleWordChange(index, t)}
+                        onSubmitEditing={() => handleSubmitEditing(index)}
+                        onKeyPress={(e) => handleKeyPress(index, e)}
+                        placeholderTextColor={colors.textMuted}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        autoComplete="off"
+                        spellCheck={false}
+                        secureTextEntry={!showWords && !!word}
+                        returnKeyType={index === SEED_LENGTH - 1 ? 'done' : 'next'}
+                        blurOnSubmit={index === SEED_LENGTH - 1}
+                        selectTextOnFocus
+                        placeholder=""
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+
+              {error ? (
+                <Text variant="bodySm" color="danger" align="center" style={{ marginBottom: spacing.md }}>
+                  {error}
+                </Text>
+              ) : null}
+
+              <Button
+                title="Restore wallet"
+                onPress={handleImportWallet}
+                disabled={!canSubmit}
+                loading={loadingAction === 'import'}
+              />
+            </Card>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: spacing['2xl'] }}>
+              <View style={{ flex: 1 }}>
+                <Divider />
+              </View>
+              <Text variant="bodySm" color="textMuted" style={{ marginHorizontal: spacing.lg }}>
+                or
+              </Text>
+              <View style={{ flex: 1 }}>
+                <Divider />
+              </View>
             </View>
 
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-            <TouchableOpacity
-              style={[styles.primaryButton, !canSubmit && styles.disabledButton]}
-              onPress={handleImportWallet}
-              disabled={!canSubmit}
-            >
-              {loadingAction === 'import' ? (
-                <ActivityIndicator color={COLORS.white} />
-              ) : (
-                <Text style={styles.primaryButtonText}>Restore wallet</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.separatorRow}>
-            <View style={styles.separatorLine} />
-            <Text style={styles.separatorText}>or</Text>
-            <View style={styles.separatorLine} />
-          </View>
-
-          <TouchableOpacity
-            style={[styles.secondaryButton, loading && styles.disabledButton]}
-            onPress={handleCreateNewWallet}
-            disabled={loading}
-          >
-            {loadingAction === 'create' ? (
-              <ActivityIndicator color={COLORS.primary} />
-            ) : (
-              <Text style={styles.secondaryButtonText}>Create a new wallet</Text>
-            )}
-          </TouchableOpacity>
-        </ScrollView>
-      </KeyboardAvoidingView>
+            <Button
+              title="Create a new wallet"
+              variant="secondary"
+              onPress={handleCreateNewWallet}
+              disabled={loading}
+              loading={loadingAction === 'create'}
+            />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     );
   }
 
   // Step 1: Warning
   if (step === 'warning') {
     return (
-      <View style={styles.container}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.header} />
-
-          <View style={styles.warningCard}>
-            <Text style={styles.warningTitle}>Important: Read carefully</Text>
-            <Text style={styles.warningBody}>
+      <SafeAreaView style={screen} edges={['top']}>
+        <ScrollView contentContainerStyle={scrollContent}>
+          <AccentCard
+            railColor={colors.danger}
+            padding="lg"
+            style={{ backgroundColor: colors.dangerBg, marginBottom: spacing['2xl'] }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="warning" size={20} color={colors.danger} />
+              <Text variant="title3" weight="700" color="danger">
+                Important: Read carefully
+              </Text>
+            </View>
+            <Text variant="bodySm" color="danger" style={{ marginBottom: spacing.md }}>
               Your seed phrase is the only way to recover your wallet if you lose access to your
               device. Anyone with your seed phrase can access your funds.
             </Text>
-            <View style={styles.warningList}>
-              <Text style={styles.warningItem}>
-                {'\u2022'} Write it down on paper and store it in a safe place
-              </Text>
-              <Text style={styles.warningItem}>
-                {'\u2022'} Never share it with anyone
-              </Text>
-              <Text style={styles.warningItem}>
-                {'\u2022'} Never store it digitally (no screenshots, no cloud storage)
-              </Text>
-              <Text style={styles.warningItem}>
-                {'\u2022'} TSA Connect will never ask for your seed phrase
-              </Text>
+            <View style={{ gap: spacing.sm }}>
+              {[
+                'Write it down on paper and store it in a safe place',
+                'Never share it with anyone',
+                'Never store it digitally (no screenshots, no cloud storage)',
+                'TSA Connect will never ask for your seed phrase',
+              ].map((item) => (
+                <View key={item} style={{ flexDirection: 'row', gap: spacing.sm }}>
+                  <Text variant="bodySm" color="danger">
+                    {'•'}
+                  </Text>
+                  <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                    {item}
+                  </Text>
+                </View>
+              ))}
             </View>
-          </View>
+          </AccentCard>
 
-          <TouchableOpacity style={styles.primaryButton} onPress={handleProceedToDisplay}>
-            {loading ? (
-              <ActivityIndicator color={COLORS.white} />
-            ) : (
-              <Text style={styles.primaryButtonText}>I Understand, Show My Seed Phrase</Text>
-            )}
-          </TouchableOpacity>
+          <Button
+            title="I Understand, Show My Seed Phrase"
+            leftIcon="eye"
+            onPress={handleProceedToDisplay}
+            loading={loading}
+          />
 
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          {error ? (
+            <Text variant="bodySm" color="danger" align="center" style={{ marginTop: spacing.md }}>
+              {error}
+            </Text>
+          ) : null}
         </ScrollView>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // Step 2: Display words
   if (step === 'display') {
     return (
-      <View style={styles.container}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.header}>
-            <Text style={styles.subtitle}>
-              Write down these 12 words in order. You will need to verify them next.
-            </Text>
-          </View>
+      <SafeAreaView style={screen} edges={['top']}>
+        <ScrollView contentContainerStyle={scrollContent}>
+          <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing['2xl'] }}>
+            Write down these 12 words in order. You will need to verify them next.
+          </Text>
 
-          <View style={styles.wordGrid}>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              gap: spacing.sm,
+              justifyContent: 'center',
+              marginBottom: spacing['2xl'],
+            }}
+          >
             {words.map((word, index) => (
-              <View key={index} style={styles.wordCard}>
-                <Text style={styles.wordNumber}>{index + 1}</Text>
-                <Text style={styles.wordText}>{word}</Text>
-              </View>
+              <Card
+                key={index}
+                padding="md"
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  width: '47%',
+                }}
+              >
+                <Text variant="caption" weight="600" color="textMuted" style={{ width: 24 }}>
+                  {index + 1}
+                </Text>
+                <Text variant="bodyMed" weight="500">
+                  {word}
+                </Text>
+              </Card>
             ))}
           </View>
 
-          <TouchableOpacity
-            style={styles.copyButton}
+          <PressableScale
             onPress={async () => {
               await Clipboard.setStringAsync(words.join(' '));
               setCopied(true);
               setTimeout(() => setCopied(false), 2000);
             }}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: spacing.xs,
+              paddingVertical: spacing.md,
+              marginBottom: spacing.lg,
+            }}
           >
-            <Text style={styles.copyButtonText}>
+            <Icon name={copied ? 'check' : 'copy'} size={18} color={colors.accent} />
+            <Text variant="bodySm" weight="600" color="accent">
               {copied ? 'Copied!' : 'Copy to Clipboard'}
             </Text>
-          </TouchableOpacity>
+          </PressableScale>
 
-          <TouchableOpacity style={styles.primaryButton} onPress={handleProceedToVerify}>
-            <Text style={styles.primaryButtonText}>I've Written It Down</Text>
-          </TouchableOpacity>
+          <Button title="I've Written It Down" onPress={handleProceedToVerify} />
         </ScrollView>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // Step 3: Verify
   if (step === 'verify') {
     return (
-      <View style={styles.container}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.header}>
-            <Text style={styles.subtitle}>
-              Select the correct word for each numbered position.
-            </Text>
-          </View>
+      <SafeAreaView style={screen} edges={['top']}>
+        <ScrollView contentContainerStyle={scrollContent}>
+          <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing['2xl'] }}>
+            Select the correct word for each numbered position.
+          </Text>
 
           {verifyIndices.map((idx) => (
-            <View key={idx} style={styles.verifyGroup}>
-              <Text style={styles.verifyLabel}>Word #{idx + 1}</Text>
-              <View style={styles.optionsRow}>
+            <View key={idx} style={{ marginBottom: spacing.xl }}>
+              <Text variant="bodySm" weight="600" style={{ marginBottom: spacing.sm }}>
+                Word #{idx + 1}
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
                 {(shuffledOptions[idx] || []).map((option) => (
-                  <TouchableOpacity
+                  <Chip
                     key={option}
-                    style={[
-                      styles.optionButton,
-                      userSelections[idx] === option && styles.optionButtonSelected,
-                    ]}
+                    label={option}
+                    selected={userSelections[idx] === option}
                     onPress={() => handleSelectWord(idx, option)}
-                  >
-                    <Text
-                      style={[
-                        styles.optionText,
-                        userSelections[idx] === option && styles.optionTextSelected,
-                      ]}
-                    >
-                      {option}
-                    </Text>
-                  </TouchableOpacity>
+                  />
                 ))}
               </View>
             </View>
           ))}
 
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          {error ? (
+            <Text variant="bodySm" color="danger" align="center" style={{ marginBottom: spacing.md }}>
+              {error}
+            </Text>
+          ) : null}
 
-          <TouchableOpacity
-            style={[styles.primaryButton, loading && styles.disabledButton]}
-            onPress={handleVerify}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color={COLORS.white} />
-            ) : (
-              <Text style={styles.primaryButtonText}>Verify</Text>
-            )}
-          </TouchableOpacity>
+          <Button title="Verify" onPress={handleVerify} loading={loading} disabled={loading} />
         </ScrollView>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // Step 4: Success
   return (
-    <View style={styles.container}>
-      <View style={styles.successContainer}>
-        <View style={styles.successIcon}>
-          <Text style={styles.successIconText}>!</Text>
+    <SafeAreaView style={screen} edges={['top']}>
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: spacing.lg,
+        }}
+      >
+        <View
+          style={{
+            width: 72,
+            height: 72,
+            borderRadius: radius.pill,
+            backgroundColor: colors.successBg,
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: spacing.lg,
+          }}
+        >
+          <Icon name="checkCircle" size={40} color={colors.success} />
         </View>
-        <Text style={styles.successTitle}>Seed Phrase Backed Up</Text>
-        <Text style={styles.successMessage}>
+        <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
+          Seed Phrase Backed Up
+        </Text>
+        <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing['3xl'] }}>
           Your wallet is now fully secured. Keep your seed phrase safe and never share it.
         </Text>
-        <TouchableOpacity
-          style={[styles.primaryButton, { width: '100%' }]}
-          onPress={() => router.replace('/tokenization')}
-        >
-          <Text style={styles.primaryButtonText}>Go to Wallet</Text>
-        </TouchableOpacity>
+        <Button title="Go to Wallet" onPress={() => router.replace('/tokenization')} />
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 export default SeedPhrase;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    padding: SIZES.padding3,
-  },
-  header: {
-    marginBottom: 24,
-  },
-  title: {
-    ...FONTS.h2,
-    color: COLORS.dark,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  subtitle: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    lineHeight: 22,
-  },
-  warningCard: {
-    backgroundColor: '#FEF2F2',
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 24,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-  },
-  warningTitle: {
-    ...FONTS.h4,
-    color: COLORS.danger,
-    fontWeight: '600',
-    marginBottom: 12,
-  },
-  warningBody: {
-    ...FONTS.body3,
-    color: '#7F1D1D',
-    lineHeight: 22,
-    marginBottom: 12,
-  },
-  warningList: {
-    gap: 8,
-  },
-  warningItem: {
-    ...FONTS.body4,
-    color: '#7F1D1D',
-    lineHeight: 20,
-    paddingLeft: 4,
-  },
-  primaryButton: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    ...SHADOWS.medium,
-  },
-  primaryButtonText: {
-    ...FONTS.h4,
-    color: COLORS.white,
-    fontWeight: '600',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  errorText: {
-    ...FONTS.body4,
-    color: COLORS.danger,
-    marginTop: 12,
-    textAlign: 'center',
-  },
-  secondaryButton: {
-    backgroundColor: COLORS.white,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.primary,
-  },
-  secondaryButtonText: {
-    ...FONTS.h4,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  separatorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 24,
-  },
-  separatorLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: COLORS.lightGray,
-  },
-  separatorText: {
-    ...FONTS.body4,
-    color: COLORS.gray,
-    marginHorizontal: 16,
-  },
-  label: {
-    ...FONTS.body3,
-    fontWeight: '600',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  importCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    ...SHADOWS.light,
-  },
-  importCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-    gap: 12,
-  },
-  importCardHeading: {
-    flex: 1,
-  },
-  importCardTitle: {
-    ...FONTS.h3,
-    color: COLORS.dark,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  importCardSubtitle: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    lineHeight: 18,
-  },
-  counterPill: {
-    backgroundColor: COLORS.lightGray,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-  counterPillText: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    fontWeight: '700',
-  },
-  counterPillTextDone: {
-    color: COLORS.success,
-  },
-  toolbar: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  toolbarBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-  },
-  toolbarBtnText: {
-    ...FONTS.body5,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  wordInputGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 16,
-  },
-  wordInputCell: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: '31.5%',
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    backgroundColor: '#FAFAFA',
-  },
-  wordInputCellFilled: {
-    backgroundColor: COLORS.white,
-    borderColor: COLORS.primary,
-  },
-  wordInputCellInvalid: {
-    backgroundColor: '#FEF2F2',
-    borderColor: COLORS.danger,
-  },
-  wordInputNumber: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    fontWeight: '700',
-    width: 18,
-  },
-  wordInputField: {
-    flex: 1,
-    ...FONTS.body4,
-    color: COLORS.dark,
-    paddingVertical: 0,
-    paddingHorizontal: 4,
-  },
-  // Word grid
-  wordGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 32,
-    justifyContent: 'center',
-  },
-  wordCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.white,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    width: '47%',
-  },
-  wordNumber: {
-    ...FONTS.body5,
-    color: COLORS.gray,
-    fontWeight: '600',
-    width: 24,
-  },
-  wordText: {
-    ...FONTS.body3,
-    color: COLORS.dark,
-    fontWeight: '500',
-  },
-  copyButton: {
-    alignItems: 'center',
-    paddingVertical: 12,
-    marginBottom: 16,
-  },
-  copyButtonText: {
-    ...FONTS.body4,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  // Verify
-  verifyGroup: {
-    marginBottom: 20,
-  },
-  verifyLabel: {
-    ...FONTS.body3,
-    fontWeight: '600',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  optionsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  optionButton: {
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    backgroundColor: COLORS.white,
-  },
-  optionButtonSelected: {
-    borderColor: COLORS.primary,
-    backgroundColor: COLORS.primary,
-  },
-  optionText: {
-    ...FONTS.body4,
-    color: COLORS.dark,
-  },
-  optionTextSelected: {
-    color: COLORS.white,
-    fontWeight: '600',
-  },
-  // Success
-  successContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: SIZES.padding3,
-  },
-  successIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#D1FAE5',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  successIconText: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: COLORS.success,
-  },
-  successTitle: {
-    ...FONTS.h2,
-    color: COLORS.dark,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  successMessage: {
-    ...FONTS.body3,
-    color: COLORS.gray,
-    textAlign: 'center',
-    marginBottom: 32,
-    lineHeight: 22,
-  },
-});

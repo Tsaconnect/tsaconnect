@@ -1,22 +1,23 @@
+// app/(dashboard)/orderdetail.tsx
+//
+// Order detail — the marketplace buyer's view of a single escrow order, with the
+// full status-gated action set (confirm receipt, request refund, request cancel,
+// raise dispute, cancel order). Restyled onto the TSA Signature design system
+// (@/theme + @/components/ui). ALL data fetching (getOrderById), the
+// prepare→sign+broadcast→submit confirm flow, refund / cancel-request / dispute /
+// cancel-order calls, status/dispute gating, money formatting (formatTokenAmount)
+// and navigation are preserved verbatim — this is a visual/structural restyle only.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
-  Text,
-  StyleSheet,
   ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
   Alert,
-  Pressable,
-  Modal,
   TextInput,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
 import {
   getOrderById,
@@ -30,7 +31,38 @@ import {
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
-import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
+import { formatStatus, formatDate } from '@/constants/orderStatus';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Button,
+  Card,
+  Icon,
+  IconButton,
+  PressableScale,
+  Sheet,
+  Spinner,
+  SummaryCard,
+  SummaryRow,
+  Text,
+  useToneColors,
+} from '@/components/ui';
+import type { StatusTone } from '@/components/ui';
+
+// Order statuses live in their own namespace (not trade/ad/dispute), so map them
+// to the shared StatusTone palette here for token-driven coloring.
+const ORDER_STATUS_TONE: Record<string, StatusTone> = {
+  pending_payment: 'warning',
+  escrowed: 'info',
+  shipped: 'info',
+  delivered: 'success',
+  completed: 'success',
+  refund_requested: 'danger',
+  cancel_requested: 'warning',
+  refunded: 'neutral',
+  cancelled: 'neutral',
+};
 
 const truncateHash = (hash?: string): string => {
   if (!hash) return '—';
@@ -39,6 +71,7 @@ const truncateHash = (hash?: string): string => {
 };
 
 const OrderDetailScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -224,687 +257,465 @@ const OrderDetailScreen = () => {
     Alert.alert('Copied', 'Copied to clipboard');
   };
 
+  const Header = () => (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.md,
+      }}
+    >
+      <IconButton
+        icon="chevronLeft"
+        variant="surface"
+        accessibilityLabel="Go back"
+        onPress={() => router.back()}
+      />
+      <Text variant="title3" weight="700">
+        Order Detail
+      </Text>
+      <View style={{ width: 44 }} />
+    </View>
+  );
+
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
-        <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
-          <View style={styles.header}>
-            <Pressable onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
-            </Pressable>
-            <Text style={styles.headerTitle}>Order Detail</Text>
-            <View style={{ width: 24 }} />
-          </View>
-          <View style={styles.centered}>
-            <ActivityIndicator size="large" color="#8B5A2B" />
-          </View>
-        </LinearGradient>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <Header />
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <Spinner size="large" label="Loading order…" />
+        </View>
       </SafeAreaView>
     );
   }
 
   if (error || !order) {
     return (
-      <SafeAreaView style={styles.container}>
-        <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
-          <View style={styles.header}>
-            <Pressable onPress={() => router.back()} style={styles.backButton}>
-              <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
-            </Pressable>
-            <Text style={styles.headerTitle}>Order Detail</Text>
-            <View style={{ width: 24 }} />
-          </View>
-          <View style={styles.centered}>
-            <Ionicons name="alert-circle-outline" size={48} color="#8B5A2B" />
-            <Text style={styles.errorText}>{error || 'Order not found'}</Text>
-            <TouchableOpacity onPress={fetchOrder} style={styles.retryButton}>
-              <Text style={styles.retryText}>Try Again</Text>
-            </TouchableOpacity>
-          </View>
-        </LinearGradient>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <Header />
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <ErrorBody message={error || 'Order not found'} onRetry={fetchOrder} />
+        </View>
       </SafeAreaView>
     );
   }
 
-  const statusColor = STATUS_COLORS[order.status] || STATUS_COLORS.cancelled;
+  const tone = ORDER_STATUS_TONE[order.status] ?? 'neutral';
 
   return (
-    <SafeAreaView style={styles.container}>
-      <LinearGradient colors={['#FDF8F3', '#FAF0E6']} style={styles.gradientBackground}>
-        <View style={styles.header}>
-          <Pressable onPress={() => router.back()} style={styles.backButton}>
-            <Ionicons name="chevron-back" size={24} color="#8B5A2B" />
-          </Pressable>
-          <Text style={styles.headerTitle}>Order Detail</Text>
-          <View style={{ width: 24 }} />
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <Header />
+
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing['4xl'] }}
+      >
+        {/* Status badge */}
+        <View style={{ alignItems: 'center', marginBottom: spacing.xl, gap: spacing.sm }}>
+          <StatusBadge status={order.status} tone={tone} />
+          {order.status === 'completed' && (
+            <Icon name="checkCircle" size={32} color={colors.success} />
+          )}
         </View>
 
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-          {/* Status badge */}
-          <View style={styles.statusContainer}>
-            <View style={[styles.statusBadgeLarge, { backgroundColor: statusColor.bg }]}>
-              <Text style={[styles.statusTextLarge, { color: statusColor.text }]}>
-                {formatStatus(order.status)}
-              </Text>
-            </View>
-            {order.status === 'completed' && (
-              <Ionicons name="checkmark-circle" size={32} color="#065F46" style={{ marginTop: 8 }} />
+        {/* Order info */}
+        <Card style={{ marginBottom: spacing.lg }}>
+          <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
+            Order Info
+          </Text>
+          <InfoRow label="Order ID" value={order.id.slice(0, 16) + '...'} onCopy={() => copyToClipboard(order.id)} />
+          <InfoRow label="Quantity" value={String(order.quantity)} />
+          <InfoRow label="Token" value={order.token} />
+          <InfoRow label="Shipping Zone" value={formatStatus(order.shippingZone || 'N/A')} />
+        </Card>
+
+        {/* Amounts */}
+        <Card style={{ marginBottom: spacing.lg }}>
+          <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
+            Amounts
+          </Text>
+          <SummaryCard dividerBeforeLast>
+            <SummaryRow label="Product" value={formatTokenAmount(order.productAmount, order.token)} />
+            <SummaryRow label="Shipping" value={formatTokenAmount(order.shippingAmount, order.token)} />
+            <SummaryRow label="Platform Fee" value={formatTokenAmount(order.platformFee, order.token)} />
+            <SummaryRow label="Total" value={formatTokenAmount(order.totalAmount, order.token)} total />
+          </SummaryCard>
+        </Card>
+
+        {/* Blockchain info */}
+        {(order.contractOrderId || order.escrowTxHash || order.approveTxHash || order.releaseTxHash) && (
+          <Card style={{ marginBottom: spacing.lg }}>
+            <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
+              Blockchain
+            </Text>
+            {order.contractOrderId && (
+              <InfoRow
+                label="Contract Order"
+                value={truncateHash(order.contractOrderId)}
+                onCopy={() => copyToClipboard(order.contractOrderId!)}
+              />
             )}
-          </View>
+            {order.approveTxHash && (
+              <InfoRow
+                label="Approve Tx"
+                value={truncateHash(order.approveTxHash)}
+                onCopy={() => copyToClipboard(order.approveTxHash!)}
+              />
+            )}
+            {order.escrowTxHash && (
+              <InfoRow
+                label="Escrow Tx"
+                value={truncateHash(order.escrowTxHash)}
+                onCopy={() => copyToClipboard(order.escrowTxHash!)}
+              />
+            )}
+            {order.releaseTxHash && (
+              <InfoRow
+                label="Release Tx"
+                value={truncateHash(order.releaseTxHash)}
+                onCopy={() => copyToClipboard(order.releaseTxHash!)}
+              />
+            )}
+          </Card>
+        )}
 
-          {/* Order info */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Order Info</Text>
-            <InfoRow label="Order ID" value={order.id.slice(0, 16) + '...'} onCopy={() => copyToClipboard(order.id)} />
-            <InfoRow label="Quantity" value={String(order.quantity)} />
-            <InfoRow label="Token" value={order.token} />
-            <InfoRow label="Shipping Zone" value={formatStatus(order.shippingZone || 'N/A')} />
-          </View>
+        {/* Timeline */}
+        <Card style={{ marginBottom: spacing.lg }}>
+          <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
+            Timeline
+          </Text>
+          <InfoRow label="Created" value={formatDate(order.createdAt, true)} />
+          {order.sellerDeliveredAt && (
+            <InfoRow label="Delivered" value={formatDate(order.sellerDeliveredAt, true)} />
+          )}
+          {order.buyerConfirmedAt && (
+            <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt, true)} />
+          )}
+          {order.escrowExpiresAt && (
+            <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt, true)} />
+          )}
+        </Card>
 
-          {/* Amounts */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Amounts</Text>
-            <InfoRow label="Product" value={formatTokenAmount(order.productAmount, order.token)} />
-            <InfoRow label="Shipping" value={formatTokenAmount(order.shippingAmount, order.token)} />
-            <InfoRow label="Platform Fee" value={formatTokenAmount(order.platformFee, order.token)} />
-            <View style={styles.divider} />
-            <InfoRow
-              label="Total"
-              value={formatTokenAmount(order.totalAmount, order.token)}
-              bold
+        {/* Action buttons */}
+        {actionLoading ? (
+          <View style={{ alignItems: 'center', paddingVertical: spacing['2xl'] }}>
+            <Spinner size="large" label="Processing transaction…" />
+          </View>
+        ) : order.disputedAt ? (
+          <View style={{ gap: spacing.md }}>
+            <Banner
+              tone="danger"
+              icon="dispute"
+              text="This order is under admin review. Actions are paused until a resolution."
             />
+            {order.disputeReason ? (
+              <Text variant="caption" color="textMuted" style={{ fontStyle: 'italic', paddingHorizontal: spacing.xs }}>
+                Reason: {order.disputeReason}
+              </Text>
+            ) : null}
           </View>
-
-          {/* Blockchain info */}
-          {(order.contractOrderId || order.escrowTxHash || order.approveTxHash || order.releaseTxHash) && (
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Blockchain</Text>
-              {order.contractOrderId && (
-                <InfoRow
-                  label="Contract Order"
-                  value={truncateHash(order.contractOrderId)}
-                  onCopy={() => copyToClipboard(order.contractOrderId!)}
+        ) : (
+          <>
+            {order.status === 'escrowed' && (
+              <View style={{ gap: spacing.md }}>
+                <Banner tone="info" icon="clock" text="Waiting for seller to ship" />
+                <Button
+                  title="Request Cancel"
+                  variant="danger"
+                  onPress={() => setCancelModalVisible(true)}
                 />
-              )}
-              {order.approveTxHash && (
-                <InfoRow
-                  label="Approve Tx"
-                  value={truncateHash(order.approveTxHash)}
-                  onCopy={() => copyToClipboard(order.approveTxHash!)}
+                <Button title="Request Refund" variant="danger" onPress={handleRequestRefund} />
+                <Button
+                  title="Report to Admin"
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setDisputeModalVisible(true)}
                 />
-              )}
-              {order.escrowTxHash && (
-                <InfoRow
-                  label="Escrow Tx"
-                  value={truncateHash(order.escrowTxHash)}
-                  onCopy={() => copyToClipboard(order.escrowTxHash!)}
-                />
-              )}
-              {order.releaseTxHash && (
-                <InfoRow
-                  label="Release Tx"
-                  value={truncateHash(order.releaseTxHash)}
-                  onCopy={() => copyToClipboard(order.releaseTxHash!)}
-                />
-              )}
-            </View>
-          )}
-
-          {/* Timeline */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Timeline</Text>
-            <InfoRow label="Created" value={formatDate(order.createdAt, true)} />
-            {order.sellerDeliveredAt && (
-              <InfoRow label="Delivered" value={formatDate(order.sellerDeliveredAt, true)} />
-            )}
-            {order.buyerConfirmedAt && (
-              <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt, true)} />
-            )}
-            {order.escrowExpiresAt && (
-              <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt, true)} />
-            )}
-          </View>
-
-          {/* Action buttons */}
-          {actionLoading ? (
-            <View style={styles.actionLoadingContainer}>
-              <ActivityIndicator size="large" color="#8B5A2B" />
-              <Text style={styles.actionLoadingText}>Processing transaction...</Text>
-            </View>
-          ) : order.disputedAt ? (
-            <View style={styles.actionContainer}>
-              <View style={[styles.waitingBanner, { backgroundColor: '#FEE2E2' }]}>
-                <Ionicons name="alert-circle-outline" size={20} color="#991B1B" />
-                <Text style={[styles.waitingText, { color: '#991B1B' }]}>
-                  This order is under admin review. Actions are paused until a resolution.
-                </Text>
               </View>
-              {order.disputeReason ? (
-                <Text style={styles.mutedNote}>Reason: {order.disputeReason}</Text>
-              ) : null}
-            </View>
-          ) : (
-            <>
-              {order.status === 'escrowed' && (
-                <View style={styles.actionContainer}>
-                  <View style={styles.waitingBanner}>
-                    <Ionicons name="time-outline" size={20} color="#0C5460" />
-                    <Text style={styles.waitingText}>Waiting for seller to ship</Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.refundButton}
-                    onPress={() => setCancelModalVisible(true)}
-                  >
-                    <Text style={styles.refundButtonText}>Request Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
-                    <Text style={styles.refundButtonText}>Request Refund</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.linkButton}
-                    onPress={() => setDisputeModalVisible(true)}
-                  >
-                    <Text style={styles.linkButtonText}>Report to Admin</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
+            )}
 
-              {order.status === 'cancel_requested' && (
-                <View style={styles.actionContainer}>
-                  <View style={styles.waitingBanner}>
-                    <Ionicons name="hourglass-outline" size={20} color="#856404" />
-                    <Text style={[styles.waitingText, { color: '#856404' }]}>
-                      Your cancel request is pending seller approval.
-                    </Text>
-                  </View>
-                  {order.cancelReason ? (
-                    <Text style={styles.mutedNote}>Your reason: {order.cancelReason}</Text>
-                  ) : null}
-                  <TouchableOpacity
-                    style={styles.linkButton}
-                    onPress={() => setDisputeModalVisible(true)}
-                  >
-                    <Text style={styles.linkButtonText}>Report to Admin</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
+            {order.status === 'cancel_requested' && (
+              <View style={{ gap: spacing.md }}>
+                <Banner tone="warning" icon="clock" text="Your cancel request is pending seller approval." />
+                {order.cancelReason ? (
+                  <Text variant="caption" color="textMuted" style={{ fontStyle: 'italic', paddingHorizontal: spacing.xs }}>
+                    Your reason: {order.cancelReason}
+                  </Text>
+                ) : null}
+                <Button
+                  title="Report to Admin"
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setDisputeModalVisible(true)}
+                />
+              </View>
+            )}
 
-              {order.status === 'shipped' && (
-                <View style={styles.actionContainer}>
-                  <View style={styles.waitingBanner}>
-                    <Ionicons name="cube-outline" size={20} color="#1E3A8A" />
-                    <Text style={[styles.waitingText, { color: '#1E3A8A' }]}>
-                      {order.trackingNumber
-                        ? `Shipped! Tracking: ${order.trackingNumber}`
-                        : 'Your order has been shipped!'}
-                    </Text>
-                  </View>
-                  <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmReceipt}>
-                    <LinearGradient
-                      colors={['#2E7D32', '#1B5E20']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={styles.actionGradient}
-                    >
-                      <Ionicons name="checkmark-circle-outline" size={20} color="#FFF" />
-                      <Text style={styles.confirmButtonText}>Mark as Received</Text>
-                    </LinearGradient>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
-                    <Text style={styles.refundButtonText}>Request Refund</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.linkButton}
-                    onPress={() => setDisputeModalVisible(true)}
-                  >
-                    <Text style={styles.linkButtonText}>Report to Admin</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
+            {order.status === 'shipped' && (
+              <View style={{ gap: spacing.md }}>
+                <Banner
+                  tone="info"
+                  icon="storefront"
+                  text={
+                    order.trackingNumber
+                      ? `Shipped! Tracking: ${order.trackingNumber}`
+                      : 'Your order has been shipped!'
+                  }
+                />
+                <Button
+                  title="Mark as Received"
+                  variant="success"
+                  leftIcon="checkCircle"
+                  size="lg"
+                  onPress={handleConfirmReceipt}
+                />
+                <Button title="Request Refund" variant="danger" onPress={handleRequestRefund} />
+                <Button
+                  title="Report to Admin"
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setDisputeModalVisible(true)}
+                />
+              </View>
+            )}
 
-              {order.status === 'delivered' && (
-                <View style={styles.actionContainer}>
-                  <TouchableOpacity style={styles.confirmButton} onPress={handleConfirmReceipt}>
-                    <LinearGradient
-                      colors={['#2E7D32', '#1B5E20']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={styles.actionGradient}
-                    >
-                      <Ionicons name="checkmark-circle-outline" size={20} color="#FFF" />
-                      <Text style={styles.confirmButtonText}>Confirm Receipt</Text>
-                    </LinearGradient>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.refundButton} onPress={handleRequestRefund}>
-                    <Text style={styles.refundButtonText}>Request Refund</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.linkButton}
-                    onPress={() => setDisputeModalVisible(true)}
-                  >
-                    <Text style={styles.linkButtonText}>Report to Admin</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
+            {order.status === 'delivered' && (
+              <View style={{ gap: spacing.md }}>
+                <Button
+                  title="Confirm Receipt"
+                  variant="success"
+                  leftIcon="checkCircle"
+                  size="lg"
+                  onPress={handleConfirmReceipt}
+                />
+                <Button title="Request Refund" variant="danger" onPress={handleRequestRefund} />
+                <Button
+                  title="Report to Admin"
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setDisputeModalVisible(true)}
+                />
+              </View>
+            )}
 
-              {order.status === 'refund_requested' && (
-                <View style={styles.actionContainer}>
-                  <View style={styles.waitingBanner}>
-                    <Ionicons name="hourglass-outline" size={20} color="#856404" />
-                    <Text style={[styles.waitingText, { color: '#856404' }]}>
-                      Refund requested. Awaiting seller or admin review.
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.linkButton}
-                    onPress={() => setDisputeModalVisible(true)}
-                  >
-                    <Text style={styles.linkButtonText}>Report to Admin</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
+            {order.status === 'refund_requested' && (
+              <View style={{ gap: spacing.md }}>
+                <Banner tone="warning" icon="clock" text="Refund requested. Awaiting seller or admin review." />
+                <Button
+                  title="Report to Admin"
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setDisputeModalVisible(true)}
+                />
+              </View>
+            )}
 
-              {order.status === 'pending_payment' && (
-                <View style={styles.actionContainer}>
-                  <View style={styles.waitingBanner}>
-                    <Ionicons name="wallet-outline" size={20} color="#856404" />
-                    <Text style={[styles.waitingText, { color: '#856404' }]}>
-                      Awaiting payment. Complete checkout to fund escrow.
-                    </Text>
-                  </View>
-                  <TouchableOpacity style={styles.refundButton} onPress={handleCancelOrder}>
-                    <Text style={styles.refundButtonText}>Cancel Order</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </>
-          )}
-
-          <View style={{ height: 32 }} />
-        </ScrollView>
-      </LinearGradient>
+            {order.status === 'pending_payment' && (
+              <View style={{ gap: spacing.md }}>
+                <Banner tone="warning" icon="wallet" text="Awaiting payment. Complete checkout to fund escrow." />
+                <Button title="Cancel Order" variant="danger" onPress={handleCancelOrder} />
+              </View>
+            )}
+          </>
+        )}
+      </ScrollView>
 
       {/* Cancel request modal */}
-      <Modal
+      <Sheet
         visible={cancelModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setCancelModalVisible(false)}
+        onClose={() => setCancelModalVisible(false)}
+        title="Request to Cancel"
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={modalStyles.overlay}
-        >
-          <View style={modalStyles.card}>
-            <Text style={modalStyles.title}>Request to Cancel</Text>
-            <Text style={modalStyles.body}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
               Tell the seller why you want to cancel. They will approve or reject the request.
             </Text>
             <TextInput
-              style={modalStyles.input}
+              style={{
+                borderWidth: 1.5,
+                borderColor: colors.border,
+                borderRadius: radius.md,
+                padding: spacing.md,
+                fontSize: 14,
+                color: colors.textPrimary,
+                minHeight: 70,
+                textAlignVertical: 'top',
+                backgroundColor: colors.surface,
+              }}
               placeholder="e.g. Ordered the wrong item"
-              placeholderTextColor="#999"
+              placeholderTextColor={colors.textMuted}
               value={cancelReason}
               onChangeText={setCancelReason}
               multiline
             />
-            <View style={modalStyles.row}>
-              <TouchableOpacity
-                style={modalStyles.cancelBtn}
-                onPress={() => {
-                  setCancelModalVisible(false);
-                  setCancelReason('');
-                }}
-              >
-                <Text style={modalStyles.cancelBtnText}>Keep Order</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={modalStyles.submitBtn} onPress={submitCancelRequest}>
-                <Text style={modalStyles.submitBtnText}>Submit Request</Text>
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.xs }}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Keep Order"
+                  variant="secondary"
+                  onPress={() => {
+                    setCancelModalVisible(false);
+                    setCancelReason('');
+                  }}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button title="Submit Request" onPress={submitCancelRequest} />
+              </View>
             </View>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
 
       {/* Dispute modal */}
-      <Modal
+      <Sheet
         visible={disputeModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDisputeModalVisible(false)}
+        onClose={() => setDisputeModalVisible(false)}
+        title="Report to Admin"
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={modalStyles.overlay}
-        >
-          <View style={modalStyles.card}>
-            <Text style={modalStyles.title}>Report to Admin</Text>
-            <Text style={modalStyles.body}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
+            <Text variant="bodySm" color="textSecondary">
               Describe the issue in detail (minimum 10 characters). An admin will review and resolve.
             </Text>
             <TextInput
-              style={[modalStyles.input, { minHeight: 90 }]}
+              style={{
+                borderWidth: 1.5,
+                borderColor: colors.border,
+                borderRadius: radius.md,
+                padding: spacing.md,
+                fontSize: 14,
+                color: colors.textPrimary,
+                minHeight: 90,
+                textAlignVertical: 'top',
+                backgroundColor: colors.surface,
+              }}
               placeholder="What went wrong?"
-              placeholderTextColor="#999"
+              placeholderTextColor={colors.textMuted}
               value={disputeReason}
               onChangeText={setDisputeReason}
               multiline
             />
-            <View style={modalStyles.row}>
-              <TouchableOpacity
-                style={modalStyles.cancelBtn}
-                onPress={() => {
-                  setDisputeModalVisible(false);
-                  setDisputeReason('');
-                }}
-              >
-                <Text style={modalStyles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={modalStyles.submitBtn} onPress={submitDispute}>
-                <Text style={modalStyles.submitBtnText}>Submit Dispute</Text>
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.xs }}>
+              <View style={{ flex: 1 }}>
+                <Button
+                  title="Cancel"
+                  variant="secondary"
+                  onPress={() => {
+                    setDisputeModalVisible(false);
+                    setDisputeReason('');
+                  }}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Button title="Submit Dispute" onPress={submitDispute} />
+              </View>
             </View>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </Sheet>
     </SafeAreaView>
   );
 };
 
-// Reusable info row
+// Large status badge driven by the shared StatusTone palette.
+const StatusBadge = ({ status, tone }: { status: string; tone: StatusTone }) => {
+  const { color, bg } = useToneColors(tone);
+  const { spacing } = useTheme();
+  return (
+    <Badge
+      label={formatStatus(status)}
+      color={color}
+      background={bg}
+      style={{ paddingHorizontal: spacing.xl, paddingVertical: spacing.sm }}
+    />
+  );
+};
+
+// Tone-colored info/warning banner (replaces the legacy waiting banner).
+const Banner = ({
+  tone,
+  icon,
+  text,
+}: {
+  tone: StatusTone;
+  icon: React.ComponentProps<typeof Icon>['name'];
+  text: string;
+}) => {
+  const { color } = useToneColors(tone);
+  const { spacing } = useTheme();
+  return (
+    <AccentCard railColor={color} padding="md">
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+        <Icon name={icon} size={20} color={color} />
+        <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+          {text}
+        </Text>
+      </View>
+    </AccentCard>
+  );
+};
+
+// Inline error body for the failed/empty fetch state.
+const ErrorBody = ({ message, onRetry }: { message: string; onRetry: () => void }) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <View style={{ alignItems: 'center', paddingHorizontal: spacing.xl, gap: spacing.md }}>
+      <Icon name="warning" size={48} color={colors.danger} />
+      <Text variant="body" color="textSecondary" align="center">
+        {message}
+      </Text>
+      <Button title="Try Again" variant="secondary" leftIcon="refresh" fullWidth={false} onPress={onRetry} />
+    </View>
+  );
+};
+
+// Reusable info row — label on the left, value (with optional copy) on the right.
 const InfoRow = ({
   label,
   value,
-  bold,
   onCopy,
 }: {
   label: string;
   value: string;
-  bold?: boolean;
   onCopy?: () => void;
-}) => (
-  <View style={infoRowStyles.row}>
-    <Text style={infoRowStyles.label}>{label}</Text>
-    <View style={infoRowStyles.valueContainer}>
-      <Text style={[infoRowStyles.value, bold && infoRowStyles.boldValue]}>{value}</Text>
-      {onCopy && (
-        <TouchableOpacity onPress={onCopy} style={infoRowStyles.copyButton}>
-          <Ionicons name="copy-outline" size={14} color="#8B5A2B" />
-        </TouchableOpacity>
-      )}
+}) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: spacing.sm,
+      }}
+    >
+      <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+        {label}
+      </Text>
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: spacing.xs,
+          flex: 1,
+          justifyContent: 'flex-end',
+        }}
+      >
+        <Text variant="bodySm" weight="600" numeric align="right">
+          {value}
+        </Text>
+        {onCopy && (
+          <PressableScale onPress={onCopy} accessibilityRole="button" accessibilityLabel={`Copy ${label}`} style={{ padding: spacing.xs }}>
+            <Icon name="copy" size={14} color={colors.accent} />
+          </PressableScale>
+        )}
+      </View>
     </View>
-  </View>
-);
-
-const infoRowStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-  },
-  label: {
-    fontSize: 13,
-    color: '#A67C52',
-    flex: 1,
-  },
-  valueContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  value: {
-    fontSize: 13,
-    color: '#4A2C1A',
-    fontWeight: '500',
-    textAlign: 'right',
-  },
-  boldValue: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#8B5A2B',
-  },
-  copyButton: {
-    padding: 4,
-  },
-});
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  gradientBackground: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#FFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#8B5A2B',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#4A2C1A',
-  },
-  scrollContent: {
-    padding: 20,
-    paddingTop: 8,
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 12,
-  },
-  errorText: {
-    color: '#4A2C1A',
-    fontSize: 16,
-    textAlign: 'center',
-    paddingHorizontal: 32,
-  },
-  retryButton: {
-    marginTop: 8,
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    backgroundColor: '#8B5A2B',
-    borderRadius: 12,
-  },
-  retryText: {
-    color: '#FFF',
-    fontWeight: '600',
-  },
-  // Status
-  statusContainer: {
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  statusBadgeLarge: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-  },
-  statusTextLarge: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  // Cards
-  card: {
-    backgroundColor: '#FFF',
-    padding: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-    marginBottom: 16,
-    shadowColor: '#8B5A2B',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#4A2C1A',
-    marginBottom: 8,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: '#E8D5C0',
-    marginVertical: 8,
-  },
-  // Actions
-  actionContainer: {
-    marginTop: 8,
-    gap: 12,
-  },
-  confirmButton: {
-    borderRadius: 16,
-    overflow: 'hidden',
-  },
-  actionGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    gap: 8,
-    borderRadius: 16,
-  },
-  confirmButtonText: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  refundButton: {
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: '#EF4444',
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  refundButtonText: {
-    color: '#EF4444',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  linkButton: {
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  linkButtonText: {
-    color: '#8B5A2B',
-    fontSize: 13,
-    fontWeight: '500',
-    textDecorationLine: 'underline',
-  },
-  mutedNote: {
-    color: '#6B5A4B',
-    fontSize: 12,
-    fontStyle: 'italic',
-    paddingHorizontal: 4,
-  },
-  waitingBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#D1ECF1',
-    padding: 14,
-    borderRadius: 12,
-  },
-  waitingText: {
-    fontSize: 13,
-    color: '#0C5460',
-    flex: 1,
-  },
-  actionLoadingContainer: {
-    alignItems: 'center',
-    paddingVertical: 24,
-    gap: 12,
-  },
-  actionLoadingText: {
-    fontSize: 14,
-    color: '#8B5A2B',
-  },
-});
-
-const modalStyles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    padding: 20,
-    gap: 12,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  body: {
-    fontSize: 13,
-    color: '#6B7280',
-    lineHeight: 18,
-  },
-  input: {
-    borderWidth: 1.5,
-    borderColor: '#E5E7EB',
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 14,
-    color: '#111827',
-    minHeight: 70,
-    textAlignVertical: 'top',
-  },
-  row: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 4,
-  },
-  cancelBtn: {
-    flex: 1,
-    borderWidth: 1.5,
-    borderColor: '#D1D5DB',
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  cancelBtnText: {
-    color: '#4B5563',
-    fontWeight: '600',
-  },
-  submitBtn: {
-    flex: 1,
-    backgroundColor: '#8B5A2B',
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  submitBtnText: {
-    color: '#FFF',
-    fontWeight: '700',
-  },
-});
+  );
+};
 
 export default OrderDetailScreen;

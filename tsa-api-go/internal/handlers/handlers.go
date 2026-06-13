@@ -16,6 +16,15 @@ type Handlers struct {
 	Config                 *config.Config
 	EventBus               *events.Bus
 	EmailService           *services.EmailService
+	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
+	// main.go after construction. Fee-settled sites route through
+	// settleFeeEarnings.
+	FeeService *services.FeeDistributionService
+
+	// EligibilityService is the SP7 claim-eligibility gate. Optional/nil-safe:
+	// wired from main.go. Signup uses it to run the bounded velocity heuristic on
+	// the referrer (best-effort, advisory) when a referred user joins.
+	EligibilityService *services.RewardEligibilityService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.

@@ -1,18 +1,35 @@
-import { View, StyleSheet } from "react-native";
-import React from "react";
-import Dots from "./Dots";
-import { COLORS } from "../../constants/theme";
+// components/buttons/Progress.tsx
+//
+// Onboarding pager progress indicators (active page marker + inactive Dots).
+// Migrated onto the TSA Signature design system: theme tokens (colors / spacing /
+// radius) via useTheme instead of the legacy constants/theme COLORS and raw magic
+// numbers. The active marker uses colors.accent (the brand gold, formerly
+// COLORS.primary). Behavior + public API are unchanged — same named exports
+// (ProgressOne/Two/Three/Four), same ProgressOne `index` prop, same dot layout —
+// so the onboarding consumer (./NextSkip.tsx) keeps working untouched.
+import React from 'react';
+import { View } from 'react-native';
+import { useTheme } from '@/theme';
+import Dots from './Dots';
 
 interface ProgressOneProps {
   index: number;
 }
 
 export const ProgressOne: React.FC<ProgressOneProps> = ({ index }) => {
+  const { colors, spacing, radius } = useTheme();
+  const activeDot = {
+    backgroundColor: colors.accent,
+    width: spacing.md - 2,
+    height: spacing.md - 2,
+    borderRadius: radius.pill,
+    margin: spacing.xs + 1,
+  };
   return (
-    <View style={{ flexDirection: "row", justifyContent: "center" }}>
+    <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
       {index === 1 && (
         <>
-          <View style={styles.activeDot}></View>
+          <View style={activeDot} />
           <Dots />
           <Dots />
         </>
@@ -20,7 +37,7 @@ export const ProgressOne: React.FC<ProgressOneProps> = ({ index }) => {
       {index === 2 && (
         <>
           <Dots />
-          <View style={styles.activeDot}></View>
+          <View style={activeDot} />
           <Dots />
         </>
       )}
@@ -28,64 +45,56 @@ export const ProgressOne: React.FC<ProgressOneProps> = ({ index }) => {
         <>
           <Dots />
           <Dots />
-          <View style={styles.activeDot}></View>
+          <View style={activeDot} />
         </>
       )}
     </View>
   );
 };
 
-export const ProgressTwo: React.FC = () => {
+// Larger active marker used by the row-style Next/Back indicators.
+const LargeActiveDot: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
   return (
-    <View style={styles.progressContainer}>
-      <Dots />
-      <View style={styles.largeActiveDot}></View>
-      <Dots />
-    </View>
+    <View
+      style={{
+        backgroundColor: colors.accent,
+        width: spacing.md + 2,
+        height: spacing.md + 2,
+        borderRadius: radius.pill,
+        margin: spacing.xs + 1,
+        marginTop: spacing.xs - 1,
+      }}
+    />
   );
 };
 
-export const ProgressThree: React.FC = () => {
-  return (
-    <View style={styles.progressContainer}>
-      <Dots />
-      <Dots />
-      <View style={styles.largeActiveDot}></View>
-      <Dots />
-    </View>
-  );
-};
+const ProgressContainer: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <View style={{ flexDirection: 'row', justifyContent: 'center', flex: 1 }}>{children}</View>
+);
 
-export const ProgressFour: React.FC = () => {
-  return (
-    <View style={styles.progressContainer}>
-      <Dots />
-      <Dots />
-      <Dots />
-      <View style={styles.largeActiveDot}></View>
-    </View>
-  );
-};
+export const ProgressTwo: React.FC = () => (
+  <ProgressContainer>
+    <Dots />
+    <LargeActiveDot />
+    <Dots />
+  </ProgressContainer>
+);
 
-const styles = StyleSheet.create({
-  activeDot: {
-    backgroundColor: COLORS.primary,
-    width: 10,
-    height: 10,
-    borderRadius: 25,
-    margin: 5,
-  },
-  largeActiveDot: {
-    backgroundColor: COLORS.primary,
-    width: 14,
-    height: 14,
-    borderRadius: 25,
-    margin: 5,
-    marginTop: 3,
-  },
-  progressContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
-    flex: 1,
-  },
-});
+export const ProgressThree: React.FC = () => (
+  <ProgressContainer>
+    <Dots />
+    <Dots />
+    <LargeActiveDot />
+    <Dots />
+  </ProgressContainer>
+);
+
+export const ProgressFour: React.FC = () => (
+  <ProgressContainer>
+    <Dots />
+    <Dots />
+    <Dots />
+    <LargeActiveDot />
+  </ProgressContainer>
+);

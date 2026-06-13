@@ -44,6 +44,19 @@ type User struct {
 	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
 	TPBalance                  float64    `gorm:"default:0" json:"tpBalance"`
 	CashbackBalance            float64    `gorm:"default:0" json:"cashbackBalance"`
+
+	// LastSettledGlobalIndex is the user's checkpoint into the global-pool
+	// cumulative index (models.GlobalTPPool.PerUserIndexScaled, same scaled-int
+	// units). Owed global TP = (currentIndex − this) / GlobalTPIndexScale,
+	// credited lazily by FeeDistributionService.SettleUserGlobalShare.
+	//
+	// NULLABLE on purpose — NEW-USER FAIRNESS: a nil checkpoint means "never
+	// settled". On first settlement it initializes to the CURRENT index (the
+	// user is owed 0 for all epochs before they existed; they only share epochs
+	// AFTER they join). A non-nil 0 would wrongly grant the user every epoch's
+	// share since the index began.
+	LastSettledGlobalIndex     *int64     `gorm:"default:null" json:"lastSettledGlobalIndex,omitempty"`
+
 	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
 	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
 	CreatedAt                  time.Time      `json:"createdAt"`
