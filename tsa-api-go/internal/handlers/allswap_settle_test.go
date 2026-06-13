@@ -19,10 +19,9 @@ import (
 // newAllSwapHandler builds a SwapLiFiHandler wired with config + the fee engine
 // and an INJECTED requeryQuoteUSD so tests control LiFi reachability + the
 // re-queried from-amount USD without HTTP.
-func newAllSwapHandler(t *testing.T, db *gorm.DB, v2Enabled bool, fromAmountUSD float64, reachable bool) *SwapLiFiHandler {
+func newAllSwapHandler(t *testing.T, db *gorm.DB, fromAmountUSD float64, reachable bool) *SwapLiFiHandler {
 	t.Helper()
 	cfg := &config.Config{
-		FeeModelV2Enabled:         v2Enabled,
 		TPPerUSD:                  1.0,
 		AllSwapFeeDeviationMax:    0.10,
 		AllSwapNominalFeeBps:      300, // 3%
@@ -53,7 +52,7 @@ func doSettle(t *testing.T, h *SwapLiFiHandler, user models.User, body map[strin
 func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newAllSwapHandler(t, db, true, 1000.0, true) // LiFi reachable, $1000 from-amount
+	h := newAllSwapHandler(t, db, 1000.0, true) // LiFi reachable, $1000 from-amount
 	user := mkWUser(t, db, "asuser", nil)
 
 	quoteID := "quote-abc-123"
@@ -98,7 +97,7 @@ func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newAllSwapHandler(t, db, true, 1000.0, true) // verified fee = $30
+	h := newAllSwapHandler(t, db, 1000.0, true) // verified fee = $30
 	user := mkWUser(t, db, "asforge", nil)
 
 	// Client claims it only paid $5 — a 83% under-statement, far past the 10% gate.
@@ -121,7 +120,7 @@ func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newAllSwapHandler(t, db, true, 0, false) // LiFi unreachable
+	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
 	user := mkWUser(t, db, "asdown", nil)
 
 	// Client claims $1 (tiny). LiFi down → we ignore the client and charge the
@@ -142,26 +141,6 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	// 3.5% of $1000 = $35 — never 0, never the client's $1.
 	if fd.FeeUSD < 34.999 || fd.FeeUSD > 35.001 {
 		t.Errorf("conservative feeUSD=%v want 35 (3.5%% of 1000)", fd.FeeUSD)
-	}
-}
-
-// (d) flag OFF → no AllSwap FeeEvent (byte-for-byte: AllSwap did not accrue before).
-func TestAllSwap_FlagOff_NoAccrual(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
-	h := newAllSwapHandler(t, db, false, 1000.0, true) // flag OFF
-	user := mkWUser(t, db, "asoff", nil)
-
-	w := doSettle(t, h, user, map[string]interface{}{
-		"quoteId": "off-1", "fromToken": "USDC", "toToken": "ETH", "fromAmount": "1000", "chainId": 1,
-	})
-	if w.Code != http.StatusOK {
-		t.Fatalf("settle status=%d body=%s", w.Code, w.Body.String())
-	}
-	var total int64
-	db.Model(&models.FeeDistribution{}).Count(&total)
-	if total != 0 {
-		t.Fatalf("flag OFF must accrue nothing; found %d guard rows", total)
 	}
 }
 

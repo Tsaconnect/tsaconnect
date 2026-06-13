@@ -81,8 +81,8 @@ func setupFeeAdminTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func feeAdminCfg(v2 bool, chains ...int64) *config.Config {
-	c := &config.Config{FeeModelV2Enabled: v2, FeeManagerChains: map[int64]config.FeeManagerChainConfig{}}
+func feeAdminCfg(chains ...int64) *config.Config {
+	c := &config.Config{FeeManagerChains: map[int64]config.FeeManagerChainConfig{}}
 	for _, id := range chains {
 		c.FeeManagerChains[id] = config.FeeManagerChainConfig{ChainID: id, ChainKey: "sonic", Address: "0xFeeManager"}
 	}
@@ -105,30 +105,6 @@ func drive(method, path string, body any, fn func(*gin.Context)) *httptest.Respo
 	c.Set("user", &models.User{ID: uuid.New(), Role: models.RoleSuperAdmin})
 	fn(c)
 	return w
-}
-
-// TestFeeAdmin409WhileFlagOff: all three endpoints (intent/plan/confirm) return
-// 409 while FEE_MODEL_V2_ENABLED is OFF.
-func TestFeeAdmin409WhileFlagOff(t *testing.T) {
-	db := setupFeeAdminTestDB(t)
-	reader := newStubChainReader()
-	cfg := feeAdminCfg(false, feeSonicC) // flag OFF
-	feeCfg := services.NewFeeConfigService(db)
-	intents := services.NewFeeRateIntentService(db, cfg, reader)
-	h := NewFeeAdminHandler(cfg, intents, feeCfg, reader)
-
-	w := drive("POST", "/admin/fees/intent", map[string]any{"feature": "withdrawal", "token": "*"}, h.CreateIntent)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("intent flag-off = %d, want 409", w.Code)
-	}
-	w = drive("POST", "/admin/fees/plan", map[string]any{"intentId": uuid.New().String()}, h.Plan)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("plan flag-off = %d, want 409", w.Code)
-	}
-	w = drive("POST", "/admin/fees/confirm", map[string]any{"intentId": uuid.New().String(), "chainId": feeSonicC, "txHash": "0xabc"}, h.Confirm)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("confirm flag-off = %d, want 409", w.Code)
-	}
 }
 
 // createIntentForTest authors an intent and returns its ID.
@@ -157,7 +133,7 @@ func createIntentForTest(t *testing.T, h *FeeAdminHandler, def map[string]any) s
 func TestConfirmWritesReplicaAfterVerifiedReadBack(t *testing.T) {
 	db := setupFeeAdminTestDB(t)
 	reader := newStubChainReader()
-	cfg := feeAdminCfg(true, feeSonicC)
+	cfg := feeAdminCfg(feeSonicC)
 	feeCfg := services.NewFeeConfigService(db)
 	intents := services.NewFeeRateIntentService(db, cfg, reader)
 	h := NewFeeAdminHandler(cfg, intents, feeCfg, reader)
@@ -192,7 +168,7 @@ func TestConfirmWritesReplicaAfterVerifiedReadBack(t *testing.T) {
 func TestConfirmRejects422OnFailedReceipt(t *testing.T) {
 	db := setupFeeAdminTestDB(t)
 	reader := newStubChainReader()
-	cfg := feeAdminCfg(true, feeSonicC)
+	cfg := feeAdminCfg(feeSonicC)
 	feeCfg := services.NewFeeConfigService(db)
 	intents := services.NewFeeRateIntentService(db, cfg, reader)
 	h := NewFeeAdminHandler(cfg, intents, feeCfg, reader)
@@ -215,7 +191,7 @@ func TestConfirmRejects422OnFailedReceipt(t *testing.T) {
 func TestConfirmRejects422OnRateMismatch(t *testing.T) {
 	db := setupFeeAdminTestDB(t)
 	reader := newStubChainReader()
-	cfg := feeAdminCfg(true, feeSonicC)
+	cfg := feeAdminCfg(feeSonicC)
 	feeCfg := services.NewFeeConfigService(db)
 	intents := services.NewFeeRateIntentService(db, cfg, reader)
 	h := NewFeeAdminHandler(cfg, intents, feeCfg, reader)

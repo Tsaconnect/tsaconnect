@@ -13,17 +13,11 @@ import (
 // users.referred_by: who sits above a user (uplines / ancestors) and who sits
 // below (downlines / descendants).
 //
-// The single existing graph walk (handlers.DistributeTPEarnings) climbs the
-// referred_by chain with one sequential SELECT per generation and STOPS at the
-// first inactive ancestor (tp_handler.go:54-56). This service replaces that
-// pattern for the fee/TP overhaul (SP2): it does the whole climb in ONE query
-// using a recursive CTE, and it FLAGS inactive ancestors rather than stopping —
-// SP3's route-and-continue policy (§3 of the design) needs the full path,
-// including the inactive nodes whose generation share is routed to the global
-// pool.
-//
-// This service is purely additive: it does NOT change DistributeTPEarnings or
-// any existing behavior. SP3 and the TP/referrals UI consume it.
+// This service walks the upline chain for the fee/TP overhaul (SP2): it does the
+// whole climb in ONE query using a recursive CTE, and it FLAGS inactive ancestors
+// rather than stopping — SP3's route-and-continue policy (§3 of the design) needs
+// the full path, including the inactive nodes whose generation share is routed to
+// the global pool. SP3 and the TP/referrals UI consume it.
 //
 // Portability: every query uses `WITH RECURSIVE`, which is supported by BOTH
 // PostgreSQL (production) and SQLite (the in-memory unit-test DB). Cycle safety

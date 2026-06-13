@@ -52,11 +52,8 @@ func main() {
 	// unchanged. Constructed here so it's available for wiring into handlers.
 	referralGraphService := services.NewReferralGraphService(config.DB)
 
-	// Fee/TP overhaul v2 engine (SP3). Constructed unconditionally so Stage 2
-	// can wire OnFeeSettled into the fee-settled paths, but GATED by
-	// cfg.IsFeeModelV2Enabled() — while the flag is off (default) the legacy
-	// handlers.DistributeTPEarnings path stays live and callers must not invoke
-	// this engine. TP minting rate comes from cfg (default 1 TP = $1).
+	// Fee/TP engine (SP3). Wired into every fee-settled path via OnFeeSettled.
+	// TP minting rate comes from cfg (default 1 TP = $1).
 	feeDistributionService := services.NewFeeDistributionService(config.DB, referralGraphService, cfg.TPPerUSDOrDefault())
 
 	// SP7 — claim-eligibility gate (anti-sybil + KYC). TP keeps accruing for
@@ -74,11 +71,7 @@ func main() {
 	)
 	log.Printf("[sp7] claim-eligibility gate ready (velocity heuristic enabled=%t, max=%d/%s)",
 		cfg.RewardVelocityEnabled, cfg.RewardVelocityMaxSignups, cfg.RewardVelocityWindow)
-	if cfg.IsFeeModelV2Enabled() {
-		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=true — new fee/TP engine ACTIVE (tpPerUSD=%.4f)", cfg.TPPerUSDOrDefault())
-	} else {
-		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=false — legacy TP path live; v2 engine constructed but dormant")
-	}
+	log.Printf("[fee-v2] fee/TP engine ACTIVE (tpPerUSD=%.4f)", cfg.TPPerUSDOrDefault())
 	_ = referralGraphService
 
 	// Get underlying sql.DB for health check and cleanup
@@ -194,10 +187,8 @@ func main() {
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 
-	// Wire the fee/TP v2 engine (SP3) into the fiat/on-chain fee-settled
-	// handlers. Each site routes through handlers.settleFeeEarnings, which only
-	// uses this engine when cfg.IsFeeModelV2Enabled(); while the flag is off the
-	// legacy DistributeTPEarnings path stays live (nil here would be equivalent).
+	// Wire the fee/TP engine (SP3) into the fiat/on-chain fee-settled handlers.
+	// Each site routes through handlers.settleFeeEarnings.
 	h.FeeService = feeDistributionService
 	ch.FeeService = feeDistributionService
 	sch.FeeService = feeDistributionService
@@ -207,7 +198,7 @@ func main() {
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
-	// the verified integrator fee, flag-gated on FEE_MODEL_V2_ENABLED.
+	// the verified integrator fee.
 	slh.Config = cfg
 	slh.FeeService = feeDistributionService
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
@@ -242,19 +233,6 @@ func main() {
 		log.Printf("[fee-manager] dormant: no FeeManager chain configured with a reachable RPC — admin set-fee flow + drift reconciler off")
 	}
 
-	// I1 boot guard — the double-pay interlock (design §9 step 4). If
-	// FEE_MODEL_V2_ENABLED is ON, EVERY configured escrow MUST have already
-	// stopped splitting on-chain (legacySplitEnabled==false) AND be wired to a
-	// FeeManager (feeManager!=0x0); otherwise the same fee is split BOTH on-chain
-	// (legacy escrow) AND off-chain (v2 engine) — a double-pay. With the flag OFF,
-	// or with no escrow addresses configured, the guard is a NO-OP (the flag-OFF
-	// behavior is unchanged). A failure is FATAL (fail-safe boot).
-	verifyEscrowCutoverReady(cfg, blockchainService)
-
-	// BLOCKER 3 — runnable fee/TP v2 cutover reset. Super-admin-gated route
-	// (RequireP2PAdmin) + confirm-phrase guard. Run BEFORE the FEE_MODEL_V2_ENABLED
-	// flip per the runbook in fee_distribution_reset.go.
-	ftch := handlers.NewFeeTPCutoverHandler(config.DB)
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.
 	rfh := handlers.NewRewardFlagHandler(config.DB, rewardEligibilityService)
 
@@ -375,12 +353,10 @@ func main() {
 			return addr
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
-		// Wire the fee/TP v2 engine (SP3) — P2P is a NEW fee-settled integration.
+		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.
 		// Every release transition (ConfirmRelease, reconciler auto-release,
-		// adminResolve→buyer) accrues the realized on-chain fee through a single
-		// seam, gated on the flag. While FEE_MODEL_V2_ENABLED is off this is a
-		// no-op and P2P keeps its pre-SP3 behavior of not accruing TP.
-		p2pTradeSvc.SetFeeService(feeDistributionService, cfg.IsFeeModelV2Enabled())
+		// adminResolve→buyer) accrues the realized on-chain fee through a single seam.
+		p2pTradeSvc.SetFeeService(feeDistributionService)
 		// Chat service — system messages auto-emitted on every trade
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)
@@ -412,11 +388,8 @@ func main() {
 
 	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
 	// share into the per-user cumulative index once per epoch (default daily,
-	// FEE_GLOBAL_POOL_SETTLE_INTERVAL). GATED on FEE_MODEL_V2_ENABLED: while the
-	// flag is off the SP3 accrual path never runs, the pool stays empty, and
-	// there's nothing to settle — so the worker is simply not registered
-	// (dormant until cutover), independent of whether P2P is configured.
-	if cfg.IsFeeModelV2Enabled() {
+	// FEE_GLOBAL_POOL_SETTLE_INTERVAL).
+	{
 		interval := cfg.GlobalPoolSettleIntervalOrDefault()
 		scheduler.Register(jobs.NewGlobalPoolSettler(feeDistributionService, interval))
 		log.Printf("[fee-v2] global-pool settler registered (interval=%s)", interval)
@@ -428,8 +401,6 @@ func main() {
 		// and accumulates the per-user claimable-MCGP balance SP6 will publish.
 		scheduler.Register(jobs.NewRewardProcessorJob(rewardService, time.Minute, 500))
 		log.Printf("[fee-v2] reward processor registered (interval=1m)")
-	} else {
-		log.Printf("[fee-v2] global-pool settler + reward processor dormant: FEE_MODEL_V2_ENABLED=false")
 	}
 
 	// Backfill any pending transactions that already have a txHash.
@@ -464,7 +435,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, ftch, fah)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah)
 
 	// Configure HTTP server
 	port := cfg.Port
@@ -511,59 +482,6 @@ func main() {
 	}
 
 	log.Println("Server exited gracefully")
-}
-
-// verifyEscrowCutoverReady is the I1 double-pay boot interlock (design §9 step
-// 4). When FEE_MODEL_V2_ENABLED is ON it reads each configured escrow's
-// legacySplitEnabled() + feeManager() on-chain and FATALLY aborts the boot if any
-// escrow still splits on-chain (legacySplitEnabled==true) OR is not yet wired to
-// a FeeManager (feeManager==0x0) — that combination double-pays the fee (on-chain
-// split + off-chain v2 engine). When the flag is OFF, or no escrow addresses are
-// configured, this is a NO-OP (flag-OFF behavior is byte-for-byte unchanged).
-func verifyEscrowCutoverReady(cfg *config.Config, bs *services.BlockchainService) {
-	flagOn := cfg.IsFeeModelV2Enabled()
-	if !flagOn {
-		return // flag OFF — no-op, preserves legacy behavior exactly.
-	}
-
-	// Assemble the configured escrows the backend knows about: P2P per-chain
-	// (from the P2P registry), plus the Sonic-fixed Product + ServiceContact
-	// escrows. Unconfigured (empty) addresses are skipped inside the guard.
-	var escrows []services.EscrowRef
-	for chainID, p := range cfg.P2PChains {
-		if p.EscrowAddress != "" {
-			escrows = append(escrows, services.EscrowRef{Label: "p2p", ChainID: chainID, Address: p.EscrowAddress})
-		}
-	}
-	if cfg.ProductEscrowAddress != "" {
-		escrows = append(escrows, services.EscrowRef{Label: "product", ChainID: cfg.SonicChainID, Address: cfg.ProductEscrowAddress})
-	}
-	if cfg.ServiceContractAddress != "" {
-		escrows = append(escrows, services.EscrowRef{Label: "service-contact", ChainID: cfg.SonicChainID, Address: cfg.ServiceContractAddress})
-	}
-	if len(escrows) == 0 {
-		return // no escrows configured — dormant, nothing to verify.
-	}
-
-	// Build a per-chain RPC reader over the chains the escrows live on.
-	rpcByChain := map[int64]services.FeeManagerRPCClient{}
-	for _, e := range escrows {
-		if _, ok := rpcByChain[e.ChainID]; ok {
-			continue
-		}
-		client, _ := bs.ClientForChainID(e.ChainID)
-		if client != nil && client.Client != nil {
-			rpcByChain[e.ChainID] = client.Client
-		}
-	}
-	reader := services.NewEscrowCutoverReaderFromClients(rpcByChain)
-
-	if err := services.VerifyEscrowCutoverReady(context.Background(), reader, escrows, flagOn); err != nil {
-		// FATAL: do NOT boot with the v2 engine active while an escrow still
-		// splits on-chain — that double-pays every fee.
-		log.Fatalf("[fee-v2] BOOT ABORTED — %v", err)
-	}
-	log.Printf("[fee-v2] escrow cutover guard PASSED: %d escrow(s) verified not-splitting + FeeManager-wired", len(escrows))
 }
 
 // verifyEscrowAdmin logs the escrow contract's on-chain owner on startup so

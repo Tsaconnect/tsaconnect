@@ -20,9 +20,8 @@ import "fmt"
 // The init() below is a hard static assertion: any future ladder edit that
 // breaks the sum panics at boot rather than silently leaking value.
 //
-// This lives in the models package so it is a single source of truth shared by
-// BOTH the legacy engine (handlers.DistributeTPEarnings, which aliases this) and
-// the v2 engine (services.FeeDistributionService) without an import cycle
+// This lives in the models package so it is a single source of truth for the
+// fee/TP engine (services.FeeDistributionService) without an import cycle
 // (handlers → services already exists; services cannot import handlers).
 var GenerationPercentages = []float64{
 	0.354, // gen 0: self

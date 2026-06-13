@@ -16,9 +16,9 @@ type Handlers struct {
 	Config                 *config.Config
 	EventBus               *events.Bus
 	EmailService           *services.EmailService
-	// FeeService is the fee/TP v2 engine (SP3). Optional/nil-safe: wired from
+	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go after construction. Fee-settled sites route through
-	// settleFeeEarnings, which only uses it when cfg.IsFeeModelV2Enabled().
+	// settleFeeEarnings.
 	FeeService *services.FeeDistributionService
 
 	// EligibilityService is the SP7 claim-eligibility gate. Optional/nil-safe:

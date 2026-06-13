@@ -195,8 +195,7 @@ type Config struct {
 	// FEE_MANAGER_ADDRESS_SONIC / FEE_MANAGER_ADDRESS_BSC. A chain appears here
 	// ONLY when its FeeManager address is configured — UNSET keeps the admin
 	// set-fee flow + drift reconciler DORMANT for that chain (dormant-by-default,
-	// like the BSC P2P escrow). The admin endpoints stay 409-gated on
-	// FEE_MODEL_V2_ENABLED regardless of this map.
+	// like the BSC P2P escrow).
 	FeeManagerChains map[int64]FeeManagerChainConfig
 
 	// SonicNetwork records which preset was active for this boot
@@ -269,16 +268,8 @@ type Config struct {
 	P2PTrustedMinCompletion float64
 	P2PTrustedMinAgeDays    int
 
-	// Fee/TP overhaul (SP3) feature flag + tunables.
+	// Fee/TP overhaul (SP3) tunables.
 	//
-	// FeeModelV2Enabled gates the new FeeDistributionService engine. Default
-	// FALSE: while off, the legacy handlers.DistributeTPEarnings path stays the
-	// live path and nothing changes in production. Flip to true (env
-	// FEE_MODEL_V2_ENABLED=true) at the deliberate cutover. Read it via
-	// Config.IsFeeModelV2Enabled() rather than poking the field directly so the
-	// gate has one chokepoint.
-	FeeModelV2Enabled bool
-
 	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
 	// mints. DEFAULT 1 (1 TP = $1). Tunable via FEE_TP_PER_USD; it sets level
 	// PACING (see design §3), not the reward ratio.
@@ -288,7 +279,6 @@ type Config struct {
 	// epoch (SettleGlobalPoolEpoch folds the pool delta into the cumulative
 	// index once per interval). DEFAULT 24h (daily). Tunable via
 	// FEE_GLOBAL_POOL_SETTLE_INTERVAL (a Go duration string, e.g. "1h", "15m").
-	// The settlement job is GATED on FeeModelV2Enabled — dormant until cutover.
 	GlobalPoolSettleInterval time.Duration
 
 	// Fee/TP overhaul (SP7) — claim-eligibility velocity heuristic tunables.
@@ -498,10 +488,8 @@ func Load() *Config {
 	cfg.P2PTrustedMinCompletion = getEnvFloat64("P2P_TRUSTED_MIN_COMPLETION", 0.95)
 	cfg.P2PTrustedMinAgeDays = int(getEnvInt64("P2P_TRUSTED_MIN_AGE_DAYS", 30))
 
-	// Fee/TP overhaul (SP3). Engine OFF by default so production keeps the
-	// legacy TP path until the deliberate cutover. TP minting rate defaults to
-	// 1 TP = $1 of pool value; tunable without code change.
-	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
+	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
+	// value; tunable without code change.
 	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
 	// SP4 global-pool settlement cadence — default daily.
 	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
@@ -686,16 +674,6 @@ func getEnvBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
-}
-
-// IsFeeModelV2Enabled is the single chokepoint for the fee/TP v2 gate. While it
-// returns false the legacy handlers.DistributeTPEarnings path is live and the
-// new FeeDistributionService engine must not be invoked.
-func (c *Config) IsFeeModelV2Enabled() bool {
-	if c == nil {
-		return false
-	}
-	return c.FeeModelV2Enabled
 }
 
 // AllSwapFeeDeviationMaxOrDefault returns the configured max client-fee

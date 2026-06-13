@@ -79,7 +79,7 @@ type SwapLiFiHandler struct {
 
 	// Config + FeeService wire the server-verified AllSwap settle (design §8, I8).
 	// Optional/nil-safe: when Config is nil the settle endpoint returns "not
-	// configured" and the v2 accrual is gated on cfg.IsFeeModelV2Enabled().
+	// configured"; the accrual runs whenever FeeService is wired.
 	Config     *config.Config
 	FeeService *services.FeeDistributionService
 
@@ -600,10 +600,8 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	// no-op in the engine.
 	sourceID := deterministicUUID("allswap:" + req.QuoteID)
 
-	// Accrue the VERIFIED fee (never the client value), flag-gated. With the flag
-	// OFF this writes NOTHING — byte-for-byte no AllSwap accrual (AllSwap is a new
-	// fee-settled integration that did not accrue before).
-	if h.Config.IsFeeModelV2Enabled() && h.FeeService != nil && verifiedFeeUSD > 0 {
+	// Accrue the VERIFIED fee (never the client value).
+	if h.FeeService != nil && verifiedFeeUSD > 0 {
 		h.FeeService.EnqueueFeeSettled(services.FeeEvent{
 			Feature:    models.FeatureAllswap,
 			Token:      strings.ToUpper(req.FromToken),

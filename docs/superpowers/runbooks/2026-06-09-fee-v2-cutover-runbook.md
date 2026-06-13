@@ -1,5 +1,16 @@
 # Fee v2 + FeeManager — Deploy & Cutover Runbook
 
+> ⚠️ **OBSOLETE (2026-06-13).** The `FEE_MODEL_V2_ENABLED` flag, the v2 cutover-reset
+> (`fee_distribution_reset.go`, `/admin/fee-tp/cutover-reset`, `cmd/feetp-reset`,
+> `cmd/feetp-smoke`), and the escrow double-pay boot guard (`escrow_cutover_guard.go`,
+> `verifyEscrowCutoverReady`) have all been **removed** — the v1 TP engine is retired and
+> the v2 `FeeDistributionService` is now the only fee/TP path. The flag-flip cutover this
+> runbook describes no longer exists. **Retained for historical context only.**
+>
+> ⚠️ The double-pay interlock is gone with it: before any **mainnet** escrow that still
+> splits fees on-chain goes live, a replacement guard MUST be re-introduced, or the same
+> fee will be paid both on-chain (escrow split) and off-chain (v2 engine).
+
 **Date:** 2026-06-09
 **Branch:** `feat/fee-tp-overhaul` (contains the fee/TP overhaul **and** the FeeManager after PR #35)
 **Scope:** The combined go-live of the v2 fee/TP engine **and** the configurable on-chain FeeManager. They share **one flag** (`FEE_MODEL_V2_ENABLED`), so this is **one cutover**, not two.

@@ -145,9 +145,9 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 }
 
 // newP2PFeeService builds a trade service wired with a REAL FeeDistributionService.
-// v2Enabled toggles the SP3 gate. Returns the trade service, the mock escrow, and
-// the fee service so tests can inspect both sides of the seam.
-func newP2PFeeService(t *testing.T, db *gorm.DB, v2Enabled bool) (*P2PTradeService, *mockEscrow, *FeeDistributionService) {
+// Returns the trade service, the mock escrow, and the fee service so tests can
+// inspect both sides of the seam.
+func newP2PFeeService(t *testing.T, db *gorm.DB) (*P2PTradeService, *mockEscrow, *FeeDistributionService) {
 	t.Helper()
 	esc := newMockEscrow()
 	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, &mockBus{}, 146)
@@ -159,7 +159,7 @@ func newP2PFeeService(t *testing.T, db *gorm.DB, v2Enabled bool) (*P2PTradeServi
 		return ""
 	})
 	feeSvc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
-	svc.SetFeeService(feeSvc, v2Enabled)
+	svc.SetFeeService(feeSvc)
 	return svc, esc, feeSvc
 }
 
@@ -244,7 +244,7 @@ func waitForGuard(t *testing.T, db *gorm.DB, tradeID uuid.UUID, want int64) int6
 //	contract.
 func TestP2PFee_ConfirmRelease_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, true)
+	svc, esc, _ := newP2PFeeService(t, db)
 
 	upline := mkP2PUser(t, db, "p2pupline", nil)
 	buyer := mkP2PUser(t, db, "p2pbuyer", &upline.ID) // buyer = gen0, upline = gen1
@@ -283,7 +283,7 @@ func TestP2PFee_ConfirmRelease_NoAccrual(t *testing.T) {
 //	accrueP2PReleaseFee call (the seam) is a documented no-op.
 func TestP2PFee_ReconcileRelease_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, true)
+	svc, esc, _ := newP2PFeeService(t, db)
 
 	buyer := mkP2PUser(t, db, "rcbuyer", nil)
 	seller := mkP2PUser(t, db, "rcseller", nil)
@@ -318,7 +318,7 @@ func TestP2PFee_ReconcileRelease_NoAccrual(t *testing.T) {
 //	accrues NOTHING under the new model.
 func TestP2PFee_AdminResolve_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, true)
+	svc, esc, _ := newP2PFeeService(t, db)
 	buyer := mkP2PUser(t, db, "arb_buyer", nil)
 	seller := mkP2PUser(t, db, "arb_seller", nil)
 	adID := seedAd(t, db, seller.ID, "0", "1000000")
@@ -341,61 +341,6 @@ func TestP2PFee_AdminResolve_NoAccrual(t *testing.T) {
 	}
 }
 
-// (d) With the flag OFF, ALL release paths are a no-op too (unchanged contract).
-func TestP2PFee_FlagOff_NoAccrualOnAnyPath(t *testing.T) {
-	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, false) // flag OFF
-
-	buyer := mkP2PUser(t, db, "off_buyer", nil)
-	seller := mkP2PUser(t, db, "off_seller", nil)
-	adID := seedAd(t, db, seller.ID, "0", "1000000")
-
-	// Live ConfirmRelease.
-	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-	fee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
-	toBuyer := new(big.Int).Sub(tokenAmt, fee)
-	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID), AmountToBuyer: toBuyer, FeeToSystem: fee}
-	if _, err := svc.ConfirmRelease(context.Background(), trade.ID, seller.ID, "0xrel"); err != nil {
-		t.Fatalf("ConfirmRelease: %v", err)
-	}
-
-	// Reconciler auto-release.
-	trade2 := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-	esc.onChainTrade = &OnChainP2PTrade{
-		Amount: tokenAmt, FeeBps: 50, Funding: models.P2PTradeFundingPooled,
-		Status: OnChainP2PStatusReleased, Exists: true,
-	}
-	if _, err := svc.ReconcileTrade(context.Background(), trade2.ID); err != nil {
-		t.Fatalf("ReconcileTrade: %v", err)
-	}
-
-	// Admin-resolve to buyer.
-	trade3 := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-	db.Model(&models.P2PTrade{}).Where("id = ?", trade3.ID).Update("status", models.P2PTradeStatusDisputed)
-	moved := new(big.Int).Sub(tokenAmt, fee)
-	esc.resolvedEvent = &P2PTradeResolvedEvent{
-		TradeID: HashID(trade3.ID), ReleasedToBuyer: true, AmountMoved: moved, FeeToSystem: fee,
-	}
-	esc.onChainTrade = nil // resolve path uses the resolved event, not ReadTrade
-	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade3.ID, uuid.New(), "0xres"); err != nil {
-		t.Fatalf("ConfirmAdminResolveDispute: %v", err)
-	}
-
-	// Flag off → no guard rows on ANY path, no TP/cashback credited anywhere.
-	time.Sleep(200 * time.Millisecond)
-	var totalGuards int64
-	db.Model(&models.FeeDistribution{}).Count(&totalGuards)
-	if totalGuards != 0 {
-		t.Fatalf("flag OFF must accrue nothing; found %d guard rows", totalGuards)
-	}
-	var b models.User
-	db.First(&b, "id = ?", buyer.ID)
-	if b.TPBalance != 0 || b.CashbackBalance != 0 {
-		t.Fatalf("flag OFF must not credit TP/cashback; got tp=%v cb=%v", b.TPBalance, b.CashbackBalance)
-	}
-}
-
 // (e) With a NON-ZERO V3 platform snapshot, ConfirmRelease accrues the 1%
 //
 //	platform fee under FeatureP2PPlatform (the carved split → buyer/upline
@@ -403,7 +348,7 @@ func TestP2PFee_FlagOff_NoAccrualOnAnyPath(t *testing.T) {
 //	accrueP2PReleaseFee call is a guard no-op.
 func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, true)
+	svc, esc, _ := newP2PFeeService(t, db)
 	// V3 escrow reports a 100-bps (1%) platform snapshot for the trade.
 	esc.platformFeeBpsSnapshot = 100
 
@@ -459,7 +404,7 @@ func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 //	trade.ID)).
 func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
 	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, true)
+	svc, esc, _ := newP2PFeeService(t, db)
 	esc.platformFeeBpsSnapshot = 100 // 1% V3 snapshot
 
 	buyer := mkP2PUser(t, db, "rcpsbuyer", nil)
@@ -489,27 +434,3 @@ func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
 	}
 }
 
-// (g) flag OFF with a non-zero snapshot is STILL a no-op (byte-for-byte legacy).
-func TestP2PFee_PlatformSnapshot_FlagOff_NoAccrual(t *testing.T) {
-	db := setupP2PFeeDB(t)
-	svc, esc, _ := newP2PFeeService(t, db, false) // flag OFF
-	esc.platformFeeBpsSnapshot = 100              // snapshot present but flag off
-
-	buyer := mkP2PUser(t, db, "psoffbuyer", nil)
-	seller := mkP2PUser(t, db, "psoffseller", nil)
-	adID := seedAd(t, db, seller.ID, "0", "1000000")
-	trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
-
-	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-	gasFee := new(big.Int).Div(new(big.Int).Mul(tokenAmt, big.NewInt(50)), big.NewInt(10000))
-	toBuyer := new(big.Int).Sub(tokenAmt, gasFee)
-	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID), AmountToBuyer: toBuyer, FeeToSystem: gasFee}
-
-	if _, err := svc.ConfirmRelease(context.Background(), trade.ID, seller.ID, "0xrel"); err != nil {
-		t.Fatalf("ConfirmRelease: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-	if got := guardRows(t, db, trade.ID); got != 0 {
-		t.Fatalf("flag OFF must accrue nothing even with a snapshot; got %d guard rows", got)
-	}
-}

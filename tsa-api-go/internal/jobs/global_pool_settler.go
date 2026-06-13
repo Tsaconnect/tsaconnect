@@ -23,11 +23,6 @@ type globalPoolSettler interface {
 // (IndexedTP high-water mark guards against double-folding the same delta), so
 // a missed tick (restart) is recovered by the next tick and an extra tick is
 // harmless — matching the scheduler's Phase-1 in-process contract.
-//
-// GATING: this worker is only REGISTERED in main.go when FEE_MODEL_V2_ENABLED
-// is on. While the flag is off the SP3 accrual path never runs either, so the
-// pool stays empty and there is nothing to settle — the worker is simply not
-// scheduled (dormant until cutover).
 type GlobalPoolSettler struct {
 	svc      globalPoolSettler
 	interval time.Duration

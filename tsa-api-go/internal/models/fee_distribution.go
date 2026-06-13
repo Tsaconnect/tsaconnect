@@ -8,11 +8,9 @@ import (
 
 // Fee-distribution v2 (SP3) models.
 //
-// These back the new fee/TP engine (services.FeeDistributionService). They are
-// purely additive — the legacy DistributeTPEarnings path (tp_handler.go) and
-// its tp_earnings/cashback_earnings tables are untouched. The v2 engine writes
-// into the SAME tp_earnings / cashback_earnings ledgers (reusing TPEarning /
-// CashbackEarning) and the SAME tp_balance / cashback_balance columns, but adds:
+// These back the fee/TP engine (services.FeeDistributionService). The engine
+// writes into the tp_earnings / cashback_earnings ledgers (reusing TPEarning /
+// CashbackEarning) and the tp_balance / cashback_balance columns, plus adds:
 //
 //   - FeeDistribution: a per-(source_type, source_id) idempotency guard row,
 //     mirroring order.TPDistributedAt but generalized so EVERY fee-settled path
