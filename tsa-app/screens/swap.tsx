@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS } from '@/constants/chains';
-import { signTransaction } from '@/services/wallet';
+import { signTransaction, withRpcFallback } from '@/services/wallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
   type WalletBalance,
@@ -23,6 +23,7 @@ import { useTheme } from '@/theme';
 import {
   Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
 } from '@/components/ui';
+import { mapSubmitError } from '@/services/swapErrors';
 
 // ── Token config (extend this list as new tokens are added) ──
 interface TokenInfo {
@@ -338,7 +339,42 @@ const SwapScreen = () => {
           gasLimit: approveTx.gasLimit, gasPrice: approveTx.gasPrice,
           nonce: approveTx.nonce, chainId: approveTx.chainId,
         });
-        await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId);
+
+        // submitTransaction returns { success: false, message } on backend
+        // errors — it never throws. Check explicitly so a failed approve
+        // surfaces here instead of silently advancing into the swap step
+        // with a stale nonce.
+        const approveRes = await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId);
+        const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
+        if (!approveHash) {
+          console.error('[swap] approve rejected by backend', approveRes);
+          throw new Error(mapSubmitError(approveRes.message));
+        }
+
+        // Wait for the approve to confirm before submitting the swap.
+        // Without this we'd push two pending txs from the same sender into
+        // the mempool back-to-back. Nodes that enforce EIP-7702's
+        // in-flight-tx cap for delegated EOAs (BSC Maxwell+, Pectra) reject
+        // the second. The wait is the correct pattern regardless of the
+        // cap — it also surfaces approve failures that would otherwise be
+        // hidden behind a stale-nonce error on the swap step.
+        setStatus('Waiting for approval to confirm...');
+        let receipt;
+        try {
+          receipt = await withRpcFallback('sonic', (p) =>
+            p.waitForTransaction(approveHash, 1, 90_000),
+          );
+        } catch (e) {
+          console.error('[swap] waitForTransaction failed', { approveHash, e });
+          throw new Error(`Lost connection while waiting for the approval (tx ${approveHash}). Try again.`);
+        }
+        if (!receipt) {
+          throw new Error(`Approval is taking longer than expected (tx ${approveHash}). Check the network and try again once it confirms.`);
+        }
+        if (receipt.status === 0) {
+          console.error('[swap] approve reverted on-chain', { approveHash, receipt });
+          throw new Error(`Approval reverted on-chain (tx ${approveHash}). Try again.`);
+        }
       }
 
       setStatus('Executing swap...');
@@ -353,9 +389,17 @@ const SwapScreen = () => {
       });
       const res = await submitTransaction(signedS, 'swap', 'MCGP', swapTx.to, amount, swapTx.chainId);
 
-      if (res.success && res.data) { setTxHash(res.data.txHash); setScreen('success'); loadBalances(); }
-      else throw new Error(res.message || 'Swap failed');
-    } catch (e: any) { setError(e.message || 'Swap failed.'); setScreen('failure'); }
+      const swapHash = res.success ? res.data?.txHash : undefined;
+      if (swapHash) {
+        setTxHash(swapHash); setScreen('success'); loadBalances();
+      } else {
+        console.error('[swap] swap rejected by backend', res);
+        throw new Error(mapSubmitError(res.message));
+      }
+    } catch (e: any) {
+      console.error('[swap] handleSwap failed', e);
+      setError(e.message || 'Swap failed.'); setScreen('failure');
+    }
   };
 
   // ── Signing ──

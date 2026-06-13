@@ -428,7 +428,7 @@ export async function ensureGas(
  * or 502 in mobile contexts. Without this, contract reads on non-Sonic chains
  * appear "broken" to the user even though the chain is fine.
  */
-async function withRpcFallback<T>(
+export async function withRpcFallback<T>(
   chainKey: ChainKey,
   fn: (provider: ethers.JsonRpcProvider) => Promise<T>,
 ): Promise<T> {
