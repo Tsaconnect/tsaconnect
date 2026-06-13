@@ -1,24 +1,35 @@
 // app/wallet/token.tsx
-// Token detail screen — shows balance, price, chart, and actions for a single asset
+//
+// Token detail screen — shows balance, price, chart, and actions for a single asset.
+// Restyled onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives).
+//
+// FINANCIAL screen: every balance/price/chart fetch, chain/token selection, money
+// rendering, and send/receive navigation (including the discovered-ERC-20 param
+// passthrough) is preserved verbatim — this is a visual/structural restyle only.
+// The legacy ChainSelector + ActivityFeed wallet components are reused unchanged,
+// and the custom View-based MiniChart keeps its rendering logic (theme-tinted only).
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import ActivityFeed from '@/components/activity/ActivityFeed';
-import {
-  View,
-  Text,
-  ScrollView,
-  StyleSheet,
-  Pressable,
-  Dimensions,
-  ActivityIndicator,
-  Image,
-} from 'react-native';
-import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { CHAINS, CHAIN_KEYS, type ChainKey, type ChainConfig } from '../../constants/chains';
+import { View, ScrollView, Dimensions, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { CHAINS, type ChainKey, type ChainConfig } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { getTokenPriceHistory } from '../../services/walletApi';
+import { useTheme } from '@/theme';
+import {
+  AmountText,
+  Button,
+  Card,
+  Chip,
+  Divider,
+  Icon,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CHART_WIDTH = SCREEN_WIDTH - 64;
@@ -41,18 +52,40 @@ const MiniChart: React.FC<{
   color: string;
   loading: boolean;
 }> = ({ data, width, height, color, loading }) => {
+  const { colors, radius } = useTheme();
+
   if (loading) {
     return (
-      <View style={[{ width, height }, styles.chartPlaceholder]}>
-        <ActivityIndicator color={color} />
+      <View
+        style={{
+          width,
+          height,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: colors.surfaceAlt,
+          borderRadius: radius.sm,
+        }}
+      >
+        <Spinner color={color} />
       </View>
     );
   }
 
   if (data.length < 2) {
     return (
-      <View style={[{ width, height }, styles.chartPlaceholder]}>
-        <Text style={styles.chartNoData}>No price data available</Text>
+      <View
+        style={{
+          width,
+          height,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: colors.surfaceAlt,
+          borderRadius: radius.sm,
+        }}
+      >
+        <Text variant="bodySm" color="textMuted">
+          No price data available
+        </Text>
       </View>
     );
   }
@@ -65,7 +98,7 @@ const MiniChart: React.FC<{
   const barWidth = width / data.length;
 
   return (
-    <View style={[{ width, height }, styles.chartContainer]}>
+    <View style={{ width, height, position: 'relative', overflow: 'hidden' }}>
       {data.map((val, i) => {
         const normalised = (val - min) / range;
         const barHeight = Math.max(2, normalised * (height - 8));
@@ -111,6 +144,8 @@ const MiniChart: React.FC<{
 
 // ── Main Screen ──
 const TokenDetailScreen: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
+
   const params = useLocalSearchParams<{
     symbol: string;
     chainKey: string;
@@ -222,293 +257,241 @@ const TokenDetailScreen: React.FC = () => {
   useEffect(() => { fetchPriceHistory(selectedRange); }, [fetchPriceHistory, selectedRange]);
 
   const isNative = type === 'Native Token';
-  const changeColor = priceChange >= 0 ? '#22C55E' : '#EF4444';
-  const displayColor = iconColor || activeChainConfig?.iconColor || '#888';
+  const isUp = priceChange >= 0;
+  const changeColor = isUp ? colors.success : colors.danger;
+  const changeBg = isUp ? colors.successBg : colors.dangerBg;
+  const displayColor = iconColor || activeChainConfig?.iconColor || colors.textMuted;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
-      {/* Token Header */}
-      <View style={styles.headerCard}>
-        <View style={styles.tokenHeader}>
-          <View style={[styles.tokenAvatar, { backgroundColor: displayColor + '20' }]}>
-            {iconUrl ? (
-              <Image source={{ uri: iconUrl }} style={styles.tokenAvatarImage} />
-            ) : (
-              <Text style={[styles.tokenAvatarText, { color: displayColor }]}>
-                {symbol?.charAt(0)}
-              </Text>
-            )}
-          </View>
-          <View style={styles.tokenHeaderInfo}>
-            <Text style={styles.tokenSymbol}>{symbol}</Text>
-            <Text style={styles.tokenName}>{name}</Text>
-          </View>
-        </View>
-
-        {/* Balance */}
-        <View style={styles.balanceSection}>
-          {loadingBalance ? (
-            <ActivityIndicator color={displayColor} style={{ marginVertical: 12 }} />
-          ) : (
-            <>
-              <Text style={styles.balanceAmount}>
-                {balance.toFixed(isNative ? 4 : 2)} {symbol}
-              </Text>
-              <Text style={styles.balanceUsd}>
-                ${usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </Text>
-            </>
-          )}
-        </View>
-
-        {/* Price Info */}
-        <View style={styles.priceRow}>
-          <Text style={styles.priceLabel}>Price</Text>
-          <View style={styles.priceValueRow}>
-            <Text style={styles.priceValue}>
-              ${usdPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
-            </Text>
-            {priceHistory.length >= 2 && (
-              <View style={[styles.changeBadge, { backgroundColor: changeColor + '15' }]}>
-                <Icon
-                  name={priceChange >= 0 ? 'arrow-drop-up' : 'arrow-drop-down'}
-                  size={18}
-                  color={changeColor}
-                />
-                <Text style={[styles.changeText, { color: changeColor }]}>
-                  {Math.abs(priceChange).toFixed(2)}%
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+      >
+        {/* Token Header */}
+        <Card padding="xl" style={{ marginBottom: spacing.md }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xl }}>
+            <View
+              style={{
+                width: 52,
+                height: 52,
+                borderRadius: radius.pill,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+                backgroundColor: displayColor + '20',
+              }}
+            >
+              {iconUrl ? (
+                <Image source={{ uri: iconUrl }} style={{ width: 32, height: 32, borderRadius: radius.pill }} />
+              ) : (
+                <Text variant="title2" weight="700" style={{ color: displayColor }}>
+                  {symbol?.charAt(0)}
                 </Text>
+              )}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="title2" weight="700">
+                {symbol}
+              </Text>
+              <Text variant="bodySm" color="textMuted">
+                {name}
+              </Text>
+            </View>
+          </View>
+
+          {/* Balance */}
+          <View style={{ alignItems: 'center', marginBottom: spacing.xl }}>
+            {loadingBalance ? (
+              <View style={{ marginVertical: spacing.md }}>
+                <Spinner color={displayColor} />
               </View>
+            ) : (
+              <>
+                <Text variant="display" weight="700">
+                  {balance.toFixed(isNative ? 4 : 2)} {symbol}
+                </Text>
+                <AmountText
+                  value={usdValue}
+                  currency="USD"
+                  variant="bodyMed"
+                  weight="400"
+                  color="textMuted"
+                  minimumFractionDigits={2}
+                  maximumFractionDigits={2}
+                  style={{ marginTop: spacing.xs }}
+                />
+              </>
             )}
           </View>
-        </View>
-      </View>
 
-      {/* Chain Selector */}
-      {availableChains.length > 1 && (
-        <View style={{ paddingHorizontal: 16, marginBottom: 12 }}>
-          <ChainSelector
-            availableChains={availableChains}
-            selectedChain={activeChainKey}
-            onSelect={(chain) => setActiveChainKey(chain)}
+          {/* Price Info */}
+          <Divider spacing="md" />
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text variant="bodySm" color="textMuted">
+              Price
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+              <AmountText
+                value={usdPrice}
+                currency="USD"
+                variant="bodyMed"
+                weight="600"
+                minimumFractionDigits={2}
+                maximumFractionDigits={6}
+              />
+              {priceHistory.length >= 2 && (
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.xs,
+                    paddingHorizontal: spacing.sm,
+                    paddingVertical: 2,
+                    borderRadius: radius.sm,
+                    backgroundColor: changeBg,
+                  }}
+                >
+                  <Icon name={isUp ? 'trendingUp' : 'trendingDown'} size={14} color={changeColor} />
+                  <Text variant="caption" weight="600" style={{ color: changeColor }}>
+                    {Math.abs(priceChange).toFixed(2)}%
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+        </Card>
+
+        {/* Chain Selector */}
+        {availableChains.length > 1 && (
+          <View style={{ marginBottom: spacing.md }}>
+            <ChainSelector
+              availableChains={availableChains}
+              selectedChain={activeChainKey}
+              onSelect={(chain) => setActiveChainKey(chain)}
+            />
+          </View>
+        )}
+
+        {/* Chart */}
+        <Card padding="lg" style={{ marginBottom: spacing.md }}>
+          <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+            Price Chart
+          </Text>
+          <MiniChart
+            data={priceHistory}
+            width={CHART_WIDTH}
+            height={CHART_HEIGHT}
+            color={displayColor}
+            loading={loadingChart}
+          />
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-around',
+              marginTop: spacing.md,
+            }}
+          >
+            {TIME_RANGES.map(r => (
+              <Chip
+                key={r.days}
+                label={r.label}
+                selected={selectedRange === r.days}
+                onPress={() => setSelectedRange(r.days)}
+              />
+            ))}
+          </View>
+        </Card>
+
+        {/* Token Info */}
+        <Card padding="lg" style={{ marginBottom: spacing.md }}>
+          <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+            Details
+          </Text>
+          <InfoRow label="Type" value={type || 'Token'} />
+          <InfoRow label="Network" value={activeChainConfig?.name || activeChainKey} />
+          <InfoRow label="Symbol" value={symbol} />
+          {isNative && <InfoRow label="Decimals" value="18" />}
+          {activeChainConfig?.explorerUrl && (
+            <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} />
+          )}
+        </Card>
+
+        {/* Transaction History */}
+        <Card padding="lg" style={{ marginBottom: spacing.md }}>
+          <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+            Recent Activity
+          </Text>
+          <ActivityFeed
+            types={['wallet', 'swap']}
+            embedded
+            onSeeAll={() => router.push('/wallet/history' as any)}
+          />
+        </Card>
+
+        {/* Actions */}
+        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+          <Button
+            title="Send"
+            leftIcon="send"
+            style={{ flex: 1 }}
+            onPress={() => router.push({
+              pathname: '/wallet/send',
+              params: {
+                token: symbol,
+                chainKey: activeChainKey,
+                ...(isDiscovered && contractAddress
+                  ? {
+                      contractAddress,
+                      discovered: '1',
+                      decimals: discoveredDecimals != null ? String(discoveredDecimals) : '',
+                      balance: String(balance),
+                      usdValue: String(usdValue),
+                      name,
+                    }
+                  : {}),
+              },
+            } as any)}
+          />
+          <Button
+            title="Receive"
+            variant="secondary"
+            leftIcon="arrowDown"
+            style={{ flex: 1 }}
+            onPress={() => router.push('/wallet/receive')}
           />
         </View>
-      )}
-
-      {/* Chart */}
-      <View style={styles.chartCard}>
-        <Text style={styles.sectionTitle}>Price Chart</Text>
-        <MiniChart
-          data={priceHistory}
-          width={CHART_WIDTH}
-          height={CHART_HEIGHT}
-          color={displayColor}
-          loading={loadingChart}
-        />
-        <View style={styles.timeRangeRow}>
-          {TIME_RANGES.map(r => (
-            <Pressable
-              key={r.days}
-              style={[
-                styles.timeRangeBtn,
-                selectedRange === r.days && { backgroundColor: displayColor + '20' },
-              ]}
-              onPress={() => setSelectedRange(r.days)}
-            >
-              <Text style={[
-                styles.timeRangeText,
-                selectedRange === r.days && { color: displayColor, fontWeight: '700' },
-              ]}>
-                {r.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      </View>
-
-      {/* Token Info */}
-      <View style={styles.infoCard}>
-        <Text style={styles.sectionTitle}>Details</Text>
-        <InfoRow label="Type" value={type || 'Token'} />
-        <InfoRow label="Network" value={activeChainConfig?.name || activeChainKey} />
-        <InfoRow label="Symbol" value={symbol} />
-        {isNative && <InfoRow label="Decimals" value="18" />}
-        {activeChainConfig?.explorerUrl && (
-          <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} />
-        )}
-      </View>
-
-      {/* Transaction History */}
-      <View style={styles.infoCard}>
-        <Text style={styles.sectionTitle}>Recent Activity</Text>
-        <ActivityFeed
-          types={['wallet', 'swap']}
-          embedded
-          onSeeAll={() => router.push('/wallet/history' as any)}
-        />
-      </View>
-
-      {/* Actions */}
-      <View style={styles.actionsCard}>
-        <Pressable
-          style={[styles.actionBtn, { backgroundColor: displayColor }]}
-          onPress={() => router.push({
-            pathname: '/wallet/send',
-            params: {
-              token: symbol,
-              chainKey: activeChainKey,
-              ...(isDiscovered && contractAddress
-                ? {
-                    contractAddress,
-                    discovered: '1',
-                    decimals: discoveredDecimals != null ? String(discoveredDecimals) : '',
-                    balance: String(balance),
-                    usdValue: String(usdValue),
-                    name,
-                  }
-                : {}),
-            },
-          } as any)}
-        >
-          <Icon name="send" size={20} color="#FFF" />
-          <Text style={styles.actionBtnText}>Send</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.actionBtn, styles.actionBtnOutline, { borderColor: displayColor }]}
-          onPress={() => router.push('/wallet/receive')}
-        >
-          <Icon name="call-received" size={20} color={displayColor} />
-          <Text style={[styles.actionBtnText, { color: displayColor }]}>Receive</Text>
-        </Pressable>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 // ── Info Row ──
-const InfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <View style={styles.infoRow}>
-    <Text style={styles.infoLabel}>{label}</Text>
-    <Text style={styles.infoValue}>{value}</Text>
-  </View>
-);
-
-// ── Styles ──
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-
-  // Header Card
-  headerCard: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 16,
-    backgroundColor: '#FFF',
-    padding: 20,
-  },
-  tokenHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
-  tokenAvatar: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 14,
-  },
-  tokenAvatarImage: { width: 32, height: 32, borderRadius: 16 },
-  tokenAvatarText: { fontSize: 22, fontWeight: '700' },
-  tokenHeaderInfo: { flex: 1 },
-  tokenSymbol: { fontSize: 20, fontWeight: '800', color: '#1A1A1A' },
-  tokenName: { fontSize: 14, color: '#888', marginTop: 2 },
-
-  // Balance
-  balanceSection: { alignItems: 'center', marginBottom: 20 },
-  balanceAmount: { fontSize: 28, fontWeight: '800', color: '#1A1A1A' },
-  balanceUsd: { fontSize: 16, color: '#888', marginTop: 4 },
-
-  // Price
-  priceRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-  },
-  priceLabel: { fontSize: 14, color: '#888' },
-  priceValueRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  priceValue: { fontSize: 16, fontWeight: '600', color: '#1A1A1A' },
-  changeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  changeText: { fontSize: 13, fontWeight: '600' },
-
-  // Chart
-  chartCard: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 14,
-    backgroundColor: '#FFF',
-    padding: 16,
-  },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#1A1A1A', marginBottom: 14 },
-  chartContainer: { position: 'relative', overflow: 'hidden' },
-  chartPlaceholder: { justifyContent: 'center', alignItems: 'center', backgroundColor: '#FAFAFA', borderRadius: 8 },
-  chartNoData: { fontSize: 13, color: '#AAA' },
-  timeRangeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 14,
-  },
-  timeRangeBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  timeRangeText: { fontSize: 13, fontWeight: '500', color: '#888' },
-
-  // Info
-  infoCard: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 14,
-    backgroundColor: '#FFF',
-    padding: 16,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F5F5F5',
-  },
-  infoLabel: { fontSize: 14, color: '#888' },
-  infoValue: { fontSize: 14, fontWeight: '500', color: '#1A1A1A' },
-
-  // Actions
-  actionsCard: {
-    flexDirection: 'row',
-    gap: 12,
-    marginHorizontal: 16,
-    marginTop: 12,
-  },
-  actionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
-  actionBtnOutline: {
-    backgroundColor: 'transparent',
-    borderWidth: 1.5,
-  },
-  actionBtnText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
-});
+const InfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        paddingVertical: spacing.sm,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.hairline,
+      }}
+    >
+      <Text variant="bodySm" color="textMuted">
+        {label}
+      </Text>
+      <Text variant="bodySm" weight="500">
+        {value}
+      </Text>
+    </View>
+  );
+};
 
 export default TokenDetailScreen;

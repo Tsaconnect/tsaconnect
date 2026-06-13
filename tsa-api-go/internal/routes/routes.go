@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -70,6 +70,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.GET("/tp-earnings", h.GetTPEarnings)
 		userGroup.GET("/cashback-balance", h.GetCashbackBalance)
 		userGroup.GET("/cashback-earnings", h.GetCashbackEarnings)
+		userGroup.GET("/cashback-summary", h.GetCashbackSummary)
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
@@ -80,6 +81,79 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	adminGroup.Use(adminAuth)
 	{
 		adminGroup.GET("/stats", h.GetAdminStats)
+	}
+
+	// Admin fee-config routes — unified, tunable fee-rate table.
+	adminFeeConfig := api.Group("/admin/fee-config")
+	adminFeeConfig.Use(adminAuth)
+	{
+		adminFeeConfig.GET("", fch.ListFeeConfigs)
+		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)
+	}
+
+	// Admin configurable-FeeManager set-fee flow (design §5) — author a desired-
+	// rate intent, plan the unsigned FeeManager.setRate tx(s), confirm a broadcast
+	// tx (verify receipt + read-back THEN refresh the replica + advance the intent
+	// state machine), cancel an unapplied intent. On-chain-rate authority +
+	// funds-adjacent, so restricted to true admin roles (RequireP2PAdmin) on top of
+	// AdminAuth, like reward-distributions.
+	if fah != nil {
+		adminFees := api.Group("/admin/fees")
+		adminFees.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminFees.POST("/intent", fah.CreateIntent)
+			adminFees.POST("/plan", fah.Plan)
+			adminFees.POST("/confirm", fah.Confirm)
+			adminFees.DELETE("/intent/:id", fah.CancelIntent)
+		}
+	}
+
+	// Admin claim-eligibility routes (fee/TP overhaul SP7) — anti-sybil reward
+	// flags + per-user eligibility review. Funds-/payout-adjacent (a flag gates
+	// MCGP claims), so restricted to true admin roles on top of AdminAuth.
+	if rfh != nil {
+		adminRewards := api.Group("/admin")
+		adminRewards.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminRewards.GET("/reward-flags", rfh.ListRewardFlags)
+			adminRewards.POST("/reward-flags", rfh.CreateRewardFlag)
+			adminRewards.POST("/reward-flags/:id/clear", rfh.ClearRewardFlag)
+			adminRewards.GET("/reward-eligibility/:userId", rfh.GetRewardEligibility)
+		}
+	}
+
+	// Admin reward-distribution routes (fee/TP overhaul SP6) — build + publish
+	// cumulative merkle roots. Funds-adjacent (the root authorizes MCGP claims),
+	// so restricted to true admin roles on top of AdminAuth, like reward-flags.
+	if rdh != nil {
+		adminDist := api.Group("/admin/reward-distributions")
+		adminDist.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminDist.GET("", rdh.ListDistributions)
+			adminDist.POST("/publish", rdh.PublishDistribution)
+			adminDist.POST("/confirm", rdh.ConfirmPublish)
+		}
+	}
+
+	// User reward routes (fee/TP overhaul SP6 + SP8) — all auth'd, all returning
+	// empty/ineligible cleanly rather than erroring:
+	//   - /claim-data    (SP6): the authed user's proof + cumulative amount for the
+	//     latest published epoch — the CANONICAL claim source.
+	//   - /summary       (SP8): the full TP-screen dashboard payload.
+	//   - /prepare-claim (SP8): the UNSIGNED claim(account, cumulative, proof) tx,
+	//     a convenience over /claim-data matching the prepared-unsigned-tx pattern.
+	if rdh != nil || rsh != nil {
+		rewardsGroup := api.Group("/rewards")
+		rewardsGroup.Use(auth)
+		{
+			if rdh != nil {
+				rewardsGroup.GET("/claim-data", rdh.GetClaimData)
+			}
+			if rsh != nil {
+				rewardsGroup.GET("/summary", rsh.GetRewardSummary)
+				rewardsGroup.GET("/prepare-claim", rsh.PrepareClaim)
+			}
+		}
 	}
 
 	// KYC routes
@@ -223,6 +297,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		cartGroup.DELETE("/items/:id", auth, h.RemoveFromCart)
 		cartGroup.POST("/checkout", auth, h.ConvertToOrder)
 		cartGroup.GET("/summary", auth, h.GetCartSummary)
+		cartGroup.GET("/count", auth, h.GetCartCount)
 		cartGroup.POST("/validate", auth, h.ValidateCart)
 		cartGroup.GET("/abandoned", adminAuth, h.GetAbandonedCarts)
 		cartGroup.POST("/cleanup", adminAuth, h.CleanupExpiredCarts)
@@ -261,6 +336,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			lifiGroup.GET("/tokens/all", slh.GetAllChainTokens)
 			lifiGroup.GET("/token", slh.GetToken)
 			lifiGroup.GET("/quote", slh.GetQuote)
+			// AllSwap server-verified settle (design §8, I8): authenticated user,
+			// NOT super-admin. Backend re-queries LiFi + accrues the verified fee.
+			lifiGroup.POST("/settle", slh.SettleAllSwap)
 		}
 	}
 
@@ -308,6 +386,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		notifGroup.GET("/unread-count", h.GetUnreadCount)
 		notifGroup.GET("/preferences", h.GetNotificationPreferences)
 		notifGroup.PATCH("/preferences", h.UpdateNotificationPreferences)
+		// Expo push device-token registry (per device).
+		notifGroup.POST("/device-tokens", h.RegisterDevice)
+		notifGroup.DELETE("/device-tokens/:token", h.UnregisterDevice)
 	}
 
 	// Private sale routes
@@ -321,6 +402,94 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
 			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// Nomba-backed Nigerian bank directory + name enquiry. Registered as
+	// long as Nomba credentials are configured, even when the P2P escrow
+	// contract isn't deployed — the form for adding a payment method
+	// should still work in dev/sandbox environments.
+	if p2p != nil && p2p.HasNomba() {
+		banksGroup := api.Group("/p2p/banks")
+		banksGroup.Use(auth)
+		{
+			banksGroup.GET("", p2p.ListNigerianBanks)
+			banksGroup.GET("/resolve", p2p.ResolveAccountName)
+		}
+	}
+
+	// P2P routes — every endpoint requires JWT auth + Persona-verified KYC
+	// (the handler itself enforces verification via the require() helper).
+	// Idempotency is applied to the write paths so retries are safe.
+	if p2p != nil && p2p.IsConfigured() {
+		idem := middleware.Idempotency(config.DB)
+
+		p2pGroup := api.Group("/p2p")
+		p2pGroup.Use(auth)
+		{
+			p2pGroup.GET("/chains", p2p.GetChains)
+			p2pGroup.GET("/payment-methods", p2p.ListPaymentMethods)
+			p2pGroup.POST("/payment-methods", idem, p2p.CreatePaymentMethod)
+			p2pGroup.DELETE("/payment-methods/:id", p2p.DeletePaymentMethod)
+			p2pGroup.GET("/payment-providers", p2p.ListPaymentProviders)
+
+			// Express auto-match: one-shot best-price quote (open via /ads/:id/trades).
+			p2pGroup.POST("/express/quote", p2p.ExpressQuote)
+
+			// Seller deposit / withdraw — pool-model capital movement.
+			p2pGroup.GET("/balance", p2p.GetPoolBalance)
+			p2pGroup.GET("/allowance", p2p.GetAllowance)
+			p2pGroup.POST("/deposits/approve", idem, p2p.PrepareApprove)
+			p2pGroup.POST("/deposits", idem, p2p.PrepareDeposit)
+			p2pGroup.POST("/deposits/confirm", idem, p2p.ConfirmDeposit)
+			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
+			p2pGroup.POST("/withdrawals/confirm", idem, p2p.ConfirmWithdraw)
+
+			p2pGroup.GET("/ads", p2p.ListAds)
+			p2pGroup.GET("/ads/my", p2p.ListMyAds)
+			p2pGroup.GET("/ads/:id", p2p.GetAd)
+			p2pGroup.POST("/ads", idem, p2p.CreateAd)
+			// Replaces the old /confirm tx-hash flow. Seller signs the EIP-712
+			// voucher returned by CreateAd off-chain and submits the signature.
+			p2pGroup.POST("/ads/:id/sign", idem, p2p.SignAd)
+			p2pGroup.POST("/ads/:id/pause", p2p.PauseAd)
+			p2pGroup.POST("/ads/:id/resume", p2p.ResumeAd)
+			// Cancel replaces close — on-chain voucher revocation.
+			p2pGroup.POST("/ads/:id/cancel", idem, p2p.PrepareCancelAd)
+			p2pGroup.POST("/ads/:id/cancel/confirm", idem, p2p.ConfirmCancelAd)
+			p2pGroup.POST("/ads/:id/trades", idem, p2p.OpenTrade)
+
+			p2pGroup.GET("/trades", p2p.ListTrades)
+			p2pGroup.GET("/trades/:id", p2p.GetTrade)
+			p2pGroup.POST("/trades/:id/open/confirm", idem, p2p.ConfirmOpenTrade)
+			p2pGroup.POST("/trades/:id/mark-paid", idem, p2p.MarkPaid)
+			p2pGroup.POST("/trades/:id/release", idem, p2p.PrepareRelease)
+			p2pGroup.POST("/trades/:id/release/confirm", idem, p2p.ConfirmRelease)
+			p2pGroup.POST("/trades/:id/cancel", idem, p2p.PrepareCancel)
+			p2pGroup.POST("/trades/:id/cancel/confirm", idem, p2p.ConfirmCancel)
+			p2pGroup.POST("/trades/:id/dispute", idem, p2p.RaiseDispute)
+			p2pGroup.POST("/trades/:id/dispute/confirm", idem, p2p.ConfirmRaiseDispute)
+			p2pGroup.GET("/trades/:id/dispute", p2p.GetDispute)
+
+			// Chat messages — text and image-URL posts; List paginates by
+			// `since` query param.
+			p2pGroup.GET("/trades/:id/messages", p2p.ListMessages)
+			p2pGroup.POST("/trades/:id/messages", idem, p2p.SendMessage)
+
+			p2pGroup.GET("/sellers/:id", p2p.GetSellerProfile)
+			p2pGroup.POST("/trades/:id/rate", idem, p2p.RateTrade)
+		}
+
+		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
+		// admits merchants/support too, so we layer RequireP2PAdmin on top
+		// to restrict to admin / super_admin.
+		adminP2P := api.Group("/admin/p2p")
+		adminP2P.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminP2P.GET("/disputes", p2p.AdminListDisputes)
+			adminP2P.GET("/disputes/:id", p2p.AdminGetDispute)
+			adminP2P.POST("/disputes/:id/resolve", idem, p2p.AdminResolveDispute)
+			adminP2P.POST("/disputes/:id/resolve/confirm", idem, p2p.ConfirmAdminResolveDispute)
 		}
 	}
 

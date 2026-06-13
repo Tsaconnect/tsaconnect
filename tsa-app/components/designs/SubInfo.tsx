@@ -1,6 +1,16 @@
-import { View, Text, Image, ImageSourcePropType } from "react-native";
+// components/designs/SubInfo.tsx
+//
+// Sub-info row primitives (ProductTitle, Catalogue, ImageCmp, People, Price,
+// SubInfo) used on product detail / card layouts. Migrated onto the TSA
+// Signature design system (theme tokens + @/components/ui primitives). Every
+// prop type, export, the `onPress`/`handlePress` wiring, the avatar image set,
+// the negative-margin overlap layout, and the literal price text are preserved
+// verbatim — this is a visual / structural restyle only.
 import React from "react";
-import { COLORS, SIZES, SHADOWS, assets } from "../../constants";
+import { View, Image, ImageSourcePropType } from "react-native";
+import { useTheme } from "@/theme";
+import { Surface, Text } from "@/components/ui";
+import { assets } from "../../constants";
 
 // Define the prop types for each component
 type ProductTitleProps = {
@@ -34,14 +44,8 @@ export const ProductTitle: React.FC<ProductTitleProps> = ({
 }) => {
   return (
     <View>
-      <Text
-        style={{
-          fontSize: titleSize,
-          color: COLORS.primary,
-          fontWeight: "500",
-        }}
-      >
-        {companyName}'s {title}
+      <Text color="accent" weight="500" style={{ fontSize: titleSize }}>
+        {companyName}&apos;s {title}
       </Text>
     </View>
   );
@@ -51,14 +55,7 @@ export const ProductTitle: React.FC<ProductTitleProps> = ({
 export const Catalogue: React.FC<CatalogueProps> = ({ handlePress }) => {
   return (
     <View style={{ flexDirection: "row", alignItems: "center" }}>
-      <Text
-        onPress={handlePress}
-        style={{
-          fontSize: SIZES.small,
-          color: COLORS.black,
-          fontWeight: "500",
-        }}
-      >
+      <Text onPress={handlePress} variant="caption" weight="500">
         see catalogue
       </Text>
     </View>
@@ -67,6 +64,7 @@ export const Catalogue: React.FC<CatalogueProps> = ({ handlePress }) => {
 
 // Component for displaying an image
 export const ImageCmp: React.FC<ImageCmpProps> = ({ imgUrl, index }) => {
+  const { spacing } = useTheme();
   return (
     <View>
       <Image
@@ -75,7 +73,7 @@ export const ImageCmp: React.FC<ImageCmpProps> = ({ imgUrl, index }) => {
         style={{
           width: 48,
           height: 48,
-          marginLeft: index === 0 ? 0 : -SIZES.font,
+          marginLeft: index === 0 ? 0 : -spacing.md,
         }}
       />
     </View>
@@ -102,48 +100,36 @@ export const People: React.FC = () => {
 
 // Component for displaying price
 export const Price: React.FC<PriceProps> = ({ price }) => {
+  const { spacing } = useTheme();
   return (
-    <View
+    <Surface
+      elevation="sm"
+      radius="md"
       style={{
-        paddingHorizontal: SIZES.font,
-        paddingVertical: SIZES.base,
-        backgroundColor: COLORS.white,
+        paddingHorizontal: spacing.md,
+        paddingVertical: spacing.sm,
         justifyContent: "center",
         alignItems: "center",
-        ...SHADOWS.light,
-        elevation: 1,
         maxWidth: "50%",
       }}
     >
-      <Text
-        style={{
-          fontSize: SIZES.small,
-          color: COLORS.black,
-        }}
-      >
-        Amount in NGN
-      </Text>
-      <Text
-        style={{
-          fontSize: SIZES.large,
-          color: COLORS.black,
-          fontWeight: "600",
-        }}
-      >
+      <Text variant="caption">Amount in NGN</Text>
+      <Text variant="title3" weight="600">
         ${price}
       </Text>
-    </View>
+    </Surface>
   );
 };
 
 // Component for sub-information display
 export const SubInfo: React.FC<SubInfoProps> = ({ price }) => {
+  const { spacing } = useTheme();
   return (
     <View
       style={{
         width: "100%",
-        paddingHorizontal: SIZES.font,
-        marginTop: -SIZES.extraLarge,
+        paddingHorizontal: spacing.md,
+        marginTop: -spacing["2xl"],
         flexDirection: "row",
         justifyContent: "space-between",
       }}

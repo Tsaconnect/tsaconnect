@@ -1,22 +1,37 @@
+// screens/transfer.tsx
+//
+// Send / withdraw flow — withdrawal-method picker, asset selector, amount entry
+// with custom keypad, recipient details, fee summary, and the send action.
+// Migrated onto the TSA Signature design system (theme tokens + @/components/ui
+// primitives). All state, effects (network availability + fee/total math),
+// callbacks, the asset/network fee rules, amount/decimal handling, validation,
+// navigation, and the simulated send are unchanged — this is a visual/structural
+// restyle only.
 
 import { router } from 'expo-router';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
-  Text,
-  TouchableOpacity,
-  ScrollView,
   TextInput,
+  ScrollView,
   Animated,
   StyleSheet,
   Dimensions,
   Platform,
-  ActivityIndicator,
   KeyboardAvoidingView,
-  Alert
+  Alert,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
-import { SafeAreaView } from "react-native-safe-area-context"
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '@/theme';
+import {
+  Text,
+  Button,
+  Card,
+  Surface,
+  Icon,
+  PressableScale,
+} from '@/components/ui';
+
 // Types and interfaces
 interface Asset {
   id: string;
@@ -40,71 +55,73 @@ interface Network {
   isAvailable: boolean;
 }
 
-// Gold color palette
-const GOLD_COLORS = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  background: '#FAF9F6',
-  error: '#DC3545',
-  success: '#28A745',
-};
-
 // Network Selection Component
 const NetworkCard: React.FC<{
   network: Network;
   isSelected: boolean;
   onSelect: (network: Network) => void;
 }> = ({ network, isSelected, onSelect }) => {
+  const { colors, spacing, radius } = useTheme();
   return (
-    <TouchableOpacity
-      style={[
-        styles.networkCard,
-        isSelected && styles.selectedNetworkCard,
-        !network.isAvailable && styles.disabledNetworkCard,
-      ]}
+    <PressableScale
       onPress={() => network.isAvailable && onSelect(network)}
       disabled={!network.isAvailable}
-      activeOpacity={0.7}
+      style={{
+        width: 180,
+        backgroundColor: isSelected ? colors.accentMuted : colors.surfaceAlt,
+        borderRadius: radius.lg,
+        padding: spacing.lg,
+        marginRight: spacing.md,
+        borderWidth: 2,
+        borderColor: isSelected ? colors.accent : 'transparent',
+        opacity: !network.isAvailable ? 0.5 : 1,
+      }}
     >
-      <View style={styles.networkCardContent}>
-        <View style={styles.networkIconContainer}>
-          <View style={[
-            styles.networkIcon,
-            isSelected && styles.selectedNetworkIcon
-          ]}>
-            <Text style={styles.networkIconText}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <View style={{ marginRight: spacing.md }}>
+          <View
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 24,
+              backgroundColor: isSelected ? colors.accent : colors.surfaceElevated,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <Text variant="title3" weight="800" style={{ color: isSelected ? colors.onAccent : colors.textPrimary }}>
               {network.symbol.charAt(0)}
             </Text>
           </View>
         </View>
 
-        <View style={styles.networkInfo}>
-          <View style={styles.networkHeader}>
-            <Text style={[
-              styles.networkName,
-              isSelected && styles.selectedNetworkName
-            ]}>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm }}>
+            <Text
+              variant="bodyMed"
+              weight="700"
+              numberOfLines={1}
+              style={{ flex: 1, color: isSelected ? colors.accent : colors.textPrimary }}
+            >
               {network.name}
             </Text>
             {isSelected && (
-              <View style={styles.selectedNetworkBadge}>
-                <Icon name="check-circle" size={14} color="#000000" />
+              <View style={{ marginLeft: spacing.xs }}>
+                <Icon name="checkCircle" size={14} color={colors.accent} />
               </View>
             )}
           </View>
 
-          <View style={styles.networkDetails}>
-            <View style={styles.networkDetailItem}>
-              <Icon name="money" size={12} color="#666666" />
-              <Text style={styles.networkDetailText}>
+          <View style={{ gap: spacing.xs }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="card" size={12} color={colors.textMuted} />
+              <Text variant="caption" color="textMuted" style={{ marginLeft: spacing.xs }}>
                 Fee: {network.fee} USD
               </Text>
             </View>
-            <View style={styles.networkDetailItem}>
-              <Icon name="schedule" size={12} color="#666666" />
-              <Text style={styles.networkDetailText}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="clock" size={12} color={colors.textMuted} />
+              <Text variant="caption" color="textMuted" style={{ marginLeft: spacing.xs }}>
                 Time: {network.time}
               </Text>
             </View>
@@ -113,16 +130,30 @@ const NetworkCard: React.FC<{
       </View>
 
       {!network.isAvailable && (
-        <View style={styles.unavailableOverlay}>
-          <Text style={styles.unavailableText}>Unavailable</Text>
+        <View
+          style={{
+            position: 'absolute',
+            top: 8,
+            right: 8,
+            backgroundColor: colors.danger,
+            paddingHorizontal: spacing.sm,
+            paddingVertical: spacing.xs,
+            borderRadius: radius.sm,
+          }}
+        >
+          <Text variant="overline" weight="700" style={{ color: '#FFFFFF' }}>
+            Unavailable
+          </Text>
         </View>
       )}
-    </TouchableOpacity>
+    </PressableScale>
   );
 };
 
 
 const TransferScreen: React.FC = () => {
+  const { colors, spacing, radius, fonts, type } = useTheme();
+
   // Available assets (from dashboard)
   const [assets, setAssets] = useState<Asset[]>([
     {
@@ -446,76 +477,106 @@ const TransferScreen: React.FC = () => {
     }
 
     return (
-      <View style={styles.networkInfoContainer}>
-        <Icon name="info" size={14} color={GOLD_COLORS.dark} />
-        <Text style={styles.networkInfoText}>{infoText}</Text>
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          backgroundColor: colors.accentMuted,
+          padding: spacing.md,
+          borderRadius: radius.md,
+          marginBottom: spacing.lg,
+        }}
+      >
+        <Icon name="info" size={14} color={colors.accent} />
+        <Text variant="caption" weight="600" color="accent" style={{ marginLeft: spacing.sm, flex: 1 }}>
+          {infoText}
+        </Text>
       </View>
     );
   };
 
   // Render numeric keypad
   const renderNumericKeypad = () => (
-    <View style={styles.keypadContainer}>
+    <View style={{ marginTop: spacing.sm }}>
       <View style={styles.keypadRow}>
         {['1', '2', '3'].map((num) => (
-          <TouchableOpacity
+          <PressableScale
             key={num}
-            style={styles.keypadKey}
+            style={keypadKeyStyle}
             onPress={() => handleAmountInput(sendAmount + num)}
           >
-            <Text style={styles.keypadKeyText}>{num}</Text>
-          </TouchableOpacity>
+            <Text variant="title2" weight="700">{num}</Text>
+          </PressableScale>
         ))}
       </View>
       <View style={styles.keypadRow}>
         {['4', '5', '6'].map((num) => (
-          <TouchableOpacity
+          <PressableScale
             key={num}
-            style={styles.keypadKey}
+            style={keypadKeyStyle}
             onPress={() => handleAmountInput(sendAmount + num)}
           >
-            <Text style={styles.keypadKeyText}>{num}</Text>
-          </TouchableOpacity>
+            <Text variant="title2" weight="700">{num}</Text>
+          </PressableScale>
         ))}
       </View>
       <View style={styles.keypadRow}>
         {['7', '8', '9'].map((num) => (
-          <TouchableOpacity
+          <PressableScale
             key={num}
-            style={styles.keypadKey}
+            style={keypadKeyStyle}
             onPress={() => handleAmountInput(sendAmount + num)}
           >
-            <Text style={styles.keypadKeyText}>{num}</Text>
-          </TouchableOpacity>
+            <Text variant="title2" weight="700">{num}</Text>
+          </PressableScale>
         ))}
       </View>
       <View style={styles.keypadRow}>
-        <TouchableOpacity
-          style={styles.keypadKey}
+        <PressableScale
+          style={keypadKeyStyle}
           onPress={() => handleAmountInput(sendAmount + '.')}
         >
-          <Text style={styles.keypadKeyText}>.</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.keypadKey}
+          <Text variant="title2" weight="700">.</Text>
+        </PressableScale>
+        <PressableScale
+          style={keypadKeyStyle}
           onPress={() => handleAmountInput(sendAmount + '0')}
         >
-          <Text style={styles.keypadKeyText}>0</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.keypadKey}
+          <Text variant="title2" weight="700">0</Text>
+        </PressableScale>
+        <PressableScale
+          style={keypadKeyStyle}
           onPress={() => setSendAmount(sendAmount.slice(0, -1))}
         >
-          <Icon name="backspace" size={24} color="#000000" />
-        </TouchableOpacity>
+          <Icon name="close" size={24} color={colors.textPrimary} />
+        </PressableScale>
       </View>
     </View>
   );
 
+  // keypad key styling (uses theme tokens + the legacy width math).
+  const keypadKeyStyle = {
+    width: (Dimensions.get('window').width - 80) / 3,
+    height: 60,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.lg,
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+  };
+
   // Render asset icon
   const renderAssetIcon = (symbol: string, size: number = 40) => (
-    <View style={[styles.assetIcon, { width: size, height: size, borderRadius: size / 2 }]}>
-      <Text style={[styles.assetIconText, { fontSize: size / 2 }]}>
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: colors.accent,
+        justifyContent: 'center',
+        alignItems: 'center',
+      }}
+    >
+      <Text weight="800" style={{ fontSize: size / 2, color: colors.onAccent }}>
         {symbol.charAt(0)}
       </Text>
     </View>
@@ -523,201 +584,292 @@ const TransferScreen: React.FC = () => {
 
   // Asset Selector Modal
   const AssetSelectorModal = () => (
-    <View style={styles.modalOverlay}>
-      <View style={styles.modalContent}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Select Asset</Text>
-          <TouchableOpacity
+    <View
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: colors.overlay,
+        justifyContent: 'center',
+        alignItems: 'center',
+        paddingHorizontal: spacing.xl,
+      }}
+    >
+      <Surface
+        elevation="lg"
+        style={{
+          width: '100%',
+          maxWidth: 400,
+          maxHeight: '70%',
+        }}
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            paddingHorizontal: spacing['2xl'],
+            paddingVertical: spacing.xl,
+            borderBottomWidth: 1,
+            borderBottomColor: colors.hairline,
+          }}
+        >
+          <Text variant="title2" weight="800">Select Asset</Text>
+          <PressableScale
             onPress={() => setShowAssetSelector(false)}
-            style={styles.modalCloseButton}
+            hitSlop={8}
           >
-            <Icon name="close" size={24} color="#666" />
-          </TouchableOpacity>
+            <Icon name="close" size={24} color={colors.textSecondary} />
+          </PressableScale>
         </View>
 
-        <ScrollView style={styles.assetList}>
-          {assets.map((asset) => (
-            <TouchableOpacity
-              key={asset.id}
-              style={[
-                styles.assetOption,
-                selectedAsset?.id === asset.id && styles.selectedAssetOption
-              ]}
-              onPress={() => handleAssetSelect(asset)}
-              activeOpacity={0.7}
-            >
-              {renderAssetIcon(asset.symbol, 44)}
-              <View style={styles.assetOptionInfo}>
-                <Text style={styles.assetOptionSymbol}>{asset.symbol}</Text>
-                <Text style={styles.assetOptionName}>{asset.name}</Text>
-                {/* Show network info for each asset */}
-                {asset.symbol === 'MCGP' && (
-                  <Text style={styles.assetNetworkInfo}>Sonic Network only • $0 fee</Text>
+        <ScrollView style={{ padding: spacing.xl }}>
+          {assets.map((asset) => {
+            const isSelected = selectedAsset?.id === asset.id;
+            return (
+              <PressableScale
+                key={asset.id}
+                onPress={() => handleAssetSelect(asset)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingVertical: spacing.lg,
+                  borderBottomWidth: 1,
+                  borderBottomColor: colors.hairline,
+                  ...(isSelected
+                    ? {
+                        backgroundColor: colors.surfaceAlt,
+                        borderRadius: radius.md,
+                        paddingHorizontal: spacing.md,
+                      }
+                    : null),
+                }}
+              >
+                {renderAssetIcon(asset.symbol, 44)}
+                <View style={{ flex: 1, marginLeft: spacing.lg }}>
+                  <Text variant="title3" weight="800">{asset.symbol}</Text>
+                  <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>{asset.name}</Text>
+                  {/* Show network info for each asset */}
+                  {asset.symbol === 'MCGP' && (
+                    <Text variant="caption" color="accent" style={{ marginTop: spacing.xs, fontStyle: 'italic' }}>Sonic Network only • $0 fee</Text>
+                  )}
+                  {asset.symbol === 'USDC' && (
+                    <Text variant="caption" color="accent" style={{ marginTop: spacing.xs, fontStyle: 'italic' }}>Sonic ($1) or Binance ($0.80)</Text>
+                  )}
+                  {asset.symbol === 'USDT' && (
+                    <Text variant="caption" color="accent" style={{ marginTop: spacing.xs, fontStyle: 'italic' }}>Binance Network only • $0.80 fee</Text>
+                  )}
+                </View>
+                <View style={{ alignItems: 'flex-end', marginRight: spacing.md }}>
+                  <Text variant="bodyMed" weight="700">
+                    {asset.balance.toFixed(2)} {asset.symbol}
+                  </Text>
+                  <Text variant="caption" weight="600" color="success" style={{ marginTop: spacing.xs }}>
+                    ${asset.usdValue.toLocaleString()}
+                  </Text>
+                </View>
+                {isSelected && (
+                  <Icon name="checkCircle" size={24} color={colors.accent} />
                 )}
-                {asset.symbol === 'USDC' && (
-                  <Text style={styles.assetNetworkInfo}>Sonic ($1) or Binance ($0.80)</Text>
-                )}
-                {asset.symbol === 'USDT' && (
-                  <Text style={styles.assetNetworkInfo}>Binance Network only • $0.80 fee</Text>
-                )}
-              </View>
-              <View style={styles.assetOptionBalance}>
-                <Text style={styles.assetOptionBalanceText}>
-                  {asset.balance.toFixed(2)} {asset.symbol}
-                </Text>
-                <Text style={styles.assetOptionUSDValue}>
-                  ${asset.usdValue.toLocaleString()}
-                </Text>
-              </View>
-              {selectedAsset?.id === asset.id && (
-                <Icon name="check-circle" size={24} color={GOLD_COLORS.primary} />
-              )}
-            </TouchableOpacity>
-          ))}
+              </PressableScale>
+            );
+          })}
         </ScrollView>
-      </View>
+      </Surface>
     </View>
   );
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.container}
+        style={{ flex: 1 }}
       >
-        <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
           {/* Withdrawal Method Selection */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Select Withdraw Method</Text>
+          <Card style={{ marginTop: spacing.sm, marginHorizontal: spacing.xl, paddingVertical: spacing['2xl'] }}>
+            <Text variant="title2" weight="800" style={{ marginBottom: spacing.lg }}>Select Withdraw Method</Text>
 
-            <View style={styles.methodContainer}>
+            <View style={{ gap: spacing.md }}>
               {/* Binance Users (Internal Transfer) */}
-              <TouchableOpacity
-                style={[
-                  styles.methodCard,
-                  withdrawalMethod === 'internal' && styles.selectedMethodCard
-                ]}
+              <PressableScale
                 onPress={() => handleWithdrawalMethod('internal')}
-                activeOpacity={0.8}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: withdrawalMethod === 'internal' ? colors.accentMuted : colors.surfaceAlt,
+                  borderRadius: radius.lg,
+                  padding: spacing.lg,
+                  borderWidth: 2,
+                  borderColor: withdrawalMethod === 'internal' ? colors.accent : 'transparent',
+                }}
               >
-                <View style={styles.methodIconContainer}>
+                <View style={{ marginRight: spacing.lg }}>
                   <Icon
-                    name="people"
+                    name="user"
                     size={32}
-                    color={withdrawalMethod === 'internal' ? GOLD_COLORS.primary : '#666'}
+                    color={withdrawalMethod === 'internal' ? colors.accent : colors.textSecondary}
                   />
                 </View>
-                <View style={styles.methodInfo}>
-                  <Text style={[
-                    styles.methodTitle,
-                    withdrawalMethod === 'internal' && styles.selectedMethodTitle
-                  ]}>
+                <View style={{ flex: 1 }}>
+                  <Text
+                    variant="bodyMed"
+                    weight="700"
+                    style={{ marginBottom: spacing.xs, color: withdrawalMethod === 'internal' ? colors.accent : colors.textPrimary }}
+                  >
                     Send to TSA Connect users
                   </Text>
-                  <Text style={styles.methodDescription}>
+                  <Text variant="bodySm" color="textSecondary">
                     TSA Connect internal transfer, send via Email/Phone/ID
                   </Text>
                   {withdrawalMethod === 'internal' && (
-                    <View style={styles.promoBadge}>
-                      <Icon name="bolt" size={12} color="#000000" />
-                      <Text style={styles.promoText}>
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        backgroundColor: colors.accent,
+                        paddingHorizontal: spacing.sm,
+                        paddingVertical: spacing.xs,
+                        borderRadius: radius.sm,
+                        marginTop: spacing.sm,
+                        alignSelf: 'flex-start',
+                      }}
+                    >
+                      <Icon name="bolt" size={12} color={colors.onAccent} />
+                      <Text variant="overline" weight="700" style={{ color: colors.onAccent, marginLeft: spacing.xs }}>
                         Win up to 50,000 LINEA when sending at least $0.01
                       </Text>
                     </View>
                   )}
                 </View>
                 {withdrawalMethod === 'internal' && (
-                  <Icon name="check-circle" size={24} color={GOLD_COLORS.primary} />
+                  <Icon name="checkCircle" size={24} color={colors.accent} />
                 )}
-              </TouchableOpacity>
+              </PressableScale>
 
 
             </View>
-          </View>
+          </Card>
 
           {/* Asset Selection */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Select Asset</Text>
+          <Card style={{ marginTop: spacing.sm, marginHorizontal: spacing.xl, paddingVertical: spacing['2xl'] }}>
+            <Text variant="title2" weight="800" style={{ marginBottom: spacing.lg }}>Select Asset</Text>
 
-            <TouchableOpacity
-              style={styles.assetSelector}
+            <PressableScale
               onPress={() => setShowAssetSelector(true)}
-              activeOpacity={0.8}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                backgroundColor: colors.surfaceAlt,
+                borderRadius: radius.lg,
+                padding: spacing.lg,
+                borderWidth: 2,
+                borderColor: colors.border,
+              }}
             >
               {selectedAsset ? (
-                <View style={styles.selectedAssetDisplay}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
                   {renderAssetIcon(selectedAsset.symbol, 44)}
-                  <View style={styles.selectedAssetInfo}>
-                    <Text style={styles.selectedAssetSymbol}>{selectedAsset.symbol}</Text>
-                    <Text style={styles.selectedAssetName}>{selectedAsset.name}</Text>
-                    <Text style={styles.selectedAssetBalance}>
+                  <View style={{ marginLeft: spacing.lg, flex: 1 }}>
+                    <Text variant="title3" weight="800">{selectedAsset.symbol}</Text>
+                    <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>{selectedAsset.name}</Text>
+                    <Text variant="caption" weight="600" color="accent" style={{ marginTop: spacing.xs }}>
                       Balance: {selectedAsset.balance.toFixed(2)} {selectedAsset.symbol}
                     </Text>
                     {/* Show network fee info */}
                     {selectedAsset.symbol === 'MCGP' && (
-                      <Text style={styles.selectedAssetFeeInfo}>Sonic Network • $0 fee</Text>
+                      <Text variant="caption" color="textSecondary" style={{ marginTop: 2, fontStyle: 'italic' }}>Sonic Network • $0 fee</Text>
                     )}
                     {selectedAsset.symbol === 'USDC' && (
-                      <Text style={styles.selectedAssetFeeInfo}>Choose network below</Text>
+                      <Text variant="caption" color="textSecondary" style={{ marginTop: 2, fontStyle: 'italic' }}>Choose network below</Text>
                     )}
                     {selectedAsset.symbol === 'USDT' && (
-                      <Text style={styles.selectedAssetFeeInfo}>Binance Network • $0.80 fee</Text>
+                      <Text variant="caption" color="textSecondary" style={{ marginTop: 2, fontStyle: 'italic' }}>Binance Network • $0.80 fee</Text>
                     )}
                   </View>
                 </View>
               ) : (
-                <View style={styles.placeholderDisplay}>
-                  <Icon name="account-balance-wallet" size={28} color={GOLD_COLORS.primary} />
-                  <Text style={styles.placeholderText}>Select Asset</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                  <Icon name="wallet" size={28} color={colors.accent} />
+                  <Text variant="title3" weight="600" style={{ marginLeft: spacing.md }}>Select Asset</Text>
                 </View>
               )}
-              <Icon name="keyboard-arrow-down" size={32} color={GOLD_COLORS.dark} />
-            </TouchableOpacity>
+              <Icon name="chevronDown" size={32} color={colors.accent} />
+            </PressableScale>
 
             {/* Quick Percentage Selector */}
-            <View style={styles.percentageContainer}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.lg }}>
               {[25, 50, 75, 100].map((percentage) => (
-                <TouchableOpacity
+                <PressableScale
                   key={percentage}
-                  style={styles.percentageButton}
                   onPress={() => handlePercentageSelect(percentage)}
-                  activeOpacity={0.7}
+                  style={{
+                    backgroundColor: colors.surfaceAlt,
+                    paddingHorizontal: spacing.xl,
+                    paddingVertical: spacing.sm,
+                    borderRadius: radius.xl,
+                    minWidth: 70,
+                    alignItems: 'center',
+                  }}
                 >
-                  <Text style={styles.percentageText}>{percentage}%</Text>
-                </TouchableOpacity>
+                  <Text variant="bodySm" weight="700">{percentage}%</Text>
+                </PressableScale>
               ))}
             </View>
-          </View>
+          </Card>
 
           {/* Amount Input */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Amount to Send</Text>
+          <Card style={{ marginTop: spacing.sm, marginHorizontal: spacing.xl, paddingVertical: spacing['2xl'] }}>
+            <Text variant="title2" weight="800" style={{ marginBottom: spacing.lg }}>Amount to Send</Text>
 
-            <View style={styles.amountInputContainer}>
-              <View style={styles.amountInputHeader}>
-                <Text style={styles.amountLabel}>Send Amount</Text>
-                <Text style={styles.balanceText}>
+            <View
+              style={{
+                backgroundColor: colors.surfaceAlt,
+                borderRadius: radius.lg,
+                padding: spacing.xl,
+                marginBottom: spacing.xl,
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: spacing.md,
+                }}
+              >
+                <Text variant="bodySm" weight="600">Send Amount</Text>
+                <Text variant="caption" weight="600" color="accent">
                   Available: {selectedAsset?.balance.toFixed(2) || '0.00'} {selectedAsset?.symbol || ''}
                 </Text>
               </View>
 
-              <View style={styles.amountInputRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <TextInput
-                  style={styles.amountInput}
+                  style={{
+                    flex: 1,
+                    fontSize: 36,
+                    fontFamily: fonts['800'],
+                    color: colors.textPrimary,
+                    padding: 0,
+                  }}
                   value={sendAmount}
                   onChangeText={handleAmountInput}
                   placeholder="0.00"
-                  placeholderTextColor="#999"
+                  placeholderTextColor={colors.textMuted}
                   keyboardType="decimal-pad"
                   returnKeyType="done"
                 />
-                <Text style={styles.amountCurrency}>
+                <Text variant="title2" weight="700" color="accent" style={{ marginLeft: spacing.md }}>
                   {selectedAsset?.symbol || 'USD'}
                 </Text>
               </View>
 
-              <View style={styles.usdValueContainer}>
-                <Text style={styles.usdValueText}>
+              <View style={{ marginTop: spacing.md }}>
+                <Text variant="body" weight="600" color="textSecondary">
                   ≈ ${receiveAmount} USD
                 </Text>
               </View>
@@ -725,107 +877,166 @@ const TransferScreen: React.FC = () => {
 
             {/* Numeric Keypad */}
             {renderNumericKeypad()}
-          </View>
+          </Card>
           {/* Recipient Details */}
           <Animated.View
-            style={[
-              styles.section,
-              {
-                opacity: slideAnimation.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [1, 0.7],
-                }),
-              }
-            ]}
+            style={{
+              opacity: slideAnimation.interpolate({
+                inputRange: [0, 1],
+                outputRange: [1, 0.7],
+              }),
+            }}
           >
-            <Text style={styles.sectionTitle}>
-              {withdrawalMethod === 'internal' ? 'Recipient Details' : 'Recipient Address'}
-            </Text>
+            <Card style={{ marginTop: spacing.sm, marginHorizontal: spacing.xl, paddingVertical: spacing['2xl'] }}>
+              <Text variant="title2" weight="800" style={{ marginBottom: spacing.lg }}>
+                {withdrawalMethod === 'internal' ? 'Recipient Details' : 'Recipient Address'}
+              </Text>
 
-            <View style={styles.recipientContainer}>
-              {withdrawalMethod === 'internal' ? (
-                <>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: colors.surfaceAlt,
+                  borderRadius: radius.lg,
+                  paddingHorizontal: spacing.lg,
+                  marginBottom: spacing.xl,
+                }}
+              >
+                {withdrawalMethod === 'internal' ? (
+                  <>
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        fontSize: type.body.fontSize,
+                        fontFamily: fonts['400'],
+                        color: colors.textPrimary,
+                        paddingVertical: spacing.lg,
+                      }}
+                      value={recipientAddress}
+                      onChangeText={setRecipientAddress}
+                      placeholder="Email / Phone / Binance ID"
+                      placeholderTextColor={colors.textMuted}
+                      keyboardType="default"
+                      autoCapitalize="none"
+                    />
+                    <PressableScale style={{ padding: spacing.sm }}>
+                      <Icon name="scan" size={20} color={colors.accent} />
+                    </PressableScale>
+                  </>
+                ) : (
+                  <>
+                    <TextInput
+                      style={{
+                        flex: 1,
+                        fontSize: type.bodySm.fontSize,
+                        color: colors.textPrimary,
+                        paddingVertical: spacing.lg,
+                        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                      }}
+                      value={recipientAddress}
+                      onChangeText={setRecipientAddress}
+                      placeholder="Enter wallet address (0x...)"
+                      placeholderTextColor={colors.textMuted}
+                      multiline
+                      numberOfLines={2}
+                      autoCapitalize="none"
+                    />
+                    <PressableScale style={{ padding: spacing.sm }}>
+                      <Icon name="scan" size={20} color={colors.accent} />
+                    </PressableScale>
+                  </>
+                )}
+              </View>
+
+              {/* Note to Payee - Only for internal transfers */}
+              {withdrawalMethod === 'internal' && (
+                <View style={{ marginBottom: spacing.xl }}>
+                  <Text variant="bodySm" weight="600" style={{ marginBottom: spacing.sm }}>Note to Payee (Optional)</Text>
                   <TextInput
-                    style={styles.recipientInput}
-                    value={recipientAddress}
-                    onChangeText={setRecipientAddress}
-                    placeholder="Email / Phone / Binance ID"
-                    placeholderTextColor="#999"
-                    keyboardType="default"
-                    autoCapitalize="none"
-                  />
-                  <TouchableOpacity style={styles.scanButton}>
-                    <Icon name="qr-code-scanner" size={20} color={GOLD_COLORS.primary} />
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <>
-                  <TextInput
-                    style={[styles.recipientInput, styles.addressInput]}
-                    value={recipientAddress}
-                    onChangeText={setRecipientAddress}
-                    placeholder="Enter wallet address (0x...)"
-                    placeholderTextColor="#999"
+                    style={{
+                      backgroundColor: colors.surfaceAlt,
+                      borderRadius: radius.md,
+                      padding: spacing.lg,
+                      fontSize: type.bodySm.fontSize,
+                      fontFamily: fonts['400'],
+                      color: colors.textPrimary,
+                      minHeight: 80,
+                      textAlignVertical: 'top',
+                    }}
+                    value={noteToPayee}
+                    onChangeText={setNoteToPayee}
+                    placeholder="Add a note..."
+                    placeholderTextColor={colors.textMuted}
                     multiline
                     numberOfLines={2}
-                    autoCapitalize="none"
+                    maxLength={100}
                   />
-                  <TouchableOpacity style={styles.scanButton}>
-                    <Icon name="qr-code-scanner" size={20} color={GOLD_COLORS.primary} />
-                  </TouchableOpacity>
-                </>
+                  <Text variant="caption" color="textSecondary" align="right" style={{ marginTop: spacing.xs }}>
+                    {noteToPayee.length}/100
+                  </Text>
+                </View>
               )}
-            </View>
 
-            {/* Note to Payee - Only for internal transfers */}
-            {withdrawalMethod === 'internal' && (
-              <View style={styles.noteContainer}>
-                <Text style={styles.noteLabel}>Note to Payee (Optional)</Text>
-                <TextInput
-                  style={styles.noteInput}
-                  value={noteToPayee}
-                  onChangeText={setNoteToPayee}
-                  placeholder="Add a note..."
-                  placeholderTextColor="#999"
-                  multiline
-                  numberOfLines={2}
-                  maxLength={100}
-                />
-                <Text style={styles.noteCounter}>
-                  {noteToPayee.length}/100
+              {/* Payee Will Receive - Based on image 3 */}
+              <View
+                style={{
+                  backgroundColor: colors.surfaceAlt,
+                  borderRadius: radius.lg,
+                  padding: spacing.xl,
+                  alignItems: 'center',
+                }}
+              >
+                <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.md }}>Payee will Receive</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', marginBottom: spacing.sm }}>
+                  <Text variant="bodyMed" weight="600" color="textSecondary" style={{ marginRight: spacing.sm }}>USD</Text>
+                  <Text variant="title1" weight="800">${receiveAmount}</Text>
+                </View>
+                <Text variant="caption" color="textSecondary" align="center">
+                  {withdrawalMethod === 'internal'
+                    ? 'Recipient will receive in their preferred currency'
+                    : `Amount after ${selectedNetwork?.fee ? `$${selectedNetwork.fee.toFixed(2)} network fee` : 'network fees'}`
+                  }
                 </Text>
               </View>
-            )}
-
-            {/* Payee Will Receive - Based on image 3 */}
-            <View style={styles.receiveContainer}>
-              <Text style={styles.receiveLabel}>Payee will Receive</Text>
-              <View style={styles.receiveAmountContainer}>
-                <Text style={styles.receiveCurrency}>USD</Text>
-                <Text style={styles.receiveAmount}>${receiveAmount}</Text>
-              </View>
-              <Text style={styles.receiveNote}>
-                {withdrawalMethod === 'internal'
-                  ? 'Recipient will receive in their preferred currency'
-                  : `Amount after ${selectedNetwork?.fee ? `$${selectedNetwork.fee.toFixed(2)} network fee` : 'network fees'}`
-                }
-              </Text>
-            </View>
+            </Card>
           </Animated.View>
 
           {/* Fee Summary */}
-          <View style={styles.feeSection}>
-            <View style={styles.feeRow}>
-              <Text style={styles.feeLabel}>Network Fee</Text>
-              <Text style={styles.feeValue}>${feeDetails.fee.toFixed(2)}</Text>
+          <Card style={{ marginTop: spacing.sm, marginHorizontal: spacing.xl, paddingVertical: spacing.xl }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" color="textSecondary">Network Fee</Text>
+              <Text variant="bodySm" weight="600">${feeDetails.fee.toFixed(2)}</Text>
             </View>
-            <View style={styles.feeRow}>
-              <Text style={styles.feeLabel}>Total Amount</Text>
-              <Text style={styles.totalValue}>${feeDetails.total.toFixed(2)}</Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" color="textSecondary">Total Amount</Text>
+              <Text variant="title3" weight="800" color="accent">${feeDetails.total.toFixed(2)}</Text>
             </View>
-            <View style={styles.feeNote}>
-              <Icon name="info" size={14} color={GOLD_COLORS.dark} />
-              <Text style={styles.feeNoteText}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                marginTop: spacing.md,
+                paddingTop: spacing.md,
+                borderTopWidth: 1,
+                borderTopColor: colors.hairline,
+              }}
+            >
+              <Icon name="info" size={14} color={colors.accent} />
+              <Text variant="caption" color="accent" style={{ marginLeft: spacing.sm, flex: 1 }}>
                 {selectedAsset?.symbol === 'MCGP'
                   ? 'MCGP transactions are free on Sonic Network'
                   : selectedAsset?.symbol === 'USDC'
@@ -836,37 +1047,39 @@ const TransferScreen: React.FC = () => {
                 }
               </Text>
             </View>
-          </View>
+          </Card>
 
           {/* Send Button */}
-          <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
-            <TouchableOpacity
-              style={[
-                styles.sendButton,
-                (!selectedAsset || !selectedNetwork || !sendAmount || !recipientAddress) &&
-                styles.sendButtonDisabled
-              ]}
+          <Animated.View
+            style={{
+              transform: [{ scale: buttonScale }],
+              marginHorizontal: spacing.xl,
+              marginTop: spacing['2xl'],
+              marginBottom: spacing.xl,
+            }}
+          >
+            <Button
+              title={`Send Now ${selectedNetwork?.fee ? `($${selectedNetwork.fee.toFixed(2)} fee)` : '(No fee)'}`}
               onPress={handleSend}
-              disabled={isLoading || !selectedAsset || !selectedNetwork || !sendAmount || !recipientAddress}
-              activeOpacity={0.8}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color="#000000" />
-              ) : (
-                <>
-                  <Icon name="send" size={20} color="#000000" style={styles.sendIcon} />
-                  <Text style={styles.sendButtonText}>
-                    Send Now {selectedNetwork?.fee ? `($${selectedNetwork.fee.toFixed(2)} fee)` : '(No fee)'}
-                  </Text>
-                </>
-              )}
-            </TouchableOpacity>
+              loading={isLoading}
+              disabled={!selectedAsset || !selectedNetwork || !sendAmount || !recipientAddress}
+              size="lg"
+              leftIcon="send"
+            />
           </Animated.View>
 
           {/* Security Note */}
-          <View style={styles.securityNote}>
-            <Icon name="security" size={16} color={GOLD_COLORS.dark} />
-            <Text style={styles.securityText}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              paddingBottom: spacing['3xl'],
+              marginHorizontal: spacing.xl,
+            }}
+          >
+            <Icon name="shield" size={16} color={colors.accent} />
+            <Text variant="caption" color="accent" style={{ marginLeft: spacing.sm }}>
               Your transaction is secured with bank-level encryption
             </Text>
           </View>
@@ -879,624 +1092,13 @@ const TransferScreen: React.FC = () => {
   );
 };
 
-// Styles
+// Static layout-only styles (no colors). Colors/spacing that depend on the theme
+// are inlined via useTheme() at render time.
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD_COLORS.background,
-  },
-  scrollContainer: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 10 : 20,
-    paddingBottom: 20,
-    backgroundColor: '#FFFFFF',
-  },
-  backButton: {
-    padding: 8,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  helpButton: {
-    padding: 8,
-  },
-  section: {
-    backgroundColor: '#FFFFFF',
-    marginTop: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 24,
-    borderRadius: 16,
-    marginHorizontal: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-    marginBottom: 16,
-  },
-  sectionSubtitle: {
-    fontSize: 14,
-    color: '#666666',
-    marginBottom: 20,
-  },
-  networkInfoContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    padding: 12,
-    borderRadius: 12,
-    marginBottom: 16,
-  },
-  networkInfoText: {
-    fontSize: 13,
-    color: GOLD_COLORS.dark,
-    marginLeft: 8,
-    flex: 1,
-    fontWeight: '600',
-  },
-  methodContainer: {
-    gap: 12,
-  },
-  methodCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  selectedMethodCard: {
-    backgroundColor: '#FFF8E1',
-    borderColor: GOLD_COLORS.primary,
-  },
-  methodIconContainer: {
-    marginRight: 16,
-  },
-  methodInfo: {
-    flex: 1,
-  },
-  methodTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  selectedMethodTitle: {
-    color: GOLD_COLORS.dark,
-  },
-  methodDescription: {
-    fontSize: 13,
-    color: '#666666',
-  },
-  promoBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.primary,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginTop: 8,
-    alignSelf: 'flex-start',
-  },
-  promoText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#000000',
-    marginLeft: 4,
-  },
-  assetSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 2,
-    borderColor: GOLD_COLORS.muted,
-  },
-  selectedAssetDisplay: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  assetIcon: {
-    backgroundColor: GOLD_COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  assetIconText: {
-    color: '#000000',
-    fontWeight: '900',
-  },
-  selectedAssetInfo: {
-    marginLeft: 16,
-    flex: 1,
-  },
-  selectedAssetSymbol: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  selectedAssetName: {
-    fontSize: 14,
-    color: '#666666',
-    marginTop: 2,
-  },
-  selectedAssetBalance: {
-    fontSize: 13,
-    color: GOLD_COLORS.dark,
-    marginTop: 6,
-    fontWeight: '600',
-  },
-  selectedAssetFeeInfo: {
-    fontSize: 12,
-    color: '#666666',
-    marginTop: 2,
-    fontStyle: 'italic',
-  },
-  placeholderDisplay: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  placeholderText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000000',
-    marginLeft: 12,
-  },
-  percentageContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 16,
-  },
-  percentageButton: {
-    backgroundColor: GOLD_COLORS.light,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    minWidth: 70,
-    alignItems: 'center',
-  },
-  percentageText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  amountInputContainer: {
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  amountInputHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  amountLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-  },
-  balanceText: {
-    fontSize: 13,
-    color: GOLD_COLORS.dark,
-    fontWeight: '600',
-  },
-  amountInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  amountInput: {
-    flex: 1,
-    fontSize: 36,
-    fontWeight: '800',
-    color: '#000000',
-    padding: 0,
-  },
-  amountCurrency: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: GOLD_COLORS.dark,
-    marginLeft: 12,
-  },
-  usdValueContainer: {
-    marginTop: 12,
-  },
-  usdValueText: {
-    fontSize: 16,
-    color: '#666666',
-    fontWeight: '600',
-  },
-  keypadContainer: {
-    marginTop: 10,
-  },
   keypadRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 12,
-  },
-  keypadKey: {
-    width: (Dimensions.get('window').width - 80) / 3,
-    height: 60,
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  keypadKeyText: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  networkScroll: {
-    marginHorizontal: -20,
-    paddingHorizontal: 20,
-  },
-  networkCard: {
-    width: 180,
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    padding: 16,
-    marginRight: 12,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  selectedNetworkCard: {
-    backgroundColor: '#FFF8E1',
-    borderColor: GOLD_COLORS.primary,
-  },
-  disabledNetworkCard: {
-    opacity: 0.5,
-  },
-  networkCardContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  networkIconContainer: {
-    marginRight: 12,
-  },
-  networkIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#E5E5EA',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  selectedNetworkIcon: {
-    backgroundColor: GOLD_COLORS.primary,
-  },
-  networkIconText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  networkInfo: {
-    flex: 1,
-  },
-  networkHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  networkName: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-    flex: 1,
-  },
-  selectedNetworkName: {
-    color: GOLD_COLORS.dark,
-  },
-  selectedNetworkBadge: {
-    marginLeft: 4,
-  },
-  networkDetails: {
-    gap: 6,
-  },
-  networkDetailItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  networkDetailText: {
-    fontSize: 12,
-    color: '#666666',
-    marginLeft: 4,
-  },
-  unavailableOverlay: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    backgroundColor: GOLD_COLORS.error,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  unavailableText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  noNetworksContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 30,
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-  },
-  noNetworksText: {
-    fontSize: 14,
-    color: GOLD_COLORS.error,
-    fontWeight: '600',
-    marginTop: 12,
-    textAlign: 'center',
-  },
-  recipientContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    marginBottom: 20,
-  },
-  recipientInput: {
-    flex: 1,
-    fontSize: 16,
-    color: '#000000',
-    paddingVertical: 16,
-  },
-  addressInput: {
-    fontSize: 14,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  scanButton: {
-    padding: 8,
-  },
-  noteContainer: {
-    marginBottom: 20,
-  },
-  noteLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 8,
-  },
-  noteInput: {
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 14,
-    color: '#000000',
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
-  noteCounter: {
-    fontSize: 12,
-    color: '#666666',
-    textAlign: 'right',
-    marginTop: 4,
-  },
-  receiveContainer: {
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 16,
-    padding: 20,
-    alignItems: 'center',
-  },
-  receiveLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#666666',
-    marginBottom: 12,
-  },
-  receiveAmountContainer: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    marginBottom: 8,
-  },
-  receiveCurrency: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#666666',
-    marginRight: 8,
-  },
-  receiveAmount: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  receiveNote: {
-    fontSize: 13,
-    color: '#666666',
-    textAlign: 'center',
-  },
-  feeSection: {
-    backgroundColor: '#FFFFFF',
-    marginTop: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    borderRadius: 16,
-    marginHorizontal: 20,
-  },
-  feeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  feeLabel: {
-    fontSize: 15,
-    color: '#666666',
-  },
-  feeValue: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#000000',
-  },
-  totalValue: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: GOLD_COLORS.dark,
-  },
-  feeNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#F2F2F7',
-  },
-  feeNoteText: {
-    fontSize: 12,
-    color: GOLD_COLORS.dark,
-    marginLeft: 8,
-    flex: 1,
-  },
-  sendButton: {
-    backgroundColor: GOLD_COLORS.primary,
-    marginHorizontal: 20,
-    marginTop: 24,
-    marginBottom: 20,
-    borderRadius: 16,
-    paddingVertical: 20,
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    shadowColor: GOLD_COLORS.dark,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  sendButtonDisabled: {
-    opacity: 0.5,
-  },
-  sendIcon: {
-    marginRight: 12,
-  },
-  sendButtonText: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#000000',
-  },
-  securityNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingBottom: 30,
-    marginHorizontal: 20,
-  },
-  securityText: {
-    fontSize: 12,
-    color: GOLD_COLORS.dark,
-    marginLeft: 8,
-  },
-  // Modal Styles
-  modalOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modalContent: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    width: '100%',
-    maxWidth: 400,
-    maxHeight: '70%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.25,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F2F2F7',
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  modalCloseButton: {
-    padding: 4,
-  },
-  assetList: {
-    padding: 20,
-  },
-  assetOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F2F2F7',
-  },
-  selectedAssetOption: {
-    backgroundColor: GOLD_COLORS.light,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-  },
-  assetOptionInfo: {
-    flex: 1,
-    marginLeft: 16,
-  },
-  assetOptionSymbol: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  assetOptionName: {
-    fontSize: 14,
-    color: '#666666',
-    marginTop: 2,
-  },
-  assetNetworkInfo: {
-    fontSize: 12,
-    color: GOLD_COLORS.dark,
-    marginTop: 4,
-    fontStyle: 'italic',
-  },
-  assetOptionBalance: {
-    alignItems: 'flex-end',
-    marginRight: 12,
-  },
-  assetOptionBalanceText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  assetOptionUSDValue: {
-    fontSize: 13,
-    color: '#34C759',
-    marginTop: 4,
-    fontWeight: '600',
   },
 });
 

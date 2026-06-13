@@ -42,6 +42,9 @@ type ServiceContactHandler struct {
 	Config                *config.Config
 	BlockchainService     *services.BlockchainService
 	ServiceContactService *services.ServiceContactService
+	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
+	// main.go. Used via settleFeeEarnings.
+	FeeService *services.FeeDistributionService
 }
 
 // NewServiceContactHandler creates a new ServiceContactHandler.
@@ -355,24 +358,22 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		return
 	}
 
-	if err := DistributeTPEarnings(config.DB, user.ID, "service_contact", payment.ID, 0.10); err != nil {
+	// System fee for TP distribution = the $0.10 contact fee, read from the
+	// service_contact fee_config row (seeded to FlatAmountUSD = 0.10).
+	// Fee settlement (see settleFeeEarnings).
+	// Documented-GLOBAL (chainID nil) — Sonic-only service-contact flow (§6).
+	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol, nil)
+	providerID := provider.ID
+	if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
+		Feature:    models.FeatureServiceContact,
+		Token:      tokenSymbol,
+		FeeUSD:     contactFeeUSD,
+		UserID:     user.ID,
+		ProviderID: &providerID, // service_contact carries a 10% provider cashback
+		SourceType: "service_contact",
+		SourceID:   payment.ID,
+	}); err != nil {
 		log.Printf("TP distribution failed for service contact %s: %v", payment.ID, err)
-	}
-
-	// Record cashback for caller (12.5% of fee) — matches ServiceContact CALLER_BPS
-	feeWei := h.ServiceContactService.GetFeeAmount()
-	feeUSD := weiToUSDFloat(feeWei.String(), tokenSymbol)
-	callerCashbackUSD := feeUSD * 0.125
-	if err := RecordCashbackEarning(config.DB, user.ID, provider.ID, "service_contact", payment.ID, callerCashbackUSD, req.PayFeeTxHash); err != nil {
-		log.Printf("Cashback recording failed for caller on service contact %s: %v", payment.ID, err)
-	}
-
-	// Record cashback for caller's upline (12.5% of fee) — matches ServiceContact UPLINE_BPS
-	if user.ReferredBy != nil {
-		uplineCashbackUSD := feeUSD * 0.125
-		if err := RecordCashbackEarning(config.DB, *user.ReferredBy, user.ID, "service_contact", payment.ID, uplineCashbackUSD, req.PayFeeTxHash); err != nil {
-			log.Printf("Cashback recording failed for upline on service contact %s: %v", payment.ID, err)
-		}
 	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Contact fee paid successfully", gin.H{

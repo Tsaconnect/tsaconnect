@@ -1,67 +1,58 @@
+// app/merchants/inventory/edit/[productId].tsx
+//
+// Edit inventory product — prefill an existing product (from a passed
+// productData param or a getProductById fetch), edit every field, then
+// updateProduct (multipart FormData) or deleteProduct. Restyled onto the TSA
+// Signature design system (@/theme tokens + @/components/ui primitives).
+//
+// VISUAL/STRUCTURAL restyle ONLY. All logic is preserved verbatim: the prefill
+// (loadProduct: productData-param JSON fast path → getProductById fallback,
+// location string split, category id/name resolution, http-only existing image
+// URL filter, attribute mapping), fetchCategories, the expo-image-picker
+// gallery/camera flows (local URIs appended to FormData), validateForm, the
+// updateProduct FormData assembly (existingImages JSON, new image multipart
+// parts, name/description/price/stock/category/location/contact/shipping/
+// attributes), handleDeleteProduct (Alert.alert destructive confirm), the
+// shipping base-fee → zone auto-fill (applyBaseShippingFee / applyPackagePreset
+// via calculateZoneRates), all refs/focus chaining, and the showModal-driven
+// success/error/info dialog + post-update router.back() timing.
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
-  Text,
   TextInput,
-  Pressable,
   ScrollView,
-  StyleSheet,
   Image,
   Modal,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
-  ActivityIndicator,
   TouchableOpacity,
   Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
-import Icon from 'react-native-vector-icons/MaterialIcons';
 import * as ImagePicker from 'expo-image-picker';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
-import LocationPicker from "../../../../components/common/LocationPicker";
+import LocationPicker from '../../../../components/common/LocationPicker';
 import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
-
-const { width } = Dimensions.get('window');
-
-const COLORS = {
-  primary: '#8B4513',
-  primaryLight: '#A0522D',
-  primaryDark: '#654321',
-  secondary: '#D2691E',
-  accent: '#DEB887',
-  background: '#F5F5DC',
-  surface: '#FFF8DC',
-  text: '#333333',
-  textLight: '#666666',
-  textLighter: '#999999',
-  border: '#D2B48C',
-  success: '#228B22',
-  error: '#DC143C',
-  warning: '#FF8C00',
-  white: '#FFFFFF',
-  gray: '#E8E8E8',
-  darkGray: '#A9A9A9',
-};
-
-const CategoryAvatar = ({ category }: { category: any }) => {
-  if (category.icon) {
-    return (
-      <Image source={{ uri: category.icon }} style={styles.categoryItemImage} />
-    );
-  }
-  const initial = (category.title || '?')[0].toUpperCase();
-  const bgColor = category.color || COLORS.primary;
-  return (
-    <View style={[styles.categoryItemAvatar, { backgroundColor: bgColor }]}>
-      <Text style={styles.categoryItemAvatarText}>{initial}</Text>
-    </View>
-  );
-};
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Avatar,
+  Button,
+  Card,
+  Divider,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Sheet,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
 const EditProduct = () => {
+  const { colors, spacing, radius } = useTheme();
   const { productId, productData: productDataParam } = useLocalSearchParams<{
     productId: string;
     productData?: string;
@@ -79,7 +70,7 @@ const EditProduct = () => {
   const [stock, setStock] = useState('0');
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
-  const [location, setLocation] = useState({ country: "", state: "", city: "" });
+  const [location, setLocation] = useState({ country: '', state: '', city: '' });
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -116,10 +107,6 @@ const EditProduct = () => {
   const maxDescriptionLength = 500;
 
   const descriptionRef = useRef<TextInput>(null);
-  const priceRef = useRef<TextInput>(null);
-  const stockRef = useRef<TextInput>(null);
-  const locationRef = useRef<TextInput>(null);
-  const phoneRef = useRef<TextInput>(null);
   const emailRef = useRef<TextInput>(null);
   const companyRef = useRef<TextInput>(null);
   const scrollRef = useRef<ScrollView>(null);
@@ -150,16 +137,16 @@ const EditProduct = () => {
       }
 
       if (product) {
-        setActualProductId(product.id || product._id || productId as string);
+        setActualProductId(product.id || product._id || (productId as string));
         setProductName(product.name || '');
         setDescription(product.description || '');
         setPrice(product.price?.toString() || '');
         setStock(product.stock?.toString() || '0');
-        const parts = (product.location || "").split(", ");
+        const parts = (product.location || '').split(', ');
         setLocation({
-          city: parts.length >= 3 ? parts[0] : "",
-          state: parts.length >= 2 ? parts[parts.length - 2] : "",
-          country: parts.length >= 1 ? parts[parts.length - 1] : "",
+          city: parts.length >= 3 ? parts[0] : '',
+          state: parts.length >= 2 ? parts[parts.length - 2] : '',
+          country: parts.length >= 1 ? parts[parts.length - 1] : '',
         });
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
@@ -170,8 +157,10 @@ const EditProduct = () => {
         setShippingInternational(product.shippingInternational?.toString() || '');
 
         // Category
-        const catId = typeof product.category === 'string' ? product.category :
-          (product.category as any)?.id || (product.category as any)?._id || '';
+        const catId =
+          typeof product.category === 'string'
+            ? product.category
+            : (product.category as any)?.id || (product.category as any)?._id || '';
         setCategoryId(catId);
         setCategoryName(product.categoryName || '');
 
@@ -185,10 +174,12 @@ const EditProduct = () => {
 
         // Attributes
         if (product.attributes?.length) {
-          setAttributes(product.attributes.map((a: any) => ({
-            name: a.name || '',
-            value: a.value || '',
-          })));
+          setAttributes(
+            product.attributes.map((a: any) => ({
+              name: a.name || '',
+              value: a.value || '',
+            }))
+          );
         }
       }
     } catch (error) {
@@ -229,8 +220,8 @@ const EditProduct = () => {
         selectionLimit: 10 - totalImages,
       });
       if (!result.canceled && result.assets.length > 0) {
-        const picked = result.assets.map(asset => asset.uri);
-        setNewImages(prev => [...prev, ...picked].slice(0, 10 - existingImageUrls.length));
+        const picked = result.assets.map((asset) => asset.uri);
+        setNewImages((prev) => [...prev, ...picked].slice(0, 10 - existingImageUrls.length));
       }
     } catch (error) {
       showModal('error', 'Failed to pick images');
@@ -250,7 +241,7 @@ const EditProduct = () => {
         quality: 0.8,
       });
       if (!result.canceled && result.assets[0]) {
-        setNewImages(prev => [...prev, result.assets[0].uri].slice(0, 10 - existingImageUrls.length));
+        setNewImages((prev) => [...prev, result.assets[0].uri].slice(0, 10 - existingImageUrls.length));
       }
     } catch (error) {
       showModal('error', 'Failed to take photo');
@@ -258,11 +249,11 @@ const EditProduct = () => {
   };
 
   const removeExistingImage = (index: number) => {
-    setExistingImageUrls(prev => prev.filter((_, i) => i !== index));
+    setExistingImageUrls((prev) => prev.filter((_, i) => i !== index));
   };
 
   const removeNewImage = (index: number) => {
-    setNewImages(prev => prev.filter((_, i) => i !== index));
+    setNewImages((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleAddAttribute = () => {
@@ -348,7 +339,7 @@ const EditProduct = () => {
         formData.append('attributes', JSON.stringify(attributes));
       }
 
-      const updateId = actualProductId || productId as string;
+      const updateId = actualProductId || (productId as string);
       const response = await api.updateProduct(updateId, formData);
 
       if (response.success) {
@@ -381,7 +372,7 @@ const EditProduct = () => {
           onPress: async () => {
             try {
               setLoading(true);
-              const deleteId = actualProductId || productId as string;
+              const deleteId = actualProductId || (productId as string);
               const response = await api.deleteProduct(deleteId);
               if (response.success) {
                 showModal('success', 'Product deleted');
@@ -408,734 +399,624 @@ const EditProduct = () => {
 
   const totalImages = existingImageUrls.length + newImages.length;
 
+  // Visual helpers for the success/error/info dialog.
+  const modalTone =
+    modalType === 'success' ? colors.success : modalType === 'error' ? colors.danger : colors.warning;
+  const modalToneBg =
+    modalType === 'success' ? colors.successBg : modalType === 'error' ? colors.dangerBg : colors.warningBg;
+  const modalIcon =
+    modalType === 'success' ? 'checkCircle' : modalType === 'error' ? 'closeCircle' : 'info';
+
+  const filteredCategories = categories.filter(
+    (item) => !categorySearch || item.title?.toLowerCase().includes(categorySearch.toLowerCase())
+  );
+
   if (initialLoading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading product...</Text>
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading product..." />
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.container}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      <LinearGradient
-        colors={[COLORS.background, COLORS.surface]}
-        style={styles.gradientBackground}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{ flex: 1 }}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
+        {/* Header */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            paddingHorizontal: spacing.lg,
+            paddingVertical: spacing.sm,
+            borderBottomWidth: 1,
+            borderBottomColor: colors.hairline,
+          }}
+        >
+          <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
+          <Text variant="title3" weight="700">
+            Edit Product
+          </Text>
+          <IconButton
+            icon="trash"
+            accessibilityLabel="Delete product"
+            color={colors.danger}
+            disabled={loading}
+            onPress={handleDeleteProduct}
+          />
+        </View>
+
         <ScrollView
           ref={scrollRef}
-          style={styles.scrollView}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
-          <View style={styles.header}>
-            <Pressable style={styles.backButton} onPress={() => router.back()}>
-              <Icon name="arrow-back" size={28} color={COLORS.primary} />
-            </Pressable>
-            <Text style={styles.headerTitle}>Edit Product</Text>
-            <Pressable style={styles.deleteButton} onPress={handleDeleteProduct} disabled={loading}>
-              <Icon name="delete" size={24} color={COLORS.error} />
-            </Pressable>
-          </View>
+          {/* Basic Information */}
+          <Card style={{ marginBottom: spacing.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="info" size={20} color={colors.accent} />
+              <Text variant="bodyMed" weight="700">
+                Basic Information
+              </Text>
+            </View>
+            <Divider spacing="sm" />
 
-          <View style={styles.formContainer}>
-            {/* Basic Information */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="info" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Basic Information</Text>
-              </View>
+            <View style={{ gap: spacing.md, marginTop: spacing.sm }}>
+              <Input
+                label="Product Name *"
+                placeholder="Enter product name"
+                value={productName}
+                onChangeText={setProductName}
+                returnKeyType="next"
+                onSubmitEditing={() => descriptionRef.current?.focus()}
+                error={errors.productName}
+              />
 
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Product Name *</Text>
-                <TextInput
-                  style={[styles.input, errors.productName && styles.inputError]}
-                  placeholder="Enter product name"
-                  placeholderTextColor={COLORS.textLighter}
-                  value={productName}
-                  onChangeText={setProductName}
-                  returnKeyType="next"
-                  onSubmitEditing={() => descriptionRef.current?.focus()}
-                />
-                {errors.productName && <Text style={styles.errorText}>{errors.productName}</Text>}
-              </View>
+              <Input
+                ref={descriptionRef}
+                label="Description *"
+                placeholder="Describe your product..."
+                value={description}
+                onChangeText={setDescription}
+                multiline
+                numberOfLines={4}
+                maxLength={maxDescriptionLength}
+                counter
+                inputStyle={{ minHeight: 80, textAlignVertical: 'top' } as any}
+                error={errors.description}
+              />
 
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Description *</Text>
-                <View style={[styles.textAreaContainer, errors.description && styles.inputError]}>
-                  <TextInput
-                    ref={descriptionRef}
-                    style={styles.textArea}
-                    placeholder="Describe your product..."
-                    placeholderTextColor={COLORS.textLighter}
-                    multiline
-                    numberOfLines={4}
-                    value={description}
-                    onChangeText={setDescription}
-                    maxLength={maxDescriptionLength}
-                  />
-                  <Text style={styles.charCount}>{description.length}/{maxDescriptionLength}</Text>
-                </View>
-                {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
-              </View>
-
-              <View style={styles.row}>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Price ($) *</Text>
-                  <TextInput
-                    ref={priceRef}
-                    style={[styles.input, errors.price && styles.inputError]}
-                    placeholder="0.00"
-                    placeholderTextColor={COLORS.textLighter}
-                    keyboardType="decimal-pad"
-                    value={price}
-                    onChangeText={setPrice}
-                  />
-                  {errors.price && <Text style={styles.errorText}>{errors.price}</Text>}
-                  <Text style={styles.feeHint}>2% platform fee applies per sale</Text>
-                </View>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Stock *</Text>
-                  <TextInput
-                    ref={stockRef}
-                    style={[styles.input, errors.stock && styles.inputError]}
-                    placeholder="0"
-                    placeholderTextColor={COLORS.textLighter}
-                    keyboardType="number-pad"
-                    value={stock}
-                    onChangeText={setStock}
-                  />
-                  {errors.stock && <Text style={styles.errorText}>{errors.stock}</Text>}
-                </View>
-              </View>
-
-              {/* Shipping Rates */}
-              <Text style={[styles.label, { marginTop: 8, marginBottom: 4, fontWeight: '700' }]}>Shipping Rates ($)</Text>
-
-              <Text style={[styles.label, { marginTop: 4, marginBottom: 6 }]}>Package size (quick-select)</Text>
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
-                {PACKAGE_SIZE_PRESETS.map((preset) => (
-                  <TouchableOpacity
-                    key={preset.key}
-                    style={{ flex: 1, minWidth: 90, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 12, borderWidth: 1, borderColor: '#E0E0E0', backgroundColor: '#FAFAFA', alignItems: 'center' }}
-                    onPress={() => applyPackagePreset(preset.baseFee)}
-                  >
-                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#1A1A1A', textAlign: 'center' }}>{preset.label}</Text>
-                    <Text style={{ fontSize: 11, color: COLORS.primary, marginTop: 2, fontWeight: '600' }}>${preset.baseFee}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Base shipping fee ($)</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. 2.00"
-                  placeholderTextColor={COLORS.textLighter}
+              <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Price ($) *"
+                  placeholder="0.00"
                   keyboardType="decimal-pad"
-                  value={baseShippingFee}
-                  onChangeText={applyBaseShippingFee}
+                  value={price}
+                  onChangeText={setPrice}
+                  error={errors.price}
+                  helper={errors.price ? undefined : '2% platform fee applies per sale'}
                 />
-                <Text style={{ fontSize: 11, color: '#888', marginTop: 4, fontStyle: 'italic' }}>
-                  Auto-fills zone rates below. Edit any zone to override.
-                </Text>
-              </View>
-
-              <View style={styles.row}>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same Residential Area</Text>
-                  <TextInput style={[styles.input, { backgroundColor: '#f0f0f0', color: '#888' }]} value="Free" editable={false} />
-                </View>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same City</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCity} onChangeText={setShippingSameCity} />
-                </View>
-              </View>
-              <View style={styles.row}>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same State</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameState} onChangeText={setShippingSameState} />
-                </View>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>Same Country</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingSameCountry} onChangeText={setShippingSameCountry} />
-                </View>
-              </View>
-              <View style={styles.row}>
-                <View style={[styles.formGroup, styles.halfWidth]}>
-                  <Text style={styles.label}>International</Text>
-                  <TextInput style={styles.input} placeholder="0.00" placeholderTextColor={COLORS.textLighter} keyboardType="decimal-pad" value={shippingInternational} onChangeText={setShippingInternational} />
-                </View>
-              </View>
-
-              {/* Category Picker */}
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Category *</Text>
-                {categoriesLoading ? (
-                  <View style={styles.categoryLoadingRow}>
-                    <ActivityIndicator size="small" color={COLORS.primary} />
-                    <Text style={styles.categoryLoadingText}>Loading categories...</Text>
-                  </View>
-                ) : (
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    style={[
-                      styles.categorySelector,
-                      errors.category && styles.categorySelectorError,
-                      categoryId ? styles.categorySelectorSelected : undefined,
-                    ]}
-                    onPress={() => {
-                      setCategorySearch('');
-                      setCategoryModalVisible(true);
-                    }}
-                  >
-                    {categoryId ? (
-                      <View style={styles.categorySelectorValue}>
-                        <CategoryAvatar category={categories.find(c => (c.id || c._id) === categoryId) || { title: categoryName }} />
-                        <Text style={styles.categorySelectorText}>{categoryName}</Text>
-                      </View>
-                    ) : (
-                      <Text style={styles.categorySelectorPlaceholder}>Select a category</Text>
-                    )}
-                    <Icon name="keyboard-arrow-down" size={24} color={COLORS.textLight} />
-                  </TouchableOpacity>
-                )}
-                {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
-              </View>
-
-              {/* Category Modal */}
-              <Modal
-                visible={categoryModalVisible}
-                animationType="slide"
-                transparent
-                onRequestClose={() => setCategoryModalVisible(false)}
-              >
-                <View style={styles.pickerOverlay}>
-                  <Pressable style={styles.pickerOverlayDismiss} onPress={() => setCategoryModalVisible(false)} />
-                  <View style={styles.pickerModal}>
-                    <View style={styles.pickerModalHeader}>
-                      <Text style={styles.pickerModalTitle}>Select Category</Text>
-                      <TouchableOpacity onPress={() => setCategoryModalVisible(false)}>
-                        <Icon name="close" size={24} color={COLORS.textLight} />
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.categorySearchContainer}>
-                      <Icon name="search" size={20} color={COLORS.textLight} />
-                      <TextInput
-                        style={styles.categorySearchInput}
-                        placeholder="Search categories..."
-                        placeholderTextColor={COLORS.textLighter}
-                        value={categorySearch}
-                        onChangeText={setCategorySearch}
-                        autoCapitalize="none"
-                      />
-                      {categorySearch.length > 0 && (
-                        <TouchableOpacity onPress={() => setCategorySearch('')}>
-                          <Icon name="close" size={18} color={COLORS.textLight} />
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                    <ScrollView keyboardShouldPersistTaps="handled">
-                      {categories
-                        .filter(item => !categorySearch || item.title.toLowerCase().includes(categorySearch.toLowerCase()))
-                        .map((item, index) => {
-                          const itemId = item.id || item._id;
-                          const isSelected = categoryId === itemId;
-                          return (
-                            <TouchableOpacity
-                              key={itemId || index.toString()}
-                              style={[styles.categoryListItem, isSelected && styles.categoryListItemSelected]}
-                              onPress={() => {
-                                setCategoryId(itemId);
-                                setCategoryName(item.title);
-                                setErrors(prev => { const { category, ...rest } = prev; return rest; });
-                                setCategoryModalVisible(false);
-                              }}
-                            >
-                              <CategoryAvatar category={item} />
-                              <View style={styles.categoryListItemInfo}>
-                                <Text style={[styles.categoryListItemTitle, isSelected && styles.categoryListItemTitleSelected]}>
-                                  {item.title}
-                                </Text>
-                                {item.description ? (
-                                  <Text style={styles.categoryListItemDesc} numberOfLines={1}>{item.description}</Text>
-                                ) : null}
-                              </View>
-                              {isSelected && <Icon name="check-circle" size={22} color={COLORS.primary} />}
-                            </TouchableOpacity>
-                          );
-                        })}
-                    </ScrollView>
-                  </View>
-                </View>
-              </Modal>
-            </View>
-
-            {/* Contact Information */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="contact-phone" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Contact Information</Text>
-              </View>
-
-              <View style={styles.formGroup}>
-                <LocationPicker
-                  value={location}
-                  onChange={setLocation}
-                  required={["country", "state"]}
-                />
-                {errors.location && <Text style={styles.errorText}>{errors.location}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Phone Number *</Text>
-                <TextInput
-                  ref={phoneRef}
-                  style={[styles.input, errors.phoneNumber && styles.inputError]}
-                  placeholder="Enter phone number"
-                  placeholderTextColor={COLORS.textLighter}
-                  keyboardType="phone-pad"
-                  value={phoneNumber}
-                  onChangeText={setPhoneNumber}
-                  returnKeyType="next"
-                  onSubmitEditing={() => emailRef.current?.focus()}
-                />
-                {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Email *</Text>
-                <TextInput
-                  ref={emailRef}
-                  style={[styles.input, errors.email && styles.inputError]}
-                  placeholder="Enter email address"
-                  placeholderTextColor={COLORS.textLighter}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  value={email}
-                  onChangeText={setEmail}
-                  returnKeyType="next"
-                  onSubmitEditing={() => companyRef.current?.focus()}
-                />
-                {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.label}>Company Name (Optional)</Text>
-                <TextInput
-                  ref={companyRef}
-                  style={styles.input}
-                  placeholder="Enter company name"
-                  placeholderTextColor={COLORS.textLighter}
-                  value={companyName}
-                  onChangeText={setCompanyName}
-                  returnKeyType="done"
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Stock *"
+                  placeholder="0"
+                  keyboardType="number-pad"
+                  value={stock}
+                  onChangeText={setStock}
+                  error={errors.stock}
                 />
               </View>
             </View>
 
-            {/* Images */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="photo-library" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Product Images *</Text>
-                <Text style={styles.imageCount}>({totalImages}/10)</Text>
-              </View>
+            {/* Shipping Rates */}
+            <Text variant="bodySm" weight="700" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              Shipping Rates ($)
+            </Text>
 
-              {errors.images && <Text style={styles.errorText}>{errors.images}</Text>}
-
-              {/* Existing images */}
-              {existingImageUrls.length > 0 && (
-                <>
-                  <Text style={styles.imageSectionLabel}>Current Images</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.imagesScroll}
-                    contentContainerStyle={styles.imagesList}
-                  >
-                    {existingImageUrls.map((url, index) => (
-                      <View key={`existing-${index}`} style={styles.imageItem}>
-                        <Image source={{ uri: url }} style={styles.productImage} />
-                        <Pressable style={styles.removeImageButton} onPress={() => removeExistingImage(index)}>
-                          <Icon name="close" size={16} color={COLORS.white} />
-                        </Pressable>
-                      </View>
-                    ))}
-                  </ScrollView>
-                </>
-              )}
-
-              {/* New images */}
-              {newImages.length > 0 && (
-                <>
-                  <Text style={styles.imageSectionLabel}>New Images</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.imagesScroll}
-                    contentContainerStyle={styles.imagesList}
-                  >
-                    {newImages.map((uri, index) => (
-                      <View key={`new-${index}`} style={styles.imageItem}>
-                        <Image source={{ uri }} style={styles.productImage} />
-                        <Pressable style={styles.removeImageButton} onPress={() => removeNewImage(index)}>
-                          <Icon name="close" size={16} color={COLORS.white} />
-                        </Pressable>
-                      </View>
-                    ))}
-                  </ScrollView>
-                </>
-              )}
-
-              {totalImages < 10 && (
-                <View style={styles.imageUploadRow}>
-                  <Pressable style={styles.uploadBtn} onPress={pickProductImages}>
-                    <Icon name="photo-library" size={22} color={COLORS.white} />
-                    <Text style={styles.uploadBtnText}>Gallery</Text>
-                  </Pressable>
-                  <Pressable style={[styles.uploadBtn, { backgroundColor: COLORS.secondary }]} onPress={takePhoto}>
-                    <Icon name="camera-alt" size={22} color={COLORS.white} />
-                    <Text style={styles.uploadBtnText}>Camera</Text>
-                  </Pressable>
-                </View>
-              )}
+            <Text variant="caption" color="textSecondary" style={{ marginBottom: spacing.sm }}>
+              Package size (quick-select)
+            </Text>
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md, flexWrap: 'wrap' }}>
+              {PACKAGE_SIZE_PRESETS.map((preset) => (
+                <PressableScale
+                  key={preset.key}
+                  onPress={() => applyPackagePreset(preset.baseFee)}
+                  style={{
+                    flex: 1,
+                    minWidth: 90,
+                    paddingVertical: spacing.sm,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.md,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    backgroundColor: colors.surfaceAlt,
+                    alignItems: 'center',
+                  }}
+                >
+                  <Text variant="caption" weight="700" align="center">
+                    {preset.label}
+                  </Text>
+                  <Text variant="caption" weight="600" color="accent" style={{ marginTop: 2 }}>
+                    ${preset.baseFee}
+                  </Text>
+                </PressableScale>
+              ))}
             </View>
 
-            {/* Attributes */}
-            <View style={styles.card}>
-              <View style={styles.cardHeader}>
-                <Icon name="tune" size={24} color={COLORS.primary} />
-                <Text style={styles.cardTitle}>Attributes (Optional)</Text>
-                <Pressable style={styles.addAttributeHeaderButton} onPress={handleAddAttribute}>
-                  <Icon name="add" size={24} color={COLORS.primary} />
-                </Pressable>
-              </View>
+            <View style={{ gap: spacing.md }}>
+              <Input
+                label="Base shipping fee ($)"
+                placeholder="e.g. 2.00"
+                keyboardType="decimal-pad"
+                value={baseShippingFee}
+                onChangeText={applyBaseShippingFee}
+                helper="Auto-fills zone rates below. Edit any zone to override."
+              />
 
-              {attributes.length > 0 ? (
-                <>
-                  {attributes.map((item, index) => (
-                    <View key={index} style={styles.attributeItem}>
-                      <View style={styles.attributeInputs}>
-                        <TextInput
-                          style={[styles.attributeInput, errors[`attr_name_${index}`] && styles.inputError]}
-                          placeholder="e.g. Size"
-                          placeholderTextColor={COLORS.textLighter}
-                          value={item.name}
-                          onChangeText={(value) => handleAttributeChange(index, 'name', value)}
-                        />
-                        <TextInput
-                          style={[styles.attributeInput, errors[`attr_value_${index}`] && styles.inputError]}
-                          placeholder="e.g. Large"
-                          placeholderTextColor={COLORS.textLighter}
-                          value={item.value}
-                          onChangeText={(value) => handleAttributeChange(index, 'value', value)}
-                        />
-                      </View>
-                      <Pressable style={styles.removeAttributeButton} onPress={() => handleRemoveAttribute(index)}>
-                        <Icon name="delete" size={24} color={COLORS.error} />
-                      </Pressable>
-                    </View>
-                  ))}
-                  <Pressable style={styles.addAttributeButton} onPress={handleAddAttribute}>
-                    <Icon name="add-circle" size={20} color={COLORS.primary} />
-                    <Text style={styles.addAttributeButtonText}>Add Another</Text>
-                  </Pressable>
-                </>
+              <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Same Residential Area"
+                  value="Free"
+                  editable={false}
+                  inputStyle={{ color: colors.textMuted } as any}
+                />
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Same City"
+                  placeholder="0.00"
+                  keyboardType="decimal-pad"
+                  value={shippingSameCity}
+                  onChangeText={setShippingSameCity}
+                />
+              </View>
+              <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Same State"
+                  placeholder="0.00"
+                  keyboardType="decimal-pad"
+                  value={shippingSameState}
+                  onChangeText={setShippingSameState}
+                />
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="Same Country"
+                  placeholder="0.00"
+                  keyboardType="decimal-pad"
+                  value={shippingSameCountry}
+                  onChangeText={setShippingSameCountry}
+                />
+              </View>
+              <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                <Input
+                  containerStyle={{ flex: 1 }}
+                  label="International"
+                  placeholder="0.00"
+                  keyboardType="decimal-pad"
+                  value={shippingInternational}
+                  onChangeText={setShippingInternational}
+                />
+                <View style={{ flex: 1 }} />
+              </View>
+            </View>
+
+            {/* Category Picker */}
+            <View style={{ marginTop: spacing.md }}>
+              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+                Category *
+              </Text>
+              {categoriesLoading ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.md }}>
+                  <Spinner size="small" inline />
+                  <Text variant="bodySm" color="textSecondary">
+                    Loading categories...
+                  </Text>
+                </View>
               ) : (
-                <Text style={styles.noAttributesHint}>
-                  Add attributes like size, color, material, etc.
-                </Text>
+                <PressableScale
+                  onPress={() => {
+                    setCategorySearch('');
+                    setCategoryModalVisible(true);
+                  }}
+                  accessibilityRole="button"
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.sm,
+                    minHeight: 48,
+                    paddingHorizontal: spacing.md,
+                    borderRadius: radius.md,
+                    borderWidth: 1.5,
+                    borderColor: errors.category ? colors.danger : colors.border,
+                    backgroundColor: colors.surface,
+                  }}
+                >
+                  {categoryId ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 }}>
+                      <CategoryAvatar
+                        category={categories.find((c) => (c.id || c._id) === categoryId) || { title: categoryName }}
+                      />
+                      <Text variant="body" weight="600" numberOfLines={1} style={{ flex: 1 }}>
+                        {categoryName}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text variant="body" color="textMuted" style={{ flex: 1 }}>
+                      Select a category
+                    </Text>
+                  )}
+                  <Icon name="chevronDown" size={18} color={colors.textMuted} />
+                </PressableScale>
               )}
+              {errors.category ? (
+                <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+                  {errors.category}
+                </Text>
+              ) : null}
             </View>
+          </Card>
 
-            {/* Submit */}
-            <Pressable
-              style={[styles.submitButton, loading && styles.submitButtonDisabled]}
-              onPress={updateProduct}
-              disabled={loading}
-            >
-              <LinearGradient
-                colors={[COLORS.primary, COLORS.primaryDark]}
-                style={styles.submitButtonGradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-              >
-                {loading ? (
-                  <ActivityIndicator color={COLORS.white} size="small" />
-                ) : (
-                  <>
-                    <Icon name="save" size={24} color={COLORS.white} />
-                    <Text style={styles.submitButtonText}>Save Changes</Text>
-                  </>
-                )}
-              </LinearGradient>
-            </Pressable>
-          </View>
+          {/* Contact Information */}
+          <Card style={{ marginBottom: spacing.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="mobile" size={20} color={colors.accent} />
+              <Text variant="bodyMed" weight="700">
+                Contact Information
+              </Text>
+            </View>
+            <Divider spacing="sm" />
+
+            <View style={{ gap: spacing.md, marginTop: spacing.sm }}>
+              <View>
+                <LocationPicker value={location} onChange={setLocation} required={['country', 'state']} />
+                {errors.location ? (
+                  <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+                    {errors.location}
+                  </Text>
+                ) : null}
+              </View>
+
+              <Input
+                label="Phone Number *"
+                placeholder="Enter phone number"
+                keyboardType="phone-pad"
+                value={phoneNumber}
+                onChangeText={setPhoneNumber}
+                returnKeyType="next"
+                onSubmitEditing={() => emailRef.current?.focus()}
+                error={errors.phoneNumber}
+              />
+
+              <Input
+                ref={emailRef}
+                label="Email *"
+                placeholder="Enter email address"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                value={email}
+                onChangeText={setEmail}
+                returnKeyType="next"
+                onSubmitEditing={() => companyRef.current?.focus()}
+                error={errors.email}
+              />
+
+              <Input
+                ref={companyRef}
+                label="Company Name (Optional)"
+                placeholder="Enter company name"
+                value={companyName}
+                onChangeText={setCompanyName}
+                returnKeyType="done"
+              />
+            </View>
+          </Card>
+
+          {/* Images */}
+          <Card style={{ marginBottom: spacing.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="image" size={20} color={colors.accent} />
+              <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
+                Product Images *
+              </Text>
+              <Text variant="caption" color="textSecondary">
+                ({totalImages}/10)
+              </Text>
+            </View>
+            <Divider spacing="sm" />
+
+            {errors.images ? (
+              <Text variant="caption" color="danger" style={{ marginTop: spacing.sm }}>
+                {errors.images}
+              </Text>
+            ) : null}
+
+            {/* Existing images */}
+            {existingImageUrls.length > 0 && (
+              <>
+                <Text variant="caption" weight="600" color="textSecondary" style={{ marginTop: spacing.sm, marginBottom: spacing.xs }}>
+                  Current Images
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingVertical: spacing.xs, gap: spacing.sm }}
+                >
+                  {existingImageUrls.map((url, index) => (
+                    <ImageTile key={`existing-${index}`} uri={url} onRemove={() => removeExistingImage(index)} />
+                  ))}
+                </ScrollView>
+              </>
+            )}
+
+            {/* New images */}
+            {newImages.length > 0 && (
+              <>
+                <Text variant="caption" weight="600" color="textSecondary" style={{ marginTop: spacing.sm, marginBottom: spacing.xs }}>
+                  New Images
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingVertical: spacing.xs, gap: spacing.sm }}
+                >
+                  {newImages.map((uri, index) => (
+                    <ImageTile key={`new-${index}`} uri={uri} onRemove={() => removeNewImage(index)} />
+                  ))}
+                </ScrollView>
+              </>
+            )}
+
+            {totalImages < 10 && (
+              <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.md }}>
+                <Button
+                  title="Gallery"
+                  leftIcon="image"
+                  variant="secondary"
+                  onPress={pickProductImages}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  title="Camera"
+                  leftIcon="camera"
+                  variant="secondary"
+                  onPress={takePhoto}
+                  style={{ flex: 1 }}
+                />
+              </View>
+            )}
+          </Card>
+
+          {/* Attributes */}
+          <Card style={{ marginBottom: spacing.lg }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md }}>
+              <Icon name="list" size={20} color={colors.accent} />
+              <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
+                Attributes (Optional)
+              </Text>
+              <IconButton icon="plus" accessibilityLabel="Add attribute" color={colors.accent} onPress={handleAddAttribute} />
+            </View>
+            <Divider spacing="sm" />
+
+            {attributes.length > 0 ? (
+              <View style={{ marginTop: spacing.sm }}>
+                {attributes.map((item, index) => (
+                  <View
+                    key={index}
+                    style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginBottom: spacing.sm }}
+                  >
+                    <Input
+                      containerStyle={{ flex: 1 }}
+                      placeholder="e.g. Size"
+                      value={item.name}
+                      onChangeText={(value) => handleAttributeChange(index, 'name', value)}
+                      error={errors[`attr_name_${index}`]}
+                    />
+                    <Input
+                      containerStyle={{ flex: 1 }}
+                      placeholder="e.g. Large"
+                      value={item.value}
+                      onChangeText={(value) => handleAttributeChange(index, 'value', value)}
+                      error={errors[`attr_value_${index}`]}
+                    />
+                    <IconButton
+                      icon="trash"
+                      accessibilityLabel="Remove attribute"
+                      color={colors.danger}
+                      onPress={() => handleRemoveAttribute(index)}
+                      style={{ marginTop: spacing.xs }}
+                    />
+                  </View>
+                ))}
+                <Button
+                  title="Add Another"
+                  leftIcon="plus"
+                  variant="ghost"
+                  onPress={handleAddAttribute}
+                  style={{ marginTop: spacing.xs }}
+                />
+              </View>
+            ) : (
+              <Text variant="bodySm" color="textMuted" align="center" style={{ paddingVertical: spacing.sm }}>
+                Add attributes like size, color, material, etc.
+              </Text>
+            )}
+          </Card>
+
+          {/* Submit */}
+          <Button
+            title="Save Changes"
+            leftIcon="check"
+            size="lg"
+            loading={loading}
+            disabled={loading}
+            onPress={updateProduct}
+          />
         </ScrollView>
-      </LinearGradient>
+      </KeyboardAvoidingView>
 
-      {/* Modal */}
+      {/* Category Sheet */}
+      <Sheet visible={categoryModalVisible} onClose={() => setCategoryModalVisible(false)} title="Select Category">
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm }}>
+          <Input
+            placeholder="Search categories..."
+            value={categorySearch}
+            onChangeText={setCategorySearch}
+            autoCapitalize="none"
+            autoCorrect={false}
+            leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+            rightAdornment={
+              categorySearch.length > 0 ? (
+                <PressableScale onPress={() => setCategorySearch('')} hitSlop={8}>
+                  <Icon name="close" size={16} color={colors.textMuted} />
+                </PressableScale>
+              ) : undefined
+            }
+          />
+        </View>
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }}
+        >
+          {filteredCategories.map((item, index) => {
+            const itemId = item.id || item._id;
+            const isSelected = categoryId === itemId;
+            return (
+              <PressableScale
+                key={itemId || index.toString()}
+                onPress={() => {
+                  setCategoryId(itemId);
+                  setCategoryName(item.title);
+                  setErrors((prev) => {
+                    const { category, ...rest } = prev;
+                    return rest;
+                  });
+                  setCategoryModalVisible(false);
+                }}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isSelected }}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.md,
+                  paddingVertical: spacing.md,
+                }}
+              >
+                <CategoryAvatar category={item} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="body" weight={isSelected ? '600' : '400'} color={isSelected ? 'accent' : 'textPrimary'}>
+                    {item.title}
+                  </Text>
+                  {item.description ? (
+                    <Text variant="caption" color="textMuted" numberOfLines={1}>
+                      {item.description}
+                    </Text>
+                  ) : null}
+                </View>
+                {isSelected && <Icon name="checkCircle" size={20} color={colors.accent} />}
+              </PressableScale>
+            );
+          })}
+        </ScrollView>
+      </Sheet>
+
+      {/* Success / error / info dialog */}
       <Modal
         visible={isModalVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setIsModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={[
-              styles.modalIconContainer,
-              modalType === 'success' && styles.modalIconSuccess,
-              modalType === 'error' && styles.modalIconError,
-              modalType === 'info' && styles.modalIconInfo,
-            ]}>
-              <Icon
-                name={modalType === 'success' ? 'check-circle' : modalType === 'error' ? 'error' : 'info'}
-                size={48}
-                color={COLORS.white}
-              />
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: colors.overlay,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: spacing.xl,
+          }}
+        >
+          <Card
+            padding="2xl"
+            style={{ width: '100%', maxWidth: 400, alignItems: 'center' }}
+          >
+            <View
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: radius.pill,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginBottom: spacing.lg,
+                backgroundColor: modalToneBg,
+              }}
+            >
+              <Icon name={modalIcon as any} size={40} color={modalTone} />
             </View>
-            <Text style={styles.modalTitle}>
+            <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.xs }}>
               {modalType === 'success' ? 'Success!' : modalType === 'error' ? 'Error!' : 'Information'}
             </Text>
-            <Text style={styles.modalMessage}>{modalMessage}</Text>
-            <Pressable style={styles.modalButton} onPress={() => setIsModalVisible(false)}>
-              <Text style={styles.modalButtonText}>
-                {modalType === 'success' ? 'Continue' : 'Try Again'}
-              </Text>
-            </Pressable>
-          </View>
+            <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing.xl }}>
+              {modalMessage}
+            </Text>
+            <Button
+              title={modalType === 'success' ? 'Continue' : 'Try Again'}
+              onPress={() => setIsModalVisible(false)}
+            />
+          </Card>
         </View>
       </Modal>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.background },
-  gradientBackground: { flex: 1 },
-  scrollView: { flex: 1 },
-  scrollContent: { paddingBottom: 40 },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.background },
-  loadingText: { marginTop: 12, fontSize: 16, color: COLORS.textLight },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 60 : 20,
-    paddingBottom: 16,
-    backgroundColor: COLORS.white,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    elevation: 3,
-  },
-  backButton: { padding: 8, borderRadius: 20, backgroundColor: COLORS.accent + '20' },
-  deleteButton: { padding: 8, borderRadius: 20, backgroundColor: COLORS.error + '15' },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: COLORS.primary, flex: 1, textAlign: 'center' },
-  formContainer: { paddingHorizontal: 16, paddingTop: 16 },
-  card: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: COLORS.primaryDark,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: COLORS.border + '30',
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border + '30',
-  },
-  cardTitle: { fontSize: 16, fontWeight: '600', color: COLORS.primary, marginLeft: 10, flex: 1 },
-  imageCount: { fontSize: 14, fontWeight: '500', color: COLORS.textLight },
-  formGroup: { marginBottom: 14 },
-  label: { fontSize: 14, fontWeight: '600', color: COLORS.primaryDark, marginBottom: 6 },
-  input: {
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: COLORS.text,
-    borderWidth: 1,
-    borderColor: COLORS.border + '50',
-  },
-  inputError: { borderColor: COLORS.error, backgroundColor: COLORS.error + '10' },
-  errorText: { fontSize: 12, color: COLORS.error, marginTop: 4, marginLeft: 4 },
-  feeHint: { fontSize: 11, color: '#888', marginTop: 4, marginLeft: 4 },
-  textAreaContainer: {
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border + '50',
-    minHeight: 100,
-  },
-  textArea: { padding: 14, fontSize: 15, color: COLORS.text, textAlignVertical: 'top', minHeight: 80 },
-  charCount: { textAlign: 'right', fontSize: 12, color: COLORS.textLight, paddingHorizontal: 14, paddingBottom: 8 },
-  row: { flexDirection: 'row', justifyContent: 'space-between' },
-  halfWidth: { width: '48%' },
-  categorySelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: COLORS.border + '50',
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  categorySelectorSelected: { borderColor: COLORS.primary + '40', backgroundColor: COLORS.primary + '08' },
-  categorySelectorError: { borderColor: '#ef4444' },
-  categorySelectorValue: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-  categorySelectorText: { fontSize: 15, fontWeight: '600', color: COLORS.text },
-  categorySelectorPlaceholder: { fontSize: 15, color: COLORS.textLighter },
-  categorySearchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.gray,
-    marginHorizontal: 16,
-    marginVertical: 12,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
-    gap: 8,
-  },
-  categorySearchInput: { flex: 1, fontSize: 15, color: COLORS.text },
-  categoryLoadingRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },
-  categoryLoadingText: { fontSize: 14, color: COLORS.textLight, marginLeft: 8 },
-  pickerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  pickerOverlayDismiss: { flex: 1 },
-  pickerModal: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: '60%',
-    paddingBottom: Platform.OS === 'ios' ? 30 : 16,
-  },
-  pickerModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.gray,
-  },
-  pickerModalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.primaryDark },
-  categoryListItem: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
-  categoryListItemSelected: { backgroundColor: COLORS.accent + '20' },
-  categoryItemImage: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.gray },
-  categoryItemAvatar: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  categoryItemAvatarText: { fontSize: 18, fontWeight: '700', color: COLORS.white },
-  categoryListItemInfo: { flex: 1, marginLeft: 12 },
-  categoryListItemTitle: { fontSize: 15, fontWeight: '500', color: COLORS.text },
-  categoryListItemTitleSelected: { color: COLORS.primary, fontWeight: '600' },
-  categoryListItemDesc: { fontSize: 12, color: COLORS.textLighter, marginTop: 2 },
-  imageSectionLabel: { fontSize: 12, fontWeight: '600', color: COLORS.textLight, marginTop: 4, marginBottom: 4 },
-  imageUploadRow: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  uploadBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    borderRadius: 12,
-    gap: 8,
-  },
-  uploadBtnText: { fontSize: 14, fontWeight: '600', color: COLORS.white },
-  imagesScroll: { marginBottom: 8 },
-  imagesList: { paddingVertical: 4, gap: 10 },
-  imageItem: { position: 'relative' },
-  productImage: { width: 90, height: 90, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border },
-  removeImageButton: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    backgroundColor: COLORS.error,
-    borderRadius: 10,
-    width: 22,
-    height: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  attributeItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  attributeInputs: { flex: 1, flexDirection: 'row', gap: 8 },
-  attributeInput: {
-    flex: 1,
-    backgroundColor: COLORS.gray,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: COLORS.text,
-    borderWidth: 1,
-    borderColor: COLORS.border + '50',
-  },
-  removeAttributeButton: { padding: 8, marginLeft: 4 },
-  addAttributeHeaderButton: { padding: 4, borderRadius: 12, backgroundColor: COLORS.accent + '20' },
-  noAttributesHint: { fontSize: 13, color: COLORS.textLighter, textAlign: 'center', paddingVertical: 8 },
-  addAttributeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.accent + '20',
-    borderRadius: 10,
-    paddingVertical: 10,
-    marginTop: 4,
-    gap: 6,
-  },
-  addAttributeButtonText: { fontSize: 14, fontWeight: '600', color: COLORS.primary },
-  submitButton: { borderRadius: 16, overflow: 'hidden', marginTop: 8, marginBottom: 16, elevation: 4 },
-  submitButtonDisabled: { opacity: 0.7 },
-  submitButtonGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    gap: 10,
-  },
-  submitButtonText: { fontSize: 17, fontWeight: '700', color: COLORS.white },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modalContainer: {
-    backgroundColor: COLORS.white,
-    borderRadius: 20,
-    padding: 28,
-    width: '100%',
-    maxWidth: 400,
-    alignItems: 'center',
-  },
-  modalIconContainer: { width: 72, height: 72, borderRadius: 36, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-  modalIconSuccess: { backgroundColor: COLORS.success },
-  modalIconError: { backgroundColor: COLORS.error },
-  modalIconInfo: { backgroundColor: COLORS.warning },
-  modalTitle: { fontSize: 22, fontWeight: '700', color: COLORS.primary, marginBottom: 8 },
-  modalMessage: { fontSize: 15, color: COLORS.text, textAlign: 'center', marginBottom: 20, lineHeight: 22 },
-  modalButton: { backgroundColor: COLORS.primary, borderRadius: 12, paddingHorizontal: 28, paddingVertical: 12, width: '100%' },
-  modalButtonText: { fontSize: 15, fontWeight: '600', color: COLORS.white, textAlign: 'center' },
-});
+// Category avatar — image (uri) or initial-tinted circle, via the Avatar primitive.
+const CategoryAvatar = ({ category }: { category: any }) => {
+  if (category?.icon) {
+    return <Avatar uri={category.icon} size={40} />;
+  }
+  return <Avatar name={category?.title || '?'} size={40} />;
+};
+
+// A square image preview tile with a corner remove (×) button.
+const ImageTile: React.FC<{ uri: string; onRemove: () => void }> = ({ uri, onRemove }) => {
+  const { colors, radius, spacing } = useTheme();
+  return (
+    <View style={{ width: 90, height: 90 }}>
+      <Image
+        source={{ uri }}
+        style={{ width: 90, height: 90, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border }}
+      />
+      <PressableScale
+        onPress={onRemove}
+        accessibilityRole="button"
+        accessibilityLabel="Remove image"
+        hitSlop={6}
+        style={{
+          position: 'absolute',
+          top: -spacing.xs,
+          insetInlineEnd: -spacing.xs,
+          width: 22,
+          height: 22,
+          borderRadius: radius.pill,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: colors.danger,
+        }}
+      >
+        <Icon name="close" size={14} color="#FFFFFF" />
+      </PressableScale>
+    </View>
+  );
+};
 
 export default EditProduct;

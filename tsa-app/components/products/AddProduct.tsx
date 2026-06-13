@@ -1,33 +1,42 @@
+// components/products/AddProduct.tsx
+//
+// Add-product form (merchant lists a marketplace product). Restyled onto the
+// TSA Signature design system (@/theme + @/components/ui). VISUAL/STRUCTURAL
+// only — the categories fetch, expo-image-picker local-URI selection, multipart
+// FormData submit (axios → ${baseUrl}/products), validation, attribute editing,
+// and form reset are all unchanged from the legacy version.
 import {
   Image,
   ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
   View,
   Alert,
   Platform,
   KeyboardAvoidingView,
-  ActivityIndicator,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import React, { useState, useEffect, useCallback } from "react";
-import Icon from "react-native-vector-icons/MaterialIcons";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { Picker } from "@react-native-picker/picker";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
-
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  bg: '#FAF9F6',
-};
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  Divider,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  SelectRow,
+  Spinner,
+  Text,
+  PickerSheet,
+  type PickerItem,
+} from "@/components/ui";
 
 const AddProduct = () => {
+  const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
   const [productImages, setProductImages] = useState<string[]>([]);
   const [description, setDescription] = useState("");
@@ -43,6 +52,8 @@ const AddProduct = () => {
   const { setLoading, loading } = useAuth();
   const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
   const maxDescriptionLength = 500;
+  // Sheet visibility for the category picker (replaces the inline RN Picker).
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
 
   const delay = useCallback((duration: number) => {
     return new Promise((resolve) => setTimeout(resolve, duration));
@@ -164,399 +175,274 @@ const AddProduct = () => {
     setAttributes(updated);
   };
 
+  const categoryItems: PickerItem[] = categories.map((item) => ({
+    id: item.id,
+    label: item.title,
+  }));
+  const selectedCategoryLabel = categories.find((c) => c.id === category)?.title;
+
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <Text style={styles.title}>Add Product</Text>
-        <Text style={styles.subtitle}>Fill in the details to list your product</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing["4xl"] }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Header */}
+          <Text variant="title1" weight="700">
+            Add Product
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            Fill in the details to list your product
+          </Text>
 
-        {/* Image Upload */}
-        <Text style={styles.sectionTitle}>Photos</Text>
-        <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
-          <Icon name="add-a-photo" size={32} color={GOLD.dark} />
-          <Text style={styles.imageUploadText}>Tap to upload images</Text>
-          <Text style={styles.imageUploadHint}>High quality photos help sell faster</Text>
-        </TouchableOpacity>
+          {/* Image Upload */}
+          <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.xl, marginBottom: spacing.sm }}>
+            Photos
+          </Text>
+          <PressableScale onPress={pickProductImages}>
+            <Card
+              padding="2xl"
+              style={{
+                alignItems: "center",
+                justifyContent: "center",
+                borderWidth: 2,
+                borderStyle: "dashed",
+                borderColor: colors.accentRail,
+                backgroundColor: colors.surfaceAlt,
+              }}
+            >
+              <Icon name="camera" size={32} color={colors.accent} />
+              <Text variant="bodyMed" weight="600" color="accent" style={{ marginTop: spacing.sm }}>
+                Tap to upload images
+              </Text>
+              <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                High quality photos help sell faster
+              </Text>
+            </Card>
+          </PressableScale>
 
-        {productImages.length > 0 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
-            {productImages.map((uri, index) => (
-              <View key={index} style={styles.imagePreviewWrapper}>
-                <Image source={{ uri }} style={styles.imagePreview} />
-                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
-                  <Icon name="close" size={16} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            ))}
-          </ScrollView>
-        )}
+          {productImages.length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: spacing.sm, paddingVertical: spacing.sm }}
+            >
+              {productImages.map((uri, index) => (
+                <View key={index} style={{ position: "relative" }}>
+                  <Image
+                    source={{ uri }}
+                    style={{
+                      width: 80,
+                      height: 80,
+                      borderRadius: radius.md,
+                      backgroundColor: colors.surfaceAlt,
+                    }}
+                  />
+                  <PressableScale
+                    onPress={() => removeImage(index)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove image"
+                    hitSlop={6}
+                    style={{
+                      position: "absolute",
+                      top: -6,
+                      insetInlineEnd: -6,
+                      width: 24,
+                      height: 24,
+                      borderRadius: radius.pill,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: colors.background,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                    }}
+                  >
+                    <Icon name="close" size={14} color={colors.textPrimary} />
+                  </PressableScale>
+                </View>
+              ))}
+            </ScrollView>
+          )}
 
-        {/* Product Details */}
-        <Text style={styles.sectionTitle}>Product Details</Text>
+          {/* Product Details */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>
+            Product Details
+          </Text>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Product Name *</Text>
-          <TextInput
-            style={styles.input}
+          <Input
+            label="Product Name *"
             value={productName}
             onChangeText={setProductName}
             placeholder="e.g. Organic Honey 500ml"
-            placeholderTextColor="#bbb"
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Category *</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={category}
-              onValueChange={(val) => setCategory(val)}
-              style={styles.picker}
-            >
-              <Picker.Item label="Select a category" value="" color="#bbb" />
-              {categories.map((item) => (
-                <Picker.Item key={item.id} label={item.title} value={item.id} />
-              ))}
-            </Picker>
-          </View>
-        </View>
+          <SelectRow
+            label="Category *"
+            value={selectedCategoryLabel}
+            placeholder="Select a category"
+            onPress={() => setCategoryPickerOpen(true)}
+            style={{ marginBottom: spacing.lg }}
+          />
 
-        <View style={styles.row}>
-          <View style={[styles.inputGroup, { flex: 1, marginRight: 8 }]}>
-            <Text style={styles.label}>Price (USDT) *</Text>
-            <TextInput
-              style={styles.input}
+          <View style={{ flexDirection: "row", gap: spacing.md, marginBottom: spacing.lg }}>
+            <Input
+              label="Price (USDT) *"
               value={price}
               onChangeText={setPrice}
               keyboardType="numeric"
               placeholder="0.00"
-              placeholderTextColor="#bbb"
+              containerStyle={{ flex: 1 }}
             />
-          </View>
-          <View style={[styles.inputGroup, { flex: 1, marginLeft: 8 }]}>
-            <Text style={styles.label}>Stock</Text>
-            <TextInput
-              style={styles.input}
+            <Input
+              label="Stock"
               value={stock}
               onChangeText={setStock}
               keyboardType="numeric"
               placeholder="0"
-              placeholderTextColor="#bbb"
+              containerStyle={{ flex: 1 }}
             />
           </View>
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Description *</Text>
-          <TextInput
-            style={styles.textArea}
+          <Input
+            label="Description *"
             placeholder="Describe your product..."
-            placeholderTextColor="#bbb"
-            numberOfLines={5}
             multiline
+            numberOfLines={5}
             maxLength={maxDescriptionLength}
+            counter
             value={description}
             onChangeText={setDescription}
             textAlignVertical="top"
+            inputStyle={{ minHeight: 120 }}
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-          <Text style={styles.charCount}>
-            {description.length}/{maxDescriptionLength}
+
+          {/* Contact & Location */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing.lg, marginBottom: spacing.md }}>
+            Contact &amp; Location
           </Text>
-        </View>
 
-        {/* Contact & Location */}
-        <Text style={styles.sectionTitle}>Contact & Location</Text>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Company Name</Text>
-          <TextInput
-            style={styles.input}
+          <Input
+            label="Company Name"
             value={companyName}
             onChangeText={setCompanyName}
             placeholder="Your business name"
-            placeholderTextColor="#bbb"
+            containerStyle={{ marginBottom: spacing.lg }}
           />
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Location *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="location-on" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
-              value={location}
-              onChangeText={setLocation}
-              placeholder="City, State"
-              placeholderTextColor="#bbb"
-            />
-          </View>
-        </View>
+          <Input
+            label="Location *"
+            value={location}
+            onChangeText={setLocation}
+            placeholder="City, State"
+            leftAdornment={<Icon name="nearMe" size={20} color={colors.textSecondary} />}
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Phone Number *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
-              value={phoneNumber}
-              onChangeText={setPhoneNumber}
-              keyboardType="phone-pad"
-              placeholder="+234 800 000 0000"
-              placeholderTextColor="#bbb"
-            />
-          </View>
-        </View>
+          <Input
+            label="Phone Number *"
+            value={phoneNumber}
+            onChangeText={setPhoneNumber}
+            keyboardType="phone-pad"
+            placeholder="+234 800 000 0000"
+            leftAdornment={<Icon name="mobile" size={20} color={colors.textSecondary} />}
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Email *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              placeholder="you@example.com"
-              placeholderTextColor="#bbb"
-            />
-          </View>
-        </View>
+          <Input
+            label="Email *"
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholder="you@example.com"
+            leftAdornment={<Icon name="send" size={20} color={colors.textSecondary} />}
+            containerStyle={{ marginBottom: spacing.lg }}
+          />
 
-        {/* Attributes */}
-        <Text style={styles.sectionTitle}>Attributes</Text>
-        <Text style={styles.attributeHint}>Add custom details like size, color, weight, etc.</Text>
+          {/* Attributes */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing.lg }}>
+            Attributes
+          </Text>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.md }}>
+            Add custom details like size, color, weight, etc.
+          </Text>
 
-        {attributes.map((attribute, index) => (
-          <View key={index} style={styles.attributeRow}>
-            <TextInput
-              style={[styles.input, { flex: 1, marginRight: 8 }]}
-              placeholder="Name"
-              placeholderTextColor="#bbb"
-              value={attribute.name}
-              onChangeText={(value) => handleAttributeChange(index, "name", value)}
-            />
-            <TextInput
-              style={[styles.input, { flex: 1, marginRight: 8 }]}
-              placeholder="Value"
-              placeholderTextColor="#bbb"
-              value={attribute.value}
-              onChangeText={(value) => handleAttributeChange(index, "value", value)}
-            />
-            <TouchableOpacity onPress={() => handleRemoveAttribute(index)} style={styles.removeAttrBtn}>
-              <Icon name="delete-outline" size={22} color="#e53935" />
-            </TouchableOpacity>
-          </View>
-        ))}
+          {attributes.map((attribute, index) => (
+            <View
+              key={index}
+              style={{ flexDirection: "row", alignItems: "flex-end", gap: spacing.sm, marginBottom: spacing.md }}
+            >
+              <Input
+                placeholder="Name"
+                value={attribute.name}
+                onChangeText={(value) => handleAttributeChange(index, "name", value)}
+                containerStyle={{ flex: 1 }}
+              />
+              <Input
+                placeholder="Value"
+                value={attribute.value}
+                onChangeText={(value) => handleAttributeChange(index, "value", value)}
+                containerStyle={{ flex: 1 }}
+              />
+              <IconButton
+                icon="trash"
+                variant="plain"
+                color={colors.danger}
+                onPress={() => handleRemoveAttribute(index)}
+                accessibilityLabel="Remove attribute"
+              />
+            </View>
+          ))}
 
-        <TouchableOpacity style={styles.addAttrBtn} onPress={handleAddAttribute} activeOpacity={0.7}>
-          <Icon name="add" size={20} color={GOLD.dark} />
-          <Text style={styles.addAttrText}>Add Attribute</Text>
-        </TouchableOpacity>
+          <Button
+            title="Add Attribute"
+            leftIcon="plus"
+            variant="secondary"
+            onPress={handleAddAttribute}
+          />
 
-        {/* Submit */}
-        {loading && (
-          <View style={{ marginTop: 16 }}>
-            <ActivityIndicator size="small" color={GOLD.dark} />
-            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
-          </View>
-        )}
+          {/* Submit */}
+          {loading && (
+            <View style={{ alignItems: "center", marginTop: spacing.lg, gap: spacing.sm }}>
+              <Spinner />
+              <Text variant="caption" color="textSecondary">
+                Submitting...
+              </Text>
+            </View>
+          )}
 
-        <TouchableOpacity
-          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
-          onPress={createProduct}
-          disabled={loading}
-          activeOpacity={0.8}
-        >
-          <Icon name="publish" size={22} color="#000" />
-          <Text style={styles.submitBtnText}>Publish Product</Text>
-        </TouchableOpacity>
+          <Button
+            title="Publish Product"
+            leftIcon="upload"
+            onPress={createProduct}
+            disabled={loading}
+            loading={loading}
+            style={{ marginTop: spacing.xl }}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
 
-        <View style={{ height: 40 }} />
-      </ScrollView>
-    </KeyboardAvoidingView>
+      <PickerSheet
+        visible={categoryPickerOpen}
+        onClose={() => setCategoryPickerOpen(false)}
+        title="Select a category"
+        items={categoryItems}
+        selectedId={category}
+        onSelect={(item) => {
+          setCategory(item.id);
+          setCategoryPickerOpen(false);
+        }}
+        emptyText="No categories available"
+      />
+    </SafeAreaView>
   );
 };
 
 export default AddProduct;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD.bg,
-    paddingHorizontal: 20,
-  },
-  title: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: '#000',
-    marginTop: 20,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 4,
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  inputGroup: {
-    marginBottom: 16,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#555',
-    marginBottom: 6,
-  },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: '#000',
-  },
-  inputWithIcon: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
-  },
-  pickerWrapper: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  picker: {
-    marginHorizontal: 4,
-  },
-  row: {
-    flexDirection: 'row',
-  },
-  textArea: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 15,
-    color: '#000',
-    minHeight: 120,
-  },
-  charCount: {
-    textAlign: 'right',
-    color: '#bbb',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  imageUploadArea: {
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: GOLD.muted,
-    borderStyle: 'dashed',
-    borderRadius: 16,
-    paddingVertical: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  imageUploadText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: GOLD.dark,
-    marginTop: 8,
-  },
-  imageUploadHint: {
-    fontSize: 12,
-    color: '#bbb',
-    marginTop: 4,
-  },
-  imagePreviewRow: {
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  imagePreviewWrapper: {
-    marginRight: 10,
-    position: 'relative',
-  },
-  imagePreview: {
-    width: 80,
-    height: 80,
-    borderRadius: 12,
-    backgroundColor: '#eee',
-  },
-  imageRemoveBtn: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attributeHint: {
-    fontSize: 13,
-    color: '#999',
-    marginBottom: 12,
-    marginTop: -4,
-  },
-  attributeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  removeAttrBtn: {
-    padding: 8,
-  },
-  addAttrBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.light,
-    borderWidth: 1,
-    borderColor: GOLD.muted,
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginBottom: 8,
-  },
-  addAttrText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: GOLD.dark,
-    marginLeft: 6,
-  },
-  submitBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.primary,
-    borderRadius: 14,
-    paddingVertical: 16,
-    marginTop: 24,
-    gap: 8,
-  },
-  submitBtnText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-  },
-});

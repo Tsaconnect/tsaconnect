@@ -1,10 +1,133 @@
 package config
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
+
+// chainPreset bundles every value that has to flip together for one chain's
+// P2P deployment (Sonic or BSC). Flipping piecemeal makes the EIP-712 voucher
+// domain mismatch what the contract recovers, so every signature gets rejected.
+type chainPreset struct {
+	rpcURL      string
+	chainID     int64
+	usdcAddress string
+	usdtAddress string
+	mcgpAddress string
+	p2pEscrow   string
+	// eip712Version is the EIP-712 domain `version` string the deployed
+	// P2PEscrow at p2pEscrow was initialized with. It MUST move in lockstep
+	// with p2pEscrow: v1 deployed "1", the two-sided v2 deployed "2". The
+	// backend stamps this into the voucher typed-data the app signs; a value
+	// that disagrees with the on-chain contract makes ecrecover resolve to a
+	// wrong address and rejects every sell-ad signature.
+	eip712Version string
+}
+
+// sonicPresets holds the canonical Sonic P2P deployment for each network.
+// To flip the server between testnet and mainnet, set SONIC_NETWORK and
+// restart — no other env vars need to change. Individual addresses can
+// still be overridden via the legacy SONIC_RPC_URL / *_TOKEN_ADDRESS /
+// P2P_ESCROW_ADDRESS env vars (escape hatch for hot-fixes).
+var sonicPresets = map[string]chainPreset{
+	"mainnet": {
+		rpcURL:      "https://rpc.soniclabs.com",
+		chainID:     146,
+		usdcAddress: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+		usdtAddress: "0x6047828dc181963ba44974801ff68e538da5eaf9",
+		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
+		// Still the v1 (sell-only) escrow — mainnet v2 awaits the external
+		// re-audit. Domain version stays "1" to match it.
+		p2pEscrow:     "0x1Dc47600C713B216686dd20c349fDCd2575D3cE1",
+		eip712Version: "1",
+	},
+	"testnet": {
+		rpcURL:      "https://rpc.testnet.soniclabs.com",
+		chainID:     14601,
+		usdcAddress: "0x685CD180e603A15507f575E7A347610b83d36d41",
+		usdtAddress: "0xb5617cD43dcd27C9E0be8c0FF82F9406Cb1123ad",
+		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
+		// P2PEscrowV2 (two-sided) — deployed 2026-05-29, UUPS proxy,
+		// initialized with EIP-712 domain version "2".
+		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
+		eip712Version: "2",
+	},
+}
+
+// bscPresets mirrors sonicPresets for BSC. p2pEscrow is EMPTY until P2PEscrowV2
+// is deployed to BSC (see Plan 6) — an empty escrow keeps BSC P2P dormant (Load
+// omits it from P2PChains). mcgpAddress is intentionally empty: MCGP is Sonic-
+// only, so the fee-discount path is disabled on BSC (P2PEscrowV2 charges the
+// standard fee when mcgpToken is address(0)). Testnet token addresses are filled
+// in at deploy time via P2P_ESCROW_ADDRESS_BSC + the *_TOKEN_ADDRESS overrides.
+var bscPresets = map[string]chainPreset{
+	"mainnet": {
+		rpcURL:        "https://bsc-dataseed.binance.org",
+		chainID:       56,
+		usdcAddress:   "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+		usdtAddress:   "0x55d398326f99059fF775485246999027B3197955",
+		mcgpAddress:   "",
+		p2pEscrow:     "", // set after the audit-gated BSC mainnet deploy
+		eip712Version: "2",
+	},
+	"testnet": {
+		rpcURL:        "https://data-seed-prebsc-1-s1.binance.org:8545",
+		chainID:       97,
+		usdcAddress:   "", // set at BSC-testnet deploy (test token addresses)
+		usdtAddress:   "",
+		mcgpAddress:   "",
+		p2pEscrow:     "", // set after the BSC testnet deploy
+		eip712Version: "2",
+	},
+}
+
+// P2PChainConfig is the per-chain P2P deployment the trade/escrow services
+// resolve by chainID. ChainID + EscrowAddress + EIP712Version move in lockstep
+// (a mismatch rejects every voucher). Assets is the curated allow-list of
+// tradeable asset symbols on this chain — no asset is split across chains.
+type P2PChainConfig struct {
+	ChainID       int64
+	ChainKey      string // blockchainService key: "sonic", "bsc"
+	EscrowAddress string
+	EIP712Version string
+	Assets        []string // e.g. ["MCGP"] on Sonic, ["USDT","USDC"] on BSC
+}
+
+// FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
+// FeeManager admin flow + drift reconciler resolve by chainID (design §3/§5/§10).
+// The FeeManager is the on-chain SOURCE OF TRUTH for every fee rate; the backend
+// builds unsigned setRate txs against Address and reads back rateFor to confirm.
+//
+// Address is EMPTY until a FeeManager is deployed to that chain — an empty
+// address keeps the whole flow DORMANT for that chain (Load omits it from
+// FeeManagerChains, the admin endpoints surface "not configured", and the drift
+// reconciler no-ops), exactly like the BSC P2P escrow dormant-by-default pattern.
+type FeeManagerChainConfig struct {
+	ChainID  int64
+	ChainKey string // blockchainService chain key: "sonic", "bsc"
+	Address  string // FeeManager proxy address on this chain
+}
+
+// validateFeeManagerAddress rejects a FEE_MANAGER_ADDRESS_* env value that is
+// not a syntactically valid 20-byte hex address, or that is the zero address.
+// common.HexToAddress NEVER errors — it silently pads/truncates — so the admin
+// set-fee flow could otherwise build setRate txs against a wrong/zero contract.
+// Returns a descriptive error; the caller fails the boot loudly (design §6).
+func validateFeeManagerAddress(envName, addr string) error {
+	if !common.IsHexAddress(addr) {
+		return fmt.Errorf("%s=%q is not a valid hex address (common.HexToAddress would silently pad/truncate it); fix or unset it", envName, addr)
+	}
+	if common.HexToAddress(addr) == (common.Address{}) {
+		return fmt.Errorf("%s=%q resolves to the zero address; a FeeManager address must be non-zero", envName, addr)
+	}
+	return nil
+}
 
 // ChainConfig holds the configuration for a single EVM-compatible blockchain.
 type ChainConfig struct {
@@ -48,10 +171,46 @@ type Config struct {
 	ProductEscrowAddress   string
 	ServiceContractAddress string
 	OTCMarketplaceAddress  string
+	P2PEscrowAddress       string
+
+	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
+	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
+	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
+	// admin publish endpoint errors clearly, user claim-data returns empty). On
+	// Sonic, same chain as MCGP.
+	RewardDistributorAddress string
+	// P2PEscrowEIP712Version is the voucher domain `version` matching the
+	// deployed P2PEscrow (see chainPreset.eip712Version). Stamped into the
+	// typed-data the app signs.
+	P2PEscrowEIP712Version string
+
+	// P2PChains is the per-chain P2P deployment registry keyed by chainID,
+	// assembled in Load(). Sonic is always present; BSC is present only when
+	// its escrow address is configured (dormant-by-default). Later refactors
+	// resolve escrow/domain/version by trade.ChainID from this map.
+	P2PChains map[int64]P2PChainConfig
+
+	// FeeManagerChains is the per-chain FeeManager registry keyed by chainID
+	// (configurable-FeeManager design §3/§5/§10), assembled in Load() from
+	// FEE_MANAGER_ADDRESS_SONIC / FEE_MANAGER_ADDRESS_BSC. A chain appears here
+	// ONLY when its FeeManager address is configured — UNSET keeps the admin
+	// set-fee flow + drift reconciler DORMANT for that chain (dormant-by-default,
+	// like the BSC P2P escrow).
+	FeeManagerChains map[int64]FeeManagerChainConfig
+
+	// SonicNetwork records which preset was active for this boot
+	// ("mainnet" or "testnet"). Downstream code that needs to query the
+	// right Networks[…] map for sonic-side lookups reads this rather than
+	// re-parsing the SONIC_NETWORK env var.
+	SonicNetwork string
 
 	// Mailjet email service
 	MailjetAPIKey    string
 	MailjetSecretKey string
+
+	// Expo push notifications. Optional — sends work unauthenticated; set to
+	// enable Expo's enhanced push security. Dormant if unset.
+	ExpoAccessToken string
 
 	// Persona KYC verification
 	PersonaAPIKey        string
@@ -60,16 +219,82 @@ type Config struct {
 	PersonaWebhookSecret string
 
 	// LiFi swap aggregator
-	LiFiAPIKey         string
-	LiFiIntegratorID   string
-	LiFiIntegratorFee  string
+	LiFiAPIKey        string
+	LiFiIntegratorID  string
+	LiFiIntegratorFee string
+
+	// AllSwap server-verified settle (design §8, I8). The backend re-queries LiFi
+	// to recompute the integrator fee, then rejects a client-supplied fee that
+	// deviates by more than AllSwapFeeDeviationMax (fraction, default 0.10 = 10%).
+	// When LiFi is unreachable it does NOT trust the client or charge 0: it
+	// charges AllSwapConservativeFeeBps of the from-amount (default 350 = 3.5% vs
+	// the nominal 3%) and emits a warning metric.
+	AllSwapFeeDeviationMax    float64
+	AllSwapConservativeFeeBps int
+	// AllSwapNominalFeeBps is the integrator fee the backend recomputes when LiFi
+	// is reachable but the response carries no usable fee figure (default 300 =
+	// 3%). It is the verified-fee basis, never the client value.
+	AllSwapNominalFeeBps int
 
 	// Open Exchange Rates configuration
 	OpenExchangeRatesAppID string
-	SupportedCurrencies     []string
+	SupportedCurrencies    []string
 
 	// Currencies routed through Bybit P2P (others use OER)
 	BybitP2PCurrencies []string
+
+	// Per-currency retail probe amount sent as the `amount` filter on Bybit
+	// queries. Picking a retail-tier amount (~$3–4 equivalent) gets us a
+	// tight, consensus-driven price; the unfiltered API returns by merchant
+	// rank, surfacing large-ticket whales whose prices drift from the
+	// retail consensus.
+	BybitProbeAmounts map[string]string
+
+	// P2P float-rate offset cap in basis points (e.g. 1000 = ±10%). Sellers
+	// publishing float-rate ads pick an offset within ±this value relative
+	// to the reference feed. Tune via env to widen/tighten platform-wide.
+	P2PFloatOffsetMaxBps int
+
+	// Nomba — used for Nigerian bank directory + account name enquiry today,
+	// and the auto-payout path in Phase 2. Falls back to "feature disabled"
+	// when credentials aren't set so dev environments work without them.
+	NombaBaseURL      string
+	NombaClientID     string
+	NombaClientSecret string
+	NombaAccountID    string
+
+	// P2P merchant-reputation thresholds for the "Trusted" badge.
+	P2PTrustedMinReleased   int64
+	P2PTrustedMinCompletion float64
+	P2PTrustedMinAgeDays    int
+
+	// Fee/TP overhaul (SP3) tunables.
+	//
+	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
+	// mints. DEFAULT 1 (1 TP = $1). Tunable via FEE_TP_PER_USD; it sets level
+	// PACING (see design §3), not the reward ratio.
+	TPPerUSD float64
+
+	// GlobalPoolSettleInterval is the cadence of the SP4 global-pool settlement
+	// epoch (SettleGlobalPoolEpoch folds the pool delta into the cumulative
+	// index once per interval). DEFAULT 24h (daily). Tunable via
+	// FEE_GLOBAL_POOL_SETTLE_INTERVAL (a Go duration string, e.g. "1h", "15m").
+	GlobalPoolSettleInterval time.Duration
+
+	// Fee/TP overhaul (SP7) — claim-eligibility velocity heuristic tunables.
+	//
+	// The heuristic auto-flags a referrer whose DIRECT downline grew by more
+	// than RewardVelocityMaxSignups within RewardVelocityWindow. It is cheap +
+	// bounded (a single indexed COUNT over users referred by one referrer in a
+	// time window — never a full-graph scan). An auto-flag writes an advisory
+	// RewardFlag{source:auto} that gates the claim until an admin clears it.
+	//
+	// RewardVelocityEnabled gates the whole heuristic so it can be disabled
+	// without code change (REWARD_VELOCITY_ENABLED=false). The KYC + admin-flag
+	// + cycle gates in IsClaimEligible are independent of this flag.
+	RewardVelocityEnabled    bool
+	RewardVelocityMaxSignups int
+	RewardVelocityWindow     time.Duration
 
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
@@ -80,7 +305,21 @@ type Config struct {
 }
 
 func Load() *Config {
+	// Pick the Sonic deployment preset first; individual env vars layered on
+	// top can override any single field. Default is "mainnet" so a production
+	// server with no SONIC_NETWORK set keeps its current behaviour.
+	sonicNetwork := strings.ToLower(strings.TrimSpace(getEnv("SONIC_NETWORK", "mainnet")))
+	preset, ok := sonicPresets[sonicNetwork]
+	if !ok {
+		log.Printf("[config] SONIC_NETWORK=%q is unknown; falling back to 'mainnet'", sonicNetwork)
+		sonicNetwork = "mainnet"
+		preset = sonicPresets["mainnet"]
+	}
+	log.Printf("[config] Sonic network = %s (chain %d, P2PEscrow %s)",
+		sonicNetwork, preset.chainID, preset.p2pEscrow)
+
 	cfg := &Config{
+		SonicNetwork:        sonicNetwork,
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://localhost:5432/tsa?sslmode=disable"),
 		JWTSecret:           getEnv("JWT_SECRET", ""),
 		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
@@ -92,12 +331,12 @@ func Load() *Config {
 		CloudinaryAPIKey:    getEnv("CLOUDINARY_API_KEY", ""),
 		CloudinaryAPISecret: getEnv("CLOUDINARY_API_SECRET", ""),
 
-		// Sonic blockchain (env vars override testnet defaults)
-		SonicRPCURL:         getEnv("SONIC_RPC_URL", "https://rpc.testnet.soniclabs.com"),
-		SonicChainID:        getEnvInt64("SONIC_CHAIN_ID", 14601),
-		MCGPTokenAddress:    getEnv("MCGP_TOKEN_ADDRESS", "0x517600323e5E2938207fA2e2e915B9D80e5B2b21"),
-		USDTTokenAddress:    getEnv("USDT_TOKEN_ADDRESS", ""),
-		USDCTokenAddress:    getEnv("USDC_TOKEN_ADDRESS", ""),
+		// Sonic blockchain — preset by SONIC_NETWORK, overridable per-field.
+		SonicRPCURL:         getEnv("SONIC_RPC_URL", preset.rpcURL),
+		SonicChainID:        getEnvInt64("SONIC_CHAIN_ID", preset.chainID),
+		MCGPTokenAddress:    getEnv("MCGP_TOKEN_ADDRESS", preset.mcgpAddress),
+		USDTTokenAddress:    getEnv("USDT_TOKEN_ADDRESS", preset.usdtAddress),
+		USDCTokenAddress:    getEnv("USDC_TOKEN_ADDRESS", preset.usdcAddress),
 		SystemWalletAddress: getEnv("SYSTEM_WALLET_ADDRESS", "0xaF326D5D242C9A55590540f14658adDDd3586A8d"),
 
 		// BSC blockchain
@@ -109,10 +348,96 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
+	// SP6 reward distributor — UNSET keeps root-publishing dormant.
+	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
+	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
+	// you need to point at a hot-fix deployment.
+	cfg.P2PEscrowAddress = strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow))
+	// Must match the deployed contract's EIP-712 domain version (moves in
+	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
+	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
+
+	// ── Per-chain P2P registry ────────────────────────────────────────────
+	// Sonic is always present (its escrow is preset/overridable above). BSC is
+	// added only when its escrow address is configured (dormant-by-default).
+	cfg.P2PChains = map[int64]P2PChainConfig{
+		cfg.SonicChainID: {
+			ChainID:       cfg.SonicChainID,
+			ChainKey:      "sonic",
+			EscrowAddress: cfg.P2PEscrowAddress,
+			EIP712Version: cfg.P2PEscrowEIP712Version,
+			// Transition: Sonic serves all three today. At BSC launch, narrow this
+			// to []string{"MCGP"} (stablecoin P2P moves to BSC) — spec §4.5.
+			Assets: []string{"USDT", "USDC", "MCGP"},
+		},
+	}
+
+	bscNetwork := strings.ToLower(strings.TrimSpace(getEnv("BSC_NETWORK", "testnet")))
+	bscPreset, okBSC := bscPresets[bscNetwork]
+	if !okBSC {
+		log.Printf("[config] BSC_NETWORK=%q is unknown; falling back to 'testnet'", bscNetwork)
+		bscNetwork = "testnet"
+		bscPreset = bscPresets["testnet"]
+	}
+	bscEscrow := strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS_BSC", bscPreset.p2pEscrow))
+	if bscEscrow != "" {
+		cfg.P2PChains[bscPreset.chainID] = P2PChainConfig{
+			ChainID:       bscPreset.chainID,
+			ChainKey:      "bsc",
+			EscrowAddress: bscEscrow,
+			EIP712Version: getEnv("P2P_ESCROW_EIP712_VERSION_BSC", bscPreset.eip712Version),
+			Assets:        []string{"USDT", "USDC"},
+		}
+		log.Printf("[config] P2P chains enabled: sonic(%d) + bsc(%d, network=%s, escrow=%s)",
+			cfg.SonicChainID, bscPreset.chainID, bscNetwork, bscEscrow)
+	} else {
+		log.Printf("[config] P2P chains enabled: sonic(%d) only — BSC dormant (no escrow for BSC_NETWORK=%s)",
+			cfg.SonicChainID, bscNetwork)
+	}
+
+	// ── Per-chain FeeManager registry (configurable-FeeManager design §3) ──
+	// DORMANT-BY-DEFAULT: a chain is registered only when its FeeManager address
+	// is configured. Sonic uses the Sonic chainID active for this boot; BSC uses
+	// the BSC preset chainID. UNSET addresses keep the admin set-fee flow + drift
+	// reconciler dormant for that chain (the endpoints surface "not configured").
+	// A configured FEE_MANAGER_ADDRESS_* MUST be a syntactically valid, non-zero
+	// hex address. common.HexToAddress silently pads/truncates a malformed value
+	// (e.g. "0x123" → 0x0000…0123, or extra nibbles dropped), which would make the
+	// admin set-fee flow build setRate txs against the WRONG contract and the drift
+	// reconciler read a phantom rate. Fail LOUDLY at boot instead (design §6).
+	cfg.FeeManagerChains = map[int64]FeeManagerChainConfig{}
+	if fmSonic := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_SONIC", "")); fmSonic != "" {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_SONIC", fmSonic); err != nil {
+			log.Fatalf("[config] %v", err)
+		}
+		cfg.FeeManagerChains[cfg.SonicChainID] = FeeManagerChainConfig{
+			ChainID:  cfg.SonicChainID,
+			ChainKey: "sonic",
+			Address:  fmSonic,
+		}
+	}
+	if fmBSC := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")); fmBSC != "" {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", fmBSC); err != nil {
+			log.Fatalf("[config] %v", err)
+		}
+		cfg.FeeManagerChains[bscPreset.chainID] = FeeManagerChainConfig{
+			ChainID:  bscPreset.chainID,
+			ChainKey: "bsc",
+			Address:  fmBSC,
+		}
+	}
+	if len(cfg.FeeManagerChains) == 0 {
+		log.Printf("[config] FeeManager dormant: no FEE_MANAGER_ADDRESS_* configured — admin set-fee flow + drift reconciler off")
+	} else {
+		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
+	}
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
+
+	// Expo push notifications (optional)
+	cfg.ExpoAccessToken = os.Getenv("EXPO_ACCESS_TOKEN")
 
 	// Persona KYC
 	cfg.PersonaAPIKey = os.Getenv("PERSONA_API_KEY")
@@ -128,6 +453,11 @@ func Load() *Config {
 	cfg.LiFiIntegratorID = os.Getenv("LIFI_INTEGRATOR_ID")
 	cfg.LiFiIntegratorFee = os.Getenv("LIFI_INTEGRATOR_FEE")
 
+	// AllSwap server-verified settle thresholds (design §8, I8).
+	cfg.AllSwapFeeDeviationMax = getEnvFloat64("ALLSWAP_FEE_DEVIATION_MAX", 0.10)
+	cfg.AllSwapConservativeFeeBps = int(getEnvFloat64("ALLSWAP_CONSERVATIVE_FEE_BPS", 350))
+	cfg.AllSwapNominalFeeBps = int(getEnvFloat64("ALLSWAP_NOMINAL_FEE_BPS", 300))
+
 	// Open Exchange Rates API — free tier: 1,000 req/month, cached at 1 hour
 	cfg.OpenExchangeRatesAppID = os.Getenv("OPEN_EXCHANGE_RATES_APP_ID")
 	// "*" returns every ISO 4217 fiat currency in the metadata table; otherwise comma-separated.
@@ -137,6 +467,44 @@ func Load() *Config {
 	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
 	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
 	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
+
+	// Bybit probe amounts — "CUR:AMT,CUR:AMT". NGN→5000 (~$3) by default.
+	// Add others as new currencies are routed through Bybit.
+	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000"))
+
+	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
+	// P2P's typical platform-wide deviation cap.
+	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
+
+	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to
+	// https://api.nomba.com and provide live credentials.
+	cfg.NombaBaseURL = getEnv("NOMBA_BASE_URL", "https://sandbox.nomba.com")
+	cfg.NombaClientID = os.Getenv("NOMBA_CLIENT_ID")
+	cfg.NombaClientSecret = os.Getenv("NOMBA_CLIENT_SECRET")
+	cfg.NombaAccountID = os.Getenv("NOMBA_ACCOUNT_ID")
+
+	// P2P merchant-reputation thresholds.
+	cfg.P2PTrustedMinReleased = getEnvInt64("P2P_TRUSTED_MIN_RELEASED", 50)
+	cfg.P2PTrustedMinCompletion = getEnvFloat64("P2P_TRUSTED_MIN_COMPLETION", 0.95)
+	cfg.P2PTrustedMinAgeDays = int(getEnvInt64("P2P_TRUSTED_MIN_AGE_DAYS", 30))
+
+	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
+	// value; tunable without code change.
+	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
+	// SP4 global-pool settlement cadence — default daily.
+	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
+
+	// SP7 claim-eligibility velocity heuristic. ON by default (advisory auto-
+	// flags only gate the CLAIM, never accrual). Tunable + disable-able via env:
+	//   REWARD_VELOCITY_ENABLED      — set false to turn the heuristic off entirely
+	//   REWARD_VELOCITY_MAX_SIGNUPS  — direct-downline signups allowed per window
+	//   REWARD_VELOCITY_WINDOW       — Go duration string (e.g. "24h", "1h")
+	// Default: >20 direct referrals in 24h trips an advisory flag. Sensible for
+	// an early-stage platform with few users — a genuine power-referrer above it
+	// is simply reviewed + cleared by an admin.
+	cfg.RewardVelocityEnabled = getEnvBool("REWARD_VELOCITY_ENABLED", true)
+	cfg.RewardVelocityMaxSignups = int(getEnvInt64("REWARD_VELOCITY_MAX_SIGNUPS", 20))
+	cfg.RewardVelocityWindow = getEnvDuration("REWARD_VELOCITY_WINDOW", 24*time.Hour)
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
@@ -203,13 +571,19 @@ func Load() *Config {
 		"linea":     {Name: "Linea Sepolia", RPCURL: getEnv("LINEA_TESTNET_RPC_URL", "https://rpc.sepolia.linea.build"), ChainID: getEnvInt64("LINEA_TESTNET_CHAIN_ID", 59141), NativeCurrency: "ETH"},
 	}
 	testnetTokens := map[string]string{}
-	if addr := getEnv("TESTNET_MCGP_ADDRESS", ""); addr != "" {
+	// Sonic testnet token defaults come from the testnet preset (the same
+	// source the P2P stack uses when SONIC_NETWORK=testnet). This keeps the
+	// wallet's token-discovery surface in sync with what the P2P escrow has
+	// whitelisted — without it, the wallet looks up sonic:USDT against
+	// mainnet addresses on the testnet RPC and shows nothing.
+	testnetSonic := sonicPresets["testnet"]
+	if addr := getEnv("TESTNET_MCGP_ADDRESS", testnetSonic.mcgpAddress); addr != "" {
 		testnetTokens["sonic:MCGP"] = addr
 	}
-	if addr := getEnv("TESTNET_USDT_ADDRESS", ""); addr != "" {
+	if addr := getEnv("TESTNET_USDT_ADDRESS", testnetSonic.usdtAddress); addr != "" {
 		testnetTokens["sonic:USDT"] = addr
 	}
-	if addr := getEnv("TESTNET_USDC_ADDRESS", "0x0BA304580ee7c9a980CF72e55f5Ed2E9fd30Bc51"); addr != "" {
+	if addr := getEnv("TESTNET_USDC_ADDRESS", testnetSonic.usdcAddress); addr != "" {
 		testnetTokens["sonic:USDC"] = addr
 	}
 	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "")); addr != "" {
@@ -254,10 +628,19 @@ func Load() *Config {
 	return cfg
 }
 
+func getEnvFloat64(key string, fallback float64) float64 {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
 func getEnvInt64(key string, fallback int64) int64 {
 	if value, exists := os.LookupEnv(key); exists {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return parsed
+			return parsed
 		}
 	}
 	return fallback
@@ -270,12 +653,103 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// getEnvDuration parses a Go duration env var (e.g. "24h", "15m", "1h30m"). An
+// unset, unparseable, or non-positive value yields the fallback.
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := time.ParseDuration(strings.TrimSpace(value)); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// getEnvBool parses a boolean env var. Accepts the strconv.ParseBool set
+// (1/t/T/TRUE/true/0/f/F/FALSE/false …). An unset or unparseable value yields
+// the fallback.
+func getEnvBool(key string, fallback bool) bool {
+	if value, exists := os.LookupEnv(key); exists {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// AllSwapFeeDeviationMaxOrDefault returns the configured max client-fee
+// deviation (fraction), defaulting to 0.10 (10%) when unset/invalid.
+func (c *Config) AllSwapFeeDeviationMaxOrDefault() float64 {
+	if c == nil || c.AllSwapFeeDeviationMax <= 0 {
+		return 0.10
+	}
+	return c.AllSwapFeeDeviationMax
+}
+
+// AllSwapConservativeFeeBpsOrDefault returns the conservative fee bps charged
+// when LiFi is unreachable (never 0, never the client value), default 350 (3.5%).
+func (c *Config) AllSwapConservativeFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapConservativeFeeBps <= 0 {
+		return 350
+	}
+	return c.AllSwapConservativeFeeBps
+}
+
+// AllSwapNominalFeeBpsOrDefault returns the nominal integrator fee bps used as
+// the verified-fee basis when LiFi is reachable but reports no usable fee figure,
+// default 300 (3%).
+func (c *Config) AllSwapNominalFeeBpsOrDefault() int {
+	if c == nil || c.AllSwapNominalFeeBps <= 0 {
+		return 300
+	}
+	return c.AllSwapNominalFeeBps
+}
+
+// TPPerUSDOrDefault returns the configured TP minting rate, falling back to 1.0
+// (1 TP = $1) when unset or non-positive so the engine always has a sane rate.
+func (c *Config) TPPerUSDOrDefault() float64 {
+	if c == nil || c.TPPerUSD <= 0 {
+		return 1.0
+	}
+	return c.TPPerUSD
+}
+
+// GlobalPoolSettleIntervalOrDefault returns the SP4 settlement cadence, falling
+// back to 24h (daily) when unset or non-positive so the job always has a sane
+// tick period.
+func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
+	if c == nil || c.GlobalPoolSettleInterval <= 0 {
+		return 24 * time.Hour
+	}
+	return c.GlobalPoolSettleInterval
+}
+
+// parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries
+// missing a colon or with empty key/value are skipped silently — better
+// than failing boot over a typo, since the caller treats absence as
+// "no amount filter for this currency".
+func parseProbeAmounts(s string) map[string]string {
+	out := map[string]string{}
+	for _, part := range splitAndTrim(s, ",") {
+		kv := strings.SplitN(part, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		cur := strings.ToUpper(strings.TrimSpace(kv[0]))
+		amt := strings.TrimSpace(kv[1])
+		if cur == "" || amt == "" {
+			continue
+		}
+		out[cur] = amt
+	}
+	return out
+}
+
 func splitAndTrim(s, sep string) []string {
 	var result []string
 	for _, part := range strings.Split(s, sep) {
 		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
-		result = append(result, trimmed)
+			result = append(result, trimmed)
 		}
 	}
 	return result

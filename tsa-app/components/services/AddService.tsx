@@ -1,35 +1,43 @@
+// components/services/AddService.tsx
+//
+// Add-service form. A merchant/user fills in service details, picks one or more
+// local images, and POSTs a multipart product (type=Service) to the API.
+//
+// Migrated onto the TSA Signature design system (@/theme + @/components/ui).
+// Visual/structural restyle ONLY — the data fetching (categories GET, multipart
+// POST /products), state, image-picker logic (local URIs in FormData), field
+// validation, Alert flows, and the LocationPicker integration are unchanged.
 import {
   Image,
   ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
   View,
   Alert,
   Platform,
   KeyboardAvoidingView,
-  ActivityIndicator,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import React, { useState, useEffect } from "react";
-import Icon from "react-native-vector-icons/MaterialIcons";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { Picker } from "@react-native-picker/picker";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import LocationPicker, { LocationValue } from "../common/LocationPicker";
-
-const GOLD = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  muted: '#F5DEB3',
-  bg: '#FAF9F6',
-};
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  Icon,
+  Input,
+  PickerSheet,
+  PressableScale,
+  SelectRow,
+  Spinner,
+  Text,
+} from "@/components/ui";
 
 const AddService = () => {
   const { token } = useAuth();
+  const { colors, spacing, radius } = useTheme();
   const [loading, setLoading] = useState(false);
   const [productImages, setProductImages] = useState<string[]>([]);
   const [description, setDescription] = useState("");
@@ -40,6 +48,7 @@ const AddService = () => {
   const [category, setCategory] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
+  const [categorySheetVisible, setCategorySheetVisible] = useState(false);
   const maxDescriptionLength = 500;
 
   useEffect(() => {
@@ -146,303 +155,203 @@ const AddService = () => {
     setCompanyName("");
   };
 
+  const selectedCategoryTitle = categories.find((c) => c.id === category)?.title;
+
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <Text style={styles.title}>Add Service</Text>
-        <Text style={styles.subtitle}>Fill in the details to list your service</Text>
-
-        {/* Image Upload */}
-        <Text style={styles.sectionTitle}>Photos</Text>
-        <TouchableOpacity style={styles.imageUploadArea} onPress={pickProductImages} activeOpacity={0.7}>
-          <Icon name="add-a-photo" size={32} color={GOLD.dark} />
-          <Text style={styles.imageUploadText}>Tap to upload images</Text>
-          <Text style={styles.imageUploadHint}>Showcase your service with quality photos</Text>
-        </TouchableOpacity>
-
-        {productImages.length > 0 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagePreviewRow}>
-            {productImages.map((uri, index) => (
-              <View key={index} style={styles.imagePreviewWrapper}>
-                <Image source={{ uri }} style={styles.imagePreview} />
-                <TouchableOpacity style={styles.imageRemoveBtn} onPress={() => removeImage(index)}>
-                  <Icon name="close" size={16} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            ))}
-          </ScrollView>
-        )}
-
-        {/* Service Details */}
-        <Text style={styles.sectionTitle}>Service Details</Text>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Service Name *</Text>
-          <TextInput
-            style={styles.input}
-            value={productName}
-            onChangeText={setProductName}
-            placeholder="e.g. Plumbing & Pipe Repair"
-            placeholderTextColor="#bbb"
-          />
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Category *</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={category}
-              onValueChange={(val) => setCategory(val)}
-              style={styles.picker}
-            >
-              <Picker.Item label="Select a category" value="" color="#bbb" />
-              {categories.map((item) => (
-                <Picker.Item key={item.id} label={item.title} value={item.id} />
-              ))}
-            </Picker>
-          </View>
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Description *</Text>
-          <TextInput
-            style={styles.textArea}
-            placeholder="Describe your service, expertise, and what clients can expect..."
-            placeholderTextColor="#bbb"
-            numberOfLines={5}
-            multiline
-            maxLength={maxDescriptionLength}
-            value={description}
-            onChangeText={setDescription}
-            textAlignVertical="top"
-          />
-          <Text style={styles.charCount}>
-            {description.length}/{maxDescriptionLength}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Header */}
+          <Text variant="title1" weight="700">
+            Add Service
           </Text>
-        </View>
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            Fill in the details to list your service
+          </Text>
 
-        {/* Contact & Location */}
-        <Text style={styles.sectionTitle}>Contact & Location</Text>
+          {/* Image Upload */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Photos
+          </Text>
+          <PressableScale onPress={pickProductImages}>
+            <View
+              style={{
+                backgroundColor: colors.surface,
+                borderWidth: 2,
+                borderColor: colors.accentMuted,
+                borderStyle: 'dashed',
+                borderRadius: radius.lg,
+                paddingVertical: spacing['3xl'],
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Icon name="camera" size={32} color={colors.accent} />
+              <Text variant="bodyMed" weight="600" color="accent" style={{ marginTop: spacing.sm }}>
+                Tap to upload images
+              </Text>
+              <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                Showcase your service with quality photos
+              </Text>
+            </View>
+          </PressableScale>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Company Name</Text>
-          <TextInput
-            style={styles.input}
-            value={companyName}
-            onChangeText={setCompanyName}
-            placeholder="Your business name"
-            placeholderTextColor="#bbb"
-          />
-        </View>
+          {productImages.length > 0 && (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: spacing.md }}
+              style={{ marginTop: spacing.md, marginBottom: spacing.xs }}
+            >
+              {productImages.map((uri, index) => (
+                <View key={index} style={{ position: 'relative' }}>
+                  <Image
+                    source={{ uri }}
+                    style={{
+                      width: 80,
+                      height: 80,
+                      borderRadius: radius.md,
+                      backgroundColor: colors.surfaceAlt,
+                    }}
+                  />
+                  <PressableScale
+                    onPress={() => removeImage(index)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove image"
+                    hitSlop={6}
+                    style={{
+                      position: 'absolute',
+                      top: -6,
+                      insetInlineEnd: -6,
+                      width: 24,
+                      height: 24,
+                      borderRadius: radius.pill,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: colors.background,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                    }}
+                  >
+                    <Icon name="close" size={14} color={colors.textPrimary} />
+                  </PressableScale>
+                </View>
+              ))}
+            </ScrollView>
+          )}
 
-        <View style={styles.inputGroup}>
-          <LocationPicker
-            value={location}
-            onChange={setLocation}
-            required={["country", "state"]}
-          />
-        </View>
+          {/* Service Details */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Service Details
+          </Text>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Phone Number *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="phone" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
+          <Card padding="lg" style={{ gap: spacing.lg }}>
+            <Input
+              label="Service Name *"
+              value={productName}
+              onChangeText={setProductName}
+              placeholder="e.g. Plumbing & Pipe Repair"
+            />
+
+            <SelectRow
+              label="Category *"
+              value={selectedCategoryTitle}
+              placeholder="Select a category"
+              onPress={() => setCategorySheetVisible(true)}
+            />
+
+            <Input
+              label="Description *"
+              placeholder="Describe your service, expertise, and what clients can expect..."
+              numberOfLines={5}
+              multiline
+              maxLength={maxDescriptionLength}
+              counter
+              value={description}
+              onChangeText={setDescription}
+              textAlignVertical="top"
+              inputStyle={{ minHeight: 120 }}
+            />
+          </Card>
+
+          {/* Contact & Location */}
+          <Text variant="title3" weight="600" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Contact & Location
+          </Text>
+
+          <Card padding="lg" style={{ gap: spacing.lg }}>
+            <Input
+              label="Company Name"
+              value={companyName}
+              onChangeText={setCompanyName}
+              placeholder="Your business name"
+            />
+
+            <LocationPicker
+              value={location}
+              onChange={setLocation}
+              required={["country", "state"]}
+            />
+
+            <Input
+              label="Phone Number *"
               value={phoneNumber}
               onChangeText={setPhoneNumber}
               keyboardType="phone-pad"
               placeholder="+234 800 000 0000"
-              placeholderTextColor="#bbb"
+              leftAdornment={<Icon name="mobile" size={20} color={colors.textSecondary} />}
             />
-          </View>
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Email *</Text>
-          <View style={styles.inputWithIcon}>
-            <Icon name="email" size={20} color={GOLD.dark} style={{ marginRight: 8 }} />
-            <TextInput
-              style={{ flex: 1, fontSize: 15, color: '#000' }}
+            <Input
+              label="Email *"
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
               autoCapitalize="none"
               placeholder="you@example.com"
-              placeholderTextColor="#bbb"
+              leftAdornment={<Icon name="mail" size={20} color={colors.textSecondary} />}
             />
-          </View>
-        </View>
+          </Card>
 
-        {/* Submit */}
-        {loading && (
-          <View style={{ marginTop: 16 }}>
-            <ActivityIndicator size="small" color={GOLD.dark} />
-            <Text style={{ textAlign: 'center', marginTop: 8, color: '#999' }}>Submitting...</Text>
-          </View>
-        )}
+          {/* Submit */}
+          {loading && (
+            <View style={{ marginTop: spacing.lg }}>
+              <Spinner label="Submitting…" />
+            </View>
+          )}
 
-        <TouchableOpacity
-          style={[styles.submitBtn, loading && { opacity: 0.5 }]}
-          onPress={createService}
-          disabled={loading}
-          activeOpacity={0.8}
-        >
-          <Icon name="publish" size={22} color="#000" />
-          <Text style={styles.submitBtnText}>Publish Service</Text>
-        </TouchableOpacity>
+          <Button
+            title="Publish Service"
+            leftIcon="upload"
+            onPress={createService}
+            disabled={loading}
+            style={{ marginTop: spacing['2xl'] }}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
 
-        <View style={{ height: 40 }} />
-      </ScrollView>
-    </KeyboardAvoidingView>
+      <PickerSheet
+        visible={categorySheetVisible}
+        onClose={() => setCategorySheetVisible(false)}
+        title="Select a category"
+        items={categories.map((item) => ({ id: item.id, label: item.title }))}
+        selectedId={category || undefined}
+        onSelect={(item) => {
+          setCategory(item.id);
+          setCategorySheetVisible(false);
+        }}
+        searchable
+        emptyText="No categories available"
+      />
+    </SafeAreaView>
   );
 };
 
 export default AddService;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: GOLD.bg,
-    paddingHorizontal: 20,
-  },
-  title: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: '#000',
-    marginTop: 20,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#999',
-    marginTop: 4,
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  inputGroup: {
-    marginBottom: 16,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#555',
-    marginBottom: 6,
-  },
-  input: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: '#000',
-  },
-  inputWithIcon: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: Platform.OS === 'ios' ? 13 : 4,
-  },
-  pickerWrapper: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  picker: {
-    marginHorizontal: 4,
-  },
-  textArea: {
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#E8E8E8',
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 15,
-    color: '#000',
-    minHeight: 120,
-  },
-  charCount: {
-    textAlign: 'right',
-    color: '#bbb',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  imageUploadArea: {
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: GOLD.muted,
-    borderStyle: 'dashed',
-    borderRadius: 16,
-    paddingVertical: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  imageUploadText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: GOLD.dark,
-    marginTop: 8,
-  },
-  imageUploadHint: {
-    fontSize: 12,
-    color: '#bbb',
-    marginTop: 4,
-  },
-  imagePreviewRow: {
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  imagePreviewWrapper: {
-    marginRight: 10,
-    position: 'relative',
-  },
-  imagePreview: {
-    width: 80,
-    height: 80,
-    borderRadius: 12,
-    backgroundColor: '#eee',
-  },
-  imageRemoveBtn: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  submitBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: GOLD.primary,
-    borderRadius: 14,
-    paddingVertical: 16,
-    marginTop: 24,
-    gap: 8,
-  },
-  submitBtnText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#000',
-  },
-});

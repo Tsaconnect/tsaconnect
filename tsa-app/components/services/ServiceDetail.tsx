@@ -1,7 +1,23 @@
+// components/services/ServiceDetail.tsx
+//
+// Service detail content card — the hero image, title/address, the locked vs.
+// revealed contact-details state, and the optional "See Catalogue" link.
+// Restyled onto the TSA Signature design system (@/theme + @/components/ui);
+// the props interface, exports, every callback wiring (onRevealPress,
+// onCopyPress per contact field, onCataloguePress), the loading/disabled
+// gating, and the contactPaid + contact presence gating are preserved verbatim.
 import React from 'react';
-import { View, Text, Image, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '../../constants';
+import { View, Image } from 'react-native';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Badge,
+  Button,
+  Icon,
+  PressableScale,
+  Text,
+  type IconName,
+} from '@/components/ui';
 import type { ContactInfo } from '../../services/serviceContactApi';
 
 interface ServiceDetailCardProps {
@@ -34,93 +50,123 @@ const ServiceDetailCard = ({
   onCopyPress,
   onCataloguePress,
 }: ServiceDetailCardProps) => {
+  const { colors, spacing, radius } = useTheme();
+
+  // A single tap-to-copy contact row. Keeps the exact onCopyPress(value)
+  // contract — the parent owns clipboard + toast, so this row only forwards.
+  const ContactRow = ({
+    icon,
+    value,
+    showDivider,
+  }: {
+    icon: IconName;
+    value: string;
+    showDivider: boolean;
+  }) => (
+    <PressableScale
+      onPress={() => onCopyPress?.(value)}
+      accessibilityRole="button"
+      accessibilityLabel={`Copy ${value}`}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.sm,
+        paddingVertical: spacing.sm,
+        borderTopWidth: showDivider ? 1 : 0,
+        borderTopColor: colors.hairline,
+      }}
+    >
+      <Icon name={icon} size={16} color={colors.accent} />
+      <Text variant="bodySm" color="textPrimary" style={{ flex: 1 }} numberOfLines={1}>
+        {value}
+      </Text>
+      <Icon name="copy" size={14} color={colors.textMuted} />
+    </PressableScale>
+  );
+
   return (
-    <View style={styles.card}>
-      <Image source={{ uri: imageSrc }} style={styles.image} />
-      <View style={styles.detailsContainer}>
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.address}>{address}</Text>
+    <View
+      style={{
+        backgroundColor: colors.surface,
+        borderRadius: radius.lg,
+        overflow: 'hidden',
+        marginBottom: spacing.xl,
+        borderWidth: 1,
+        borderColor: colors.border,
+      }}
+    >
+      <Image
+        source={{ uri: imageSrc }}
+        style={{ width: '100%', height: 200, resizeMode: 'contain', backgroundColor: colors.surfaceAlt }}
+      />
+      <View style={{ padding: spacing.lg }}>
+        <Text variant="title3" weight="700">
+          {title}
+        </Text>
+        <Text variant="bodySm" color="textMuted" style={{ marginTop: spacing.xs, marginBottom: spacing.md }}>
+          {address}
+        </Text>
 
         {/* Contact Details Section */}
         {contactPaid && contact ? (
-          <View style={styles.contactCard}>
-            <View style={styles.contactHeader}>
-              <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
-              <Text style={styles.contactHeaderText}>Contact Details</Text>
-            </View>
-
-            {contact.name ? (
-              <TouchableOpacity
-                style={styles.contactRow}
-                onPress={() => onCopyPress?.(contact.name!)}
-              >
-                <Ionicons name="person-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.contactText}>{contact.name}</Text>
-                <Ionicons name="copy-outline" size={14} color={COLORS.gray} />
-              </TouchableOpacity>
-            ) : null}
-
-            {contact.phone ? (
-              <TouchableOpacity
-                style={styles.contactRow}
-                onPress={() => onCopyPress?.(contact.phone!)}
-              >
-                <Ionicons name="call-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.contactText}>{contact.phone}</Text>
-                <Ionicons name="copy-outline" size={14} color={COLORS.gray} />
-              </TouchableOpacity>
-            ) : null}
-
-            {contact.email ? (
-              <TouchableOpacity
-                style={styles.contactRow}
-                onPress={() => onCopyPress?.(contact.email!)}
-              >
-                <Ionicons name="mail-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.contactText}>{contact.email}</Text>
-                <Ionicons name="copy-outline" size={14} color={COLORS.gray} />
-              </TouchableOpacity>
-            ) : null}
-
-            {contact.address ? (
-              <TouchableOpacity
-                style={styles.contactRow}
-                onPress={() => onCopyPress?.(contact.address!)}
-              >
-                <Ionicons name="location-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.contactText}>{contact.address}</Text>
-                <Ionicons name="copy-outline" size={14} color={COLORS.gray} />
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        ) : (
-          <View style={styles.lockedCard}>
-            <View style={styles.lockedContent}>
-              <Ionicons name="lock-closed" size={20} color={COLORS.primary} />
-              <Text style={styles.lockedText}>Contact details locked</Text>
-              <View style={styles.feeBadge}>
-                <Text style={styles.feeBadgeText}>{feeDisplay}</Text>
-              </View>
-            </View>
-            <TouchableOpacity
-              style={styles.revealButton}
-              onPress={onRevealPress}
-              disabled={loading}
+          <AccentCard padding="md" style={{ marginBottom: spacing.lg }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                marginBottom: spacing.sm,
+              }}
             >
-              {loading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.revealButtonText}>Reveal Contact — {feeDisplay}</Text>
-              )}
-            </TouchableOpacity>
-          </View>
+              <Icon name="checkCircle" size={18} color={colors.success} />
+              <Text variant="bodySm" weight="600">
+                Contact Details
+              </Text>
+            </View>
+
+            {(() => {
+              const rows: { icon: IconName; value: string }[] = [];
+              if (contact.name) rows.push({ icon: 'user', value: contact.name });
+              if (contact.phone) rows.push({ icon: 'mobile', value: contact.phone });
+              if (contact.email) rows.push({ icon: 'mail', value: contact.email });
+              if (contact.address) rows.push({ icon: 'location', value: contact.address });
+              return rows.map((row, i) => (
+                <ContactRow key={row.icon} icon={row.icon} value={row.value} showDivider={i > 0} />
+              ));
+            })()}
+          </AccentCard>
+        ) : (
+          <AccentCard padding="md" style={{ marginBottom: spacing.lg }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                marginBottom: spacing.md,
+              }}
+            >
+              <Icon name="lock" size={20} color={colors.accent} />
+              <Text variant="bodySm" color="textMuted" style={{ flex: 1 }}>
+                Contact details locked
+              </Text>
+              <Badge label={feeDisplay} background={colors.accent} color={colors.onAccent} size="sm" />
+            </View>
+            <Button
+              title={`Reveal Contact — ${feeDisplay}`}
+              onPress={onRevealPress}
+              loading={loading}
+              disabled={loading}
+            />
+          </AccentCard>
         )}
 
         {onCataloguePress ? (
-          <View style={styles.payCatalogue}>
-            <TouchableOpacity onPress={onCataloguePress} hitSlop={8}>
-              <Text style={styles.catalogue}>See Catalogue</Text>
-            </TouchableOpacity>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center' }}>
+            <PressableScale onPress={onCataloguePress} hitSlop={8}>
+              <Text variant="bodySm" weight="600" color="info" align="center">
+                See Catalogue
+              </Text>
+            </PressableScale>
           </View>
         ) : null}
       </View>
@@ -129,121 +175,3 @@ const ServiceDetailCard = ({
 };
 
 export default ServiceDetailCard;
-
-const styles = StyleSheet.create({
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    overflow: 'hidden',
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
-    elevation: 3,
-  },
-  image: {
-    width: '100%',
-    height: 200,
-    resizeMode: 'contain',
-  },
-  detailsContainer: {
-    padding: 15,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 5,
-    color: COLORS.primary,
-  },
-  address: {
-    fontSize: 14,
-    color: '#777',
-    marginBottom: 10,
-  },
-  // Contact details (paid state)
-  contactCard: {
-    backgroundColor: '#f9f6f2',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-  },
-  contactHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-    gap: 6,
-  },
-  contactHeaderText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  contactRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#E8D5C0',
-    gap: 8,
-  },
-  contactText: {
-    flex: 1,
-    fontSize: 14,
-    color: '#333',
-  },
-  // Locked state
-  lockedCard: {
-    backgroundColor: '#f9f6f2',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#E8D5C0',
-  },
-  lockedContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-    gap: 8,
-  },
-  lockedText: {
-    flex: 1,
-    fontSize: 14,
-    color: '#777',
-  },
-  feeBadge: {
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-  },
-  feeBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  revealButton: {
-    backgroundColor: '#E8A14A',
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  revealButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  payCatalogue: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  catalogue: {
-    fontSize: 14,
-    color: '#007BFF',
-    textAlign: 'center',
-  },
-});

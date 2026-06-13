@@ -1118,6 +1118,13 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 
 	includeSubcategories := c.DefaultQuery("includeSubcategories", "true")
 
+	// Listing-type filter. Products and services share this model+endpoint; a
+	// "Both" category holds both. Without this filter a service leaks into the
+	// product marketplace (and vice-versa). The app always sends the type of the
+	// section being browsed; an empty/unknown value keeps the legacy
+	// (unfiltered) behaviour for any non-marketplace caller.
+	typeFilter := c.Query("type")
+
 	// Collect category IDs
 	categoryIDs := []uuid.UUID{categoryID}
 	if includeSubcategories == "true" {
@@ -1131,9 +1138,12 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 	}
 
 	// Get products
+	query := config.DB.Where("category_id IN ? AND status = ?", categoryIDs, "active")
+	if typeFilter == models.ProductTypeProduct || typeFilter == models.ProductTypeService {
+		query = query.Where("type = ?", typeFilter)
+	}
 	var products []models.Product
-	if err := config.DB.Where("category_id IN ? AND status = ?", categoryIDs, "active").
-		Order("created_at DESC").Find(&products).Error; err != nil {
+	if err := query.Order("created_at DESC").Find(&products).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category tree")
 		return
 	}
@@ -1185,7 +1195,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 
 // GetFeeConfig handles GET /api/fees - returns the platform fee schedule.
 func (h *Handlers) GetFeeConfig(c *gin.Context) {
-	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig())
+	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig(cartFeeLookups()))
 }
 
 // GetMarketplaceProducts handles GET /api/products/public/marketplace - public marketplace listing with sorting.

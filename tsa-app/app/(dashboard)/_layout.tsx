@@ -1,4 +1,21 @@
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+// app/(dashboard)/_layout.tsx
+//
+// Dashboard drawer/stack layout — user (and merchant-extended) navigation drawer
+// plus the (tabs) header chrome (notification bell + profile avatar). Migrated onto
+// the TSA Signature design system: legacy `COLORS` constants and the
+// react-native-elements Avatar are replaced by useTheme() tokens and @/components/ui
+// primitives (Text, Avatar, Divider), so the drawer + header chrome track light/dark
+// automatically.
+//
+// LAYOUT INVARIANT: every Drawer.Screen registration, name, order, and option is
+// preserved verbatim; the merchant drawer section (its DrawerItems, labels, icons,
+// routes, and order) is preserved verbatim. The MaterialCommunityIcons glyphs are
+// kept for the drawer/section navigation icons (they are navigation chrome, not
+// @/components/ui content icons, and the Icon registry does not cover them). Only
+// theming/chrome was swapped onto tokens — auth check, profile fetch, the 5-minute
+// refresh interval, refreshProfile, handleAvatarPress, getUserInitials, the
+// unauthenticated guard, and the loading/auth render gate are all unchanged.
+import { Pressable, View } from "react-native";
 import React, { useEffect, useState } from "react";
 import { Drawer } from "expo-router/drawer";
 import {
@@ -6,13 +23,13 @@ import {
   DrawerItemList,
   DrawerItem,
 } from "@react-navigation/drawer";
-import { COLORS } from "../../constants";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import { router } from "expo-router";
-import { Avatar } from "react-native-elements";
 import api from "@/components/services/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import NotificationBell from '../../components/NotificationBell';
+import NotificationBell from "../../components/NotificationBell";
+import { useTheme, fontFamily } from "@/theme";
+import { Avatar, Divider, Text } from "@/components/ui";
 
 interface UserProfile {
   _id: string;
@@ -24,6 +41,7 @@ interface UserProfile {
 }
 
 const Layout = () => {
+  const { colors, spacing, radius, type } = useTheme();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -36,7 +54,7 @@ const Layout = () => {
         // Check if user is authenticated
         const authenticated = await api.checkAuth();
         setIsAuthenticated(authenticated);
-        
+
         if (authenticated) {
           // Fetch user profile
           const profileResponse = await api.getProfile();
@@ -73,7 +91,7 @@ const Layout = () => {
     try {
       if (isAuthenticated) {
         const profileResponse = await api.getProfile();
-        
+
         if (profileResponse.success && profileResponse.data) {
           setCurrentUser(profileResponse.data);
           return { success: true, data: profileResponse.data };
@@ -118,20 +136,39 @@ const Layout = () => {
 
   const isMerchant = userRole === "merchant";
 
+  const merchantIconStyle = {
+    marginVertical: -5,
+    marginRight: spacing.lg,
+    marginLeft: -spacing.md,
+  } as const;
+
+  const merchantDrawerLabelStyle = {
+    marginHorizontal: -spacing.xl,
+    fontSize: type.body.fontSize,
+    fontFamily: fontFamily['400'],
+    color: colors.textPrimary,
+  } as const;
+
   const CustomDrawerContent = (props: any) => (
     <DrawerContentScrollView {...props}>
       <DrawerItemList {...props} />
       {isMerchant && (
-        <View style={styles.merchantSection}>
-          <View style={styles.merchantDivider} />
-          <Text style={styles.merchantSectionTitle}>Merchant</Text>
+        <View style={{ marginTop: spacing.xs }}>
+          <Divider spacing="sm" inset={spacing.xl} />
+          <Text
+            variant="overline"
+            color="textMuted"
+            style={{ paddingHorizontal: spacing.xl, marginBottom: spacing.xs }}
+          >
+            MERCHANT
+          </Text>
           <DrawerItem
             label="Merchant Dashboard"
-            icon={({ color, size }) => (
-              <Icon name="view-dashboard-outline" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="view-dashboard-outline" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/dashboard");
@@ -139,11 +176,11 @@ const Layout = () => {
           />
           <DrawerItem
             label="Products & Services"
-            icon={({ color, size }) => (
-              <Icon name="shopping-outline" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="shopping-outline" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/inventory");
@@ -151,11 +188,11 @@ const Layout = () => {
           />
           <DrawerItem
             label="Add Product"
-            icon={({ color, size }) => (
-              <Icon name="plus-circle-outline" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="plus-circle-outline" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/inventory/add");
@@ -163,11 +200,11 @@ const Layout = () => {
           />
           <DrawerItem
             label="Sell USDT for Fiat"
-            icon={({ color, size }) => (
-              <Icon name="trending-up" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="trending-up" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/sell-usdt");
@@ -175,11 +212,11 @@ const Layout = () => {
           />
           <DrawerItem
             label="Buy Crypto with Cash"
-            icon={({ color, size }) => (
-              <Icon name="cash-multiple" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="cash-multiple" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/buy-usdt");
@@ -187,11 +224,11 @@ const Layout = () => {
           />
           <DrawerItem
             label="Digital Assets"
-            icon={({ color, size }) => (
-              <Icon name="wallet-outline" size={25} color={color} style={styles.merchantIcon} />
+            icon={({ color }) => (
+              <Icon name="wallet-outline" size={25} color={color} style={merchantIconStyle} />
             )}
-            activeTintColor={COLORS.primary}
-            labelStyle={styles.merchantDrawerLabel}
+            activeTintColor={colors.accent}
+            labelStyle={merchantDrawerLabelStyle}
             onPress={() => {
               props.navigation.closeDrawer();
               router.push("/merchants/digital");
@@ -254,17 +291,24 @@ const Layout = () => {
                   color={color}
                   style={{
                     marginVertical: -5,
-                    marginRight: 15,
-                    marginLeft: -10,
+                    marginRight: spacing.lg,
+                    marginLeft: -spacing.md,
                   }}
                 />
               );
             },
-            headerTintColor: navigation.isFocused() ? COLORS.primary : "black",
+            headerTintColor: navigation.isFocused() ? colors.accent : colors.textPrimary,
+            headerStyle: { backgroundColor: colors.surface },
+            headerShadowVisible: false,
+            sceneContainerStyle: { backgroundColor: colors.background },
+            drawerActiveTintColor: colors.accent,
+            drawerInactiveTintColor: colors.textPrimary,
+            drawerStyle: { backgroundColor: colors.surface },
             drawerLabelStyle: {
-              marginHorizontal: -20,
-              fontSize: 16,
-              padding: -20,
+              marginHorizontal: -spacing.xl,
+              fontSize: type.body.fontSize,
+              fontFamily: fontFamily['400'],
+              padding: -spacing.xl,
             },
             itemStyle: {
               marginVertical: 0,
@@ -285,40 +329,38 @@ const Layout = () => {
                 <NotificationBell />
                 <Pressable
                   onPress={handleAvatarPress}
-                  style={styles.avatarContainer}
+                  style={{ flexDirection: "row", alignItems: "center" }}
                 >
                   {loading ? (
                     // Loading state
-                    <View style={styles.avatarPlaceholder}>
-                      <Text style={styles.avatarLoadingText}>...</Text>
+                    <View
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: radius.pill,
+                        backgroundColor: colors.surfaceAlt,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        marginRight: spacing.md,
+                      }}
+                    >
+                      <Text variant="bodyMed" weight="700" color="accent">
+                        ...
+                      </Text>
                     </View>
                   ) : currentUser && currentUser.profilePicture ? (
                     // User has profile picture
-                    <Avatar
-                      rounded
-                      source={{ uri: currentUser.profilePicture }}
-                      size="small"
-                      containerStyle={styles.avatar}
-                      onPress={handleAvatarPress}
-                    />
+                    <View style={{ marginRight: spacing.md }}>
+                      <Avatar uri={currentUser.profilePicture} size={36} />
+                    </View>
                   ) : currentUser && currentUser.name ? (
                     // User has name but no profile picture
-                    <Avatar
-                      rounded
-                      title={getUserInitials(currentUser.name)}
-                      size="small"
-                      overlayContainerStyle={{ backgroundColor: COLORS.primary }}
-                      containerStyle={styles.avatar}
-                      onPress={handleAvatarPress}
-                    />
+                    <View style={{ marginRight: spacing.md }}>
+                      <Avatar name={currentUser.name} size={36} />
+                    </View>
                   ) : (
                     // No user data (guest or not logged in)
-                    <Avatar
-                      rounded
-                      icon={{ name: "person", type: "material" }}
-                      size="small"
-                      overlayContainerStyle={{ backgroundColor: "#9D6B38" }}
-                      containerStyle={styles.avatar}
+                    <Pressable
                       onPress={() => {
                         if (!isAuthenticated) {
                           router.push("/login");
@@ -326,7 +368,10 @@ const Layout = () => {
                           router.push("/profile");
                         }
                       }}
-                    />
+                      style={{ marginRight: spacing.md }}
+                    >
+                      <Avatar name="?" size={36} />
+                    </Pressable>
                   )}
                 </Pressable>
               </View>
@@ -335,13 +380,14 @@ const Layout = () => {
               title: "Dashboard",
               headerTitleAlign: "center",
               headerTitleStyle: {
-                fontSize: 16,
-                color: navigation.isFocused() ? COLORS.primary : "black",
+                fontSize: type.title3.fontSize,
+                fontFamily: fontFamily['600'],
+                color: navigation.isFocused() ? colors.accent : colors.textPrimary,
               },
               headerTintColor: navigation.isFocused()
-                ? COLORS.primary
-                : "black",
-              drawerActiveTintColor: COLORS.primary,
+                ? colors.accent
+                : colors.textPrimary,
+              drawerActiveTintColor: colors.accent,
             })
           }
         />
@@ -349,24 +395,24 @@ const Layout = () => {
           name="orderlist"
           options={{
             title: "My Orders",
-            drawerActiveTintColor: COLORS.primary,
+            drawerActiveTintColor: colors.accent,
           }}
         />
         <Drawer.Screen
           name="myAdverts"
           options={{
             title: "My Products",
-            drawerActiveTintColor: COLORS.primary,
+            drawerActiveTintColor: colors.accent,
           }}
         />
         <Drawer.Screen
           name="profile"
           options={{
             title: "Profile",
-            drawerActiveTintColor: COLORS.primary,
+            drawerActiveTintColor: colors.accent,
             // Protect profile route if not authenticated
-            ...(!isAuthenticated && {
-              drawerItemStyle: { display: 'none' }
+            ...(isAuthenticated ? {} : {
+              drawerItemStyle: { display: 'none' as const },
             }),
           }}
         />
@@ -374,14 +420,14 @@ const Layout = () => {
           name="settings"
           options={{
             title: "Settings",
-            drawerActiveTintColor: COLORS.primary,
+            drawerActiveTintColor: colors.accent,
           }}
         />
         <Drawer.Screen
           name="categories"
           options={{
             title: "Category",
-            drawerActiveTintColor: COLORS.primary,
+            drawerActiveTintColor: colors.accent,
           }}
         />
         <Drawer.Screen
@@ -411,54 +457,3 @@ const Layout = () => {
 };
 
 export default Layout;
-
-const styles = StyleSheet.create({
-  avatar: {
-    marginRight: 10,
-  },
-  avatarContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  avatarPlaceholder: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#f0f0f0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  avatarLoadingText: {
-    fontSize: 18,
-    color: COLORS.primary,
-    fontWeight: 'bold',
-  },
-  merchantSection: {
-    marginTop: 5,
-  },
-  merchantDivider: {
-    height: 1,
-    backgroundColor: COLORS.lightGray || '#e0e0e0',
-    marginHorizontal: 20,
-    marginBottom: 8,
-  },
-  merchantSectionTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.gray || '#999',
-    paddingHorizontal: 20,
-    marginBottom: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  merchantDrawerLabel: {
-    marginHorizontal: -20,
-    fontSize: 16,
-  },
-  merchantIcon: {
-    marginVertical: -5,
-    marginRight: 15,
-    marginLeft: -10,
-  },
-});

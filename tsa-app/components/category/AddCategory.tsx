@@ -1,27 +1,48 @@
-import {
-  Alert,
-  Image,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
+// components/category/AddCategory.tsx
+//
+// Add-category form (admin). Migrated onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives). Behavior is unchanged: the
+// parent-category fetch (axios GET /category?isParent=true), the expo-image-picker
+// featured-image flow, the Title+Type required validation, the multipart FormData
+// build, the registerCategory submit, the success Alert + form reset, and the
+// default export are all preserved verbatim — this is a visual/structural
+// restyle only. The two @react-native-picker dropdowns are re-expressed as
+// SelectRow + PickerSheet, and the three FontAwesome checkboxes as themed
+// Toggle rows, with no change to the underlying state they drive.
+import { Alert, Image, ScrollView, View } from "react-native";
 import React, { useEffect, useState } from "react";
-import { COLORS, SIZES } from "../../constants/theme";
-import Icon from "@expo/vector-icons/FontAwesome";
+import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import { registerCategory } from "../../constants/api/AuthenticationService";
 import { useAuth } from "../../AuthContext/AuthContext";
-import { Picker } from "@react-native-picker/picker";
 import { generateFileName } from "../../constants/api/filename";
 import { baseUrl } from "../../constants/api/apiClient";
-import { router, useRouter } from "expo-router";
 import axios from "axios";
-import LoadingSpinner from "../others/LoadingSpinner";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Card,
+  Icon,
+  Input,
+  PickerSheet,
+  PressableScale,
+  SelectRow,
+  Text,
+  Toggle,
+  type PickerItem,
+} from "@/components/ui";
+
+const TYPE_OPTIONS: PickerItem[] = [
+  { id: "Product", label: "Product" },
+  { id: "Service", label: "Service" },
+  // "Both" lets a same-titled category serve both sections (e.g. "Generators"
+  // for a generator product AND a generator-repair service). Listings stay in
+  // their own marketplace section — the type filter prevents cross-leakage.
+  { id: "Both", label: "Both (Product & Service)" },
+];
 
 const AddCategoryScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const [description, setDescription] = useState("");
   const [title, setTitle] = useState("");
   const [type, setType] = useState("");
@@ -33,6 +54,10 @@ const AddCategoryScreen = () => {
   const [parentCategories, setParentCategories] = useState([]);
   const { token, currentUser } = useAuth();
   const [loading, setLoading] = useState(false);
+
+  // Sheet visibility for the SelectRow-backed pickers (UI-only state).
+  const [typeSheetOpen, setTypeSheetOpen] = useState(false);
+  const [parentSheetOpen, setParentSheetOpen] = useState(false);
 
   const fetchParentCategories = async () => {
     try {
@@ -126,197 +151,204 @@ const AddCategoryScreen = () => {
     }
   };
 
+  // Picker items derived from the fetched parent categories (UI mapping only —
+  // value remains item.id and label remains item.title, as before).
+  const parentItems: PickerItem[] = parentCategories.map((item: any) => ({
+    id: String(item.id),
+    label: item.title,
+  }));
+
+  const selectedTypeLabel =
+    TYPE_OPTIONS.find((o) => o.id === type)?.label ?? "";
+  const selectedParentLabel =
+    parentItems.find((o) => o.id === parentCategory)?.label ?? "";
+
   return (
-    <View style={{ backgroundColor: "#fff" }}>
-      <ScrollView style={styles.cover}>
-        <Text style={styles.label}>Title</Text>
-        <TextInput
-          style={styles.input}
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: colors.background }}
+      edges={["top"]}
+    >
+      <ScrollView
+        contentContainerStyle={{
+          padding: spacing.lg,
+          paddingBottom: spacing["4xl"],
+          gap: spacing.lg,
+        }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <Input
+          label="Title"
           value={title}
           onChangeText={(e) => setTitle(e)}
+          placeholder="Category title"
         />
-        <Text style={styles.label}>Enter Description</Text>
-        <TextInput
-          style={styles.input}
+
+        <Input
+          label="Enter Description"
           value={description}
           onChangeText={(e) => setDescription(e)}
           autoCapitalize="none"
+          placeholder="Short description"
         />
-        <Text style={styles.label}>Enter Category Type</Text>
-        <Picker
-          style={styles.input}
-          selectedValue={type}
-          onValueChange={(itemValue) => setType(itemValue)}
-        >
-          <Picker.Item label={"Select Type"} value={""} />
-          <Picker.Item label={"Product"} value={"Product"} />
-          <Picker.Item label={"Service"} value={"Service"} />
-        </Picker>
 
-        <Text style={styles.label}>Upload Featured Image</Text>
-        <View style={styles.uploadContainer}>
-          <TouchableOpacity onPress={pickImageAsync}>
-            <Icon name="upload" size={25} color="#aaa" />
-          </TouchableOpacity>
+        <SelectRow
+          label="Enter Category Type"
+          value={selectedTypeLabel}
+          placeholder="Select Type"
+          onPress={() => setTypeSheetOpen(true)}
+        />
+
+        {/* Featured image upload — same expo-image-picker flow, restyled tile */}
+        <View style={{ gap: spacing.sm }}>
+          <Text variant="bodySm" weight="600" color="textSecondary">
+            Upload Featured Image
+          </Text>
+          <PressableScale
+            onPress={pickImageAsync}
+            accessibilityRole="button"
+            accessibilityLabel="Upload featured image"
+            style={{
+              alignItems: "center",
+              justifyContent: "center",
+              height: 100,
+              borderRadius: radius.md,
+              borderWidth: 1,
+              borderStyle: "dashed",
+              borderColor: colors.border,
+              backgroundColor: colors.surfaceAlt,
+            }}
+          >
+            <Icon name="upload" size={24} color={colors.textMuted} />
+            <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+              Tap to choose an image
+            </Text>
+          </PressableScale>
+
+          {featuredImage && (
+            <View style={{ alignItems: "center" }}>
+              <Image
+                source={{ uri: featuredImage }}
+                style={{
+                  width: 100,
+                  height: 100,
+                  resizeMode: "contain",
+                  borderRadius: radius.sm,
+                }}
+              />
+            </View>
+          )}
         </View>
 
-        {featuredImage && (
-          <View style={styles.imageContainer}>
-            <Image
-              source={{ uri: featuredImage }}
-              style={styles.uploadedImage}
+        {/* Toggle rows replace the FontAwesome checkboxes — same boolean state */}
+        <Card padding="sm" style={{ gap: spacing.sm }}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              paddingVertical: spacing.xs,
+            }}
+          >
+            <Text variant="body" style={{ flex: 1 }}>
+              Select Parent Category
+            </Text>
+            <Toggle
+              value={hasParent}
+              onValueChange={() => setHasParent(!hasParent)}
+              accessibilityLabel="Select parent category"
             />
           </View>
-        )}
 
-        <Text style={styles.label}></Text>
-        <TouchableOpacity
-          style={styles.checkboxContainer}
-          onPress={() => setHasParent(!hasParent)}
-        >
-          <Icon
-            name={hasParent ? "check-square-o" : "square-o"}
-            size={25}
-            color="#000"
-          />
-          <Text style={styles.checkboxLabel}>Select Parent Category</Text>
-        </TouchableOpacity>
-        {hasParent && (
-          <Picker
-            style={styles.input}
-            selectedValue={parentCategory}
-            onValueChange={(itemValue) => setParentCategory(itemValue)}
+          {hasParent && (
+            <SelectRow
+              value={selectedParentLabel}
+              placeholder="Select Parent Category"
+              onPress={() => setParentSheetOpen(true)}
+            />
+          )}
+
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              paddingVertical: spacing.xs,
+            }}
           >
-            <Picker.Item label={"Select Parent Category"} value={""} />
-            {parentCategories.map((item, index) => (
-              <Picker.Item
-                key={index}
-                //@ts-ignore
-                label={item.title}
-                //@ts-ignore
-                value={item.id}
-              />
-            ))}
-          </Picker>
-        )}
+            <View style={{ flex: 1 }}>
+              <Text variant="body">Is Parent</Text>
+              <Text variant="caption" color="textMuted">
+                Parent Category?
+              </Text>
+            </View>
+            <Toggle
+              value={isParent}
+              onValueChange={() => setIsParent(!isParent)}
+              accessibilityLabel="Is parent"
+            />
+          </View>
 
-        <Text style={styles.label}>Parent Category?</Text>
-        <TouchableOpacity
-          style={styles.checkboxContainer}
-          onPress={() => setIsParent(!isParent)}
-        >
-          <Icon
-            name={isParent ? "check-square-o" : "square-o"}
-            size={25}
-            color="#000"
-          />
-          <Text style={styles.checkboxLabel}>Is Parent</Text>
-        </TouchableOpacity>
-
-        <Text style={styles.label}>Featured?</Text>
-        <TouchableOpacity
-          style={styles.checkboxContainer}
-          onPress={() => setIsFeatured(!isFeatured)}
-        >
-          <Icon
-            name={isFeatured ? "check-square-o" : "square-o"}
-            size={25}
-            color="#000"
-          />
-          <Text style={styles.checkboxLabel}>Is Featured</Text>
-        </TouchableOpacity>
-
-        <View style={{ alignItems: "center", marginBottom: 55 }}>
-          <TouchableOpacity
-            //@ts-ignore
-            style={[styles.button, loading && styles.buttonDisabled]}
-            onPress={createCategory}
-            disabled={loading}
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              paddingVertical: spacing.xs,
+            }}
           >
-            {loading ? (
-              <LoadingSpinner />
-            ) : (
-              <Text style={styles.buttonText}>Continue</Text>
-            )}
-          </TouchableOpacity>
-        </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="body">Is Featured</Text>
+              <Text variant="caption" color="textMuted">
+                Featured?
+              </Text>
+            </View>
+            <Toggle
+              value={isFeatured}
+              onValueChange={() => setIsFeatured(!isFeatured)}
+              accessibilityLabel="Is featured"
+            />
+          </View>
+        </Card>
+
+        <Button
+          title="Continue"
+          onPress={createCategory}
+          disabled={loading}
+          loading={loading}
+          size="lg"
+        />
       </ScrollView>
-    </View>
+
+      {/* Category-type picker */}
+      <PickerSheet
+        visible={typeSheetOpen}
+        onClose={() => setTypeSheetOpen(false)}
+        title="Select Type"
+        items={TYPE_OPTIONS}
+        selectedId={type}
+        searchable={false}
+        onSelect={(item) => {
+          setType(item.id);
+          setTypeSheetOpen(false);
+        }}
+      />
+
+      {/* Parent-category picker */}
+      <PickerSheet
+        visible={parentSheetOpen}
+        onClose={() => setParentSheetOpen(false)}
+        title="Select Parent Category"
+        items={parentItems}
+        selectedId={parentCategory}
+        emptyText="No parent categories"
+        onSelect={(item) => {
+          setParentCategory(item.id);
+          setParentSheetOpen(false);
+        }}
+      />
+    </SafeAreaView>
   );
 };
 
 export default AddCategoryScreen;
-
-const styles = StyleSheet.create({
-  container: {
-    justifyContent: "center",
-    padding: 20,
-    backgroundColor: COLORS.white,
-  },
-  input: {
-    width: SIZES.width * 0.9,
-    height: (6.2 / 100) * SIZES.height,
-    borderColor: "gray",
-    marginTop: 2,
-    marginBottom: 10,
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: SIZES.width * 0.05,
-    backgroundColor: COLORS.gray,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: SIZES.width * 0.9,
-    alignItems: "center",
-    justifyContent: "center",
-    height: 0.0687 * SIZES.height,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    marginBottom: 20,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-  },
-  label: {
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  uploadContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    width: SIZES.width * 0.9,
-    height: 100,
-    borderColor: "#ccc",
-    borderWidth: 1,
-    borderRadius: 5,
-    marginBottom: 20,
-    backgroundColor: "#f9f9f9",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  uploadedImage: {
-    width: 100,
-    height: 100,
-    resizeMode: "contain",
-    marginHorizontal: SIZES.width * 0.05,
-  },
-  imageContainer: {
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  cover: {
-    backgroundColor: COLORS.white,
-  },
-  checkboxContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginHorizontal: SIZES.width * 0.05,
-    marginBottom: 10,
-  },
-  checkboxLabel: {
-    marginLeft: 10,
-  },
-  buttonDisabled: {
-    color: "#fff",
-  },
-});

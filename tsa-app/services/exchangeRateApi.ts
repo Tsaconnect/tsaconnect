@@ -21,6 +21,8 @@ export interface P2PRate {
   source?: "bybit" | "oer";
   /** True when this row was served from a fallback path; FE must not quote against it. */
   stale?: boolean;
+  /** True when this currency is eligible for a float-rate anchor (has a Bybit feed). */
+  floatAnchor?: boolean;
   yellowCard?: number;
   updatedAt: number;
 }

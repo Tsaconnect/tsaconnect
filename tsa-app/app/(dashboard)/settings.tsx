@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -10,13 +10,14 @@ import {
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
-import api from "@/components/services/api";
 import { useAuth } from "../../AuthContext/AuthContext";
 import CurrencySelector from "../../components/currency/CurrencySelector";
+import { SegmentedControl } from "@/components/ui";
+import { useThemeControls, useTheme, type SchemePreference } from "@/theme";
 import {
   isLockEnabled, setLockEnabled, hasPin, removePin,
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
-  authenticateWithBiometric, verifyPin,
+  authenticateWithBiometric,
 } from "@/services/localAuth";
 
 interface SettingsItem {
@@ -33,7 +34,10 @@ interface SettingsSection {
 }
 
 const SettingsScreen = () => {
-  const { logOut, logOutFull, currentUser } = useAuth();
+  const { logOut, logOutFull } = useAuth();
+  const { preference, setScheme } = useThemeControls();
+  const { colors } = useTheme();
+  const styles = makeStyles(colors);
   const [lockOn, setLockOn] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [bioEnabled, setBioEnabled] = useState(false);
@@ -175,6 +179,10 @@ const SettingsScreen = () => {
       items: [],
     },
     {
+      title: "Appearance",
+      items: [],
+    },
+    {
       title: "Wallet",
       items: [
         {
@@ -305,6 +313,21 @@ const SettingsScreen = () => {
               <View style={{ padding: 4 }}>
                 <CurrencySelector variant="card" showRates />
               </View>
+            ) : section.title === "Appearance" ? (
+              <View style={{ padding: 12, gap: 8 }}>
+                <SegmentedControl
+                  segments={[
+                    { key: "light", label: "Light" },
+                    { key: "dark", label: "Dark" },
+                    { key: "system", label: "System" },
+                  ]}
+                  value={preference}
+                  onChange={(k) => setScheme(k as SchemePreference)}
+                />
+                <Text style={styles.description}>
+                  Defaults to light. System follows your device setting.
+                </Text>
+              </View>
             ) : (
               section.items.map((item, index) => (
                 <TouchableOpacity
@@ -325,7 +348,7 @@ const SettingsScreen = () => {
                     <Icon
                       name={item.icon}
                       size={22}
-                      color={item.danger ? "#EF4444" : "#9D6B38"}
+                      color={item.danger ? colors.danger : colors.accent}
                     />
                   </View>
                   <View style={styles.textContainer}>
@@ -336,7 +359,7 @@ const SettingsScreen = () => {
                     </Text>
                     <Text style={styles.description}>{item.description}</Text>
                   </View>
-                  <Icon name="chevron-right" size={22} color="#C0C0C0" />
+                  <Icon name="chevron-right" size={22} color={colors.textMuted} />
                 </TouchableOpacity>
               ))
             )}
@@ -350,65 +373,68 @@ const SettingsScreen = () => {
 
 export default SettingsScreen;
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F5F5F5",
-  },
-  section: {
-    marginTop: 24,
-    paddingHorizontal: 16,
-  },
-  sectionTitle: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#9D6B38",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 8,
-    marginLeft: 4,
-  },
-  sectionCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    overflow: "hidden",
-  },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  rowBorder: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#E5E5E5",
-  },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    backgroundColor: "#FDF5ED",
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 14,
-  },
-  iconContainerDanger: {
-    backgroundColor: "#FEF2F2",
-  },
-  textContainer: {
-    flex: 1,
-  },
-  label: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: "#1F2937",
-    marginBottom: 2,
-  },
-  labelDanger: {
-    color: "#EF4444",
-  },
-  description: {
-    fontSize: 13,
-    color: "#9CA3AF",
-  },
-});
+// Theme-aware style factory — colors come from useTheme() so the screen adapts
+// to light/dark; layout/typography geometry stays fixed.
+const makeStyles = (colors: ReturnType<typeof useTheme>["colors"]) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    section: {
+      marginTop: 24,
+      paddingHorizontal: 16,
+    },
+    sectionTitle: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: colors.accent,
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+      marginBottom: 8,
+      marginLeft: 4,
+    },
+    sectionCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      overflow: "hidden",
+    },
+    row: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 14,
+      paddingHorizontal: 16,
+    },
+    rowBorder: {
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.hairline,
+    },
+    iconContainer: {
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      backgroundColor: colors.accentMuted,
+      justifyContent: "center",
+      alignItems: "center",
+      marginRight: 14,
+    },
+    iconContainerDanger: {
+      backgroundColor: colors.dangerBg,
+    },
+    textContainer: {
+      flex: 1,
+    },
+    label: {
+      fontSize: 15,
+      fontWeight: "600",
+      color: colors.textPrimary,
+      marginBottom: 2,
+    },
+    labelDanger: {
+      color: colors.danger,
+    },
+    description: {
+      fontSize: 13,
+      color: colors.textMuted,
+    },
+  });

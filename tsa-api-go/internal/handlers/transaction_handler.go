@@ -14,6 +14,8 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/gorm"
 )
 
 // GetTransactions returns paginated, filtered transactions.
@@ -394,19 +396,69 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	})
 	tx.Fees = feesJSON
 
-	if err := config.DB.Create(&tx).Error; err != nil {
+	newBalance := asset.Balance - totalDeduction
+	newUSDValue := newBalance * price
+
+	// Fee-v2 accrual (design §8, B5/I7): the 0.5% platform fee is recorded as a
+	// FeeEvent IN THE SAME DB TRANSACTION as the tx-create + balance deduction, so
+	// the fee can NEVER be deducted without the accrual being recorded (no
+	// treasury leak). SourceType "withdrawal" + SourceID tx.ID is distinct from
+	// any on-chain send path (wallet_handler uses its own source), so a withdrawal
+	// touching both never double-settles.
+	platformFeeUSD := platformFee * price
+	feeEvent := services.FeeEvent{
+		Feature:    models.FeatureWithdrawal,
+		Token:      body.AssetSymbol,
+		FeeUSD:     platformFeeUSD,
+		UserID:     user.ID,
+		SourceType: "withdrawal",
+		SourceID:   tx.ID,
+	}
+
+	// Resolve uplines OUTSIDE the write tx (the recursive-CTE read must not
+	// contend with the write tx on a single-connection pool). Skipped when there's
+	// no fee to settle or the engine isn't wired.
+	var byGen map[int]services.Ancestor
+	feeV2 := h.FeeService != nil && platformFeeUSD > 0
+	if feeV2 {
+		var err error
+		byGen, err = h.FeeService.ResolveUplines(c.Request.Context(), user.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to resolve fee distribution"})
+			return
+		}
+	}
+	recipients := make(map[uuid.UUID]struct{})
+
+	if err := config.DB.Transaction(func(dbtx *gorm.DB) error {
+		if err := dbtx.Create(&tx).Error; err != nil {
+			return fmt.Errorf("create withdrawal: %w", err)
+		}
+		if err := dbtx.Model(&asset).Updates(map[string]interface{}{
+			"balance":    newBalance,
+			"usd_value":  newUSDValue,
+			"updated_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("deduct balance: %w", err)
+		}
+		// In-tx accrual: a settlement failure here rolls back the deduction.
+		if feeV2 {
+			if err := feeAccrualInTx(h.FeeService, dbtx, feeEvent, byGen, recipients); err != nil {
+				return fmt.Errorf("accrue withdrawal fee: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Printf("Withdrawal tx failed for user %s: %v", user.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create withdrawal"})
 		return
 	}
 
-	// Update asset balance
-	newBalance := asset.Balance - totalDeduction
-	newUSDValue := newBalance * price
-	config.DB.Model(&asset).Updates(map[string]interface{}{
-		"balance":    newBalance,
-		"usd_value":  newUSDValue,
-		"updated_at": now,
-	})
+	// Distribution committed atomically with the deduction; bridge to SP5 AFTER
+	// the tx commits (best-effort, idempotent).
+	if feeV2 {
+		h.FeeService.MarkRecipientsDirty(c.Request.Context(), recipients)
+	}
 
 	h.EventBus.Publish(events.Event{
 		Type:    events.TransactionPending,
@@ -461,8 +513,12 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 		return
 	}
 
-	// Check balance (including 0.1% fee)
-	fee := body.Amount * 0.001
+	// Check balance (including swap fee). Rate from the swap fee_config row
+	// (seeded to 10 bps = 0.1%). float64(10)/10000 is bit-identical to 0.001.
+	// Internal asset swap operates on off-chain balances with no single chain
+	// context, so it reads the documented-GLOBAL row (chainID nil) — design §6.
+	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset, nil)
+	fee := body.Amount * (float64(swapBps) / 10000.0)
 	totalDeduction := body.Amount + fee
 	if fromAssetDoc.Balance < totalDeduction {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -580,7 +636,23 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 		},
 	})
 
-	if err := DistributeTPEarnings(config.DB, user.ID, "swap", tx.ID, feeUSD); err != nil {
+	// Fee settlement (see settleFeeEarnings): idempotent on swap/tx.ID.
+	//
+	// Feature mapping: this is the platform's INTERNAL asset-to-asset exchange on
+	// its own books (not the LiFi cross-chain bridge, which is "allswap", nor a
+	// fiat<->crypto OTC desk). The best-fit split feature is therefore "spot"
+	// (the internal spot exchange). spot/otc/allswap/instant_pay all share the same
+	// 70/30 no-cashback split, so the split is identical regardless; FeatureSpot is
+	// chosen for the most accurate audit/feature labelling. The FeeUSD itself is the
+	// rate-config swap fee.
+	if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
+		Feature:    models.FeatureSpot,
+		Token:      body.FromAsset,
+		FeeUSD:     feeUSD,
+		UserID:     user.ID,
+		SourceType: "swap",
+		SourceID:   tx.ID,
+	}); err != nil {
 		log.Printf("TP distribution failed for swap %s: %v", tx.ID, err)
 	}
 
@@ -650,8 +722,19 @@ func (h *Handlers) checkWithdrawalLimits(userID uuid.UUID, amount float64, asset
 
 // calculateWithdrawalFees calculates platform and network fees for a withdrawal.
 func (h *Handlers) calculateWithdrawalFees(assetSymbol string, network string, amount float64) map[string]float64 {
-	// 0.5% platform fee
-	platformFee := amount * 0.005
+	// Platform fee rate from the withdrawal fee_config row (seeded to 50 bps =
+	// 0.5%). float64(50)/10000 is bit-identical to the previous 0.005 literal.
+	// Thread the chainID resolved from the withdrawal's network so a per-chain
+	// override applies (design §6); nil falls back to the global row when the
+	// network name is unknown/empty.
+	var chainID *int64
+	if h.BlockchainService != nil {
+		if id, ok := h.BlockchainService.ChainIDForName(network); ok {
+			chainID = &id
+		}
+	}
+	bps, _ := services.FeeRate(models.FeatureWithdrawal, assetSymbol, chainID)
+	platformFee := amount * (float64(bps) / 10000.0)
 
 	// Mock network fees based on network
 	networkFees := map[string]float64{

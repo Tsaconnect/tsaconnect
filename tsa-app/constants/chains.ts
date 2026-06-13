@@ -360,9 +360,39 @@ export function getChainsForNetwork(network: NetworkType): Record<ChainKey, Chai
 }
 
 export function getChainByChainId(chainId: number): (ChainConfig & { key: ChainKey }) | undefined {
-  const entry = Object.entries(CHAINS).find(([, c]) => c.chainId === chainId);
-  if (!entry) return undefined;
-  return { ...entry[1], key: entry[0] as ChainKey };
+  // Resolve against the ACTIVE network first, then fall back to BOTH the
+  // mainnet and testnet maps. P2P runs on its own network (e.g. testnet) which
+  // can differ from the wallet's active network — without this fallback a
+  // testnet chainId (14601 Sonic, 97 BSC) wouldn't resolve while CHAINS is
+  // mainnet, and the UI would show the raw chainId number instead of a name.
+  for (const map of [CHAINS, MAINNET_CHAINS, TESTNET_CHAINS]) {
+    const entry = Object.entries(map).find(([, c]) => c.chainId === chainId);
+    if (entry) return { ...entry[1], key: entry[0] as ChainKey };
+  }
+  return undefined;
+}
+
+// User-facing network names for chooser chips/labels. Distinct from `shortName`
+// (which carries token-standard labels like BEP20) — here we want the plain
+// network a merchant recognises ("Sonic", "BNB").
+const NETWORK_DISPLAY_NAMES: Record<ChainKey, string> = {
+  sonic: 'Sonic',
+  bsc: 'BNB',
+  ethereum: 'Ethereum',
+  polygon: 'Polygon',
+  arbitrum: 'Arbitrum',
+  base: 'Base',
+  optimism: 'Optimism',
+  avalanche: 'Avalanche',
+  linea: 'Linea',
+};
+
+/** Clean, user-facing network name for a chainId (e.g. 14601 → "Sonic", 97 →
+ *  "BNB"). Falls back to "Chain <id>" only for genuinely unknown chains. */
+export function getNetworkDisplayName(chainId: number): string {
+  const c = getChainByChainId(chainId);
+  if (c) return NETWORK_DISPLAY_NAMES[c.key] ?? c.name;
+  return `Chain ${chainId}`;
 }
 
 export function getSupportedNetworkNames(): string {

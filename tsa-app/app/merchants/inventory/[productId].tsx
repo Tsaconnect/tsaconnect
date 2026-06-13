@@ -1,23 +1,44 @@
+// app/merchants/inventory/[productId].tsx
+//
+// Inventory product detail — a merchant's view of a single product: hero image,
+// price/status, stock/views/sales stats, per-token revenue, recent orders,
+// shipping rates, location, plus an Edit + activate/deactivate action bar.
+// Migrated onto the TSA Signature design system (@/theme tokens + @/components/ui
+// primitives). This is a VISUAL/STRUCTURAL restyle only — every API call
+// (api.getProductById, getOrders, api.updateProduct), all state/effects, the
+// wei→number revenue math (weiToNumber / sumByToken / USD_PEGGED bucketing),
+// the status-toggle confirm flow, role/status gating, navigation routes/params,
+// and money/token formatting are preserved verbatim from the legacy screen.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
-  Text,
-  StyleSheet,
   ScrollView,
-  TouchableOpacity,
   Image,
-  ActivityIndicator,
   Dimensions,
   RefreshControl,
   Alert,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import api, { Product } from '@/components/services/api';
 import { getOrders, formatTokenAmount, Order } from '@/services/orderApi';
 import { STATUS_COLORS, formatStatus, formatDate } from '@/constants/orderStatus';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Badge,
+  Button,
+  Card,
+  Divider,
+  EmptyState,
+  Icon,
+  IconButton,
+  PressableScale,
+  Spinner,
+  Text,
+} from '@/components/ui';
 
-const GOLD = '#D4AF37';
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Wei conversion per token (matches frontend `formatTokenAmount` decimals)
@@ -60,6 +81,7 @@ function sumByToken(orders: Order[]): Record<string, number> {
 }
 
 const MerchantProductDetail = () => {
+  const { colors, spacing, radius } = useTheme();
   const { productId } = useLocalSearchParams<{ productId: string }>();
   const [product, setProduct] = useState<Product | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -138,26 +160,62 @@ const MerchantProductDetail = () => {
 
   if (loading) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color={GOLD} />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <Spinner size="large" label="Loading product…" />
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (error || !product) {
     return (
-      <View style={styles.centered}>
-        <Ionicons name="alert-circle-outline" size={64} color="#D9B68B" />
-        <Text style={styles.errorTitle}>{error || 'Product not found'}</Text>
-        <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => { setLoading(true); fetchData().finally(() => setLoading(false)); }}>
-            <Text style={styles.retryText}>Retry</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: '#888' }]} onPress={() => router.back()}>
-            <Text style={styles.retryText}>Go back</Text>
-          </TouchableOpacity>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View
+          style={{
+            flex: 1,
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: spacing['3xl'],
+            gap: spacing.lg,
+          }}
+        >
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 32,
+              backgroundColor: colors.dangerBg,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Icon name="warning" size={30} color={colors.danger} />
+          </View>
+          <Text variant="title3" weight="700" align="center">
+            {error || 'Product not found'}
+          </Text>
+          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+            <Button
+              title="Retry"
+              variant="primary"
+              size="sm"
+              fullWidth={false}
+              onPress={() => {
+                setLoading(true);
+                fetchData().finally(() => setLoading(false));
+              }}
+            />
+            <Button
+              title="Go back"
+              variant="secondary"
+              size="sm"
+              fullWidth={false}
+              onPress={() => router.back()}
+            />
+          </View>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
@@ -178,363 +236,321 @@ const MerchantProductDetail = () => {
   const isActive = product.status === 'active';
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#FAFAFA' }}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={24} color="#1A1A1A" />
-        </TouchableOpacity>
-        <Text style={styles.title} numberOfLines={1}>Product Details</Text>
-        <TouchableOpacity
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      {/* Header */}
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingHorizontal: spacing.sm,
+          paddingVertical: spacing.sm,
+          borderBottomWidth: 1,
+          borderBottomColor: colors.hairline,
+          backgroundColor: colors.surface,
+        }}
+      >
+        <IconButton icon="chevronLeft" accessibilityLabel="Go back" onPress={() => router.back()} />
+        <Text variant="title3" weight="700" numberOfLines={1} style={{ flex: 1, textAlign: 'center', marginHorizontal: spacing.sm }}>
+          Product Details
+        </Text>
+        <IconButton
+          icon="edit"
+          color={colors.accent}
+          accessibilityLabel="Edit product"
           onPress={() => router.push(`/merchants/inventory/edit/${product.id}`)}
-          style={styles.editBtn}
-        >
-          <Ionicons name="create-outline" size={22} color={GOLD} />
-        </TouchableOpacity>
+        />
       </View>
 
       <ScrollView
-        contentContainerStyle={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={GOLD} />}
+        contentContainerStyle={{ paddingBottom: spacing['4xl'] * 2 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.accent} colors={[colors.accent]} />
+        }
       >
         {primaryImage ? (
-          <Image source={{ uri: primaryImage }} style={styles.image} />
+          <Image
+            source={{ uri: primaryImage }}
+            style={{ width: SCREEN_WIDTH, height: SCREEN_WIDTH * 0.7, backgroundColor: colors.surfaceAlt }}
+          />
         ) : (
-          <View style={[styles.image, styles.imagePlaceholder]}>
-            <Ionicons name="image-outline" size={48} color="#CCC" />
+          <View
+            style={{
+              width: SCREEN_WIDTH,
+              height: SCREEN_WIDTH * 0.7,
+              backgroundColor: colors.surfaceAlt,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <Icon name="image" size={48} color={colors.textMuted} />
           </View>
         )}
 
-        <View style={styles.card}>
-          <Text style={styles.name}>{product.name}</Text>
-          <Text style={styles.price}>${product.price.toFixed(2)}</Text>
-          <View style={[styles.statusPill, isActive ? styles.statusActive : styles.statusInactive]}>
-            <Text style={[styles.statusPillText, !isActive && { color: '#6B7280' }]}>
-              {formatStatus(product.status || 'active')}
-            </Text>
+        {/* Identity */}
+        <Card style={{ marginHorizontal: spacing.lg, marginTop: spacing.md }}>
+          <Text variant="title2" weight="700">
+            {product.name}
+          </Text>
+          <View style={{ marginTop: spacing.xs, marginBottom: spacing.sm }}>
+            <AmountText value={product.price} currency="USD" variant="title1" color="accent" minimumFractionDigits={2} maximumFractionDigits={2} />
           </View>
-          {product.description ? <Text style={styles.desc}>{product.description}</Text> : null}
-        </View>
+          <Badge
+            label={formatStatus(product.status || 'active')}
+            color={isActive ? colors.success : colors.textSecondary}
+            background={isActive ? colors.successBg : colors.surfaceAlt}
+          />
+          {product.description ? (
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm }}>
+              {product.description}
+            </Text>
+          ) : null}
+        </Card>
 
         {/* Stats */}
-        <View style={styles.statsRow}>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Stock</Text>
-            <Text style={[styles.statValue, product.stock === 0 && { color: '#DC2626' }]}>
+        <View style={{ flexDirection: 'row', marginHorizontal: spacing.lg, marginTop: spacing.md, gap: spacing.sm }}>
+          <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+            <Text variant="overline" color="textMuted">
+              STOCK
+            </Text>
+            <Text variant="title2" weight="700" numeric color={product.stock === 0 ? 'danger' : 'textPrimary'} style={{ marginTop: spacing.xs }}>
               {product.stock}
             </Text>
-          </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Views</Text>
-            <Text style={styles.statValue}>{product.views ?? 0}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Sales</Text>
-            <Text style={styles.statValue}>{product.sales ?? 0}</Text>
-          </View>
+          </Card>
+          <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+            <Text variant="overline" color="textMuted">
+              VIEWS
+            </Text>
+            <Text variant="title2" weight="700" numeric style={{ marginTop: spacing.xs }}>
+              {product.views ?? 0}
+            </Text>
+          </Card>
+          <Card padding="md" style={{ flex: 1, alignItems: 'center' }}>
+            <Text variant="overline" color="textMuted">
+              SALES
+            </Text>
+            <Text variant="title2" weight="700" numeric style={{ marginTop: spacing.xs }}>
+              {product.sales ?? 0}
+            </Text>
+          </Card>
         </View>
 
         {/* Revenue */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>REVENUE</Text>
+        <Card style={{ marginHorizontal: spacing.lg, marginTop: spacing.md }}>
+          <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+            REVENUE
+          </Text>
           {tokenEntries.length === 0 ? (
-            <Text style={styles.muted}>No revenue yet</Text>
+            <Text variant="bodySm" color="textMuted">
+              No revenue yet
+            </Text>
           ) : (
             <>
               {usdRevenue > 0 && (
-                <View style={styles.rowBetween}>
-                  <Text style={styles.muted}>USD-pegged (USDC + USDT)</Text>
-                  <Text style={[styles.bold, { color: GOLD }]}>${usdRevenue.toFixed(2)}</Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+                  <Text variant="bodySm" color="textSecondary">
+                    USD-pegged (USDC + USDT)
+                  </Text>
+                  <AmountText value={usdRevenue} currency="USD" variant="bodyMed" color="accent" minimumFractionDigits={2} maximumFractionDigits={2} />
                 </View>
               )}
               {otherTokens.map(([token, amount]) => (
-                <View key={token} style={styles.rowBetween}>
-                  <Text style={styles.muted}>{token}</Text>
-                  <Text style={styles.bold}>{amount.toFixed(4)} {token}</Text>
+                <View
+                  key={token}
+                  style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}
+                >
+                  <Text variant="bodySm" color="textSecondary">
+                    {token}
+                  </Text>
+                  <Text variant="bodySm" weight="700" numeric>
+                    {amount.toFixed(4)} {token}
+                  </Text>
                 </View>
               ))}
-              <Text style={[styles.muted, { fontSize: 11, marginTop: 6, fontStyle: 'italic' }]}>
+              <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm, fontStyle: 'italic' }}>
                 From {completedOrders.length} shipped/delivered/completed order(s)
               </Text>
             </>
           )}
-        </View>
+        </Card>
 
-        {/* Orders header */}
-        <View style={styles.card}>
-          <View style={styles.ordersHeader}>
+        {/* Orders */}
+        <Card style={{ marginHorizontal: spacing.lg, marginTop: spacing.md }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.sm }}>
             <View>
-              <Text style={styles.cardLabel}>ORDERS ({orders.length})</Text>
+              <Text variant="overline" color="textMuted">
+                ORDERS ({orders.length})
+              </Text>
               {pendingCount > 0 && (
-                <Text style={styles.pendingText}>{pendingCount} awaiting action</Text>
+                <Text variant="caption" weight="700" color="accent" style={{ marginTop: 2 }}>
+                  {pendingCount} awaiting action
+                </Text>
               )}
             </View>
             {orders.length > 0 && (
-              <TouchableOpacity onPress={() => router.push('/merchants/orders' as any)}>
-                <Text style={styles.viewAll}>View all</Text>
-              </TouchableOpacity>
+              <PressableScale onPress={() => router.push('/merchants/orders' as any)}>
+                <Text variant="bodySm" weight="600" color="accent">
+                  View all
+                </Text>
+              </PressableScale>
             )}
           </View>
 
           {ordersError ? (
-            <View style={styles.errorBanner}>
-              <Ionicons name="warning-outline" size={16} color="#92400E" />
-              <Text style={styles.errorBannerText}>{ordersError}. Pull to refresh.</Text>
-            </View>
+            <AccentCard railColor={colors.warning} padding="md" style={{ backgroundColor: colors.warningBg }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="warning" size={16} color={colors.warning} />
+                <Text variant="caption" color="warning" style={{ flex: 1 }}>
+                  {ordersError}. Pull to refresh.
+                </Text>
+              </View>
+            </AccentCard>
           ) : orders.length === 0 ? (
-            <View style={styles.emptyOrders}>
-              <Ionicons name="receipt-outline" size={40} color="#D9B68B" />
-              <Text style={styles.emptyOrdersText}>No orders yet for this product</Text>
-            </View>
+            <EmptyState icon="list" title="No orders yet for this product" />
           ) : (
-            orders.slice(0, 5).map((order) => {
+            orders.slice(0, 5).map((order, idx) => {
               const statusColor = STATUS_COLORS[order.status] || STATUS_COLORS.cancelled;
               const buyerLabel =
                 order.buyer?.name?.trim() ||
                 (order.buyer?.username ? `@${order.buyer.username}` : '') ||
                 'Buyer';
               return (
-                <TouchableOpacity
-                  key={order.id}
-                  style={styles.orderItem}
-                  onPress={() => router.push(`/merchants/orders/${order.id}` as any)}
-                  activeOpacity={0.7}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.orderItemId}>#{order.id.slice(0, 8)} · {buyerLabel}</Text>
-                    <Text style={styles.orderItemDate}>{formatDate(order.createdAt)}</Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end', marginRight: 8 }}>
-                    <Text style={styles.orderItemAmount}>{formatTokenAmount(order.totalAmount, order.token)}</Text>
-                    <Text style={styles.orderItemQty}>Qty {order.quantity}</Text>
-                  </View>
-                  <View style={[styles.statusBadge, { backgroundColor: statusColor.bg }]}>
-                    <Text style={[styles.statusText, { color: statusColor.text }]}>{formatStatus(order.status)}</Text>
-                  </View>
-                </TouchableOpacity>
+                <View key={order.id}>
+                  {idx > 0 && <Divider />}
+                  <PressableScale
+                    onPress={() => router.push(`/merchants/orders/${order.id}` as any)}
+                    style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text variant="bodySm" weight="700" numberOfLines={1}>
+                        #{order.id.slice(0, 8)} · {buyerLabel}
+                      </Text>
+                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                        {formatDate(order.createdAt)}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', marginRight: spacing.sm }}>
+                      <Text variant="bodySm" weight="700" numeric>
+                        {formatTokenAmount(order.totalAmount, order.token)}
+                      </Text>
+                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                        Qty {order.quantity}
+                      </Text>
+                    </View>
+                    <Badge label={formatStatus(order.status)} color={statusColor.text} background={statusColor.bg} size="sm" />
+                  </PressableScale>
+                </View>
               );
             })
           )}
-        </View>
+        </Card>
 
         {/* Shipping rates */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>SHIPPING RATES</Text>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Same Residential Area</Text>
-            <Text style={styles.bold}>Free</Text>
+        <Card style={{ marginHorizontal: spacing.lg, marginTop: spacing.md }}>
+          <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+            SHIPPING RATES
+          </Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">
+              Same Residential Area
+            </Text>
+            <Text variant="bodySm" weight="700">
+              Free
+            </Text>
           </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Same City</Text>
-            <Text>${(product.shippingSameCity ?? 0).toFixed(2)}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">
+              Same City
+            </Text>
+            <AmountText value={product.shippingSameCity ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
           </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Same State</Text>
-            <Text>${(product.shippingSameState ?? 0).toFixed(2)}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">
+              Same State
+            </Text>
+            <AmountText value={product.shippingSameState ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
           </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>Same Country</Text>
-            <Text>${(product.shippingSameCountry ?? 0).toFixed(2)}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">
+              Same Country
+            </Text>
+            <AmountText value={product.shippingSameCountry ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
           </View>
-          <View style={styles.rowBetween}>
-            <Text style={styles.muted}>International</Text>
-            <Text>${(product.shippingInternational ?? 0).toFixed(2)}</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
+            <Text variant="bodySm" color="textSecondary">
+              International
+            </Text>
+            <AmountText value={product.shippingInternational ?? 0} currency="USD" variant="bodySm" weight="400" minimumFractionDigits={2} maximumFractionDigits={2} />
           </View>
-        </View>
+        </Card>
 
         {product.location && (
-          <View style={styles.card}>
-            <Text style={styles.cardLabel}>LOCATION</Text>
-            <View style={styles.rowStart}>
-              <Ionicons name="location-outline" size={16} color={GOLD} />
-              <Text style={{ marginLeft: 6 }}>{product.location}</Text>
+          <Card style={{ marginHorizontal: spacing.lg, marginTop: spacing.md }}>
+            <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+              LOCATION
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+              <Icon name="nearMe" size={16} color={colors.accent} />
+              <Text variant="bodySm">{product.location}</Text>
             </View>
-          </View>
+          </Card>
         )}
       </ScrollView>
 
       {/* Action bar — Edit + Toggle Active */}
-      <View style={styles.actionBar}>
-        <TouchableOpacity
-          style={[styles.toggleBtn, isActive ? styles.toggleBtnActive : styles.toggleBtnInactive, togglingStatus && { opacity: 0.5 }]}
+      <View
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          flexDirection: 'row',
+          gap: spacing.sm,
+          padding: spacing.lg,
+          backgroundColor: colors.surface,
+          borderTopWidth: 1,
+          borderTopColor: colors.hairline,
+        }}
+      >
+        <PressableScale
           onPress={handleToggleStatus}
           disabled={togglingStatus}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: spacing.xs,
+            height: 56,
+            paddingHorizontal: spacing.lg,
+            borderRadius: radius.md,
+            borderWidth: 1.5,
+            borderColor: isActive ? colors.danger : colors.success,
+            backgroundColor: isActive ? colors.dangerBg : colors.successBg,
+            opacity: togglingStatus ? 0.5 : 1,
+          }}
         >
           {togglingStatus ? (
-            <ActivityIndicator color={isActive ? '#DC2626' : '#16A34A'} size="small" />
+            <Spinner size="small" color={isActive ? colors.danger : colors.success} />
           ) : (
             <>
-              <Ionicons
-                name={isActive ? 'pause-circle-outline' : 'play-circle-outline'}
-                size={18}
-                color={isActive ? '#DC2626' : '#16A34A'}
-              />
-              <Text style={[styles.toggleBtnText, { color: isActive ? '#DC2626' : '#16A34A' }]}>
+              <Icon name={isActive ? 'pause' : 'play'} size={18} color={isActive ? colors.danger : colors.success} />
+              <Text variant="bodySm" weight="700" style={{ color: isActive ? colors.danger : colors.success }}>
                 {isActive ? 'Deactivate' : 'Activate'}
               </Text>
             </>
           )}
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.editActionBtn}
+        </PressableScale>
+        <Button
+          title="Edit Product"
+          leftIcon="edit"
+          size="lg"
+          style={{ flex: 1 }}
           onPress={() => router.push(`/merchants/inventory/edit/${product.id}`)}
-        >
-          <Ionicons name="create-outline" size={18} color="#FFF" />
-          <Text style={styles.editActionText}>Edit Product</Text>
-        </TouchableOpacity>
+        />
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 export default MerchantProductDetail;
-
-const styles = StyleSheet.create({
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: '#FAFAFA' },
-  errorTitle: { fontSize: 16, fontWeight: '700', color: '#1A1A1A', marginTop: 16, textAlign: 'center' },
-
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#FFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  backBtn: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
-  editBtn: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
-  title: { fontSize: 17, fontWeight: '700', color: '#1A1A1A', flex: 1, textAlign: 'center', marginHorizontal: 8 },
-
-  content: { paddingBottom: 110 },
-
-  image: { width: SCREEN_WIDTH, height: SCREEN_WIDTH * 0.7, backgroundColor: '#F0F0F0' },
-  imagePlaceholder: { justifyContent: 'center', alignItems: 'center' },
-
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
-    padding: 16,
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  cardLabel: { fontSize: 11, fontWeight: '700', color: '#AAA', letterSpacing: 1, marginBottom: 10 },
-
-  name: { fontSize: 20, fontWeight: '700', color: '#1A1A1A', marginBottom: 4 },
-  price: { fontSize: 22, fontWeight: '700', color: GOLD, marginBottom: 8 },
-  desc: { fontSize: 14, color: '#555', lineHeight: 20, marginTop: 8 },
-
-  statusPill: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
-  statusActive: { backgroundColor: '#D1FAE5' },
-  statusInactive: { backgroundColor: '#F5F5F5' },
-  statusPillText: { fontSize: 11, fontWeight: '700', color: '#065F46' },
-
-  statsRow: { flexDirection: 'row', marginHorizontal: 16, marginTop: 12, gap: 10 },
-  statCard: {
-    flex: 1,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  statLabel: { fontSize: 11, color: '#888', fontWeight: '600', letterSpacing: 0.5, marginBottom: 4 },
-  statValue: { fontSize: 22, fontWeight: '700', color: '#1A1A1A' },
-
-  ordersHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 10,
-  },
-  pendingText: { fontSize: 11, color: GOLD, fontWeight: '700', marginTop: 2 },
-  viewAll: { fontSize: 13, color: GOLD, fontWeight: '600' },
-
-  orderItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#F5F5F5',
-  },
-  orderItemId: { fontSize: 13, fontWeight: '700', color: '#1A1A1A' },
-  orderItemDate: { fontSize: 11, color: '#888', marginTop: 2 },
-  orderItemAmount: { fontSize: 13, fontWeight: '700', color: '#1A1A1A' },
-  orderItemQty: { fontSize: 11, color: '#888', marginTop: 2 },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  statusText: { fontSize: 10, fontWeight: '700' },
-
-  emptyOrders: { alignItems: 'center', paddingVertical: 20 },
-  emptyOrdersText: { fontSize: 13, color: '#888', marginTop: 8 },
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#FEF3C7',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-  },
-  errorBannerText: { fontSize: 12, color: '#92400E', flex: 1 },
-
-  rowBetween: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 5,
-  },
-  rowStart: { flexDirection: 'row', alignItems: 'center' },
-  muted: { color: '#888', fontSize: 13 },
-  bold: { fontWeight: '700', color: '#1A1A1A', fontSize: 13 },
-
-  actionBar: {
-    position: 'absolute',
-    bottom: 0, left: 0, right: 0,
-    backgroundColor: '#FFF',
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-    flexDirection: 'row',
-    gap: 10,
-  },
-  toggleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    borderWidth: 1.5,
-  },
-  toggleBtnActive: { borderColor: '#DC2626', backgroundColor: '#FEE2E2' },
-  toggleBtnInactive: { borderColor: '#16A34A', backgroundColor: '#D1FAE5' },
-  toggleBtnText: { fontWeight: '700', fontSize: 14 },
-  editActionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 14,
-    backgroundColor: GOLD,
-  },
-  editActionText: { color: '#FFF', fontWeight: '700', fontSize: 15 },
-
-  retryBtn: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: GOLD,
-    borderRadius: 20,
-  },
-  retryText: { color: '#FFF', fontWeight: '700', fontSize: 14 },
-});

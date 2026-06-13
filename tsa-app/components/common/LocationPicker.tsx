@@ -1,20 +1,21 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  Modal,
-  StyleSheet,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-} from "react-native";
-import MaterialIcons from "@expo/vector-icons/MaterialIcons";
-import { COLORS, SIZES } from "../../constants/theme";
-import { countries } from "../../constants/api/statesConstants";
-import { fetchStates, fetchCities } from "./locationApi";
+// components/common/LocationPicker.tsx
+//
+// Cascading country → state → city selection control. Country list is static
+// (constants/api/statesConstants); states/cities are fetched on demand from
+// locationApi (countriesnow.space) with an in-memory cache. When the remote API
+// fails for states/cities, the affected field degrades to a free-text input so
+// the user is never blocked, plus a retry affordance.
+//
+// Migrated onto the TSA Signature design system: selection rows use SelectRow,
+// the searchable picker modal uses PickerSheet, and the API-failure fallback uses
+// the Input primitive — all driven by @/theme tokens (no legacy COLORS/SIZES).
+// Selection logic, props interface, and exports are preserved verbatim.
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View } from 'react-native';
+import { useTheme } from '@/theme';
+import { Icon, Input, PickerSheet, PressableScale, SelectRow, Text } from '@/components/ui';
+import { countries } from '../../constants/api/statesConstants';
+import { fetchStates, fetchCities } from './locationApi';
 
 // --- Types ---
 
@@ -27,8 +28,8 @@ export interface LocationValue {
 export interface LocationPickerProps {
   value: LocationValue;
   onChange: (location: LocationValue) => void;
-  fields?: ("country" | "state" | "city")[];
-  required?: ("country" | "state" | "city")[];
+  fields?: ('country' | 'state' | 'city')[];
+  required?: ('country' | 'state' | 'city')[];
   labels?: { country?: string; state?: string; city?: string };
   showLabels?: boolean;
   disabled?: boolean;
@@ -38,6 +39,7 @@ export interface LocationPickerProps {
 // --- Internal SearchableDropdown ---
 
 interface SearchableDropdownProps {
+  label?: string;
   data: string[];
   selectedItem: string;
   onSelect: (item: string) => void;
@@ -51,6 +53,7 @@ interface SearchableDropdownProps {
 }
 
 const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
+  label,
   data,
   selectedItem,
   onSelect,
@@ -62,165 +65,66 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
   onRetry,
   onFallbackTextChange,
 }) => {
-  const [modalVisible, setModalVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const searchInputRef = useRef<TextInput>(null);
-
-  // Focus search input after modal animation completes to prevent Android crash
-  useEffect(() => {
-    if (modalVisible) {
-      const timer = setTimeout(() => {
-        searchInputRef.current?.focus();
-      }, 400);
-      return () => clearTimeout(timer);
-    }
-  }, [modalVisible]);
-
-  const filteredData = data.filter((item) =>
-    item.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const { colors, spacing } = useTheme();
+  const [sheetVisible, setSheetVisible] = useState(false);
 
   const handleSelect = (item: string) => {
     onSelect(item);
-    setModalVisible(false);
-    setSearchQuery("");
+    setSheetVisible(false);
   };
 
-  const displayText = loading
-    ? "Loading..."
-    : selectedItem || placeholder;
+  const displayValue = loading ? 'Loading…' : selectedItem;
 
   const isDisabled = disabled || loading;
 
-  // If API failed, show a free-text input as fallback
+  // If the remote API failed, degrade to a free-text input so the user can still
+  // enter a value, plus a retry affordance.
   if (apiError && !loading) {
     return (
       <View>
-        <TextInput
-          style={[styles.dropdownTrigger, error ? styles.dropdownError : null]}
+        <Input
+          label={label}
           placeholder={placeholder}
           value={selectedItem}
           onChangeText={onFallbackTextChange}
-          placeholderTextColor={COLORS.gray}
+          error={error}
         />
         {onRetry && (
-          <TouchableOpacity onPress={onRetry} style={styles.retryButton}>
-            <MaterialIcons name="refresh" size={14} color={COLORS.primary} />
-            <Text style={styles.retryText}>Tap to retry</Text>
-          </TouchableOpacity>
+          <PressableScale
+            onPress={onRetry}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }}
+          >
+            <Icon name="refresh" size={14} color={colors.accent} />
+            <Text variant="caption" color="accent">
+              Tap to retry
+            </Text>
+          </PressableScale>
         )}
-        {error && <Text style={styles.errorText}>{error}</Text>}
       </View>
     );
   }
 
   return (
     <View>
-      <TouchableOpacity
-        style={[
-          styles.dropdownTrigger,
-          isDisabled && styles.dropdownDisabled,
-          error ? styles.dropdownError : null,
-        ]}
-        onPress={() => !isDisabled && setModalVisible(true)}
+      <SelectRow
+        label={label}
+        value={displayValue}
+        placeholder={placeholder}
+        onPress={() => setSheetVisible(true)}
         disabled={isDisabled}
-        accessibilityLabel={placeholder}
-      >
-        <Text
-          style={[
-            styles.dropdownText,
-            !selectedItem && styles.dropdownPlaceholder,
-          ]}
-        >
-          {displayText}
-        </Text>
-        {loading ? (
-          <ActivityIndicator size="small" color={COLORS.gray} />
-        ) : (
-          <MaterialIcons
-            name="arrow-drop-down"
-            size={24}
-            color={COLORS.gray}
-          />
-        )}
-      </TouchableOpacity>
+        error={error}
+      />
 
-      {error && <Text style={styles.errorText}>{error}</Text>}
-
-      <Modal
-        visible={modalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          keyboardVerticalOffset={0}
-        >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{placeholder}</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <MaterialIcons name="close" size={24} color={COLORS.dark} />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.searchContainer}>
-              <MaterialIcons name="search" size={20} color={COLORS.gray} />
-              <TextInput
-                ref={searchInputRef}
-                style={styles.searchInput}
-                placeholder="Search..."
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-            </View>
-
-            <FlatList
-              data={filteredData}
-              nestedScrollEnabled
-              keyExtractor={(item, index) => `${item}-${index}`}
-              keyboardShouldPersistTaps="handled"
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[
-                    styles.listItem,
-                    selectedItem === item && styles.selectedListItem,
-                  ]}
-                  onPress={() => handleSelect(item)}
-                >
-                  <Text
-                    style={[
-                      styles.listItemText,
-                      selectedItem === item && styles.selectedListItemText,
-                    ]}
-                  >
-                    {item}
-                  </Text>
-                  {selectedItem === item && (
-                    <MaterialIcons
-                      name="check"
-                      size={20}
-                      color={COLORS.primary}
-                    />
-                  )}
-                </TouchableOpacity>
-              )}
-              ListEmptyComponent={
-                <View style={styles.emptyContainer}>
-                  <MaterialIcons
-                    name="search-off"
-                    size={40}
-                    color={COLORS.gray}
-                  />
-                  <Text style={styles.emptyText}>No results found</Text>
-                </View>
-              }
-            />
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      <PickerSheet
+        visible={sheetVisible}
+        onClose={() => setSheetVisible(false)}
+        title={placeholder}
+        items={data.map((item) => ({ id: item, label: item }))}
+        selectedId={selectedItem || undefined}
+        onSelect={(item) => handleSelect(item.id)}
+        searchable
+        emptyText="No results found"
+      />
     </View>
   );
 };
@@ -230,15 +134,16 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
 const LocationPicker: React.FC<LocationPickerProps> = ({
   value,
   onChange,
-  fields = ["country", "state", "city"],
-  required = ["country", "state", "city"],
+  fields = ['country', 'state', 'city'],
+  required = ['country', 'state', 'city'],
   labels = {},
   showLabels = true,
   disabled = false,
   errors = {},
 }) => {
-  const showState = fields.includes("state");
-  const showCity = fields.includes("city");
+  const { spacing } = useTheme();
+  const showState = fields.includes('state');
+  const showCity = fields.includes('city');
   const [statesList, setStatesList] = useState<string[]>([]);
   const [citiesList, setCitiesList] = useState<string[]>([]);
   const [loadingStates, setLoadingStates] = useState(false);
@@ -267,26 +172,23 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     }
   }, []);
 
-  const loadCities = useCallback(
-    async (country: string, state: string) => {
-      if (!country || !state) {
-        setCitiesList([]);
-        return;
-      }
-      setLoadingCities(true);
-      setCitiesApiError(false);
-      try {
-        const cities = await fetchCities(country, state);
-        setCitiesList(cities);
-      } catch {
-        setCitiesApiError(true);
-        setCitiesList([]);
-      } finally {
-        setLoadingCities(false);
-      }
-    },
-    []
-  );
+  const loadCities = useCallback(async (country: string, state: string) => {
+    if (!country || !state) {
+      setCitiesList([]);
+      return;
+    }
+    setLoadingCities(true);
+    setCitiesApiError(false);
+    try {
+      const cities = await fetchCities(country, state);
+      setCitiesList(cities);
+    } catch {
+      setCitiesApiError(true);
+      setCitiesList([]);
+    } finally {
+      setLoadingCities(false);
+    }
+  }, []);
 
   // Load states/cities on mount if pre-filled
   useEffect(() => {
@@ -303,14 +205,14 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     setCitiesList([]);
     setStatesApiError(false);
     setCitiesApiError(false);
-    onChange({ country, state: "", city: "" });
+    onChange({ country, state: '', city: '' });
     if (country) loadStates(country);
   };
 
   const handleStateChange = (state: string) => {
     setCitiesList([]);
     setCitiesApiError(false);
-    onChange({ ...value, state, city: "" });
+    onChange({ ...value, state, city: '' });
     if (value.country && state) loadCities(value.country, state);
   };
 
@@ -318,29 +220,20 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     onChange({ ...value, city });
   };
 
-  const countryLabel = labels.country || "Country";
-  const stateLabel = labels.state || "State";
-  const cityLabel = labels.city || "City";
+  const countryLabel = labels.country || 'Country';
+  const stateLabel = labels.state || 'State';
+  const cityLabel = labels.city || 'City';
 
-  const statePlaceholder = !value.country
-    ? "Select country first"
-    : `Select ${stateLabel}`;
+  const statePlaceholder = !value.country ? 'Select country first' : `Select ${stateLabel}`;
 
-  const cityPlaceholder = !value.state
-    ? "Select state first"
-    : `Select ${cityLabel}`;
+  const cityPlaceholder = !value.state ? 'Select state first' : `Select ${cityLabel}`;
 
   return (
-    <View style={styles.container}>
+    <View>
       {/* Country */}
-      <View style={styles.fieldGroup}>
-        {showLabels && (
-          <Text style={styles.label}>
-            {countryLabel}
-            {required.includes("country") ? " *" : ""}
-          </Text>
-        )}
+      <View style={{ marginBottom: spacing.md }}>
         <SearchableDropdown
+          label={showLabels ? `${countryLabel}${required.includes('country') ? ' *' : ''}` : undefined}
           data={countries}
           selectedItem={value.country}
           onSelect={handleCountryChange}
@@ -352,14 +245,9 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
 
       {/* State */}
       {showState && (
-        <View style={styles.fieldGroup}>
-          {showLabels && (
-            <Text style={styles.label}>
-              {stateLabel}
-              {required.includes("state") ? " *" : ""}
-            </Text>
-          )}
+        <View style={{ marginBottom: spacing.md }}>
           <SearchableDropdown
+            label={showLabels ? `${stateLabel}${required.includes('state') ? ' *' : ''}` : undefined}
             data={statesList}
             selectedItem={value.state}
             onSelect={handleStateChange}
@@ -369,23 +257,16 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
             error={errors.state}
             apiError={statesApiError}
             onRetry={() => loadStates(value.country)}
-            onFallbackTextChange={(text) =>
-              onChange({ ...value, state: text, city: "" })
-            }
+            onFallbackTextChange={(text) => onChange({ ...value, state: text, city: '' })}
           />
         </View>
       )}
 
       {/* City */}
       {showCity && (
-        <View style={styles.fieldGroup}>
-          {showLabels && (
-            <Text style={styles.label}>
-              {cityLabel}
-              {required.includes("city") ? " *" : ""}
-            </Text>
-          )}
+        <View style={{ marginBottom: spacing.md }}>
           <SearchableDropdown
+            label={showLabels ? `${cityLabel}${required.includes('city') ? ' *' : ''}` : undefined}
             data={citiesList}
             selectedItem={value.city}
             onSelect={handleCityChange}
@@ -402,129 +283,5 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     </View>
   );
 };
-
-// --- Styles ---
-
-const styles = StyleSheet.create({
-  container: {},
-  fieldGroup: {
-    marginBottom: 12,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: "500",
-    color: COLORS.dark,
-    marginBottom: 6,
-  },
-  dropdownTrigger: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    height: 56,
-    backgroundColor: COLORS.lightGray,
-    borderWidth: 1,
-    borderColor: COLORS.lightGray,
-  },
-  dropdownDisabled: {
-    opacity: 0.5,
-  },
-  dropdownError: {
-    borderColor: "#ff4444",
-    borderWidth: 1.5,
-  },
-  dropdownText: {
-    fontSize: 16,
-    color: COLORS.dark,
-    flex: 1,
-  },
-  dropdownPlaceholder: {
-    color: COLORS.gray,
-  },
-  errorText: {
-    color: "#ff4444",
-    fontSize: 12,
-    marginTop: 4,
-  },
-  retryButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 4,
-  },
-  retryText: {
-    color: COLORS.primary,
-    fontSize: 12,
-    marginLeft: 4,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "flex-end",
-  },
-  modalContent: {
-    backgroundColor: "#fff",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: "80%",
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.lightGray,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: COLORS.dark,
-  },
-  searchContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#f9fafb",
-    margin: 20,
-    paddingHorizontal: 15,
-    borderRadius: 12,
-    height: 50,
-  },
-  searchInput: {
-    flex: 1,
-    marginLeft: 10,
-    fontSize: 16,
-  },
-  listItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.lightGray,
-  },
-  selectedListItem: {
-    backgroundColor: "rgba(99, 102, 241, 0.1)",
-  },
-  listItemText: {
-    fontSize: 16,
-    color: COLORS.dark,
-  },
-  selectedListItemText: {
-    color: COLORS.primary,
-    fontWeight: "600",
-  },
-  emptyContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 40,
-  },
-  emptyText: {
-    marginTop: 10,
-    color: COLORS.gray,
-    fontSize: 16,
-  },
-});
 
 export default LocationPicker;

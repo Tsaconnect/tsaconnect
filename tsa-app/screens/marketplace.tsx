@@ -1,30 +1,43 @@
 // screens/marketplace.tsx
+//
+// Marketplace landing — product / service category browse, search, quick-access
+// shortcuts, and role-aware merchant banner. Restyled onto the TSA Signature
+// design system (theme tokens + @/components/ui primitives). Data fetching
+// (api.getCategoryTree / api.getProfile), state, effects, the category
+// transform, role gating, and all navigation routes + params are unchanged —
+// this is a visual / structural migration only.
 import { router } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Alert,
   View,
-  Text,
-  TouchableOpacity,
   ScrollView,
-  StyleSheet,
-  Platform,
-  TextInput,
-  ActivityIndicator,
   RefreshControl,
   Dimensions,
   Image,
 } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import TradeAndEarnScreen from './TradeAndEarnScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '@/components/services/api';
 import CartIconBadge from '@/components/common/CartIconBadge';
 import CurrencySelector from '@/components/currency/CurrencySelector';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  Card,
+  Chip,
+  EmptyState,
+  Icon,
+  Input,
+  PressableScale,
+  Spinner,
+  Text,
+  type IconName,
+} from '@/components/ui';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_GAP = 10;
-const GRID_PADDING = 20;
+const GRID_PADDING = 16;
 const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
 
 interface CategoryItem {
@@ -59,7 +72,18 @@ const ICON_MAP: Record<string, string> = {
   'Food & Beverages': 'restaurant',
 };
 
+// Quick-access shortcut tiles. Icon names are mapped to the design-system Icon
+// registry; tint colors come from the theme palette so they adapt to light/dark.
+type QuickColor = 'accent' | 'success' | 'info' | 'escrow';
+const QUICK_ACCESS: { key: string; label: string; icon: IconName; tone: QuickColor }[] = [
+  { key: 'featured', label: 'Featured', icon: 'star', tone: 'accent' },
+  { key: 'deals', label: 'Deals', icon: 'bolt', tone: 'success' },
+  { key: 'trending', label: 'Trending', icon: 'trendingUp', tone: 'info' },
+  { key: 'nearby', label: 'Nearby', icon: 'send', tone: 'escrow' },
+];
+
 const MarketplaceScreen: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTab, setSelectedTab] = useState<string>('products');
   const [categories, setCategories] = useState<CategoryItem[]>([]);
@@ -170,306 +194,362 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'products', label: 'Products' },
     { key: 'services', label: 'Services' },
     { key: 'trade', label: 'Trade & Earn' },
-    { key: 'fundfiat', label: 'Buy USDT' },
-    { key: 'send', label: 'Sell USDT' },
+    { key: 'p2p', label: 'P2P' },
+    { key: 'pm', label: 'PM' },
   ];
 
   // ── Loading ──
   if (loading && !refreshing && (selectedTab === 'products' || selectedTab === 'services')) {
     return (
-      <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator size="large" color="#D4AF37" />
-      </View>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Spinner size="large" />
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView
-        style={styles.scroll}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: spacing['4xl'] }}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
         }
       >
-        {/* Search + Cart */}
-        <View style={styles.searchWrap}>
-          <View style={styles.searchRow}>
-            <View style={[styles.searchBar, { flex: 1 }]}>
-              <Icon name="search" size={20} color="#999" />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search products or services..."
-                placeholderTextColor="#AAA"
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                onSubmitEditing={handleSearch}
-                returnKeyType="search"
-              />
-              {searchQuery.length > 0 && (
-                <TouchableOpacity onPress={() => setSearchQuery('')}>
-                  <Icon name="close" size={18} color="#999" />
-                </TouchableOpacity>
-              )}
-            </View>
-            <CurrencySelector variant="header" />
-            <CartIconBadge color="#D4AF37" size={24} />
-          </View>
+        {/* Search + Currency + Cart */}
+        <View
+          style={{
+            paddingHorizontal: spacing.lg,
+            paddingTop: spacing.md,
+            paddingBottom: spacing.lg,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: spacing.sm,
+          }}
+        >
+          <Input
+            containerStyle={{ flex: 1 }}
+            placeholder="Search products or services..."
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleSearch}
+            returnKeyType="search"
+            leftAdornment={<Icon name="search" size={18} color={colors.textMuted} />}
+            rightAdornment={
+              searchQuery.length > 0 ? (
+                <PressableScale onPress={() => setSearchQuery('')} hitSlop={8}>
+                  <Icon name="close" size={16} color={colors.textMuted} />
+                </PressableScale>
+              ) : undefined
+            }
+          />
+          <CurrencySelector variant="header" />
+          <CartIconBadge color={colors.accent} size={24} />
         </View>
 
         {/* Tabs */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.sm }}
+          style={{ marginBottom: spacing.md }}
+        >
           {TABS.map((tab) => (
-            <TouchableOpacity
+            <Chip
               key={tab.key}
-              style={[styles.tab, selectedTab === tab.key && styles.tabActive]}
+              label={tab.label}
+              selected={selectedTab === tab.key}
               onPress={() => setSelectedTab(tab.key)}
-            >
-              <Text style={[styles.tabText, selectedTab === tab.key && styles.tabTextActive]}>
-                {tab.label}
-              </Text>
-            </TouchableOpacity>
+            />
           ))}
         </ScrollView>
 
         {/* Content */}
         {(selectedTab === 'products' || selectedTab === 'services') && (
-          <View style={styles.content}>
+          <View style={{ paddingHorizontal: spacing.lg }}>
             {error && (
-              <TouchableOpacity style={styles.errorBanner} onPress={onRefresh}>
-                <Icon name="error-outline" size={16} color="#DC2626" />
-                <Text style={styles.errorText}>{error}</Text>
-                <Text style={styles.errorRetry}>Tap to retry</Text>
-              </TouchableOpacity>
+              <PressableScale onPress={onRefresh} style={{ marginBottom: spacing.lg }}>
+                <AccentCard padding="md" railColor={colors.danger}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                    <Icon name="warning" size={18} color={colors.danger} />
+                    <Text variant="bodySm" color="danger" style={{ flex: 1 }}>
+                      {error}
+                    </Text>
+                    <Text variant="bodySm" weight="700" color="danger">
+                      Tap to retry
+                    </Text>
+                  </View>
+                </AccentCard>
+              </PressableScale>
             )}
 
             {categories.length === 0 && !loading ? (
-              <View style={styles.emptyState}>
-                <Icon name="category" size={48} color="#CCC" />
-                <Text style={styles.emptyText}>No categories found</Text>
-              </View>
+              <EmptyState
+                icon="list"
+                title="No categories found"
+                subtitle="Pull to refresh or try another tab."
+              />
             ) : (
-              <View style={styles.categoryGrid}>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP }}>
                 {categories.map((cat) => (
-                  <TouchableOpacity
+                  <PressableScale
                     key={cat.id}
-                    style={styles.categoryTile}
                     onPress={() => handleCategoryPress(cat)}
-                    activeOpacity={0.7}
+                    style={{ width: TILE_WIDTH }}
                   >
-                    {cat.image ? (
-                      <Image
-                        source={{ uri: cat.image }}
-                        style={styles.categoryImage}
-                        resizeMode="cover"
-                      />
-                    ) : (
-                      <View style={[styles.categoryIcon, { backgroundColor: `${cat.color}15` }]}>
-                        <Icon name={cat.icon as any} size={26} color={cat.color === '#666666' ? '#D4AF37' : cat.color} />
-                      </View>
-                    )}
-                    <Text style={styles.categoryTitle} numberOfLines={2}>{cat.title}</Text>
-                    {cat.productCount > 0 && (
-                      <Text style={styles.categoryCount}>
-                        {cat.productCount} {cat.productCount === 1 ? 'item' : 'items'}
+                    <Card padding="lg">
+                      {cat.image ? (
+                        <Image
+                          source={{ uri: cat.image }}
+                          style={{
+                            width: 48,
+                            height: 48,
+                            borderRadius: radius.md,
+                            marginBottom: spacing.md,
+                            backgroundColor: colors.surfaceAlt,
+                          }}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <View
+                          style={{
+                            width: 48,
+                            height: 48,
+                            borderRadius: radius.md,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            marginBottom: spacing.md,
+                            backgroundColor: colors.accentMuted,
+                          }}
+                        >
+                          <Icon name="list" size={24} color={colors.accent} />
+                        </View>
+                      )}
+                      <Text variant="bodySm" weight="700" numberOfLines={2}>
+                        {cat.title}
                       </Text>
-                    )}
-                    {cat.children && cat.children.length > 0 && (
-                      <Text style={styles.categorySubcount}>
-                        {cat.children.length} subcategories
-                      </Text>
-                    )}
-                  </TouchableOpacity>
+                      {cat.productCount > 0 && (
+                        <Text variant="caption" weight="600" color="accent" style={{ marginTop: spacing.xs }}>
+                          {cat.productCount} {cat.productCount === 1 ? 'item' : 'items'}
+                        </Text>
+                      )}
+                      {cat.children && cat.children.length > 0 && (
+                        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                          {cat.children.length} subcategories
+                        </Text>
+                      )}
+                    </Card>
+                  </PressableScale>
                 ))}
               </View>
             )}
 
             {/* Quick Access */}
-            <Text style={styles.sectionTitle}>Quick Access</Text>
-            <View style={styles.quickAccessGrid}>
-              {[
-                { key: 'featured', label: 'Featured', icon: 'star', color: '#D4AF37', bg: 'rgba(212,175,55,0.12)' },
-                { key: 'deals', label: 'Deals', icon: 'local-offer', color: '#16A34A', bg: 'rgba(22,163,74,0.12)' },
-                { key: 'trending', label: 'Trending', icon: 'trending-up', color: '#3B82F6', bg: 'rgba(59,130,246,0.12)' },
-                { key: 'nearby', label: 'Nearby', icon: 'near-me', color: '#8B5CF6', bg: 'rgba(139,92,246,0.12)' },
-              ].map((item) => (
-                <TouchableOpacity
+            <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+              Quick Access
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP }}>
+              {QUICK_ACCESS.map((item) => (
+                <PressableScale
                   key={item.key}
-                  style={styles.quickAccessTile}
                   onPress={() => router.push(`/subcategory/${item.key}?subcategoryName=${encodeURIComponent(item.label)}&categoryTitle=${encodeURIComponent(item.label)}`)}
-                  activeOpacity={0.7}
+                  style={{ width: TILE_WIDTH }}
                 >
-                  <View style={[styles.quickAccessIcon, { backgroundColor: item.bg }]}>
-                    <Icon name={item.icon as any} size={28} color={item.color} />
-                  </View>
-                  <Text style={styles.quickAccessLabel}>{item.label}</Text>
-                </TouchableOpacity>
+                  <Card padding="xl" style={{ alignItems: 'center' }}>
+                    <View
+                      style={{
+                        width: 56,
+                        height: 56,
+                        borderRadius: radius.pill,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginBottom: spacing.sm,
+                        backgroundColor:
+                          item.tone === 'accent'
+                            ? colors.accentMuted
+                            : item.tone === 'success'
+                              ? colors.successBg
+                              : item.tone === 'info'
+                                ? colors.infoBg
+                                : colors.escrowBg,
+                      }}
+                    >
+                      <Icon
+                        name={item.icon}
+                        size={26}
+                        color={colors[item.tone]}
+                      />
+                    </View>
+                    <Text variant="bodySm" weight="600">
+                      {item.label}
+                    </Text>
+                  </Card>
+                </PressableScale>
               ))}
             </View>
 
             {/* Merchant Banner */}
             {userRole === 'merchant' ? (
-              <TouchableOpacity style={styles.merchantBanner} onPress={() => router.push('/merchants/dashboard')} activeOpacity={0.8}>
-                <Icon name="storefront" size={28} color="#16A34A" />
-                <View style={styles.bannerInfo}>
-                  <Text style={styles.bannerTitle}>Merchant Dashboard</Text>
-                  <Text style={styles.bannerDesc}>Manage products, orders & inventory</Text>
-                </View>
-                <Icon name="chevron-right" size={22} color="#16A34A" />
-              </TouchableOpacity>
+              <PressableScale onPress={() => router.push('/merchants/dashboard')} style={{ marginTop: spacing.xl }}>
+                <AccentCard padding="md" railColor={colors.success}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                    <Icon name="storefront" size={26} color={colors.success} />
+                    <View style={{ flex: 1 }}>
+                      <Text variant="bodyMed" weight="700">
+                        Merchant Dashboard
+                      </Text>
+                      <Text variant="caption" color="textSecondary">
+                        Manage products, orders & inventory
+                      </Text>
+                    </View>
+                    <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                  </View>
+                </AccentCard>
+              </PressableScale>
             ) : userRole !== 'admin' && userRole !== 'superadmin' ? (
-              <TouchableOpacity style={[styles.merchantBanner, styles.becomeBanner]} onPress={() => router.push('/merchants/merchant-request')} activeOpacity={0.8}>
-                <Icon name="store" size={28} color="#D4AF37" />
-                <View style={styles.bannerInfo}>
-                  <Text style={[styles.bannerTitle, { color: '#8B6914' }]}>Become a Merchant</Text>
-                  <Text style={styles.bannerDesc}>Sell your products & services</Text>
-                </View>
-                <Icon name="chevron-right" size={22} color="#D4AF37" />
-              </TouchableOpacity>
+              <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginTop: spacing.xl }}>
+                <AccentCard padding="md">
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                    <Icon name="storefront" size={26} color={colors.accent} />
+                    <View style={{ flex: 1 }}>
+                      <Text variant="bodyMed" weight="700" color="accent">
+                        Become a Merchant
+                      </Text>
+                      <Text variant="caption" color="textSecondary">
+                        Sell your products & services
+                      </Text>
+                    </View>
+                    <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                  </View>
+                </AccentCard>
+              </PressableScale>
             ) : null}
           </View>
         )}
 
         {selectedTab === 'trade' && <TradeAndEarnScreen />}
-        {(selectedTab === 'fundfiat' || selectedTab === 'send') && (
-          <View style={styles.comingSoonWrap}>
-            <View style={styles.comingSoonIcon}>
-              <Icon name="construction" size={48} color="#D4AF37" />
-            </View>
-            <Text style={styles.comingSoonTitle}>Coming Soon</Text>
-            <Text style={styles.comingSoonDesc}>
-              {selectedTab === 'fundfiat'
-                ? 'P2P Buy USDT will be available soon. Stay tuned!'
-                : 'P2P Sell USDT will be available soon. Stay tuned!'}
-            </Text>
-          </View>
+
+        {selectedTab === 'p2p' && (
+          <BuySellSection
+            heading="P2P"
+            tag="Individual"
+            subtitle="Trade crypto peer-to-peer with other individuals. Funds are escrowed on-chain until release."
+            onBuy={() => router.push('/p2p?side=buy')}
+            onSell={() => router.push('/p2p?side=sell')}
+          />
         )}
 
-        <View style={{ height: 40 }} />
+        {selectedTab === 'pm' && (
+          <BuySellSection
+            heading="PM"
+            tag="Corporate"
+            subtitle="Trade with corporate market makers for larger, faster fills."
+            comingSoon
+          />
+        )}
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  scroll: { flex: 1 },
-  centered: { justifyContent: 'center', alignItems: 'center' },
+// ── P2P / PM Buy|Sell section ────────────────────────────────────────────────
+// A heading ("P2P · Individual" / "PM · Corporate") over two Buy / Sell action
+// cards. P2P is live and deep-links into the /p2p marketplace with the right
+// side preselected; PM is corporate and not yet implemented (coming-soon).
+const BuySellSection: React.FC<{
+  heading: string;
+  tag: string;
+  subtitle: string;
+  onBuy?: () => void;
+  onSell?: () => void;
+  comingSoon?: boolean;
+}> = ({ heading, tag, subtitle, onBuy, onSell, comingSoon }) => {
+  const { colors, spacing, radius } = useTheme();
 
-  // Search
-  searchWrap: { backgroundColor: '#FFF', paddingHorizontal: 20, paddingTop: 12, paddingBottom: 16 },
-  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  searchBar: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#F5F5F5', borderRadius: 12,
-    paddingHorizontal: 14, paddingVertical: Platform.OS === 'ios' ? 12 : 8,
-  },
-  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A', marginLeft: 10 },
+  const ActionCard: React.FC<{ side: 'buy' | 'sell'; onPress?: () => void }> = ({ side, onPress }) => {
+    const isBuy = side === 'buy';
+    const tint = isBuy ? colors.success : colors.danger;
+    const tintBg = isBuy ? colors.successBg : colors.dangerBg;
+    const card = (
+      <Card padding="lg" style={{ flex: 1, opacity: comingSoon ? 0.6 : 1 }}>
+        <View
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: radius.md,
+            backgroundColor: tintBg,
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: spacing.sm,
+          }}
+        >
+          <Icon name={isBuy ? 'arrowDown' : 'arrowUp'} size={20} color={tint} />
+        </View>
+        <Text variant="bodyMed" weight="700">
+          {isBuy ? 'Buy' : 'Sell'}
+        </Text>
+        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+          {isBuy ? 'Pay fiat, get crypto' : 'Sell crypto for fiat'}
+        </Text>
+      </Card>
+    );
+    if (comingSoon || !onPress) return <View style={{ flex: 1 }}>{card}</View>;
+    return (
+      <PressableScale style={{ flex: 1 }} onPress={onPress}>
+        {card}
+      </PressableScale>
+    );
+  };
 
-  // Tabs
-  tabRow: { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#FFF', gap: 6 },
-  tab: {
-    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20,
-    backgroundColor: '#F5F5F5',
-  },
-  tabActive: { backgroundColor: '#D4AF37' },
-  tabText: { fontSize: 13, fontWeight: '600', color: '#888' },
-  tabTextActive: { color: '#FFF' },
-
-  // Content
-  content: { padding: GRID_PADDING },
-
-  // Error
-  errorBanner: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#FEF2F2', borderRadius: 10, padding: 12, marginBottom: 16,
-  },
-  errorText: { flex: 1, fontSize: 13, color: '#DC2626' },
-  errorRetry: { fontSize: 12, color: '#DC2626', fontWeight: '600' },
-
-  // Empty
-  emptyState: { alignItems: 'center', padding: 40 },
-  emptyText: { marginTop: 12, fontSize: 15, color: '#AAA' },
-
-  // Category Grid
-  categoryGrid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP,
-  },
-  categoryTile: {
-    width: TILE_WIDTH,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  categoryIcon: {
-    width: 48, height: 48, borderRadius: 14,
-    justifyContent: 'center', alignItems: 'center',
-    marginBottom: 12,
-  },
-  categoryImage: {
-    width: 48, height: 48, borderRadius: 14,
-    marginBottom: 12,
-    backgroundColor: '#F5F5F5',
-  },
-  categoryTitle: {
-    fontSize: 14, fontWeight: '700', color: '#1A1A1A',
-    lineHeight: 18, marginBottom: 4,
-  },
-  categoryCount: { fontSize: 12, color: '#D4AF37', fontWeight: '500' },
-  categorySubcount: { fontSize: 11, color: '#AAA', marginTop: 2 },
-
-  // Quick Access
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A', marginTop: 24, marginBottom: 12 },
-  quickAccessGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
-  quickAccessTile: {
-    width: TILE_WIDTH,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 20,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  quickAccessIcon: {
-    width: 56, height: 56, borderRadius: 28,
-    justifyContent: 'center', alignItems: 'center',
-    marginBottom: 10,
-  },
-  quickAccessLabel: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-
-  // Merchant Banner
-  merchantBanner: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: '#F0FDF4', borderRadius: 14,
-    padding: 18, marginTop: 20,
-    borderWidth: 1, borderColor: '#BBF7D0',
-  },
-  becomeBanner: {
-    backgroundColor: 'rgba(212,175,55,0.08)',
-    borderColor: 'rgba(212,175,55,0.2)',
-  },
-  bannerInfo: { flex: 1 },
-  bannerTitle: { fontSize: 15, fontWeight: '700', color: '#16A34A', marginBottom: 2 },
-  bannerDesc: { fontSize: 12, color: '#888' },
-
-  // Coming Soon
-  comingSoonWrap: { alignItems: 'center', paddingVertical: 60, paddingHorizontal: 32 },
-  comingSoonIcon: {
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: 'rgba(212,175,55,0.1)',
-    justifyContent: 'center', alignItems: 'center',
-    marginBottom: 20,
-  },
-  comingSoonTitle: { fontSize: 22, fontWeight: '800', color: '#1A1A1A', marginBottom: 8 },
-  comingSoonDesc: { fontSize: 14, color: '#888', textAlign: 'center', lineHeight: 20 },
-});
+  return (
+    <View style={{ paddingHorizontal: spacing.lg }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
+        <Text variant="title2" weight="700">
+          {heading}
+        </Text>
+        <View
+          style={{
+            paddingHorizontal: spacing.sm,
+            paddingVertical: 2,
+            borderRadius: radius.pill,
+            backgroundColor: colors.surfaceAlt,
+          }}
+        >
+          <Text variant="caption" weight="600" color="textSecondary">
+            {tag}
+          </Text>
+        </View>
+        {comingSoon && (
+          <View
+            style={{
+              paddingHorizontal: spacing.sm,
+              paddingVertical: 2,
+              borderRadius: radius.pill,
+              backgroundColor: colors.warningBg,
+            }}
+          >
+            <Text variant="caption" weight="600" style={{ color: colors.warning }}>
+              Coming soon
+            </Text>
+          </View>
+        )}
+      </View>
+      <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
+        {subtitle}
+      </Text>
+      <View style={{ flexDirection: 'row', gap: spacing.md }}>
+        <ActionCard side="buy" onPress={onBuy} />
+        <ActionCard side="sell" onPress={onSell} />
+      </View>
+      {comingSoon && (
+        <Text variant="caption" color="textMuted" style={{ marginTop: spacing.md, textAlign: 'center' }}>
+          PM (corporate) trading isn’t available yet — stay tuned.
+        </Text>
+      )}
+    </View>
+  );
+};
 
 export default MarketplaceScreen;

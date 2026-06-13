@@ -1,23 +1,27 @@
 // screens/wallet.tsx
+//
+// Multi-chain wallet home — total balance hero, quick actions, asset list with
+// chain filter, recent activity, and the fund / send / wallet-selector /
+// manage-tokens sheets. Migrated onto the TSA Signature design system
+// (theme tokens + @/components/ui primitives). All data fetching, state,
+// effects (balance fetch + race guard, discovery/custom-token merges,
+// AsyncStorage hidden-tokens), navigation routes/params, money handling, and
+// network switching are unchanged — this is a visual/structural restyle only.
 import { router } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
-  Text,
   ScrollView,
   StyleSheet,
   RefreshControl,
-  Pressable,
   Modal,
   Image,
-  Switch,
   TextInput,
   FlatList,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { MaterialIcons as Icon } from '@expo/vector-icons';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -38,6 +42,22 @@ import { useTokens, type CustomToken } from '../hooks/useTokens';
 import { CHAINS, type ChainKey } from '../constants/chains';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Avatar,
+  Badge,
+  Divider,
+  EmptyState,
+  Icon,
+  IconButton,
+  PressableScale,
+  Sheet,
+  Skeleton,
+  Text,
+  Toggle,
+} from '@/components/ui';
 
 // ── Types ──
 interface WalletAsset {
@@ -216,10 +236,10 @@ async function mergeCustomTokens(
 
 // ── Quick Actions ──
 const QUICK_ACTIONS = [
-  { key: 'fund', label: 'Fund', icon: 'account-balance' },
-  { key: 'swap', label: 'Swap', icon: 'swap-horiz' },
-  { key: 'send', label: 'Send', icon: 'send' },
-  { key: 'instant-pay', label: 'Instant Pay', icon: 'flash-on' },
+  { key: 'fund', label: 'Fund', icon: 'bank' as const },
+  { key: 'swap', label: 'Swap', icon: 'swap' as const },
+  { key: 'send', label: 'Send', icon: 'send' as const },
+  { key: 'instant-pay', label: 'Instant Pay', icon: 'bolt' as const },
 ] as const;
 
 // ── Balance Card ──
@@ -230,43 +250,79 @@ const WalletBalanceCard: React.FC<{
   onToggleVisibility: () => void;
   onQuickAction: (action: string) => void;
   onWalletPress: () => void;
-}> = ({ totalUsdValue, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => (
-  <View style={styles.balanceCard}>
-    <Pressable style={styles.walletSelector} onPress={onWalletPress}>
-      <Text style={styles.walletSelectorLabel}>{activeLabel}</Text>
-      <Icon name="keyboard-arrow-down" size={18} color="rgba(255,255,255,0.8)" />
-    </Pressable>
-    <View style={styles.balanceHeader}>
-      <Text style={styles.balanceLabel}>Wallet Balance</Text>
-      <Pressable onPress={onToggleVisibility} hitSlop={8}>
-        <Icon
-          name={isValuesHidden ? 'visibility-off' : 'visibility'}
-          size={20}
-          color="rgba(255,255,255,0.4)"
+}> = ({ totalUsdValue, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <AccentCard padding="xl">
+      <PressableScale
+        onPress={onWalletPress}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, alignSelf: 'flex-start' }}
+      >
+        <Text variant="bodySm" weight="600" color="textSecondary">
+          {activeLabel}
+        </Text>
+        <Icon name="chevronDown" size={16} color={colors.textMuted} />
+      </PressableScale>
+
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginTop: spacing.md,
+        }}
+      >
+        <Text variant="bodySm" color="textSecondary">
+          Wallet Balance
+        </Text>
+        <IconButton
+          icon={isValuesHidden ? 'lock' : 'wallet'}
+          size={18}
+          color={colors.textMuted}
+          accessibilityLabel={isValuesHidden ? 'Show balance' : 'Hide balance'}
+          onPress={onToggleVisibility}
         />
-      </Pressable>
-    </View>
-    <Text style={styles.balanceAmount}>
-      {isValuesHidden
-        ? '••••••'
-        : `$${totalUsdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-    </Text>
-    <View style={styles.actionsRow}>
-      {QUICK_ACTIONS.map((action) => (
-        <Pressable
-          key={action.key}
-          style={({ pressed }) => [styles.actionButton, pressed && styles.actionPressed]}
-          onPress={() => onQuickAction(action.key)}
-        >
-          <View style={styles.actionIcon}>
-            <Icon name={action.icon} size={20} color="#D4AF37" />
-          </View>
-          <Text style={styles.actionLabel}>{action.label}</Text>
-        </Pressable>
-      ))}
-    </View>
-  </View>
-);
+      </View>
+
+      {isValuesHidden ? (
+        <Text variant="display" weight="700">
+          ••••••
+        </Text>
+      ) : (
+        <AmountText value={totalUsdValue} currency="USD" variant="display" />
+      )}
+
+      <Divider spacing="lg" />
+
+      <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
+        {QUICK_ACTIONS.map((action) => (
+          <PressableScale
+            key={action.key}
+            style={{ alignItems: 'center', minWidth: 56 }}
+            onPress={() => onQuickAction(action.key)}
+          >
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accentMuted,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginBottom: spacing.xs,
+              }}
+            >
+              <Icon name={action.icon} size={20} color={colors.accent} />
+            </View>
+            <Text variant="caption" color="textSecondary">
+              {action.label}
+            </Text>
+          </PressableScale>
+        ))}
+      </View>
+    </AccentCard>
+  );
+};
 
 // ── Asset Row ──
 const AssetRow: React.FC<{
@@ -274,140 +330,158 @@ const AssetRow: React.FC<{
   isValuesHidden: boolean;
   onPress?: () => void;
 }> = ({ asset, isValuesHidden, onPress }) => {
+  const { colors, spacing } = useTheme();
   const isNative = asset.details?.type === 'Native Token';
   return (
-    <Pressable style={({ pressed }) => [styles.assetRow, pressed && { opacity: 0.7 }]} onPress={onPress}>
-      <View style={[styles.assetAvatar, { backgroundColor: asset.iconColor + '20' }]}>
-        {asset.iconUrl ? (
-          <Image source={{ uri: asset.iconUrl }} style={styles.assetAvatarImage} />
-        ) : (
-          <Text style={[styles.assetAvatarText, { color: asset.iconColor }]}>
-            {asset.symbol.charAt(0)}
-          </Text>
-        )}
+    <PressableScale
+      style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm }}
+      onPress={onPress}
+    >
+      <View style={{ marginRight: spacing.md }}>
+        <Avatar name={asset.symbol} uri={asset.iconUrl} size={40} />
       </View>
-      <View style={styles.assetInfo}>
-        <View style={styles.assetSymbolRow}>
-          <Text style={styles.assetSymbol}>{asset.symbol}</Text>
-          {asset.discovered && (
-            <View style={styles.discoveredBadge}>
-              <Text style={styles.discoveredBadgeText}>NEW</Text>
-            </View>
-          )}
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <Text variant="bodyMed" weight="600">
+            {asset.symbol}
+          </Text>
+          {asset.discovered && <Badge label="NEW" size="sm" color={colors.accent} background={colors.accentMuted} />}
         </View>
-        <View style={styles.assetMeta}>
-          <Text style={styles.assetName}>{asset.name}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+          <Text variant="caption" color="textMuted">
+            {asset.name}
+          </Text>
           {asset.details?.chain && (
             <>
-              <View style={[styles.chainDot, { backgroundColor: asset.details.chainKey ? CHAINS[asset.details.chainKey].iconColor : '#999' }]} />
-              <Text style={styles.chainName}>{asset.details.chain}</Text>
+              <View
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: 2.5,
+                  marginLeft: spacing.xs,
+                  marginRight: 3,
+                  backgroundColor: asset.details.chainKey ? CHAINS[asset.details.chainKey].iconColor : colors.textMuted,
+                }}
+              />
+              <Text variant="caption" color="textMuted">
+                {asset.details.chain}
+              </Text>
             </>
           )}
         </View>
       </View>
-      <View style={styles.assetValues}>
-        <Text style={styles.assetBalance}>
+      <View style={{ alignItems: 'flex-end' }}>
+        <Text variant="bodyMed" weight="600">
           {isValuesHidden ? '••••' : asset.balance.toFixed(isNative ? 4 : 2)}
         </Text>
-        <Text style={styles.assetUsd}>
-          {isValuesHidden ? '••••' : `$${asset.usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+          {isValuesHidden
+            ? '••••'
+            : `$${asset.usdValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
         </Text>
       </View>
-    </Pressable>
+    </PressableScale>
   );
 };
 
-// ── Fund Modal ──
-const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
-  const insets = useSafeAreaInsets();
-  return (
-    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-          <View style={styles.sheetHandle} />
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Fund Your Wallet</Text>
-            <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
-          </View>
-          <Pressable
-            style={styles.modalOption}
-            onPress={() => { onClose(); router.push('/fundfiat'); }}
-          >
-            <View style={[styles.modalOptionIcon, { backgroundColor: '#E3F2FD' }]}>
-              <Icon name="account-balance" size={24} color="#1976D2" />
-            </View>
-            <View style={styles.modalOptionInfo}>
-              <Text style={styles.modalOptionTitle}>Fiat Deposit</Text>
-              <Text style={styles.modalOptionDesc}>Bank transfer or credit card</Text>
-            </View>
-            <Icon name="chevron-right" size={20} color="#CCC" />
-          </Pressable>
-          <Pressable
-            style={styles.modalOption}
-            onPress={() => { onClose(); router.push('/fund'); }}
-          >
-            <View style={[styles.modalOptionIcon, { backgroundColor: '#FFF3E0' }]}>
-              <Icon name="account-balance-wallet" size={24} color="#E65100" />
-            </View>
-            <View style={styles.modalOptionInfo}>
-              <Text style={styles.modalOptionTitle}>Crypto Deposit</Text>
-              <Text style={styles.modalOptionDesc}>From external wallet or exchange</Text>
-            </View>
-            <Icon name="chevron-right" size={20} color="#CCC" />
-          </Pressable>
-          <Pressable style={styles.modalCancel} onPress={onClose}>
-            <Text style={styles.modalCancelText}>Cancel</Text>
-          </Pressable>
-        </View>
-      </View>
-    </Modal>
-  );
-};
+// ── Fund Sheet ──
+const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
+  <Sheet visible={visible} onClose={onClose} title="Fund Your Wallet">
+    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+      <SheetOption
+        icon="bank"
+        title="Fiat Deposit"
+        desc="Bank transfer or credit card"
+        onPress={() => {
+          onClose();
+          router.push('/fundfiat');
+        }}
+      />
+      <SheetOption
+        icon="wallet"
+        title="Crypto Deposit"
+        desc="From external wallet or exchange"
+        onPress={() => {
+          onClose();
+          router.push('/fund');
+        }}
+      />
+    </View>
+  </Sheet>
+);
 
-// ── Send Modal ──
-const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
-  const insets = useSafeAreaInsets();
+// ── Send Sheet ──
+const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
+  <Sheet visible={visible} onClose={onClose} title="Send Funds">
+    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+      <SheetOption
+        icon="card"
+        title="Withdraw as Fiat"
+        desc="Bank transfer or mobile money"
+        onPress={() => {
+          onClose();
+          router.push('/sendfiat');
+        }}
+      />
+      <SheetOption
+        icon="wallet"
+        title="Send Crypto"
+        desc="To external wallet or exchange"
+        onPress={() => {
+          onClose();
+          router.push('/wallet/send');
+        }}
+      />
+    </View>
+  </Sheet>
+);
+
+// Shared sheet option row (icon tile + title/desc + chevron).
+const SheetOption: React.FC<{
+  icon: React.ComponentProps<typeof Icon>['name'];
+  title: string;
+  desc: string;
+  onPress: () => void;
+  iconColor?: string;
+  iconBg?: string;
+  trailing?: React.ReactNode;
+}> = ({ icon, title, desc, onPress, iconColor, iconBg, trailing }) => {
+  const { colors, spacing, radius } = useTheme();
   return (
-    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-          <View style={styles.sheetHandle} />
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Send Funds</Text>
-            <Pressable onPress={onClose}><Icon name="close" size={24} color="#888" /></Pressable>
-          </View>
-          <Pressable
-            style={styles.modalOption}
-            onPress={() => { onClose(); router.push('/sendfiat'); }}
-          >
-            <View style={[styles.modalOptionIcon, { backgroundColor: '#E8F5E9' }]}>
-              <Icon name="attach-money" size={24} color="#2E7D32" />
-            </View>
-            <View style={styles.modalOptionInfo}>
-              <Text style={styles.modalOptionTitle}>Withdraw as Fiat</Text>
-              <Text style={styles.modalOptionDesc}>Bank transfer or mobile money</Text>
-            </View>
-            <Icon name="chevron-right" size={20} color="#CCC" />
-          </Pressable>
-          <Pressable
-            style={styles.modalOption}
-            onPress={() => { onClose(); router.push('/wallet/send'); }}
-          >
-            <View style={[styles.modalOptionIcon, { backgroundColor: '#F3E5F5' }]}>
-              <Icon name="account-balance-wallet" size={24} color="#7B1FA2" />
-            </View>
-            <View style={styles.modalOptionInfo}>
-              <Text style={styles.modalOptionTitle}>Send Crypto</Text>
-              <Text style={styles.modalOptionDesc}>To external wallet or exchange</Text>
-            </View>
-            <Icon name="chevron-right" size={20} color="#CCC" />
-          </Pressable>
-          <Pressable style={styles.modalCancel} onPress={onClose}>
-            <Text style={styles.modalCancelText}>Cancel</Text>
-          </Pressable>
-        </View>
+    <PressableScale
+      onPress={onPress}
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.md,
+        padding: spacing.md,
+        backgroundColor: colors.surfaceAlt,
+        borderRadius: radius.lg,
+        marginBottom: spacing.sm,
+      }}
+    >
+      <View
+        style={{
+          width: 48,
+          height: 48,
+          borderRadius: radius.md,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: iconBg ?? colors.accentMuted,
+        }}
+      >
+        <Icon name={icon} size={22} color={iconColor ?? colors.accent} />
       </View>
-    </Modal>
+      <View style={{ flex: 1 }}>
+        <Text variant="bodyMed" weight="600">
+          {title}
+        </Text>
+        <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 2 }}>
+          {desc}
+        </Text>
+      </View>
+      {trailing ?? <Icon name="chevronRight" size={18} color={colors.textMuted} />}
+    </PressableScale>
   );
 };
 
@@ -424,6 +498,7 @@ const ManageTokensModal: React.FC<{
   const [search, setSearch] = useState('');
   const [chainFilter, setChainFilter] = useState<'all' | ChainKey>('all');
   const insets = useSafeAreaInsets();
+  const { colors, spacing, radius, fonts, type } = useTheme();
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -436,87 +511,86 @@ const ManageTokensModal: React.FC<{
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={[manStyles.screen, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
-        <View style={manStyles.header}>
-          <View style={manStyles.headerSide}>
-            <Pressable style={manStyles.headerIconButton} onPress={onClose} hitSlop={12}>
-              <Icon name="arrow-back" size={24} color="#1A1A1A" />
-            </Pressable>
+      <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: insets.top, paddingBottom: insets.bottom }}>
+        <View
+          style={{
+            minHeight: 56,
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingHorizontal: spacing.lg,
+            borderBottomWidth: StyleSheet.hairlineWidth,
+            borderBottomColor: colors.hairline,
+          }}
+        >
+          <View style={{ width: 104, justifyContent: 'center' }}>
+            <IconButton icon="chevronLeft" accessibilityLabel="Back" onPress={onClose} style={{ marginLeft: -10 }} />
           </View>
-          <Text style={manStyles.title} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+          <Text
+            variant="title3"
+            weight="700"
+            align="center"
+            numberOfLines={1}
+            style={{ flex: 1 }}
+          >
             Manage crypto
           </Text>
-          <View style={[manStyles.headerSide, manStyles.headerSideRight]}>
-            <Pressable onPress={onImport} hitSlop={8}>
-              <Text style={manStyles.importAction} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+          <View style={{ width: 104, alignItems: 'flex-end' }}>
+            <PressableScale onPress={onImport} hitSlop={8}>
+              <Text variant="bodySm" weight="700" color="accent" numberOfLines={1}>
                 Import tokens
               </Text>
-            </Pressable>
+            </PressableScale>
           </View>
         </View>
 
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={manStyles.chipRow}
-          contentContainerStyle={manStyles.chipRowContent}
+          style={{ flexGrow: 0, marginTop: spacing.md }}
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingVertical: spacing.xs, paddingRight: spacing['2xl'], alignItems: 'center', gap: spacing.sm }}
         >
-          <Pressable
-            style={[manStyles.chip, chainFilter === 'all' && manStyles.chipActive]}
-            onPress={() => setChainFilter('all')}
-          >
-            <Text
-              numberOfLines={1}
-              style={[manStyles.chipText, chainFilter === 'all' && manStyles.chipTextActive]}
-            >
-              All
-            </Text>
-          </Pressable>
-          {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
-            const isActive = chainFilter === key;
-            return (
-              <Pressable
-                key={key}
-                style={[manStyles.chip, isActive && manStyles.chipActive]}
-                onPress={() => setChainFilter(key)}
-              >
-                <View style={manStyles.chipIconWrap}>
-                  {chain.iconUrl ? (
-                    <Image
-                      source={{ uri: chain.iconUrl }}
-                      style={manStyles.chipIcon}
-                      resizeMode="cover"
-                    />
-                  ) : (
-                    <View style={[manStyles.chipDot, { backgroundColor: chain.iconColor }]} />
-                  )}
-                </View>
-                <Text
-                  numberOfLines={1}
-                  style={[manStyles.chipText, isActive && manStyles.chipTextActive]}
-                >
-                  {chain.shortName}
-                </Text>
-              </Pressable>
-            );
-          })}
+          <ManageChip active={chainFilter === 'all'} label="All" onPress={() => setChainFilter('all')} />
+          {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => (
+            <ManageChip
+              key={key}
+              active={chainFilter === key}
+              label={chain.shortName}
+              iconUrl={chain.iconUrl}
+              iconColor={chain.iconColor}
+              onPress={() => setChainFilter(key)}
+            />
+          ))}
         </ScrollView>
 
-        <View style={manStyles.searchRow}>
-          <Icon name="search" size={18} color="#AAA" />
+        <View
+          style={{
+            minHeight: 54,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: spacing.sm,
+            marginHorizontal: spacing.lg,
+            marginTop: spacing.sm,
+            marginBottom: spacing.md,
+            backgroundColor: colors.surfaceAlt,
+            borderRadius: radius.md,
+            paddingHorizontal: spacing.lg,
+            paddingVertical: spacing.sm,
+          }}
+        >
+          <Icon name="search" size={18} color={colors.textMuted} />
           <TextInput
-            style={manStyles.searchInput}
+            style={{ flex: 1, fontSize: type.body.fontSize, color: colors.textPrimary, fontFamily: fonts['400'], paddingVertical: 0 }}
             placeholder="Search tokens"
-            placeholderTextColor="#BBB"
+            placeholderTextColor={colors.textMuted}
             value={search}
             onChangeText={setSearch}
             autoCapitalize="none"
             autoCorrect={false}
           />
           {search.length > 0 && (
-            <Pressable onPress={() => setSearch('')} hitSlop={8}>
-              <Icon name="close" size={18} color="#AAA" />
-            </Pressable>
+            <PressableScale onPress={() => setSearch('')} hitSlop={8}>
+              <Icon name="close" size={18} color={colors.textMuted} />
+            </PressableScale>
           )}
         </View>
 
@@ -530,35 +604,86 @@ const ManageTokensModal: React.FC<{
             const isVisible = !hiddenTokens.has(key);
             const meta = getManageTokenMeta(item);
             return (
-              <Pressable style={manStyles.row} onPress={() => onToggle(key)}>
-                <View style={[manStyles.avatar, { backgroundColor: item.iconColor + '20' }]}>
-                  {item.iconUrl
-                    ? <Image source={{ uri: item.iconUrl }} style={manStyles.avatarImg} />
-                    : <Text style={[manStyles.avatarText, { color: item.iconColor }]}>{item.symbol[0]}</Text>
-                  }
+              <PressableScale
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: spacing.lg,
+                  paddingVertical: spacing.sm,
+                  borderBottomWidth: StyleSheet.hairlineWidth,
+                  borderBottomColor: colors.hairline,
+                }}
+                onPress={() => onToggle(key)}
+              >
+                <View style={{ marginRight: spacing.md }}>
+                  <Avatar name={item.symbol} uri={item.iconUrl} size={40} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={manStyles.symbol}>{item.symbol}</Text>
-                  {meta ? <Text style={manStyles.meta} numberOfLines={1}>{meta}</Text> : null}
+                  <Text variant="bodyMed" weight="600">
+                    {item.symbol}
+                  </Text>
+                  {meta ? (
+                    <Text variant="caption" color="textMuted" numberOfLines={1} style={{ marginTop: 2 }}>
+                      {meta}
+                    </Text>
+                  ) : null}
                 </View>
-                <Switch
+                <Toggle
                   value={isVisible}
                   onValueChange={() => onToggle(key)}
-                  trackColor={{ false: '#E0E0E0', true: '#D4AF3750' }}
-                  thumbColor={isVisible ? '#D4AF37' : '#BBB'}
+                  accessibilityLabel={`Toggle ${item.symbol}`}
                 />
-              </Pressable>
+              </PressableScale>
             );
           }}
-          contentContainerStyle={[manStyles.listContent, { paddingBottom: Math.max(insets.bottom, 20) + 12 }]}
+          contentContainerStyle={{ paddingTop: 2, paddingBottom: Math.max(insets.bottom, spacing.xl) + spacing.md }}
         />
       </View>
     </Modal>
   );
 };
 
+// Filter chip used inside the manage-tokens modal's horizontal rail.
+const ManageChip: React.FC<{
+  active: boolean;
+  label: string;
+  iconUrl?: string;
+  iconColor?: string;
+  onPress: () => void;
+}> = ({ active, label, iconUrl, iconColor, onPress }) => {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <PressableScale
+      onPress={onPress}
+      style={{
+        flexShrink: 0,
+        minHeight: 36,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.xs,
+        paddingHorizontal: spacing.md,
+        paddingVertical: spacing.xs,
+        borderRadius: radius.pill,
+        backgroundColor: active ? colors.accentMuted : colors.surface,
+        borderWidth: 1,
+        borderColor: active ? colors.accent : colors.border,
+      }}
+    >
+      {iconUrl ? (
+        <Image source={{ uri: iconUrl }} style={{ width: 16, height: 16, borderRadius: 8 }} resizeMode="cover" />
+      ) : iconColor ? (
+        <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: iconColor }} />
+      ) : null}
+      <Text variant="bodySm" weight={active ? '700' : '500'} style={{ color: active ? colors.accent : colors.textSecondary }}>
+        {label}
+      </Text>
+    </PressableScale>
+  );
+};
+
 // ── Main Screen ──
 const WalletScreen: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
   const { tokenList, customTokens } = useTokens();
   const { network, switchNetwork } = useNetwork();
   const [assets, setAssets] = useState<WalletAsset[]>([]);
@@ -574,7 +699,6 @@ const WalletScreen: React.FC = () => {
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
   const [selectedChain, setSelectedChain] = useState<'all' | ChainKey>('all');
-  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -777,443 +901,228 @@ const WalletScreen: React.FC = () => {
   // Skeleton loading
   if (isLoading && !isRefreshing) {
     return (
-      <ScrollView style={styles.container} contentContainerStyle={styles.skeletonContent}>
-        <View style={[styles.skeletonCard, { height: 180 }]} />
-        <View style={[styles.skeletonCard, { height: 300, marginTop: 14 }]} />
-      </ScrollView>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+          <Skeleton height={180} radius="lg" />
+          <Skeleton height={300} radius="lg" style={{ marginTop: spacing.lg }} />
+        </ScrollView>
+      </SafeAreaView>
     );
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={{ paddingBottom: 100 }}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor="#D4AF37" colors={['#D4AF37']} />
-      }
-    >
-      <Pressable
-        style={[styles.networkBadge, network === 'testnet' && styles.networkBadgeTestnet]}
-        onPress={() => switchNetwork(network === 'mainnet' ? 'testnet' : 'mainnet')}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] * 2.5 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={isRefreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />
+        }
       >
-        <View style={[styles.networkDot, { backgroundColor: network === 'mainnet' ? '#4CAF50' : '#FF9800' }]} />
-        <Text style={styles.networkBadgeText}>
-          {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
-        </Text>
-      </Pressable>
-
-      <WalletBalanceCard
-        totalUsdValue={totalUsdValue}
-        isValuesHidden={isValuesHidden}
-        activeLabel={activeLabel}
-        onToggleVisibility={() => setIsValuesHidden(v => !v)}
-        onQuickAction={handleQuickAction}
-        onWalletPress={() => setShowWalletSelector(true)}
-      />
-
-      {/* Assets */}
-      <View style={styles.assetsCard}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Assets</Text>
-          <View style={{ flexDirection: 'row', gap: 12 }}>
-            <Pressable style={styles.manageBtn} onPress={() => router.push('/activity' as any)}>
-              <Icon name="history" size={15} color="#888" />
-              <Text style={styles.manageBtnText}>Activity</Text>
-            </Pressable>
-            <Pressable style={styles.manageBtn} onPress={() => setShowManageModal(true)}>
-              <Icon name="tune" size={15} color="#888" />
-              <Text style={styles.manageBtnText}>Manage</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        {/* Chain filter */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.chainFilterRow}
-          contentContainerStyle={styles.chainFilterContent}
+        <PressableScale
+          onPress={() => switchNetwork(network === 'mainnet' ? 'testnet' : 'mainnet')}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            alignSelf: 'center',
+            gap: spacing.xs,
+            backgroundColor: network === 'mainnet' ? colors.successBg : colors.warningBg,
+            paddingHorizontal: spacing.md,
+            paddingVertical: spacing.xs,
+            borderRadius: radius.pill,
+            marginBottom: spacing.md,
+          }}
         >
-          <Pressable
-            style={[styles.chainChip, selectedChain === 'all' && styles.chainChipActive]}
-            onPress={() => setSelectedChain('all')}
-          >
-            <Text style={[styles.chainChipText, selectedChain === 'all' && styles.chainChipTextActive]}>
-              All
-            </Text>
-          </Pressable>
-          {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
-            const isActive = selectedChain === key;
-            const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
-            return (
-              <Pressable
-                key={key}
-                style={[styles.chainChip, isActive && styles.chainChipActive]}
-                onPress={() => setSelectedChain(key)}
-              >
-                {chain.iconUrl ? (
-                  <Image source={{ uri: chain.iconUrl }} style={styles.chainChipIcon} />
-                ) : (
-                  <View style={[styles.chainChipDot, { backgroundColor: chain.iconColor }]} />
-                )}
-                <Text style={[styles.chainChipText, isActive && styles.chainChipTextActive]}>
-                  {chain.shortName}
-                </Text>
-                {hasBalance && !isActive && <View style={styles.chainChipDotIndicator} />}
-              </Pressable>
-            );
-          })}
-        </ScrollView>
+          <View
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 4,
+              backgroundColor: network === 'mainnet' ? colors.success : colors.warning,
+            }}
+          />
+          <Text variant="caption" weight="600">
+            {network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+          </Text>
+        </PressableScale>
 
-        {previewAssets.map(asset => (
-          <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
-        ))}
-
-        {previewNatives.length > 0 && (
-          <>
-            {previewAssets.length > 0 && <View style={styles.divider} />}
-            <Text style={styles.zeroBalanceLabel}>Networks</Text>
-            {previewNatives.map(asset => (
-              <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
-            ))}
-          </>
-        )}
-
-        {assetsWithBalance.length === 0 && nativeZeroBalance.length === 0 && (
-          <View style={styles.emptyAssets}>
-            <Icon name="account-balance-wallet" size={36} color="#DDD" />
-            <Text style={styles.emptyAssetsText}>No tokens found</Text>
-            <Text style={styles.emptyAssetsHint}>Pull to refresh or fund your wallet</Text>
-          </View>
-        )}
-
-        {hasMoreTokens && (
-          <Pressable style={styles.seeAllBtn} onPress={() => router.push('/wallet/tokens' as any)}>
-            <Text style={styles.seeAllText}>See all {totalVisible} tokens</Text>
-            <Icon name="chevron-right" size={16} color="#D4AF37" />
-          </Pressable>
-        )}
-      </View>
-
-      {/* Recent Activity */}
-      <View style={styles.assetsCard}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Recent Activity</Text>
-          <Pressable style={styles.manageBtn} onPress={() => router.push('/activity' as any)}>
-            <Text style={styles.manageBtnText}>See all</Text>
-            <Icon name="chevron-right" size={15} color="#888" />
-          </Pressable>
-        </View>
-        <ActivityFeed
-          types={['wallet', 'swap']}
-          embedded
-          onSeeAll={() => router.push('/wallet/history' as any)}
+        <WalletBalanceCard
+          totalUsdValue={totalUsdValue}
+          isValuesHidden={isValuesHidden}
+          activeLabel={activeLabel}
+          onToggleVisibility={() => setIsValuesHidden(v => !v)}
+          onQuickAction={handleQuickAction}
+          onWalletPress={() => setShowWalletSelector(true)}
         />
-      </View>
 
-      <View style={{ height: 40 }} />
-
-      <FundModal visible={showFundModal} onClose={() => setShowFundModal(false)} />
-      <SendModal visible={showSendModal} onClose={() => setShowSendModal(false)} />
-      <ManageTokensModal
-        visible={showManageModal}
-        assets={assets}
-        hiddenTokens={hiddenTokens}
-        tokenKey={tokenKey}
-        onToggle={toggleHidden}
-        onClose={() => setShowManageModal(false)}
-        onImport={() => {
-          setShowManageModal(false);
-          router.push('/wallet/import-token' as any);
-        }}
-      />
-
-      {/* Wallet Selector */}
-      <Modal visible={showWalletSelector} transparent animationType="slide" onRequestClose={() => setShowWalletSelector(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setShowWalletSelector(false)}>
-          <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-            <View style={styles.sheetHandle} />
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Select Wallet</Text>
-              <Pressable onPress={() => setShowWalletSelector(false)}><Icon name="close" size={24} color="#888" /></Pressable>
-            </View>
-            {walletList.map((w) => (
-              <Pressable
-                key={w.address}
-                style={styles.modalOption}
-                onPress={() => handleSwitchWallet(w.address)}
+        {/* Assets */}
+        <AccentCard padding="lg" railColor="transparent" style={{ marginTop: spacing.lg }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+            <Text variant="title3" weight="700">
+              Assets
+            </Text>
+            <View style={{ flexDirection: 'row', gap: spacing.md }}>
+              <PressableScale
+                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+                onPress={() => router.push('/activity' as any)}
               >
-                <View style={[styles.modalOptionIcon, { backgroundColor: w.address === activeAddress ? '#D4AF3720' : '#F5F5F5' }]}>
-                  <Icon name="account-balance-wallet" size={24} color={w.address === activeAddress ? '#D4AF37' : '#888'} />
+                <Icon name="clock" size={15} color={colors.textMuted} />
+                <Text variant="caption" color="textMuted" weight="600">
+                  Activity
+                </Text>
+              </PressableScale>
+              <PressableScale
+                style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+                onPress={() => setShowManageModal(true)}
+              >
+                <Icon name="filter" size={15} color={colors.textMuted} />
+                <Text variant="caption" color="textMuted" weight="600">
+                  Manage
+                </Text>
+              </PressableScale>
+            </View>
+          </View>
+
+          {/* Chain filter */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={{ marginBottom: spacing.sm, marginHorizontal: -spacing.xs }}
+            contentContainerStyle={{ paddingHorizontal: spacing.xs, gap: spacing.xs }}
+          >
+            <ManageChip active={selectedChain === 'all'} label="All" onPress={() => setSelectedChain('all')} />
+            {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
+              const isActive = selectedChain === key;
+              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+              return (
+                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <ManageChip
+                    active={isActive}
+                    label={chain.shortName}
+                    iconUrl={chain.iconUrl}
+                    iconColor={chain.iconColor}
+                    onPress={() => setSelectedChain(key)}
+                  />
+                  {hasBalance && !isActive && (
+                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                  )}
                 </View>
-                <View style={styles.modalOptionInfo}>
-                  <Text style={styles.modalOptionTitle}>{w.label}</Text>
-                  <Text style={styles.modalOptionDesc} numberOfLines={1}>{w.address.slice(0, 8)}...{w.address.slice(-6)}</Text>
-                </View>
-                {w.address === activeAddress && (
-                  <Icon name="check-circle" size={22} color="#D4AF37" />
-                )}
-              </Pressable>
+              );
+            })}
+          </ScrollView>
+
+          {previewAssets.map(asset => (
+            <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
+          ))}
+
+          {previewNatives.length > 0 && (
+            <>
+              {previewAssets.length > 0 && <Divider spacing="sm" />}
+              <Text variant="overline" color="textMuted" style={{ marginTop: spacing.sm, marginBottom: spacing.xs }}>
+                NETWORKS
+              </Text>
+              {previewNatives.map(asset => (
+                <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
+              ))}
+            </>
+          )}
+
+          {assetsWithBalance.length === 0 && nativeZeroBalance.length === 0 && (
+            <EmptyState
+              icon="wallet"
+              title="No tokens found"
+              subtitle="Pull to refresh or fund your wallet"
+            />
+          )}
+
+          {hasMoreTokens && (
+            <>
+              <Divider spacing="sm" />
+              <PressableScale
+                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, paddingVertical: spacing.md }}
+                onPress={() => router.push('/wallet/tokens' as any)}
+              >
+                <Text variant="bodySm" weight="600" color="accent">
+                  See all {totalVisible} tokens
+                </Text>
+                <Icon name="chevronRight" size={16} color={colors.accent} />
+              </PressableScale>
+            </>
+          )}
+        </AccentCard>
+
+        {/* Recent Activity */}
+        <AccentCard padding="lg" railColor="transparent" style={{ marginTop: spacing.lg }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+            <Text variant="title3" weight="700">
+              Recent Activity
+            </Text>
+            <PressableScale
+              style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}
+              onPress={() => router.push('/activity' as any)}
+            >
+              <Text variant="caption" color="textMuted" weight="600">
+                See all
+              </Text>
+              <Icon name="chevronRight" size={15} color={colors.textMuted} />
+            </PressableScale>
+          </View>
+          <ActivityFeed
+            types={['wallet', 'swap']}
+            embedded
+            onSeeAll={() => router.push('/wallet/history' as any)}
+          />
+        </AccentCard>
+
+        <FundModal visible={showFundModal} onClose={() => setShowFundModal(false)} />
+        <SendModal visible={showSendModal} onClose={() => setShowSendModal(false)} />
+        <ManageTokensModal
+          visible={showManageModal}
+          assets={assets}
+          hiddenTokens={hiddenTokens}
+          tokenKey={tokenKey}
+          onToggle={toggleHidden}
+          onClose={() => setShowManageModal(false)}
+          onImport={() => {
+            setShowManageModal(false);
+            router.push('/wallet/import-token' as any);
+          }}
+        />
+
+        {/* Wallet Selector */}
+        <Sheet visible={showWalletSelector} onClose={() => setShowWalletSelector(false)} title="Select Wallet">
+          <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.lg }}>
+            {walletList.map((w) => (
+              <SheetOption
+                key={w.address}
+                icon="wallet"
+                title={w.label}
+                desc={`${w.address.slice(0, 8)}...${w.address.slice(-6)}`}
+                iconColor={w.address === activeAddress ? colors.accent : colors.textMuted}
+                iconBg={w.address === activeAddress ? colors.accentMuted : colors.surfaceAlt}
+                trailing={
+                  w.address === activeAddress ? (
+                    <Icon name="checkCircle" size={22} color={colors.accent} />
+                  ) : (
+                    <View />
+                  )
+                }
+                onPress={() => handleSwitchWallet(w.address)}
+              />
             ))}
-            <Pressable
-              style={styles.modalCancel}
+            <PressableScale
+              style={{ alignItems: 'center', paddingVertical: spacing.md, marginTop: spacing.xs }}
               onPress={() => { setShowWalletSelector(false); router.push('/wallet/manage'); }}
             >
-              <Text style={[styles.modalCancelText, { color: '#D4AF37', fontWeight: '600' }]}>Manage Wallets</Text>
-            </Pressable>
+              <Text variant="bodyMed" weight="600" color="accent">
+                Manage Wallets
+              </Text>
+            </PressableScale>
           </View>
-        </Pressable>
-      </Modal>
-    </ScrollView>
+        </Sheet>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
-
-// ── Styles ──
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F5F7' },
-  networkBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: '#E8F5E9',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    marginTop: 8,
-    marginBottom: 4,
-  },
-  networkBadgeTestnet: {
-    backgroundColor: '#FFF3E0',
-  },
-  networkDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 6,
-  },
-  networkBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#333',
-  },
-  skeletonContent: { padding: 16 },
-  skeletonCard: {
-    backgroundColor: '#E5E5E5',
-    borderRadius: 14,
-    marginHorizontal: 16,
-    opacity: 0.5,
-  },
-
-  // Balance Card
-  balanceCard: {
-    marginHorizontal: 16,
-    marginTop: 8,
-    borderRadius: 16,
-    padding: 20,
-    backgroundColor: '#1A1A1A',
-  },
-  balanceHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  balanceLabel: { fontSize: 13, color: 'rgba(255,255,255,0.6)' },
-  balanceAmount: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', marginBottom: 4 },
-  actionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 18,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
-  },
-  actionButton: { alignItems: 'center', minWidth: 56 },
-  actionPressed: { opacity: 0.7 },
-  actionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(212,175,55,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  actionLabel: { fontSize: 11, color: 'rgba(255,255,255,0.7)', fontWeight: '500' },
-
-  // Assets Card
-  assetsCard: {
-    marginHorizontal: 16,
-    marginTop: 14,
-    borderRadius: 14,
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
-  assetCount: { fontSize: 12, color: '#888' },
-  manageBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, padding: 4 },
-  manageBtnText: { fontSize: 12, color: '#888', fontWeight: '600' },
-  zeroBalanceLabel: { fontSize: 11, fontWeight: '700', color: '#BBB', letterSpacing: 0.8, marginTop: 8, marginBottom: 4, paddingHorizontal: 2 },
-  emptyAssets: { alignItems: 'center', paddingVertical: 32, gap: 8 },
-  seeAllBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0F0F0', marginTop: 4 },
-  seeAllText: { fontSize: 14, fontWeight: '600', color: '#D4AF37' },
-  emptyAssetsText: { fontSize: 15, fontWeight: '600', color: '#BBB' },
-  emptyAssetsHint: { fontSize: 12, color: '#CCC' },
-  divider: {
-    height: 1,
-    backgroundColor: '#F0F0F0',
-    marginVertical: 8,
-    marginHorizontal: 4,
-  },
-
-  // Asset Row
-  assetRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  assetAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  assetAvatarImage: { width: 24, height: 24, borderRadius: 12 },
-  assetAvatarText: { fontSize: 16, fontWeight: '700' },
-  assetInfo: { flex: 1 },
-  assetSymbolRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  assetSymbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  discoveredBadge: {
-    backgroundColor: 'rgba(212,175,55,0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  discoveredBadgeText: { fontSize: 9, fontWeight: '800', color: '#8B6914', letterSpacing: 0.5 },
-  assetMeta: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  assetName: { fontSize: 12, color: '#888' },
-  chainDot: { width: 5, height: 5, borderRadius: 2.5, marginLeft: 6, marginRight: 3 },
-  chainName: { fontSize: 11, color: '#AAA' },
-  assetValues: { alignItems: 'flex-end' },
-  assetBalance: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  assetUsd: { fontSize: 12, color: '#888', marginTop: 2 },
-
-  // Chain filter
-  chainFilterRow: { marginBottom: 8, marginHorizontal: -4 },
-  chainFilterContent: { paddingHorizontal: 4, gap: 6 },
-  chainChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-    backgroundColor: '#F5F5F5',
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  chainChipActive: {
-    backgroundColor: '#D4AF3715',
-    borderColor: '#D4AF37',
-  },
-  chainChipIcon: { width: 14, height: 14, borderRadius: 7 },
-  chainChipDot: { width: 8, height: 8, borderRadius: 4 },
-  chainChipText: { fontSize: 11, fontWeight: '600', color: '#888' },
-  chainChipTextActive: { color: '#D4AF37' },
-  chainChipDotIndicator: {
-    width: 5,
-    height: 5,
-    borderRadius: 2.5,
-    backgroundColor: '#4CAF50',
-    marginLeft: 2,
-  },
-
-  // Sheet handle
-  sheetHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#E0E0E0',
-    alignSelf: 'center',
-    marginBottom: 12,
-  },
-
-  // Modals
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 34 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-  modalOption: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FAFAFA', borderRadius: 14, marginBottom: 10 },
-  modalOptionIcon: { width: 48, height: 48, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
-  modalOptionInfo: { flex: 1 },
-  modalOptionTitle: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  modalOptionDesc: { fontSize: 12, color: '#888', marginTop: 2 },
-  modalCancel: { alignItems: 'center', paddingVertical: 14, marginTop: 4 },
-  modalCancelText: { fontSize: 15, color: '#888', fontWeight: '500' },
-
-  // Wallet Selector
-  walletSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 8,
-  },
-  walletSelectorLabel: {
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.9)',
-    fontWeight: '600',
-  },
-});
-
-const manStyles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#FFF' },
-  header: { minHeight: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#F0F0F0' },
-  headerSide: { width: 104, justifyContent: 'center' },
-  headerSideRight: { alignItems: 'flex-end' },
-  headerIconButton: { width: 32, height: 32, alignItems: 'flex-start', justifyContent: 'center' },
-  title: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700', color: '#1A1A1A' },
-  importAction: { fontSize: 14, fontWeight: '700', color: '#D4AF37' },
-  chipRow: { flexGrow: 0, marginTop: 12 },
-  chipRowContent: { paddingHorizontal: 20, paddingVertical: 4, paddingRight: 28, alignItems: 'center' },
-  chip: { flexShrink: 0, minHeight: 36, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, paddingVertical: 7, borderRadius: 18, backgroundColor: '#F5F5F5', borderWidth: 1, borderColor: 'transparent', marginRight: 8 },
-  chipActive: { backgroundColor: '#D4AF3715', borderColor: '#D4AF37' },
-  chipIconWrap: { width: 16, height: 16, marginRight: 6, alignItems: 'center', justifyContent: 'center' },
-  chipIcon: { width: 16, height: 16, borderRadius: 8 },
-  chipDot: { width: 10, height: 10, borderRadius: 5 },
-  chipText: { fontSize: 12, fontWeight: '500', color: '#666', includeFontPadding: false },
-  chipTextActive: { color: '#D4AF37', fontWeight: '700' },
-  searchRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginTop: 10, marginBottom: 12, backgroundColor: '#F5F5F5', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10 },
-  searchInput: { flex: 1, fontSize: 15, color: '#1A1A1A', paddingVertical: 0 },
-  listContent: { paddingTop: 2 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#F4F4F4',
-  },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  avatarImg: { width: 24, height: 24, borderRadius: 12 },
-  avatarText: { fontSize: 16, fontWeight: '700' },
-  symbol: { fontSize: 15, fontWeight: '600', color: '#1A1A1A' },
-  meta: { fontSize: 12, color: '#888', marginTop: 2 },
-});
 
 export default WalletScreen;

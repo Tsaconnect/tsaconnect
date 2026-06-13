@@ -1,48 +1,47 @@
 // app/screens/TradeAndEarnScreen.tsx
+//
+// Trade & Earn landing — Trade-Points balance + referral hero, earning-method
+// shortcuts, earning details, TP explainer, and the "how it works" steps plus
+// the trade / merchant CTAs. Restyled onto the TSA Signature design system
+// (theme tokens + @/components/ui primitives). All data fetching, state,
+// effects, navigation routes, clipboard/share behavior, and number formatting
+// are unchanged — this is a visual/structural restyle only.
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  ScrollView,
-  StyleSheet,
-  Share,
-  Alert,
-  RefreshControl,
-} from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { View, ScrollView, Share, Alert, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import api from '../components/services/api';
-
-const COLORS = {
-  primary: '#FFD700',
-  dark: '#B8860B',
-  light: '#FFF8DC',
-  background: '#F5F5F5',
-  white: '#FFFFFF',
-  text: '#1A1A1A',
-  textSecondary: '#666666',
-  textMuted: '#999999',
-  success: '#28A745',
-  border: '#F0F0F0',
-};
+import { useTheme, formatNumber } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Card,
+  Divider,
+  Icon,
+  IconButton,
+  PressableScale,
+  Surface,
+  Text,
+} from '@/components/ui';
+import api, { rewardsApi, type RewardSummary } from '../components/services/api';
 
 const TradeAndEarnScreen: React.FC = () => {
+  const { colors, spacing, radius } = useTheme();
   const [referralCode, setReferralCode] = useState('');
   const [tpBalance, setTpBalance] = useState(0);
   const [cashbackBalance, setCashbackBalance] = useState(0);
   const [totalReferrals, setTotalReferrals] = useState(0);
+  const [summary, setSummary] = useState<RewardSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = async () => {
     try {
-      const [profileRes, tpRes, referralsRes, cashbackRes] = await Promise.all([
+      const [profileRes, tpRes, referralsRes, cashbackRes, summaryRes] = await Promise.all([
         api.getProfile(),
         api.getTPBalance(),
         api.getReferrals(),
         api.getCashbackBalance(),
+        rewardsApi.summary(),
       ]);
 
       if (profileRes.success && profileRes.data) {
@@ -56,6 +55,12 @@ const TradeAndEarnScreen: React.FC = () => {
       }
       if (cashbackRes.success && cashbackRes.data) {
         setCashbackBalance(cashbackRes.data.cashbackBalance || 0);
+      }
+      if (summaryRes.success && summaryRes.data) {
+        setSummary(summaryRes.data);
+        // The summary settles pending accrual server-side, so prefer its
+        // (more current) TP balance for the hero when available.
+        setTpBalance(summaryRes.data.tpBalance);
       }
     } catch (error) {
       console.error('Error fetching trade & earn data:', error);
@@ -95,589 +100,569 @@ const TradeAndEarnScreen: React.FC = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.accent}
+            colors={[colors.accent]}
+          />
         }
       >
-        <View style={styles.content}>
-          {/* Hero Card — TP Balance + Referral Code */}
-          <View style={styles.heroCard}>
-            <View style={styles.heroTop}>
-              <View>
-                <Text style={styles.heroLabel}>Trade Points</Text>
-                <Text style={styles.heroBalance}>{tpBalance.toFixed(2)}</Text>
-                <Text style={styles.heroUnit}>TP</Text>
-              </View>
-              <View style={styles.heroIconWrap}>
-                <Icon name="stars" size={36} color={COLORS.dark} />
-              </View>
+        {/* Hero Card — TP Balance + Referral Code */}
+        <AccentCard padding="xl">
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <View>
+              <Text variant="bodySm" color="textSecondary">
+                Trade Points
+              </Text>
+              <AmountText
+                value={tpBalance}
+                variant="display"
+                minimumFractionDigits={2}
+                maximumFractionDigits={2}
+                style={{ marginTop: spacing.xs }}
+              />
+              <Text variant="caption" weight="700" color="accent" style={{ marginTop: 2 }}>
+                TP
+              </Text>
             </View>
-
-            <View style={styles.heroDivider} />
-
-            <View style={styles.referralRow}>
-              <View style={styles.referralInfo}>
-                <Text style={styles.referralLabel}>Your Referral Code</Text>
-                <Text style={styles.referralCode}>{referralCode || 'N/A'}</Text>
-              </View>
-              <View style={styles.referralActions}>
-                <TouchableOpacity style={styles.referralBtn} onPress={copyReferralCode}>
-                  <Icon name="content-copy" size={18} color={COLORS.dark} />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.referralBtn} onPress={shareReferralCode}>
-                  <Icon name="share" size={18} color={COLORS.dark} />
-                </TouchableOpacity>
-              </View>
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accentMuted,
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <Icon name="star" size={32} color={colors.accent} />
             </View>
           </View>
 
-          {/* Stats Row */}
-          <View style={styles.statsRow}>
-            <TouchableOpacity
-              style={styles.statItem}
-              onPress={() => router.push('/marketplace')}
-            >
-              <View style={[styles.statDot, { backgroundColor: '#FFF3E0' }]}>
-                <Icon name="payments" size={16} color="#F57C00" />
-              </View>
-              <Text style={styles.statValue}>${cashbackBalance.toFixed(2)}</Text>
-              <Text style={styles.statLabel}>Cashback</Text>
-            </TouchableOpacity>
+          <Divider spacing="lg" />
 
-            <TouchableOpacity
-              style={styles.statItem}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <View style={{ flex: 1 }}>
+              <Text variant="caption" color="textMuted">
+                Your Referral Code
+              </Text>
+              <Text variant="title3" weight="700" style={{ marginTop: 2 }}>
+                {referralCode || 'N/A'}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <IconButton
+                icon="copy"
+                size={18}
+                color={colors.accent}
+                accessibilityLabel="Copy referral code"
+                onPress={copyReferralCode}
+              />
+              <IconButton
+                icon="send"
+                size={18}
+                color={colors.accent}
+                accessibilityLabel="Share referral code"
+                onPress={shareReferralCode}
+              />
+            </View>
+          </View>
+        </AccentCard>
+
+        {/* Rewards & TP Levels — entry point into the full SP8 dashboard */}
+        <PressableScale onPress={() => router.push('/rewards')} style={{ marginTop: spacing.lg }}>
+          <Card padding="lg">
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: radius.md,
+                  backgroundColor: colors.accentMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginRight: spacing.md,
+                }}
+              >
+                <Icon name="trendingUp" size={22} color={colors.accent} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700">
+                  Rewards &amp; TP Levels
+                </Text>
+                <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                  {summary
+                    ? `${
+                        summary.currentLevel > 0
+                          ? summary.currentLevelName || `Level ${summary.currentLevel}`
+                          : 'No level yet'
+                      } · ${formatNumber(summary.claimableMcgp, { maximumFractionDigits: 4 })} MCGP to claim`
+                    : 'View your level ladder, earnings & claim rewards'}
+                </Text>
+              </View>
+              <Icon name="chevronRight" size={22} color={colors.textMuted} />
+            </View>
+
+            {!!summary && !!summary.nextLevelThresholdTP && (
+              <>
+                <View
+                  style={{
+                    height: 6,
+                    borderRadius: radius.pill,
+                    backgroundColor: colors.surfaceAlt,
+                    overflow: 'hidden',
+                    marginTop: spacing.md,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: `${Math.max(0, Math.min(1, summary.progressToNext)) * 100}%`,
+                      height: '100%',
+                      borderRadius: radius.pill,
+                      backgroundColor: colors.accent,
+                    }}
+                  />
+                </View>
+                <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                  {Math.round(summary.progressToNext * 100)}% to{' '}
+                  {summary.levels.find((l) => l.level === summary.currentLevel + 1)?.name ||
+                    `Level ${summary.currentLevel + 1}`}{' '}
+                  ({formatNumber(summary.nextLevelThresholdTP)} TP)
+                </Text>
+              </>
+            )}
+          </Card>
+        </PressableScale>
+
+        {/* Stats Row */}
+        <Card padding="lg" style={{ marginTop: spacing.lg, marginBottom: spacing['2xl'] }}>
+          <View style={{ flexDirection: 'row' }}>
+            <PressableScale
+              style={{ flex: 1, alignItems: 'center' }}
+              onPress={() => router.push('/cashback')}
+            >
+              <View
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.warningBg,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: spacing.sm,
+                }}
+              >
+                <Icon name="card" size={16} color={colors.warning} />
+              </View>
+              <AmountText
+                value={cashbackBalance}
+                currency="USD"
+                variant="bodyMed"
+                weight="700"
+                minimumFractionDigits={2}
+                maximumFractionDigits={2}
+              />
+              <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                Cashback
+              </Text>
+            </PressableScale>
+
+            <PressableScale
+              style={{ flex: 1, alignItems: 'center' }}
               onPress={() => router.push('/referrals')}
             >
-              <View style={[styles.statDot, { backgroundColor: '#E8F5E9' }]}>
-                <Icon name="people" size={16} color="#2E7D32" />
+              <View
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.successBg,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: spacing.sm,
+                }}
+              >
+                <Icon name="user" size={16} color={colors.success} />
               </View>
-              <Text style={styles.statValue}>{totalReferrals}</Text>
-              <Text style={styles.statLabel}>Referrals</Text>
-            </TouchableOpacity>
-
-            <View style={styles.statItem}>
-              <View style={[styles.statDot, { backgroundColor: '#E3F2FD' }]}>
-                <Icon name="stars" size={16} color="#1976D2" />
-              </View>
-              <Text style={styles.statValue}>{tpBalance.toFixed(2)}</Text>
-              <Text style={styles.statLabel}>TP Earned</Text>
-            </View>
-          </View>
-
-          {/* Earning Methods */}
-          <Text style={styles.sectionTitle}>Ways to Earn</Text>
-
-          <View style={styles.methodsCard}>
-            <TouchableOpacity
-              style={styles.methodRow}
-              activeOpacity={0.7}
-              onPress={() => router.push('/marketplace')}
-            >
-              <View style={[styles.methodIcon, { backgroundColor: '#FFF3E0' }]}>
-                <Icon name="payments" size={22} color="#F57C00" />
-              </View>
-              <View style={styles.methodInfo}>
-                <Text style={styles.methodTitle}>Cashback</Text>
-                <Text style={styles.methodDesc}>
-                  Earn instant dollar cashback on purchases & services
-                </Text>
-              </View>
-              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
-            </TouchableOpacity>
-
-            <View style={styles.methodDivider} />
-
-            <TouchableOpacity
-              style={styles.methodRow}
-              activeOpacity={0.7}
-              onPress={() => router.push('/referrals')}
-            >
-              <View style={[styles.methodIcon, { backgroundColor: '#E8F5E9' }]}>
-                <Icon name="people" size={22} color="#2E7D32" />
-              </View>
-              <View style={styles.methodInfo}>
-                <Text style={styles.methodTitle}>Trade Points</Text>
-                <Text style={styles.methodDesc}>
-                  Earn TP from fees across 10 generations of your network
-                </Text>
-              </View>
-              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
-            </TouchableOpacity>
-
-            <View style={styles.methodDivider} />
-
-            <TouchableOpacity
-              style={styles.methodRow}
-              activeOpacity={0.7}
-              onPress={() => router.push('/easyswap')}
-            >
-              <View style={[styles.methodIcon, { backgroundColor: '#E3F2FD' }]}>
-                <Icon name="swap-horiz" size={22} color="#1976D2" />
-              </View>
-              <View style={styles.methodInfo}>
-                <Text style={styles.methodTitle}>Swap & Instant Pay</Text>
-                <Text style={styles.methodDesc}>
-                  Earn TP & cashback on every swap and instant transfer
-                </Text>
-              </View>
-              <Icon name="chevron-right" size={22} color={COLORS.textMuted} />
-            </TouchableOpacity>
-          </View>
-
-          {/* Earning Details */}
-          <Text style={styles.sectionTitle}>Earning Details</Text>
-
-          <View style={styles.detailsCard}>
-            <View style={styles.detailSection}>
-              <View style={styles.detailHeader}>
-                <Icon name="payments" size={18} color="#F57C00" />
-                <Text style={styles.detailTitle}>Cashback (Trade & Earn)</Text>
-              </View>
-              <Text style={styles.detailText}>
-                Paid to you and your direct upline in dollars instantly for every purchase, service order, swap, and Instant Pay — debited from system fees even if it's $0.00001.
+              <Text variant="bodyMed" weight="700">
+                {totalReferrals}
               </Text>
-            </View>
-
-            <View style={styles.detailDivider} />
-
-            <View style={styles.detailSection}>
-              <View style={styles.detailHeader}>
-                <Icon name="people" size={18} color="#2E7D32" />
-                <Text style={styles.detailTitle}>Trade Points (TP) Network</Text>
-              </View>
-              <Text style={styles.detailText}>
-                System fees from every transaction are split across 10 generations. You earn 35.4% of fees directly, your direct upline earns 17.7%, and it cascades down to 0.4% at the 10th generation.
+              <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                Referrals
               </Text>
-            </View>
+            </PressableScale>
 
-            <View style={styles.detailDivider} />
-
-            <View style={styles.detailSection}>
-              <View style={styles.detailHeader}>
-                <Icon name="swap-horiz" size={18} color="#1976D2" />
-                <Text style={styles.detailTitle}>Swap & Instant Pay TP</Text>
+            <View style={{ flex: 1, alignItems: 'center' }}>
+              <View
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.infoBg,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: spacing.sm,
+                }}
+              >
+                <Icon name="star" size={16} color={colors.info} />
               </View>
-              <Text style={styles.detailText}>
-                Every swap (MCGP/USDC) and Instant Pay transfer now earns TP from system fees. TP is credited instantly and visible on your dashboard.
+              <AmountText
+                value={tpBalance}
+                variant="bodyMed"
+                weight="700"
+                minimumFractionDigits={2}
+                maximumFractionDigits={2}
+              />
+              <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                TP Earned
               </Text>
             </View>
           </View>
+        </Card>
 
-          {/* TP Conversion Rates */}
-          <Text style={styles.sectionTitle}>How TP Is Earned</Text>
+        {/* Earning Methods */}
+        <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+          Ways to Earn
+        </Text>
 
-          <View style={styles.conversionCard}>
-            <View style={styles.conversionRow}>
-              <Icon name="info-outline" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>TP is earned from system fees, not trade volume</Text>
-            </View>
-            <View style={styles.conversionRow}>
-              <Icon name="people" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>Split across you + 10 generations of upline</Text>
-            </View>
-            <View style={styles.conversionRow}>
-              <Icon name="flash-on" size={16} color={COLORS.dark} />
-              <Text style={styles.conversionText}>Credited instantly after each transaction</Text>
-            </View>
-            <View style={styles.conversionNote}>
-              <Icon name="info-outline" size={14} color={COLORS.dark} />
-              <Text style={styles.conversionNoteText}>
-                Every time you trade, swap, purchase products/services, or send via Instant Pay, the system fees are split into TP and distributed to you and your upline network.
-              </Text>
-            </View>
-          </View>
-
-          {/* How It Works */}
-          <Text style={styles.sectionTitle}>How It Works</Text>
-
-          <View style={styles.stepsCard}>
-            <View style={styles.stepRow}>
-              <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepTitle}>Start Trading</Text>
-                <Text style={styles.stepDesc}>Buy or sell products/services in the marketplace</Text>
-              </View>
-            </View>
-            <View style={styles.stepRow}>
-              <View style={styles.stepNum}><Text style={styles.stepNumText}>2</Text></View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepTitle}>Earn Rewards</Text>
-                <Text style={styles.stepDesc}>Automatically earn cashback, TPs, and commissions</Text>
-              </View>
-            </View>
-            <View style={styles.stepRow}>
-              <View style={styles.stepNum}><Text style={styles.stepNumText}>3</Text></View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepTitle}>Invite & Earn More</Text>
-                <Text style={styles.stepDesc}>Share your referral code to earn from your network</Text>
-              </View>
-            </View>
-            <View style={styles.stepRow}>
-              <View style={styles.stepNum}><Text style={styles.stepNumText}>4</Text></View>
-              <View style={styles.stepInfo}>
-                <Text style={styles.stepTitle}>Join P2P</Text>
-                <Text style={styles.stepDesc}>Become a merchant for additional commission</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* CTA */}
-          <TouchableOpacity
-            style={styles.ctaButton}
-            onPress={() => router.push('/marketplace')}
-            activeOpacity={0.8}
+        <Surface elevation="sm" style={{ marginBottom: spacing.lg, overflow: 'hidden' }}>
+          <PressableScale
+            onPress={() => router.push('/cashback')}
+            style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}
           >
-            <Icon name="shopping-cart" size={22} color="#000" />
-            <Text style={styles.ctaText}>Start Trading Now</Text>
-          </TouchableOpacity>
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: radius.md,
+                backgroundColor: colors.warningBg,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Icon name="card" size={22} color={colors.warning} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="700">
+                Cashback
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Earn cashback on purchases, services &amp; P2P — claimable as MCGP
+              </Text>
+            </View>
+            <Icon name="chevronRight" size={22} color={colors.textMuted} />
+          </PressableScale>
 
-          <TouchableOpacity
-            style={styles.ctaSecondary}
-            onPress={() => router.push('/services')}
-            activeOpacity={0.8}
+          <Divider inset={74} />
+
+          <PressableScale
+            onPress={() => router.push('/rewards')}
+            style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}
           >
-            <Icon name="store" size={22} color={COLORS.dark} />
-            <Text style={styles.ctaSecondaryText}>Become a P2P Merchant</Text>
-          </TouchableOpacity>
-        </View>
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: radius.md,
+                backgroundColor: colors.successBg,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Icon name="user" size={22} color={colors.success} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="700">
+                Trade Points
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Earn TP from fees across 10 generations of your network
+              </Text>
+            </View>
+            <Icon name="chevronRight" size={22} color={colors.textMuted} />
+          </PressableScale>
+
+          <Divider inset={74} />
+
+          <PressableScale
+            onPress={() => router.push('/easyswap')}
+            style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}
+          >
+            <View
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: radius.md,
+                backgroundColor: colors.infoBg,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Icon name="swap" size={22} color={colors.info} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="700">
+                Swap &amp; Instant Pay
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Earn TP &amp; cashback on every swap and instant transfer
+              </Text>
+            </View>
+            <Icon name="chevronRight" size={22} color={colors.textMuted} />
+          </PressableScale>
+        </Surface>
+
+        {/* Earning Details */}
+        <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+          Earning Details
+        </Text>
+
+        <Card padding="xl" style={{ marginBottom: spacing['2xl'] }}>
+          <View style={{ paddingVertical: spacing.xs }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm }}>
+              <Icon name="card" size={18} color={colors.warning} />
+              <Text variant="bodyMed" weight="700">
+                Cashback (Trade &amp; Earn)
+              </Text>
+            </View>
+            <Text variant="bodySm" color="textSecondary">
+              You and your direct upline each earn cashback, split equally, on every product purchase, service order, and P2P trade — carved from the platform fee (even on the tiniest fees) and claimable as MCGP.
+            </Text>
+          </View>
+
+          <Divider spacing="lg" />
+
+          <View style={{ paddingVertical: spacing.xs }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm }}>
+              <Icon name="user" size={18} color={colors.success} />
+              <Text variant="bodyMed" weight="700">
+                Trade Points (TP) Network
+              </Text>
+            </View>
+            <Text variant="bodySm" color="textSecondary">
+              System fees from every transaction are split across 10 generations. You earn 35.4% of fees directly, your direct upline earns 17.7%, and it cascades down to 0.4% at the 10th generation.
+            </Text>
+          </View>
+
+          <Divider spacing="lg" />
+
+          <View style={{ paddingVertical: spacing.xs }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm }}>
+              <Icon name="swap" size={18} color={colors.info} />
+              <Text variant="bodyMed" weight="700">
+                Swap &amp; Instant Pay TP
+              </Text>
+            </View>
+            <Text variant="bodySm" color="textSecondary">
+              Every swap (MCGP/USDC) and Instant Pay transfer now earns TP from system fees. TP is credited instantly and visible on your dashboard.
+            </Text>
+          </View>
+        </Card>
+
+        {/* How TP Is Earned — short explainer; the live per-generation
+            breakdown, level ladder & claim now live on the Rewards screen. */}
+        <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+          How TP Is Earned
+        </Text>
+
+        <Card padding="xl" style={{ marginBottom: spacing['2xl'] }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md }}>
+            <Icon name="info" size={16} color={colors.accent} />
+            <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+              TP is earned from system fees, not trade volume
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md }}>
+            <Icon name="user" size={16} color={colors.accent} />
+            <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+              Split across you + 10 generations of upline
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg }}>
+            <Icon name="bolt" size={16} color={colors.accent} />
+            <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+              Credited instantly after each transaction
+            </Text>
+          </View>
+
+          <PressableScale
+            onPress={() => router.push('/rewards')}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: spacing.sm,
+              backgroundColor: colors.accentMuted,
+              paddingVertical: spacing.md,
+              borderRadius: radius.sm,
+            }}
+          >
+            <Icon name="trendingUp" size={16} color={colors.accent} />
+            <Text variant="bodySm" weight="700" color="accent">
+              See your TP levels &amp; per-generation earnings
+            </Text>
+          </PressableScale>
+        </Card>
+
+        {/* How It Works */}
+        <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
+          How It Works
+        </Text>
+
+        <Card padding="xl" style={{ marginBottom: spacing['2xl'] }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
+            <View
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" weight="800" style={{ color: colors.onAccent }}>
+                1
+              </Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodySm" weight="700">
+                Start Trading
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Buy or sell products/services in the marketplace
+              </Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
+            <View
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" weight="800" style={{ color: colors.onAccent }}>
+                2
+              </Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodySm" weight="700">
+                Earn Rewards
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Automatically earn cashback, TPs, and commissions
+              </Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
+            <View
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" weight="800" style={{ color: colors.onAccent }}>
+                3
+              </Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodySm" weight="700">
+                Invite &amp; Earn More
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Share your referral code to earn from your network
+              </Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: radius.pill,
+                backgroundColor: colors.accent,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: spacing.md,
+              }}
+            >
+              <Text variant="bodySm" weight="800" style={{ color: colors.onAccent }}>
+                4
+              </Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodySm" weight="700">
+                Join P2P
+              </Text>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                Become a merchant for additional commission
+              </Text>
+            </View>
+          </View>
+        </Card>
+
+        {/* CTA */}
+        <PressableScale
+          onPress={() => router.push('/marketplace')}
+          style={{
+            backgroundColor: colors.accent,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: radius.md,
+            paddingVertical: spacing.lg,
+            marginBottom: spacing.md,
+            gap: spacing.sm,
+          }}
+        >
+          <Icon name="cart" size={22} color={colors.onAccent} />
+          <Text variant="bodyMed" weight="700" style={{ color: colors.onAccent }}>
+            Start Trading Now
+          </Text>
+        </PressableScale>
+
+        <PressableScale
+          onPress={() => router.push('/services')}
+          style={{
+            backgroundColor: colors.surface,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: radius.md,
+            paddingVertical: spacing.lg,
+            gap: spacing.sm,
+            borderWidth: 1.5,
+            borderColor: colors.accent,
+          }}
+        >
+          <Icon name="storefront" size={22} color={colors.accent} />
+          <Text variant="bodyMed" weight="700" color="accent">
+            Become a P2P Merchant
+          </Text>
+        </PressableScale>
       </ScrollView>
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  content: {
-    padding: 16,
-  },
-
-  // Hero Card
-  heroCard: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 20,
-    padding: 24,
-    marginBottom: 16,
-  },
-  heroTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  heroLabel: {
-    fontSize: 14,
-    color: COLORS.text,
-    opacity: 0.7,
-    marginBottom: 4,
-  },
-  heroBalance: {
-    fontSize: 40,
-    fontWeight: '900',
-    color: COLORS.text,
-    lineHeight: 44,
-  },
-  heroUnit: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.dark,
-    marginTop: 2,
-  },
-  heroIconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: 'rgba(255,255,255,0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  heroDivider: {
-    height: 1,
-    backgroundColor: 'rgba(0,0,0,0.1)',
-    marginVertical: 16,
-  },
-  referralRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  referralInfo: {
-    flex: 1,
-  },
-  referralLabel: {
-    fontSize: 12,
-    color: COLORS.text,
-    opacity: 0.6,
-    marginBottom: 2,
-  },
-  referralCode: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.text,
-  },
-  referralActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  referralBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  // Stats Row
-  statsRow: {
-    flexDirection: 'row',
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  statItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  statDot: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  statValue: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: COLORS.text,
-    marginBottom: 2,
-  },
-  statLabel: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-  },
-
-  // Section
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.text,
-    marginBottom: 12,
-  },
-
-  // Methods
-  methodsCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  methodRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-  },
-  methodIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 14,
-  },
-  methodInfo: {
-    flex: 1,
-  },
-  methodTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 2,
-  },
-  methodDesc: {
-    fontSize: 13,
-    color: COLORS.textSecondary,
-  },
-  methodDivider: {
-    height: 1,
-    backgroundColor: COLORS.border,
-    marginLeft: 74,
-  },
-
-  // Earning Details
-  detailsCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  detailSection: {
-    paddingVertical: 4,
-  },
-  detailHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 6,
-  },
-  detailTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  detailText: {
-    fontSize: 13,
-    color: COLORS.textSecondary,
-    lineHeight: 19,
-  },
-  detailDivider: {
-    height: 1,
-    backgroundColor: COLORS.border,
-    marginVertical: 14,
-  },
-
-  // Conversion Rates
-  conversionCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  conversionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 10,
-  },
-  conversionText: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-  },
-  conversionNote: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: COLORS.light,
-    padding: 12,
-    borderRadius: 10,
-    marginTop: 6,
-    gap: 8,
-  },
-  conversionNoteText: {
-    fontSize: 12,
-    color: COLORS.dark,
-    flex: 1,
-    lineHeight: 17,
-  },
-
-  // How It Works
-  stepsCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  stepRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  stepNum: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 14,
-  },
-  stepNumText: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: COLORS.text,
-  },
-  stepInfo: {
-    flex: 1,
-  },
-  stepTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 2,
-  },
-  stepDesc: {
-    fontSize: 13,
-    color: COLORS.textSecondary,
-  },
-
-  // CTAs
-  ctaButton: {
-    backgroundColor: COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 14,
-    paddingVertical: 16,
-    marginBottom: 10,
-    gap: 8,
-    shadowColor: COLORS.dark,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  ctaText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#000',
-  },
-  ctaSecondary: {
-    backgroundColor: COLORS.white,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 14,
-    paddingVertical: 16,
-    marginBottom: 24,
-    gap: 8,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-  },
-  ctaSecondaryText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: COLORS.dark,
-  },
-});
 
 export default TradeAndEarnScreen;

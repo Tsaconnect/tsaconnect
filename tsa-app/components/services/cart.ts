@@ -258,6 +258,39 @@ export interface CleanupResponse {
 class CartService {
     private token: string | null = null;
 
+    // Listeners notified after any mutation that changes cart contents
+    // (add/update/remove/clear/checkout/restore). The shared CartContext
+    // subscribes here to keep the cart-count badge current without polling.
+    private changeListeners = new Set<() => void>();
+
+    /**
+     * Subscribe to cart-change events. Returns an unsubscribe function.
+     */
+    subscribe(listener: () => void): () => void {
+        this.changeListeners.add(listener);
+        return () => {
+            this.changeListeners.delete(listener);
+        };
+    }
+
+    /**
+     * Notify subscribers that the cart changed. cartService's own mutations
+     * call this automatically; call it directly from any other code path that
+     * mutates the cart without going through this service (e.g. legacy add-to-
+     * cart flows in productcard/productdetail) so the shared count badge stays
+     * current without polling.
+     */
+    notifyChange() {
+        this.changeListeners.forEach((listener) => {
+            try {
+                listener();
+            } catch (error) {
+                // A misbehaving listener must not break the mutation flow.
+                console.error('Cart change listener error:', error);
+            }
+        });
+    }
+
     // Handle API response
     private async handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
         let data;
@@ -375,7 +408,9 @@ class CartService {
                 body: JSON.stringify(data),
             });
 
-            return this.handleResponse<Cart>(response);
+            const result = await this.handleResponse<Cart>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Add to cart error:', error);
             return {
@@ -396,7 +431,9 @@ class CartService {
                 body: JSON.stringify(data),
             });
 
-            return this.handleResponse<Cart>(response);
+            const result = await this.handleResponse<Cart>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Update cart item error:', error);
             return {
@@ -416,7 +453,9 @@ class CartService {
                 headers: this.getHeaders(),
             });
 
-            return this.handleResponse<Cart>(response);
+            const result = await this.handleResponse<Cart>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Remove from cart error:', error);
             return {
@@ -436,7 +475,9 @@ class CartService {
                 headers: this.getHeaders(),
             });
 
-            return this.handleResponse<{ items: []; summary: CartSummary }>(response);
+            const result = await this.handleResponse<{ items: []; summary: CartSummary }>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Clear cart error:', error);
             return {
@@ -588,7 +629,9 @@ class CartService {
                 headers: this.getHeaders(),
             });
 
-            return this.handleResponse<CheckoutResponse>(response);
+            const result = await this.handleResponse<CheckoutResponse>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Checkout error:', error);
             return {
@@ -648,7 +691,9 @@ class CartService {
                 headers: this.getHeaders(),
             });
 
-            return this.handleResponse<Cart>(response);
+            const result = await this.handleResponse<Cart>(response);
+            if (result.success) this.notifyChange();
+            return result;
         } catch (error: any) {
             console.error('Restore cart error:', error);
             return {
@@ -783,13 +828,35 @@ class CartService {
     }
 
     /**
+     * Get just the cart item count. Lightweight — hits /cart/count, which
+     * returns only the total quantity and skips the product/seller enrichment
+     * that /cart/summary performs.
+     */
+    async getCartCount(): Promise<ApiResponse<{ count: number }>> {
+        try {
+            const response = await fetch(`${API_BASE_URL}/cart/count`, {
+                method: 'GET',
+                headers: this.getHeaders(),
+            });
+
+            return this.handleResponse<{ count: number }>(response);
+        } catch (error: any) {
+            console.error('Get cart count error:', error);
+            return {
+                success: false,
+                message: error.message || 'Failed to get cart count',
+            };
+        }
+    }
+
+    /**
      * Get cart item count
      */
     async getCartItemCount(): Promise<number> {
         try {
-            const response = await this.getCartSummary();
+            const response = await this.getCartCount();
             if (response.success && response.data) {
-                return response.data.summary.totalQuantity || 0;
+                return response.data.count || 0;
             }
             return 0;
         } catch (error) {

@@ -1,26 +1,40 @@
+// Signup form (legacy onboarding component).
+//
+// Migrated onto the TSA Signature design system: legacy constants/theme styling
+// (COLORS) and the react-native-elements LinearProgress chrome replaced with
+// @/theme tokens + @/components/ui primitives. ALL logic is preserved verbatim —
+// the signup API call, username/password validation, auto wallet generation
+// (generateWallet → addWallet → registerWalletAddress) with the AsyncStorage
+// auth-token write, the seed-phrase backup prompt, error handling, and every
+// navigation route. This is a visual/structural restyle only. The reusable
+// PhoneNumber and LocationPicker child components are used unchanged.
 import React, { useState } from "react";
 import {
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-  Pressable,
-  Alert,
-  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  View,
+  Alert,
 } from "react-native";
-import { COLORS } from "../../constants/theme";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { LinearProgress } from "react-native-elements";
 import { useAuth } from "../../AuthContext/AuthContext";
 import PhoneNumber from "../country/phoneNumber";
 import LocationPicker from "../common/LocationPicker";
-import Icon from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { generateWallet, addWallet } from "../../services/wallet";
 import { registerWalletAddress } from "../../services/walletApi";
+import { useTheme } from "@/theme";
+import {
+  Button,
+  Divider,
+  Icon,
+  IconButton,
+  Input,
+  PressableScale,
+  Spinner,
+  Text,
+} from "@/components/ui";
 
 interface Country {
   cca2: string;
@@ -29,6 +43,7 @@ interface Country {
 }
 
 const Signup = () => {
+  const { colors, spacing, radius } = useTheme();
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [referralCode, setReferralCode] = useState("");
@@ -139,359 +154,259 @@ const Signup = () => {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-    >
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
-        <Text style={styles.headerText}>Sign Up</Text>
-
-        <View style={styles.formContainer}>
-          {/* Name */}
-          <TextInput
-            style={[styles.input, isError && !name && styles.inputError]}
-            value={name}
-            placeholder="Full Name"
-            onChangeText={(text) => {
-              setName(text);
-              setIsError(false);
-            }}
-            autoCapitalize="words"
-            editable={!loading}
-            placeholderTextColor="#999"
-          />
-
-          {/* Username */}
-          <TextInput
-            style={[styles.input, isError && !username && styles.inputError]}
-            value={username}
-            placeholder="Username"
-            onChangeText={(text) => {
-              setUsername(text.replace(/[^a-zA-Z0-9_]/g, ''));
-              setIsError(false);
-            }}
-            autoCapitalize="none"
-            autoCorrect={false}
-            editable={!loading}
-            placeholderTextColor="#999"
-            maxLength={20}
-          />
-
-          {/* Phone Number */}
-          <PhoneNumber
-            inputValue={phoneNumber}
-            setInputValue={setPhoneNumber}
-            selectedCountry={selectedCountry as Country}
-            setSelectedCountry={setSelectedCountry}
-          />
-
-          {/* Country Picker */}
-          <LocationPicker
-            value={{ country, state: "", city: "" }}
-            onChange={({ country: c }) => setCountry(c)}
-            fields={["country"]}
-            required={["country"]}
-            showLabels={false}
-          />
-
-          {/* Email */}
-          <TextInput
-            style={[styles.input, isError && !email && styles.inputError]}
-            value={email}
-            placeholder="Email"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-            onChangeText={(text) => {
-              setEmail(text);
-              setIsError(false);
-            }}
-            editable={!loading}
-            placeholderTextColor="#999"
-          />
-
-          {/* Password */}
-          <View
-            style={[
-              styles.passwordContainer,
-              isError && !password && styles.inputError,
-            ]}
-          >
-            <TextInput
-              style={styles.passwordInput}
-              value={password}
-              placeholder="Password"
-              secureTextEntry={!showPassword}
-              autoCapitalize="none"
-              autoComplete="password-new"
-              onChangeText={(text) => {
-                setPassword(text);
-                setIsError(false);
-              }}
-              editable={!loading}
-              placeholderTextColor="#999"
-            />
-            <Pressable
-              style={styles.icon}
-              onPress={() => setShowPassword(!showPassword)}
-              disabled={loading}
-            >
-              <Icon
-                name={showPassword ? "eye-off" : "eye"}
-                size={24}
-                color={loading ? "#cccccc" : "gray"}
-              />
-            </Pressable>
-          </View>
-
-          {/* Confirm Password */}
-          <View
-            style={[
-              styles.passwordContainer,
-              isError && !confirmPassword && styles.inputError,
-              isError &&
-                confirmPassword &&
-                password !== confirmPassword &&
-                styles.inputError,
-            ]}
-          >
-            <TextInput
-              style={styles.passwordInput}
-              value={confirmPassword}
-              placeholder="Confirm Password"
-              secureTextEntry={!showConfirmPassword}
-              autoCapitalize="none"
-              autoComplete="password-new"
-              onChangeText={(text) => {
-                setConfirmPassword(text);
-                setIsError(false);
-              }}
-              editable={!loading}
-              placeholderTextColor="#999"
-            />
-            <Pressable
-              style={styles.icon}
-              onPress={() => setShowConfirmPassword(!showConfirmPassword)}
-              disabled={loading}
-            >
-              <Icon
-                name={showConfirmPassword ? "eye-off" : "eye"}
-                size={24}
-                color={loading ? "#cccccc" : "gray"}
-              />
-            </Pressable>
-          </View>
-
-          {/* Referral Code */}
-          <TextInput
-            style={styles.input}
-            value={referralCode}
-            placeholder="Referral Code (optional)"
-            onChangeText={setReferralCode}
-            autoCapitalize="none"
-            editable={!loading}
-            placeholderTextColor="#999"
-          />
-
-          {/* Loading Indicator */}
-          {loading && (
-            <View style={styles.progressContainer}>
-              <LinearProgress color={COLORS.primary} />
-              <Text style={styles.loadingText}>Creating account...</Text>
-            </View>
-          )}
-
-          {/* Signup Button */}
-          <Pressable
-            onPress={handleSignup}
-            style={({ pressed }) => [
-              styles.button,
-              loading && styles.buttonLoading,
-              isError && styles.buttonError,
-              pressed && styles.buttonPressed,
-            ]}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Text style={styles.buttonText}>Create Account</Text>
-            )}
-          </Pressable>
-
-          {/* Separator */}
-          <View style={styles.separatorContainer}>
-            <View style={styles.separatorLine} />
-            <Text style={styles.orText}>OR</Text>
-            <View style={styles.separatorLine} />
-          </View>
-
-          {/* Login Option */}
-          <View style={styles.loginContainer}>
-            <Text style={styles.question}>Already have an account?</Text>
-            <Pressable
-              onPress={() => router.push("/login")}
-              disabled={loading}
-              style={({ pressed }) => [pressed && styles.loginPressed]}
-            >
-              <Text
-                style={[styles.loginLinkText, loading && styles.disabledText]}
+        <ScrollView
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: "center",
+            padding: spacing.lg,
+          }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={{ width: "100%", maxWidth: 400, alignSelf: "center" }}>
+            <View style={{ alignItems: "center", marginBottom: spacing["3xl"] }}>
+              <View
+                style={{
+                  width: 72,
+                  height: 72,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.accent,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  marginBottom: spacing.lg,
+                }}
               >
-                Login
+                <Text variant="title2" weight="700" style={{ color: colors.onAccent }}>
+                  TSA
+                </Text>
+              </View>
+              <Text variant="title1" weight="700" align="center">
+                Sign Up
               </Text>
-            </Pressable>
+              <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                Create your TSA Connect account
+              </Text>
+            </View>
+
+            <View>
+              {/* Name */}
+              <Input
+                value={name}
+                placeholder="Full Name"
+                onChangeText={(text) => {
+                  setName(text);
+                  setIsError(false);
+                }}
+                autoCapitalize="words"
+                editable={!loading}
+                error={isError && !name ? " " : undefined}
+                containerStyle={{ marginBottom: spacing.md }}
+                leftAdornment={<Icon name="user" size={20} color={colors.textMuted} />}
+              />
+
+              {/* Username */}
+              <Input
+                value={username}
+                placeholder="Username"
+                onChangeText={(text) => {
+                  setUsername(text.replace(/[^a-zA-Z0-9_]/g, ''));
+                  setIsError(false);
+                }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!loading}
+                maxLength={20}
+                error={isError && !username ? " " : undefined}
+                containerStyle={{ marginBottom: spacing.md }}
+                leftAdornment={<Icon name="user" size={20} color={colors.textMuted} />}
+              />
+
+              {/* Phone Number */}
+              <View style={{ marginBottom: spacing.md }}>
+                <PhoneNumber
+                  inputValue={phoneNumber}
+                  setInputValue={setPhoneNumber}
+                  selectedCountry={selectedCountry as Country}
+                  setSelectedCountry={setSelectedCountry}
+                />
+              </View>
+
+              {/* Country Picker */}
+              <View style={{ marginBottom: spacing.md }}>
+                <LocationPicker
+                  value={{ country, state: "", city: "" }}
+                  onChange={({ country: c }) => setCountry(c)}
+                  fields={["country"]}
+                  required={["country"]}
+                  showLabels={false}
+                />
+              </View>
+
+              {/* Email */}
+              <Input
+                value={email}
+                placeholder="Email"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+                onChangeText={(text) => {
+                  setEmail(text);
+                  setIsError(false);
+                }}
+                editable={!loading}
+                error={isError && !email ? " " : undefined}
+                containerStyle={{ marginBottom: spacing.md }}
+                leftAdornment={<Icon name="send" size={20} color={colors.textMuted} />}
+              />
+
+              {/* Password */}
+              <Input
+                value={password}
+                placeholder="Password"
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoComplete="password-new"
+                onChangeText={(text) => {
+                  setPassword(text);
+                  setIsError(false);
+                }}
+                editable={!loading}
+                error={isError && !password ? " " : undefined}
+                containerStyle={{ marginBottom: spacing.md }}
+                leftAdornment={<Icon name="lock" size={20} color={colors.textMuted} />}
+                rightAdornment={
+                  <IconButton
+                    icon={showPassword ? "eye" : "eyeOff"}
+                    size={20}
+                    color={loading ? colors.textDisabled : colors.textMuted}
+                    disabled={loading}
+                    onPress={() => setShowPassword(!showPassword)}
+                    accessibilityLabel={showPassword ? "Hide password" : "Show password"}
+                    style={{ width: 32, height: 32 }}
+                  />
+                }
+              />
+
+              {/* Confirm Password */}
+              <Input
+                value={confirmPassword}
+                placeholder="Confirm Password"
+                secureTextEntry={!showConfirmPassword}
+                autoCapitalize="none"
+                autoComplete="password-new"
+                onChangeText={(text) => {
+                  setConfirmPassword(text);
+                  setIsError(false);
+                }}
+                editable={!loading}
+                error={
+                  isError &&
+                  (!confirmPassword || (!!confirmPassword && password !== confirmPassword))
+                    ? " "
+                    : undefined
+                }
+                containerStyle={{ marginBottom: spacing.md }}
+                leftAdornment={<Icon name="lock" size={20} color={colors.textMuted} />}
+                rightAdornment={
+                  <IconButton
+                    icon={showConfirmPassword ? "eye" : "eyeOff"}
+                    size={20}
+                    color={loading ? colors.textDisabled : colors.textMuted}
+                    disabled={loading}
+                    onPress={() => setShowConfirmPassword(!showConfirmPassword)}
+                    accessibilityLabel={showConfirmPassword ? "Hide password" : "Show password"}
+                    style={{ width: 32, height: 32 }}
+                  />
+                }
+              />
+
+              {/* Referral Code */}
+              <Input
+                value={referralCode}
+                placeholder="Referral Code (optional)"
+                onChangeText={setReferralCode}
+                autoCapitalize="none"
+                editable={!loading}
+                containerStyle={{ marginBottom: spacing.lg }}
+                leftAdornment={<Icon name="localOffer" size={20} color={colors.textMuted} />}
+              />
+
+              {/* Loading Indicator */}
+              {loading && (
+                <View style={{ alignItems: "center", marginBottom: spacing.md }}>
+                  <Spinner size="small" label="Creating account..." />
+                </View>
+              )}
+
+              {/* Signup Button */}
+              <Button
+                title="Create Account"
+                onPress={handleSignup}
+                loading={loading}
+                disabled={loading}
+                size="lg"
+              />
+
+              {/* Separator */}
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  marginVertical: spacing["2xl"],
+                }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Divider />
+                </View>
+                <Text
+                  variant="bodySm"
+                  weight="500"
+                  color="textMuted"
+                  style={{ marginHorizontal: spacing.lg }}
+                >
+                  OR
+                </Text>
+                <View style={{ flex: 1 }}>
+                  <Divider />
+                </View>
+              </View>
+
+              {/* Login Option */}
+              <View
+                style={{
+                  flexDirection: "row",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  gap: spacing.sm,
+                }}
+              >
+                <Text variant="bodySm" color="textSecondary">
+                  Already have an account?
+                </Text>
+                <PressableScale
+                  onPress={() => router.push("/login")}
+                  disabled={loading}
+                >
+                  <Text
+                    variant="bodySm"
+                    weight="600"
+                    color={loading ? "textDisabled" : "accent"}
+                  >
+                    Login
+                  </Text>
+                </PressableScale>
+              </View>
+            </View>
           </View>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 };
 
 export default Signup;
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#fff",
-  },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: "center",
-    padding: 20,
-    alignItems: "center",
-  },
-  formContainer: {
-    width: "100%",
-    maxWidth: 400,
-    alignItems: "center",
-  },
-  headerText: {
-    fontSize: 28,
-    fontWeight: "bold",
-    marginBottom: 30,
-    color: COLORS.primary,
-    textAlign: "center",
-    width: "100%",
-  },
-  input: {
-    width: "100%",
-    height: 56,
-    borderColor: "#ddd",
-    borderWidth: 1,
-    marginBottom: 16,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    fontSize: 16,
-    backgroundColor: "#f9f9f9",
-  },
-  inputError: {
-    borderColor: "#ff4444",
-    borderWidth: 2,
-    backgroundColor: "#fff5f5",
-  },
-  passwordContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    width: "100%",
-    height: 56,
-    borderColor: "#ddd",
-    borderWidth: 1,
-    marginBottom: 16,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    backgroundColor: "#f9f9f9",
-  },
-  passwordInput: {
-    flex: 1,
-    fontSize: 16,
-    height: "100%",
-  },
-  icon: {
-    padding: 8,
-  },
-  button: {
-    backgroundColor: COLORS.primary,
-    width: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 20,
-    height: 56,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  buttonPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.99 }],
-  },
-  buttonLoading: {
-    backgroundColor: "#d4ba92",
-    opacity: 0.8,
-  },
-  buttonError: {
-    borderColor: "#ff4444",
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "600",
-  },
-  separatorContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 24,
-    width: "100%",
-  },
-  separatorLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: "#ddd",
-  },
-  orText: {
-    marginHorizontal: 16,
-    color: "#666",
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  loginContainer: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 16,
-  },
-  loginPressed: {
-    opacity: 0.7,
-  },
-  question: {
-    color: "#666",
-    fontSize: 14,
-    marginRight: 8,
-  },
-  loginLinkText: {
-    color: COLORS.primary,
-    fontWeight: "600",
-    fontSize: 14,
-  },
-  disabledText: {
-    color: "#cccccc",
-  },
-  progressContainer: {
-    width: "100%",
-    marginTop: 10,
-    alignItems: "center",
-  },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 14,
-    color: "#666",
-  },
-});

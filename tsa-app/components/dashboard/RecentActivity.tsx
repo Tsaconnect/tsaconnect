@@ -1,18 +1,28 @@
 // components/dashboard/RecentActivity.tsx
+//
+// Recent wallet transactions list. Migrated onto the TSA Signature design
+// system — the type→icon mapping, description derivation, time/address
+// formatting, and confirmed/pending/failed status colors are all preserved
+// verbatim; only presentation moved to @/theme tokens + @/components/ui.
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialIcons';
+import { View } from 'react-native';
 import { Transaction } from '@/services/walletApi';
+import { useTheme } from '@/theme';
+import { Divider, EmptyState, Icon, Surface, Text } from '@/components/ui';
+import type { IconName } from '@/components/ui';
+
+const ARROW_UP: IconName = 'arrowUp';
+const ARROW_DOWN: IconName = 'arrowDown';
 
 interface RecentActivityProps {
   transactions: Transaction[];
   isValuesHidden: boolean;
 }
 
-const TX_ICONS: Record<string, { icon: string; color: string }> = {
-  send: { icon: 'arrow-upward', color: '#F87171' },
-  receive: { icon: 'arrow-downward', color: '#4ADE80' },
-  swap: { icon: 'swap-horiz', color: '#60A5FA' },
+const TX_ICONS: Record<string, { icon: IconName; tone: 'danger' | 'success' | 'info' }> = {
+  send: { icon: ARROW_UP, tone: 'danger' },
+  receive: { icon: ARROW_DOWN, tone: 'success' },
+  swap: { icon: 'swap', tone: 'info' },
 };
 
 function truncateAddress(addr: string): string {
@@ -49,6 +59,8 @@ function formatTime(dateStr: string): string {
 }
 
 export const RecentActivity: React.FC<RecentActivityProps> = ({ transactions, isValuesHidden }) => {
+  const { colors, spacing } = useTheme();
+
   const txType = (tx: Transaction) => {
     const t = tx.type?.toLowerCase() || '';
     if (t.includes('send') || t.includes('transfer')) return 'send';
@@ -57,98 +69,79 @@ export const RecentActivity: React.FC<RecentActivityProps> = ({ transactions, is
     return 'send';
   };
 
+  const statusColor = (status: Transaction['status']): keyof typeof colors => {
+    if (status === 'confirmed') return 'success';
+    if (status === 'pending') return 'warning';
+    if (status === 'failed') return 'danger';
+    return 'textMuted';
+  };
+
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Recent Activity</Text>
+    <Surface elevation="sm" style={{ marginTop: spacing.lg, overflow: 'hidden' }}>
+      <View style={{ paddingHorizontal: spacing.lg, paddingVertical: spacing.md }}>
+        <Text variant="bodySm" weight="700">
+          Recent Activity
+        </Text>
       </View>
+      <Divider />
 
       {transactions.length === 0 ? (
-        <View style={styles.empty}>
-          <Icon name="receipt-long" size={32} color="#DDD" />
-          <Text style={styles.emptyText}>No recent transactions</Text>
+        <View style={{ paddingVertical: spacing.lg }}>
+          <EmptyState icon="empty" title="No recent transactions" />
         </View>
       ) : (
         transactions.map((tx, index) => {
           const typeInfo = TX_ICONS[txType(tx)] || TX_ICONS.send;
+          const toneColor = colors[typeInfo.tone];
+          const toneBg = colors[`${typeInfo.tone}Bg` as keyof typeof colors];
           const isLast = index === transactions.length - 1;
           return (
-            <View key={tx.id || tx.txHash || index} style={[styles.row, !isLast && styles.rowBorder]}>
-              <View style={[styles.txIcon, { backgroundColor: `${typeInfo.color}15` }]}>
-                <Icon name={typeInfo.icon} size={18} color={typeInfo.color} />
-              </View>
-              <View style={styles.txInfo}>
-                <Text style={styles.txDesc} numberOfLines={1}>
-                  {isValuesHidden ? `${tx.type || 'Transaction'} ••••` : deriveDescription(tx)}
-                </Text>
-                <Text style={styles.txTime}>{formatTime(tx.createdAt)}</Text>
-              </View>
-              <View style={styles.txStatus}>
-                <Text style={[
-                  styles.statusText,
-                  tx.status === 'confirmed' && styles.statusConfirmed,
-                  tx.status === 'pending' && styles.statusPending,
-                  tx.status === 'failed' && styles.statusFailed,
-                ]}>
+            <View key={tx.id || tx.txHash || index}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.md,
+                  paddingHorizontal: spacing.lg,
+                  paddingVertical: spacing.md,
+                }}
+              >
+                <View
+                  style={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: 18,
+                    backgroundColor: toneBg,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Icon name={typeInfo.icon} size={18} color={toneColor} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodySm" weight="600" numberOfLines={1}>
+                    {isValuesHidden ? `${tx.type || 'Transaction'} ••••` : deriveDescription(tx)}
+                  </Text>
+                  <Text variant="caption" color="textMuted">
+                    {formatTime(tx.createdAt)}
+                  </Text>
+                </View>
+                <Text
+                  variant="caption"
+                  weight="600"
+                  color={statusColor(tx.status)}
+                  style={{ textTransform: 'capitalize' }}
+                >
                   {tx.status}
                 </Text>
               </View>
+              {!isLast && <Divider inset={spacing.lg} />}
             </View>
           );
         })
       )}
-    </View>
+    </Surface>
   );
 };
-
-const styles = StyleSheet.create({
-  container: {
-    marginHorizontal: 16,
-    marginTop: 14,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  headerTitle: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
-  empty: { alignItems: 'center', paddingVertical: 28 },
-  emptyText: { fontSize: 13, color: '#BBB', marginTop: 8 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 12,
-  },
-  rowBorder: { borderBottomWidth: 1, borderBottomColor: '#F5F5F5' },
-  txIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  txInfo: { flex: 1 },
-  txDesc: { fontSize: 13, fontWeight: '500', color: '#1A1A1A' },
-  txTime: { fontSize: 11, color: '#AAA', marginTop: 2 },
-  txStatus: {},
-  statusText: { fontSize: 11, fontWeight: '500', color: '#888', textTransform: 'capitalize' },
-  statusConfirmed: { color: '#16A34A' },
-  statusPending: { color: '#D97706' },
-  statusFailed: { color: '#DC2626' },
-});
 
 export default RecentActivity;

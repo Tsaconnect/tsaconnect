@@ -30,6 +30,10 @@ interface UseSubcategoryProductsProps {
     minPrice?: number;
     maxPrice?: number;
     sort?: 'recent' | 'popular' | 'price_low' | 'price_high' | 'rating';
+    /** Listing type of the section being browsed. Passed to the API so a
+     *  "Both" category never leaks services into the product marketplace
+     *  (or vice-versa). */
+    type?: 'Product' | 'Service';
 }
 
 export function useSubcategoryProducts({
@@ -42,6 +46,7 @@ export function useSubcategoryProducts({
     minPrice,
     maxPrice,
     sort = 'recent',
+    type,
 }: UseSubcategoryProductsProps) {
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
@@ -105,7 +110,7 @@ export function useSubcategoryProducts({
 
             if (categoryId) {
                 // Fetch products by category tree (includes all subcategories)
-                response = await api.getProductsByCategoryTree(categoryId, true);
+                response = await api.getProductsByCategoryTree(categoryId, true, type);
             } else if (subcategoryId) {
                 // Fetch products by specific subcategory
                 response = await api.getProductsByCategory({
@@ -113,6 +118,7 @@ export function useSubcategoryProducts({
                     page,
                     limit,
                     search: searchQuery || undefined,
+                    type,
                     minPrice,
                     maxPrice,
                     sortBy: sort === 'recent' ? 'createdAt' :
@@ -169,7 +175,7 @@ export function useSubcategoryProducts({
             setLoading(false);
             setRefreshing(false);
         }
-    }, [subcategoryId, categoryId, searchQuery, page, limit, location, minPrice, maxPrice, sort, groupProductsBySeller]);
+    }, [subcategoryId, categoryId, searchQuery, page, limit, location, minPrice, maxPrice, sort, type, groupProductsBySeller]);
 
     useEffect(() => {
         fetchProducts();

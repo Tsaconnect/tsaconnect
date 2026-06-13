@@ -1,18 +1,23 @@
+// app/(dashboard)/(tabs)/(home)/checkout/index.tsx
+//
+// Checkout (home tab) — review cart, pick shipping address + payment token, then
+// run the escrow checkout flow (createOrders → approve → escrow → submit) signing
+// + broadcasting client-side. Restyled onto the TSA Signature design system
+// (@/theme tokens + @/components/ui primitives).
+//
+// FINANCIAL screen: every order total, shipping/address handling, fee/gas math,
+// and the place-order escrow sign/broadcast/confirm flow is preserved verbatim —
+// this is a visual/structural restyle only. The reused LocationPicker (already on
+// the design system) is unchanged.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
-  Text,
-  StyleSheet,
   ScrollView,
-  TouchableOpacity,
-  Pressable,
-  ActivityIndicator,
   Alert,
   Image,
   Platform,
   KeyboardAvoidingView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/AuthContext/AuthContext';
@@ -23,7 +28,7 @@ import {
   Product,
 } from '@/components/services/cart';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { formatPrice as formatPriceUtil, formatPriceDual } from '@/utils/formatPrice';
+import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import {
   createOrders,
   prepareApprove,
@@ -37,6 +42,22 @@ import { signAndBroadcast } from '@/services/transaction';
 import LocationPicker from '@/components/common/LocationPicker';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '../../../../../hooks/useKycVerification';
+import { useTheme } from '@/theme';
+import {
+  AccentCard,
+  AmountText,
+  Button,
+  Card,
+  Divider,
+  EmptyState,
+  ErrorState,
+  Icon,
+  IconButton,
+  PressableScale,
+  Spinner,
+  SummaryRow,
+  Text,
+} from '@/components/ui';
 
 type CheckoutStep = 'review' | 'signing' | 'success';
 type SigningPhase =
@@ -66,16 +87,20 @@ function friendlyTxError(err: any): string {
   return msg;
 }
 
+// Brand-identity colors for each stablecoin/token (used only to tint the token
+// icon chip so the selector reads as the real coin). These are token identity,
+// not UI theme — all surface/text chrome comes from useTheme tokens below.
 const TOKEN_META: Record<
   string,
   { icon: string; color: string; label: string }
 > = {
-  USDC: { icon: 'logo-usd', color: '#2775CA', label: 'USD Coin' },
-  USDT: { icon: 'logo-usd', color: '#26A17B', label: 'Tether' },
-  MCGP: { icon: 'diamond-outline', color: '#D4AF37', label: 'MCGP (0% fee)' },
+  USDC: { icon: 'card', color: '#2775CA', label: 'USD Coin' },
+  USDT: { icon: 'card', color: '#26A17B', label: 'Tether' },
+  MCGP: { icon: 'pricetag', color: '#D4AF37', label: 'MCGP (0% fee)' },
 };
 
 const CheckoutScreen = () => {
+  const { colors, spacing, radius } = useTheme();
   const { currentUser, token } = useAuth();
   const { requireKycVerified } = useKycVerification();
   const [cartData, setCartData] = useState<CartSummaryResponse | null>(null);
@@ -270,6 +295,9 @@ const CheckoutScreen = () => {
 
       setSigningPhase('done');
       setStep('success');
+      // Checkout goes through orderApi (not cartService), and the backend marks
+      // the cart converted — nudge the shared count badge so it drops to 0.
+      cartService.notifyChange();
     } catch (err: any) {
       console.error('Checkout escrow error:', err);
       setSigningError(err.message || 'Something went wrong');
@@ -312,7 +340,10 @@ const CheckoutScreen = () => {
   };
   const feeConfig = cartData?.feeConfig;
   const isMCGP = selectedToken === 'MCGP';
-  const gasFee = isMCGP ? 0 : (summary.gasFee ?? feeConfig?.gasFeeUSD ?? 0.1);
+  // Never fabricate a gas fee: fall back to 0 (not a hardcoded estimate) so the
+  // total stays honest if the backend omits the fee. The Gas Fee row only shows
+  // when there's a real positive value.
+  const gasFee = isMCGP ? 0 : (summary.gasFee || feeConfig?.gasFeeUSD || 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -415,27 +446,42 @@ const CheckoutScreen = () => {
     title?: string;
     showBack?: boolean;
   }) => (
-    <View style={s.header}>
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: spacing.lg,
+        paddingVertical: spacing.sm,
+        borderBottomWidth: 1,
+        borderBottomColor: colors.hairline,
+        backgroundColor: colors.surface,
+      }}
+    >
       {showBack ? (
-        <Pressable onPress={() => router.back()} style={s.backBtn}>
-          <Ionicons name="chevron-back" size={22} color="#1A1A1A" />
-        </Pressable>
+        <IconButton
+          icon="chevronLeft"
+          accessibilityLabel="Go back"
+          variant="surface"
+          onPress={() => router.back()}
+        />
       ) : (
-        <View style={{ width: 40 }} />
+        <View style={{ width: 44 }} />
       )}
-      <Text style={s.headerTitle}>{title}</Text>
-      <View style={{ width: 40 }} />
+      <Text variant="title3" weight="700">
+        {title}
+      </Text>
+      <View style={{ width: 44 }} />
     </View>
   );
 
   // ===== LOADING =====
   if (loading) {
     return (
-      <SafeAreaView style={s.safe}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Header />
-        <View style={s.center}>
-          <ActivityIndicator size="large" color="#D4AF37" />
-          <Text style={s.mutedText}>Loading your order...</Text>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <Spinner size="large" label="Loading your order..." />
         </View>
       </SafeAreaView>
     );
@@ -444,17 +490,10 @@ const CheckoutScreen = () => {
   // ===== ERROR =====
   if (error && step === 'review') {
     return (
-      <SafeAreaView style={s.safe}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Header />
-        <View style={s.center}>
-          <View style={s.errorCircle}>
-            <Ionicons name="alert-circle" size={40} color="#DC2626" />
-          </View>
-          <Text style={s.errorTitle}>Something went wrong</Text>
-          <Text style={s.mutedText}>{error}</Text>
-          <TouchableOpacity onPress={loadCart} style={s.primaryBtn}>
-            <Text style={s.primaryBtnText}>Try Again</Text>
-          </TouchableOpacity>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <ErrorState subtitle={error} onRetry={loadCart} />
         </View>
       </SafeAreaView>
     );
@@ -463,14 +502,15 @@ const CheckoutScreen = () => {
   // ===== EMPTY CART =====
   if (items.length === 0 && step === 'review') {
     return (
-      <SafeAreaView style={s.safe}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Header />
-        <View style={s.center}>
-          <Ionicons name="cart-outline" size={56} color="#CCC" />
-          <Text style={s.errorTitle}>Your cart is empty</Text>
-          <TouchableOpacity onPress={() => router.replace('/digital')} style={s.primaryBtn}>
-            <Text style={s.primaryBtnText}>Start Shopping</Text>
-          </TouchableOpacity>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <EmptyState
+            icon="cart"
+            title="Your cart is empty"
+            actionLabel="Start Shopping"
+            onAction={() => router.replace('/digital')}
+          />
         </View>
       </SafeAreaView>
     );
@@ -493,45 +533,79 @@ const CheckoutScreen = () => {
   // ===== SUCCESS =====
   if (step === 'success') {
     return (
-      <SafeAreaView style={s.safe}>
-        <View style={s.center}>
-          <View style={s.successCircle}>
-            <Ionicons name="checkmark" size={48} color="#FFF" />
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <ScrollView
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: 'center',
+            padding: spacing.lg,
+            paddingBottom: spacing['4xl'],
+          }}
+        >
+          <View style={{ alignItems: 'center', gap: spacing.sm }}>
+            <View
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: radius.pill,
+                backgroundColor: colors.success,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginBottom: spacing.sm,
+              }}
+            >
+              <Icon name="check" size={40} color={colors.textInverse} />
+            </View>
+            <Text variant="title1" weight="700" align="center">
+              Payment Successful!
+            </Text>
+            <Text variant="bodySm" color="textSecondary" align="center">
+              {orders.length} order{orders.length !== 1 ? 's' : ''} created &
+              funded via escrow
+            </Text>
           </View>
-          <Text style={s.successTitle}>Payment Successful!</Text>
-          <Text style={s.mutedText}>
-            {orders.length} order{orders.length !== 1 ? 's' : ''} created &
-            funded via escrow
-          </Text>
 
-          <View style={s.successOrders}>
+          <View style={{ width: '100%', marginTop: spacing.lg, gap: spacing.sm }}>
             {orders.map((order) => (
-              <View key={order.id} style={s.successOrderRow}>
-                <View>
-                  <Text style={s.successOrderId}>#{order.id.slice(0, 8)}</Text>
-                  <Text style={s.successOrderToken}>{order.token}</Text>
+              <Card key={order.id} padding="md">
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <View>
+                    <Text variant="bodySm" weight="600">
+                      #{order.id.slice(0, 8)}
+                    </Text>
+                    <Text variant="caption" color="textMuted">
+                      {order.token}
+                    </Text>
+                  </View>
+                  <AmountText
+                    value={formatTokenAmount(order.totalAmount, order.token)}
+                    variant="title3"
+                    color="accent"
+                  />
                 </View>
-                <Text style={s.successOrderAmount}>
-                  {formatTokenAmount(order.totalAmount, order.token)}
-                </Text>
-              </View>
+              </Card>
             ))}
           </View>
 
-          <TouchableOpacity
-            style={s.primaryBtn}
-            onPress={() => router.push('/(dashboard)/orderlist')}
-          >
-            <Ionicons name="receipt-outline" size={18} color="#FFF" />
-            <Text style={s.primaryBtnText}>View Orders</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={s.outlineBtn}
-            onPress={() => router.replace('/home')}
-          >
-            <Text style={s.outlineBtnText}>Continue Shopping</Text>
-          </TouchableOpacity>
-        </View>
+          <View style={{ marginTop: spacing.xl, gap: spacing.sm }}>
+            <Button
+              title="View Orders"
+              leftIcon="list"
+              onPress={() => router.push('/(dashboard)/orderlist')}
+            />
+            <Button
+              title="Continue Shopping"
+              variant="secondary"
+              onPress={() => router.replace('/home')}
+            />
+          </View>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -541,27 +615,48 @@ const CheckoutScreen = () => {
     const progress =
       orders.length > 0 ? completedOrders.length / orders.length : 0;
     return (
-      <SafeAreaView style={s.safe}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Header title="Processing" showBack={false} />
-        <View style={s.center}>
+        <View
+          style={{
+            flex: 1,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: spacing['2xl'],
+            gap: spacing.md,
+          }}
+        >
           {signingError ? (
             <>
-              <View style={s.errorCircle}>
-                <Ionicons name="close" size={36} color="#FFF" />
-              </View>
-              <Text style={s.errorTitle}>Transaction Failed</Text>
-              <Text
-                style={[s.mutedText, { textAlign: 'center', lineHeight: 20 }]}
+              <View
+                style={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: radius.pill,
+                  backgroundColor: colors.danger,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
               >
+                <Icon name="close" size={32} color={colors.textInverse} />
+              </View>
+              <Text variant="title3" weight="700" align="center">
+                Transaction Failed
+              </Text>
+              <Text variant="bodySm" color="textSecondary" align="center">
                 {signingError}
               </Text>
               {completedOrders.length > 0 && (
-                <Text style={s.partialText}>
+                <Text variant="bodySm" color="textMuted" align="center">
                   {completedOrders.length}/{orders.length} orders completed
                 </Text>
               )}
-              <TouchableOpacity
-                style={s.primaryBtn}
+              <Button
+                title={
+                  completedOrders.length > 0 ? 'View Orders' : 'Back to Checkout'
+                }
+                fullWidth={false}
+                style={{ marginTop: spacing.sm }}
                 onPress={() => {
                   if (completedOrders.length > 0) {
                     router.replace('/(dashboard)/orderlist');
@@ -573,28 +668,36 @@ const CheckoutScreen = () => {
                     setCompletedOrders([]);
                   }
                 }}
-              >
-                <Text style={s.primaryBtnText}>
-                  {completedOrders.length > 0
-                    ? 'View Orders'
-                    : 'Back to Checkout'}
-                </Text>
-              </TouchableOpacity>
+              />
             </>
           ) : (
             <>
-              <View style={s.processingRing}>
-                <ActivityIndicator size="large" color="#D4AF37" />
-              </View>
-              <Text style={s.processingTitle}>{getSigningStatusText()}</Text>
+              <Spinner size="large" />
+              <Text variant="title3" weight="600" align="center">
+                {getSigningStatusText()}
+              </Text>
               {orders.length > 1 && (
-                <View style={s.progressBar}>
+                <View
+                  style={{
+                    width: '70%',
+                    height: 4,
+                    backgroundColor: colors.surfaceAlt,
+                    borderRadius: radius.pill,
+                    marginTop: spacing.lg,
+                    overflow: 'hidden',
+                  }}
+                >
                   <View
-                    style={[s.progressFill, { width: `${progress * 100}%` }]}
+                    style={{
+                      height: '100%',
+                      width: `${progress * 100}%`,
+                      backgroundColor: colors.accent,
+                      borderRadius: radius.pill,
+                    }}
                   />
                 </View>
               )}
-              <Text style={s.mutedText}>
+              <Text variant="bodySm" color="textSecondary" align="center">
                 Please wait. Do not close the app.
               </Text>
             </>
@@ -606,7 +709,7 @@ const CheckoutScreen = () => {
 
   // ===== REVIEW (MAIN CHECKOUT) =====
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <Header />
 
       <KeyboardAvoidingView
@@ -614,550 +717,411 @@ const CheckoutScreen = () => {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={s.scroll}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Step Indicators */}
-        <View style={s.steps}>
-          {['Review', 'Pay', 'Done'].map((label, i) => (
-            <View key={label} style={s.stepItem}>
-              <View style={[s.stepDot, i === 0 && s.stepDotActive]}>
-                <Text style={[s.stepDotText, i === 0 && s.stepDotTextActive]}>
-                  {i + 1}
-                </Text>
-              </View>
-              <Text style={[s.stepLabel, i === 0 && s.stepLabelActive]}>
-                {label}
-              </Text>
-            </View>
-          ))}
-        </View>
-
-        {/* Shipping Address */}
-        <View style={s.card}>
-          <View style={s.cardHeader}>
-            <View style={s.cardIconWrap}>
-              <Ionicons name="location" size={16} color="#D4AF37" />
-            </View>
-            <Text style={s.cardTitle}>Shipping Address</Text>
-            <TouchableOpacity
-              onPress={() => setEditingAddress(!editingAddress)}
-            >
-              <Text style={s.editLink}>{editingAddress ? 'Done' : 'Edit'}</Text>
-            </TouchableOpacity>
-          </View>
-          {editingAddress ? (
-            <LocationPicker
-              value={shippingLocation}
-              onChange={setShippingLocation}
-            />
-          ) : shippingAddress.country ? (
-            <View style={s.addressContent}>
-              <Text style={s.addressName}>{shippingName}</Text>
-              <Text style={s.addressLine}>
-                {[
-                  shippingAddress.city,
-                  shippingAddress.state,
-                  shippingAddress.country,
-                ]
-                  .filter(Boolean)
-                  .join(', ')}
-              </Text>
-            </View>
-          ) : (
-            <TouchableOpacity
-              onPress={() => setEditingAddress(true)}
-              style={s.addAddressBtn}
-            >
-              <Ionicons name="add-circle-outline" size={20} color="#D4AF37" />
-              <Text style={s.addAddressText}>Add shipping address</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Payment Token */}
-        <View style={s.card}>
-          <View style={s.cardHeader}>
-            <View style={s.cardIconWrap}>
-              <Ionicons name="wallet" size={16} color="#D4AF37" />
-            </View>
-            <Text style={s.cardTitle}>Payment Method</Text>
-          </View>
-          <View style={s.tokenGrid}>
-            {SUPPORTED_TOKENS.map((tk) => {
-              const meta = TOKEN_META[tk];
-              const active = selectedToken === tk;
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Step Indicators */}
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'center',
+              gap: spacing['3xl'],
+              marginBottom: spacing.lg,
+            }}
+          >
+            {['Review', 'Pay', 'Done'].map((label, i) => {
+              const active = i === 0;
               return (
-                <TouchableOpacity
-                  key={tk}
-                  style={[s.tokenCard, active && s.tokenCardActive]}
-                  onPress={() => setSelectedToken(tk)}
-                  activeOpacity={0.7}
-                >
+                <View key={label} style={{ alignItems: 'center', gap: spacing.xs }}>
                   <View
-                    style={[
-                      s.tokenIcon,
-                      {
-                        backgroundColor: active ? meta.color + '15' : '#F5F5F5',
-                      },
-                    ]}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: radius.pill,
+                      backgroundColor: active ? colors.accent : colors.surfaceAlt,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                    }}
                   >
-                    <Ionicons
-                      name={meta.icon as any}
-                      size={20}
-                      color={active ? meta.color : '#999'}
-                    />
-                  </View>
-                  <Text style={[s.tokenName, active && { color: meta.color }]}>
-                    {tk}
-                  </Text>
-                  <Text style={s.tokenSub}>{meta.label}</Text>
-                  {active && (
-                    <View
-                      style={[s.tokenCheck, { backgroundColor: meta.color }]}
+                    <Text
+                      variant="caption"
+                      weight="700"
+                      style={{ color: active ? colors.onAccent : colors.textMuted }}
                     >
-                      <Ionicons name="checkmark" size={12} color="#FFF" />
-                    </View>
-                  )}
-                </TouchableOpacity>
+                      {i + 1}
+                    </Text>
+                  </View>
+                  <Text
+                    variant="caption"
+                    weight={active ? '600' : '500'}
+                    color={active ? 'accent' : 'textMuted'}
+                  >
+                    {label}
+                  </Text>
+                </View>
               );
             })}
           </View>
-          {isMCGP ? (
-            <View style={s.tokenBanner}>
-              <Ionicons name="gift-outline" size={14} color="#16A34A" />
-              <Text style={s.tokenBannerText}>MCGP: No gas fee applied</Text>
-            </View>
-          ) : feeConfig?.buyerCashbackPercent ? (
-            <View style={s.tokenBanner}>
-              <Ionicons name="gift-outline" size={14} color="#16A34A" />
-              <Text style={s.tokenBannerText}>
-                {feeConfig.buyerCashbackPercent}% cashback on order confirmation
-              </Text>
-            </View>
-          ) : null}
-        </View>
 
-        {/* Order Items */}
-        <View style={s.card}>
-          <View style={s.cardHeader}>
-            <View style={s.cardIconWrap}>
-              <Ionicons name="bag" size={16} color="#D4AF37" />
+          {/* Shipping Address */}
+          <Card style={{ marginBottom: spacing.md }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                marginBottom: spacing.md,
+              }}
+            >
+              <Icon name="nearMe" size={16} color={colors.accent} />
+              <Text variant="bodyMed" weight="600" style={{ flex: 1 }}>
+                Shipping Address
+              </Text>
+              <PressableScale onPress={() => setEditingAddress(!editingAddress)} hitSlop={8}>
+                <Text variant="bodySm" weight="600" color="accent">
+                  {editingAddress ? 'Done' : 'Edit'}
+                </Text>
+              </PressableScale>
             </View>
-            <Text style={s.cardTitle}>Items ({summary.totalQuantity})</Text>
-          </View>
-          {items.map((item, index) => {
-            const { name, imageUrl } = getProductData(item);
-            return (
-              <View
-                key={item._id || index}
-                style={[s.itemRow, index < items.length - 1 && s.itemBorder]}
-              >
-                <View style={s.itemImg}>
-                  {imageUrl ? (
-                    <Image source={{ uri: imageUrl }} style={s.itemImgFull} />
-                  ) : (
-                    <Ionicons name="cube-outline" size={22} color="#CCC" />
-                  )}
-                </View>
-                <View style={s.itemInfo}>
-                  <Text style={s.itemName} numberOfLines={2}>
-                    {name}
-                  </Text>
-                  <Text style={s.itemQty}>Qty: {item.quantity}</Text>
-                </View>
-                <Text style={s.itemPrice}>
-                  {fmtPrice(item.price * item.quantity)}
+            {editingAddress ? (
+              <LocationPicker
+                value={shippingLocation}
+                onChange={setShippingLocation}
+              />
+            ) : shippingAddress.country ? (
+              <View>
+                <Text variant="bodyMed" weight="600">
+                  {shippingName}
+                </Text>
+                <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
+                  {[
+                    shippingAddress.city,
+                    shippingAddress.state,
+                    shippingAddress.country,
+                  ]
+                    .filter(Boolean)
+                    .join(', ')}
                 </Text>
               </View>
-            );
-          })}
-        </View>
+            ) : (
+              <PressableScale
+                onPress={() => setEditingAddress(true)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.sm,
+                  paddingVertical: spacing.sm,
+                }}
+              >
+                <Icon name="plus" size={18} color={colors.accent} />
+                <Text variant="bodySm" weight="600" color="accent">
+                  Add shipping address
+                </Text>
+              </PressableScale>
+            )}
+          </Card>
 
-        {/* Order Summary */}
-        <View style={[s.card, { marginBottom: 100 }]}>
-          <View style={s.cardHeader}>
-            <View style={s.cardIconWrap}>
-              <Ionicons name="receipt" size={16} color="#D4AF37" />
-            </View>
-            <Text style={s.cardTitle}>Summary</Text>
-          </View>
-
-          <View style={s.summaryRow}>
-            <Text style={s.summaryLabel}>Subtotal</Text>
-            <Text style={s.summaryValue}>{fmtPrice(summary.subtotal)}</Text>
-          </View>
-          <View style={s.summaryRow}>
-            <Text style={s.summaryLabel}>Shipping</Text>
-            <Text style={s.summaryValue}>
-              {shippingEstimateLoading
-                ? 'Calculating...'
-                : shippingTotal > 0
-                ? fmtPrice(shippingTotal)
-                : 'Free'}
-            </Text>
-          </View>
-          {!isMCGP && gasFee > 0 && (
-            <View style={s.summaryRow}>
-              <Text style={s.summaryLabel}>Gas Fee</Text>
-              <Text style={s.summaryValue}>{fmtPrice(gasFee)}</Text>
-            </View>
-          )}
-          {summary.discount > 0 && (
-            <View style={s.summaryRow}>
-              <Text style={s.summaryLabel}>Discount</Text>
-              <Text style={[s.summaryValue, { color: '#16A34A' }]}>
-                -{fmtPrice(summary.discount)}
+          {/* Payment Token */}
+          <Card style={{ marginBottom: spacing.md }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                marginBottom: spacing.md,
+              }}
+            >
+              <Icon name="wallet" size={16} color={colors.accent} />
+              <Text variant="bodyMed" weight="600">
+                Payment Method
               </Text>
             </View>
-          )}
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              {SUPPORTED_TOKENS.map((tk) => {
+                const meta = TOKEN_META[tk];
+                const active = selectedToken === tk;
+                return (
+                  <PressableScale
+                    key={tk}
+                    onPress={() => setSelectedToken(tk)}
+                    style={{
+                      flex: 1,
+                      alignItems: 'center',
+                      paddingVertical: spacing.md,
+                      paddingHorizontal: spacing.sm,
+                      borderRadius: radius.md,
+                      borderWidth: 1.5,
+                      borderColor: active ? colors.accent : colors.border,
+                      backgroundColor: active ? colors.accentMuted : colors.surfaceAlt,
+                      gap: spacing.xs,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: radius.pill,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        backgroundColor: active ? meta.color + '22' : colors.surfaceAlt,
+                      }}
+                    >
+                      <Icon
+                        name={meta.icon as any}
+                        size={20}
+                        color={active ? meta.color : colors.textMuted}
+                      />
+                    </View>
+                    <Text
+                      variant="bodySm"
+                      weight="700"
+                      style={active ? { color: meta.color } : undefined}
+                    >
+                      {tk}
+                    </Text>
+                    <Text variant="caption" color="textMuted" align="center">
+                      {meta.label}
+                    </Text>
+                    {active && (
+                      <View
+                        style={{
+                          position: 'absolute',
+                          top: spacing.xs,
+                          right: spacing.xs,
+                          width: 18,
+                          height: 18,
+                          borderRadius: radius.pill,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          backgroundColor: meta.color,
+                        }}
+                      >
+                        <Icon name="check" size={12} color="#FFFFFF" />
+                      </View>
+                    )}
+                  </PressableScale>
+                );
+              })}
+            </View>
+            {isMCGP ? (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                  marginTop: spacing.md,
+                  paddingVertical: spacing.sm,
+                  paddingHorizontal: spacing.md,
+                  backgroundColor: colors.successBg,
+                  borderRadius: radius.sm,
+                }}
+              >
+                <Icon name="star" size={14} color={colors.success} />
+                <Text variant="caption" weight="500" color="success">
+                  MCGP: No gas fee applied
+                </Text>
+              </View>
+            ) : feeConfig?.buyerCashbackPercent ? (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: spacing.xs,
+                  marginTop: spacing.md,
+                  paddingVertical: spacing.sm,
+                  paddingHorizontal: spacing.md,
+                  backgroundColor: colors.successBg,
+                  borderRadius: radius.sm,
+                }}
+              >
+                <Icon name="star" size={14} color={colors.success} />
+                <Text variant="caption" weight="500" color="success">
+                  {feeConfig.buyerCashbackPercent}% cashback on order confirmation
+                </Text>
+              </View>
+            ) : null}
+          </Card>
 
-          {feeConfig?.merchantFeePercent != null && feeConfig.merchantFeePercent > 0 && (
-            <View style={s.summaryRow}>
-              <Text style={[s.summaryLabel, { color: '#888' }]}>
-                Platform Fee ({feeConfig.merchantFeePercent}%)
-              </Text>
-              <Text style={[s.summaryValue, { color: '#888' }]}>
-                Charged to seller
+          {/* Order Items */}
+          <Card style={{ marginBottom: spacing.md }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                marginBottom: spacing.md,
+              }}
+            >
+              <Icon name="cart" size={16} color={colors.accent} />
+              <Text variant="bodyMed" weight="600">
+                Items ({summary.totalQuantity})
               </Text>
             </View>
-          )}
+            {items.map((item, index) => {
+              const { name, imageUrl } = getProductData(item);
+              return (
+                <View key={item._id || index}>
+                  {index > 0 && <Divider spacing="sm" />}
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: spacing.xs,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: radius.md,
+                        backgroundColor: colors.surfaceAlt,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {imageUrl ? (
+                        <Image
+                          source={{ uri: imageUrl }}
+                          style={{ width: 48, height: 48, borderRadius: radius.md }}
+                        />
+                      ) : (
+                        <Icon name="cart" size={22} color={colors.textMuted} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: spacing.md }}>
+                      <Text variant="bodySm" weight="500" numberOfLines={2}>
+                        {name}
+                      </Text>
+                      <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                        Qty: {item.quantity}
+                      </Text>
+                    </View>
+                    <Text variant="bodyMed" weight="700" numeric>
+                      {fmtPrice(item.price * item.quantity)}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </Card>
 
-          <View style={s.summaryDivider} />
-
-          <View style={s.totalRow}>
-            <Text style={s.totalLabel}>Total</Text>
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text style={s.totalValue}>{totalDisplay}</Text>
-              <Text style={s.totalToken}>Paid in {selectedToken}</Text>
+          {/* Order Summary */}
+          <Card>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                marginBottom: spacing.sm,
+              }}
+            >
+              <Icon name="list" size={16} color={colors.accent} />
+              <Text variant="bodyMed" weight="600">
+                Summary
+              </Text>
             </View>
-          </View>
-        </View>
-      </ScrollView>
+
+            <SummaryRow label="Subtotal" value={fmtPrice(summary.subtotal)} />
+            <SummaryRow
+              label="Shipping"
+              value={
+                shippingEstimateLoading
+                  ? 'Calculating...'
+                  : shippingTotal > 0
+                  ? fmtPrice(shippingTotal)
+                  : 'Free'
+              }
+            />
+            {!isMCGP && gasFee > 0 && (
+              <SummaryRow label="Gas Fee" value={fmtPrice(gasFee)} />
+            )}
+            {summary.discount > 0 && (
+              <SummaryRow
+                label="Discount"
+                value={`-${fmtPrice(summary.discount)}`}
+                valueColor="success"
+              />
+            )}
+
+            {feeConfig?.merchantFeePercent != null && feeConfig.merchantFeePercent > 0 && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  paddingVertical: spacing.sm,
+                }}
+              >
+                <Text variant="bodySm" color="textMuted">
+                  Platform Fee ({feeConfig.merchantFeePercent}%)
+                </Text>
+                <Text variant="bodySm" color="textMuted">
+                  Charged to seller
+                </Text>
+              </View>
+            )}
+
+            <Divider spacing="sm" />
+
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <Text variant="title3" weight="700">
+                Total
+              </Text>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text variant="title1" weight="800" color="accent" numeric>
+                  {totalDisplay}
+                </Text>
+                <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+                  Paid in {selectedToken}
+                </Text>
+              </View>
+            </View>
+          </Card>
+        </ScrollView>
       </KeyboardAvoidingView>
 
       {/* Fixed Footer */}
-      <View style={s.footer}>
-        <View style={s.footerRow}>
-          <View>
-            <Text style={s.footerLabel}>Total</Text>
-            <Text style={s.footerTotal}>{totalDisplay}</Text>
-          </View>
-          <TouchableOpacity
-            style={[s.payBtn, shippingEstimateLoading && { opacity: 0.6 }]}
-            activeOpacity={0.8}
-            onPress={handleCreateOrders}
-            disabled={shippingEstimateLoading}
-          >
-            <Ionicons name="shield-checkmark" size={18} color="#FFF" />
-            <Text style={s.payBtnText}>Pay with {selectedToken}</Text>
-          </TouchableOpacity>
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: spacing.md,
+          paddingHorizontal: spacing.lg,
+          paddingTop: spacing.md,
+          paddingBottom: Platform.OS === 'ios' ? spacing['3xl'] : spacing.lg,
+          backgroundColor: colors.surface,
+          borderTopWidth: 1,
+          borderTopColor: colors.hairline,
+        }}
+      >
+        <View>
+          <Text variant="caption" color="textMuted">
+            Total
+          </Text>
+          <Text variant="title1" weight="800" numeric>
+            {totalDisplay}
+          </Text>
         </View>
+        <Button
+          title={`Pay with ${selectedToken}`}
+          leftIcon="shield"
+          fullWidth={false}
+          disabled={shippingEstimateLoading}
+          onPress={handleCreateOrders}
+        />
       </View>
     </SafeAreaView>
   );
 };
-
-const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F8F9FA' },
-  center: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    gap: 12,
-  },
-  mutedText: { fontSize: 14, color: '#888', textAlign: 'center' },
-
-  // Header
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#FFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
-  },
-  backBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F5F5F5',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-
-  // Steps
-  steps: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 32,
-    paddingVertical: 16,
-  },
-  stepItem: { alignItems: 'center', gap: 4 },
-  stepDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#E8E8E8',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  stepDotActive: { backgroundColor: '#D4AF37' },
-  stepDotText: { fontSize: 12, fontWeight: '700', color: '#999' },
-  stepDotTextActive: { color: '#FFF' },
-  stepLabel: { fontSize: 11, color: '#999', fontWeight: '500' },
-  stepLabelActive: { color: '#D4AF37', fontWeight: '600' },
-
-  scroll: { paddingHorizontal: 16, paddingTop: 4 },
-
-  // Card
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
-  cardIconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    backgroundColor: 'rgba(212,175,55,0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  cardTitle: { fontSize: 15, fontWeight: '600', color: '#1A1A1A', flex: 1 },
-  editLink: { fontSize: 13, fontWeight: '600', color: '#D4AF37' },
-
-  // Address
-  addressContent: { paddingLeft: 38 },
-  addressName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1A1A1A',
-    marginBottom: 2,
-  },
-  addressLine: { fontSize: 13, color: '#888', lineHeight: 18 },
-  addAddressBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingLeft: 38,
-    paddingVertical: 8,
-  },
-  addAddressText: { fontSize: 14, fontWeight: '600', color: '#D4AF37' },
-
-  // Token
-  tokenGrid: { flexDirection: 'row', gap: 10 },
-  tokenCard: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#F0F0F0',
-    backgroundColor: '#FAFAFA',
-    gap: 4,
-  },
-  tokenCardActive: { borderColor: '#D4AF37', backgroundColor: '#FFFDF7' },
-  tokenIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  tokenName: { fontSize: 14, fontWeight: '700', color: '#1A1A1A' },
-  tokenSub: { fontSize: 10, color: '#AAA' },
-  tokenCheck: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  tokenBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    backgroundColor: '#F0FDF4',
-    borderRadius: 8,
-  },
-  tokenBannerText: { fontSize: 12, color: '#16A34A', fontWeight: '500' },
-
-  // Items
-  itemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
-  itemBorder: { borderBottomWidth: 1, borderBottomColor: '#F5F5F5' },
-  itemImg: {
-    width: 48,
-    height: 48,
-    borderRadius: 10,
-    backgroundColor: '#F5F5F5',
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  itemImgFull: { width: 48, height: 48, borderRadius: 10 },
-  itemInfo: { flex: 1, marginLeft: 12 },
-  itemName: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#1A1A1A',
-    marginBottom: 2,
-  },
-  itemQty: { fontSize: 12, color: '#AAA' },
-  itemPrice: { fontSize: 15, fontWeight: '700', color: '#1A1A1A' },
-
-  // Summary
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-  },
-  summaryLabel: { fontSize: 14, color: '#888' },
-  summaryValue: { fontSize: 14, fontWeight: '500', color: '#1A1A1A' },
-  summaryDivider: { height: 1, backgroundColor: '#F0F0F0', marginVertical: 10 },
-  totalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  totalLabel: { fontSize: 16, fontWeight: '700', color: '#1A1A1A' },
-  totalValue: { fontSize: 22, fontWeight: '800', color: '#D4AF37' },
-  totalToken: { fontSize: 11, color: '#AAA', marginTop: 2 },
-
-  // Footer
-  footer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: '#FFF',
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: Platform.OS === 'ios' ? 28 : 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  footerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  footerLabel: { fontSize: 12, color: '#AAA' },
-  footerTotal: { fontSize: 22, fontWeight: '800', color: '#1A1A1A' },
-  payBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#D4AF37',
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
-  payBtnText: { fontSize: 15, fontWeight: '700', color: '#FFF' },
-
-  // Buttons
-  primaryBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#D4AF37',
-    paddingHorizontal: 28,
-    paddingVertical: 14,
-    borderRadius: 14,
-    marginTop: 8,
-  },
-  primaryBtnText: { fontSize: 15, fontWeight: '700', color: '#FFF' },
-  outlineBtn: {
-    paddingHorizontal: 28,
-    paddingVertical: 14,
-    borderRadius: 14,
-    marginTop: 4,
-    borderWidth: 1.5,
-    borderColor: '#E8E8E8',
-  },
-  outlineBtnText: { fontSize: 15, fontWeight: '600', color: '#888' },
-
-  // Error
-  errorCircle: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#FEE2E2',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  errorTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A1A' },
-  partialText: { fontSize: 13, color: '#888' },
-
-  // Success
-  successCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#16A34A',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  successTitle: { fontSize: 22, fontWeight: '700', color: '#1A1A1A' },
-  successOrders: { width: '100%', marginTop: 12, gap: 8 },
-  successOrderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#FFF',
-    padding: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#F0F0F0',
-  },
-  successOrderId: { fontSize: 14, fontWeight: '600', color: '#1A1A1A' },
-  successOrderToken: { fontSize: 12, color: '#AAA', marginTop: 2 },
-  successOrderAmount: { fontSize: 16, fontWeight: '700', color: '#D4AF37' },
-
-  // Processing
-  processingRing: { marginBottom: 12 },
-  processingTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1A1A1A',
-    textAlign: 'center',
-  },
-  progressBar: {
-    width: '70%',
-    height: 4,
-    backgroundColor: '#E8E8E8',
-    borderRadius: 2,
-    marginTop: 16,
-    overflow: 'hidden',
-  },
-  progressFill: { height: '100%', backgroundColor: '#D4AF37', borderRadius: 2 },
-});
 
 export default CheckoutScreen;

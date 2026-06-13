@@ -1,6 +1,7 @@
 // services/wallet.ts
 // Core crypto wallet service for TSA Connect — multi-wallet support
 import 'react-native-get-random-values';
+import { Alert } from 'react-native';
 import { ethers } from 'ethers';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -112,6 +113,45 @@ export async function markWalletBackedUp(address: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Wallet integrity
+// ---------------------------------------------------------------------------
+
+export type WalletIntegrityResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing' }
+  | { ok: false; reason: 'mismatch'; derived: string };
+
+/**
+ * Check that the private key stored under `address` actually derives to that
+ * address. Used as a pre-flight before flows that ask the wallet to sign on
+ * behalf of `address` — running this *before* creating server-side state
+ * (e.g. a pending P2P ad row) means the user sees actionable guidance instead
+ * of a cryptic server-side "signature recovered to X, expected Y" error after
+ * the row is already in the DB.
+ *
+ * Corruption modes this catches:
+ *   - SecureStore key missing entirely (deleted, never written)
+ *   - Stored key derives to a different address (legacy migration crossed
+ *     wires, or a re-import wrote under the wrong slot)
+ *
+ * The same defensive check also lives inside `signTypedData` /
+ * `signTransaction`, but those run *after* the API call that submits the ad.
+ * Keeping a parallel check at the entry point lets the caller short-circuit
+ * with the same error message before any network I/O.
+ */
+export async function verifyWalletKey(address: string): Promise<WalletIntegrityResult> {
+  const privateKey = await getPrivateKey(address);
+  if (!privateKey) {
+    return { ok: false, reason: 'missing' };
+  }
+  const derived = ethers.computeAddress(privateKey);
+  if (derived.toLowerCase() !== address.toLowerCase()) {
+    return { ok: false, reason: 'mismatch', derived };
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Wallet generation & import
 // ---------------------------------------------------------------------------
 
@@ -194,12 +234,92 @@ export async function getMnemonic(address?: string): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 /**
- * Sign a transaction with the stored private key
+ * Sign an EIP-712 typed-data payload with the stored private key.
+ *
+ * Used by the P2P pool/voucher flow: the backend returns a `VoucherTypedData`
+ * payload at ad-create time, the wallet signs it off-chain (no gas, no
+ * broadcast), and the signature is submitted back via `adsApi.sign`.
+ *
+ * `domain`, `types`, and `message` accept the same shapes as ethers'
+ * `Wallet.signTypedData`. The EIP712Domain entry must be stripped from
+ * `types` before passing to ethers — its `_TypedDataEncoder.from()`
+ * throws with "ambiguous primary types or unused types" when both the
+ * domain entry and the primary type are present. The backend's JSON wire
+ * payload includes EIP712Domain (per the EIP-712 spec) so we accept it
+ * and remove it here, letting callers forward the server payload as-is.
  */
-export async function signTransaction(unsignedTx: ethers.TransactionLike): Promise<string> {
-  const privateKey = await getPrivateKey();
+export async function signTypedData(
+  domain: ethers.TypedDataDomain,
+  types: Record<string, ethers.TypedDataField[]>,
+  message: Record<string, any>,
+  /**
+   * Wallet address to sign with. Pass the same address the caller used
+   * to populate the payload (e.g. the ad's `sellerAddress`) so the
+   * signature is guaranteed to recover to that wallet. Omit only when
+   * you're sure no other code path can flip the active wallet between
+   * the caller's read and this call.
+   */
+  expectedAddress?: string,
+): Promise<string> {
+  const addr = expectedAddress || (await getActiveWallet()) || undefined;
+  const privateKey = await getPrivateKey(addr);
   if (!privateKey) {
-    throw new Error('No private key found. Please set up your wallet first.');
+    throw new Error(
+      addr
+        ? `No private key stored for wallet ${addr}.`
+        : 'No private key found. Please set up your wallet first.',
+    );
+  }
+  const wallet = new ethers.Wallet(privateKey);
+  // Defensive: SecureStore can hold a mismatched (address, key) pair if a
+  // legacy migration or stale storage corrupted the wallet list. Catch it
+  // here instead of letting the backend reject the signature with the
+  // generic "recovered != expected" error, which doesn't hint at the
+  // local-storage corruption.
+  if (addr && wallet.address.toLowerCase() !== addr.toLowerCase()) {
+    throw new Error(
+      `Wallet key mismatch — stored key for ${addr} derives to ${wallet.address}. ` +
+        `The wallet list is corrupt; remove and re-import this wallet from its seed phrase.`,
+    );
+  }
+  const cleaned: Record<string, ethers.TypedDataField[]> = {};
+  for (const k of Object.keys(types)) {
+    if (k !== 'EIP712Domain') cleaned[k] = types[k];
+  }
+  return wallet.signTypedData(domain, cleaned, message);
+}
+
+/**
+ * Sign a transaction with the stored private key.
+ *
+ * Pass `expectedAddress` to pin signing to a specific wallet (e.g. the
+ * one whose `from` is encoded in the unsigned tx). Without it we sign
+ * with whatever the active wallet happens to be at call time, which
+ * can race against a user switching wallets mid-flow.
+ */
+export async function signTransaction(
+  unsignedTx: ethers.TransactionLike,
+  expectedAddress?: string,
+): Promise<string> {
+  const addr = expectedAddress || (await getActiveWallet()) || undefined;
+  const privateKey = await getPrivateKey(addr);
+  if (!privateKey) {
+    throw new Error(
+      addr
+        ? `No private key stored for wallet ${addr}.`
+        : 'No private key found. Please set up your wallet first.',
+    );
+  }
+  // Defensive: detect (address, key) mismatch in storage before the chain
+  // rejects the tx with a generic signature error.
+  if (addr) {
+    const derived = ethers.computeAddress(privateKey);
+    if (derived.toLowerCase() !== addr.toLowerCase()) {
+      throw new Error(
+        `Wallet key mismatch — stored key for ${addr} derives to ${derived}. ` +
+          `Remove and re-import this wallet from its seed phrase.`,
+      );
+    }
   }
 
   // Build a Transaction object and sign with SigningKey for proper EIP-155
@@ -238,6 +358,65 @@ export function formatTokenBalance(rawBalance: string, decimals: number): number
   const whole = padded.slice(0, cut) || '0';
   const frac = padded.slice(cut).replace(/0+$/, '');
   return parseFloat(frac.length > 0 ? `${whole}.${frac}` : whole);
+}
+
+/**
+ * Read the native gas-token balance (in wei) for an address on the given
+ * chain. Uses the same RPC fallback strategy as other read helpers.
+ *
+ * Returns null when every configured RPC fails — callers should treat null
+ * as "balance unknown" and degrade gracefully (do NOT hard-block the user).
+ */
+export async function nativeBalance(chainKey: ChainKey, address: string): Promise<bigint | null> {
+  try {
+    return await withRpcFallback(chainKey, (provider) => provider.getBalance(address));
+  } catch (err) {
+    console.warn('[wallet] nativeBalance read failed, degrading gracefully:', err);
+    return null;
+  }
+}
+
+/**
+ * Gas guard: check that `address` holds at least some native gas token on
+ * `chainKey` before broadcasting. Calls `onAlert` with a human-readable
+ * message if the balance is zero (or near-zero). Returns `true` when the
+ * user can proceed, `false` when they should fund first.
+ *
+ * Degrades gracefully on RPC failure — if the balance read returns null,
+ * this function returns `true` (proceed) and logs a warning rather than
+ * blocking the user on a network blip.
+ *
+ * @param chainKey  Chain to check (must match the tx's target chain).
+ * @param address   Wallet address that will pay gas.
+ * @param onAlert   Called with (title, message) when gas is insufficient.
+ *                  Default: Alert.alert.
+ */
+export async function ensureGas(
+  chainKey: ChainKey,
+  address: string,
+  onAlert?: (title: string, message: string) => void,
+): Promise<boolean> {
+  const balance = await nativeBalance(chainKey, address);
+  if (balance === null) {
+    // RPC blip — can't determine gas; let the broadcast attempt proceed.
+    // The chain will reject it with "insufficient funds" if truly empty,
+    // which is no worse than the pre-guard behaviour.
+    return true;
+  }
+  if (balance === 0n) {
+    const chain = CHAINS[chainKey];
+    const symbol = chain.nativeCurrency.symbol;
+    const name = chain.name;
+    const title = 'Not enough gas';
+    const message = `You need ${symbol} on ${name} to cover the transaction fee. Fund your wallet and try again.`;
+    if (onAlert) {
+      onAlert(title, message);
+    } else {
+      Alert.alert(title, message);
+    }
+    return false;
+  }
+  return true;
 }
 
 /**

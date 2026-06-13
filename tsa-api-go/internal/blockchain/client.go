@@ -139,3 +139,28 @@ func (c *EVMClient) GetTransactionReceipt(txHash string) (*types.Receipt, error)
 	}
 	return receipt, nil
 }
+
+const receiptPollInterval = 1500 * time.Millisecond
+
+// WaitForReceipt polls for a transaction's receipt until it's mined or `timeout`
+// elapses. A just-broadcast tx isn't mined yet — eth_getTransactionReceipt
+// returns "not found" — so confirm flows that re-read the receipt to verify an
+// on-chain action must wait rather than fail on the first miss. Retries on any
+// error (NotFound or a transient RPC blip) and returns the last error only after
+// the deadline passes.
+func (c *EVMClient) WaitForReceipt(txHash string, timeout time.Duration) (*types.Receipt, error) {
+	hash := common.HexToHash(txHash)
+	deadline := time.Now().Add(timeout)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		receipt, err := c.Client.TransactionReceipt(ctx, hash)
+		cancel()
+		if err == nil {
+			return receipt, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("failed to get receipt for %s within %s: %w", txHash, timeout, err)
+		}
+		time.Sleep(receiptPollInterval)
+	}
+}
