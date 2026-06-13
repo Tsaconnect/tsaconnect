@@ -29,8 +29,8 @@ type CheckoutHandler struct {
 	EscrowService     *services.EscrowService
 	EventBus          *events.Bus
 	otcService        *services.OTCService
-	// FeeService is the fee/TP v2 engine (SP3). Optional/nil-safe: wired from
-	// main.go. Used only when cfg.IsFeeModelV2Enabled() via settleFeeEarnings.
+	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
+	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
 }
 
@@ -1247,25 +1247,17 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		// SEPARATE 100%-system fee that must NOT generate TP/cashback. We feed the
 		// merchant fee here; the gas component is intentionally not settled into the
 		// engine (it would only ever credit system, producing no recipients).
-		var feeUSD float64
-		feeFeature := models.FeatureProduct
-		if ch.Config.IsFeeModelV2Enabled() {
-			feeFeature = models.FeatureProductMerchant
-			feeUSD = orderMerchantFeeUSD(&order)
-		} else {
-			feeUSD = orderSystemFeeUSD(&order)
-		}
-		// Centralized v1↔v2 fee settlement. When FEE_MODEL_V2_ENABLED is on the
-		// realized merchant fee is handed to the new engine (async, idempotent on
-		// checkout/order.ID); otherwise the legacy DistributeTPEarnings path runs
-		// unchanged on the bundled system fee. tp_distributed_at is stamped as a
-		// secondary site-level guard, but it is NOT the authoritative record of v2
+		feeFeature := models.FeatureProductMerchant
+		feeUSD := orderMerchantFeeUSD(&order)
+		// Fee settlement: the realized merchant fee is handed to the engine
+		// (async, idempotent on checkout/order.ID). tp_distributed_at is stamped as
+		// a secondary site-level guard, but it is NOT the authoritative record of
 		// distribution: the FeeDistribution guard row (keyed checkout/order.ID) is,
 		// and the completed-order status transition already prevents re-entry here.
-		// On the v2 path the enqueue retries + alerts on permanent failure
+		// The enqueue retries + alerts on permanent failure
 		// (fee_v2_settle_failed_total), so a stamped-but-undistributed window
 		// requires all retries to fail — surfaced loudly rather than silent.
-		if err := settleFeeEarnings(ch.FeeService, ch.Config, config.DB, services.FeeEvent{
+		if err := settleFeeEarnings(ch.FeeService, services.FeeEvent{
 			Feature:    feeFeature,
 			Token:      order.Token,
 			FeeUSD:     feeUSD,
@@ -1280,32 +1272,6 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 			}
 		}
 
-		// Legacy cashback (v1 ONLY). Under FEE_MODEL_V2_ENABLED the v2 engine's
-		// OnFeeSettled already credits the 10% buyer + 10% upline cashback (and
-		// writes the CashbackEarning rows) as part of settleFeeEarnings above, so
-		// running these legacy calls too would DOUBLE-credit cashback_balance and
-		// land a second CashbackEarning row per (source_type, source_id). Gate on
-		// !v2 so the v2 split is the sole cashback source when the flag is on —
-		// mirroring the v1↔v2 branch settleFeeEarnings applies to TP.
-		if !ch.Config.IsFeeModelV2Enabled() && strings.ToUpper(order.Token) != "MCGP" {
-			// Record cashback for buyer (0.5% of productAmount) — matches ProductEscrow BUYER_CASHBACK_BPS
-			productUSD := weiToUSDFloat(order.ProductAmount, order.Token)
-			buyerCashbackUSD := productUSD * 0.005
-			if err := RecordCashbackEarning(config.DB, order.BuyerID, order.SellerID, "checkout", order.ID, buyerCashbackUSD, order.EscrowTxHash); err != nil {
-				log.Printf("Cashback recording failed for buyer on order %s: %v", order.ID, err)
-			}
-
-			// Record cashback for buyer's upline (0.5% of productAmount) — matches ProductEscrow UPLINE_FEE_BPS
-			if order.BuyerUpline != "" && order.BuyerUpline != "0x0000000000000000000000000000000000000000" {
-				var uplineUser models.User
-				if err := config.DB.Where("wallet_address = ?", order.BuyerUpline).First(&uplineUser).Error; err == nil {
-					uplineCashbackUSD := productUSD * 0.005
-					if err := RecordCashbackEarning(config.DB, uplineUser.ID, order.BuyerID, "checkout", order.ID, uplineCashbackUSD, order.EscrowTxHash); err != nil {
-						log.Printf("Cashback recording failed for upline on order %s: %v", order.ID, err)
-					}
-				}
-			}
-		}
 	}
 
 	ch.EventBus.Publish(events.Event{

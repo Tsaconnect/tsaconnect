@@ -404,8 +404,7 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	// the fee can NEVER be deducted without the accrual being recorded (no
 	// treasury leak). SourceType "withdrawal" + SourceID tx.ID is distinct from
 	// any on-chain send path (wallet_handler uses its own source), so a withdrawal
-	// touching both never double-settles. The whole accrual is gated on
-	// IsFeeModelV2Enabled — flag OFF → byte-for-byte legacy (no FeeEvent written).
+	// touching both never double-settles.
 	platformFeeUSD := platformFee * price
 	feeEvent := services.FeeEvent{
 		Feature:    models.FeatureWithdrawal,
@@ -417,10 +416,10 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 	}
 
 	// Resolve uplines OUTSIDE the write tx (the recursive-CTE read must not
-	// contend with the write tx on a single-connection pool). Only on the v2
-	// path; nil/empty on the flag-off path keeps the legacy behavior untouched.
+	// contend with the write tx on a single-connection pool). Skipped when there's
+	// no fee to settle or the engine isn't wired.
 	var byGen map[int]services.Ancestor
-	feeV2 := h.Config != nil && h.Config.IsFeeModelV2Enabled() && h.FeeService != nil && platformFeeUSD > 0
+	feeV2 := h.FeeService != nil && platformFeeUSD > 0
 	if feeV2 {
 		var err error
 		byGen, err = h.FeeService.ResolveUplines(c.Request.Context(), user.ID)
@@ -444,7 +443,7 @@ func (h *Handlers) CreateWithdrawal(c *gin.Context) {
 		}
 		// In-tx accrual: a settlement failure here rolls back the deduction.
 		if feeV2 {
-			if err := feeAccrualInTx(c.Request.Context(), h.FeeService, h.Config, dbtx, feeEvent, byGen, recipients); err != nil {
+			if err := feeAccrualInTx(h.FeeService, dbtx, feeEvent, byGen, recipients); err != nil {
 				return fmt.Errorf("accrue withdrawal fee: %w", err)
 			}
 		}
@@ -637,22 +636,17 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 		},
 	})
 
-	// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine when
-	// FEE_MODEL_V2_ENABLED is on (idempotent on swap/tx.ID), legacy otherwise.
+	// Fee settlement (see settleFeeEarnings): idempotent on swap/tx.ID.
 	//
 	// Feature mapping: this is the platform's INTERNAL asset-to-asset exchange on
 	// its own books (not the LiFi cross-chain bridge, which is "allswap", nor a
-	// fiat<->crypto OTC desk). The best-fit v2 split feature is therefore "spot"
+	// fiat<->crypto OTC desk). The best-fit split feature is therefore "spot"
 	// (the internal spot exchange). spot/otc/allswap/instant_pay all share the same
 	// 70/30 no-cashback split, so the split is identical regardless; FeatureSpot is
 	// chosen for the most accurate audit/feature labelling. The FeeUSD itself is the
-	// rate-config swap fee (live rate unchanged at cutover-time, per the runbook).
-	swapSplitFeature := models.FeatureSwap
-	if h.Config.IsFeeModelV2Enabled() {
-		swapSplitFeature = models.FeatureSpot
-	}
-	if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
-		Feature:    swapSplitFeature,
+	// rate-config swap fee.
+	if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
+		Feature:    models.FeatureSpot,
 		Token:      body.FromAsset,
 		FeeUSD:     feeUSD,
 		UserID:     user.ID,

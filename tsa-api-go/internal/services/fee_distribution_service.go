@@ -43,9 +43,8 @@ import (
 // idempotent per (SourceType, SourceID): a FeeDistribution guard row with a
 // unique index makes double-distribution impossible.
 //
-// This engine is purely additive and FLAG-GATED (cfg.IsFeeModelV2Enabled).
-// While the flag is off the legacy handlers.DistributeTPEarnings path stays
-// live and OnFeeSettled is never invoked. Call sites must check the flag.
+// This engine is the sole fee/TP settlement path. Every fee-settled call site
+// routes its realized fee through OnFeeSettled (via settleFeeEarnings).
 type FeeDistributionService struct {
 	db    *gorm.DB
 	graph *ReferralGraphService

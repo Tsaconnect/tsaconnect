@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, ftch *handlers.FeeTPCutoverHandler, fah *handlers.FeeAdminHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -96,8 +96,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// tx (verify receipt + read-back THEN refresh the replica + advance the intent
 	// state machine), cancel an unapplied intent. On-chain-rate authority +
 	// funds-adjacent, so restricted to true admin roles (RequireP2PAdmin) on top of
-	// AdminAuth, like reward-distributions. Every endpoint also 409s while
-	// FEE_MODEL_V2_ENABLED is OFF (the handler's v2 gate).
+	// AdminAuth, like reward-distributions.
 	if fah != nil {
 		adminFees := api.Group("/admin/fees")
 		adminFees.Use(adminAuth, middleware.RequireP2PAdmin())
@@ -106,19 +105,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminFees.POST("/plan", fah.Plan)
 			adminFees.POST("/confirm", fah.Confirm)
 			adminFees.DELETE("/intent/:id", fah.CancelIntent)
-		}
-	}
-
-	// Admin fee/TP v2 cutover-reset (BLOCKER 3). DESTRUCTIVE: archives+deletes
-	// the legacy tp/cashback ledgers, zeroes balances, and clears ALL v2 reward
-	// state. Gated by the strictest admin middleware (RequireP2PAdmin —
-	// admin / super_admin only) on top of AdminAuth, plus a confirm-phrase guard
-	// in the handler. Run STRICTLY BEFORE flipping FEE_MODEL_V2_ENABLED.
-	if ftch != nil {
-		adminFeeTP := api.Group("/admin/fee-tp")
-		adminFeeTP.Use(adminAuth, middleware.RequireP2PAdmin())
-		{
-			adminFeeTP.POST("/cutover-reset", ftch.CutoverReset)
 		}
 	}
 

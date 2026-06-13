@@ -68,23 +68,13 @@ type updateFeeConfigRequest struct {
 // chain truth). The full intent → on-chain setRate → confirm flow that replaces
 // this handler is deferred to task #43 (design §13); at that cutover, retire
 // UpdateFeeConfig's direct-write + Invalidate-on-save in favor of the
-// confirm-driven RefreshFromConfirmedRate. It is non-firing in production today
-// only because of the flag guard below — do not treat it as a green light to
+// confirm-driven RefreshFromConfirmedRate. Do not treat it as a green light to
 // write the replica from admin input.
 //
-// FLAG ISOLATION (FIX-BEFORE-MERGE B): fee-rate edits are REJECTED while
-// FEE_MODEL_V2_ENABLED is OFF. The SP1 fee_config table only becomes the single
-// source of truth at the v2 cutover; until then the cart quote still reads the
-// hardcoded fee CONSTANTS, so mutating a config row would make the quote (from
-// constants) and the charge (from config) diverge. Rates are immutable until the
-// cutover — change the constants in code pre-cutover, the config post-cutover.
+// NOTE: the fee_config table is now the live source of truth. Callers MUST
+// ensure the cart/quote path reads config rather than the historical hardcoded
+// constants, or an admin rate edit will diverge the quote from the charge.
 func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
-	if h.Config != nil && !h.Config.IsFeeModelV2Enabled() {
-		utils.ErrorResponse(c, http.StatusConflict,
-			"Fee rates are immutable until the v2 cutover (FEE_MODEL_V2_ENABLED is off): the cart quote still reads the hardcoded fee constants, so editing the config now would diverge the quote from the charge.")
-		return
-	}
-
 	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid fee config ID")
@@ -147,7 +137,7 @@ func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
 	// LEGACY invalidate-on-save — the replica-leads-chain pattern the design §4
 	// CQRS rule removes; superseded by RefreshFromConfirmedRate (task #43). See
 	// the function doc above. Refreshes the in-memory cache so the edit takes
-	// effect immediately (only reachable while FEE_MODEL_V2_ENABLED is ON).
+	// effect immediately.
 	if h.Service != nil {
 		if err := h.Service.Invalidate(); err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Fee config updated but cache refresh failed")

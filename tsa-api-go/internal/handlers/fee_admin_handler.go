@@ -27,9 +27,7 @@ func parseChainID(s string) (int64, error) {
 // Signed-but-not-broadcast: the backend PREPARES the unsigned txs; the multisig
 // signs + broadcasts; the backend CONFIRMS. No backend key custody.
 //
-// ALL endpoints are super-admin gated (RequireP2PAdmin on the route) AND return
-// 409 while FEE_MODEL_V2_ENABLED is OFF — the fee_config replica only becomes the
-// single source of truth at the v2 cutover (mirrors fee_config_handler's gate).
+// ALL endpoints are super-admin gated (RequireP2PAdmin on the route).
 type FeeAdminHandler struct {
 	cfg     *config.Config
 	intents *services.FeeRateIntentService
@@ -41,17 +39,6 @@ type FeeAdminHandler struct {
 // plan/confirm then surface "not configured" rather than crashing.
 func NewFeeAdminHandler(cfg *config.Config, intents *services.FeeRateIntentService, feeCfg *services.FeeConfigService, reader services.FeeManagerChainReader) *FeeAdminHandler {
 	return &FeeAdminHandler{cfg: cfg, intents: intents, feeCfg: feeCfg, reader: reader}
-}
-
-// v2Gate enforces the FEE_MODEL_V2_ENABLED 409 gate shared by all endpoints.
-// Returns true when the request should proceed.
-func (h *FeeAdminHandler) v2Gate(c *gin.Context) bool {
-	if h.cfg == nil || !h.cfg.IsFeeModelV2Enabled() {
-		utils.ErrorResponse(c, http.StatusConflict,
-			"Fee rates are immutable until the v2 cutover (FEE_MODEL_V2_ENABLED is off): the fee_config replica is not yet the single source of truth, so authoring/applying an on-chain rate now would diverge the quote from the charge.")
-		return false
-	}
-	return true
 }
 
 // rateInput is the JSON rate shape in the intent request (bps + flat USD in 1e6
@@ -80,9 +67,6 @@ type createIntentRequest struct {
 // CreateIntent handles POST /api/admin/fees/intent — persists the desired-rate
 // intent (state pending) and returns {intentId, status}.
 func (h *FeeAdminHandler) CreateIntent(c *gin.Context) {
-	if !h.v2Gate(c) {
-		return
-	}
 	if h.intents == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
 		return
@@ -137,9 +121,6 @@ type planRequest struct {
 // reads each chain's on-chain rateFor, and returns the diff + unsigned setRate
 // tx(s) (one per affected chain). Idempotent: empty txs when already matching.
 func (h *FeeAdminHandler) Plan(c *gin.Context) {
-	if !h.v2Gate(c) {
-		return
-	}
 	if h.intents == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
 		return
@@ -189,9 +170,6 @@ type confirmRequest struct {
 // OR a rate mismatch → 422, the intent stays pending for that chain, the replica
 // is UNTOUCHED, and no retry is auto-issued (the admin re-signs / re-plans).
 func (h *FeeAdminHandler) Confirm(c *gin.Context) {
-	if !h.v2Gate(c) {
-		return
-	}
 	if h.intents == nil || h.feeCfg == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
 		return
@@ -279,9 +257,6 @@ func (h *FeeAdminHandler) Confirm(c *gin.Context) {
 // CancelIntent handles DELETE /api/admin/fees/intent/:id — marks the intent
 // cancelled (allowed only while NOT fully applied).
 func (h *FeeAdminHandler) CancelIntent(c *gin.Context) {
-	if !h.v2Gate(c) {
-		return
-	}
 	if h.intents == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
 		return

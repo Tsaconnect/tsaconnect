@@ -610,21 +610,15 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 			}
 		}
 		if systemFeeUSD > 0 {
-			// Centralized v1↔v2 fee settlement (see settleFeeEarnings): v2 engine
-			// when FEE_MODEL_V2_ENABLED is on (idempotent on req.TxType/walletTx.ID),
-			// legacy DistributeTPEarnings otherwise. Feature maps the wallet tx type
-			// to a fee feature: a raw send is a withdrawal (70/30, now earns TP); a
-			// swap is the internal spot exchange (FeatureSpot, 70/30) under v2. The
-			// legacy path ignores Feature (DistributeTPEarnings uses only FeeUSD), so
-			// FeatureSwap is preserved there for behavior-identical v1 fees.
+			// Fee settlement (see settleFeeEarnings): idempotent on
+			// req.TxType/walletTx.ID. Feature maps the wallet tx type to a fee
+			// feature: a raw send is a withdrawal (70/30, earns TP); a swap is the
+			// internal spot exchange (FeatureSpot, 70/30).
 			feeFeature := models.FeatureWithdrawal
 			if req.TxType == models.TxTypeSwap {
-				feeFeature = models.FeatureSwap
-				if h.Config.IsFeeModelV2Enabled() {
-					feeFeature = models.FeatureSpot
-				}
+				feeFeature = models.FeatureSpot
 			}
-			if err := settleFeeEarnings(h.FeeService, h.Config, config.DB, services.FeeEvent{
+			if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
 				Feature:    feeFeature,
 				Token:      tokenUpper,
 				FeeUSD:     systemFeeUSD,
@@ -635,25 +629,6 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 				log.Printf("TP distribution failed for %s tx %s: %v", req.TxType, walletTx.ID, err)
 			}
 
-			// Legacy cashback (v1 ONLY). Under FEE_MODEL_V2_ENABLED the v2 engine
-			// (settleFeeEarnings above) already credits the 10% user + 10% upline
-			// cashback and writes the CashbackEarning rows, so these legacy calls
-			// would double-credit cashback_balance. Gate on !v2 so v2 is the sole
-			// cashback source when the flag is on.
-			if !h.Config.IsFeeModelV2Enabled() {
-				// Record cashback: 25% of system fee back to user, 25% to direct upline
-				buyerCashbackUSD := systemFeeUSD * 0.25
-				if err := RecordCashbackEarning(config.DB, user.ID, user.ID, req.TxType, walletTx.ID, buyerCashbackUSD, walletTx.TxHash); err != nil {
-					log.Printf("Cashback recording failed for user on %s tx %s: %v", req.TxType, walletTx.ID, err)
-				}
-
-				if user.ReferredBy != nil {
-					uplineCashbackUSD := systemFeeUSD * 0.25
-					if err := RecordCashbackEarning(config.DB, *user.ReferredBy, user.ID, req.TxType, walletTx.ID, uplineCashbackUSD, walletTx.TxHash); err != nil {
-						log.Printf("Cashback recording failed for upline on %s tx %s: %v", req.TxType, walletTx.ID, err)
-					}
-				}
-			}
 		}
 	}
 

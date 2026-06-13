@@ -174,14 +174,11 @@ type P2PTradeService struct {
 	// publish on a float-rate ad. 0 (or unset) means use defaultFloatOffsetMaxBps.
 	floatOffsetMaxBps int
 
-	// fees is the fee/TP v2 engine (SP3). Optional/nil-safe: wired via
-	// SetFeeService from main.go. P2P is a NEW fee-settled integration — it
-	// did not call the TP engine before. Every release transition (ConfirmRelease,
+	// fees is the fee/TP engine (SP3). Optional/nil-safe: wired via
+	// SetFeeService from main.go. Every release transition (ConfirmRelease,
 	// reconciler auto-release, adminResolve→buyer) accrues the realized on-chain
-	// fee through accrueP2PReleaseFee, gated on feeV2Enabled so the flag-off path
-	// is a no-op (preserving today's "P2P does not accrue TP" behavior).
-	fees         *FeeDistributionService
-	feeV2Enabled bool
+	// fee through accrueP2PReleaseFee. nil fees → no-op.
+	fees *FeeDistributionService
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -259,14 +256,10 @@ func (s *P2PTradeService) floatOffsetCap() int {
 	return s.floatOffsetMaxBps
 }
 
-// SetFeeService wires the fee/TP v2 engine (SP3) plus the v2-enabled gate.
-// Called once at construction from main.go. v2Enabled is captured here (rather
-// than holding a *config.Config) to keep the trade service free of config-shape
-// coupling. When v2Enabled is false (the default) accrueP2PReleaseFee is a
-// no-op — P2P keeps its pre-SP3 behavior of not accruing TP at all.
-func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled bool) {
+// SetFeeService wires the fee/TP engine (SP3). Called once at construction from
+// main.go. A nil engine makes accrueP2PReleaseFee a no-op.
+func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService) {
 	s.fees = svc
-	s.feeV2Enabled = v2Enabled
 }
 
 // accrueP2PReleaseFee is the SINGLE seam through which all three P2P release
@@ -316,7 +309,7 @@ func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled b
 // 0 (pre-V3 escrow / V2-opened trade) → this is a documented no-op, exactly as
 // before. The flag check + the wiring fire real accrual the moment V3 lands.
 //
-// Gating: no-op unless s.feeV2Enabled AND a wired fee engine. Idempotency:
+// Gating: no-op unless a wired fee engine. Idempotency:
 // OnFeeSettled is keyed (SourceType="p2p_release", SourceID=trade.ID), so a
 // confirm + a later reconciler pass for the SAME trade accrue exactly once — the
 // second is a guard-row no-op, so the chain reconciler does NOT re-accrue. Run
@@ -324,7 +317,7 @@ func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService, v2Enabled b
 func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUnits *big.Int) {
 	_ = feeBaseUnits // the on-chain gas fee is system-only; not accrued here.
 
-	if !s.feeV2Enabled || s.fees == nil || trade == nil {
+	if s.fees == nil || trade == nil {
 		return
 	}
 

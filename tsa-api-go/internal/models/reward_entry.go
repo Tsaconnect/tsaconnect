@@ -42,7 +42,7 @@ import (
 //   - PrizeDue         — one row per crossed L6+ level; manual/operational
 //                        fulfilment (never auto-paid).
 //
-// All SP5 tables are additive and dormant until FEE_MODEL_V2_ENABLED cutover.
+// All SP5 tables back the fee/TP reward-payout pipeline.
 
 // Reward-entry kinds recorded on RewardEntry.Kind.
 const (

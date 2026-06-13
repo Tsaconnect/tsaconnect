@@ -109,9 +109,9 @@ func seededPriceService(symbol string) *services.PriceService {
 	return ps
 }
 
-func newWithdrawalHandler(t *testing.T, db *gorm.DB, v2Enabled bool) *Handlers {
+func newWithdrawalHandler(t *testing.T, db *gorm.DB) *Handlers {
 	t.Helper()
-	cfg := &config.Config{FeeModelV2Enabled: v2Enabled, TPPerUSD: 1.0}
+	cfg := &config.Config{TPPerUSD: 1.0}
 	feeSvc := services.NewFeeDistributionService(db, services.NewReferralGraphService(db), 1.0)
 	return &Handlers{
 		Config:       cfg,
@@ -168,7 +168,7 @@ func feeGuardCount(db *gorm.DB, sourceType string, sourceID uuid.UUID) int64 {
 func TestWithdrawal_AccruesInSameTx(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newWithdrawalHandler(t, db, true)
+	h := newWithdrawalHandler(t, db)
 
 	user := mkWUser(t, db, "wuser", nil)
 	mkAsset(t, db, user.ID, "USDT", 1000.0)
@@ -213,7 +213,7 @@ func TestWithdrawal_AccruesInSameTx(t *testing.T) {
 func TestWithdrawal_AccrualIdempotent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newWithdrawalHandler(t, db, true)
+	h := newWithdrawalHandler(t, db)
 	user := mkWUser(t, db, "widem", nil)
 	mkAsset(t, db, user.ID, "USDT", 1000.0)
 
@@ -242,7 +242,7 @@ func TestWithdrawal_AccrualIdempotent(t *testing.T) {
 func TestWithdrawal_FeeWriteFailureRollsBack(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupWithdrawalTestDB(t)
-	h := newWithdrawalHandler(t, db, true)
+	h := newWithdrawalHandler(t, db)
 	user := mkWUser(t, db, "wrollback", nil)
 	mkAsset(t, db, user.ID, "USDT", 1000.0)
 
@@ -269,36 +269,3 @@ func TestWithdrawal_FeeWriteFailureRollsBack(t *testing.T) {
 	}
 }
 
-// (4) Flag OFF: byte-for-byte legacy — the balance is deducted, the tx is
-// created, but NO FeeEvent (no v2 guard row) is written. (The on-chain send path
-// historically did no TP on withdrawal-create, so withdrawal-create writes no
-// guard either when off.)
-func TestWithdrawal_FlagOff_NoFeeEvent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
-	h := newWithdrawalHandler(t, db, false) // flag OFF
-	user := mkWUser(t, db, "woff", nil)
-	mkAsset(t, db, user.ID, "USDT", 1000.0)
-
-	w := doWithdraw(t, h, user, "USDT", 100.0)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("withdraw status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	var tx models.Transaction
-	if err := db.Where("user_id = ? AND type = ?", user.ID, models.TransactionTypeWithdrawal).First(&tx).Error; err != nil {
-		t.Fatalf("tx not created on flag-off path: %v", err)
-	}
-	// Balance deducted (legacy behavior unchanged).
-	var asset models.Asset
-	db.Where("user_id = ? AND symbol = ?", user.ID, "USDT").First(&asset)
-	if asset.Balance >= 1000.0 {
-		t.Errorf("flag-off balance not deducted: %v", asset.Balance)
-	}
-	// No v2 FeeEvent anywhere.
-	var total int64
-	db.Model(&models.FeeDistribution{}).Count(&total)
-	if total != 0 {
-		t.Fatalf("flag OFF must write no FeeEvent; found %d guard rows", total)
-	}
-}

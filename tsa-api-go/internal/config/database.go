@@ -57,9 +57,7 @@ func AutoMigrate() error {
 		&models.PrivateSaleSubmission{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},
-		// Fee/TP overhaul v2 (SP3) — additive tables for the new engine. The
-		// *_legacy archive tables are created on demand by ResetForV2Cutover,
-		// not here.
+		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.
 		&models.FeeDistribution{},
 		&models.GlobalTPPool{},
 		&models.GlobalTPAccrual{},
@@ -68,7 +66,6 @@ func AutoMigrate() error {
 		// added by AutoMigrate on the existing structs above / models.User.
 		&models.GlobalTPEpoch{},
 		// SP5 — payout computation: per-user claimable-MCGP ledger + checkpoints.
-		// Additive and dormant until FEE_MODEL_V2_ENABLED cutover.
 		&models.RewardEntry{},
 		&models.RewardClaimable{},
 		&models.UserRewardState{},

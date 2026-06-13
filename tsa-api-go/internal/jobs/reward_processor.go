@@ -22,11 +22,6 @@ type rewardProcessor interface {
 // cashback keyed per row, claimable is the Σ of those), so a missed tick
 // (restart) is recovered next tick and an extra tick is harmless — matching the
 // scheduler's Phase-1 in-process contract.
-//
-// GATING: this worker is only REGISTERED in main.go when FEE_MODEL_V2_ENABLED is
-// on. While the flag is off no TP/cashback accrues, nothing is marked dirty, and
-// there is nothing to process — so the worker is simply not scheduled (dormant
-// until cutover).
 type RewardProcessorJob struct {
 	svc      rewardProcessor
 	interval time.Duration

@@ -39,10 +39,7 @@ import (
 // written, the level is NOT advanced past the un-converted reward, the cashback
 // row is left un-converted) and retried on the next run. The level checkpoint
 // advances only over levels that were successfully converted, so a price outage
-// can never skip a reward.
-//
-// Everything is FLAG-GATED upstream (the periodic job and call sites check
-// cfg.IsFeeModelV2Enabled()); the service itself is pure and flag-agnostic.
+// can never skip a reward. The service itself is pure (no config coupling).
 type RewardService struct {
 	db  *gorm.DB
 	bus *events.Bus
@@ -174,17 +171,10 @@ func (s *RewardService) ProcessUserRewards(ctx context.Context, userID uuid.UUID
 			"deferring conversions (no rate locked), will retry: %v", userID, priceErr)
 	}
 
-	// Defense-in-depth cutover FLOOR (BLOCKER 1, design §3 "cutover keyed on
-	// settlement timestamp"): only convert cashback_earnings rows created AT OR
-	// AFTER the latest cutover. Belt-and-suspenders with the reset's DELETE of the
-	// live pre-cutover cashback rows — even if a stray pre-cutover row survived (a
-	// missed delete, a late settlement landing an old-dated row), it can never be
-	// re-minted into MCGP. If no cutover has run this is the zero time, so EVERY
-	// row qualifies and pre-cutover behavior is byte-for-byte unchanged.
-	cutoverFloor, cutoverErr := CutoverTimestamp(ctx, s.db)
-	if cutoverErr != nil {
-		return res, fmt.Errorf("read cutover floor for %s: %w", userID, cutoverErr)
-	}
+	// No cutover floor: the v1→v2 cutover machinery has been retired, so every
+	// cashback_earnings row is eligible for conversion (the zero-value time admits
+	// all rows, matching the pre-retirement "no cutover has run" behavior).
+	var cutoverFloor time.Time
 
 	// Collect level-up events to publish AFTER the tx commits (don't emit on a
 	// rolled-back tx).
