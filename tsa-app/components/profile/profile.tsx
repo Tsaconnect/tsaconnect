@@ -164,6 +164,7 @@ const ProfileScreen = () => {
     { key: "wishlist", icon: "star", label: "Wishlist" },
   ];
   const lowerLinkRows: LinkRow[] = [
+    { key: "trade", icon: "trendingUp", label: "Trade & Earn", onPress: () => router.push("/trade") },
     { key: "referrals", icon: "user", label: "My Referrals", onPress: () => router.push("/referrals") },
     { key: "settings", icon: "construction", label: "Settings", onPress: () => router.push("/(dashboard)/settings") },
   ];
