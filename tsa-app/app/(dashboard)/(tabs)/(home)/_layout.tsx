@@ -40,7 +40,7 @@ export default function Layout() {
         />
         <Stack.Screen
           name="trade"
-          options={{ title: "Trade" }}
+          options={{ headerShown: false }}
         />
         <Stack.Screen
           name="rewards"
