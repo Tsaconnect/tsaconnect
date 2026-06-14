@@ -95,9 +95,9 @@ func TestRateForSeededValues(t *testing.T) {
 		{models.FeatureProduct, "USDC", 0, 0.10, true}, // 0% + $0.10 flat
 		{models.FeatureServiceContact, "USDC", 0, 0.10, true},      // $0.10 flat
 		{models.FeatureWithdrawal, "BTC", 50, 0, true},             // 0.5%
-		{models.FeatureSwap, "ETH", 10, 0, true},                   // 0.1%
+		{models.FeatureSwap, "ETH", 300, 0, true},                  // 3% → 0.9% TP
 		{models.FeatureServiceOther, "USDC", 50, 0, true},
-		{models.FeatureOTC, "USDC", 50, 0, true},
+		{models.FeatureOTC, "USDC", 200, 0, true},                  // 2% → 0.6% TP
 		{models.FeatureP2P, "USDT", 50, 0, true},
 		{models.FeatureP2PPlatform, "USDT", 100, 0, true},
 		{"nonexistent_feature", "USDC", 0, 0, false},
@@ -264,7 +264,7 @@ func TestBehaviorPreservation_SwapFee(t *testing.T) {
 	for _, amount := range []float64{100, 250.75, 1_000_000, 0.01, 33.33} {
 		bps, _, _, _ := svc.RateFor(models.FeatureSwap, "ETH", nil)
 		got := amount * (float64(bps) / 10000.0)
-		want := amount * 0.001 // old literal
+		want := amount * 0.03 // spot/swap = 3% (→ 0.9% TP per PM spec)
 		if got != want {
 			t.Errorf("swap fee for %v: got %v want %v", amount, got, want)
 		}

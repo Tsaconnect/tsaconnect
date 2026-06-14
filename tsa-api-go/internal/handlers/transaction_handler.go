@@ -514,7 +514,7 @@ func (h *Handlers) CreateSwap(c *gin.Context) {
 	}
 
 	// Check balance (including swap fee). Rate from the swap fee_config row
-	// (seeded to 10 bps = 0.1%). float64(10)/10000 is bit-identical to 0.001.
+	// (seeded to 300 bps = 3%, so the 30% spot TP split = 0.9% TP per the PM spec).
 	// Internal asset swap operates on off-chain balances with no single chain
 	// context, so it reads the documented-GLOBAL row (chainID nil) — design §6.
 	swapBps, _ := services.FeeRate(models.FeatureSwap, body.FromAsset, nil)

@@ -67,12 +67,12 @@ type FeeDistributionService struct {
 	onDirty func(ctx context.Context, userID uuid.UUID)
 }
 
-// NewFeeDistributionService builds the engine. tpPerUSD <= 0 falls back to 1.0
-// so the service always has a sane minting rate (mirrors
+// NewFeeDistributionService builds the engine. tpPerUSD <= 0 falls back to 100
+// (1 TP = $0.01) so the service always has a sane minting rate (mirrors
 // config.TPPerUSDOrDefault).
 func NewFeeDistributionService(db *gorm.DB, graph *ReferralGraphService, tpPerUSD float64) *FeeDistributionService {
 	if tpPerUSD <= 0 {
-		tpPerUSD = 1.0
+		tpPerUSD = 100.0
 	}
 	if graph == nil {
 		graph = NewReferralGraphService(db)
