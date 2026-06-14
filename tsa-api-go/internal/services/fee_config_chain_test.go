@@ -271,7 +271,7 @@ func TestFlagOffUnaffected(t *testing.T) {
 	}{
 		{models.FeatureProductMerchant, "USDC", 200},
 		{models.FeatureWithdrawal, "BTC", 50},
-		{models.FeatureSwap, "ETH", 10},
+		{models.FeatureSwap, "ETH", 300},
 		{models.FeatureP2P, "USDT", 50},
 		{models.FeatureP2PPlatform, "USDT", 100},
 	}

@@ -2,39 +2,35 @@ package models
 
 import "fmt"
 
-// GenerationPercentages is the canonical TP distribution ladder: the fraction
-// of the TP pool credited to each generation, indexed 0..10 (gen 0 = the
-// transacting user / self, gen 1 = direct referrer, … gen 10). These are the
-// PM-image percentages (gen0 35.4% → gen10), and they MUST sum to EXACTLY 1.0
-// so the TP pool is conserved: on a full active 11-gen chain the engine credits
-// `tpPool * pct` per generation, so any sum > 1.0 over-mints TP value from
-// nothing on every full-chain fee event (design §9 conservation requirement).
+// GenerationPercentages is the canonical TP distribution split: the fraction of
+// the TP pool credited to each generation, indexed 0..10 (gen 0 = the
+// transacting user / self, gen 1 = direct referrer, … gen 10).
 //
-// The handwritten PM image rounded gen0..gen10 to values summing to 1.002 (a
-// 0.2% over-mint). gen10 absorbs the residual so the ladder conserves by
-// construction: gen0..gen9 are byte-identical to the image; gen10 = 1.0 −
-// Σ(gen0..gen9) = 0.002 (image rounded it to 0.004). gen10's share is the
-// smallest and most aspirational rung, so carrying the rounding error there has
-// the least economic effect while keeping the pool exact.
+// Per the PM spec, the pool is shared EQUALLY across "you + 10 generations" —
+// 11 participants — so every generation's share is 1/11. The values MUST sum to
+// EXACTLY 1.0 so the TP pool is conserved (boot-asserted in init() below): on a
+// full active 11-gen chain the engine credits `tpPool * pct` per generation, and
+// any generation with no live ancestor routes its 1/11 share to the global pool
+// (which SP4 redistributes equally to all registered users).
 //
-// The init() below is a hard static assertion: any future ladder edit that
-// breaks the sum panics at boot rather than silently leaking value.
+// The init() below is a hard static assertion: any future edit that breaks the
+// sum panics at boot rather than silently leaking value.
 //
 // This lives in the models package so it is a single source of truth for the
 // fee/TP engine (services.FeeDistributionService) without an import cycle
 // (handlers → services already exists; services cannot import handlers).
 var GenerationPercentages = []float64{
-	0.354, // gen 0: self
-	0.177, // gen 1: direct referrer
-	0.142, // gen 2
-	0.106, // gen 3
-	0.071, // gen 4
-	0.057, // gen 5
-	0.042, // gen 6
-	0.028, // gen 7
-	0.014, // gen 8
-	0.007, // gen 9
-	0.002, // gen 10 (residual: 1.0 − Σ(gen0..gen9) so the pool conserves)
+	1.0 / 11.0, // gen 0: self
+	1.0 / 11.0, // gen 1: direct referrer
+	1.0 / 11.0, // gen 2
+	1.0 / 11.0, // gen 3
+	1.0 / 11.0, // gen 4
+	1.0 / 11.0, // gen 5
+	1.0 / 11.0, // gen 6
+	1.0 / 11.0, // gen 7
+	1.0 / 11.0, // gen 8
+	1.0 / 11.0, // gen 9
+	1.0 / 11.0, // gen 10
 }
 
 // init enforces the conservation invariant at boot: the TP ladder MUST sum to

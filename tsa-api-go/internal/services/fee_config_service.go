@@ -106,21 +106,21 @@ func DefaultFeeConfigs() []models.FeeConfig {
 		{Feature: models.FeatureServiceContact, TokenSymbol: models.FeeTokenAny, FlatUSD: 0.10, MCGPExempt: true},
 		// Withdrawal — 0.5% platform fee.
 		{Feature: models.FeatureWithdrawal, TokenSymbol: models.FeeTokenAny, BPS: 50},
-		// Internal asset swap — 0.1% fee.
-		{Feature: models.FeatureSwap, TokenSymbol: models.FeeTokenAny, BPS: 10},
+		// Internal asset (spot) swap — 3% fee, so the 30% TP split = 0.9% TP per
+		// the PM spec (matches allswap). FeatureSwap is the rate CreateSwap charges.
+		{Feature: models.FeatureSwap, TokenSymbol: models.FeeTokenAny, BPS: 300},
 		// Forward-looking rows (no SP1 Go-side math; read by SP3+).
 		{Feature: models.FeatureServiceOther, TokenSymbol: models.FeeTokenAny, BPS: 50},
-		{Feature: models.FeatureOTC, TokenSymbol: models.FeeTokenAny, BPS: 50},
+		// OTC — 2% fee → 0.6% TP (PM spec).
+		{Feature: models.FeatureOTC, TokenSymbol: models.FeeTokenAny, BPS: 200},
 		{Feature: models.FeatureP2P, TokenSymbol: models.FeeTokenAny, BPS: 50},
 		{Feature: models.FeatureP2PPlatform, TokenSymbol: models.FeeTokenAny, BPS: 100},
 		// Forward-looking rows for features that don't exist as Go-side flows yet
-		// (design §2). Harmless: no current call site computes a fee from them, so
-		// seeding them changes no charged fee. They give the v2 split table (and the
-		// admin API) a rate to read once the features are built. Rates are the
-		// PRE-cutover placeholders; the OTC→2% / allswap·spot→3% / product-gas→0.5%
-		// rate flips are cutover-time admin changes (see the spec runbook), NOT done
-		// here so current charged fees are unchanged.
-		{Feature: models.FeatureSpot, TokenSymbol: models.FeeTokenAny, BPS: 10},
+		// (design §2). No current call site computes a fee from FeatureInstantPay /
+		// FeatureInstantTransfer, so their rates are read-only until those features
+		// ship. Rates carry the PM-spec TP percentages via the v2 split table:
+		// spot 3%→0.9%, instant_pay 0.5%→0.15%, instant_transfer 2%→0.25%.
+		{Feature: models.FeatureSpot, TokenSymbol: models.FeeTokenAny, BPS: 300},
 		{Feature: models.FeatureInstantPay, TokenSymbol: models.FeeTokenAny, BPS: 50},
 		{Feature: models.FeatureInstantTransfer, TokenSymbol: models.FeeTokenAny, BPS: 200},
 	}

@@ -271,8 +271,9 @@ type Config struct {
 	// Fee/TP overhaul (SP3) tunables.
 	//
 	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
-	// mints. DEFAULT 1 (1 TP = $1). Tunable via FEE_TP_PER_USD; it sets level
-	// PACING (see design §3), not the reward ratio.
+	// mints. DEFAULT 100 (1 TP = $0.01, per the PM spec — consistent with the
+	// level ladder's rewardUSD = thresholdTP/100). Tunable via FEE_TP_PER_USD;
+	// it sets level PACING (see design §3), not the reward ratio.
 	TPPerUSD float64
 
 	// GlobalPoolSettleInterval is the cadence of the SP4 global-pool settlement
@@ -490,7 +491,7 @@ func Load() *Config {
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
 	// value; tunable without code change.
-	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 1.0)
+	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 100.0)
 	// SP4 global-pool settlement cadence — default daily.
 	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
 
@@ -704,11 +705,11 @@ func (c *Config) AllSwapNominalFeeBpsOrDefault() int {
 	return c.AllSwapNominalFeeBps
 }
 
-// TPPerUSDOrDefault returns the configured TP minting rate, falling back to 1.0
-// (1 TP = $1) when unset or non-positive so the engine always has a sane rate.
+// TPPerUSDOrDefault returns the configured TP minting rate, falling back to 100
+// (1 TP = $0.01) when unset or non-positive so the engine always has a sane rate.
 func (c *Config) TPPerUSDOrDefault() float64 {
 	if c == nil || c.TPPerUSD <= 0 {
-		return 1.0
+		return 100.0
 	}
 	return c.TPPerUSD
 }
