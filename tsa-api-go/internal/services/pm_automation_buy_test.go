@@ -381,3 +381,54 @@ func TestHandleInbound_Ambiguous_NoOp(t *testing.T) {
 		t.Errorf("signer called %d times, want 0", len(signer.calls))
 	}
 }
+
+// TestHandleInbound_UnparseableTokenAmount_NoRelease verifies the cap-bypass
+// guard: a trade whose TokenAmount cannot be parsed as a base-10 integer (e.g.
+// a decimal like "1.5") must NOT be auto-released. "1.5" inserts cleanly into
+// SQLite's TEXT column but big.Int.SetString("1.5", 10) returns ok=false
+// because base-10 parsing rejects the decimal point.
+func TestHandleInbound_UnparseableTokenAmount_NoRelease(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+
+	// Overwrite token_amount with a decimal value that inserts fine (TEXT column
+	// in SQLite) but fails big.Int.SetString(_, 10). "1.5" is the canonical
+	// example: valid as a number but not as a base-10 integer string.
+	if err := db.Exec("UPDATE p2p_trades SET token_amount = '1.5' WHERE id = ?", trade.ID).Error; err != nil {
+		t.Fatalf("overwrite token_amount: %v", err)
+	}
+	trade.TokenAmount = "1.5"
+	// We do NOT call setReleasedEvent — if the signer were called it would fail
+	// the money-invariant check anyway, making the test stricter.
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
+		buyerID: "JOHN DOE",
+	}))
+
+	err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:             "settled",
+		DestinationAccount: pm.InboundAccountNumber,
+		SenderAccountName:  "JOHN DOE",
+		AmountNGN:          "1500.00",
+		EventID:            "evt_bad_amount",
+	})
+	// Route-to-manual is a deliberate no-op: no error returned.
+	if err != nil {
+		t.Fatalf("HandleInbound: %v (want nil — unparseable amount routes to manual, not hard error)", err)
+	}
+
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("status = %q, want pending_payment (must not release when USD unknown)", persisted.Status)
+	}
+	if len(signer.calls) != 0 {
+		t.Errorf("signer called %d times, want 0 (must not sign when USD unknown)", len(signer.calls))
+	}
+}
