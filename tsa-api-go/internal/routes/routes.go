@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -89,6 +89,18 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		adminFeeConfig.GET("", fch.ListFeeConfigs)
 		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)
+	}
+
+	// Admin reward-payout routes — the (reward kind, payment token) → (payout
+	// token, chain) mapping. Lets admins repoint cashback / TP-level payouts to
+	// USDC / USDT / MCGP on any chain without a code change.
+	if rph != nil {
+		adminRewardPayout := api.Group("/admin/reward-payouts")
+		adminRewardPayout.Use(adminAuth)
+		{
+			adminRewardPayout.GET("", rph.ListRewardPayouts)
+			adminRewardPayout.PUT("", rph.UpsertRewardPayout)
+		}
 	}
 
 	// Admin configurable-FeeManager set-fee flow (design §5) — author a desired-

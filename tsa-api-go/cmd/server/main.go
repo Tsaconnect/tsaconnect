@@ -204,6 +204,15 @@ func main() {
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService, cfg)
 
+	// Admin-configurable reward payout-token mapping (PM: payout token flexible,
+	// not hardcoded). Seeds the launch defaults on first boot; the SP5 reward
+	// processor resolves the payout token/chain per reward via this service.
+	rewardPayoutService, err := services.NewRewardPayoutConfigService(config.DB)
+	if err != nil {
+		log.Fatalf("Failed to init reward payout config: %v", err)
+	}
+	rph := handlers.NewRewardPayoutHandler(rewardPayoutService)
+
 	// Configurable-FeeManager admin set-fee flow + drift reconciler (design
 	// §5/§10). DORMANT-BY-DEFAULT: a multi-chain FeeManager reader is built only
 	// over the configured FeeManagerChains that also have a reachable RPC client.
@@ -435,7 +444,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph)
 
 	// Configure HTTP server
 	port := cfg.Port

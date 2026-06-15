@@ -69,6 +69,8 @@ func AutoMigrate() error {
 		&models.RewardEntry{},
 		&models.RewardClaimable{},
 		&models.UserRewardState{},
+		// Admin-configurable reward payout-token mapping (flexible payout token).
+		&models.RewardPayoutConfig{},
 		&models.PrizeDue{},
 		// SP7 — claim-eligibility gate (anti-sybil + KYC). An ACTIVE reward_flags
 		// row makes a user claim-ineligible (SP6 excludes them from merkle roots).
