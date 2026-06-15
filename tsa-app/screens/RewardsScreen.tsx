@@ -666,22 +666,18 @@ const RewardsScreen: React.FC = () => {
           </Text>
         </AccentCard>
 
-        {/* ── Reward earned (MCGP + claim) ── */}
+        {/* ── Reward earned (shown in $; payout token is admin-configured) ── */}
         <Card padding="xl" style={{ marginTop: spacing.lg }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <View>
               <Text variant="bodySm" color="textSecondary">
                 Reward earned
               </Text>
-              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: spacing.xs, marginTop: spacing.xs }}>
-                <AmountText
-                  value={summary.claimableMcgp}
-                  variant="title1"
-                  minimumFractionDigits={0}
-                  maximumFractionDigits={4}
-                />
-                <Text variant="bodyMed" weight="700" color="accent">
-                  MCGP
+              <View style={{ marginTop: spacing.xs }}>
+                <Text variant="title1" weight="700">
+                  {formatFiat(summary.claimableUsd, 'USD', {
+                    maximumFractionDigits: summary.claimableUsd < 1 ? 4 : 2,
+                  })}
                 </Text>
               </View>
             </View>

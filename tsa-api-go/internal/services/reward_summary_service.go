@@ -131,6 +131,12 @@ type RewardSummary struct {
 	// claimed); otherwise it is the gross cumulative.
 	ClaimableMCGP float64 `json:"claimableMcgp"`
 
+	// ClaimableUSD is the dollar value of the rewards owed — Σ RewardEntry.RewardUSD,
+	// the USD locked at accrual time (price-independent). This is the figure the app
+	// shows the user ("$" earned), since payout token is flexible/admin-configured
+	// and may not be MCGP. Gross today (nothing claimed on-chain yet).
+	ClaimableUSD float64 `json:"claimableUsd"`
+
 	// TotalClaimedMCGP is the MCGP the user has already claimed on-chain (0 when
 	// no claimed reader is wired).
 	TotalClaimedMCGP float64 `json:"totalClaimedMcgp"`
@@ -222,6 +228,14 @@ func (s *RewardSummaryService) Summary(ctx context.Context, userID uuid.UUID) (*
 		out.ClaimableMCGP = claimable
 	}
 
+	// Dollar value owed (USD locked at accrual) — the figure the app displays,
+	// independent of the (flexible) payout token. Gross Σ RewardUSD today.
+	usd, err := s.claimableUSD(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out.ClaimableUSD = usd
+
 	// Level + progress, from the REUSED tp_level ladder.
 	out.CurrentLevel = models.LevelFor(user.TPBalance)
 	out.CurrentLevelName = models.NameForLevel(out.CurrentLevel) // "" when CurrentLevel == 0
@@ -267,6 +281,22 @@ func (s *RewardSummaryService) claimableMCGP(ctx context.Context, userID uuid.UU
 		return 0, fmt.Errorf("load claimable for %s: %w", userID, err)
 	}
 	return row.ClaimableMCGP, nil
+}
+
+// claimableUSD sums the USD value locked across all of the user's reward entries
+// (level + cashback). This is the payout-token-independent dollar figure the app
+// shows; it does not need the MCGP price (USD is locked at accrual).
+func (s *RewardSummaryService) claimableUSD(ctx context.Context, userID uuid.UUID) (float64, error) {
+	var total float64
+	err := s.db.WithContext(ctx).
+		Model(&models.RewardEntry{}).
+		Where("user_id = ?", userID).
+		Select("COALESCE(SUM(reward_usd), 0)").
+		Scan(&total).Error
+	if err != nil {
+		return 0, fmt.Errorf("sum reward usd for %s: %w", userID, err)
+	}
+	return total, nil
 }
 
 // perGeneration groups the user's TPEarning rows by Generation and returns a row

@@ -65,6 +65,9 @@ export interface PrizeDueItem {
 export interface RewardSummary {
   tpBalance: number;
   claimableMcgp: number;
+  /** Dollar value of rewards owed (USD locked at accrual). The figure shown to
+   *  users — payout token is admin-configured and may not be MCGP. */
+  claimableUsd: number;
   totalClaimedMcgp: number;
   currentLevel: number;
   /** Rank name of the current level; absent/empty at level 0 (no rank yet). */
