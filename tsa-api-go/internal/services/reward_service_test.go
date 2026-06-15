@@ -843,6 +843,11 @@ func TestMCGPPriceFromOTC_UnavailablePaths(t *testing.T) {
 	if _, err := MCGPPriceFromOTC(&fakeOTC{price: big0()})(context.Background()); !errors.Is(err, ErrMCGPPriceUnavailable) {
 		t.Fatalf("zero price must be unavailable, got %v", err)
 	}
+	// implausibly tiny price (1 wei = $0.000001) must DEFER, not mint — the
+	// minMCGPPriceUSD sanity floor (anti-inflation).
+	if _, err := MCGPPriceFromOTC(&fakeOTC{price: big.NewInt(1)})(context.Background()); !errors.Is(err, ErrMCGPPriceUnavailable) {
+		t.Fatalf("sub-floor price must be unavailable, got %v", err)
+	}
 	// valid: 1_000_000 wei (6-decimal USDC) => $1.00 per MCGP
 	usd, err := MCGPPriceFromOTC(&fakeOTC{price: big1e6()})(context.Background())
 	if err != nil {
