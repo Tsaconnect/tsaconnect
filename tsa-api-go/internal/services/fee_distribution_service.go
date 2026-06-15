@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -556,6 +557,7 @@ func (s *FeeDistributionService) creditCashback(tx *gorm.DB, userID, sourceUserI
 		SourceType:   ev.SourceType,
 		SourceID:     ev.SourceID,
 		AmountUSD:    amountUSD,
+		Token:        strings.ToUpper(ev.Token), // payment token → SP5 payout resolution
 		CreatedAt:    time.Now(),
 	}
 	if err := tx.Create(&earning).Error; err != nil {

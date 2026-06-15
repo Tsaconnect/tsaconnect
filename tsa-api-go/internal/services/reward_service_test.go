@@ -99,6 +99,7 @@ func setupRewardTestDB(t *testing.T) *gorm.DB {
 			source_type TEXT NOT NULL,
 			source_id TEXT NOT NULL,
 			amount_usd REAL NOT NULL,
+			token TEXT,
 			tx_hash TEXT,
 			created_at DATETIME NOT NULL
 		)`,
@@ -119,6 +120,9 @@ func setupRewardTestDB(t *testing.T) *gorm.DB {
 			reward_usd REAL NOT NULL,
 			mcgp_amount REAL NOT NULL,
 			rate_usd_per_mcgp REAL NOT NULL,
+			payout_token TEXT NOT NULL DEFAULT 'MCGP',
+			payout_chain TEXT NOT NULL DEFAULT 'sonic',
+			payout_amount REAL NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			UNIQUE(user_id, kind, source_level, source_id)
 		)`,
@@ -188,6 +192,91 @@ func addCashback(t *testing.T, db *gorm.DB, userID uuid.UUID, usd float64) model
 		t.Fatalf("create cashback: %v", err)
 	}
 	return cb
+}
+
+// addCashbackToken adds a cashback row with a specific payment token (drives the
+// payout-token resolution at SP5).
+func addCashbackToken(t *testing.T, db *gorm.DB, userID uuid.UUID, usd float64, token string) {
+	t.Helper()
+	cb := models.CashbackEarning{
+		ID: uuid.New(), UserID: userID, SourceUserID: userID,
+		SourceType: "checkout", SourceID: uuid.New(), AmountUSD: usd,
+		Token: token, CreatedAt: time.Now(),
+	}
+	if err := db.Create(&cb).Error; err != nil {
+		t.Fatalf("create cashback (%s): %v", token, err)
+	}
+}
+
+// newRewardPayoutSvcForTest creates the payout-config table on db and returns a
+// seeded resolver (launch mapping).
+func newRewardPayoutSvcForTest(t *testing.T, db *gorm.DB) *RewardPayoutConfigService {
+	t.Helper()
+	if err := db.Exec(`CREATE TABLE reward_payout_configs (
+		id TEXT PRIMARY KEY, reward_kind TEXT NOT NULL, payment_token TEXT NOT NULL,
+		payout_token TEXT NOT NULL, chain TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME, updated_at DATETIME,
+		UNIQUE(reward_kind, payment_token))`).Error; err != nil {
+		t.Fatalf("create payout table: %v", err)
+	}
+	svc, err := NewRewardPayoutConfigService(db)
+	if err != nil {
+		t.Fatalf("payout svc: %v", err)
+	}
+	return svc
+}
+
+// TestProcessUserRewards_MultiTokenCashback locks the launch behavior: a USDC
+// cashback pays out in USDC (1:1, no MCGP price needed — settles even when the
+// oracle is down), while a USDT cashback pays out in MCGP and DEFERS until the
+// price is available.
+func TestProcessUserRewards_MultiTokenCashback(t *testing.T) {
+	db := setupRewardTestDB(t)
+	payouts := newRewardPayoutSvcForTest(t, db)
+	u := mkRewardUser(t, db, 0) // no level rewards
+
+	addCashbackToken(t, db, u.ID, 5.0, "USDC") // → USDC payout (1:1)
+	addCashbackToken(t, db, u.ID, 3.0, "USDT") // → MCGP payout (needs price)
+
+	// Price UNAVAILABLE: USDC converts; USDT defers.
+	svc := NewRewardService(db, nil, &noopSettler{}, unavailablePrice())
+	svc.SetPayoutResolver(payouts)
+	res, err := svc.ProcessUserRewards(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if res.CashbacksConverted != 1 {
+		t.Fatalf("converted = %d, want 1 (USDC only)", res.CashbacksConverted)
+	}
+	if !res.Deferred {
+		t.Fatal("expected Deferred=true (USDT awaits MCGP price)")
+	}
+	// USDC payout does NOT feed the MCGP claim balance.
+	if c := claimable(t, db, u.ID); c != 0 {
+		t.Fatalf("claimable MCGP = %g, want 0 (USDC payout)", c)
+	}
+	// The USDC entry recorded the payout token + 1:1 USD amount.
+	var usdc models.RewardEntry
+	if err := db.Where("user_id = ? AND payout_token = ?", u.ID, "USDC").First(&usdc).Error; err != nil {
+		t.Fatalf("load USDC entry: %v", err)
+	}
+	if !approxEq(usdc.PayoutAmount, 5.0) || usdc.MCGPAmount != 0 {
+		t.Fatalf("USDC entry payoutAmount=%g mcgp=%g, want 5/0", usdc.PayoutAmount, usdc.MCGPAmount)
+	}
+
+	// Price AVAILABLE: USDT now converts to MCGP ($3 / $1 = 3 MCGP).
+	svc2 := NewRewardService(db, nil, &noopSettler{}, fixedPrice(1.0))
+	svc2.SetPayoutResolver(payouts)
+	res2, err := svc2.ProcessUserRewards(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("process 2: %v", err)
+	}
+	if res2.CashbacksConverted != 1 {
+		t.Fatalf("second converted = %d, want 1 (USDT)", res2.CashbacksConverted)
+	}
+	if c := claimable(t, db, u.ID); !approxEq(c, 3.0) {
+		t.Fatalf("claimable MCGP = %g, want 3", c)
+	}
 }
 
 // fixedPrice returns a price function that always reports usd/MCGP.

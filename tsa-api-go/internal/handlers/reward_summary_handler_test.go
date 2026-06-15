@@ -25,6 +25,15 @@ func addRewardSummaryTables(t *testing.T, db *gorm.DB) {
 			claimable_mcgp REAL NOT NULL DEFAULT 0,
 			updated_at DATETIME NOT NULL
 		)`,
+		// claimableUSD sums reward_usd from reward_entries (the $ figure the app shows).
+		`CREATE TABLE IF NOT EXISTS reward_entries (
+			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
+			source_level INTEGER NOT NULL DEFAULT 0, source_id TEXT NOT NULL DEFAULT '',
+			reward_usd REAL NOT NULL DEFAULT 0, mcgp_amount REAL NOT NULL DEFAULT 0,
+			rate_usd_per_mcgp REAL NOT NULL DEFAULT 0,
+			payout_token TEXT NOT NULL DEFAULT 'MCGP', payout_chain TEXT NOT NULL DEFAULT 'sonic',
+			payout_amount REAL NOT NULL DEFAULT 0, created_at DATETIME NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS prize_dues (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,

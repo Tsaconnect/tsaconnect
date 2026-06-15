@@ -112,6 +112,7 @@ func setupScaleBenchDB(b *testing.B) *gorm.DB {
 			source_type TEXT NOT NULL,
 			source_id TEXT NOT NULL,
 			amount_usd REAL NOT NULL,
+			token TEXT,
 			tx_hash TEXT,
 			created_at DATETIME NOT NULL
 		)`,
@@ -169,6 +170,9 @@ func setupScaleBenchDB(b *testing.B) *gorm.DB {
 			reward_usd REAL NOT NULL,
 			mcgp_amount REAL NOT NULL,
 			rate_usd_per_mcgp REAL NOT NULL,
+			payout_token TEXT NOT NULL DEFAULT 'MCGP',
+			payout_chain TEXT NOT NULL DEFAULT 'sonic',
+			payout_amount REAL NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			UNIQUE(user_id, kind, source_level, source_id)
 		)`,

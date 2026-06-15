@@ -17,8 +17,13 @@ type CashbackEarning struct {
 	SourceType   string    `gorm:"not null" json:"sourceType"`
 	SourceID     uuid.UUID `gorm:"type:uuid;not null" json:"sourceId"`
 	AmountUSD    float64   `gorm:"not null" json:"amountUsd"`
-	TxHash       string    `json:"txHash,omitempty"`
-	CreatedAt    time.Time `gorm:"not null;index:idx_cashback_user_created,priority:2" json:"createdAt"`
+	// Token is the symbol the user PAID the originating fee with (e.g. "USDC",
+	// "USDT", "MCGP"). It drives payout-token resolution at SP5: cashback paid
+	// with USDC pays out in USDC; with USDT/MCGP, in MCGP. Empty on legacy rows
+	// → the resolver uses the kind-wide default.
+	Token     string    `gorm:"size:16" json:"token,omitempty"`
+	TxHash    string    `json:"txHash,omitempty"`
+	CreatedAt time.Time `gorm:"not null;index:idx_cashback_user_created,priority:2" json:"createdAt"`
 }
 
 // TableName overrides the default table name.

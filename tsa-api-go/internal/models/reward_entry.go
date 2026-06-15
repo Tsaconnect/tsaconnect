@@ -92,6 +92,16 @@ type RewardEntry struct {
 	// DEFERS the conversion — no row is written).
 	RateUSDPerMCGP float64 `gorm:"not null" json:"rateUsdPerMcgp"`
 
+	// PayoutToken / PayoutChain are the admin-resolved payout target for this
+	// reward (RewardPayoutConfigService). PayoutAmount is the amount in that token
+	// — RewardUSD for a 1:1 stablecoin (USDC/USDT), or RewardUSD/RateUSDPerMCGP for
+	// MCGP. Defaults preserve pre-multi-token behavior (MCGP/sonic) for legacy
+	// rows. MCGPAmount stays populated only for MCGP payouts (0 otherwise) so the
+	// MCGP claim path / ClaimableMCGP is unaffected by stablecoin payouts.
+	PayoutToken  string  `gorm:"size:16;not null;default:'MCGP'" json:"payoutToken"`
+	PayoutChain  string  `gorm:"size:32;not null;default:'sonic'" json:"payoutChain"`
+	PayoutAmount float64 `gorm:"not null;default:0" json:"payoutAmount"`
+
 	CreatedAt time.Time `gorm:"not null;index:idx_reward_entry_user_created,priority:2" json:"createdAt"`
 }
 
