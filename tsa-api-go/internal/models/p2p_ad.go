@@ -119,6 +119,10 @@ type P2PAd struct {
 	OnChainAdID  string `gorm:"size:66" json:"onChainAdId,omitempty"`
 	EscrowTxHash string `gorm:"size:66;index" json:"escrowTxHash,omitempty"`
 
+	// PMID links the ad to a PaymentMerchant when set; nil = a normal (manual)
+	// P2P ad. This is the marketplace "PM"/automated filter key (design §4).
+	PMID *uuid.UUID `gorm:"type:uuid;index" json:"pmId,omitempty"`
+
 	Status           string         `gorm:"size:16;not null;default:'pending';index" json:"status"`
 	ExpiresAt        *time.Time     `gorm:"index" json:"expiresAt,omitempty"`
 	CreatedAt        time.Time      `json:"createdAt"`
