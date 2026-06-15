@@ -891,6 +891,10 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 			f.ChainID = n
 		}
 	}
+	if pm := c.Query("pm"); pm != "" {
+		b := pm == "true" || pm == "1"
+		f.PM = &b
+	}
 	if f.Status == "" {
 		// Default: only active marketplace ads.
 		f.Status = models.P2PAdStatusActive
