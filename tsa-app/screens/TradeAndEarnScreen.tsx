@@ -11,7 +11,7 @@ import React, { useEffect, useState } from 'react';
 import { View, ScrollView, Share, Alert, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import { useTheme, formatNumber } from '@/theme';
+import { useTheme, formatNumber, formatFiat } from '@/theme';
 import {
   AccentCard,
   AmountText,
@@ -202,7 +202,7 @@ const TradeAndEarnScreen: React.FC = () => {
                         summary.currentLevel > 0
                           ? summary.currentLevelName || `Level ${summary.currentLevel}`
                           : 'No level yet'
-                      } · ${formatNumber(summary.claimableMcgp, { maximumFractionDigits: 4 })} MCGP to claim`
+                      } · ${formatFiat(summary.claimableUsd, 'USD', { maximumFractionDigits: summary.claimableUsd < 1 ? 4 : 2 })} to claim`
                     : 'View your level ladder, earnings & claim rewards'}
                 </Text>
               </View>
@@ -354,7 +354,7 @@ const TradeAndEarnScreen: React.FC = () => {
                 Cashback
               </Text>
               <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
-                Earn cashback on purchases, services &amp; P2P — claimable as MCGP
+                Earn cashback on purchases, services &amp; P2P — paid out as rewards
               </Text>
             </View>
             <Icon name="chevronRight" size={22} color={colors.textMuted} />
@@ -435,7 +435,7 @@ const TradeAndEarnScreen: React.FC = () => {
               </Text>
             </View>
             <Text variant="bodySm" color="textSecondary">
-              You and your direct upline each earn cashback, split equally, on every product purchase, service order, and P2P trade — carved from the platform fee (even on the tiniest fees) and claimable as MCGP.
+              You and your direct upline each earn cashback, split equally, on every product purchase, service order, and P2P trade — carved from the platform fee (even on the tiniest fees) and paid out as claimable rewards.
             </Text>
           </View>
 
