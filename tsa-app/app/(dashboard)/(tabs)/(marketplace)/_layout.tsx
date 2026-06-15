@@ -10,6 +10,10 @@ export default function Layout() {
           name="digital"
           options={{ headerShown: false }}
         />
+        <Stack.Screen
+          name="pm"
+          options={{ headerShown: false }}
+        />
       </Stack>
     </GestureHandlerRootView>
   );

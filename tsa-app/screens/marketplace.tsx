@@ -16,7 +16,6 @@ import {
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import TradeAndEarnScreen from './TradeAndEarnScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '@/components/services/api';
 import CartIconBadge from '@/components/common/CartIconBadge';
@@ -190,12 +189,15 @@ const MarketplaceScreen: React.FC = () => {
   };
 
   // ── Tabs ──
-  const TABS = [
+  // Products/Services are in-page tabs; Trade & Earn / P2P / PM are navigation
+  // entries (a `route`) that open their own dedicated screens instead of
+  // rendering inline here.
+  const TABS: { key: string; label: string; route?: string }[] = [
     { key: 'products', label: 'Products' },
     { key: 'services', label: 'Services' },
-    { key: 'trade', label: 'Trade & Earn' },
-    { key: 'p2p', label: 'P2P' },
-    { key: 'pm', label: 'PM' },
+    { key: 'trade', label: 'Trade & Earn', route: '/trade' },
+    { key: 'p2p', label: 'P2P', route: '/p2p' },
+    { key: 'pm', label: 'PM', route: '/pm' },
   ];
 
   // ── Loading ──
@@ -260,8 +262,8 @@ const MarketplaceScreen: React.FC = () => {
             <Chip
               key={tab.key}
               label={tab.label}
-              selected={selectedTab === tab.key}
-              onPress={() => setSelectedTab(tab.key)}
+              selected={!tab.route && selectedTab === tab.key}
+              onPress={() => (tab.route ? router.push(tab.route as any) : setSelectedTab(tab.key))}
             />
           ))}
         </ScrollView>
@@ -429,126 +431,8 @@ const MarketplaceScreen: React.FC = () => {
           </View>
         )}
 
-        {selectedTab === 'trade' && <TradeAndEarnScreen />}
-
-        {selectedTab === 'p2p' && (
-          <BuySellSection
-            heading="P2P"
-            tag="Individual"
-            subtitle="Trade crypto peer-to-peer with other individuals. Funds are escrowed on-chain until release."
-            onBuy={() => router.push('/p2p?side=buy')}
-            onSell={() => router.push('/p2p?side=sell')}
-          />
-        )}
-
-        {selectedTab === 'pm' && (
-          <BuySellSection
-            heading="PM"
-            tag="Corporate"
-            subtitle="Trade with corporate market makers for larger, faster fills."
-            comingSoon
-          />
-        )}
       </ScrollView>
     </SafeAreaView>
-  );
-};
-
-// ── P2P / PM Buy|Sell section ────────────────────────────────────────────────
-// A heading ("P2P · Individual" / "PM · Corporate") over two Buy / Sell action
-// cards. P2P is live and deep-links into the /p2p marketplace with the right
-// side preselected; PM is corporate and not yet implemented (coming-soon).
-const BuySellSection: React.FC<{
-  heading: string;
-  tag: string;
-  subtitle: string;
-  onBuy?: () => void;
-  onSell?: () => void;
-  comingSoon?: boolean;
-}> = ({ heading, tag, subtitle, onBuy, onSell, comingSoon }) => {
-  const { colors, spacing, radius } = useTheme();
-
-  const ActionCard: React.FC<{ side: 'buy' | 'sell'; onPress?: () => void }> = ({ side, onPress }) => {
-    const isBuy = side === 'buy';
-    const tint = isBuy ? colors.success : colors.danger;
-    const tintBg = isBuy ? colors.successBg : colors.dangerBg;
-    const card = (
-      <Card padding="lg" style={{ flex: 1, opacity: comingSoon ? 0.6 : 1 }}>
-        <View
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: radius.md,
-            backgroundColor: tintBg,
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginBottom: spacing.sm,
-          }}
-        >
-          <Icon name={isBuy ? 'arrowDown' : 'arrowUp'} size={20} color={tint} />
-        </View>
-        <Text variant="bodyMed" weight="700">
-          {isBuy ? 'Buy' : 'Sell'}
-        </Text>
-        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-          {isBuy ? 'Pay fiat, get crypto' : 'Sell crypto for fiat'}
-        </Text>
-      </Card>
-    );
-    if (comingSoon || !onPress) return <View style={{ flex: 1 }}>{card}</View>;
-    return (
-      <PressableScale style={{ flex: 1 }} onPress={onPress}>
-        {card}
-      </PressableScale>
-    );
-  };
-
-  return (
-    <View style={{ paddingHorizontal: spacing.lg }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
-        <Text variant="title2" weight="700">
-          {heading}
-        </Text>
-        <View
-          style={{
-            paddingHorizontal: spacing.sm,
-            paddingVertical: 2,
-            borderRadius: radius.pill,
-            backgroundColor: colors.surfaceAlt,
-          }}
-        >
-          <Text variant="caption" weight="600" color="textSecondary">
-            {tag}
-          </Text>
-        </View>
-        {comingSoon && (
-          <View
-            style={{
-              paddingHorizontal: spacing.sm,
-              paddingVertical: 2,
-              borderRadius: radius.pill,
-              backgroundColor: colors.warningBg,
-            }}
-          >
-            <Text variant="caption" weight="600" style={{ color: colors.warning }}>
-              Coming soon
-            </Text>
-          </View>
-        )}
-      </View>
-      <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
-        {subtitle}
-      </Text>
-      <View style={{ flexDirection: 'row', gap: spacing.md }}>
-        <ActionCard side="buy" onPress={onBuy} />
-        <ActionCard side="sell" onPress={onSell} />
-      </View>
-      {comingSoon && (
-        <Text variant="caption" color="textMuted" style={{ marginTop: spacing.md, textAlign: 'center' }}>
-          PM (corporate) trading isn’t available yet — stay tuned.
-        </Text>
-      )}
-    </View>
   );
 };
 
