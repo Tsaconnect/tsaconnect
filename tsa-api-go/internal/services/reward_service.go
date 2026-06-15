@@ -114,6 +114,12 @@ type mcgpPriceFunc func(ctx context.Context) (float64, error)
 // other price error — as "defer this conversion, retry next run".
 var ErrMCGPPriceUnavailable = errors.New("mcgp otc price unavailable")
 
+// minMCGPPriceUSD is a defensive sanity floor (USD per 1 MCGP). An OTC price at
+// or below this is treated as UNAVAILABLE (defer) rather than locked: reward
+// payout in MCGP is USD/price, so a glitched or manipulated near-zero price
+// would otherwise mint a near-infinite MCGP reward. Deferring is the safe mode.
+const minMCGPPriceUSD = 0.0001
+
 // NewRewardService builds the payout-computation engine. price MUST be non-nil
 // in production; a nil price is treated as permanently unavailable (every
 // conversion defers) so a mis-wire degrades safely instead of locking a zero
@@ -149,7 +155,8 @@ func MCGPPriceFromOTC(otc otcBuyPricePerToken) mcgpPriceFunc {
 		// USDC is 6-decimal; price in USD per MCGP = priceWei / 1e6.
 		usd := new(big.Float).Quo(new(big.Float).SetInt(priceWei), big.NewFloat(1e6))
 		f, _ := usd.Float64()
-		if f <= 0 {
+		// Defer (don't lock) on an implausibly low price — see minMCGPPriceUSD.
+		if f < minMCGPPriceUSD {
 			return 0, ErrMCGPPriceUnavailable
 		}
 		return f, nil

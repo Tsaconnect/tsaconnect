@@ -53,7 +53,7 @@ func main() {
 	referralGraphService := services.NewReferralGraphService(config.DB)
 
 	// Fee/TP engine (SP3). Wired into every fee-settled path via OnFeeSettled.
-	// TP minting rate comes from cfg (default 1 TP = $1).
+	// TP minting rate comes from cfg (default 100 TP per $1, i.e. 1 TP = $0.01).
 	feeDistributionService := services.NewFeeDistributionService(config.DB, referralGraphService, cfg.TPPerUSDOrDefault())
 
 	// SP7 — claim-eligibility gate (anti-sybil + KYC). TP keeps accruing for
