@@ -2868,6 +2868,9 @@ type AdFilter struct {
 	Limit        int
 	Offset       int
 	ChainID      int64
+	// PM filters by automated PaymentMerchant ads: true = only PM ads (pm_id set),
+	// false = only normal ads (pm_id null), nil = both.
+	PM *bool
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -2900,6 +2903,13 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	}
 	if f.ChainID != 0 {
 		q = q.Where("chain_id = ?", f.ChainID)
+	}
+	if f.PM != nil {
+		if *f.PM {
+			q = q.Where("pm_id IS NOT NULL")
+		} else {
+			q = q.Where("pm_id IS NULL")
+		}
 	}
 	limit := f.Limit
 	if limit <= 0 || limit > 100 {
