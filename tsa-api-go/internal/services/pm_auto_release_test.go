@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -111,5 +112,71 @@ func TestAutoRelease_SystemPath(t *testing.T) {
 	}
 	if persisted.ReleaseTxHash != "0xrelease" {
 		t.Errorf("persisted releaseTxHash = %q, want 0xrelease", persisted.ReleaseTxHash)
+	}
+}
+
+// TestAutoRelease_RollsBackOnBroadcastError verifies the optimistic-lock rollback:
+// when SignAndBroadcast fails AFTER AutoRelease flips paid → releasing, the trade
+// is reverted to its prior status (paid) rather than stranded in `releasing` for
+// the reconciler's ~10-min stale window.
+func TestAutoRelease_RollsBackOnBroadcastError(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	trade := seedOpenedPMTrade(t, svc)
+	if _, err := svc.SystemMarkPaid(context.Background(), trade.ID, "nomba:evt_1"); err != nil {
+		t.Fatalf("SystemMarkPaid: %v", err)
+	}
+
+	signer := &fakeReleaseSigner{
+		addr: "0x1111111111111111111111111111111111111111",
+		err:  errors.New("rpc down"),
+	}
+
+	if _, err := svc.AutoRelease(context.Background(), trade.ID, signer); err == nil {
+		t.Fatalf("expected AutoRelease error on broadcast failure, got nil")
+	}
+
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status != models.P2PTradeStatusPaid {
+		t.Errorf("status = %q, want paid (rolled back, not stranded in releasing)", persisted.Status)
+	}
+}
+
+// TestAutoRelease_RejectsBadMoneyInvariant verifies the money-invariant guard in
+// confirmReleaseCore: if the on-chain TradeReleased event's AmountToBuyer +
+// FeeToSystem does not equal the locked TokenAmount, AutoRelease refuses to mark
+// the trade released. (Verify succeeds, so the trade is left in `releasing`; the
+// reconciler reconciles it against on-chain truth — we only assert it is NOT
+// prematurely declared released.)
+func TestAutoRelease_RejectsBadMoneyInvariant(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	trade := seedOpenedPMTrade(t, svc)
+	if _, err := svc.SystemMarkPaid(context.Background(), trade.ID, "nomba:evt_1"); err != nil {
+		t.Fatalf("SystemMarkPaid: %v", err)
+	}
+
+	// TokenAmount is "1000000"; emit 1 + 1 = 2, which violates the invariant.
+	esc.releasedEvent = &P2PTradeReleasedEvent{
+		TradeID:       HashID(trade.ID),
+		Buyer:         common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		AmountToBuyer: big.NewInt(1),
+		FeeToSystem:   big.NewInt(1),
+	}
+
+	signer := &fakeReleaseSigner{
+		addr: "0x1111111111111111111111111111111111111111",
+		hash: "0xrelease",
+	}
+
+	if _, err := svc.AutoRelease(context.Background(), trade.ID, signer); err == nil {
+		t.Fatalf("expected AutoRelease error on money-invariant violation, got nil")
+	}
+
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status == models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, must NOT be released on invariant violation", persisted.Status)
 	}
 }

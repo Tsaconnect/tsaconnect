@@ -1812,6 +1812,8 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	if err != nil {
 		return nil, err
 	}
+	// Capture the pre-flip status so a post-flip failure can roll it back.
+	priorStatus := trade.Status
 	if trade.Status != models.P2PTradeStatusReleasing {
 		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 			Where("id = ? AND status IN ?", trade.ID,
@@ -1824,16 +1826,41 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 			return nil, ErrInvalidTransition
 		}
 	}
+	// rollback reverts the (Pending|Paid) → Releasing flip this call made, so a
+	// transient prepare/broadcast/verify error doesn't strand the trade in
+	// `releasing` until the reconciler's stale window (~10 min). Guarded two
+	// ways: (1) only if WE owned the flip (priorStatus was Pending|Paid; if the
+	// trade entered AutoRelease already Releasing we never flipped, so we don't
+	// touch it — mirrors PrepareRelease), and (2) only while the row is still
+	// Releasing, so we never clobber a trade that legitimately advanced.
+	//
+	// Safe to call on the verify-error path too: if the release actually landed
+	// on-chain, reverting to priorStatus (paid|pending_payment) is harmless —
+	// the chain reconciler walks all non-terminal trades and re-settles any whose
+	// on-chain status is Released to `released` regardless of DB status (see
+	// ReconcileTrade → reconcileToReleased, which gates on status NOT IN
+	// terminal, not on `releasing`). So a rolled-back-but-actually-released trade
+	// converges to `released` on the next reconcile pass.
+	rollback := func() {
+		if priorStatus == models.P2PTradeStatusPendingPayment || priorStatus == models.P2PTradeStatusPaid {
+			s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+				Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusReleasing).
+				Update("status", priorStatus)
+		}
+	}
 	unsignedTx, err := escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	if err != nil {
+		rollback()
 		return nil, fmt.Errorf("prepare admin release: %w", err)
 	}
 	txHash, err := signer.SignAndBroadcast(ctx, unsignedTx)
 	if err != nil {
+		rollback()
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
 	}
 	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
 	if err != nil {
+		rollback()
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
 	return s.confirmReleaseCore(ctx, &trade, txHash, nil, ev)
