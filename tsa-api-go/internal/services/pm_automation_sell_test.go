@@ -278,3 +278,65 @@ func TestHandlePayoutStatus_UnknownPayout_NoOp(t *testing.T) {
 		t.Errorf("signer called %d times, want 0", len(signer.calls))
 	}
 }
+
+// TestHandlePayoutStatus_EmptyPayoutID_NoOp verifies the empty-payout-id guard.
+// Without the guard, First(&trade, "nomba_payout_id = ?", "") would match any
+// trade whose nomba_payout_id is empty (the vast majority), then release it on
+// Status=="success". The guard must make this a no-op before the DB is touched.
+func TestHandlePayoutStatus_EmptyPayoutID_NoOp(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	// Seed a trade with an empty nomba_payout_id in a releasable state so that,
+	// without the guard, the buggy query would match and release it.
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	// nomba_payout_id is deliberately left as "" (the default from the seeder).
+	setReleasedEvent(esc, trade)
+
+	gw := &fakeNombaGateway{}
+	auto, signer := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
+		EventID: "evt_empty", PayoutID: "", Status: "success",
+	})
+	if err != nil {
+		t.Fatalf("HandlePayoutStatus: %v (want nil — empty payout id is a no-op)", err)
+	}
+
+	// The seeded trade must NOT have been released.
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("trade status = %q, want pending_payment (must not release on empty payout id)", persisted.Status)
+	}
+	if len(signer.calls) != 0 {
+		t.Errorf("signer called %d times, want 0 (must not release on empty payout id)", len(signer.calls))
+	}
+}
+
+// TestInitiateSellPayout_EmptyGatewayID_Errors verifies that a gateway returning
+// ("", nil) is treated as an error and does NOT poison the trade's nomba_payout_id.
+func TestInitiateSellPayout_EmptyGatewayID_Errors(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+
+	// Gateway returns ("", nil) — simulates a buggy/empty response with no error.
+	gw := &fakeNombaGateway{payoutID: ""}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	_, err := auto.InitiateSellPayout(context.Background(), trade.ID)
+	if err == nil {
+		t.Fatal("InitiateSellPayout: want error for empty gateway payout id, got nil")
+	}
+
+	// The trade's nomba_payout_id must remain empty — no poisoning.
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.NombaPayoutID != "" {
+		t.Errorf("nomba_payout_id = %q, want empty (must not persist empty payout id)", persisted.NombaPayoutID)
+	}
+}

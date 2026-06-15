@@ -278,6 +278,9 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 	if err != nil {
 		return "", fmt.Errorf("initiate nomba payout: %w", err)
 	}
+	if strings.TrimSpace(payoutID) == "" {
+		return "", fmt.Errorf("nomba returned empty payout id")
+	}
 	// Guard the write on nomba_payout_id='' so a concurrent caller can't clobber
 	// an id another goroutine just recorded (then double-pay on the next webhook).
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
@@ -297,6 +300,11 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 // TODO(pm-phase2): automated bounded-retry + on-chain refund once
 // adminResolve-from-pending semantics are confirmed.
 func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutStatus) error {
+	if strings.TrimSpace(p.PayoutID) == "" {
+		log.Printf("[pm automation] payout status %q with empty payout id (event=%s); ignoring", p.Status, p.EventID)
+		return nil
+	}
+
 	var trade models.P2PTrade
 	err := s.db.WithContext(ctx).First(&trade, "nomba_payout_id = ?", p.PayoutID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
