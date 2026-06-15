@@ -71,6 +71,13 @@ type P2PTrade struct {
 	ReleaseTxHash   string     `gorm:"size:66" json:"releaseTxHash,omitempty"`
 	Status          string     `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
 	ProofImageURL   string     `gorm:"type:text" json:"proofImageUrl,omitempty"`
+	// PM automation links (design §4). Empty on manual P2P trades.
+	PaymentRef          string `gorm:"size:32" json:"paymentRef,omitempty"`           // optional buyer reference aid
+	NombaInboundEventID string `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)
+	NombaPayoutID       string `gorm:"size:64" json:"nombaPayoutId,omitempty"`        // Nomba payout reference (sell)
+	PayoutAccountNumber string `gorm:"size:32" json:"payoutAccountNumber,omitempty"`  // user's KYC-name-verified bank (sell)
+	PayoutBank          string `gorm:"size:64" json:"payoutBank,omitempty"`
+	PayoutAccountName   string `gorm:"size:128" json:"payoutAccountName,omitempty"`
 	CancelReason    string     `gorm:"type:text" json:"cancelReason,omitempty"`
 	ResolvedByAdmin *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
 	MarkedPaidAt    *time.Time `json:"markedPaidAt,omitempty"`
