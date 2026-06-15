@@ -15,7 +15,7 @@ PM is **not** a new subsystem. It reuses the existing P2P escrow, trade state ma
 | Decision | Choice | Why |
 |---|---|---|
 | Fiat custody | **Each PM has its own Nomba account** | Per-PM liquidity + settlement isolation; platform orchestrates. |
-| On-chain release authorization | **Per-PM operator hot key, backend-signed; TSA-first** | No escrow contract change / audit / redeploy. Blast radius bounded per-PM and by escrow rules (release only pays the trade's counterparty). Prove the loop with TSA, then onboard corporates. |
+| On-chain release authorization | **`adminRelease` via a single platform admin EOA, key in a KMS** (AWS KMS default, swappable signer seam); owner-revocable + pausable | The deployed V2 escrow already has `adminRelease(tradeId)` (`onlyAdmin`) for happy-path release + `addAdmin`/`removeAdmin` (owner) + pause — **no contract change**. An admin can ONLY release/resolve (not withdraw the pool, change fees, pause, or add admins). The key never lives raw in the app (KMS), is revocable on-chain instantly (`removeAdmin`), and is strictly narrower than a per-PM seller key. (Revised from an earlier per-PM operator-key plan.) |
 | Buy-flow inbound attribution | **Sender bank-account name ≈ buyer KYC name + amount**, with **PM manual release** fallback | Users need no Nomba account and no bank registration; the KYC name is the anchor. Auto when names match; manual when they don't. |
 | Architecture | **Reuse P2P; mark ads with `pm_id`; add a marketplace filter** | The escrow + lifecycle are already exactly what PM needs. |
 
@@ -25,11 +25,16 @@ PM is **not** a new subsystem. It reuses the existing P2P escrow, trade state ma
 
 PM = automated P2P. Reused unchanged: `P2PEscrowV2` adapter (`p2p_escrow_service.go`), the trade state machine and transitions (`p2p_trade_service.go`: `OpenTrade`/`openTradeWithDeposit`, `MarkPaid`, `PrepareRelease`/`ConfirmRelease`, `ConfirmCancel`, dispute + `adminResolve`), the timeout watchdog + chain reconciler (`internal/jobs/`), and `accrueP2PReleaseFee` (fee/TP).
 
+**Two distinct on-chain identities (don't conflate):**
+- **Per-PM maker wallet** — funds the PM's escrow pool (token deposit) and signs its sell-ad `AdVoucher`s. This is the PM's own wallet (the existing P2P ad `SellerAddress`); one per PM.
+- **One platform admin EOA** — registered on the escrow via `addAdmin` (owner action). The automation signs `adminRelease(tradeId)` with this key (held in a **KMS**, behind a swappable `ReleaseSigner` seam) to settle confirmed trades. It is NOT per-PM, never the maker, and can only release/resolve.
+
 New components:
-- **`PaymentMerchant`** entity + service — a registered PM and its Nomba creds / operator key / inbound account / caps / status.
+- **`PaymentMerchant`** entity + service — a registered PM and its Nomba creds (secret-store ref) / maker wallet / inbound account / caps / status.
 - **Per-PM Nomba client factory** — builds a `NombaClient` from a PM's stored creds; adds payout + inbound-webhook + signature-verify capabilities the current client lacks.
 - **Nomba webhook receiver** (`POST /api/webhooks/nomba`) + **async processor** — verifies, dedupes (`WebhookEvent`), maps an event to a trade action.
-- **PM automation service** — the bridge: inbound-match → `markPaid` + operator-signed `release`; sell deposit → payout → release on payout success; failure/retry/manual-queue handling.
+- **`ReleaseSigner` seam** — signs + broadcasts the unsigned `adminRelease` tx (`PrepareAdminRelease`, already in `p2p_escrow_service.go`) with the admin key. Default impl: **AWS KMS**; a fake drives tests; a local-key impl serves dev. The app never holds the raw key.
+- **PM automation service** — the bridge: inbound-match → `markPaid` (DB) → `adminRelease` via the `ReleaseSigner` → confirm; sell deposit → Nomba payout → `adminRelease` on payout success; failure/retry/manual-queue handling.
 - **App:** a "PM"/automated filter over P2P ads, and the buy/sell order screens that show the PM's pay-to account + a manual-release queue for PM operators.
 
 ## 4. Data model (additive)
@@ -38,7 +43,7 @@ New components:
 - `id`, `user_id` (the corporate's merchant account), `name`, `status` (`pending`|`active`|`paused`).
 - Nomba: `nomba_account_id` + a **secret-store reference** for client id/secret (encrypted creds never stored plaintext in the DB).
 - `inbound_account_number` / `inbound_bank` — the static Nomba account users pay into for buys.
-- `operator_wallet_address` — the EVM address whose key (in the secret manager) the backend uses to sign `release`/deposit; **never** stored in the DB.
+- `maker_wallet_address` — the EVM address the PM uses to **fund the escrow pool** (deposits). It has **no release authority**. Its key is the PM's own (Phase 1: TSA's), never stored in the DB. (Stored on the column historically named `operator_wallet_address`; repurposed — releases go through the one platform admin EOA, not this wallet.)
 - Caps: `per_trade_cap_usd`, `daily_cap_usd` (+ a running daily counter or derived).
 - timestamps.
 
@@ -56,11 +61,11 @@ Status machine **unchanged**. Unmatched inbound payments use the existing `Webho
 
 ## 5. Buy flow — user buys token from a PM (= a sell-ad; PM is seller, token pre-funded in escrow)
 
-1. PM publishes an automated **sell-ad** (`pm_id` set; token, rate, NGN, limits), funded into the escrow pool by the PM operator key.
+1. PM publishes an automated **sell-ad** (`pm_id` set; token, rate, NGN, limits), funded into the escrow pool by the PM's **maker wallet**. Release is later signed by the platform admin EOA via `adminRelease` (not the maker).
 2. User (KYC-verified) opens a buy trade → existing `OpenTrade`. Trade is `pending_payment`. The app shows: **pay ₦`fiatAmount` to the PM's Nomba account from an account in your own name** (the name on file = their KYC name). A `payment_ref` is shown as an optional aid.
 3. User pays by normal bank transfer. Nomba **inbound webhook** fires → receiver verifies signature, dedupes, persists `WebhookEvent`, enqueues processing.
 4. **PM automation service** matches: `normalize(sender_account_name) ≈ normalize(buyer KYC name)` (threshold) **AND** `amount == trade.fiatAmount` **AND** exactly one open PM buy trade for that user:
-   - **Match** → `MarkPaid` (system-driven; no proof image) → operator-signed `release` → token to user. `accrueP2PReleaseFee` fires.
+   - **Match** → `MarkPaid` (system-driven; no proof image) → `adminRelease` signed by the platform admin EOA (via the `ReleaseSigner` seam) → token to user. `accrueP2PReleaseFee` fires.
    - **No/low-confidence/ambiguous match** → leave in the **PM manual-release queue**: the PM operator reviews the payment and either releases (manual `MarkPaid`+`release`) or declines. If never resolved, the **existing timeout watchdog** cancels the trade (token returns to the PM pool); declined/overpaid funds are refunded out-of-band by the PM.
 5. **Amount mismatch** (under/over) never auto-releases → manual queue.
 
@@ -70,7 +75,7 @@ Status machine **unchanged**. Unmatched inbound payments use the existing `Webho
 2. User opens a sell trade → existing `openTradeWithDeposit` (user's token escrowed JIT). User supplies a **destination bank account**; the system **Nomba name-lookup verifies it is in the user's own KYC name** before proceeding (mismatch → blocked/manual). Stored on the trade.
 3. PM automation service initiates a **Nomba payout** from the PM's account → the user's bank (₦ `fiatAmount`); records `nomba_payout_id`.
 4. Nomba **payout webhook**:
-   - **success** → operator-signed `release` → token to PM. `accrueP2PReleaseFee` fires.
+   - **success** → `adminRelease` signed by the platform admin EOA (via the `ReleaseSigner` seam) → token to PM. `accrueP2PReleaseFee` fires.
    - **failed** (after bounded retries) → cancel the trade via the existing cancel path → deposited token returns to the user; alert PM/admin.
 
 **Ordering (deliberate):** sell flow pays the user **fiat first, then releases token to the PM**. A release that fails after a successful payout leaves the PM merely *owed* an escrowed token (deterministic, idempotent on-chain retry) — the **user is always made whole first**. The reverse ordering would risk the user losing their token with no fiat.
@@ -89,7 +94,7 @@ Current `nomba_client.go` has only `ListBanks` + `Lookup` (OAuth2 client-credent
 ## 8. PM onboarding (reuse `MerchantRequest`)
 
 - Corporate applies via the existing `MerchantRequest` (`business_type = p2p_merchant`, already defined) → admin approves → role upgraded → a `payment_merchants` row is created (`pending`).
-- Setup: link Nomba creds (encrypted to secret store), register the operator wallet + **fund the escrow pool**, set the inbound account + payout source, rate/limits/caps → admin activates (`active`).
+- Setup: link Nomba creds (encrypted to secret store), register the PM's **maker wallet** + **fund the escrow pool** from it, set the inbound account + payout source, rate/limits/caps → admin activates (`active`). The maker wallet only funds the pool; it never signs releases.
 - **Phase 1: TSA is seeded manually** (one `payment_merchants` row; creds via secure config). Public corporate onboarding is Phase 2.
 - KYC: PM operations require a verified merchant (existing P2P `require(verified)` gate). Users require KYC verification (their name is the buy-flow match anchor and the sell-flow payout-name check).
 
@@ -101,7 +106,7 @@ Current `nomba_client.go` has only `ListBanks` + `Lookup` (OAuth2 client-credent
 - **Inbound reversal / chargeback after release** → crypto cannot be clawed back. Mitigation: release **only on a `settled` webhook** (never `pending`) + an optional hold on large amounts. Residual loss is the PM's risk — explicitly accepted.
 - **Disputes** → automated trades still flow through the existing dispute → `adminResolve` path.
 - **Kill switch** → set a PM `paused`: no new trades; in-flight trades drain.
-- **Operator-key safety** → keys in a secret manager (never DB/plaintext); sign only on a verified, settled, idempotent webhook; per-PM caps + monitoring; start TSA-only.
+- **Release-key safety** → there is **one** platform admin EOA, registered on-chain as `admin` via `addAdmin` (owner-only). Its key lives in a KMS (AWS KMS by default, behind the swappable `ReleaseSigner` seam) — never in DB/plaintext, never exported. `adminRelease` is signed only on a verified, settled, idempotent webhook; per-PM caps + monitoring gate it; the owner can `removeAdmin` to revoke and `pause` to halt all releases. Per-PM maker wallets never hold release authority, so a compromised PM cannot release.
 
 ## 10. Fee / TP
 
@@ -109,12 +114,13 @@ PM trades **are** P2P trades, so the existing **1% `p2p_platform`** fee and `acc
 
 ## 11. Phasing
 
-1. **Phase 1 (this spec): TSA-only automated PM.** Both buy and sell flows; manual `payment_merchants` seed; per-PM operator key; reference-optional name+amount matching with PM manual-release fallback; Nomba payout + inbound webhook + signature.
-2. **Phase 2:** public corporate PM onboarding (the `MerchantRequest` → setup → activate path), multiple live PMs, per-PM caps/monitoring dashboards.
-3. **Later (custody hardening):** escrow `operator` role (contract upgrade + audit) to remove per-PM hot keys, if volume justifies it.
+1. **Phase 1 (this spec): TSA-only automated PM.** Both buy and sell flows; manual `payment_merchants` seed; releases via `adminRelease` from the one platform admin EOA (key in KMS behind the `ReleaseSigner` seam); per-PM maker wallet funds the pool; reference-optional name+amount matching with PM manual-release fallback; Nomba payout + inbound webhook + signature.
+2. **Phase 2:** public corporate PM onboarding (the `MerchantRequest` → setup → activate path), multiple live PMs, per-PM caps/monitoring dashboards. Each new PM adds a maker wallet only — the release path (one admin EOA) is unchanged.
+3. **Later (custody hardening):** migrate the KMS key to MPC/threshold signing, or move to an on-chain per-PM `operator` role (contract upgrade + audit), if volume justifies it.
 
 ## 12. Open items to verify before/within implementation
 
 - Nomba: inbound payload fields (payer name/number), payout API + status webhook, signature scheme, sandbox availability.
 - Fuzzy name-match thresholds and normalization rules (case, ordering, middle names, business vs personal).
-- Secret-store mechanism for per-PM Nomba creds + operator keys (env/KMS).
+- Secret-store mechanism for per-PM Nomba creds (encrypted at rest).
+- KMS facts for the platform admin EOA: vendor (AWS KMS by default), key ARN/region, and the `ReleaseSigner` seam config (so MPC/threshold can swap in later without touching call sites).
