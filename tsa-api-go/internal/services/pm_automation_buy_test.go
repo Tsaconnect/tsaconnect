@@ -225,7 +225,7 @@ func newPMAutomationService(t *testing.T, db *gorm.DB, esc *mockEscrow, svc *P2P
 		hash: "0xrelease",
 	}
 	pmSvc := NewPMService(db)
-	return NewPMAutomationService(db, pmSvc, svc, signer, name), signer
+	return NewPMAutomationService(db, pmSvc, svc, signer, name, &fakeNombaGateway{}), signer
 }
 
 // ─── Integration tests ───────────────────────────────────────────────────────

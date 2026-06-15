@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"strconv"
@@ -109,16 +110,18 @@ type PMNameLookup func(ctx context.Context, userID uuid.UUID) (string, error)
 // (system markPaid → admin release). A non-match or ambiguity is a deliberate
 // no-op, leaving the trade pending_payment for the manual-release queue.
 type PMAutomationService struct {
-	db     *gorm.DB
-	pm     *PMService
-	trades *P2PTradeService
-	signer ReleaseSigner
-	name   PMNameLookup
+	db      *gorm.DB
+	pm      *PMService
+	trades  *P2PTradeService
+	signer  ReleaseSigner
+	name    PMNameLookup
+	gateway NombaGateway
 }
 
-// NewPMAutomationService wires the PM buy-flow automation.
-func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner, name PMNameLookup) *PMAutomationService {
-	return &PMAutomationService{db: db, pm: pm, trades: trades, signer: signer, name: name}
+// NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
+// is the per-PM Nomba boundary used by the sell flow to pay the user's bank.
+func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner, name PMNameLookup, gateway NombaGateway) *PMAutomationService {
+	return &PMAutomationService{db: db, pm: pm, trades: trades, signer: signer, name: name, gateway: gateway}
 }
 
 // inboundCandidateRow is the lightweight projection scanned from the
@@ -238,4 +241,92 @@ func tradeUSDValue(trade *models.P2PTrade) (float64, bool) {
 		return 0, false
 	}
 	return baseUnitsToUSD(amt, tokenDecimalsFor(trade.ChainID, trade.Token)), true
+}
+
+// ─── Sell flow (payout → release) ────────────────────────────────────────────
+
+// InitiateSellPayout pays the user's bank for a deposited PM sell trade and
+// records the Nomba payout id. Preconditions: trade is a deposited (funding=1)
+// pending_payment trade with a confirmed deposit (open_tx_hash set) and a
+// KYC-name-verified payout destination. Idempotent-ish: if a payout id is
+// already recorded, it returns that id without re-initiating.
+func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uuid.UUID) (string, error) {
+	var trade models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrTradeNotFound
+		}
+		return "", err
+	}
+	if trade.NombaPayoutID != "" {
+		return trade.NombaPayoutID, nil // already initiated — don't double-pay
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment ||
+		trade.Funding != models.P2PTradeFundingDepositedByTaker ||
+		strings.TrimSpace(trade.OpenTxHash) == "" {
+		return "", fmt.Errorf("%w: trade not a confirmed deposited sell trade", ErrInvalidTransition)
+	}
+	if trade.PayoutAccountNumber == "" || trade.PayoutBank == "" {
+		return "", fmt.Errorf("%w: payout destination missing", ErrInvalidParams)
+	}
+	payoutID, err := s.gateway.InitiatePayout(ctx, PayoutRequest{
+		BankCode:      trade.PayoutBank,
+		AccountNumber: trade.PayoutAccountNumber,
+		AmountNGN:     trade.FiatAmount,
+		Reference:     trade.ID.String(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("initiate nomba payout: %w", err)
+	}
+	// Guard the write on nomba_payout_id='' so a concurrent caller can't clobber
+	// an id another goroutine just recorded (then double-pay on the next webhook).
+	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		Where("id = ? AND nomba_payout_id = ''", trade.ID).
+		Update("nomba_payout_id", payoutID).Error; err != nil {
+		return "", err
+	}
+	return payoutID, nil
+}
+
+// HandlePayoutStatus settles a sell trade on the payout-result webhook. On
+// success the escrowed token is released to the PM (AutoRelease). On failure we
+// record a marker + alert and leave the trade pending_payment so the existing
+// timeout watchdog refunds the deposit on expiry (or an operator handles it via
+// the manual queue) — we deliberately do NOT auto-refund on-chain here.
+//
+// TODO(pm-phase2): automated bounded-retry + on-chain refund once
+// adminResolve-from-pending semantics are confirmed.
+func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutStatus) error {
+	var trade models.P2PTrade
+	err := s.db.WithContext(ctx).First(&trade, "nomba_payout_id = ?", p.PayoutID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// No trade for this payout id — a payout we don't track. Log and ignore.
+		log.Printf("[pm automation] payout status %q for untracked payout id %q (event=%s); ignoring", p.Status, p.PayoutID, p.EventID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	switch strings.ToLower(p.Status) {
+	case "success":
+		// Money already left the PM's Nomba account → release token to the PM.
+		_, err := s.trades.AutoRelease(ctx, trade.ID, s.signer)
+		return err
+	case "failed":
+		// SCOPING: alert + manual/watchdog, NO auto-refund (see TODO above).
+		// Record a marker on the trade so the manual queue / operator sees it,
+		// and WARN-log for alerting. Leave the trade in pending_payment so the
+		// timeout watchdog refunds the deposit on expiry.
+		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for watchdog/manual", trade.ID, p.PayoutID, p.EventID)
+		if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+			Where("id = ?", trade.ID).
+			Update("cancel_reason", "pm payout failed (nomba payout="+p.PayoutID+"); routed to manual").Error; err != nil {
+			return err
+		}
+		return nil
+	default:
+		// "pending" or unknown — no-op; await a terminal webhook.
+		return nil
+	}
 }
