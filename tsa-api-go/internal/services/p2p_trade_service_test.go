@@ -185,6 +185,10 @@ func (m *mockEscrow) PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, e
 func (m *mockEscrow) PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error) {
 	return []byte(`{"tx":"adminResolve"}`), nil
 }
+func (m *mockEscrow) PrepareAdminRelease(tradeId [32]byte, admin string) ([]byte, error) {
+	m.preparedTxs = append(m.preparedTxs, "adminRelease")
+	return []byte(`{"tx":"adminRelease"}`), nil
+}
 
 func (m *mockEscrow) VerifyDeposited(txHash string, seller, token common.Address) (*P2PDepositedEvent, error) {
 	if m.verifyDepositErr != nil {

@@ -100,6 +100,9 @@ type P2PEscrowAdapter interface {
 	PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error)
 	PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error)
 	PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error)
+	// PrepareAdminRelease builds the unsigned adminRelease tx sent by the
+	// platform admin EOA — the system-driven (PM-automation) release path.
+	PrepareAdminRelease(tradeId [32]byte, admin string) ([]byte, error)
 
 	// Receipt verification.
 	VerifyDeposited(txHash string, expectedSeller, expectedToken common.Address) (*P2PDepositedEvent, error)
@@ -1658,6 +1661,17 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
+	return s.confirmReleaseCore(ctx, &trade, txHash, &sellerID, ev)
+}
+
+// confirmReleaseCore is the post-verify settlement body shared by the seller
+// path (ConfirmRelease) and the system-driven path (AutoRelease): money-invariant
+// check, the DB transition (paid|releasing → released) with ad-reserved drain +
+// exhausted-flip, fee accrual, audit, emits and the system chat message. The
+// caller has already verified the on-chain release event (`ev`). `auditActor` is
+// the actor recorded in the audit log — &sellerID for the seller path, nil for
+// the system path.
+func (s *P2PTradeService) confirmReleaseCore(ctx context.Context, trade *models.P2PTrade, txHash string, auditActor *uuid.UUID, ev *P2PTradeReleasedEvent) (*models.P2PTrade, error) {
 	// Money-invariant check: AmountToBuyer + FeeToSystem must equal the
 	// trade amount the seller locked. If the on-chain emit reports anything
 	// else, refuse to mark the trade settled — the reconciler will pick it
@@ -1670,7 +1684,7 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	}
 
 	now := s.clock.Now()
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status IN ?", trade.ID,
 				[]string{models.P2PTradeStatusPaid, models.P2PTradeStatusReleasing}).
@@ -1715,14 +1729,14 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	// Accrue the realized on-chain fee into the fee/TP v2 engine (flag-gated,
 	// async, idempotent on p2p_release/trade.ID). The event carries the exact
 	// fee that hit-chain.
-	s.accrueP2PReleaseFee(&trade, ev.FeeToSystem)
-	s.audit(ctx, models.P2PAuditTradeReleased, &sellerID, &trade.AdID, &trade.ID, map[string]any{
+	s.accrueP2PReleaseFee(trade, ev.FeeToSystem)
+	s.audit(ctx, models.P2PAuditTradeReleased, auditActor, &trade.AdID, &trade.ID, map[string]any{
 		"txHash":        txHash,
 		"funding":       trade.Funding,
 		"amountToBuyer": ev.AmountToBuyer.String(),
 		"feeToSystem":   ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeReleased, sellerID, "Trade released", "", map[string]any{"tradeId": trade.ID})
+	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released", "", map[string]any{"tradeId": trade.ID})
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to merchant; %s in platform fee.",
@@ -1732,7 +1746,97 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to buyer; %s in platform fee.",
 			ev.AmountToBuyer, ev.FeeToSystem))
 	}
+	return trade, nil
+}
+
+// SystemMarkPaid flips a PM trade pending_payment → paid on a verified inbound
+// fiat credit (no proof image, no buyer identity gate — the Nomba match IS the
+// proof). ref is a provenance marker, e.g. "nomba:<eventID>".
+func (s *P2PTradeService) SystemMarkPaid(ctx context.Context, tradeID uuid.UUID, ref string) (*models.P2PTrade, error) {
+	var trade models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTradeNotFound
+		}
+		return nil, err
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
+	}
+	if strings.TrimSpace(trade.OpenTxHash) == "" {
+		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
+	}
+	now := s.clock.Now()
+	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Updates(map[string]any{
+			"status":          models.P2PTradeStatusPaid,
+			"marked_paid_at":  now,
+			"proof_image_url": ref,
+			"updated_at":      now,
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, ErrInvalidTransition
+	}
+	trade.Status = models.P2PTradeStatusPaid
+	trade.MarkedPaidAt = &now
+	trade.ProofImageURL = ref
+	s.audit(ctx, models.P2PAuditTradeMarkedPaid, nil, &trade.AdID, &trade.ID, map[string]any{"system": ref})
+	s.systemMsg(ctx, trade.ID, "Payment received and verified automatically. Releasing crypto.")
 	return &trade, nil
+}
+
+// AutoRelease settles a PM trade via the platform admin EOA: flip → releasing
+// (system-driven), build the unsigned adminRelease tx, sign+broadcast through
+// the ReleaseSigner, verify the on-chain event, and confirm via confirmReleaseCore.
+func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, signer ReleaseSigner) (*models.P2PTrade, error) {
+	var trade models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTradeNotFound
+		}
+		return nil, err
+	}
+	if trade.Status == models.P2PTradeStatusReleased {
+		return &trade, nil // idempotent
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment &&
+		trade.Status != models.P2PTradeStatusPaid &&
+		trade.Status != models.P2PTradeStatusReleasing {
+		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
+	}
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if trade.Status != models.P2PTradeStatusReleasing {
+		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+			Where("id = ? AND status IN ?", trade.ID,
+				[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+			Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
+		if res.Error != nil {
+			return nil, res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil, ErrInvalidTransition
+		}
+	}
+	unsignedTx, err := escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
+	if err != nil {
+		return nil, fmt.Errorf("prepare admin release: %w", err)
+	}
+	txHash, err := signer.SignAndBroadcast(ctx, unsignedTx)
+	if err != nil {
+		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
+	}
+	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
+	if err != nil {
+		return nil, fmt.Errorf("verify on-chain release: %w", err)
+	}
+	return s.confirmReleaseCore(ctx, &trade, txHash, nil, ev)
 }
 
 // PrepareCancel prepares an unsigned `cancelByTimeout` tx for a trade whose

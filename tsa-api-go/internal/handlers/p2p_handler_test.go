@@ -125,6 +125,9 @@ func (m *mockEscrow) PrepareRaiseDispute(_ [32]byte, _ string) ([]byte, error) {
 func (m *mockEscrow) PrepareAdminResolve(_ [32]byte, _ bool, _ string) ([]byte, error) {
 	return []byte(`{"tx":"adminResolve"}`), nil
 }
+func (m *mockEscrow) PrepareAdminRelease(_ [32]byte, _ string) ([]byte, error) {
+	return []byte(`{"tx":"adminRelease"}`), nil
+}
 func (m *mockEscrow) VerifyDeposited(_ string, s, t common.Address) (*services.P2PDepositedEvent, error) {
 	if m.depositedEvent != nil {
 		return m.depositedEvent, nil
