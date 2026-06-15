@@ -58,8 +58,11 @@ func ngnEqual(a, b string) bool {
 }
 
 // ngnToKobo parses a decimal NGN string into integer kobo (naira×100). The
-// fractional part is padded/truncated to exactly 2 digits. Returns ok=false on
-// any parse error (empty, non-numeric, multiple dots, negative).
+// fractional part is padded/truncated to exactly 2 digits (inputs with more
+// than 2 decimal places are TRUNCATED, not rejected — acceptable because NGN
+// is a 2dp currency and both operands truncate identically). Returns ok=false
+// on any parse error (empty, non-numeric, negative). A second dot causes
+// ok=false because ParseInt rejects the dot character in the fractional part.
 func ngnToKobo(s string) (int64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -70,7 +73,6 @@ func ngnToKobo(s string) (int64, bool) {
 	if i := strings.IndexByte(s, '.'); i >= 0 {
 		whole = s[:i]
 		frac = s[i+1:]
-		// A second dot makes the fractional part unparseable below.
 	}
 	if whole == "" {
 		return 0, false
@@ -187,12 +189,18 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
-	// 6. Cap check (USD). Over-cap → manual queue.
+	// 6. Cap check (USD). Over-cap → manual queue. Unknown USD (unparseable
+	//    TokenAmount) → also route to manual: never auto-release when the value
+	//    of the trade cannot be verified.
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		return err
 	}
-	usd := tradeUSDValue(&trade)
+	usd, usdOK := tradeUSDValue(&trade)
+	if !usdOK {
+		log.Printf("[pm automation] trade=%s has unparseable token_amount %q; routing to manual queue (cannot verify cap)", tradeID, trade.TokenAmount)
+		return nil
+	}
 	if !WithinPerTradeCap(pm, usd) {
 		log.Printf("[pm automation] trade=%s usd=%.2f over PM per-trade cap; routing to manual queue", tradeID, usd)
 		return nil
@@ -221,12 +229,13 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 
 // tradeUSDValue converts a trade's locked TokenAmount (base units) to a USD
 // float, treating the settlement token (USDT/USDC) as ~$1 — mirroring
-// baseUnitsToUSD / the handlers' weiToUSDFloat convention. Returns 0 on an
-// unparseable amount.
-func tradeUSDValue(trade *models.P2PTrade) float64 {
+// baseUnitsToUSD / the handlers' weiToUSDFloat convention. Returns ok=false
+// when TokenAmount cannot be parsed as a base-10 integer (e.g. empty, decimal,
+// or non-numeric). Callers must not auto-release when ok=false.
+func tradeUSDValue(trade *models.P2PTrade) (float64, bool) {
 	amt, ok := new(big.Int).SetString(trade.TokenAmount, 10)
 	if !ok {
-		return 0
+		return 0, false
 	}
-	return baseUnitsToUSD(amt, tokenDecimalsFor(trade.ChainID, trade.Token))
+	return baseUnitsToUSD(amt, tokenDecimalsFor(trade.ChainID, trade.Token)), true
 }
