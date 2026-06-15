@@ -90,6 +90,8 @@ func AutoMigrate() error {
 		&models.P2PAuditLog{},
 		&models.P2PMerchantStats{},
 		&models.P2PRating{},
+		// PM (Payment Merchant) — automated P2P liquidity provider (Phase 1: TSA).
+		&models.PaymentMerchant{},
 	); err != nil {
 		return err
 	}
