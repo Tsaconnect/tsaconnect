@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,46 @@ type RewardService struct {
 	// ErrMCGPPriceUnavailable (or any error) when the price cannot be obtained —
 	// the engine then DEFERS the conversion rather than locking a bad rate.
 	price mcgpPriceFunc
+
+	// payouts resolves the admin-configured payout token + chain per reward.
+	// Optional/nil-safe: a nil resolver (or unset config) falls back to MCGP/sonic,
+	// preserving the pre-multi-token behavior.
+	payouts *RewardPayoutConfigService
+}
+
+// SetPayoutResolver wires the admin-configurable payout-token resolver. Called
+// once at construction from main.go. nil-safe (Resolve falls back to MCGP/sonic).
+func (s *RewardService) SetPayoutResolver(p *RewardPayoutConfigService) {
+	s.payouts = p
+}
+
+// payoutPlan is the computed payout for one reward, denominated in the resolved
+// token. For MCGP the amount needs the OTC price (deferred when unavailable);
+// stablecoins (USDC/USDT) are 1:1 with USD and need no price.
+type payoutPlan struct {
+	token          string
+	chain          string
+	payoutAmount   float64 // amount in the payout token
+	mcgpAmount     float64 // MCGP credited (0 for stablecoin payouts)
+	rateUSDPerMCGP float64 // locked MCGP price (0 for stablecoin payouts)
+	deferred       bool    // MCGP payout but price unavailable → cannot lock a rate yet
+}
+
+// computePayout turns a USD reward value into a payoutPlan for the resolved
+// token. MCGP → USD/price (defers if price<=0); USDC/USDT → 1:1 USD, no price.
+func computePayout(rewardUSD float64, res RewardPayoutResolution, priceUSD float64) payoutPlan {
+	if strings.EqualFold(res.PayoutToken, "MCGP") {
+		if priceUSD <= 0 {
+			return payoutPlan{token: res.PayoutToken, chain: res.Chain, deferred: true}
+		}
+		mcgp := rewardUSD / priceUSD
+		return payoutPlan{
+			token: res.PayoutToken, chain: res.Chain,
+			payoutAmount: mcgp, mcgpAmount: mcgp, rateUSDPerMCGP: priceUSD,
+		}
+	}
+	// Stablecoin payout: 1:1 with USD, no MCGP price needed.
+	return payoutPlan{token: res.PayoutToken, chain: res.Chain, payoutAmount: rewardUSD}
 }
 
 // globalShareSettler is the SP4 surface RewardService needs: lazily credit a
@@ -229,22 +270,21 @@ func (s *RewardService) ProcessUserRewards(ctx context.Context, userID uuid.UUID
 
 		// (d) Convert not-yet-converted cashback rows (one entry per row). Each
 		// conversion needs the price; if unavailable, defer ALL of them.
-		if priceOK {
-			converted, mcgp, err := s.convertPendingCashback(tx, userID, priceUSD, cutoverFloor)
-			if err != nil {
-				return err
-			}
-			res.CashbacksConverted = converted
-			res.MCGPCredited += mcgp
-		} else {
-			// Only mark deferred if there is actually pending cashback to convert.
-			pending, err := s.hasPendingCashback(tx, userID, cutoverFloor)
-			if err != nil {
-				return err
-			}
-			if pending {
-				res.Deferred = true
-			}
+		// Convert pending cashback EVERY run (not gated on the MCGP price):
+		// stablecoin (USDC/USDT) payouts settle 1:1 without it; MCGP payouts defer
+		// internally and report it so the user stays dirty for retry.
+		effectivePrice := priceUSD
+		if !priceOK {
+			effectivePrice = 0
+		}
+		converted, mcgp, cbDeferred, err := s.convertPendingCashback(tx, userID, effectivePrice, cutoverFloor)
+		if err != nil {
+			return err
+		}
+		res.CashbacksConverted = converted
+		res.MCGPCredited += mcgp
+		if cbDeferred {
+			res.Deferred = true
 		}
 
 		// Advance the checkpoint + mark processed. The user stays dirty when any
@@ -328,7 +368,10 @@ func (s *RewardService) loadOrInitRewardState(tx *gorm.DB, userID uuid.UUID) (mo
 // unavailable). MCGP = rewardUSD / priceUSD, locked now.
 func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level int, priceUSD float64) (float64, *events.Event, *events.Event, error) {
 	rewardUSD := models.RewardUSDForLevel(level)
-	mcgp := rewardUSD / priceUSD
+	// TP-level payout token is admin-resolved (launch: MCGP). Called only when the
+	// price is available, so an MCGP plan never defers here.
+	plan := computePayout(rewardUSD, s.payouts.Resolve(models.RewardKindLevel, models.PaymentTokenAny), priceUSD)
+	mcgp := plan.mcgpAmount
 
 	entry := models.RewardEntry{
 		ID:             uuid.New(),
@@ -337,8 +380,11 @@ func (s *RewardService) recordLevelReward(tx *gorm.DB, userID uuid.UUID, level i
 		SourceLevel:    level,
 		SourceID:       uuid.Nil,
 		RewardUSD:      rewardUSD,
-		MCGPAmount:     mcgp,
-		RateUSDPerMCGP: priceUSD,
+		MCGPAmount:     plan.mcgpAmount,
+		RateUSDPerMCGP: plan.rateUSDPerMCGP,
+		PayoutToken:    plan.token,
+		PayoutChain:    plan.chain,
+		PayoutAmount:   plan.payoutAmount,
 		CreatedAt:      time.Now(),
 	}
 	// Idempotent insert: a duplicate (user, kind=level, level) is a clean no-op.
@@ -458,7 +504,13 @@ func (s *RewardService) recordPrizeDue(tx *gorm.DB, userID uuid.UUID, level int,
 // eligible, so a stray pre-cutover cashback row that survived the reset's DELETE
 // can never be re-minted. A zero-value floor (no cutover has run) admits every
 // row, preserving pre-cutover behavior exactly.
-func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, priceUSD float64, cutoverFloor time.Time) (int, float64, error) {
+//
+// Each row's payout token is resolved from its payment token (CashbackEarning.Token)
+// via the admin payout config. Stablecoin payouts (USDC/USDT) convert 1:1 with
+// USD and need no MCGP price — so they settle even when the OTC oracle is down.
+// MCGP payouts need the price; when it's unavailable those rows are skipped and
+// reported via deferred=true so the user stays dirty for retry.
+func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, priceUSD float64, cutoverFloor time.Time) (count int, mcgpTotal float64, deferred bool, err error) {
 	var pending []models.CashbackEarning
 	if err := tx.
 		Where("user_id = ?", userID).
@@ -470,18 +522,18 @@ func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, pr
 		).
 		Order("created_at ASC").
 		Find(&pending).Error; err != nil {
-		return 0, 0, fmt.Errorf("load pending cashback for %s: %w", userID, err)
+		return 0, 0, false, fmt.Errorf("load pending cashback for %s: %w", userID, err)
 	}
 
-	var (
-		count int
-		total float64
-	)
 	for _, cb := range pending {
 		if cb.AmountUSD <= 0 {
 			continue
 		}
-		mcgp := cb.AmountUSD / priceUSD
+		plan := computePayout(cb.AmountUSD, s.payouts.Resolve(models.RewardKindCashback, cb.Token), priceUSD)
+		if plan.deferred {
+			deferred = true // MCGP payout but no price yet — retry next run
+			continue
+		}
 		entry := models.RewardEntry{
 			ID:             uuid.New(),
 			UserID:         userID,
@@ -489,46 +541,31 @@ func (s *RewardService) convertPendingCashback(tx *gorm.DB, userID uuid.UUID, pr
 			SourceLevel:    0,
 			SourceID:       cb.ID,
 			RewardUSD:      cb.AmountUSD,
-			MCGPAmount:     mcgp,
-			RateUSDPerMCGP: priceUSD,
+			MCGPAmount:     plan.mcgpAmount,
+			RateUSDPerMCGP: plan.rateUSDPerMCGP,
+			PayoutToken:    plan.token,
+			PayoutChain:    plan.chain,
+			PayoutAmount:   plan.payoutAmount,
 			CreatedAt:      time.Now(),
 		}
 		res := tx.Clauses(clause.OnConflict{Columns: idemColumns(), DoNothing: true}).Create(&entry)
 		if res.Error != nil {
-			return 0, 0, fmt.Errorf("insert cashback reward (user=%s cb=%s): %w", userID, cb.ID, res.Error)
+			return 0, 0, false, fmt.Errorf("insert cashback reward (user=%s cb=%s): %w", userID, cb.ID, res.Error)
 		}
 		if res.RowsAffected == 0 {
 			continue // already converted (race / partial prior run)
 		}
-		if err := s.addClaimable(tx, userID, mcgp); err != nil {
-			return 0, 0, err
+		// Only MCGP payouts feed the MCGP claim balance; stablecoin payouts are
+		// tracked via RewardEntry.PayoutAmount (surfaced per-token in the summary).
+		if plan.mcgpAmount > 0 {
+			if err := s.addClaimable(tx, userID, plan.mcgpAmount); err != nil {
+				return 0, 0, false, err
+			}
 		}
 		count++
-		total += mcgp
+		mcgpTotal += plan.mcgpAmount
 	}
-	return count, total, nil
-}
-
-// hasPendingCashback reports whether the user has any positive CashbackEarning
-// row not yet converted to a RewardEntry — used to decide whether a
-// price-unavailable run actually deferred work (and must stay dirty). Applies
-// the SAME cutover floor as convertPendingCashback so a pre-cutover row (which
-// the converter would skip) never marks the run deferred.
-func (s *RewardService) hasPendingCashback(tx *gorm.DB, userID uuid.UUID, cutoverFloor time.Time) (bool, error) {
-	var n int64
-	err := tx.Model(&models.CashbackEarning{}).
-		Where("user_id = ? AND amount_usd > 0", userID).
-		Where("created_at >= ?", cutoverFloor).
-		Where("id NOT IN (?)",
-			tx.Model(&models.RewardEntry{}).
-				Select("source_id").
-				Where("user_id = ? AND kind = ?", userID, models.RewardKindCashback),
-		).
-		Count(&n).Error
-	if err != nil {
-		return false, fmt.Errorf("count pending cashback for %s: %w", userID, err)
-	}
-	return n > 0, nil
+	return count, mcgpTotal, deferred, nil
 }
 
 // addClaimable bumps the per-user cumulative claimable-MCGP balance by mcgp,

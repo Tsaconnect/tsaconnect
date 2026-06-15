@@ -80,6 +80,7 @@ func setupTPTestDB(t *testing.T) *gorm.DB {
 			source_type TEXT NOT NULL,
 			source_id TEXT NOT NULL,
 			amount_usd REAL NOT NULL,
+			token TEXT,
 			tx_hash TEXT,
 			created_at DATETIME NOT NULL
 		)`,

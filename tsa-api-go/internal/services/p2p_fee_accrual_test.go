@@ -84,7 +84,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE cashback_earnings (
 			id TEXT PRIMARY KEY, user_id TEXT, source_user_id TEXT,
-			source_type TEXT, source_id TEXT, amount_usd REAL, tx_hash TEXT, created_at DATETIME
+			source_type TEXT, source_id TEXT, amount_usd REAL, token TEXT, tx_hash TEXT, created_at DATETIME
 		)`,
 		`CREATE TABLE fee_distributions (
 			id TEXT PRIMARY KEY, source_type TEXT, source_id TEXT, user_id TEXT,

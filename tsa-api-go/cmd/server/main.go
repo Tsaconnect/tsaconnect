@@ -212,6 +212,10 @@ func main() {
 		log.Fatalf("Failed to init reward payout config: %v", err)
 	}
 	rph := handlers.NewRewardPayoutHandler(rewardPayoutService)
+	// Wire the resolver into the SP5 processor so level/cashback rewards are
+	// denominated in the admin-configured payout token (cashback follows the
+	// payment token; TP-level → MCGP for launch).
+	rewardService.SetPayoutResolver(rewardPayoutService)
 
 	// Configurable-FeeManager admin set-fee flow + drift reconciler (design
 	// §5/§10). DORMANT-BY-DEFAULT: a multi-chain FeeManager reader is built only
