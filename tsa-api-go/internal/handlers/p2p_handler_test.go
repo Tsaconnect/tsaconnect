@@ -255,7 +255,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			deleted_at DATETIME, created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE p2p_ads (
-			id TEXT PRIMARY KEY, seller_id TEXT NOT NULL,
+			id TEXT PRIMARY KEY, pm_id TEXT, seller_id TEXT NOT NULL,
 			side TEXT, token TEXT, chain_id INTEGER,
 			amount TEXT, remaining TEXT, reserved TEXT,
 			fiat_currency TEXT, rate TEXT,
@@ -278,7 +278,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
 			fiat_currency TEXT, rate TEXT,
-			payment_method_id TEXT,
+			payment_method_id TEXT, payment_ref TEXT, nomba_inbound_event_id TEXT, nomba_payout_id TEXT, payout_account_number TEXT, payout_bank TEXT, payout_account_name TEXT,
 			on_chain_trade_id TEXT UNIQUE,
 			open_tx_hash TEXT, release_tx_hash TEXT,
 			status TEXT DEFAULT 'pending_payment',
