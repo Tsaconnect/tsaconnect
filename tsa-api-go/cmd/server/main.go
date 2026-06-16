@@ -480,7 +480,9 @@ func main() {
 	if cfg.PMTSAEnabled {
 		if uid, perr := uuid.Parse(cfg.PMTSAUserID); perr != nil {
 			log.Printf("[pm] TSA seed skipped: invalid PM_TSA_USER_ID %q: %v", cfg.PMTSAUserID, perr)
-		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
+			// NombaWalletID ("") is wired from config in the main-wiring task (T9.5);
+			// passed empty here only to keep this build green.
+		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, "", cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
 			log.Printf("[pm] TSA seed failed (continuing): %v", serr)
 		} else {
 			log.Printf("[pm] TSA payment-merchant seeded (account=%s)", cfg.PMTSAInboundAccount)

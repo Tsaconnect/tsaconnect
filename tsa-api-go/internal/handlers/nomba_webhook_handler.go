@@ -51,9 +51,10 @@ func NewNombaWebhookHandler(v nombaVerifier, store *services.NombaWebhookStore, 
 }
 
 // webhookEnvelope is the minimal top-level shape we read to dedupe + classify.
-// TODO(nomba-facts): confirm event_id / event field names against the live API.
+// Nomba's real per-event id is `requestId` (NOT a top-level `event_id`), so the
+// dedup key is keyed on requestId.
 type webhookEnvelope struct {
-	EventID string `json:"event_id"`
+	EventID string `json:"requestId"`
 	Event   string `json:"event"`
 }
 
@@ -79,7 +80,7 @@ func (h *NombaWebhookHandler) Handle(c *gin.Context) {
 		return
 	}
 	if env.EventID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing event_id"})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing requestId"})
 		return
 	}
 

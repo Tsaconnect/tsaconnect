@@ -19,12 +19,12 @@ func TestMatchBuyInbound(t *testing.T) {
 	idB := uuid.New()
 
 	cases := []struct {
-		name       string
-		cands      []buyCandidate
-		sender     string
-		amountNGN  string
-		wantID     uuid.UUID
-		wantOK     bool
+		name      string
+		cands     []buyCandidate
+		sender    string
+		amountNGN string
+		wantID    uuid.UUID
+		wantOK    bool
 	}{
 		{
 			name:      "exact single name+amount match",
@@ -127,6 +127,7 @@ func createPaymentMerchantsTable(t *testing.T, db *gorm.DB) {
 		name                  TEXT NOT NULL,
 		status                TEXT NOT NULL DEFAULT 'pending',
 		nomba_account_id      TEXT,
+		nomba_wallet_id       TEXT,
 		nomba_creds_ref       TEXT,
 		inbound_account_number TEXT,
 		inbound_bank          TEXT,
@@ -151,7 +152,10 @@ func seedActivePM(t *testing.T, db *gorm.DB, inboundAcct string, perTradeCapUSD 
 		Status:               models.PaymentMerchantStatusActive,
 		InboundAccountNumber: inboundAcct,
 		InboundBank:          "Nomba",
-		PerTradeCapUSD:       perTradeCapUSD,
+		// Derive a unique non-blank wallet id from the inbound acct so the buy
+		// flow (now keyed by walletId) can resolve this PM.
+		NombaWalletID:  "wallet-" + inboundAcct,
+		PerTradeCapUSD: perTradeCapUSD,
 	}
 	if err := db.Create(pm).Error; err != nil {
 		t.Fatalf("seed PM: %v", err)
@@ -246,11 +250,11 @@ func TestHandleInbound_HappyPath(t *testing.T) {
 	}))
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:             "settled",
-		DestinationAccount: pm.InboundAccountNumber,
-		SenderAccountName:  "JOHN DOE",
-		AmountNGN:          "1500.00",
-		EventID:            "evt_1",
+		Status:            "settled",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_1",
 	})
 	if err != nil {
 		t.Fatalf("HandleInbound: %v", err)
@@ -266,6 +270,67 @@ func TestHandleInbound_HappyPath(t *testing.T) {
 	}
 	if len(signer.calls) != 1 {
 		t.Errorf("signer called %d times, want 1", len(signer.calls))
+	}
+}
+
+// TestHandleInbound_KeysByWalletId verifies the buy flow resolves the PM by the
+// Nomba walletId (data.merchant.walletId), NOT by a destination account number.
+// The inbound carries only WalletID (DestinationAccount left blank) and still
+// releases; an inbound with an unknown walletId is a no-op even if the (now
+// ignored) DestinationAccount would have matched.
+func TestHandleInbound_KeysByWalletId(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
+		buyerID: "JOHN DOE",
+	}))
+
+	// Match by walletId, with DestinationAccount deliberately blank.
+	if err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:            "settled",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_wallet",
+	}); err != nil {
+		t.Fatalf("HandleInbound (by walletId): %v", err)
+	}
+	var released models.P2PTrade
+	db.First(&released, "id = ?", trade.ID)
+	if released.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("status = %q, want released (keyed by walletId)", released.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Fatalf("signer called %d times, want 1", len(signer.calls))
+	}
+
+	// An unknown walletId is a no-op even though DestinationAccount matches the PM.
+	trade2 := seedBuyTradeOnAd(t, db, ad, buyerID, "2500.00")
+	if err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:             "settled",
+		WalletID:           "wallet-unknown",
+		DestinationAccount: pm.InboundAccountNumber,
+		SenderAccountName:  "JOHN DOE",
+		AmountNGN:          "2500.00",
+		EventID:            "evt_unknown_wallet",
+	}); err != nil {
+		t.Fatalf("HandleInbound (unknown walletId): %v", err)
+	}
+	var stuck models.P2PTrade
+	db.First(&stuck, "id = ?", trade2.ID)
+	if stuck.Status != models.P2PTradeStatusPendingPayment {
+		t.Fatalf("status = %q, want pending_payment (unknown walletId must no-op)", stuck.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Fatalf("signer called %d times after unknown-wallet inbound, want still 1", len(signer.calls))
 	}
 }
 
@@ -285,11 +350,11 @@ func TestHandleInbound_PendingStatus_NoOp(t *testing.T) {
 	}))
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:             "pending",
-		DestinationAccount: pm.InboundAccountNumber,
-		SenderAccountName:  "JOHN DOE",
-		AmountNGN:          "1500.00",
-		EventID:            "evt_1",
+		Status:            "pending",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_1",
 	})
 	if err != nil {
 		t.Fatalf("HandleInbound: %v", err)
@@ -321,11 +386,11 @@ func TestHandleInbound_NameMismatch_NoOp(t *testing.T) {
 	}))
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:             "settled",
-		DestinationAccount: pm.InboundAccountNumber,
-		SenderAccountName:  "JANE SMITH",
-		AmountNGN:          "1500.00",
-		EventID:            "evt_1",
+		Status:            "settled",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JANE SMITH",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_1",
 	})
 	if err != nil {
 		t.Fatalf("HandleInbound: %v", err)
@@ -360,11 +425,11 @@ func TestHandleInbound_Ambiguous_NoOp(t *testing.T) {
 	}))
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:             "settled",
-		DestinationAccount: pm.InboundAccountNumber,
-		SenderAccountName:  "JOHN DOE",
-		AmountNGN:          "1500.00",
-		EventID:            "evt_1",
+		Status:            "settled",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_1",
 	})
 	if err != nil {
 		t.Fatalf("HandleInbound: %v", err)
@@ -412,11 +477,11 @@ func TestHandleInbound_UnparseableTokenAmount_NoRelease(t *testing.T) {
 	}))
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:             "settled",
-		DestinationAccount: pm.InboundAccountNumber,
-		SenderAccountName:  "JOHN DOE",
-		AmountNGN:          "1500.00",
-		EventID:            "evt_bad_amount",
+		Status:            "settled",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_bad_amount",
 	})
 	// Route-to-manual is a deliberate no-op: no error returned.
 	if err != nil {

@@ -28,10 +28,10 @@ import (
 // ─── Fake dispatcher ──────────────────────────────────────────────────────────
 
 type fakeWebhookDispatcher struct {
-	inbound     []services.InboundPayment
-	payouts     []services.PayoutStatus
-	inboundErr  error
-	payoutErr   error
+	inbound    []services.InboundPayment
+	payouts    []services.PayoutStatus
+	inboundErr error
+	payoutErr  error
 }
 
 func (f *fakeWebhookDispatcher) HandleInbound(_ context.Context, p services.InboundPayment) error {
@@ -249,7 +249,7 @@ func TestNombaWebhook_MissingTimestamp_401(t *testing.T) {
 }
 
 func TestNombaWebhook_Duplicate_NotReDispatched(t *testing.T) {
-	_, store := newSQLiteWebhookStore(t)
+	db, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
 	h := newWebhookHandler(store, disp)
 
@@ -267,6 +267,16 @@ func TestNombaWebhook_Duplicate_NotReDispatched(t *testing.T) {
 	if len(disp.inbound) != 1 {
 		t.Fatalf("duplicate must dispatch exactly once, got %d", len(disp.inbound))
 	}
+
+	// Dedup is keyed on requestId (Nomba's real id), NOT the top-level event_id.
+	// The recorded webhook_events row's event_id column holds the requestId.
+	var recorded string
+	if err := db.Table("webhook_events").Select("event_id").Row().Scan(&recorded); err != nil {
+		t.Fatalf("scan recorded event_id: %v", err)
+	}
+	if recorded != "REQ-evt_dup" {
+		t.Fatalf("dedup key = %q, want requestId %q", recorded, "REQ-evt_dup")
+	}
 }
 
 func TestNombaWebhook_EmptyEventID_400(t *testing.T) {
@@ -274,10 +284,10 @@ func TestNombaWebhook_EmptyEventID_400(t *testing.T) {
 	disp := &fakeWebhookDispatcher{}
 	h := newWebhookHandler(store, disp)
 
-	// Real-shape body but WITHOUT an event_id field.
+	// Real-shape body but WITHOUT a requestId field (the dedup key). Missing
+	// requestId → 400.
 	body := []byte(`{
 		"event_type": "payment_success",
-		"requestId": "REQ-noid",
 		"data": {
 			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
 			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},

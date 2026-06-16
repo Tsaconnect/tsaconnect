@@ -28,6 +28,7 @@ type PaymentMerchant struct {
 	// Nomba (per-PM). NombaCredsRef points at the secret-store entry holding the
 	// client id/secret; the raw creds are NEVER stored in this table.
 	NombaAccountID       string `gorm:"size:64" json:"nombaAccountId"`
+	NombaWalletID        string `gorm:"size:64;index" json:"nombaWalletId"`
 	NombaCredsRef        string `gorm:"size:128" json:"-"`
 	InboundAccountNumber string `gorm:"size:32" json:"inboundAccountNumber"`
 	InboundBank          string `gorm:"size:64" json:"inboundBank"`

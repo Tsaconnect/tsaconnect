@@ -32,6 +32,26 @@ func (s *PMService) GetByInboundAccount(ctx context.Context, acct string) (*mode
 	return &pm, nil
 }
 
+// GetByWalletID looks up the PM by its Nomba walletId (data.merchant.walletId
+// on the inbound payment_success event). This is the real inbound key. An empty
+// walletID is rejected with ErrPMNotFound up front: an empty value must NEVER
+// match an arbitrary PM row (e.g. one whose wallet id is still unconfigured).
+// Returns ErrPMNotFound when no row matches.
+func (s *PMService) GetByWalletID(ctx context.Context, walletID string) (*models.PaymentMerchant, error) {
+	if walletID == "" {
+		return nil, ErrPMNotFound
+	}
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).First(&pm, "nomba_wallet_id = ?", walletID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPMNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
 // GetByID looks up a PM by its primary key UUID.
 // Returns ErrPMNotFound when no row matches.
 func (s *PMService) GetByID(ctx context.Context, id uuid.UUID) (*models.PaymentMerchant, error) {
@@ -60,7 +80,7 @@ func WithinPerTradeCap(pm *models.PaymentMerchant, usd float64) bool {
 func (s *PMService) SeedTSA(
 	ctx context.Context,
 	userID uuid.UUID,
-	name, inboundAccount, inboundBank, operatorWallet string,
+	name, inboundAccount, inboundBank, operatorWallet, nombaWalletID string,
 	perTradeCapUSD, dailyCapUSD float64,
 ) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
@@ -79,6 +99,7 @@ func (s *PMService) SeedTSA(
 			InboundAccountNumber:  inboundAccount,
 			InboundBank:           inboundBank,
 			OperatorWalletAddress: operatorWallet,
+			NombaWalletID:         nombaWalletID,
 			PerTradeCapUSD:        perTradeCapUSD,
 			DailyCapUSD:           dailyCapUSD,
 		}
@@ -97,6 +118,7 @@ func (s *PMService) SeedTSA(
 		"status":                  models.PaymentMerchantStatusActive,
 		"inbound_bank":            inboundBank,
 		"operator_wallet_address": operatorWallet,
+		"nomba_wallet_id":         nombaWalletID,
 		"per_trade_cap_usd":       perTradeCapUSD,
 		"daily_cap_usd":           dailyCapUSD,
 	}
