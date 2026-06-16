@@ -57,7 +57,7 @@ func newPMAutomationServiceWithGateway(t *testing.T, db *gorm.DB, svc *P2PTradeS
 		hash: "0xrelease",
 	}
 	pmSvc := NewPMService(db)
-	return NewPMAutomationService(db, pmSvc, svc, signer, name, gw), signer
+	return NewPMAutomationService(db, pmSvc, svc, signer, name, gw, "TSA Connect"), signer
 }
 
 // ─── InitiateSellPayout ──────────────────────────────────────────────────────

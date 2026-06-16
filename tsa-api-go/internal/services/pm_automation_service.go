@@ -111,18 +111,20 @@ type PMNameLookup func(ctx context.Context, userID uuid.UUID) (string, error)
 // (system markPaid → admin release). A non-match or ambiguity is a deliberate
 // no-op, leaving the trade pending_payment for the manual-release queue.
 type PMAutomationService struct {
-	db      *gorm.DB
-	pm      *PMService
-	trades  *P2PTradeService
-	signer  ReleaseSigner
-	name    PMNameLookup
-	gateway NombaGateway
+	db         *gorm.DB
+	pm         *PMService
+	trades     *P2PTradeService
+	signer     ReleaseSigner
+	name       PMNameLookup
+	gateway    NombaGateway
+	senderName string
 }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
 // is the per-PM Nomba boundary used by the sell flow to pay the user's bank.
-func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner, name PMNameLookup, gateway NombaGateway) *PMAutomationService {
-	return &PMAutomationService{db: db, pm: pm, trades: trades, signer: signer, name: name, gateway: gateway}
+// senderName is the display name stamped on outgoing (sell-flow) transfers.
+func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner, name PMNameLookup, gateway NombaGateway, senderName string) *PMAutomationService {
+	return &PMAutomationService{db: db, pm: pm, trades: trades, signer: signer, name: name, gateway: gateway, senderName: senderName}
 }
 
 // inboundCandidateRow is the lightweight projection scanned from the
@@ -276,6 +278,8 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 		AccountNumber: trade.PayoutAccountNumber,
 		AmountNGN:     trade.FiatAmount,
 		Reference:     trade.ID.String(),
+		AccountName:   trade.PayoutAccountName,
+		SenderName:    s.senderName,
 	})
 	if err != nil {
 		return "", fmt.Errorf("initiate nomba payout: %w", err)
