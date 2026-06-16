@@ -322,3 +322,52 @@ func TestManualRelease_TradeNotFound(t *testing.T) {
 		t.Fatal("expected error for non-existent trade, got nil")
 	}
 }
+
+// TestManualRelease_PaidOrphan_SkipsDailyCap verifies that an operator re-drive
+// of a paid-orphan (trade already at paid, empty release_tx_hash) succeeds even
+// when the PM's daily cap is set so low that counting the trade's value twice
+// would exceed it. The paid-orphan is an already-admitted completion, not a new
+// admission, so the daily-cap gate must be skipped entirely.
+//
+// Setup: PM daily cap $1.50; a prior released trade today worth $1 (leaving $0.50
+// headroom); the orphan trade is worth $1 (which alone is within $1.50 but
+// $1+$1 = $2 > $1.50 if double-counted). Advancing the trade to paid before
+// calling ManualRelease simulates a paid-orphan (markPaid succeeded, AutoRelease
+// failed). ManualRelease must succeed (release) — the cap must not block it.
+func TestManualRelease_PaidOrphan_SkipsDailyCap(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	// PM with $1.50 daily cap.
+	pm := seedActivePMWithDailyCap(t, db, "orphan-acct", 0, 1.5)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+
+	// Prior released trade today worth $1 (token_amount 1000000 with 6dp = $1.00).
+	priorReleased := seedBuyTradeOnAd(t, db, ad, uuid.New(), "1300.00")
+	markTradeStatusToday(t, db, priorReleased.ID, models.P2PTradeStatusReleased)
+
+	// The orphan: also $1 value. Seed as pending_payment, then advance to paid to
+	// simulate a paid-orphan (markPaid succeeded but AutoRelease failed).
+	// If the cap were applied, $1(prior) + $1(orphan) = $2 > $1.50 → blocked.
+	// Without double-counting (correct behaviour), it should proceed to release.
+	buyerID := uuid.New()
+	orphan := seedBuyTradeOnAd(t, db, ad, buyerID, "1300.00")
+	if _, err := svc.SystemMarkPaid(context.Background(), orphan.ID, "pre:paid"); err != nil {
+		t.Fatalf("advance orphan to paid: %v", err)
+	}
+
+	setReleasedEvent(esc, orphan)
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{buyerID: "ORPHAN USER"}))
+
+	got, err := auto.ManualRelease(context.Background(), orphan.ID, uuid.New())
+	if err != nil {
+		t.Fatalf("ManualRelease on paid orphan with near-cap PM: %v (cap must not double-count)", err)
+	}
+	if got.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released", got.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Errorf("signer called %d times, want 1", len(signer.calls))
+	}
+}

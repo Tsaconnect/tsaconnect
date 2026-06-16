@@ -687,19 +687,39 @@ func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminI
 	// the trade belongs to a PM with a daily cap, an over-cap release returns a
 	// clear error so the operator sees it (we never silently release over cap). A
 	// non-PM trade (no pm_id) or a query miss leaves the legacy behaviour intact.
+	//
+	// The cap only applies to a fresh admission (pending_payment). A trade already
+	// at paid is a paid-orphan re-drive: its capacity was already admitted when it
+	// first transitioned to paid, so counting it again here would double-count it
+	// and spuriously block a legitimate rescue.
 	if pm, err := s.pmForTrade(ctx, tradeID); err != nil {
 		return nil, err
 	} else if pm != nil {
-		usd, ok := s.tradeUSDForCap(ctx, tradeID)
-		if ok {
-			within, derr := s.withinDailyCap(ctx, pm, usd)
-			if derr != nil {
-				return nil, fmt.Errorf("daily-cap check: %w", derr)
-			}
-			if !within {
-				return nil, fmt.Errorf("%w: release of $%.2f would exceed PM daily cap $%.2f", ErrInvalidParams, usd, pm.DailyCapUSD)
+		// Load the trade status to distinguish a fresh pending_payment admission
+		// from a paid-orphan re-drive.
+		var tradeStatus struct{ Status string }
+		if err := s.db.WithContext(ctx).
+			Table("p2p_trades").
+			Select("status").
+			Where("id = ?", tradeID).
+			Scan(&tradeStatus).Error; err != nil {
+			return nil, fmt.Errorf("load trade status for cap check: %w", err)
+		}
+		if tradeStatus.Status == models.P2PTradeStatusPendingPayment {
+			// Fresh admission — apply the daily-cap gate.
+			usd, ok := s.tradeUSDForCap(ctx, tradeID)
+			if ok {
+				within, derr := s.withinDailyCap(ctx, pm, usd)
+				if derr != nil {
+					return nil, fmt.Errorf("daily-cap check: %w", derr)
+				}
+				if !within {
+					return nil, fmt.Errorf("%w: release of $%.2f would exceed PM daily cap $%.2f", ErrInvalidParams, usd, pm.DailyCapUSD)
+				}
 			}
 		}
+		// paid (orphan re-drive): skip the daily-cap gate — this is completing an
+		// already-admitted trade, not admitting a new one.
 	}
 
 	if _, err := s.trades.SystemMarkPaid(ctx, tradeID, "manual:"+adminID.String()); err != nil {
