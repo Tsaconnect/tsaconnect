@@ -268,6 +268,34 @@ type Config struct {
 	P2PTrustedMinCompletion float64
 	P2PTrustedMinAgeDays    int
 
+	// PM automation (Nomba-backed buy/sell auto-settle). All optional — absence
+	// keeps the whole PM stack DORMANT (no signer ⇒ no automation ⇒ webhook +
+	// admin PM routes surface "not configured"), matching the BSC-P2P / FeeManager
+	// dormant-by-default pattern.
+	//
+	// PMAdminEOAAddress is the platform admin EOA that signs adminRelease txs
+	// (informational; the signer derives its own address from the key).
+	PMAdminEOAAddress string
+	// PMReleaseSigner selects the signer backend: "local" (dev, in-process key)
+	// or "kms" (prod, not yet implemented — release stays disabled).
+	PMReleaseSigner string
+	// PMReleasePrivateKey is the hex private key for the local signer (DEV ONLY).
+	PMReleasePrivateKey string
+	// NombaWebhookSecret is the shared HMAC secret used to verify inbound Nomba
+	// webhooks. UNSET ⇒ webhook route dormant.
+	NombaWebhookSecret string
+
+	// TSA seed — the single platform PaymentMerchant row, upserted at boot when
+	// PMTSAEnabled (derived true when PM_TSA_INBOUND_ACCOUNT is set).
+	PMTSAEnabled         bool
+	PMTSAUserID          string
+	PMTSAName            string
+	PMTSAInboundAccount  string
+	PMTSAInboundBank     string
+	PMTSAMakerWallet     string
+	PMTSAPerTradeCapUSD  float64
+	PMTSADailyCapUSD     float64
+
 	// Fee/TP overhaul (SP3) tunables.
 	//
 	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
@@ -488,6 +516,26 @@ func Load() *Config {
 	cfg.P2PTrustedMinReleased = getEnvInt64("P2P_TRUSTED_MIN_RELEASED", 50)
 	cfg.P2PTrustedMinCompletion = getEnvFloat64("P2P_TRUSTED_MIN_COMPLETION", 0.95)
 	cfg.P2PTrustedMinAgeDays = int(getEnvInt64("P2P_TRUSTED_MIN_AGE_DAYS", 30))
+
+	// PM automation (Nomba buy/sell auto-settle). All optional + dormant-by-
+	// default: no PM_RELEASE_PRIVATE_KEY (and signer != "kms") ⇒ no signer ⇒ the
+	// automation service + webhook + admin PM routes stay off; the route stubs
+	// surface a clear "not configured" error.
+	cfg.PMAdminEOAAddress = strings.TrimSpace(getEnv("PM_ADMIN_EOA_ADDRESS", ""))
+	cfg.PMReleaseSigner = strings.ToLower(strings.TrimSpace(getEnv("PM_RELEASE_SIGNER", "local")))
+	cfg.PMReleasePrivateKey = strings.TrimSpace(getEnv("PM_RELEASE_PRIVATE_KEY", ""))
+	cfg.NombaWebhookSecret = strings.TrimSpace(getEnv("NOMBA_WEBHOOK_SECRET", ""))
+
+	// TSA seed — enabled when an inbound account is configured. Seeded at boot
+	// (best-effort; never fails boot).
+	cfg.PMTSAInboundAccount = strings.TrimSpace(getEnv("PM_TSA_INBOUND_ACCOUNT", ""))
+	cfg.PMTSAEnabled = cfg.PMTSAInboundAccount != ""
+	cfg.PMTSAUserID = strings.TrimSpace(getEnv("PM_TSA_USER_ID", ""))
+	cfg.PMTSAName = strings.TrimSpace(getEnv("PM_TSA_NAME", "TSA"))
+	cfg.PMTSAInboundBank = strings.TrimSpace(getEnv("PM_TSA_INBOUND_BANK", ""))
+	cfg.PMTSAMakerWallet = strings.TrimSpace(getEnv("PM_TSA_MAKER_WALLET", ""))
+	cfg.PMTSAPerTradeCapUSD = getEnvFloat64("PM_TSA_PER_TRADE_CAP_USD", 0)
+	cfg.PMTSADailyCapUSD = getEnvFloat64("PM_TSA_DAILY_CAP_USD", 0)
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
 	// value; tunable without code change.

@@ -1,0 +1,158 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+)
+
+// webhookDispatcher is the narrow PM-automation slice the webhook handler needs.
+// The real *services.PMAutomationService satisfies it; tests inject a fake so a
+// full service graph isn't required to test the wire/dedup/classification logic.
+type webhookDispatcher interface {
+	HandleInbound(ctx context.Context, p services.InboundPayment) error
+	HandlePayoutStatus(ctx context.Context, p services.PayoutStatus) error
+}
+
+// NombaWebhookHandler receives Nomba webhooks: it HMAC-verifies the body,
+// persists+dedupes the event in webhook_events, then classifies the payload as
+// inbound (buy) or payout (sell) and dispatches it to PM automation.
+//
+// Dispatch is synchronous; the PM reconciler/retry path is the safety net for a
+// dispatch error, so a failed dispatch is recorded as `failed` and STILL returns
+// 200 (Nomba shouldn't hammer-retry — we own the retry).
+type NombaWebhookHandler struct {
+	verifier  services.WebhookVerifier
+	store     *services.NombaWebhookStore
+	auto      webhookDispatcher
+	sigHeader string // e.g. "X-Nomba-Signature" (TODO(nomba-facts): confirm header name)
+}
+
+// NewNombaWebhookHandler constructs the handler. auto is typed as the narrow
+// webhookDispatcher so tests can inject a fake; the real
+// *services.PMAutomationService satisfies it. sigHeader is the HTTP header
+// carrying the signature (TODO(nomba-facts): confirm the exact header name).
+func NewNombaWebhookHandler(v services.WebhookVerifier, store *services.NombaWebhookStore, auto webhookDispatcher, sigHeader string) *NombaWebhookHandler {
+	return &NombaWebhookHandler{verifier: v, store: store, auto: auto, sigHeader: sigHeader}
+}
+
+// webhookEnvelope is the minimal top-level shape we read to dedupe + classify.
+// TODO(nomba-facts): confirm event_id / event field names against the live API.
+type webhookEnvelope struct {
+	EventID string `json:"event_id"`
+	Event   string `json:"event"`
+}
+
+// Handle is the POST /api/webhooks/nomba entry point. It is signature-verified,
+// not auth-gated, so it must be mounted OUTSIDE the auth-required groups.
+func (h *NombaWebhookHandler) Handle(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Failed to read body"})
+		return
+	}
+
+	sig := c.GetHeader(h.sigHeader)
+	if !h.verifier.Verify(body, sig) {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
+		return
+	}
+
+	var env webhookEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid JSON"})
+		return
+	}
+	if env.EventID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing event_id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	ev, dup, err := h.store.Record(ctx, env.EventID, body, sig)
+	if err != nil {
+		log.Printf("[nomba webhook] record event=%s: %v", env.EventID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to record event"})
+		return
+	}
+	if dup {
+		// Already processed (or in-flight) — Nomba retry. Ack without re-dispatch.
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "already processed"})
+		return
+	}
+
+	// Dispatch synchronously. A dispatch failure is recorded as `failed` (the
+	// reconciler/retry path heals it) but we still 200 so Nomba doesn't retry.
+	if dispErr := h.dispatch(ctx, body, env); dispErr != nil {
+		log.Printf("[nomba webhook] dispatch event=%s: %v", env.EventID, dispErr)
+		h.markFailed(ctx, ev.EventID, dispErr)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "received (deferred)"})
+		return
+	}
+
+	h.markProcessed(ctx, ev.EventID)
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "processed"})
+}
+
+// dispatch classifies the raw payload and routes it to the right PM-automation
+// entry point. classify decides inbound vs payout from the payload shape.
+func (h *NombaWebhookHandler) dispatch(ctx context.Context, body []byte, env webhookEnvelope) error {
+	if classifyPayout(body, env) {
+		p, err := services.ParseNombaPayout(body)
+		if err != nil {
+			return err
+		}
+		return h.auto.HandlePayoutStatus(ctx, *p)
+	}
+	p, err := services.ParseNombaInbound(body)
+	if err != nil {
+		return err
+	}
+	return h.auto.HandleInbound(ctx, *p)
+}
+
+// classifyPayout returns true for a payout-status (sell) event, false for an
+// inbound-credit (buy) event. Heuristic (TODO(nomba-facts): confirm): a payout
+// event carries a `payout_id` somewhere in the JSON, or its event type begins
+// with "payout".
+func classifyPayout(body []byte, env webhookEnvelope) bool {
+	if strings.HasPrefix(strings.ToLower(env.Event), "payout") {
+		return true
+	}
+	// Cheap substring probe avoids a second full unmarshal; the parsers do the
+	// real structured decode. A JSON body containing "payout_id" is a payout.
+	return strings.Contains(string(body), `"payout_id"`)
+}
+
+func (h *NombaWebhookHandler) markProcessed(ctx context.Context, eventID string) {
+	now := time.Now()
+	if err := h.store.DB().WithContext(ctx).
+		Model(&webhookEventRow{}).
+		Where("provider = ? AND event_id = ?", services.ProviderNomba, eventID).
+		Updates(map[string]any{"status": "processed", "processed_at": now}).Error; err != nil {
+		log.Printf("[nomba webhook] mark processed event=%s: %v", eventID, err)
+	}
+}
+
+func (h *NombaWebhookHandler) markFailed(ctx context.Context, eventID string, cause error) {
+	if err := h.store.DB().WithContext(ctx).
+		Model(&webhookEventRow{}).
+		Where("provider = ? AND event_id = ?", services.ProviderNomba, eventID).
+		Updates(map[string]any{"status": "failed", "error": cause.Error()}).Error; err != nil {
+		log.Printf("[nomba webhook] mark failed event=%s: %v", eventID, err)
+	}
+}
+
+// webhookEventRow is a thin local type used only to target the webhook_events
+// table for status updates (avoids importing the full model just for a table
+// name). TableName binds it to the right table.
+type webhookEventRow struct{}
+
+func (webhookEventRow) TableName() string { return "webhook_events" }

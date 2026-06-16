@@ -181,5 +181,13 @@ func AutoMigrate() error {
 	         WHERE provider = 'bank_transfer'
 	           AND lower(bank_name) LIKE '%kuda%'`)
 
+	// PM (payment-merchant) inbound account must be unique — PMAutomationService
+	// resolves the PM by destination account on every inbound Nomba credit
+	// (GetByInboundAccount assumes a single match). A partial index enforces
+	// uniqueness only over non-blank account numbers so multiple PMs can exist
+	// before their inbound account is configured (idempotent, like the others).
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_inbound_account
+	    ON payment_merchants (inbound_account_number) WHERE inbound_account_number <> ''`)
+
 	return nil
 }

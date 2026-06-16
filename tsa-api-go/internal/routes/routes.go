@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -177,6 +177,33 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		kycGroup.GET("/admin/verifications", adminAuth, h.GetAllVerifications)
 		kycGroup.POST("/admin/override/:id", adminAuth, h.AdminOverrideKYC)
 		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
+	}
+
+	// Nomba webhook — signature-verified (no auth middleware), mounted OUTSIDE
+	// the auth-required groups like the KYC webhook. The path is ALWAYS present so
+	// Nomba's configured URL never 404s: when PM is dormant (nwh == nil) the stub
+	// returns a clear 503 "PM automation not configured" instead of the handler.
+	api.POST("/webhooks/nomba", func(c *gin.Context) {
+		if nwh == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "PM automation not configured"})
+			return
+		}
+		nwh.Handle(c)
+	})
+
+	// Admin PM operator routes (manual-release queue + release/decline/payout).
+	// Funds-adjacent, so AdminAuth + RequireP2PAdmin, matching the set-fee group.
+	// Registered only when PM automation is configured (pmh != nil); dormant
+	// otherwise (the routes simply don't exist).
+	if pmh != nil {
+		adminPM := api.Group("/admin/pm")
+		adminPM.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminPM.GET("/manual-queue", pmh.GetManualQueue)
+			adminPM.POST("/trades/:id/release", pmh.ReleaseTrade)
+			adminPM.POST("/trades/:id/decline", pmh.DeclineTrade)
+			adminPM.POST("/trades/:id/payout", pmh.InitiatePayout)
+		}
 	}
 
 	// Upload routes
