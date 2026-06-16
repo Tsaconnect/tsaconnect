@@ -367,9 +367,20 @@ type manualQueueRow struct {
 }
 
 // ListBuyManualQueue returns PM buy trades stuck awaiting manual review:
-// pending_payment, pooled sell-ad funding (funding=0), on a PM ad (pm_id IS
-// NOT NULL), with NO matched inbound (nomba_inbound_event_id = ''), and with
-// open_tx_hash set (on-chain open confirmed). Most recent first.
+// pending_payment OR paid, pooled sell-ad funding (funding=0), on a PM ad
+// (pm_id IS NOT NULL), with NO matched inbound (nomba_inbound_event_id = ''),
+// with open_tx_hash set (on-chain open confirmed), and not yet released
+// (release_tx_hash empty). Most recent first.
+//
+// The `paid` branch recovers a `paid`-orphan: the buy flow does
+// SystemMarkPaid (pending_payment→paid) then AutoRelease, and if AutoRelease
+// fails after markPaid the rollback leaves the trade at `paid` with no
+// release. A bare `paid` trade is invisible to the timeout watchdog (filters
+// pending_payment) and the reconciler (on-chain still Pending; it never
+// reverts paid→pending), so it would never recover. Surfacing it here lets an
+// operator re-drive it via ManualRelease (which tolerates the already-paid
+// ErrInvalidTransition from SystemMarkPaid and re-runs AutoRelease). The
+// release_tx_hash guard ensures already-released trades never appear.
 func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQueueItem, error) {
 	var rows []manualQueueRow
 	if err := s.db.WithContext(ctx).
@@ -378,7 +389,8 @@ func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQ
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
 		Where("p2p_ads.side = ?", models.P2PAdSideSell).
-		Where("p2p_trades.status = ?", models.P2PTradeStatusPendingPayment).
+		Where("p2p_trades.status IN ?", []string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+		Where("p2p_trades.release_tx_hash = ? OR p2p_trades.release_tx_hash IS NULL", "").
 		Where("p2p_trades.funding = ?", models.P2PTradeFundingPooled).
 		Where("p2p_trades.open_tx_hash <> ?", "").
 		Where("p2p_trades.nomba_inbound_event_id = ?", "").

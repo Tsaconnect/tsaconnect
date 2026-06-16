@@ -439,6 +439,13 @@ func main() {
 			} else {
 				releaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
 				log.Printf("[pm] local release signer ready (admin EOA %s)", releaseSigner.Address())
+				// Catch a signer/admin-EOA misconfig at boot rather than at the
+				// first release: if the derived signer address doesn't match the
+				// configured PM_ADMIN_EOA_ADDRESS, adminRelease will revert
+				// on-chain because the key isn't a registered admin.
+				if cfg.PMAdminEOAAddress != "" && !strings.EqualFold(releaseSigner.Address(), cfg.PMAdminEOAAddress) {
+					log.Printf("[pm] WARNING: release signer address %s does not match configured PM_ADMIN_EOA_ADDRESS %s — adminRelease will revert on-chain until the key matches a registered admin", releaseSigner.Address(), cfg.PMAdminEOAAddress)
+				}
 			}
 		} else {
 			log.Printf("[pm] PM release disabled: PM_RELEASE_PRIVATE_KEY unset or sonic client unavailable")

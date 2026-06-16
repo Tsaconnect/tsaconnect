@@ -1677,9 +1677,19 @@ func (s *P2PTradeService) confirmReleaseCore(ctx context.Context, trade *models.
 	// else, refuse to mark the trade settled — the reconciler will pick it
 	// up. This is the only check between the chain event and the DB
 	// declaring funds delivered.
-	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	//
+	// Fail CLOSED on an unparseable TokenAmount: previously a nil parse
+	// silently skipped the entire invariant and confirmed the release. We
+	// now error out instead. This returns AFTER the on-chain release already
+	// happened (verify succeeded), so the trade stays in `releasing` and the
+	// reconciler converges it — loud and recoverable, far better than
+	// silently declaring funds delivered without ever checking the amount.
+	expected, ok := new(big.Int).SetString(trade.TokenAmount, 10)
+	if !ok || expected == nil {
+		return nil, fmt.Errorf("release blocked: unparseable trade token amount %q", trade.TokenAmount)
+	}
 	total := new(big.Int).Add(ev.AmountToBuyer, ev.FeeToSystem)
-	if expected != nil && total.Cmp(expected) != 0 {
+	if total.Cmp(expected) != 0 {
 		return nil, fmt.Errorf("on-chain release total %s does not match trade amount %s", total, trade.TokenAmount)
 	}
 
