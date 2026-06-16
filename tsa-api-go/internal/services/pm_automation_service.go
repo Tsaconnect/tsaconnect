@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -337,4 +338,88 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// "pending" or unknown — no-op; await a terminal webhook.
 		return nil
 	}
+}
+
+// ─── Manual-release queue ─────────────────────────────────────────────────────
+
+// ManualQueueItem is an operator-facing row for an unmatched PM buy trade.
+type ManualQueueItem struct {
+	TradeID     uuid.UUID `json:"tradeId"`
+	AdID        uuid.UUID `json:"adId"`
+	BuyerID     uuid.UUID `json:"buyerId"`
+	BuyerName   string    `json:"buyerName"`
+	Token       string    `json:"token"`
+	TokenAmount string    `json:"tokenAmount"`
+	FiatAmount  string    `json:"fiatAmount"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// manualQueueRow is the lightweight projection scanned from the join for
+// ListBuyManualQueue.
+type manualQueueRow struct {
+	ID          uuid.UUID
+	AdID        uuid.UUID
+	BuyerID     uuid.UUID
+	Token       string
+	TokenAmount string
+	FiatAmount  string
+	CreatedAt   time.Time
+}
+
+// ListBuyManualQueue returns PM buy trades stuck awaiting manual review:
+// pending_payment, pooled sell-ad funding (funding=0), on a PM ad (pm_id IS
+// NOT NULL), with NO matched inbound (nomba_inbound_event_id = ''), and with
+// open_tx_hash set (on-chain open confirmed). Most recent first.
+func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQueueItem, error) {
+	var rows []manualQueueRow
+	if err := s.db.WithContext(ctx).
+		Table("p2p_trades").
+		Select("p2p_trades.id, p2p_trades.ad_id, p2p_trades.buyer_id, p2p_trades.token, p2p_trades.token_amount, p2p_trades.fiat_amount, p2p_trades.created_at").
+		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
+		Where("p2p_ads.pm_id IS NOT NULL").
+		Where("p2p_ads.side = ?", models.P2PAdSideSell).
+		Where("p2p_trades.status = ?", models.P2PTradeStatusPendingPayment).
+		Where("p2p_trades.funding = ?", models.P2PTradeFundingPooled).
+		Where("p2p_trades.open_tx_hash <> ?", "").
+		Where("p2p_trades.nomba_inbound_event_id = ?", "").
+		Order("p2p_trades.created_at DESC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	items := make([]ManualQueueItem, 0, len(rows))
+	for _, r := range rows {
+		name, err := s.name(ctx, r.BuyerID)
+		if err != nil {
+			// Skip-name-on-error: leave BuyerName "" rather than failing the whole
+			// queue listing (one bad name lookup must not hide valid queue items).
+			log.Printf("[pm manual queue] name lookup failed for buyer=%s trade=%s: %v", r.BuyerID, r.ID, err)
+			name = ""
+		}
+		items = append(items, ManualQueueItem{
+			TradeID:     r.ID,
+			AdID:        r.AdID,
+			BuyerID:     r.BuyerID,
+			BuyerName:   name,
+			Token:       r.Token,
+			TokenAmount: r.TokenAmount,
+			FiatAmount:  r.FiatAmount,
+			CreatedAt:   r.CreatedAt,
+		})
+	}
+	return items, nil
+}
+
+// ManualRelease lets an operator settle a manually-verified PM buy trade:
+// system markPaid (ref "manual:<adminID>") then adminRelease. adminID is the
+// operator performing the release (for the ref/audit trail). ErrInvalidTransition
+// on markPaid is tolerated (already paid) and execution continues to release.
+func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error) {
+	if _, err := s.trades.SystemMarkPaid(ctx, tradeID, "manual:"+adminID.String()); err != nil {
+		if !errors.Is(err, ErrInvalidTransition) {
+			return nil, err
+		}
+		// Already paid — continue to release.
+	}
+	return s.trades.AutoRelease(ctx, tradeID, s.signer)
 }
