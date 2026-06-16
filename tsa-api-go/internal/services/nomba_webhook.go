@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +22,15 @@ import (
 // ProviderNomba is the canonical provider string stored in webhook_events.
 const ProviderNomba = "nomba"
 
+// ErrNonSettlingEvent is returned by ParseNombaInbound for a well-formed Nomba
+// envelope whose event_type is a recognized payment_* value other than
+// payment_success (e.g. payment_failed, payment_reversal). It lets the caller
+// distinguish "ignore this, it's a benign non-settling event" from a genuine
+// parse failure (malformed body, missing requestId/walletId), so benign events
+// are not recorded as failed. A genuinely malformed body still yields a normal
+// error.
+var ErrNonSettlingEvent = errors.New("recognized non-settling event")
+
 // ---------------------------------------------------------------------------
 // WebhookVerifier — signature seam
 // ---------------------------------------------------------------------------
@@ -32,11 +40,11 @@ type WebhookVerifier interface {
 	Verify(body []byte, signature string) bool
 }
 
-// HMACWebhookVerifier validates webhooks using HMAC-SHA256.
-//
-// TODO(nomba-facts): confirm Nomba's exact signature scheme + header encoding.
-// The live Nomba webhook may use a different algorithm, encoding, or header
-// name. Finalize against design §12 / Nomba documentation before production.
+// HMACWebhookVerifier validates webhooks using a plain lowercase-hex
+// HMAC-SHA256 of the raw body. Nomba's real scheme (base64 over a
+// colon-delimited signing string + nomba-timestamp header) is implemented by
+// NombaWebhookVerifier below; this simpler verifier is retained for generic
+// HMAC providers and tests.
 type HMACWebhookVerifier struct {
 	secret []byte
 }
@@ -217,13 +225,13 @@ type nombaInboundRaw struct {
 			UserID   string `json:"userId"`
 		} `json:"merchant"`
 		Transaction struct {
-			TransactionID     string  `json:"transactionId"`
-			Type              string  `json:"type"`
-			TransactionAmount float64 `json:"transactionAmount"` // naira, not kobo
-			Fee               float64 `json:"fee"`
-			Time              string  `json:"time"`
-			ResponseCode      string  `json:"responseCode"`
-			Narration         string  `json:"narration"`
+			TransactionID     string      `json:"transactionId"`
+			Type              string      `json:"type"`
+			TransactionAmount json.Number `json:"transactionAmount"` // naira, not kobo — decoded as json.Number to avoid float drift
+			Fee               json.Number `json:"fee"`
+			Time              string      `json:"time"`
+			ResponseCode      string      `json:"responseCode"`
+			Narration         string      `json:"narration"`
 		} `json:"transaction"`
 		Customer struct {
 			SenderName    string `json:"senderName"`
@@ -262,21 +270,83 @@ type nombaPayoutRaw struct {
 	} `json:"data"`
 }
 
-// formatNaira formats a float64 naira amount to a 2-decimal string (e.g. 1500 → "1500.00").
-func formatNaira(amount float64) string {
-	return strconv.FormatFloat(amount, 'f', 2, 64)
+// formatNaira normalizes a decimal naira amount (as the raw json.Number/string
+// from the webhook) to a 2-decimal string WITHOUT going through float64 — so it
+// can never drift on the 2nd decimal against real Nomba payloads. The fractional
+// part is padded/truncated to exactly 2 digits, matching ngnToKobo's truncation
+// rule (NGN is a 2dp currency): "1500" → "1500.00", "1500.5" → "1500.50",
+// "1500.005" → "1500.00" (truncated, not rounded). A non-numeric/empty input
+// falls back to "0.00" — the buy matcher's ngnEqual will then never match it, so
+// it routes to the manual queue rather than mis-releasing.
+func formatNaira(amount string) string {
+	s := strings.TrimSpace(amount)
+	if s == "" {
+		return "0.00"
+	}
+	neg := false
+	if strings.HasPrefix(s, "+") {
+		s = s[1:]
+	} else if strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
+	}
+	whole := s
+	frac := ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		whole = s[:i]
+		frac = s[i+1:]
+	}
+	if whole == "" {
+		whole = "0"
+	}
+	// Validate digits (reject scientific notation / stray chars) — fall back to
+	// "0.00" so a garbage amount never matches a real fiat amount.
+	if !isAllDigits(whole) || (frac != "" && !isAllDigits(frac)) {
+		return "0.00"
+	}
+	// Normalize fractional to exactly 2 digits (pad short, truncate long).
+	if len(frac) < 2 {
+		frac = frac + strings.Repeat("0", 2-len(frac))
+	} else {
+		frac = frac[:2]
+	}
+	out := whole + "." + frac
+	if neg {
+		out = "-" + out
+	}
+	return out
+}
+
+// isAllDigits reports whether s is non-empty and every rune is an ASCII digit.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseNombaInbound unmarshals a real Nomba payment_success webhook payload
-// into an InboundPayment DTO. Returns an error if event_type is not
-// "payment_success", requestId is empty, or data.merchant.walletId is empty.
+// into an InboundPayment DTO. event_type matching is case-insensitive. Returns:
+//   - a normal error for a genuinely malformed body (bad JSON, missing
+//     requestId, missing data.merchant.walletId);
+//   - ErrNonSettlingEvent for a well-formed envelope whose event_type is a
+//     recognized payment_* value other than payment_success (e.g.
+//     payment_failed, payment_reversal) — a benign non-settling event the caller
+//     should ignore rather than record as failed;
+//   - a normal error if event_type is neither payment_success nor a recognized
+//     non-settling payment_* event.
+//
+// The amount is normalized to a 2dp decimal string via formatNaira without
+// float64, so it can't drift on the 2nd decimal.
 func ParseNombaInbound(raw []byte) (*InboundPayment, error) {
 	var r nombaInboundRaw
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("parse nomba inbound: %w", err)
-	}
-	if r.EventType != "payment_success" {
-		return nil, fmt.Errorf("parse nomba inbound: not a payment_success event (got %q)", r.EventType)
 	}
 	if r.RequestID == "" {
 		return nil, errors.New("parse nomba inbound: missing requestId")
@@ -284,13 +354,23 @@ func ParseNombaInbound(raw []byte) (*InboundPayment, error) {
 	if r.Data.Merchant.WalletID == "" {
 		return nil, errors.New("parse nomba inbound: missing data.merchant.walletId")
 	}
+	eventType := strings.ToLower(strings.TrimSpace(r.EventType))
+	if eventType != "payment_success" {
+		// A well-formed envelope for a recognized non-settling payment_* event is
+		// benign — signal it with the sentinel so the caller doesn't record it as
+		// failed. Anything else is a real parse failure.
+		if strings.HasPrefix(eventType, "payment_") {
+			return nil, fmt.Errorf("%w: event_type %q", ErrNonSettlingEvent, r.EventType)
+		}
+		return nil, fmt.Errorf("parse nomba inbound: not a payment_success event (got %q)", r.EventType)
+	}
 	return &InboundPayment{
 		EventID:             r.RequestID,
 		WalletID:            r.Data.Merchant.WalletID,
 		DestinationAccount:  "", // not present in real Nomba payload; walletId is the PM key
 		SenderAccountName:   r.Data.Customer.SenderName,
 		SenderAccountNumber: r.Data.Customer.AccountNumber,
-		AmountNGN:           formatNaira(r.Data.Transaction.TransactionAmount),
+		AmountNGN:           formatNaira(r.Data.Transaction.TransactionAmount.String()),
 		Status:              "settled",
 	}, nil
 }
@@ -308,7 +388,7 @@ func ParseNombaPayout(raw []byte) (*PayoutStatus, error) {
 	}
 
 	var status string
-	switch r.EventType {
+	switch strings.ToLower(strings.TrimSpace(r.EventType)) {
 	case "payout_success":
 		status = "success"
 	case "payout_failed":
