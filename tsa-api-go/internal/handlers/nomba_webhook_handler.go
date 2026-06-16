@@ -21,26 +21,33 @@ type webhookDispatcher interface {
 	HandlePayoutStatus(ctx context.Context, p services.PayoutStatus) error
 }
 
-// NombaWebhookHandler receives Nomba webhooks: it HMAC-verifies the body,
-// persists+dedupes the event in webhook_events, then classifies the payload as
-// inbound (buy) or payout (sell) and dispatches it to PM automation.
+// nombaVerifier validates a Nomba webhook from the raw body, the base64
+// signature header, and the timestamp header. The real
+// *services.NombaWebhookVerifier satisfies it; tests can inject a fake.
+type nombaVerifier interface {
+	Verify(body []byte, signatureB64, timestamp string) bool
+}
+
+// NombaWebhookHandler receives Nomba webhooks: it verifies the signature using
+// Nomba's colon-field HMAC-SHA256 scheme, persists+dedupes the event in
+// webhook_events, then classifies the payload as inbound (buy) or payout (sell)
+// and dispatches it to PM automation.
 //
 // Dispatch is synchronous; the PM reconciler/retry path is the safety net for a
 // dispatch error, so a failed dispatch is recorded as `failed` and STILL returns
 // 200 (Nomba shouldn't hammer-retry — we own the retry).
 type NombaWebhookHandler struct {
-	verifier  services.WebhookVerifier
-	store     *services.NombaWebhookStore
-	auto      webhookDispatcher
-	sigHeader string // e.g. "X-Nomba-Signature" (TODO(nomba-facts): confirm header name)
+	verifier nombaVerifier
+	store    *services.NombaWebhookStore
+	auto     webhookDispatcher
 }
 
 // NewNombaWebhookHandler constructs the handler. auto is typed as the narrow
 // webhookDispatcher so tests can inject a fake; the real
-// *services.PMAutomationService satisfies it. sigHeader is the HTTP header
-// carrying the signature (TODO(nomba-facts): confirm the exact header name).
-func NewNombaWebhookHandler(v services.WebhookVerifier, store *services.NombaWebhookStore, auto webhookDispatcher, sigHeader string) *NombaWebhookHandler {
-	return &NombaWebhookHandler{verifier: v, store: store, auto: auto, sigHeader: sigHeader}
+// *services.PMAutomationService satisfies it. v is the Nomba signature verifier
+// (the real *services.NombaWebhookVerifier).
+func NewNombaWebhookHandler(v nombaVerifier, store *services.NombaWebhookStore, auto webhookDispatcher) *NombaWebhookHandler {
+	return &NombaWebhookHandler{verifier: v, store: store, auto: auto}
 }
 
 // webhookEnvelope is the minimal top-level shape we read to dedupe + classify.
@@ -59,8 +66,9 @@ func (h *NombaWebhookHandler) Handle(c *gin.Context) {
 		return
 	}
 
-	sig := c.GetHeader(h.sigHeader)
-	if !h.verifier.Verify(body, sig) {
+	sig := c.GetHeader("nomba-signature")
+	ts := c.GetHeader("nomba-timestamp")
+	if !h.verifier.Verify(body, sig, ts) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
 		return
 	}

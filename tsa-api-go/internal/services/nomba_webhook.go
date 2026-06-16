@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,6 +63,78 @@ func (h *HMACWebhookVerifier) Verify(body []byte, signature string) bool {
 	mac.Write(body)
 	expected := mac.Sum(nil)
 	return hmac.Equal(expected, sigBytes)
+}
+
+// ---------------------------------------------------------------------------
+// NombaWebhookVerifier — the REAL Nomba signature scheme
+// ---------------------------------------------------------------------------
+
+// nombaSigEnvelope is the minimal parsed shape needed to reconstruct Nomba's
+// colon-delimited signing string from a webhook body.
+type nombaSigEnvelope struct {
+	EventType string `json:"event_type"`
+	RequestID string `json:"requestId"`
+	Data      struct {
+		Merchant struct {
+			UserID   string `json:"userId"`
+			WalletID string `json:"walletId"`
+		} `json:"merchant"`
+		Transaction struct {
+			TransactionID string `json:"transactionId"`
+			Type          string `json:"type"`
+			Time          string `json:"time"`
+			ResponseCode  string `json:"responseCode"`
+		} `json:"transaction"`
+	} `json:"data"`
+}
+
+// NombaWebhookVerifier validates Nomba webhooks using Nomba's documented scheme:
+// base64( HMAC_SHA256( secret, signingString ) ), where signingString is the
+// colon-joined concatenation of fields drawn from the PARSED body plus the
+// nomba-timestamp header (the trailing element).
+type NombaWebhookVerifier struct {
+	secret []byte
+}
+
+// NewNombaWebhookVerifier constructs a verifier with the given webhook signature key.
+func NewNombaWebhookVerifier(secret string) *NombaWebhookVerifier {
+	return &NombaWebhookVerifier{secret: []byte(secret)}
+}
+
+// Verify reconstructs Nomba's colon-delimited signing string from the parsed
+// body + the nomba-timestamp header, HMAC-SHA256 with the secret, base64-encodes,
+// and constant-time compares against the nomba-signature header value.
+//
+// signingString =
+//
+//	"{event_type}:{requestId}:{userId}:{walletId}:{transactionId}:{type}:{time}:{responseCode}:{timestamp}"
+func (v *NombaWebhookVerifier) Verify(body []byte, signatureB64, timestamp string) bool {
+	if len(signatureB64) == 0 || timestamp == "" {
+		return false
+	}
+	var env nombaSigEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	signing := strings.Join([]string{
+		env.EventType,
+		env.RequestID,
+		env.Data.Merchant.UserID,
+		env.Data.Merchant.WalletID,
+		env.Data.Transaction.TransactionID,
+		env.Data.Transaction.Type,
+		env.Data.Transaction.Time,
+		env.Data.Transaction.ResponseCode,
+		timestamp,
+	}, ":")
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(signing))
+	expected := mac.Sum(nil)
+	got, err := base64.StdEncoding.DecodeString(signatureB64)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(expected, got)
 }
 
 // ---------------------------------------------------------------------------

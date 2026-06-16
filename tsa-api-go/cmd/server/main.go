@@ -462,10 +462,9 @@ func main() {
 		pmh = handlers.NewPMHandler(pmAuto)
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
-				services.NewHMACWebhookVerifier(cfg.NombaWebhookSecret),
+				services.NewNombaWebhookVerifier(cfg.NombaWebhookSecret),
 				services.NewNombaWebhookStore(config.DB),
 				pmAuto,
-				"X-Nomba-Signature", // TODO(nomba-facts): confirm header name
 			)
 			log.Printf("[pm] Nomba webhook handler ready")
 		} else {
