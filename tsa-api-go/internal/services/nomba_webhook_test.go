@@ -81,24 +81,189 @@ func TestRecordWebhookEvent_Dedup(t *testing.T) {
 }
 
 func TestParseInbound(t *testing.T) {
-	// assumed Nomba shape (GATED on real facts — see TODO in impl)
-	raw := []byte(`{"event_id":"evt_9","data":{"destination_account":"1234567890","sender_name":"JOHN DOE","sender_account":"0987654321","amount":"1500.00","status":"settled"}}`)
-	p, err := ParseNombaInbound(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.EventID != "evt_9" || p.DestinationAccount != "1234567890" || p.SenderAccountName != "JOHN DOE" || p.AmountNGN != "1500.00" || p.Status != "settled" {
-		t.Fatalf("bad parse: %+v", p)
-	}
+	t.Run("payment_success happy path", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_success",
+			"requestId": "REQ-uuid",
+			"data": {
+				"merchant": {"walletId": "wallet-123", "walletBalance": 50000, "userId": "user-uuid"},
+				"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T10:00:00Z", "responseCode": "00", "narration": "..."},
+				"customer": {"senderName": "JOHN DOE", "accountNumber": "0123456789", "bankCode": "058", "bankName": "GTB"}
+			}
+		}`)
+		p, err := ParseNombaInbound(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.EventID != "REQ-uuid" {
+			t.Errorf("EventID = %q; want %q", p.EventID, "REQ-uuid")
+		}
+		if p.WalletID != "wallet-123" {
+			t.Errorf("WalletID = %q; want %q", p.WalletID, "wallet-123")
+		}
+		if p.SenderAccountName != "JOHN DOE" {
+			t.Errorf("SenderAccountName = %q; want %q", p.SenderAccountName, "JOHN DOE")
+		}
+		if p.SenderAccountNumber != "0123456789" {
+			t.Errorf("SenderAccountNumber = %q; want %q", p.SenderAccountNumber, "0123456789")
+		}
+		if p.AmountNGN != "1500.00" {
+			t.Errorf("AmountNGN = %q; want %q", p.AmountNGN, "1500.00")
+		}
+		if p.Status != "settled" {
+			t.Errorf("Status = %q; want %q", p.Status, "settled")
+		}
+	})
+
+	t.Run("amount with decimal formats to 2dp", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_success",
+			"requestId": "REQ-dec",
+			"data": {
+				"merchant": {"walletId": "wallet-456"},
+				"transaction": {"transactionAmount": 1500.5},
+				"customer": {"senderName": "JANE", "accountNumber": "111"}
+			}
+		}`)
+		p, err := ParseNombaInbound(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.AmountNGN != "1500.50" {
+			t.Errorf("AmountNGN = %q; want %q", p.AmountNGN, "1500.50")
+		}
+	})
+
+	t.Run("wrong event_type returns error", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_failed",
+			"requestId": "REQ-fail",
+			"data": {
+				"merchant": {"walletId": "wallet-123"},
+				"transaction": {"transactionAmount": 1500},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if err == nil {
+			t.Fatal("expected error for non-payment_success event, got nil")
+		}
+	})
+
+	t.Run("missing walletId returns error", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_success",
+			"requestId": "REQ-nowallet",
+			"data": {
+				"merchant": {},
+				"transaction": {"transactionAmount": 1500},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if err == nil {
+			t.Fatal("expected error for missing walletId, got nil")
+		}
+	})
+
+	t.Run("missing requestId returns error", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_success",
+			"data": {
+				"merchant": {"walletId": "wallet-123"},
+				"transaction": {"transactionAmount": 1500},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if err == nil {
+			t.Fatal("expected error for missing requestId, got nil")
+		}
+	})
 }
 
 func TestParsePayout(t *testing.T) {
-	raw := []byte(`{"event_id":"evt_p","data":{"payout_id":"po_1","status":"success"}}`)
-	p, err := ParseNombaPayout(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.EventID != "evt_p" || p.PayoutID != "po_1" || p.Status != "success" {
-		t.Fatalf("bad parse: %+v", p)
-	}
+	t.Run("payout_success happy path", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payout_success",
+			"requestId": "REQ-uuid2",
+			"data": {
+				"merchant": {"walletId": "...", "userId": "..."},
+				"transaction": {"transactionId": "API-TRANSFER-abc", "type": "transfer", "transactionAmount": 1500, "fee": 50, "time": "...", "responseCode": "00", "merchantTxRef": "trade-uuid-123"},
+				"customer": {"senderName": "...", "recipientName": "...", "accountNumber": "...", "bankCode": "...", "bankName": "..."}
+			}
+		}`)
+		p, err := ParseNombaPayout(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.EventID != "REQ-uuid2" {
+			t.Errorf("EventID = %q; want %q", p.EventID, "REQ-uuid2")
+		}
+		if p.PayoutID != "API-TRANSFER-abc" {
+			t.Errorf("PayoutID = %q; want %q", p.PayoutID, "API-TRANSFER-abc")
+		}
+		if p.MerchantTxRef != "trade-uuid-123" {
+			t.Errorf("MerchantTxRef = %q; want %q", p.MerchantTxRef, "trade-uuid-123")
+		}
+		if p.Status != "success" {
+			t.Errorf("Status = %q; want %q", p.Status, "success")
+		}
+	})
+
+	t.Run("payout_failed maps to failed", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payout_failed",
+			"requestId": "REQ-fail",
+			"data": {
+				"merchant": {},
+				"transaction": {"transactionId": "API-TRANSFER-xyz", "merchantTxRef": "trade-uuid-456"},
+				"customer": {}
+			}
+		}`)
+		p, err := ParseNombaPayout(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Status != "failed" {
+			t.Errorf("Status = %q; want %q", p.Status, "failed")
+		}
+		if p.MerchantTxRef != "trade-uuid-456" {
+			t.Errorf("MerchantTxRef = %q; want %q", p.MerchantTxRef, "trade-uuid-456")
+		}
+	})
+
+	t.Run("unknown event_type maps to pending", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payout_processing",
+			"requestId": "REQ-pending",
+			"data": {
+				"merchant": {},
+				"transaction": {"transactionId": "API-TRANSFER-pend"},
+				"customer": {}
+			}
+		}`)
+		p, err := ParseNombaPayout(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Status != "pending" {
+			t.Errorf("Status = %q; want %q", p.Status, "pending")
+		}
+	})
+
+	t.Run("missing requestId returns error", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payout_success",
+			"data": {
+				"merchant": {},
+				"transaction": {},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaPayout(raw)
+		if err == nil {
+			t.Fatal("expected error for missing requestId, got nil")
+		}
+	})
 }
