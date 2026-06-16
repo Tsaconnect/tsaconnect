@@ -12,9 +12,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -22,8 +24,6 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
-
-const testSigHeader = "X-Nomba-Signature"
 
 // ─── Fake dispatcher ──────────────────────────────────────────────────────────
 
@@ -75,37 +75,88 @@ func newSQLiteWebhookStore(t *testing.T) (*gorm.DB, *services.NombaWebhookStore)
 	return db, services.NewNombaWebhookStore(db)
 }
 
-func signBody(secret string, body []byte) string {
+const webhookSecret = "topsecret"
+const testTimestamp = "2026-06-16T10:00:00Z"
+
+// nombaSign reconstructs Nomba's colon-delimited signing string from the parsed
+// body + timestamp and returns the base64 HMAC-SHA256 signature — i.e. exactly
+// what a correct Nomba caller would put in the nomba-signature header.
+func nombaSign(t *testing.T, secret string, body []byte, timestamp string) string {
+	t.Helper()
+	var env struct {
+		EventType string `json:"event_type"`
+		RequestID string `json:"requestId"`
+		Data      struct {
+			Merchant struct {
+				UserID   string `json:"userId"`
+				WalletID string `json:"walletId"`
+			} `json:"merchant"`
+			Transaction struct {
+				TransactionID string `json:"transactionId"`
+				Type          string `json:"type"`
+				Time          string `json:"time"`
+				ResponseCode  string `json:"responseCode"`
+			} `json:"transaction"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("nombaSign unmarshal: %v", err)
+	}
+	signing := strings.Join([]string{
+		env.EventType, env.RequestID, env.Data.Merchant.UserID, env.Data.Merchant.WalletID,
+		env.Data.Transaction.TransactionID, env.Data.Transaction.Type,
+		env.Data.Transaction.Time, env.Data.Transaction.ResponseCode, timestamp,
+	}, ":")
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+	mac.Write([]byte(signing))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func postWebhook(t *testing.T, h *NombaWebhookHandler, body []byte, sig string) *httptest.ResponseRecorder {
+func newWebhookHandler(store *services.NombaWebhookStore, disp webhookDispatcher) *NombaWebhookHandler {
+	return NewNombaWebhookHandler(services.NewNombaWebhookVerifier(webhookSecret), store, disp)
+}
+
+func postWebhook(t *testing.T, h *NombaWebhookHandler, body []byte, sig, ts string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.POST("/api/webhooks/nomba", h.Handle)
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/nomba", bytes.NewReader(body))
 	if sig != "" {
-		req.Header.Set(testSigHeader, sig)
+		req.Header.Set("nomba-signature", sig)
+	}
+	if ts != "" {
+		req.Header.Set("nomba-timestamp", ts)
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
 }
 
-const webhookSecret = "topsecret"
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+// inboundBody is a real-shape Nomba payment_success body. It also carries an
+// event_id so the handler's dedup envelope can extract it.
+func inboundBody(eventID string) []byte {
+	return []byte(`{
+		"event_id": "` + eventID + `",
+		"event_type": "payment_success",
+		"requestId": "REQ-` + eventID + `",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00", "narration": "..."},
+			"customer": {"senderName": "JOHN DOE", "accountNumber": "0987654321", "bankCode": "058", "bankName": "GTB"}
+		}
+	}`)
+}
 
 func TestNombaWebhook_ValidInbound_Dispatches(t *testing.T) {
 	_, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
-	h := NewNombaWebhookHandler(services.NewHMACWebhookVerifier(webhookSecret), store, disp, testSigHeader)
+	h := newWebhookHandler(store, disp)
 
-	body := []byte(`{"event_id":"evt_in_1","data":{"destination_account":"1234567890","sender_name":"JOHN DOE","sender_account":"0987654321","amount":"1500.00","status":"settled"}}`)
-	w := postWebhook(t, h, body, signBody(webhookSecret, body))
+	body := inboundBody("evt_in_1")
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), testTimestamp)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
@@ -113,7 +164,7 @@ func TestNombaWebhook_ValidInbound_Dispatches(t *testing.T) {
 	if len(disp.inbound) != 1 {
 		t.Fatalf("want 1 inbound dispatch, got %d", len(disp.inbound))
 	}
-	if disp.inbound[0].EventID != "evt_in_1" || disp.inbound[0].DestinationAccount != "1234567890" {
+	if disp.inbound[0].WalletID != "wallet-123" || disp.inbound[0].SenderAccountName != "JOHN DOE" {
 		t.Fatalf("bad inbound payload: %+v", disp.inbound[0])
 	}
 	if len(disp.payouts) != 0 {
@@ -124,10 +175,20 @@ func TestNombaWebhook_ValidInbound_Dispatches(t *testing.T) {
 func TestNombaWebhook_ValidPayout_Dispatches(t *testing.T) {
 	_, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
-	h := NewNombaWebhookHandler(services.NewHMACWebhookVerifier(webhookSecret), store, disp, testSigHeader)
+	h := newWebhookHandler(store, disp)
 
-	body := []byte(`{"event_id":"evt_po_1","event":"payout.success","data":{"payout_id":"po_1","status":"success"}}`)
-	w := postWebhook(t, h, body, signBody(webhookSecret, body))
+	body := []byte(`{
+		"event_id": "evt_po_1",
+		"event": "payout.success",
+		"event_type": "payout_success",
+		"requestId": "REQ-po-1",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "po_1", "type": "transfer", "time": "2026-06-16T09:00:00Z", "responseCode": "00", "merchantTxRef": "trade-uuid-123"},
+			"customer": {}
+		}
+	}`)
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), testTimestamp)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
@@ -146,10 +207,10 @@ func TestNombaWebhook_ValidPayout_Dispatches(t *testing.T) {
 func TestNombaWebhook_BadSignature_401(t *testing.T) {
 	db, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
-	h := NewNombaWebhookHandler(services.NewHMACWebhookVerifier(webhookSecret), store, disp, testSigHeader)
+	h := newWebhookHandler(store, disp)
 
-	body := []byte(`{"event_id":"evt_bad","data":{"status":"settled"}}`)
-	w := postWebhook(t, h, body, "deadbeef")
+	body := inboundBody("evt_bad")
+	w := postWebhook(t, h, body, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", testTimestamp)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d (%s)", w.Code, w.Body.String())
@@ -165,19 +226,41 @@ func TestNombaWebhook_BadSignature_401(t *testing.T) {
 	}
 }
 
+func TestNombaWebhook_MissingTimestamp_401(t *testing.T) {
+	db, store := newSQLiteWebhookStore(t)
+	disp := &fakeWebhookDispatcher{}
+	h := newWebhookHandler(store, disp)
+
+	body := inboundBody("evt_nots")
+	// Valid signature for testTimestamp, but no timestamp header sent.
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), "")
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(disp.inbound) != 0 || len(disp.payouts) != 0 {
+		t.Fatal("missing-timestamp event must not dispatch")
+	}
+	var count int64
+	db.Table("webhook_events").Count(&count)
+	if count != 0 {
+		t.Fatalf("missing-timestamp event must not be recorded, found %d rows", count)
+	}
+}
+
 func TestNombaWebhook_Duplicate_NotReDispatched(t *testing.T) {
 	_, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
-	h := NewNombaWebhookHandler(services.NewHMACWebhookVerifier(webhookSecret), store, disp, testSigHeader)
+	h := newWebhookHandler(store, disp)
 
-	body := []byte(`{"event_id":"evt_dup","data":{"destination_account":"1","sender_name":"A","sender_account":"2","amount":"1.00","status":"settled"}}`)
-	sig := signBody(webhookSecret, body)
+	body := inboundBody("evt_dup")
+	sig := nombaSign(t, webhookSecret, body, testTimestamp)
 
-	w1 := postWebhook(t, h, body, sig)
+	w1 := postWebhook(t, h, body, sig, testTimestamp)
 	if w1.Code != http.StatusOK {
 		t.Fatalf("first call want 200, got %d", w1.Code)
 	}
-	w2 := postWebhook(t, h, body, sig)
+	w2 := postWebhook(t, h, body, sig, testTimestamp)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("second (dup) call want 200, got %d", w2.Code)
 	}
@@ -189,10 +272,19 @@ func TestNombaWebhook_Duplicate_NotReDispatched(t *testing.T) {
 func TestNombaWebhook_EmptyEventID_400(t *testing.T) {
 	_, store := newSQLiteWebhookStore(t)
 	disp := &fakeWebhookDispatcher{}
-	h := NewNombaWebhookHandler(services.NewHMACWebhookVerifier(webhookSecret), store, disp, testSigHeader)
+	h := newWebhookHandler(store, disp)
 
-	body := []byte(`{"data":{"status":"settled"}}`)
-	w := postWebhook(t, h, body, signBody(webhookSecret, body))
+	// Real-shape body but WITHOUT an event_id field.
+	body := []byte(`{
+		"event_type": "payment_success",
+		"requestId": "REQ-noid",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00"},
+			"customer": {"senderName": "JOHN DOE", "accountNumber": "0987654321"}
+		}
+	}`)
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), testTimestamp)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d (%s)", w.Code, w.Body.String())

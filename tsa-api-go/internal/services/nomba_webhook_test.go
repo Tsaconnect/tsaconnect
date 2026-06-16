@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/sqlite"
@@ -57,6 +59,69 @@ func TestHMACVerifier(t *testing.T) {
 	}
 	if v.Verify(body, "") {
 		t.Fatal("empty sig accepted")
+	}
+}
+
+// nombaSign computes the real Nomba signature for the given payment_success
+// body and timestamp using the same algorithm the verifier reconstructs.
+func nombaSign(secret, eventType, requestID, userID, walletID, txID, txType, txTime, respCode, timestamp string) string {
+	signing := strings.Join([]string{
+		eventType, requestID, userID, walletID, txID, txType, txTime, respCode, timestamp,
+	}, ":")
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signing))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func TestNombaWebhookVerifier(t *testing.T) {
+	const secret = "whsec_test"
+	const ts = "2026-06-16T10:00:00Z"
+	body := []byte(`{
+		"event_type": "payment_success",
+		"requestId": "REQ-uuid",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "00", "narration": "..."},
+			"customer": {"senderName": "JOHN DOE", "accountNumber": "0123456789"}
+		}
+	}`)
+	sig := nombaSign(secret, "payment_success", "REQ-uuid", "user-uuid", "wallet-123", "txn-1", "vact_transfer", "2026-06-16T09:00:00Z", "00", ts)
+
+	v := NewNombaWebhookVerifier(secret)
+
+	if !v.Verify(body, sig, ts) {
+		t.Fatal("valid signature rejected")
+	}
+
+	// Tampered body → false (changing walletId changes the signing string).
+	tampered := []byte(strings.Replace(string(body), "wallet-123", "wallet-999", 1))
+	if v.Verify(tampered, sig, ts) {
+		t.Fatal("tampered body accepted")
+	}
+
+	// Tampered signature → false.
+	if v.Verify(body, sig[:len(sig)-2]+"AA", ts) {
+		t.Fatal("tampered signature accepted")
+	}
+
+	// Tampered timestamp → false (timestamp is part of the signing string).
+	if v.Verify(body, sig, "2026-06-16T11:00:00Z") {
+		t.Fatal("tampered timestamp accepted")
+	}
+
+	// Empty signature → false.
+	if v.Verify(body, "", ts) {
+		t.Fatal("empty signature accepted")
+	}
+
+	// Empty timestamp → false.
+	if v.Verify(body, sig, "") {
+		t.Fatal("empty timestamp accepted")
+	}
+
+	// Non-base64 signature → false.
+	if v.Verify(body, "!!!not-base64!!!", ts) {
+		t.Fatal("non-base64 signature accepted")
 	}
 }
 
