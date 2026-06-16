@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -305,6 +306,135 @@ func (s *PMAutomationService) withinDailyCap(ctx context.Context, pm *models.Pay
 		sum += usd
 	}
 	return sum+prospectiveUSD <= pm.DailyCapUSD, nil
+}
+
+// ─── Webhook dispatch + recovery ─────────────────────────────────────────────
+
+// Dispatch classifies a raw Nomba webhook body by event_type and routes it to
+// the right entry point: a "payout"-prefixed event → ParseNombaPayout +
+// HandlePayoutStatus; anything else → ParseNombaInbound + HandleInbound. The
+// result (including ErrNonSettlingEvent propagated from ParseNombaInbound for a
+// recognized non-settling payment_* event) is returned to the caller so it can
+// distinguish "handled", "intentionally no action", and "real failure".
+//
+// Centralizing classify→parse→dispatch here lets BOTH the webhook handler (live
+// path) and the recovery job (RetryFailedWebhooks) drive the exact same logic.
+func (s *PMAutomationService) Dispatch(ctx context.Context, body []byte) error {
+	var env struct {
+		EventType string `json:"event_type"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("dispatch: classify webhook: %w", err)
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.EventType)), "payout") {
+		p, err := ParseNombaPayout(body)
+		if err != nil {
+			return err
+		}
+		return s.HandlePayoutStatus(ctx, *p)
+	}
+	p, err := ParseNombaInbound(body)
+	if err != nil {
+		// Propagate ErrNonSettlingEvent (and any other parse error) unchanged.
+		return err
+	}
+	return s.HandleInbound(ctx, *p)
+}
+
+// recoverStuckRow is the lightweight projection scanned for RecoverStuckTrades.
+type recoverStuckRow struct {
+	ID uuid.UUID
+}
+
+// RecoverStuckTrades re-drives PM buy trades wedged at `paid` with no release:
+// SystemMarkPaid (pending→paid) succeeded but AutoRelease then failed BEFORE the
+// release tx landed on-chain, leaving an empty release_tx_hash. The chain
+// reconciler only recovers these when the tx actually landed (chain shows
+// Released); if the broadcast never landed, nothing else re-drives them. This
+// sweep re-calls AutoRelease, which is idempotent (early-returns on already
+// `released`) and money-invariant-gated, so re-running is safe.
+//
+// Scope: only `paid` PM trades (pm_id set) older than olderThan with an empty
+// release_tx_hash. A `releasing` trade is deliberately excluded — it's either
+// mid-flight or already owned by the chain reconciler's stale window. Per-trade
+// failures are logged and skipped so one bad trade can't stop the sweep.
+func (s *PMAutomationService) RecoverStuckTrades(ctx context.Context, olderThan time.Duration) (int, error) {
+	cutoff := time.Now().Add(-olderThan)
+	var rows []recoverStuckRow
+	if err := s.db.WithContext(ctx).
+		Table("p2p_trades").
+		Select("p2p_trades.id").
+		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
+		Where("p2p_ads.pm_id IS NOT NULL").
+		Where("p2p_trades.status = ?", models.P2PTradeStatusPaid).
+		Where("p2p_trades.release_tx_hash = ? OR p2p_trades.release_tx_hash IS NULL", "").
+		Where("p2p_trades.updated_at < ?", cutoff).
+		Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+
+	recovered := 0
+	for _, r := range rows {
+		if _, err := s.trades.AutoRelease(ctx, r.ID, s.signer); err != nil {
+			// One bad trade must not stop the sweep — log and continue.
+			log.Printf("[pm recovery] AutoRelease failed for paid-orphan trade=%s: %v", r.ID, err)
+			continue
+		}
+		recovered++
+	}
+	return recovered, nil
+}
+
+// retryWebhookRow is the lightweight projection scanned for RetryFailedWebhooks.
+type retryWebhookRow struct {
+	ID      uuid.UUID
+	EventID string
+	Payload []byte
+}
+
+// RetryFailedWebhooks re-dispatches Nomba webhook events that the live handler
+// could not settle: rows left `failed` (a dispatch error), or `pending` rows
+// orphaned by a crash mid-dispatch (received_at older than staleAfter). For each
+// it re-runs Dispatch; success (or a recognized non-settling event) flips the row
+// to `processed`. A still-failing dispatch is left untouched to be retried on the
+// next tick. Returns the count moved to `processed`.
+//
+// This recovers transient-failure inbound/payout dispatches whose trade is still
+// actionable. A paid-orphan is NOT recovered here (its trade is past
+// pending_payment, so re-dispatch no-ops) — that's RecoverStuckTrades' job.
+func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfter time.Duration) (int, error) {
+	cutoff := time.Now().Add(-staleAfter)
+	var rows []retryWebhookRow
+	if err := s.db.WithContext(ctx).
+		Table("webhook_events").
+		Select("id, event_id, payload").
+		Where("provider = ?", ProviderNomba).
+		Where("status = ? OR (status = ? AND received_at < ?)", "failed", "pending", cutoff).
+		Order("received_at ASC").
+		Limit(100).
+		Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+
+	retried := 0
+	for _, r := range rows {
+		err := s.Dispatch(ctx, r.Payload)
+		if err != nil && !errors.Is(err, ErrNonSettlingEvent) {
+			// Still failing — leave it for the next tick.
+			log.Printf("[pm recovery] re-dispatch webhook event=%s still failing: %v", r.EventID, err)
+			continue
+		}
+		// nil OR ErrNonSettlingEvent → done; flip to processed.
+		if uerr := s.db.WithContext(ctx).
+			Table("webhook_events").
+			Where("id = ?", r.ID).
+			Updates(map[string]any{"status": "processed", "processed_at": time.Now()}).Error; uerr != nil {
+			log.Printf("[pm recovery] mark webhook event=%s processed: %v", r.EventID, uerr)
+			continue
+		}
+		retried++
+	}
+	return retried, nil
 }
 
 // ─── Sell flow (payout → release) ────────────────────────────────────────────

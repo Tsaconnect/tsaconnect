@@ -34,14 +34,32 @@ type fakeWebhookDispatcher struct {
 	payoutErr  error
 }
 
-func (f *fakeWebhookDispatcher) HandleInbound(_ context.Context, p services.InboundPayment) error {
-	f.inbound = append(f.inbound, p)
+// Dispatch mirrors the real PMAutomationService.Dispatch: it classifies by
+// event_type, parses with the real Parse helpers (so ErrNonSettlingEvent
+// propagates exactly as in production), and records the parsed DTO before
+// returning the configured error. This lets the existing inbound/payout
+// assertions keep working against the new single-method interface.
+func (f *fakeWebhookDispatcher) Dispatch(_ context.Context, body []byte) error {
+	var env struct {
+		EventType string `json:"event_type"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.EventType)), "payout") {
+		p, err := services.ParseNombaPayout(body)
+		if err != nil {
+			return err
+		}
+		f.payouts = append(f.payouts, *p)
+		return f.payoutErr
+	}
+	p, err := services.ParseNombaInbound(body)
+	if err != nil {
+		return err // includes services.ErrNonSettlingEvent
+	}
+	f.inbound = append(f.inbound, *p)
 	return f.inboundErr
-}
-
-func (f *fakeWebhookDispatcher) HandlePayoutStatus(_ context.Context, p services.PayoutStatus) error {
-	f.payouts = append(f.payouts, p)
-	return f.payoutErr
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -315,6 +333,44 @@ func TestNombaWebhook_Duplicate_NotReDispatched(t *testing.T) {
 	}
 	if recorded != "REQ-evt_dup" {
 		t.Fatalf("dedup key = %q, want requestId %q", recorded, "REQ-evt_dup")
+	}
+}
+
+// TestNombaWebhook_NonSettlingEvent_MarkedProcessed asserts a recognized
+// non-settling payment_* event (payment_failed) is acknowledged with 200 and
+// recorded as `processed` — NOT `failed` — with no release dispatched. This is
+// Finding 4's handler side: ParseNombaInbound returns ErrNonSettlingEvent, and
+// the handler treats it as intentional no-action.
+func TestNombaWebhook_NonSettlingEvent_MarkedProcessed(t *testing.T) {
+	db, store := newSQLiteWebhookStore(t)
+	disp := &fakeWebhookDispatcher{}
+	h := newWebhookHandler(store, disp)
+
+	body := []byte(`{
+		"event_type": "payment_failed",
+		"requestId": "REQ-nonsettle-1",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "txn-1", "type": "vact_transfer", "transactionAmount": 1500, "fee": 0, "time": "2026-06-16T09:00:00Z", "responseCode": "01"},
+			"customer": {"senderName": "JOHN DOE", "accountNumber": "0987654321"}
+		}
+	}`)
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), testTimestamp)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(disp.inbound) != 0 || len(disp.payouts) != 0 {
+		t.Fatalf("non-settling event must not release: inbound=%d payouts=%d", len(disp.inbound), len(disp.payouts))
+	}
+
+	var status string
+	if err := db.Table("webhook_events").Select("status").
+		Where("event_id = ?", "REQ-nonsettle-1").Row().Scan(&status); err != nil {
+		t.Fatalf("scan status: %v", err)
+	}
+	if status != "processed" {
+		t.Fatalf("non-settling event status = %q, want processed (NOT failed)", status)
 	}
 }
 
