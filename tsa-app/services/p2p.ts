@@ -94,6 +94,12 @@ export interface P2PAd {
   //    pre-date the migration; new ads do not populate these).
   onChainAdId?: string;
   escrowTxHash?: string;
+  /** True when this ad is posted by a Payment Merchant (PM). PM buy-ads
+   *  trigger Nomba bank-transfer payout — the app must collect the seller's
+   *  destination bank account at open time. */
+  isPm?: boolean;
+  /** ID of the PM that owns this ad. Populated server-side alongside isPm. */
+  pmId?: string;
   status: 'pending' | 'active' | 'paused' | 'exhausted' | 'cancelled';
   expiresAt?: string;
   createdAt: string;
@@ -605,6 +611,11 @@ export interface OpenTradeInput {
   sellerAddress?: string;
   /** Base-unit crypto amount the user will sell (buy-ad path only). */
   tokenAmount?: string;
+  /** Payout bank details — required when selling to a PM buy-ad so the
+   *  backend knows where to send the Nomba bank transfer. */
+  payoutAccountNumber?: string;
+  payoutBank?: string;
+  payoutAccountName?: string;
 }
 
 export interface ListTradesFilter {
