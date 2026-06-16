@@ -180,3 +180,49 @@ func TestAutoRelease_RejectsBadMoneyInvariant(t *testing.T) {
 		t.Errorf("status = %q, must NOT be released on invariant violation", persisted.Status)
 	}
 }
+
+// TestAutoRelease_FailsClosedOnUnparseableTokenAmount verifies the fail-closed
+// money-invariant guard: when a trade's TokenAmount cannot be parsed as a
+// big.Int, confirmReleaseCore must NOT skip the invariant and confirm the
+// release. AutoRelease must error and leave the trade un-released (it stays in
+// `releasing` for the reconciler) regardless of the on-chain event.
+func TestAutoRelease_FailsClosedOnUnparseableTokenAmount(t *testing.T) {
+	for _, amt := range []string{"1.5", ""} {
+		amt := amt
+		t.Run("amount="+amt, func(t *testing.T) {
+			db := setupTradeDB(t)
+			svc, esc, _ := newService(t, db)
+			trade := seedOpenedPMTrade(t, svc)
+			// Corrupt the token amount to an unparseable value after seeding.
+			if err := db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
+				Update("token_amount", amt).Error; err != nil {
+				t.Fatalf("set token_amount: %v", err)
+			}
+			if _, err := svc.SystemMarkPaid(context.Background(), trade.ID, "nomba:evt_1"); err != nil {
+				t.Fatalf("SystemMarkPaid: %v", err)
+			}
+
+			// Fake escrow returns any well-formed event — it must still be blocked.
+			esc.releasedEvent = &P2PTradeReleasedEvent{
+				TradeID:       HashID(trade.ID),
+				Buyer:         common.HexToAddress("0x000000000000000000000000000000000000beef"),
+				AmountToBuyer: big.NewInt(999500),
+				FeeToSystem:   big.NewInt(500),
+			}
+			signer := &fakeReleaseSigner{
+				addr: "0x1111111111111111111111111111111111111111",
+				hash: "0xrelease",
+			}
+
+			if _, err := svc.AutoRelease(context.Background(), trade.ID, signer); err == nil {
+				t.Fatalf("expected AutoRelease error on unparseable token amount %q, got nil", amt)
+			}
+
+			var persisted models.P2PTrade
+			db.First(&persisted, "id = ?", trade.ID)
+			if persisted.Status == models.P2PTradeStatusReleased {
+				t.Errorf("status = %q, must NOT be released on unparseable amount", persisted.Status)
+			}
+		})
+	}
+}

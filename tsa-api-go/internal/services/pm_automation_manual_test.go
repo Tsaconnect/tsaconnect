@@ -96,6 +96,86 @@ func TestListBuyManualQueue(t *testing.T) {
 	}
 }
 
+// TestListBuyManualQueue_SurfacesPaidOrphan verifies the paid-orphan recovery:
+// a PM buy trade left at `paid` with no release (AutoRelease failed after
+// SystemMarkPaid) is invisible to the timeout watchdog and reconciler, so the
+// manual queue must surface it. A `paid` trade that already released
+// (release_tx_hash set) must NOT appear.
+func TestListBuyManualQueue_SurfacesPaidOrphan(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	pmAd := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerOrphan := uuid.New()
+	buyerReleased := uuid.New()
+
+	// paidOrphan: paid, empty release_tx_hash, empty nomba_inbound_event_id → APPEARS.
+	paidOrphan := seedBuyTradeOnAd(t, db, pmAd, buyerOrphan, "1500.00")
+	if err := db.Exec("UPDATE p2p_trades SET status = ? WHERE id = ?",
+		models.P2PTradeStatusPaid, paidOrphan.ID).Error; err != nil {
+		t.Fatalf("set paid: %v", err)
+	}
+
+	// paidReleased: paid but release_tx_hash set → HIDDEN (already released).
+	paidReleased := seedBuyTradeOnAd(t, db, pmAd, buyerReleased, "2500.00")
+	if err := db.Exec("UPDATE p2p_trades SET status = ?, release_tx_hash = '0xdone' WHERE id = ?",
+		models.P2PTradeStatusPaid, paidReleased.ID).Error; err != nil {
+		t.Fatalf("set released: %v", err)
+	}
+
+	auto, _ := newPMAutomationService(t, db, nil, svc, nameMap(map[uuid.UUID]string{
+		buyerOrphan:   "ORPHAN OPS",
+		buyerReleased: "DONE DEAL",
+	}))
+
+	items, err := auto.ListBuyManualQueue(context.Background())
+	if err != nil {
+		t.Fatalf("ListBuyManualQueue: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (the paid orphan), got %d: %+v", len(items), items)
+	}
+	if items[0].TradeID != paidOrphan.ID {
+		t.Errorf("tradeId = %v, want paid orphan %v", items[0].TradeID, paidOrphan.ID)
+	}
+}
+
+// TestManualRelease_RecoversPaidOrphan verifies an operator can settle a
+// surfaced `paid` orphan via ManualRelease: SystemMarkPaid returns
+// ErrInvalidTransition (already paid, tolerated), AutoRelease accepts `paid`
+// as an entry state, and the trade settles to released with the signer called
+// exactly once.
+func TestManualRelease_RecoversPaidOrphan(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	if err := db.Exec("UPDATE p2p_trades SET status = ? WHERE id = ?",
+		models.P2PTradeStatusPaid, trade.ID).Error; err != nil {
+		t.Fatalf("set paid: %v", err)
+	}
+
+	setReleasedEvent(esc, trade)
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{buyerID: "ALICE"}))
+
+	got, err := auto.ManualRelease(context.Background(), trade.ID, uuid.New())
+	if err != nil {
+		t.Fatalf("ManualRelease on paid orphan: %v", err)
+	}
+	if got.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released", got.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Errorf("signer called %d times, want 1", len(signer.calls))
+	}
+}
+
 // TestListBuyManualQueue_NameLookupError verifies that a name-lookup failure
 // results in an empty BuyerName (skip-name-on-error) rather than an error,
 // and the trade still appears in the queue.
