@@ -64,7 +64,9 @@ const P2PMarketScreen: React.FC = () => {
   // Optional deep-link intent from the marketplace P2P heading: ?side=buy means
   // "I want to BUY crypto" → browse sell-ads (adSide 'sell'); ?side=sell means
   // "I want to SELL crypto" → browse buy-ads (adSide 'buy').
-  const { side: sideParam } = useLocalSearchParams<{ side?: string }>();
+  // ?pm=1 → Payment Merchant mode (PM-filtered feed); absent/0 → normal P2P.
+  const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
+  const isPM = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
   const { isMerchant, role, loading: roleLoading } = useUserRole();
   const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
@@ -119,6 +121,9 @@ const P2PMarketScreen: React.FC = () => {
       token,
       fiatCurrency: currency.code,
       ...(chainFilter != null ? { chainId: chainFilter } : {}),
+      // PM mode: include only PM ads (pm_id set). Normal P2P: exclude PM ads.
+      // This keeps PM ads out of the regular feed and the PM tab out of normal P2P.
+      pm: isPM ? true : false,
     });
     if (res.success && res.data) {
       setAds(res.data);
@@ -127,7 +132,7 @@ const P2PMarketScreen: React.FC = () => {
     }
     setLoading(false);
     setRefreshing(false);
-  }, [adSide, token, currency.code, chainFilter]);
+  }, [adSide, token, currency.code, chainFilter, isPM]);
 
   useEffect(() => {
     load();
@@ -194,9 +199,16 @@ const P2PMarketScreen: React.FC = () => {
         )}
 
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text variant="title1" weight="700">
-            {adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`}
-          </Text>
+          <View style={{ flex: 1 }}>
+            <Text variant="title1" weight="700">
+              {isPM ? 'Payment Merchant' : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
+            </Text>
+            {isPM && (
+              <Text variant="caption" color="textSecondary">
+                Instant buy / sell with verified merchants
+              </Text>
+            )}
+          </View>
           <CurrencySelector variant="header" selectedCode={currency.code} onSelectCode={setMarketCurrency} />
         </View>
 
