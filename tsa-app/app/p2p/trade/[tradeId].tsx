@@ -45,6 +45,7 @@ import {
   AmountText,
   Button,
   Card,
+  CopyableField,
   Icon,
   IconButton,
   PressableScale,
@@ -853,6 +854,13 @@ const ActionPanel: React.FC<{
 }> = ({ role, trade, acting, onMarkPaid, onRelease, onCancel, onDispute }) => {
   const { colors, spacing } = useTheme();
   const expired = new Date(trade.expiresAt).getTime() < Date.now();
+  // PM (Payment Merchant) trades are automated — the backend bot drives
+  // markPaid + release, so the user must NOT see manual paid/release buttons.
+  // A buyer instead sees a pay-to card. But if isPm is set yet pmPayTo is
+  // missing (PM mis-seeded / no inbound account configured), automation can't
+  // run — fall back to the normal manual flow so the trade stays usable.
+  const pmActive = !!trade.isPm && !!trade.pmPayTo;
+  const pmDormant = !!trade.isPm && !trade.pmPayTo;
   // Role-awareness for both sell-ad and buy-ad trades:
   //   sell-ad trade: user is buyer (buys crypto), merchant is seller
   //     → buyer marks paid, seller (merchant) releases
@@ -860,7 +868,8 @@ const ActionPanel: React.FC<{
   //     → buyer (merchant) marks paid after sending fiat, seller (user) releases
   // The role field already resolves correctly from buyerId/sellerId vs user.id,
   // so canMarkPaid and canRelease gate correctly in both cases with no changes.
-  const canMarkPaid = role === 'buyer' && trade.status === 'pending_payment';
+  // On a PM trade with automation active, both manual gates are suppressed.
+  const canMarkPaid = !pmActive && role === 'buyer' && trade.status === 'pending_payment';
   // Gate the Release button on the buyer's markPaid (status === 'paid'). The
   // contract + backend deliberately ALSO allow a seller to release straight from
   // pending_payment — the seller's signature is the real gate, since markPaid is
@@ -868,9 +877,19 @@ const ActionPanel: React.FC<{
   // buyer-marks-paid → seller-releases, so the button only surfaces once the
   // buyer has marked the trade paid. (Both sell-ad and buy-ad map to role here:
   // on a buy-ad the depositing user is the seller and the merchant is the buyer.)
-  const canRelease = role === 'seller' && trade.status === 'paid';
+  const canRelease = !pmActive && role === 'seller' && trade.status === 'paid';
   // Seller is waiting on the buyer's fiat payment — explains the absent Release.
-  const sellerAwaitingPayment = role === 'seller' && trade.status === 'pending_payment';
+  // On an active PM trade the automated-status card replaces this copy.
+  const sellerAwaitingPayment =
+    !pmActive && role === 'seller' && trade.status === 'pending_payment';
+  // PM buyer who still owes fiat: show the pay-to card instead of "I've paid".
+  const showPmPayTo =
+    pmActive && role === 'buyer' && trade.status === 'pending_payment';
+  // PM seller/depositor side (or PM buyer past pending): show an automated-status
+  // info card and suppress the manual release. We surface this for the seller
+  // (depositor who sold to PM) at any non-terminal PM stage, and for the buyer
+  // once they're past the pay-to step.
+  const showPmAutomated = pmActive && !showPmPayTo;
   const canCancel = expired && trade.status === 'pending_payment';
   const canDispute =
     trade.status === 'pending_payment' || trade.status === 'paid';
@@ -884,6 +903,25 @@ const ActionPanel: React.FC<{
         </AccentCard>
       ) : (
         <View style={{ gap: spacing.md }}>
+          {showPmPayTo && trade.pmPayTo && (
+            <PmPayToCard trade={trade} payTo={trade.pmPayTo} />
+          )}
+          {showPmAutomated && (
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                <Icon name="checkCircle" size={18} color={colors.accent} />
+                <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
+                  We&apos;ll pay your bank and release once confirmed — no action
+                  needed.
+                </Text>
+              </View>
+            </AccentCard>
+          )}
+          {pmDormant && (
+            <Text variant="caption" color="textMuted" align="center">
+              Automated settlement unavailable — proceed manually.
+            </Text>
+          )}
           {sellerAwaitingPayment && (
             <Text variant="bodySm" color="textSecondary" align="center">
               Waiting for the buyer to send payment and mark it paid. You can
@@ -934,6 +972,52 @@ const ActionPanel: React.FC<{
         </View>
       )}
     </View>
+  );
+};
+
+// Read-only pay-to card for a PM (automated) buy trade. The buyer pays the
+// exact fiat into the PM's Nomba account; the backend bot detects the inbound
+// transfer, then markPaid + release the crypto automatically — no manual button.
+const PmPayToCard: React.FC<{
+  trade: P2PTrade;
+  payTo: NonNullable<P2PTrade['pmPayTo']>;
+}> = ({ trade, payTo }) => {
+  const { colors, spacing } = useTheme();
+  return (
+    <Card style={{ gap: spacing.md }}>
+      <View style={{ alignItems: 'center', gap: spacing.xs }}>
+        <Text variant="bodySm" color="textSecondary">
+          Pay exactly
+        </Text>
+        <AmountText
+          value={trade.fiatAmount}
+          currency={trade.fiatCurrency}
+          variant="title2"
+        />
+      </View>
+      <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
+        {trade.payerName
+          ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
+          : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
+      </Text>
+      <View style={{ gap: spacing.sm }}>
+        <CopyableField
+          label="Account number"
+          value={payTo.accountNumber}
+          toastMessage="Account number copied"
+        />
+        <CopyableField
+          label="Bank"
+          value={payTo.bank}
+          toastMessage="Bank copied"
+        />
+        <CopyableField
+          label="Account name"
+          value={payTo.accountName}
+          toastMessage="Account name copied"
+        />
+      </View>
+    </Card>
   );
 };
 

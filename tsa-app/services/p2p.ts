@@ -152,6 +152,12 @@ export interface P2PTrade {
   expiredNotifiedAt?: string;
   createdAt: string;
   updatedAt: string;
+  // PM (Payment Merchant) automation: when isPm, the backend bot drives
+  // markPaid + release — the user never does so manually. pmPayTo is the
+  // Nomba inbound account a buyer pays into; payerName is the buyer's KYC name.
+  isPm?: boolean;
+  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
+  payerName?: string;
 }
 
 export interface P2PPaymentMethod {
