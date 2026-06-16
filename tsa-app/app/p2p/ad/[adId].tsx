@@ -47,6 +47,11 @@ import {
   type P2PPaymentMethod,
 } from '../../../services/p2p';
 import {
+  getNigerianBanks,
+  resolveAccountName,
+  type NgBank,
+} from '../../../services/ngBanks';
+import {
   broadcastTransaction,
   ensureGas,
   getActiveWallet,
@@ -67,11 +72,15 @@ import {
   Card,
   Divider,
   Icon,
+  Input,
+  PickerSheet,
   PressableScale,
   RadioRow,
+  SelectRow,
   Spinner,
   Text,
 } from '@/components/ui';
+import type { PickerItem } from '@/components/ui';
 
 // TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
@@ -89,6 +98,19 @@ const AdDetailScreen: React.FC = () => {
   // User's own payment methods — used on buy-ad side (merchant pays fiat HERE).
   const [userPaymentMethods, setUserPaymentMethods] = useState<P2PPaymentMethod[]>([]);
   const [loadingUserPms, setLoadingUserPms] = useState(false);
+
+  // ─── PM payout bank state (buy-ad + isPm only) ───────────────────────────
+  // When the user is selling to a PM buy-ad, collect their destination bank so
+  // the backend knows where to send the Nomba fiat transfer.
+  const [banks, setBanks] = useState<NgBank[]>([]);
+  const [banksLoading, setBanksLoading] = useState(false);
+  const [showBankPicker, setShowBankPicker] = useState(false);
+  const [payoutBank, setPayoutBank] = useState<NgBank | null>(null);
+  const [payoutAccountNumber, setPayoutAccountNumber] = useState('');
+  const [payoutAccountName, setPayoutAccountName] = useState('');
+  const [resolvingPayout, setResolvingPayout] = useState(false);
+  const [payoutResolved, setPayoutResolved] = useState(false);
+  const [payoutResolveError, setPayoutResolveError] = useState<null | 'not_found' | 'unavailable'>(null);
 
   // Sell-ad: show the seller's embedded payment-methods (buyer sends fiat here).
   // Buy-ad: show the user's own payment-methods (merchant sends fiat here).
@@ -132,6 +154,52 @@ const AdDetailScreen: React.FC = () => {
     }
   }, [ad?.side, loadUserPms]);
 
+  // Load bank list when the ad is a PM buy-ad (deferred until needed).
+  const isPmBuyAd = ad?.side === 'buy' && !!ad?.isPm;
+  useEffect(() => {
+    if (!isPmBuyAd) return;
+    let cancelled = false;
+    setBanksLoading(true);
+    getNigerianBanks().then((list) => {
+      if (!cancelled) {
+        setBanks(list);
+        setBanksLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [isPmBuyAd]);
+
+  // Debounced payout account name resolution — triggers when bank is selected
+  // AND accountNumber reaches 10 digits. Mirrors the payment-methods/new.tsx flow.
+  useEffect(() => {
+    if (!isPmBuyAd || !payoutBank || payoutAccountNumber.length < 10) {
+      setResolvingPayout(false);
+      setPayoutResolved(false);
+      setPayoutResolveError(null);
+      return;
+    }
+    let cancelled = false;
+    setResolvingPayout(true);
+    setPayoutResolved(false);
+    setPayoutResolveError(null);
+    setPayoutAccountName('');
+    const timer = setTimeout(async () => {
+      const res = await resolveAccountName(payoutBank.code, payoutAccountNumber);
+      if (cancelled) return;
+      setResolvingPayout(false);
+      if (res.ok) {
+        setPayoutAccountName(res.accountName);
+        setPayoutResolved(true);
+      } else {
+        setPayoutResolveError(res.reason);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isPmBuyAd, payoutBank, payoutAccountNumber]);
+
   // FIX 1: Fail closed on unknown token decimals.
   // On the sell/deposit path a wrong decimal count makes parseTokenAmount produce
   // the wrong on-chain amount — approve/deposit mismatch or massive over-deposit.
@@ -168,13 +236,18 @@ const AdDetailScreen: React.FC = () => {
   const minOk = isBuyAd || !ad?.minLimit || fiatAmountNum >= parseFloat(ad.minLimit || '0');
   const maxOk = isBuyAd || !ad?.maxLimit || fiatAmountNum <= parseFloat(ad.maxLimit || '0');
 
+  // PM payout gate: for PM buy-ads the seller must supply a verified bank account.
+  const pmPayoutValid = !isPmBuyAd ||
+    (!!payoutBank && payoutAccountNumber.length >= 10 && payoutResolved && !!payoutAccountName);
+
   const valid =
     !!ad &&
     !ad.rateStale &&
     parseFloat(amountInput || '0') > 0 &&
     !!selectedPmId &&
     // FIX 1: sell flow (buy-ad path) requires a known token.
-    (isBuyAd ? tokenSupported : minOk && maxOk);
+    (isBuyAd ? tokenSupported : minOk && maxOk) &&
+    pmPayoutValid;
 
   // ─── Sell-ad submit (buy crypto) ─────────────────────────────────────────
 
@@ -387,6 +460,15 @@ const AdDetailScreen: React.FC = () => {
         tokenAmount: tokenBaseUnits,
         fiatAmount,
         paymentMethodId: selectedPmId,
+        // Pass payout bank details for PM buy-ads so the backend knows where
+        // to send the Nomba fiat transfer. Only set when isPm and resolved.
+        ...(isPmBuyAd && payoutResolved
+          ? {
+              payoutAccountNumber,
+              payoutBank: payoutBank!.code,
+              payoutAccountName,
+            }
+          : {}),
       });
       if (openRes.status === 503) {
         Alert.alert(
@@ -428,6 +510,13 @@ const AdDetailScreen: React.FC = () => {
 
   const handleOpen = isBuyAd ? handleOpenBuyAd : handleOpenSellAd;
 
+  // Bank picker items for PM payout — mapped to PickerSheet's { id, label } shape.
+  // Must be declared before the early return so hooks are called unconditionally.
+  const bankPickerItems: PickerItem[] = useMemo(
+    () => banks.map((b) => ({ id: b.code, label: b.name, icon: 'bank' as const })),
+    [banks],
+  );
+
   if (loading || !ad) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -442,6 +531,7 @@ const AdDetailScreen: React.FC = () => {
     supportedCurrencies.find((c) => c.code === ad.fiatCurrency)?.symbol ?? ad.fiatCurrency;
 
   const sellerLabel = ad.sellerUsername || `seller-${ad.sellerId.slice(0, 4)}`;
+
   // For buy-ads the "seller" shown is the merchant posting the buy-ad.
   const counterpartySub = isBuyAd
     ? `Buying ${ad.token} with ${ad.fiatCurrency}`
@@ -668,6 +758,81 @@ const AdDetailScreen: React.FC = () => {
             </View>
           )}
 
+          {/* PM payout bank entry — only when the buy-ad is from a PM */}
+          {isPmBuyAd && (
+            <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="bank" size={16} color={colors.accent} />
+                <Text variant="bodySm" weight="700" color="textPrimary">
+                  Your payout bank account
+                </Text>
+              </View>
+
+              {banksLoading && banks.length === 0 ? (
+                <View style={{ paddingVertical: spacing.md }}>
+                  <Spinner inline label="Loading banks…" />
+                </View>
+              ) : (
+                <>
+                  <SelectRow
+                    label="Bank"
+                    placeholder="Choose your bank"
+                    value={payoutBank?.name}
+                    leftIcon="bank"
+                    onPress={() => setShowBankPicker(true)}
+                  />
+
+                  <Input
+                    label="Account number"
+                    keyboardType="number-pad"
+                    maxLength={20}
+                    placeholder="0123456789"
+                    value={payoutAccountNumber}
+                    onChangeText={(v) => {
+                      const digits = v.replace(/\D/g, '');
+                      setPayoutAccountNumber(digits);
+                      // Clear resolved state when number changes.
+                      if (payoutResolved) {
+                        setPayoutResolved(false);
+                        setPayoutAccountName('');
+                      }
+                    }}
+                  />
+
+                  <Input
+                    label="Account name"
+                    placeholder="Verified automatically"
+                    value={payoutAccountName}
+                    editable={false}
+                    error={
+                      payoutResolveError === 'not_found'
+                        ? "Couldn't verify this account — check the number/bank."
+                        : payoutResolveError === 'unavailable'
+                          ? "Couldn't verify this account — check the number/bank."
+                          : undefined
+                    }
+                    rightAdornment={
+                      resolvingPayout ? (
+                        <Spinner size="small" />
+                      ) : payoutResolved ? (
+                        <Icon name="checkCircle" size={20} color={colors.success} />
+                      ) : undefined
+                    }
+                  />
+                </>
+              )}
+
+              <AccentCard padding="md">
+                <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+                  <Icon name="info" size={14} color={colors.accent} />
+                  <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                    {'You\'ll be paid here. The account name must match your own name (KYC) or your trade goes to manual review.'}
+                  </Text>
+                </View>
+              </AccentCard>
+            </View>
+          )}
+
           <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.lg }}>
             {isBuyAd
               ? `After opening, the merchant has 30 minutes to send ${ad.fiatCurrency} to your account. Release your ${ad.token} only after confirming receipt.`
@@ -693,6 +858,30 @@ const AdDetailScreen: React.FC = () => {
           />
         </BottomActionBar>
       </KeyboardAvoidingView>
+
+      {/* PM payout bank picker — rendered outside KeyboardAvoidingView so the
+          Sheet floats above keyboard correctly. Only mounted when isPmBuyAd. */}
+      {isPmBuyAd && (
+        <PickerSheet
+          visible={showBankPicker}
+          onClose={() => setShowBankPicker(false)}
+          title="Choose your bank"
+          items={bankPickerItems}
+          loading={banksLoading && banks.length === 0}
+          selectedId={payoutBank?.code}
+          emptyText="No banks found."
+          onSelect={(item) => {
+            const b = banks.find((x) => x.code === item.id);
+            if (!b) return;
+            setPayoutBank(b);
+            setShowBankPicker(false);
+            // Clear account name when bank changes — must re-resolve.
+            setPayoutResolved(false);
+            setPayoutAccountName('');
+            setPayoutResolveError(null);
+          }}
+        />
+      )}
     </SafeAreaView>
   );
 };
