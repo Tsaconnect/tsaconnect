@@ -458,7 +458,18 @@ func main() {
 		nwh    *handlers.NombaWebhookHandler
 	)
 	if releaseSigner != nil && p2pTradeSvc != nil {
-		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, services.NewDisabledNombaGateway())
+		// Gateway selection: live Nomba transfer gateway when client credentials
+		// are configured, otherwise the dormant gateway (sell payouts error until
+		// configured). Dormant-by-default per the repo rule.
+		var nombaGateway services.NombaGateway = services.NewDisabledNombaGateway()
+		if cfg.NombaClientID != "" && cfg.NombaClientSecret != "" {
+			nombaClient := services.NewNombaClient(cfg.NombaBaseURL, cfg.NombaClientID, cfg.NombaClientSecret, cfg.NombaAccountID)
+			nombaGateway = services.NewNombaHTTPGateway(nombaClient)
+			log.Printf("[pm] live Nomba gateway enabled (base=%s)", cfg.NombaBaseURL)
+		} else {
+			log.Printf("[pm] Nomba gateway disabled (no client credentials) — sell payouts will error until configured")
+		}
+		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
 		pmh = handlers.NewPMHandler(pmAuto)
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
@@ -480,9 +491,7 @@ func main() {
 	if cfg.PMTSAEnabled {
 		if uid, perr := uuid.Parse(cfg.PMTSAUserID); perr != nil {
 			log.Printf("[pm] TSA seed skipped: invalid PM_TSA_USER_ID %q: %v", cfg.PMTSAUserID, perr)
-			// NombaWalletID ("") is wired from config in the main-wiring task (T9.5);
-			// passed empty here only to keep this build green.
-		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, "", cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
+		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, cfg.PMTSANombaWalletID, cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
 			log.Printf("[pm] TSA seed failed (continuing): %v", serr)
 		} else {
 			log.Printf("[pm] TSA payment-merchant seeded (account=%s)", cfg.PMTSAInboundAccount)

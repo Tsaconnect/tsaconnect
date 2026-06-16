@@ -262,6 +262,8 @@ type Config struct {
 	NombaClientID     string
 	NombaClientSecret string
 	NombaAccountID    string
+	// NombaSenderName is the senderName stamped on outgoing (sell-flow) transfers.
+	NombaSenderName string
 
 	// P2P merchant-reputation thresholds for the "Trusted" badge.
 	P2PTrustedMinReleased   int64
@@ -293,6 +295,7 @@ type Config struct {
 	PMTSAInboundAccount  string
 	PMTSAInboundBank     string
 	PMTSAMakerWallet     string
+	PMTSANombaWalletID   string
 	PMTSAPerTradeCapUSD  float64
 	PMTSADailyCapUSD     float64
 
@@ -511,6 +514,7 @@ func Load() *Config {
 	cfg.NombaClientID = os.Getenv("NOMBA_CLIENT_ID")
 	cfg.NombaClientSecret = os.Getenv("NOMBA_CLIENT_SECRET")
 	cfg.NombaAccountID = os.Getenv("NOMBA_ACCOUNT_ID")
+	cfg.NombaSenderName = getEnv("NOMBA_SENDER_NAME", "TSA Connect")
 
 	// P2P merchant-reputation thresholds.
 	cfg.P2PTrustedMinReleased = getEnvInt64("P2P_TRUSTED_MIN_RELEASED", 50)
@@ -534,6 +538,7 @@ func Load() *Config {
 	cfg.PMTSAName = strings.TrimSpace(getEnv("PM_TSA_NAME", "TSA"))
 	cfg.PMTSAInboundBank = strings.TrimSpace(getEnv("PM_TSA_INBOUND_BANK", ""))
 	cfg.PMTSAMakerWallet = strings.TrimSpace(getEnv("PM_TSA_MAKER_WALLET", ""))
+	cfg.PMTSANombaWalletID = strings.TrimSpace(getEnv("PM_TSA_NOMBA_WALLET_ID", ""))
 	cfg.PMTSAPerTradeCapUSD = getEnvFloat64("PM_TSA_PER_TRADE_CAP_USD", 0)
 	cfg.PMTSADailyCapUSD = getEnvFloat64("PM_TSA_DAILY_CAP_USD", 0)
 
