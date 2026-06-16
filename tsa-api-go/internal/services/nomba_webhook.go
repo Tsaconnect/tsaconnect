@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -129,70 +130,123 @@ func (s *NombaWebhookStore) Record(ctx context.Context, eventID string, body []b
 }
 
 // ---------------------------------------------------------------------------
-// Parsers — raw Nomba JSON → existing DTOs
+// Parsers — raw Nomba JSON → DTOs
 // ---------------------------------------------------------------------------
 
-// nombaInboundRaw is the assumed wire shape of a Nomba inbound-payment webhook.
-//
-// TODO(nomba-facts): field mapping assumes a documented shape; finalize against
-// the live Nomba payload (design §12). Fields here are best-effort until the
-// live Nomba sandbox confirms the exact JSON structure and field names.
+// nombaInboundRaw is the real wire shape of a Nomba payment_success webhook.
 type nombaInboundRaw struct {
-	EventID string `json:"event_id"`
-	Data    struct {
-		DestinationAccount  string `json:"destination_account"`
-		SenderName          string `json:"sender_name"`
-		SenderAccount       string `json:"sender_account"`
-		Amount              string `json:"amount"`
-		Status              string `json:"status"`
+	EventType string `json:"event_type"`
+	RequestID string `json:"requestId"`
+	Data      struct {
+		Merchant struct {
+			WalletID string `json:"walletId"`
+			UserID   string `json:"userId"`
+		} `json:"merchant"`
+		Transaction struct {
+			TransactionID     string  `json:"transactionId"`
+			Type              string  `json:"type"`
+			TransactionAmount float64 `json:"transactionAmount"` // naira, not kobo
+			Fee               float64 `json:"fee"`
+			Time              string  `json:"time"`
+			ResponseCode      string  `json:"responseCode"`
+			Narration         string  `json:"narration"`
+		} `json:"transaction"`
+		Customer struct {
+			SenderName    string `json:"senderName"`
+			AccountNumber string `json:"accountNumber"`
+			BankCode      string `json:"bankCode"`
+			BankName      string `json:"bankName"`
+		} `json:"customer"`
 	} `json:"data"`
 }
 
-// nombaPayoutRaw is the assumed wire shape of a Nomba payout-status webhook.
-//
-// TODO(nomba-facts): field mapping assumes a documented shape; finalize against
-// the live Nomba payload (design §12).
+// nombaPayoutRaw is the real wire shape of a Nomba payout_success / payout_failed webhook.
 type nombaPayoutRaw struct {
-	EventID string `json:"event_id"`
-	Data    struct {
-		PayoutID string `json:"payout_id"`
-		Status   string `json:"status"`
+	EventType string `json:"event_type"`
+	RequestID string `json:"requestId"`
+	Data      struct {
+		Merchant struct {
+			WalletID string `json:"walletId"`
+			UserID   string `json:"userId"`
+		} `json:"merchant"`
+		Transaction struct {
+			TransactionID     string  `json:"transactionId"`
+			Type              string  `json:"type"`
+			TransactionAmount float64 `json:"transactionAmount"`
+			Fee               float64 `json:"fee"`
+			Time              string  `json:"time"`
+			ResponseCode      string  `json:"responseCode"`
+			MerchantTxRef     string  `json:"merchantTxRef"`
+		} `json:"transaction"`
+		Customer struct {
+			SenderName    string `json:"senderName"`
+			RecipientName string `json:"recipientName"`
+			AccountNumber string `json:"accountNumber"`
+			BankCode      string `json:"bankCode"`
+			BankName      string `json:"bankName"`
+		} `json:"customer"`
 	} `json:"data"`
 }
 
-// ParseNombaInbound unmarshals a raw Nomba inbound-payment webhook payload
-// into an InboundPayment DTO. Returns an error if EventID is empty.
+// formatNaira formats a float64 naira amount to a 2-decimal string (e.g. 1500 → "1500.00").
+func formatNaira(amount float64) string {
+	return strconv.FormatFloat(amount, 'f', 2, 64)
+}
+
+// ParseNombaInbound unmarshals a real Nomba payment_success webhook payload
+// into an InboundPayment DTO. Returns an error if event_type is not
+// "payment_success", requestId is empty, or data.merchant.walletId is empty.
 func ParseNombaInbound(raw []byte) (*InboundPayment, error) {
 	var r nombaInboundRaw
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("parse nomba inbound: %w", err)
 	}
-	if r.EventID == "" {
-		return nil, errors.New("parse nomba inbound: missing event_id")
+	if r.EventType != "payment_success" {
+		return nil, fmt.Errorf("parse nomba inbound: not a payment_success event (got %q)", r.EventType)
+	}
+	if r.RequestID == "" {
+		return nil, errors.New("parse nomba inbound: missing requestId")
+	}
+	if r.Data.Merchant.WalletID == "" {
+		return nil, errors.New("parse nomba inbound: missing data.merchant.walletId")
 	}
 	return &InboundPayment{
-		EventID:             r.EventID,
-		DestinationAccount:  r.Data.DestinationAccount,
-		SenderAccountName:   r.Data.SenderName,
-		SenderAccountNumber: r.Data.SenderAccount,
-		AmountNGN:           r.Data.Amount,
-		Status:              r.Data.Status,
+		EventID:             r.RequestID,
+		WalletID:            r.Data.Merchant.WalletID,
+		DestinationAccount:  "", // not present in real Nomba payload; walletId is the PM key
+		SenderAccountName:   r.Data.Customer.SenderName,
+		SenderAccountNumber: r.Data.Customer.AccountNumber,
+		AmountNGN:           formatNaira(r.Data.Transaction.TransactionAmount),
+		Status:              "settled",
 	}, nil
 }
 
-// ParseNombaPayout unmarshals a raw Nomba payout-status webhook payload into a
-// PayoutStatus DTO. Returns an error if EventID is empty.
+// ParseNombaPayout unmarshals a real Nomba payout_success / payout_failed webhook
+// payload into a PayoutStatus DTO. Returns an error if requestId is empty.
+// Status mapping: "payout_success" → "success", "payout_failed" → "failed", else "pending".
 func ParseNombaPayout(raw []byte) (*PayoutStatus, error) {
 	var r nombaPayoutRaw
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, fmt.Errorf("parse nomba payout: %w", err)
 	}
-	if r.EventID == "" {
-		return nil, errors.New("parse nomba payout: missing event_id")
+	if r.RequestID == "" {
+		return nil, errors.New("parse nomba payout: missing requestId")
 	}
+
+	var status string
+	switch r.EventType {
+	case "payout_success":
+		status = "success"
+	case "payout_failed":
+		status = "failed"
+	default:
+		status = "pending"
+	}
+
 	return &PayoutStatus{
-		EventID:  r.EventID,
-		PayoutID: r.Data.PayoutID,
-		Status:   r.Data.Status,
+		EventID:       r.RequestID,
+		PayoutID:      r.Data.Transaction.TransactionID,
+		MerchantTxRef: r.Data.Transaction.MerchantTxRef,
+		Status:        status,
 	}, nil
 }

@@ -18,6 +18,8 @@ type PayoutRequest struct {
 	AccountNumber string
 	AmountNGN     string // decimal string, e.g. "1500.00"
 	Reference     string // our trade reference (idempotency)
+	AccountName   string // recipient account name (used by live gateway)
+	SenderName    string // sender display name (used by live gateway)
 }
 
 // InboundPayment is a normalized inbound naira credit (buy flow). The webhook
@@ -25,7 +27,8 @@ type PayoutRequest struct {
 // credit is final (we only auto-release on settled — design §9).
 type InboundPayment struct {
 	EventID             string
-	DestinationAccount  string // identifies which PM was paid
+	WalletID            string // data.merchant.walletId — identifies which PM was paid
+	DestinationAccount  string // kept for back-compat with existing references; not populated by the real parser
 	SenderAccountName   string
 	SenderAccountNumber string
 	AmountNGN           string
@@ -34,7 +37,8 @@ type InboundPayment struct {
 
 // PayoutStatus is a normalized payout-result webhook (sell flow).
 type PayoutStatus struct {
-	EventID  string
-	PayoutID string
-	Status   string // "success" | "failed" | "pending"
+	EventID        string
+	PayoutID       string
+	MerchantTxRef  string // data.transaction.merchantTxRef — matches our trade UUID
+	Status         string // "success" | "failed" | "pending"
 }
