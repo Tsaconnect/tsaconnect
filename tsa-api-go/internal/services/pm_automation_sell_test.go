@@ -160,7 +160,41 @@ func TestInitiateSellPayout_BadState(t *testing.T) {
 
 // ─── HandlePayoutStatus ──────────────────────────────────────────────────────
 
-func TestHandlePayoutStatus_Success_Releases(t *testing.T) {
+// TestHandlePayoutStatus_MatchesByMerchantTxRef verifies the deterministic
+// match: a payout_success carrying merchantTxRef = the trade UUID releases that
+// trade, with NO reliance on nomba_payout_id (left empty here on purpose).
+func TestHandlePayoutStatus_MatchesByMerchantTxRef(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	// nomba_payout_id deliberately left empty — match must come from merchantTxRef.
+	setReleasedEvent(esc, trade)
+
+	gw := &fakeNombaGateway{}
+	auto, signer := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
+		EventID: "evt_1", MerchantTxRef: trade.ID.String(), Status: "success",
+	})
+	if err != nil {
+		t.Fatalf("HandlePayoutStatus: %v", err)
+	}
+
+	var persisted models.P2PTrade
+	db.First(&persisted, "id = ?", trade.ID)
+	if persisted.Status != models.P2PTradeStatusReleased {
+		t.Errorf("status = %q, want released (matched by merchantTxRef)", persisted.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Errorf("signer called %d times, want 1", len(signer.calls))
+	}
+}
+
+// TestHandlePayoutStatus_FallsBackToPayoutID verifies that when merchantTxRef is
+// empty, the legacy nomba_payout_id lookup still resolves and releases the trade.
+func TestHandlePayoutStatus_FallsBackToPayoutID(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)
 	svc, esc, _ := newService(t, db)
@@ -175,6 +209,7 @@ func TestHandlePayoutStatus_Success_Releases(t *testing.T) {
 	gw := &fakeNombaGateway{}
 	auto, signer := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
 
+	// No merchantTxRef → falls back to nomba_payout_id.
 	err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
 		EventID: "evt_1", PayoutID: "po_1", Status: "success",
 	})
@@ -185,7 +220,7 @@ func TestHandlePayoutStatus_Success_Releases(t *testing.T) {
 	var persisted models.P2PTrade
 	db.First(&persisted, "id = ?", trade.ID)
 	if persisted.Status != models.P2PTradeStatusReleased {
-		t.Errorf("status = %q, want released", persisted.Status)
+		t.Errorf("status = %q, want released (fallback to payout id)", persisted.Status)
 	}
 	if len(signer.calls) != 1 {
 		t.Errorf("signer called %d times, want 1", len(signer.calls))

@@ -189,5 +189,11 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_inbound_account
 	    ON payment_merchants (inbound_account_number) WHERE inbound_account_number <> ''`)
 
+	// Nomba walletId is the real inbound key (data.merchant.walletId): the buy
+	// flow resolves the PM by walletId on every settled credit. A partial unique
+	// index enforces one PM per non-blank walletId (idempotent, like the others).
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_wallet
+	    ON payment_merchants (nomba_wallet_id) WHERE nomba_wallet_id <> ''`)
+
 	return nil
 }

@@ -144,11 +144,12 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
-	// 2. Resolve the PM by the destination (inbound) account.
-	pm, err := s.pm.GetByInboundAccount(ctx, p.DestinationAccount)
+	// 2. Resolve the PM by the Nomba walletId (data.merchant.walletId). This is
+	//    the real inbound key — NOT a destination account number.
+	pm, err := s.pm.GetByWalletID(ctx, p.WalletID)
 	if err != nil {
 		if errors.Is(err, ErrPMNotFound) {
-			log.Printf("[pm automation] inbound to unknown account %q (event=%s); ignoring", p.DestinationAccount, p.EventID)
+			log.Printf("[pm automation] inbound to unknown walletId %q (event=%s); ignoring", p.WalletID, p.EventID)
 			return nil
 		}
 		return err
@@ -301,16 +302,37 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 // TODO(pm-phase2): automated bounded-retry + on-chain refund once
 // adminResolve-from-pending semantics are confirmed.
 func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutStatus) error {
-	if strings.TrimSpace(p.PayoutID) == "" {
-		log.Printf("[pm automation] payout status %q with empty payout id (event=%s); ignoring", p.Status, p.EventID)
+	// Resolve the trade. The deterministic key is merchantTxRef (= the trade UUID
+	// we sent when initiating the payout). Fall back to the stored nomba_payout_id
+	// only if merchantTxRef is empty/unparseable. Require at least one usable key:
+	// a parseable merchantTxRef OR a non-empty payout id — else an empty
+	// "nomba_payout_id = ''" lookup would match an arbitrary untracked trade and
+	// release it. If BOTH are unusable, this is a no-op.
+	var trade models.P2PTrade
+	var err error
+	switch {
+	case strings.TrimSpace(p.MerchantTxRef) != "":
+		tradeID, parseErr := uuid.Parse(strings.TrimSpace(p.MerchantTxRef))
+		if parseErr != nil {
+			// merchantTxRef present but not a UUID — fall back to payout id below.
+			if strings.TrimSpace(p.PayoutID) == "" {
+				log.Printf("[pm automation] payout status %q with unparseable merchantTxRef %q and empty payout id (event=%s); ignoring", p.Status, p.MerchantTxRef, p.EventID)
+				return nil
+			}
+			err = s.db.WithContext(ctx).First(&trade, "nomba_payout_id = ?", p.PayoutID).Error
+		} else {
+			err = s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error
+		}
+	case strings.TrimSpace(p.PayoutID) != "":
+		err = s.db.WithContext(ctx).First(&trade, "nomba_payout_id = ?", p.PayoutID).Error
+	default:
+		// Neither a usable merchantTxRef nor a payout id — no key to match on.
+		log.Printf("[pm automation] payout status %q with no usable key (empty merchantTxRef + payout id) (event=%s); ignoring", p.Status, p.EventID)
 		return nil
 	}
-
-	var trade models.P2PTrade
-	err := s.db.WithContext(ctx).First(&trade, "nomba_payout_id = ?", p.PayoutID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// No trade for this payout id — a payout we don't track. Log and ignore.
-		log.Printf("[pm automation] payout status %q for untracked payout id %q (event=%s); ignoring", p.Status, p.PayoutID, p.EventID)
+		// No trade for this payout — a payout we don't track. Log and ignore.
+		log.Printf("[pm automation] payout status %q for untracked payout (merchantTxRef=%q payoutId=%q event=%s); ignoring", p.Status, p.MerchantTxRef, p.PayoutID, p.EventID)
 		return nil
 	}
 	if err != nil {
@@ -368,7 +390,7 @@ type manualQueueRow struct {
 
 // ListBuyManualQueue returns PM buy trades stuck awaiting manual review:
 // pending_payment OR paid, pooled sell-ad funding (funding=0), on a PM ad
-// (pm_id IS NOT NULL), with NO matched inbound (nomba_inbound_event_id = ''),
+// (pm_id IS NOT NULL), with NO matched inbound (nomba_inbound_event_id = ”),
 // with open_tx_hash set (on-chain open confirmed), and not yet released
 // (release_tx_hash empty). Most recent first.
 //

@@ -28,6 +28,7 @@ func newSQLiteForPM(t *testing.T) *gorm.DB {
 		name                  TEXT NOT NULL,
 		status                TEXT NOT NULL DEFAULT 'pending',
 		nomba_account_id      TEXT,
+		nomba_wallet_id       TEXT,
 		nomba_creds_ref       TEXT,
 		inbound_account_number TEXT,
 		inbound_bank          TEXT,
@@ -69,6 +70,42 @@ func TestPMService_GetByInboundAccount(t *testing.T) {
 
 	if _, err := svc.GetByInboundAccount(context.Background(), "0000000000"); !errors.Is(err, ErrPMNotFound) {
 		t.Fatalf("want ErrPMNotFound, got %v", err)
+	}
+}
+
+func TestPMService_GetByWalletID(t *testing.T) {
+	db := newSQLiteForPM(t)
+	svc := NewPMService(db)
+
+	pm := &models.PaymentMerchant{
+		UserID:               uuid.New(),
+		Name:                 "TSA",
+		Status:               models.PaymentMerchantStatusActive,
+		InboundAccountNumber: "1234567890",
+		NombaWalletID:        "wallet-123",
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Hit.
+	got, err := svc.GetByWalletID(context.Background(), "wallet-123")
+	if err != nil {
+		t.Fatalf("GetByWalletID: %v", err)
+	}
+	if got.ID != pm.ID {
+		t.Fatalf("wrong PM: got %v, want %v", got.ID, pm.ID)
+	}
+
+	// Miss.
+	if _, err := svc.GetByWalletID(context.Background(), "wallet-nope"); !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("miss: want ErrPMNotFound, got %v", err)
+	}
+
+	// Empty walletId must NEVER match an arbitrary PM (even one with a blank
+	// wallet id) — it is rejected up front with ErrPMNotFound.
+	if _, err := svc.GetByWalletID(context.Background(), ""); !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("empty walletId: want ErrPMNotFound, got %v", err)
 	}
 }
 
@@ -114,15 +151,16 @@ func TestPMService_SeedTSA_Idempotent(t *testing.T) {
 
 	userID := uuid.New()
 	const (
-		acct    = "9876543210"
-		bank    = "Nomba"
-		wallet  = "0xABCDEF1234567890"
-		name    = "TSA Liquidity"
-		name2   = "TSA Liquidity Updated"
+		acct        = "9876543210"
+		bank        = "Nomba"
+		wallet      = "0xABCDEF1234567890"
+		nombaWallet = "wallet-seed-1"
+		name        = "TSA Liquidity"
+		name2       = "TSA Liquidity Updated"
 	)
 
 	// First call — should insert.
-	pm1, err := svc.SeedTSA(context.Background(), userID, name, acct, bank, wallet, 500, 10000)
+	pm1, err := svc.SeedTSA(context.Background(), userID, name, acct, bank, wallet, nombaWallet, 500, 10000)
 	if err != nil {
 		t.Fatalf("SeedTSA first call: %v", err)
 	}
@@ -133,8 +171,13 @@ func TestPMService_SeedTSA_Idempotent(t *testing.T) {
 		t.Fatalf("expected active status, got %q", pm1.Status)
 	}
 
+	// The seeded wallet id is set.
+	if pm1.NombaWalletID != nombaWallet {
+		t.Fatalf("seeded NombaWalletID = %q, want %q", pm1.NombaWalletID, nombaWallet)
+	}
+
 	// Second call with updated name — should update, NOT insert.
-	pm2, err := svc.SeedTSA(context.Background(), userID, name2, acct, bank, wallet, 500, 10000)
+	pm2, err := svc.SeedTSA(context.Background(), userID, name2, acct, bank, wallet, nombaWallet, 500, 10000)
 	if err != nil {
 		t.Fatalf("SeedTSA second call: %v", err)
 	}
@@ -158,5 +201,14 @@ func TestPMService_SeedTSA_Idempotent(t *testing.T) {
 	}
 	if refreshed.Name != name2 {
 		t.Fatalf("name not updated: got %q, want %q", refreshed.Name, name2)
+	}
+
+	// And the seeded row is resolvable by its Nomba walletId.
+	byWallet, err := svc.GetByWalletID(context.Background(), nombaWallet)
+	if err != nil {
+		t.Fatalf("GetByWalletID after seed: %v", err)
+	}
+	if byWallet.ID != pm1.ID {
+		t.Fatalf("GetByWalletID resolved %v, want %v", byWallet.ID, pm1.ID)
 	}
 }
