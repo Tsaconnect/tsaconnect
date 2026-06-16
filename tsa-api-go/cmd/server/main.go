@@ -481,6 +481,13 @@ func main() {
 		} else {
 			log.Printf("[pm] Nomba webhook dormant: NOMBA_WEBHOOK_SECRET not set")
 		}
+		// M2 liveness: periodically recover PM trades wedged at `paid` with no
+		// release (auto-release failed after markPaid, broadcast never landed) and
+		// re-dispatch failed/stale Nomba webhook events. Complements the chain
+		// reconciler + timeout watchdog, which don't cover paid-orphans or dropped
+		// dispatches.
+		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
+		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
 		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
 	} else {
 		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")

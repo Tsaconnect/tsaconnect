@@ -3,10 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,9 +16,14 @@ import (
 // webhookDispatcher is the narrow PM-automation slice the webhook handler needs.
 // The real *services.PMAutomationService satisfies it; tests inject a fake so a
 // full service graph isn't required to test the wire/dedup/classification logic.
+//
+// Dispatch owns classify→parse→dispatch so the handler and the PM recovery job
+// (RetryFailedWebhooks) drive the exact same routing. It returns
+// services.ErrNonSettlingEvent for a recognized-but-non-settling payment_* event
+// so the handler can mark it `processed` (intentionally no action) rather than
+// `failed`.
 type webhookDispatcher interface {
-	HandleInbound(ctx context.Context, p services.InboundPayment) error
-	HandlePayoutStatus(ctx context.Context, p services.PayoutStatus) error
+	Dispatch(ctx context.Context, body []byte) error
 }
 
 // nombaVerifier validates a Nomba webhook from the raw body, the base64
@@ -99,42 +104,26 @@ func (h *NombaWebhookHandler) Handle(c *gin.Context) {
 		return
 	}
 
-	// Dispatch synchronously. A dispatch failure is recorded as `failed` (the
-	// reconciler/retry path heals it) but we still 200 so Nomba doesn't retry.
-	if dispErr := h.dispatch(ctx, body, env); dispErr != nil {
+	// Dispatch synchronously via the centralized PM-automation entry point.
+	//   - nil                  → mark processed.
+	//   - ErrNonSettlingEvent  → mark processed (recognized; intentionally no
+	//                            action — NOT a failure).
+	//   - any other error      → mark failed (the recovery job re-dispatches it).
+	// We always 200 so Nomba doesn't hammer-retry — we own the retry.
+	dispErr := h.auto.Dispatch(ctx, body)
+	switch {
+	case dispErr == nil:
+		h.markProcessed(ctx, ev.EventID)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "processed"})
+	case errors.Is(dispErr, services.ErrNonSettlingEvent):
+		log.Printf("[nomba webhook] non-settling event=%s: %v (marking processed)", env.EventID, dispErr)
+		h.markProcessed(ctx, ev.EventID)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "processed (no action)"})
+	default:
 		log.Printf("[nomba webhook] dispatch event=%s: %v", env.EventID, dispErr)
 		h.markFailed(ctx, ev.EventID, dispErr)
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "received (deferred)"})
-		return
 	}
-
-	h.markProcessed(ctx, ev.EventID)
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "processed"})
-}
-
-// dispatch classifies the raw payload and routes it to the right PM-automation
-// entry point. classify decides inbound vs payout from the payload shape.
-func (h *NombaWebhookHandler) dispatch(ctx context.Context, body []byte, env webhookEnvelope) error {
-	if classifyPayout(env) {
-		p, err := services.ParseNombaPayout(body)
-		if err != nil {
-			return err
-		}
-		return h.auto.HandlePayoutStatus(ctx, *p)
-	}
-	p, err := services.ParseNombaInbound(body)
-	if err != nil {
-		return err
-	}
-	return h.auto.HandleInbound(ctx, *p)
-}
-
-// classifyPayout returns true for a payout-status (sell) event, false for an
-// inbound-credit (buy) event. The real Nomba discriminator is `event_type`:
-// payout_success / payout_failed / payout_refund are payouts; payment_* events
-// (payment_success / payment_failed / payment_reversal) are inbound.
-func classifyPayout(env webhookEnvelope) bool {
-	return strings.HasPrefix(strings.ToLower(env.EventType), "payout")
 }
 
 func (h *NombaWebhookHandler) markProcessed(ctx context.Context, eventID string) {
