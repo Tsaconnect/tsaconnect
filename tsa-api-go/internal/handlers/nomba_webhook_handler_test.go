@@ -179,7 +179,6 @@ func TestNombaWebhook_ValidPayout_Dispatches(t *testing.T) {
 
 	body := []byte(`{
 		"event_id": "evt_po_1",
-		"event": "payout.success",
 		"event_type": "payout_success",
 		"requestId": "REQ-po-1",
 		"data": {
@@ -201,6 +200,46 @@ func TestNombaWebhook_ValidPayout_Dispatches(t *testing.T) {
 	}
 	if len(disp.inbound) != 0 {
 		t.Fatalf("inbound should not be dispatched for a payout event")
+	}
+}
+
+// TestNombaWebhook_RealPayoutShape_RoutesToPayout asserts that a payout body
+// matching the REAL production Nomba shape — discriminated ONLY by top-level
+// event_type ("payout_success"), with NO synthetic "event"/"payout_id" fields —
+// is classified as a payout and routed to HandlePayoutStatus (NOT HandleInbound).
+// This is the regression guard for the misclassification bug that broke the PM
+// sell-flow release.
+func TestNombaWebhook_RealPayoutShape_RoutesToPayout(t *testing.T) {
+	_, store := newSQLiteWebhookStore(t)
+	disp := &fakeWebhookDispatcher{}
+	h := newWebhookHandler(store, disp)
+
+	body := []byte(`{
+		"event_type": "payout_success",
+		"requestId": "REQ-real-po-1",
+		"data": {
+			"merchant": {"walletId": "wallet-123", "userId": "user-uuid"},
+			"transaction": {"transactionId": "po_real_1", "type": "transfer", "time": "2026-06-16T09:00:00Z", "responseCode": "00", "merchantTxRef": "trade-uuid-456"},
+			"customer": {}
+		}
+	}`)
+	if strings.Contains(string(body), `"event"`) || strings.Contains(string(body), `"payout_id"`) {
+		t.Fatal("real-shape fixture must NOT carry synthetic event/payout_id fields")
+	}
+
+	w := postWebhook(t, h, body, nombaSign(t, webhookSecret, body, testTimestamp), testTimestamp)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(disp.payouts) != 1 {
+		t.Fatalf("real payout shape must route to HandlePayoutStatus, got %d payout dispatches", len(disp.payouts))
+	}
+	if len(disp.inbound) != 0 {
+		t.Fatalf("real payout shape must NOT route to HandleInbound, got %d inbound dispatches", len(disp.inbound))
+	}
+	if disp.payouts[0].PayoutID != "po_real_1" || disp.payouts[0].MerchantTxRef != "trade-uuid-456" || disp.payouts[0].Status != "success" {
+		t.Fatalf("bad payout payload: %+v", disp.payouts[0])
 	}
 }
 
