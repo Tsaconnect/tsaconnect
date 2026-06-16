@@ -52,10 +52,12 @@ func NewNombaWebhookHandler(v nombaVerifier, store *services.NombaWebhookStore, 
 
 // webhookEnvelope is the minimal top-level shape we read to dedupe + classify.
 // Nomba's real per-event id is `requestId` (NOT a top-level `event_id`), so the
-// dedup key is keyed on requestId.
+// dedup key is keyed on requestId. Classification reads `event_type` — the real
+// Nomba discriminator (payment_* vs payout_*); there is no top-level `event`
+// field or `payout_id` in production payloads.
 type webhookEnvelope struct {
-	EventID string `json:"requestId"`
-	Event   string `json:"event"`
+	EventID   string `json:"requestId"`
+	EventType string `json:"event_type"`
 }
 
 // Handle is the POST /api/webhooks/nomba entry point. It is signature-verified,
@@ -113,7 +115,7 @@ func (h *NombaWebhookHandler) Handle(c *gin.Context) {
 // dispatch classifies the raw payload and routes it to the right PM-automation
 // entry point. classify decides inbound vs payout from the payload shape.
 func (h *NombaWebhookHandler) dispatch(ctx context.Context, body []byte, env webhookEnvelope) error {
-	if classifyPayout(body, env) {
+	if classifyPayout(env) {
 		p, err := services.ParseNombaPayout(body)
 		if err != nil {
 			return err
@@ -128,16 +130,11 @@ func (h *NombaWebhookHandler) dispatch(ctx context.Context, body []byte, env web
 }
 
 // classifyPayout returns true for a payout-status (sell) event, false for an
-// inbound-credit (buy) event. Heuristic (TODO(nomba-facts): confirm): a payout
-// event carries a `payout_id` somewhere in the JSON, or its event type begins
-// with "payout".
-func classifyPayout(body []byte, env webhookEnvelope) bool {
-	if strings.HasPrefix(strings.ToLower(env.Event), "payout") {
-		return true
-	}
-	// Cheap substring probe avoids a second full unmarshal; the parsers do the
-	// real structured decode. A JSON body containing "payout_id" is a payout.
-	return strings.Contains(string(body), `"payout_id"`)
+// inbound-credit (buy) event. The real Nomba discriminator is `event_type`:
+// payout_success / payout_failed / payout_refund are payouts; payment_* events
+// (payment_success / payment_failed / payment_reversal) are inbound.
+func classifyPayout(env webhookEnvelope) bool {
+	return strings.HasPrefix(strings.ToLower(env.EventType), "payout")
 }
 
 func (h *NombaWebhookHandler) markProcessed(ctx context.Context, eventID string) {
