@@ -16,6 +16,11 @@ const AdminLayout = () => {
         name="p2p-disputes/[tradeId]"
         options={{ title: 'Resolve Dispute' }}
       />
+      <Stack.Screen name="pm-queue" options={{ title: 'Manual Release Queue' }} />
+      <Stack.Screen
+        name="pm-queue/[tradeId]"
+        options={{ title: 'Review PM Trade' }}
+      />
     </Stack>
   );
 };

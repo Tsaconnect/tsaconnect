@@ -744,6 +744,20 @@ export const messagesApi = {
 
 // ─── Admin (dispute resolution) ─────────────────────────────────────────────
 
+// PM manual-release queue item returned by GET /admin/pm/manual-queue.
+// Trades land here when the PM automation can't auto-match an inbound payment
+// (name or amount mismatch) and a human operator must verify before release.
+export interface PMManualQueueItem {
+  tradeId: string;
+  adId: string;
+  buyerId: string;
+  buyerName: string;
+  token: string;
+  tokenAmount: string;
+  fiatAmount: string;
+  createdAt: string;
+}
+
 export interface AdminResolveInput {
   refundBuyer: boolean;
   note?: string;
@@ -775,6 +789,28 @@ export const adminP2pApi = {
       `/admin/p2p/disputes/${encodeURIComponent(tradeId)}/resolve/confirm`,
       { txHash }
     ),
+};
+
+// PM (Payment Merchant) admin operations.
+// These endpoints are gated with RequireP2PAdmin on the backend — generic
+// admins that don't have the PM role get a 403. The queue lists trades that
+// the PM automation couldn't auto-match (name/amount mismatch); a human
+// operator verifies the bank transfer and then calls release or decline.
+//
+// decline is NOT an immediate refund — it marks the trade so the timeout
+// watchdog will cancel it and return the escrowed funds on its next tick.
+export const pmAdminApi = {
+  manualQueue: () =>
+    request<PMManualQueueItem[]>('GET', '/admin/pm/manual-queue'),
+
+  release: (tradeId: string) =>
+    request<void>('POST', `/admin/pm/trades/${encodeURIComponent(tradeId)}/release`, {}),
+
+  decline: (tradeId: string) =>
+    request<void>('POST', `/admin/pm/trades/${encodeURIComponent(tradeId)}/decline`, {}),
+
+  payout: (tradeId: string) =>
+    request<void>('POST', `/admin/pm/trades/${encodeURIComponent(tradeId)}/payout`, {}),
 };
 
 // ─── Sellers ────────────────────────────────────────────────────────────────
