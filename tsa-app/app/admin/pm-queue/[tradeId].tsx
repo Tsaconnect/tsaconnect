@@ -10,7 +10,9 @@
 //             account. Calls pmAdminApi.release() → crypto goes to the buyer.
 //   Decline — trade is flagged for cancellation on timeout; no immediate refund.
 //             Calls pmAdminApi.decline() → the timeout watchdog will cancel and
-//             return escrow on its next tick.
+//             return the escrowed token to the PM on its next tick (this is a
+//             buy trade on a PM sell-ad, so nothing is released to the buyer;
+//             any naira the buyer paid is refunded by the PM off-chain).
 //
 // Error codes:
 //   404 — trade vanished (already processed by another operator)
@@ -108,7 +110,7 @@ const PMTradeDetailScreen: React.FC = () => {
   const handleDecline = useCallback(() => {
     Alert.alert(
       'Decline this trade?',
-      "Decline this trade? It will be cancelled automatically on timeout and the buyer's deposit (if any) refunded.",
+      "Decline this trade? It will be cancelled automatically on timeout — no crypto is released to the buyer and the escrowed funds return to the PM. Refund any naira received from the buyer off-chain.",
       [
         { text: 'Cancel', style: 'cancel' },
         {
