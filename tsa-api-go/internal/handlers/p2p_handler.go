@@ -1064,6 +1064,13 @@ type openTradeRequest struct {
 	BuyerAddress    string `json:"buyerAddress"`
 	SellerAddress   string `json:"sellerAddress"`
 	TokenAmount     string `json:"tokenAmount"`
+	// Payout destination for a PM sell trade (opening a sell against a PM
+	// buy-ad): the bank account the PM automation pays the user to. Optional at
+	// the binding layer; the service requires account+bank when the ad is a PM
+	// buy-ad and ignores them otherwise.
+	PayoutAccountNumber string `json:"payoutAccountNumber"`
+	PayoutBank          string `json:"payoutBank"`
+	PayoutAccountName   string `json:"payoutAccountName"`
 }
 
 func (h *P2PHandler) OpenTrade(c *gin.Context) {
@@ -1103,9 +1110,12 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 		openerAddr = user.WalletAddress
 	}
 	trade, raw, err := h.trade.OpenTrade(c.Request.Context(), adID, user.ID, openerAddr, services.OpenTradeParams{
-		FiatAmount:      req.FiatAmount,
-		PaymentMethodID: pmID,
-		TokenAmount:     req.TokenAmount,
+		FiatAmount:          req.FiatAmount,
+		PaymentMethodID:     pmID,
+		TokenAmount:         req.TokenAmount,
+		PayoutAccountNumber: req.PayoutAccountNumber,
+		PayoutBank:          req.PayoutBank,
+		PayoutAccountName:   req.PayoutAccountName,
 	})
 	if mapServiceError(c, err) {
 		return
