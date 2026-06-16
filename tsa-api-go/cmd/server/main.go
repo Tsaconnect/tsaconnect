@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -17,6 +19,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/routes"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/ws"
@@ -399,6 +402,85 @@ func main() {
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient, merchantStats)
 
+	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
+	// DORMANT-BY-DEFAULT, gated bottom-up:
+	//   - signer: built only for a usable backend. "kms" is not implemented yet
+	//     (Task 10) → nil + log. "local" needs PM_RELEASE_PRIVATE_KEY → nil if
+	//     unset. The signer holds the ONE admin EOA key that broadcasts
+	//     adminRelease, so no key ⇒ no automation.
+	//   - pmAuto: built only when signer != nil AND a P2PTradeService exists
+	//     (P2P itself configured). Uses the disabled Nomba gateway for now, so the
+	//     buy flow works fully and the sell-payout path fails clearly until the
+	//     live gateway lands (Task 9).
+	//   - nwh (webhook): built only when NOMBA_WEBHOOK_SECRET is set AND pmAuto
+	//     exists. Unset secret ⇒ the route stub 503s.
+	//   - pmh (admin ops): built only when pmAuto exists.
+	// With none of the PM env set the server boots with all of these nil and the
+	// PM routes either don't register (admin) or 503 (webhook).
+	pmSvc := services.NewPMService(config.DB)
+	pmNameLookup := func(ctx context.Context, id uuid.UUID) (string, error) {
+		var u models.User
+		if err := config.DB.WithContext(ctx).Select("name").First(&u, "id = ?", id).Error; err != nil {
+			return "", err
+		}
+		return u.Name, nil
+	}
+
+	var releaseSigner services.ReleaseSigner
+	switch cfg.PMReleaseSigner {
+	case "kms":
+		log.Printf("[pm] KMS signer not yet implemented; PM release disabled")
+	default:
+		if cfg.PMReleasePrivateKey != "" && sonicClient != nil {
+			keyHex := strings.TrimPrefix(cfg.PMReleasePrivateKey, "0x")
+			key, kerr := crypto.HexToECDSA(keyHex)
+			if kerr != nil {
+				log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", kerr)
+			} else {
+				releaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
+				log.Printf("[pm] local release signer ready (admin EOA %s)", releaseSigner.Address())
+			}
+		} else {
+			log.Printf("[pm] PM release disabled: PM_RELEASE_PRIVATE_KEY unset or sonic client unavailable")
+		}
+	}
+
+	var (
+		pmAuto *services.PMAutomationService
+		pmh    *handlers.PMHandler
+		nwh    *handlers.NombaWebhookHandler
+	)
+	if releaseSigner != nil && p2pTradeSvc != nil {
+		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, services.NewDisabledNombaGateway())
+		pmh = handlers.NewPMHandler(pmAuto)
+		if cfg.NombaWebhookSecret != "" {
+			nwh = handlers.NewNombaWebhookHandler(
+				services.NewHMACWebhookVerifier(cfg.NombaWebhookSecret),
+				services.NewNombaWebhookStore(config.DB),
+				pmAuto,
+				"X-Nomba-Signature", // TODO(nomba-facts): confirm header name
+			)
+			log.Printf("[pm] Nomba webhook handler ready")
+		} else {
+			log.Printf("[pm] Nomba webhook dormant: NOMBA_WEBHOOK_SECRET not set")
+		}
+		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
+	} else {
+		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")
+	}
+
+	// Seed the single TSA PaymentMerchant row (idempotent). Best-effort: a seed
+	// failure must NEVER fail boot.
+	if cfg.PMTSAEnabled {
+		if uid, perr := uuid.Parse(cfg.PMTSAUserID); perr != nil {
+			log.Printf("[pm] TSA seed skipped: invalid PM_TSA_USER_ID %q: %v", cfg.PMTSAUserID, perr)
+		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
+			log.Printf("[pm] TSA seed failed (continuing): %v", serr)
+		} else {
+			log.Printf("[pm] TSA payment-merchant seeded (account=%s)", cfg.PMTSAInboundAccount)
+		}
+	}
+
 	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
 	// share into the per-user cumulative index once per epoch (default daily,
 	// FEE_GLOBAL_POOL_SETTLE_INTERVAL).
@@ -448,7 +530,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh)
 
 	// Configure HTTP server
 	port := cfg.Port

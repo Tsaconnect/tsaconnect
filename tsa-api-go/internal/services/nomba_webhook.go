@@ -77,6 +77,12 @@ func NewNombaWebhookStore(db *gorm.DB) *NombaWebhookStore {
 	return &NombaWebhookStore{db: db}
 }
 
+// DB returns the underlying GORM handle so callers (the webhook handler) can
+// update an event row's status/error/processed_at after dispatch. Exposed
+// deliberately — the store owns inserts/dedup; post-dispatch status is the
+// caller's concern and shares the same connection.
+func (s *NombaWebhookStore) DB() *gorm.DB { return s.db }
+
 // Record persists the webhook event. It returns:
 //   - (ev, false, nil) on first insert — ev is the newly created row.
 //   - (existing, true, nil) on duplicate (provider+event_id already stored).
