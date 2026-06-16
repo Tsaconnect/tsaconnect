@@ -272,6 +272,91 @@ type lookupResp struct {
 	Data        NombaLookupResult `json:"data"`
 }
 
+// ─── Transfer ─────────────────────────────────────────────────────────────
+
+// NombaTransferRequest is the body for POST /v2/transfers/bank.
+// Amount is sent as a JSON number (float64) because the Nomba API examples
+// show it as a numeric literal (e.g. 1500), and mixing number/string types
+// on payment APIs has historically caused silent truncation or rejections.
+// Callers supply the naira amount as float64 directly; NombaHTTPGateway
+// converts the string representation from PayoutRequest.AmountNGN.
+type NombaTransferRequest struct {
+	Amount        float64 `json:"amount"`
+	AccountNumber string  `json:"accountNumber"`
+	AccountName   string  `json:"accountName"`
+	BankCode      string  `json:"bankCode"`
+	MerchantTxRef string  `json:"merchantTxRef"`
+	SenderName    string  `json:"senderName"`
+	Narration     string  `json:"narration"`
+}
+
+// NombaTransferResult holds the fields returned in data{} of a successful
+// POST /v2/transfers/bank response.
+type NombaTransferResult struct {
+	ID     string // data.id — Nomba's internal transfer reference
+	Status string // data.status — "SUCCESS" | "PENDING_BILLING"
+}
+
+type transferResp struct {
+	Code        string `json:"code"`
+	Description string `json:"description"`
+	Message     string `json:"message"`
+	Status      bool   `json:"status"`
+	Data        struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"data"`
+}
+
+// Transfer initiates a Nigerian bank transfer via POST /v2/transfers/bank.
+// Both "SUCCESS" and "PENDING_BILLING" are accepted terminal-enough states
+// for the caller; the final payout status arrives later via a webhook.
+// On a non-success HTTP status or status:false response, an error is returned
+// that includes Nomba's message/description for operator visibility.
+func (c *NombaClient) Transfer(ctx context.Context, req NombaTransferRequest) (NombaTransferResult, error) {
+	if !c.IsEnabled() {
+		return NombaTransferResult{}, ErrNombaDisabled
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return NombaTransferResult{}, fmt.Errorf("nomba transfer marshal: %w", err)
+	}
+	resp, body, err := c.authedRequest(ctx, http.MethodPost, "/v2/transfers/bank", raw)
+	if err != nil {
+		return NombaTransferResult{}, fmt.Errorf("nomba transfer: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Try to extract Nomba's error message for better operator visibility.
+		var errResp transferResp
+		_ = json.Unmarshal(body, &errResp)
+		msg := errResp.Message
+		if msg == "" {
+			msg = errResp.Description
+		}
+		if msg == "" {
+			msg = string(body)
+		}
+		return NombaTransferResult{}, fmt.Errorf("nomba transfer: HTTP %d: %s", resp.StatusCode, msg)
+	}
+	var parsed transferResp
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return NombaTransferResult{}, fmt.Errorf("nomba transfer decode: %w", err)
+	}
+	if !parsed.Status {
+		msg := parsed.Message
+		if msg == "" {
+			msg = parsed.Description
+		}
+		return NombaTransferResult{}, fmt.Errorf("nomba transfer failed: %s", msg)
+	}
+	return NombaTransferResult{
+		ID:     parsed.Data.ID,
+		Status: parsed.Data.Status,
+	}, nil
+}
+
+// ─── Account lookup ────────────────────────────────────────────────────────
+
 // Lookup resolves a 10-digit Nigerian NUBAN against a bank code, returning
 // the account holder name as Nomba/NIBSS reports it. Results are cached
 // for 5 minutes by (bankCode, accountNumber) so repeated form keystrokes
