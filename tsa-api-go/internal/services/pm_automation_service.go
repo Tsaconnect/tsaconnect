@@ -213,6 +213,18 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
+	// Daily-cap gate. A cap we can't evaluate (query error) must NOT auto-release:
+	// fail safe by routing to the manual queue. Over the daily cap → manual queue.
+	withinDaily, dErr := s.withinDailyCap(ctx, pm, usd)
+	if dErr != nil {
+		log.Printf("[pm automation] trade=%s daily-cap check failed: %v; routing to manual queue (fail-safe, no release)", tradeID, dErr)
+		return nil
+	}
+	if !withinDaily {
+		log.Printf("[pm automation] trade=%s usd=%.2f over PM daily cap; routing to manual queue", tradeID, usd)
+		return nil
+	}
+
 	// 7. Record attribution so the manual queue can tell matched from
 	//    unmatched. Best-effort: a failure here must not block the release.
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
@@ -245,6 +257,54 @@ func tradeUSDValue(trade *models.P2PTrade) (float64, bool) {
 		return 0, false
 	}
 	return baseUnitsToUSD(amt, tokenDecimalsFor(trade.ChainID, trade.Token)), true
+}
+
+// withinDailyCap reports whether releasing prospectiveUSD for pm would keep the
+// PM's total released/committed USD for "today" (>= the current UTC midnight)
+// within pm.DailyCapUSD. A cap of 0 is unlimited (always true).
+//
+// "Today" is computed from time.Now().UTC() truncated to midnight (the service
+// holds no injected clock). The consumed total sums tradeUSDValue over this PM's
+// trades created since midnight that have committed/consumed capacity — statuses
+// IN ('paid','releasing','released') on this PM's ads. Rows with an unparseable
+// token_amount (tradeUSDValue ok=false) are skipped, mirroring the per-trade
+// guard. Returns (sum+prospectiveUSD) <= cap. A query error is surfaced so the
+// caller can fail safe (never auto-release on a cap it can't evaluate).
+func (s *PMAutomationService) withinDailyCap(ctx context.Context, pm *models.PaymentMerchant, prospectiveUSD float64) (bool, error) {
+	if pm.DailyCapUSD == 0 {
+		return true, nil // unlimited
+	}
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	var trades []models.P2PTrade
+	if err := s.db.WithContext(ctx).
+		Table("p2p_trades").
+		Select("p2p_trades.*").
+		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
+		Where("p2p_ads.pm_id = ?", pm.ID).
+		Where("p2p_trades.status IN ?", []string{
+			models.P2PTradeStatusPaid,
+			models.P2PTradeStatusReleasing,
+			models.P2PTradeStatusReleased,
+		}).
+		Where("p2p_trades.created_at >= ?", midnight).
+		Scan(&trades).Error; err != nil {
+		return false, err
+	}
+
+	var sum float64
+	for i := range trades {
+		usd, ok := tradeUSDValue(&trades[i])
+		if !ok {
+			// Unparseable token_amount — can't value this row; skip it (the same
+			// row is independently blocked from auto-release by the per-trade guard).
+			log.Printf("[pm automation] daily-cap: skipping trade=%s with unparseable token_amount %q", trades[i].ID, trades[i].TokenAmount)
+			continue
+		}
+		sum += usd
+	}
+	return sum+prospectiveUSD <= pm.DailyCapUSD, nil
 }
 
 // ─── Sell flow (payout → release) ────────────────────────────────────────────
@@ -448,11 +508,70 @@ func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQ
 	return items, nil
 }
 
+// pmForTrade resolves the PaymentMerchant owning the given trade's ad, or
+// (nil, nil) when the trade is not on a PM ad (ad.pm_id IS NULL) or the PM row
+// is gone. A genuine query error is returned. Used by ManualRelease to apply the
+// PM daily cap without changing behaviour for non-PM trades.
+func (s *PMAutomationService) pmForTrade(ctx context.Context, tradeID uuid.UUID) (*models.PaymentMerchant, error) {
+	var row struct{ PMID *uuid.UUID }
+	err := s.db.WithContext(ctx).
+		Table("p2p_trades").
+		Select("p2p_ads.pm_id AS pm_id").
+		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
+		Where("p2p_trades.id = ?", tradeID).
+		Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.PMID == nil {
+		return nil, nil // not a PM trade
+	}
+	pm, err := s.pm.GetByID(ctx, *row.PMID)
+	if err != nil {
+		if errors.Is(err, ErrPMNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return pm, nil
+}
+
+// tradeUSDForCap loads the trade and returns its USD value (tradeUSDValue). ok
+// is false when the trade can't be loaded or its token_amount is unparseable —
+// in which case the daily-cap gate is skipped (the trade can't be valued; the
+// existing per-trade guard already blocks the auto path for such rows).
+func (s *PMAutomationService) tradeUSDForCap(ctx context.Context, tradeID uuid.UUID) (float64, bool) {
+	var trade models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+		return 0, false
+	}
+	return tradeUSDValue(&trade)
+}
+
 // ManualRelease lets an operator settle a manually-verified PM buy trade:
 // system markPaid (ref "manual:<adminID>") then adminRelease. adminID is the
 // operator performing the release (for the ref/audit trail). ErrInvalidTransition
 // on markPaid is tolerated (already paid) and execution continues to release.
 func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error) {
+	// Daily-cap gate (operator path). Reach the PM via the trade's ad's pm_id. If
+	// the trade belongs to a PM with a daily cap, an over-cap release returns a
+	// clear error so the operator sees it (we never silently release over cap). A
+	// non-PM trade (no pm_id) or a query miss leaves the legacy behaviour intact.
+	if pm, err := s.pmForTrade(ctx, tradeID); err != nil {
+		return nil, err
+	} else if pm != nil {
+		usd, ok := s.tradeUSDForCap(ctx, tradeID)
+		if ok {
+			within, derr := s.withinDailyCap(ctx, pm, usd)
+			if derr != nil {
+				return nil, fmt.Errorf("daily-cap check: %w", derr)
+			}
+			if !within {
+				return nil, fmt.Errorf("%w: release of $%.2f would exceed PM daily cap $%.2f", ErrInvalidParams, usd, pm.DailyCapUSD)
+			}
+		}
+	}
+
 	if _, err := s.trades.SystemMarkPaid(ctx, tradeID, "manual:"+adminID.String()); err != nil {
 		if !errors.Is(err, ErrInvalidTransition) {
 			return nil, err

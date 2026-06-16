@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -245,6 +246,150 @@ func TestParseInbound(t *testing.T) {
 			t.Fatal("expected error for missing requestId, got nil")
 		}
 	})
+}
+
+// TestParseNombaInbound_Amount asserts the inbound amount is normalized to a
+// 2dp decimal string WITHOUT float drift. 1500 → "1500.00", 1500.5 → "1500.50",
+// and 1500.005 truncates deterministically to "1500.00" (NGN is a 2dp currency;
+// fractional-kobo precision is truncated, matching ngnToKobo's truncation rule).
+func TestParseNombaInbound_Amount(t *testing.T) {
+	cases := []struct {
+		name   string
+		amount string // raw JSON token for transactionAmount
+		want   string
+	}{
+		{"integer", "1500", "1500.00"},
+		{"one decimal", "1500.5", "1500.50"},
+		{"two decimals", "1500.55", "1500.55"},
+		{"fractional kobo truncates", "1500.005", "1500.00"},
+		{"trailing zeros", "1500.00", "1500.00"},
+		{"large value no float drift", "999999999999.99", "999999999999.99"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw := []byte(`{
+				"event_type": "payment_success",
+				"requestId": "REQ-amt",
+				"data": {
+					"merchant": {"walletId": "wallet-amt"},
+					"transaction": {"transactionAmount": ` + c.amount + `},
+					"customer": {"senderName": "JANE", "accountNumber": "111"}
+				}
+			}`)
+			p, err := ParseNombaInbound(raw)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p.AmountNGN != c.want {
+				t.Errorf("AmountNGN = %q; want %q", p.AmountNGN, c.want)
+			}
+		})
+	}
+}
+
+// TestParseNombaInbound_NonSettling verifies a well-formed envelope whose
+// event_type is a recognized non-settling payment_* value (payment_failed,
+// payment_reversal) returns ErrNonSettlingEvent (so the handler can distinguish
+// "ignore, fine" from a real parse failure), while a genuinely malformed body
+// still returns a normal error.
+func TestParseNombaInbound_NonSettling(t *testing.T) {
+	t.Run("payment_failed -> ErrNonSettlingEvent", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_failed",
+			"requestId": "REQ-fail",
+			"data": {
+				"merchant": {"walletId": "wallet-123"},
+				"transaction": {"transactionAmount": 1500},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if !errors.Is(err, ErrNonSettlingEvent) {
+			t.Fatalf("err = %v; want ErrNonSettlingEvent", err)
+		}
+	})
+
+	t.Run("payment_reversal -> ErrNonSettlingEvent", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_reversal",
+			"requestId": "REQ-rev",
+			"data": {
+				"merchant": {"walletId": "wallet-123"},
+				"transaction": {"transactionAmount": 1500},
+				"customer": {}
+			}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if !errors.Is(err, ErrNonSettlingEvent) {
+			t.Fatalf("err = %v; want ErrNonSettlingEvent", err)
+		}
+	})
+
+	t.Run("malformed json -> normal error (not sentinel)", func(t *testing.T) {
+		_, err := ParseNombaInbound([]byte(`{not json`))
+		if err == nil {
+			t.Fatal("expected error for malformed json")
+		}
+		if errors.Is(err, ErrNonSettlingEvent) {
+			t.Fatal("malformed json must not be ErrNonSettlingEvent")
+		}
+	})
+
+	t.Run("missing requestId -> normal error (not sentinel)", func(t *testing.T) {
+		raw := []byte(`{
+			"event_type": "payment_failed",
+			"data": {"merchant": {"walletId": "wallet-123"}, "transaction": {}, "customer": {}}
+		}`)
+		_, err := ParseNombaInbound(raw)
+		if err == nil {
+			t.Fatal("expected error for missing requestId")
+		}
+		if errors.Is(err, ErrNonSettlingEvent) {
+			t.Fatal("missing requestId must be a real parse failure, not ErrNonSettlingEvent")
+		}
+	})
+}
+
+// TestParseNombaInbound_CaseInsensitive verifies event_type matching is
+// case-insensitive: a mixed-case "Payment_Success" still settles.
+func TestParseNombaInbound_CaseInsensitive(t *testing.T) {
+	raw := []byte(`{
+		"event_type": "Payment_Success",
+		"requestId": "REQ-case",
+		"data": {
+			"merchant": {"walletId": "wallet-case"},
+			"transaction": {"transactionAmount": 1500},
+			"customer": {"senderName": "JOHN DOE", "accountNumber": "0123456789"}
+		}
+	}`)
+	p, err := ParseNombaInbound(raw)
+	if err != nil {
+		t.Fatalf("unexpected error for mixed-case event_type: %v", err)
+	}
+	if p.Status != "settled" {
+		t.Errorf("Status = %q; want settled", p.Status)
+	}
+}
+
+// TestParseNombaPayout_CaseInsensitive verifies an uppercase PAYOUT_SUCCESS
+// still maps to "success" (the status switch is case-insensitive).
+func TestParseNombaPayout_CaseInsensitive(t *testing.T) {
+	raw := []byte(`{
+		"event_type": "PAYOUT_SUCCESS",
+		"requestId": "REQ-case2",
+		"data": {
+			"merchant": {},
+			"transaction": {"transactionId": "API-TRANSFER-abc", "merchantTxRef": "trade-uuid-123"},
+			"customer": {}
+		}
+	}`)
+	p, err := ParseNombaPayout(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Status != "success" {
+		t.Errorf("Status = %q; want success (case-insensitive)", p.Status)
+	}
 }
 
 func TestParsePayout(t *testing.T) {
