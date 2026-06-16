@@ -60,35 +60,50 @@ type P2PTrade struct {
 	// openTradeWithDeposit and there is no on-chain pool to credit on refund —
 	// the crypto returns to the user's wallet. Mirrors P2PEscrowV2.sol's
 	// `Funding` enum { PooledFromMaker, DepositedByTaker }.
-	Funding         uint8      `gorm:"not null;default:0" json:"funding"`
-	TokenAmount     string     `gorm:"type:numeric(78,0);not null" json:"tokenAmount"`
-	FiatAmount      string     `gorm:"type:numeric(38,2);not null" json:"fiatAmount"`
-	FiatCurrency    string     `gorm:"size:3;not null" json:"fiatCurrency"`
-	Rate            string     `gorm:"type:numeric(38,10);not null" json:"rate"`
-	PaymentMethodID uuid.UUID  `gorm:"type:uuid;not null" json:"paymentMethodId"`
-	OnChainTradeID  string     `gorm:"size:66;uniqueIndex" json:"onChainTradeId,omitempty"`
-	OpenTxHash      string     `gorm:"size:66" json:"openTxHash,omitempty"`
-	ReleaseTxHash   string     `gorm:"size:66" json:"releaseTxHash,omitempty"`
-	Status          string     `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
-	ProofImageURL   string     `gorm:"type:text" json:"proofImageUrl,omitempty"`
+	Funding         uint8     `gorm:"not null;default:0" json:"funding"`
+	TokenAmount     string    `gorm:"type:numeric(78,0);not null" json:"tokenAmount"`
+	FiatAmount      string    `gorm:"type:numeric(38,2);not null" json:"fiatAmount"`
+	FiatCurrency    string    `gorm:"size:3;not null" json:"fiatCurrency"`
+	Rate            string    `gorm:"type:numeric(38,10);not null" json:"rate"`
+	PaymentMethodID uuid.UUID `gorm:"type:uuid;not null" json:"paymentMethodId"`
+	OnChainTradeID  string    `gorm:"size:66;uniqueIndex" json:"onChainTradeId,omitempty"`
+	OpenTxHash      string    `gorm:"size:66" json:"openTxHash,omitempty"`
+	ReleaseTxHash   string    `gorm:"size:66" json:"releaseTxHash,omitempty"`
+	Status          string    `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
+	ProofImageURL   string    `gorm:"type:text" json:"proofImageUrl,omitempty"`
 	// PM automation links (design §4). Empty on manual P2P trades.
-	PaymentRef          string `gorm:"size:32" json:"paymentRef,omitempty"`           // optional buyer reference aid
-	NombaInboundEventID string `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)
-	NombaPayoutID       string `gorm:"size:64" json:"nombaPayoutId,omitempty"`        // Nomba payout reference (sell)
-	PayoutAccountNumber string `gorm:"size:32" json:"payoutAccountNumber,omitempty"`  // user's KYC-name-verified bank (sell)
-	PayoutBank          string `gorm:"size:64" json:"payoutBank,omitempty"`
-	PayoutAccountName   string `gorm:"size:128" json:"payoutAccountName,omitempty"`
-	CancelReason    string     `gorm:"type:text" json:"cancelReason,omitempty"`
-	ResolvedByAdmin *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
-	MarkedPaidAt    *time.Time `json:"markedPaidAt,omitempty"`
-	ReleasedAt      *time.Time `json:"releasedAt,omitempty"`
-	ExpiresAt       time.Time  `gorm:"index;not null" json:"expiresAt"`
+	PaymentRef          string     `gorm:"size:32" json:"paymentRef,omitempty"`          // optional buyer reference aid
+	NombaInboundEventID string     `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)
+	NombaPayoutID       string     `gorm:"size:64" json:"nombaPayoutId,omitempty"`       // Nomba payout reference (sell)
+	PayoutAccountNumber string     `gorm:"size:32" json:"payoutAccountNumber,omitempty"` // user's KYC-name-verified bank (sell)
+	PayoutBank          string     `gorm:"size:64" json:"payoutBank,omitempty"`
+	PayoutAccountName   string     `gorm:"size:128" json:"payoutAccountName,omitempty"`
+	CancelReason        string     `gorm:"type:text" json:"cancelReason,omitempty"`
+	ResolvedByAdmin     *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
+	MarkedPaidAt        *time.Time `json:"markedPaidAt,omitempty"`
+	ReleasedAt          *time.Time `json:"releasedAt,omitempty"`
+	ExpiresAt           time.Time  `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.
 	ExpiredNotifiedAt *time.Time `gorm:"index" json:"expiredNotifiedAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
+
+	// ── Virtual PM-detail fields (gorm:"-": serialized, never persisted) ───
+	// Populated by the GetTrade handler when the trade's ad is a PM ad, so the
+	// buy screen can render a "pay to this Nomba account" card + the buyer's
+	// KYC name. Left zero/nil for normal (manual) P2P trades.
+	IsPM      bool     `gorm:"-" json:"isPm"`
+	PmPayTo   *PmPayTo `gorm:"-" json:"pmPayTo,omitempty"`
+	PayerName string   `gorm:"-" json:"payerName,omitempty"`
+}
+
+// PmPayTo is the PM's static fiat destination shown to a buyer (virtual; not persisted).
+type PmPayTo struct {
+	AccountNumber string `json:"accountNumber"`
+	Bank          string `json:"bank"`
+	AccountName   string `json:"accountName"`
 }
 
 func (P2PTrade) TableName() string {

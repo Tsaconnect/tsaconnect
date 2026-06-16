@@ -318,6 +318,16 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE IF NOT EXISTS p2p_ratings (
 			id TEXT PRIMARY KEY, trade_id TEXT, rater_id TEXT, ratee_id TEXT, value INTEGER, created_at DATETIME,
 			UNIQUE (trade_id, rater_id))`,
+		`CREATE TABLE IF NOT EXISTS payment_merchants (
+			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			nomba_account_id TEXT, nomba_creds_ref TEXT,
+			inbound_account_number TEXT, inbound_bank TEXT,
+			operator_wallet_address TEXT,
+			per_trade_cap_usd REAL NOT NULL DEFAULT 0, daily_cap_usd REAL NOT NULL DEFAULT 0,
+			created_at DATETIME, updated_at DATETIME)`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
@@ -407,6 +417,8 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.GET("/payment-providers", h.ListPaymentProviders)
 	g.GET("/sellers/:id", h.GetSellerProfile)
 	g.POST("/trades/:id/rate", h.RateTrade)
+	g.GET("/trades/:id", h.GetTrade)
+	g.GET("/ads/:id", h.GetAd)
 }
 
 // ─── HTTP helpers ──────────────────────────────────────────────────────────
@@ -1264,6 +1276,135 @@ func TestGetSellerProfile_OK(t *testing.T) {
 	rec := doJSON(t, r, http.MethodGet, "/api/p2p/sellers/"+uuid.New().String(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── PM detail enrichment (isPm / pmPayTo / payerName) ─────────────────────
+
+// seedPMTrade seeds a payment_merchants row + a PM ad (pm_id set) + a trade on
+// it where the rig user (r.sellerID) is the BUYER, plus a users row carrying
+// the buyer's KYC name. Returns the trade id.
+func seedPMTrade(t *testing.T, r *rig, payerName string) uuid.UUID {
+	t.Helper()
+	pmID := uuid.New()
+	if err := r.db.Exec(
+		`INSERT INTO payment_merchants (id, user_id, name, status, inbound_account_number, inbound_bank) VALUES (?,?,?,?,?,?)`,
+		pmID.String(), uuid.New().String(), "TSA Connect", models.PaymentMerchantStatusActive, "1234567890", "Nomba",
+	).Error; err != nil {
+		t.Fatalf("seed payment_merchant: %v", err)
+	}
+	adID := uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, PMID: &pmID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", FiatCurrency: "NGN", Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500",
+		Status: models.P2PAdStatusActive}).Error; err != nil {
+		t.Fatalf("seed pm ad: %v", err)
+	}
+	// rig user is the buyer; give them a users row with a KYC name.
+	if err := r.db.Exec(`INSERT INTO users (id, name) VALUES (?,?)`, r.sellerID.String(), payerName).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Token: "USDT", TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500",
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment}).Error; err != nil {
+		t.Fatalf("seed pm trade: %v", err)
+	}
+	return tradeID
+}
+
+func TestGetTrade_PMFields(t *testing.T) {
+	r := newRig(t)
+	tradeID := seedPMTrade(t, r, "JOHN DOE")
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+tradeID.String(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	data, _ := body["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("no data in body=%s", rec.Body.String())
+	}
+	if data["isPm"] != true {
+		t.Fatalf("isPm = %v, want true; body=%s", data["isPm"], rec.Body.String())
+	}
+	if data["payerName"] != "JOHN DOE" {
+		t.Fatalf("payerName = %v, want JOHN DOE; body=%s", data["payerName"], rec.Body.String())
+	}
+	payTo, _ := data["pmPayTo"].(map[string]any)
+	if payTo == nil {
+		t.Fatalf("pmPayTo missing; body=%s", rec.Body.String())
+	}
+	if payTo["accountNumber"] != "1234567890" {
+		t.Fatalf("accountNumber = %v, want 1234567890", payTo["accountNumber"])
+	}
+	if payTo["accountName"] != "TSA Connect" {
+		t.Fatalf("accountName = %v, want TSA Connect", payTo["accountName"])
+	}
+	if payTo["bank"] != "Nomba" {
+		t.Fatalf("bank = %v, want Nomba", payTo["bank"])
+	}
+}
+
+func TestGetTrade_NonPM(t *testing.T) {
+	r := newRig(t)
+	// Ad with no pm_id → non-PM trade.
+	adID := uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", FiatCurrency: "NGN", Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500",
+		Status: models.P2PAdStatusActive}).Error; err != nil {
+		t.Fatalf("seed ad: %v", err)
+	}
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Token: "USDT", TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500",
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+tradeID.String(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	data, _ := body["data"].(map[string]any)
+	if data["isPm"] != false {
+		t.Fatalf("isPm = %v, want false; body=%s", data["isPm"], rec.Body.String())
+	}
+	if _, present := data["pmPayTo"]; present {
+		t.Fatalf("pmPayTo should be absent for non-PM trade; body=%s", rec.Body.String())
+	}
+}
+
+func TestGetAd_PMFields(t *testing.T) {
+	r := newRig(t)
+	pmID := uuid.New()
+	if err := r.db.Exec(
+		`INSERT INTO payment_merchants (id, user_id, name, status, inbound_account_number, inbound_bank) VALUES (?,?,?,?,?,?)`,
+		pmID.String(), uuid.New().String(), "TSA Connect", models.PaymentMerchantStatusActive, "1234567890", "Nomba",
+	).Error; err != nil {
+		t.Fatalf("seed payment_merchant: %v", err)
+	}
+	adID := uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, PMID: &pmID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", FiatCurrency: "NGN", Amount: "1000000", Remaining: "1000000", Reserved: "0", Rate: "1500",
+		RateType: models.P2PAdRateTypeFixed, FloatAnchor: models.P2PAdFloatAnchorBybitSell,
+		Status: models.P2PAdStatusActive}).Error; err != nil {
+		t.Fatalf("seed pm ad: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/ads/"+adID.String(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	data, _ := body["data"].(map[string]any)
+	if data["isPm"] != true {
+		t.Fatalf("isPm = %v, want true; body=%s", data["isPm"], rec.Body.String())
+	}
+	payTo, _ := data["pmPayTo"].(map[string]any)
+	if payTo == nil {
+		t.Fatalf("pmPayTo missing; body=%s", rec.Body.String())
+	}
+	if payTo["accountNumber"] != "1234567890" || payTo["accountName"] != "TSA Connect" || payTo["bank"] != "Nomba" {
+		t.Fatalf("pmPayTo = %v; body=%s", payTo, rec.Body.String())
 	}
 }
 

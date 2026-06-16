@@ -723,6 +723,28 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	} else {
 		detail.PaymentMethods = pms
 	}
+	// PM enrichment: if this ad is backed by a payment merchant, attach its
+	// static Nomba inbound account so the buy screen can show the pay-to card.
+	// Best-effort — a lookup error leaves IsPm=false / PmPayTo=nil.
+	if ad.PMID != nil {
+		var pm struct {
+			InboundAccountNumber string
+			InboundBank          string
+			Name                 string
+		}
+		if err := h.db.Raw(
+			`SELECT inbound_account_number, inbound_bank, name FROM payment_merchants WHERE id = ?`, *ad.PMID,
+		).Scan(&pm).Error; err != nil {
+			log.Printf("[p2p GetAd] PM lookup failed for ad=%s pm=%s: %v", ad.ID, *ad.PMID, err)
+		} else if pm.InboundAccountNumber != "" || pm.Name != "" {
+			detail.IsPm = true
+			detail.PmPayTo = &models.PmPayTo{
+				AccountNumber: pm.InboundAccountNumber,
+				Bank:          pm.InboundBank,
+				AccountName:   pm.Name,
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": detail})
 }
 
@@ -788,6 +810,10 @@ type adListItem struct {
 type adDetailItem struct {
 	adListItem
 	PaymentMethods []models.P2PPaymentMethod `json:"paymentMethods,omitempty"`
+	// PM-detail fields: when the ad is a PM ad, the buy screen renders a
+	// "pay to this Nomba account" card from PmPayTo. Nil/false for manual ads.
+	IsPm    bool            `json:"isPm"`
+	PmPayTo *models.PmPayTo `json:"pmPayTo,omitempty"`
 }
 
 // decorateAdsWithEffectiveRate computes effective rate per row for the list
@@ -1533,7 +1559,45 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.enrichTradeWithPM(trade)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
+}
+
+// enrichTradeWithPM populates the trade's virtual PM-detail fields (IsPM,
+// PmPayTo, PayerName) for the buy screen. Best-effort: any query error is
+// logged and the fields are left unset — the PM enrichment must never fail
+// the trade endpoint. Adds ≤2 lightweight queries.
+func (h *P2PHandler) enrichTradeWithPM(trade *models.P2PTrade) {
+	if trade == nil || h.db == nil {
+		return
+	}
+	var pm struct {
+		InboundAccountNumber string
+		InboundBank          string
+		Name                 string
+	}
+	err := h.db.Raw(
+		`SELECT pm.inbound_account_number, pm.inbound_bank, pm.name
+		 FROM p2p_ads a JOIN payment_merchants pm ON pm.id = a.pm_id
+		 WHERE a.id = ?`, trade.AdID,
+	).Scan(&pm).Error
+	if err != nil {
+		log.Printf("[p2p GetTrade] PM lookup failed for trade=%s ad=%s: %v", trade.ID, trade.AdID, err)
+	} else if pm.InboundAccountNumber != "" || pm.Name != "" {
+		trade.IsPM = true
+		trade.PmPayTo = &models.PmPayTo{
+			AccountNumber: pm.InboundAccountNumber,
+			Bank:          pm.InboundBank,
+			AccountName:   pm.Name,
+		}
+	}
+
+	var payerName string
+	if err := h.db.Raw(`SELECT name FROM users WHERE id = ?`, trade.BuyerID).Scan(&payerName).Error; err != nil {
+		log.Printf("[p2p GetTrade] payer name lookup failed for trade=%s buyer=%s: %v", trade.ID, trade.BuyerID, err)
+	} else {
+		trade.PayerName = payerName
+	}
 }
 
 func (h *P2PHandler) ListTrades(c *gin.Context) {
