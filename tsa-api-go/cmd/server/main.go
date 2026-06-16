@@ -462,12 +462,18 @@ func main() {
 		// are configured, otherwise the dormant gateway (sell payouts error until
 		// configured). Dormant-by-default per the repo rule.
 		var nombaGateway services.NombaGateway = services.NewDisabledNombaGateway()
-		if cfg.NombaClientID != "" && cfg.NombaClientSecret != "" {
+		if cfg.NombaClientID != "" && cfg.NombaClientSecret != "" && cfg.NombaAccountID != "" {
 			nombaClient := services.NewNombaClient(cfg.NombaBaseURL, cfg.NombaClientID, cfg.NombaClientSecret, cfg.NombaAccountID)
-			nombaGateway = services.NewNombaHTTPGateway(nombaClient)
-			log.Printf("[pm] live Nomba gateway enabled (base=%s)", cfg.NombaBaseURL)
+			if nombaClient == nil {
+				// NewNombaClient returns nil when any required credential is missing;
+				// guard here in case the condition above diverges from its requirements.
+				log.Printf("[pm] WARNING: Nomba client returned nil despite creds present — check NOMBA_BASE_URL, NOMBA_CLIENT_ID, NOMBA_CLIENT_SECRET, NOMBA_ACCOUNT_ID; gateway disabled")
+			} else {
+				nombaGateway = services.NewNombaHTTPGateway(nombaClient)
+				log.Printf("[pm] live Nomba gateway enabled (base=%s)", cfg.NombaBaseURL)
+			}
 		} else {
-			log.Printf("[pm] Nomba gateway disabled (no client credentials) — sell payouts will error until configured")
+			log.Printf("[pm] Nomba gateway disabled (need NOMBA_CLIENT_ID + NOMBA_CLIENT_SECRET + NOMBA_ACCOUNT_ID) — sell payouts will error until configured")
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
 		pmh = handlers.NewPMHandler(pmAuto)
