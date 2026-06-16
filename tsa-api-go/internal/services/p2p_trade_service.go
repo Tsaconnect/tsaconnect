@@ -430,6 +430,13 @@ type OpenTradeParams struct {
 	// set (buy-ads), fiat is derived as tokenAmount × rate; when empty
 	// (sell-ads, or a fiat-first buy-ad), the amount is derived from fiat.
 	TokenAmount string
+	// Payout destination for a PM sell trade (PM buy-ad): the bank account the
+	// PM automation pays the user once their crypto is released. Required for a
+	// PM buy-ad open, ignored on non-PM opens. Persisted onto the trade and
+	// consumed later by PMAutomationService.InitiateSellPayout.
+	PayoutAccountNumber string
+	PayoutBank          string
+	PayoutAccountName   string
 }
 
 // CreateAdResult carries the persisted ad plus the EIP-712 typed-data
@@ -1281,6 +1288,18 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		return nil, nil, fmt.Errorf("%w: buy-ad missing merchant wallet", ErrInvalidTransition)
 	}
 
+	// PM buy-ad: the PM automation will pay the user fiat after release, so a
+	// payout bank account is mandatory. Validate BEFORE building any on-chain
+	// tx or mutating ad capacity so a missing destination is a clean 4xx with
+	// no side effects. Non-PM buy-ads keep these optional.
+	// TODO(nomba-facts): verify the payout destination is in the opener's KYC name via Nomba name-lookup before accepting.
+	payoutAccountNumber := strings.TrimSpace(params.PayoutAccountNumber)
+	payoutBank := strings.TrimSpace(params.PayoutBank)
+	payoutAccountName := strings.TrimSpace(params.PayoutAccountName)
+	if ad.PMID != nil && (payoutAccountNumber == "" || payoutBank == "") {
+		return nil, nil, fmt.Errorf("%w: payout bank account required for PM sell", ErrInvalidParams)
+	}
+
 	effectiveRate, err := s.ComputeEffectiveRate(ad)
 	if err != nil {
 		return nil, nil, err
@@ -1340,6 +1359,14 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		PaymentMethodID: params.PaymentMethodID,
 		Status:          models.P2PTradeStatusPendingPayment,
 		ExpiresAt:       s.clock.Now().Add(p2pPaymentWindow),
+	}
+	// PM sell trade: stamp the payout destination so the PM automation can pay
+	// the user after release. Only on PM buy-ads (validated non-empty above);
+	// non-PM buy-ads leave these empty.
+	if ad.PMID != nil {
+		trade.PayoutAccountNumber = payoutAccountNumber
+		trade.PayoutBank = payoutBank
+		trade.PayoutAccountName = payoutAccountName
 	}
 	trade.OnChainTradeID = HashIDHex(trade.ID)
 	onChainTradeID := HashID(trade.ID)
