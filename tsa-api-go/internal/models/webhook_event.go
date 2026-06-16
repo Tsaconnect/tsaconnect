@@ -8,18 +8,25 @@ import (
 )
 
 // WebhookEvent is the inbound-webhook ledger. Every incoming webhook payload
-// (Phase 2+: Flutterwave deposits/payouts) is persisted here BEFORE any
-// business-logic side effects, and the unique (Provider, EventID) index
-// dedupes provider retries.
+// (Nomba PM inbound/payout events; Phase 2+: other providers) is persisted here
+// BEFORE any business-logic side effects, and the unique (Provider, EventID)
+// index dedupes provider retries.
 //
 // Lifecycle:
-//   - status="pending": just received, HMAC-validated; awaiting processing
+//   - status="pending":   just received, HMAC-validated; dispatch in progress
 //   - status="processed": handler ran successfully; ProcessedAt set
-//   - status="failed":    handler raised an error; Error filled; retried by
-//                         the WebhookRetry worker until success or dead-letter
+//   - status="failed":    dispatch returned an infrastructure error; Error filled
 //
-// Phase 1: model exists so the schema is in place when Phase 2 wires the
-// Flutterwave handler. No table writer yet.
+// Recovery for a "failed" (or a "pending" orphaned by a crash mid-dispatch) is
+// NOT a dedicated webhook-retry worker (none exists yet). It is the downstream
+// safety net that already owns trade drift: a failed PM *inbound* leaves the
+// trade in pending_payment, surfaced by the PM manual-release queue
+// (PMAutomationService.ListBuyManualQueue); a failed PM *payout* leaves the sell
+// trade for the timeout watchdog to cancel+refund. Returning 200 on a failed
+// dispatch is deliberate — it stops the provider hammer-retrying while those
+// nets converge. TODO(pm-phase2): add a periodic sweeper over
+// webhook_events WHERE status IN ('failed','pending') AND received_at < now-N
+// to re-dispatch automatically instead of relying on the manual queue/watchdog.
 type WebhookEvent struct {
 	ID          uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	Provider    string         `gorm:"size:32;not null;uniqueIndex:idx_webhook_provider_event" json:"provider"`
