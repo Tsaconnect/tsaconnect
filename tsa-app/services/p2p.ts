@@ -413,6 +413,9 @@ export interface ListAdsFilter {
   sellerId?: string;
   limit?: number;
   offset?: number;
+  /** PM filter: true = PM-only ads; false = exclude PM ads; omit = all.
+   *  Serialised as "true"/"false" in the query string (?pm=true / ?pm=false). */
+  pm?: boolean;
 }
 
 // VoucherTypedData mirrors the EIP-712 payload returned by POST /p2p/ads.
