@@ -18,6 +18,9 @@ Design: `docs/superpowers/specs/2026-06-15-pm-payment-merchant-design.md`. Nomba
 | Limited / early launch | Local key — **defensible interim** | ALL of: server env access locked down (no shared shell, no key in logs/crash dumps); low `PerTradeCapUSD` + `DailyCapUSD`; an incident runbook ready to `removeAdmin` + rotate; key is a dedicated EOA used for nothing else |
 | Real volume | **Managed signer** (build the gated impl) | AWS KMS *or* GCP KMS *or* HashiCorp Vault *or* MPC (e.g. Fireblocks) — driven by TSA's hosting/custody vendor. Build against the existing `ReleaseSigner` seam: **zero call-site changes**, just a new impl + `PM_RELEASE_SIGNER=<impl>` |
 
+> **Current (sandbox):** `PM_RELEASE_PRIVATE_KEY` is set to the **contract deployer/owner** key (`0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9`). Verified on-chain: `owner()` == deployer and `isAdmin(deployer)` == true (the escrow's `isAdmin` returns `admins[a] || a == owner()`), so `adminRelease` works with **no `addAdmin` tx**. ⚠️ But this key is the **owner** = upgrade/admin/pause authority — a leak = full contract takeover. **Before prod:** generate a dedicated release-only EOA, `addAdmin(thatEOA)` from the owner, point `PM_RELEASE_PRIVATE_KEY` at it, and keep the owner key cold.
+
+- [ ] **Replace the deployer key with a dedicated release-only EOA before prod** (sandbox uses the deployer/owner key for convenience).
 - [ ] **Decide the prod signer vendor** (drives which impl to write — it does NOT have to be AWS KMS).
 - [ ] If launching on the local-key interim: confirm the three conditions above are in place.
 - [ ] Build the managed-signer impl (the gated "Task 10") when the vendor is chosen — needs the key handle (e.g. KMS key ARN + region) and IAM/access. Acceptance test: the signer's recovered address == `PM_ADMIN_EOA_ADDRESS` (main.go already warns on mismatch at boot).
