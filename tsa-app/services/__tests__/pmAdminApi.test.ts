@@ -170,3 +170,27 @@ describe('pmAdminApi.approveApplication', () => {
     expect(res.message).toContain('Nomba provisioning failed');
   });
 });
+
+// ─── withdrawPM ───────────────────────────────────────────────────────────────
+
+describe('pmAdminApi.withdrawPM', () => {
+  it('posts the amount to the PM withdraw endpoint', async () => {
+    const payload = { success: true, data: { payoutId: 'pay-1' } };
+    global.fetch = mockFetch(payload);
+    const res = await pmAdminApi.withdrawPM('pm-abc', '5000.00');
+    expect(res.success).toBe(true);
+    expect(res.data?.payoutId).toBe('pay-1');
+    const [calledUrl, calledInit] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toContain('/admin/pm/pm-abc/withdraw');
+    expect(calledInit.method).toBe('POST');
+    expect(JSON.parse(calledInit.body as string)).toEqual({ amount: '5000.00' });
+  });
+
+  it('surfaces a 409 over-withdrawal error', async () => {
+    const payload = { success: false, message: 'Amount exceeds withdrawable balance' };
+    global.fetch = mockFetch(payload, 409);
+    const res = await pmAdminApi.withdrawPM('pm-abc', '999999.00');
+    expect(res.success).toBe(false);
+    expect(res.status).toBe(409);
+  });
+});
