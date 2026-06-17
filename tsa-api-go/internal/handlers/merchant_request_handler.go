@@ -12,17 +12,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
 
 type MerchantRequestHandler struct {
-	DB       *gorm.DB
-	EventBus *events.Bus
+	DB          *gorm.DB
+	EventBus    *events.Bus
+	PMOnboarding *services.PMOnboardingService
 }
 
 func NewMerchantRequestHandler(db *gorm.DB, bus *events.Bus) *MerchantRequestHandler {
 	return &MerchantRequestHandler{DB: db, EventBus: bus}
+}
+
+// NewMerchantRequestHandlerWithPM constructs a MerchantRequestHandler with an
+// optional PM onboarding service.  When pmOnboarding is nil, corporate PM
+// provisioning is dormant-by-default (approval of p2p_merchant requests returns
+// a 503 until Nomba creds are configured).
+func NewMerchantRequestHandlerWithPM(db *gorm.DB, bus *events.Bus, pmOnboarding *services.PMOnboardingService) *MerchantRequestHandler {
+	return &MerchantRequestHandler{DB: db, EventBus: bus, PMOnboarding: pmOnboarding}
 }
 
 type submitMerchantRequestInput struct {
@@ -253,6 +263,21 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 
 	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
 		log.Printf("ApproveMerchantRequest: reload error: %v", err)
+	}
+
+	// Corporate PM provisioning: if this is a p2p_merchant request, spin up the
+	// Nomba sub-account + virtual account asynchronously (actually inline — the
+	// request stays approvable for retry if provisioning fails here).
+	if req.BusinessType == models.BusinessTypeP2PMerchant {
+		if h.PMOnboarding == nil {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
+			return
+		}
+		if _, err := h.PMOnboarding.ProvisionAndActivate(c.Request.Context(), &req); err != nil {
+			log.Printf("ApproveMerchantRequest: PM provisioning failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM provisioning failed — retry the approval to resume")
+			return
+		}
 	}
 
 	h.EventBus.Publish(events.Event{

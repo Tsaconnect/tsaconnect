@@ -197,7 +197,7 @@ func main() {
 	sch.FeeService = feeDistributionService
 	// SP7 — make the claim-eligibility gate available to the signup velocity hook.
 	h.EligibilityService = rewardEligibilityService
-	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus)
+	mrh := handlers.NewMerchantRequestHandler(config.DB, eventBus) // PMOnboarding wired after nombaClient below
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
@@ -342,6 +342,16 @@ func main() {
 	nombaClient := services.NewNombaClient(cfg.NombaBaseURL, cfg.NombaClientID, cfg.NombaClientSecret, cfg.NombaAccountID)
 	if nombaClient == nil {
 		log.Printf("Nomba dormant: NOMBA_CLIENT_ID / NOMBA_CLIENT_SECRET / NOMBA_ACCOUNT_ID not set — bank list and account verification disabled")
+	}
+
+	// Corporate PM onboarding — resume-able Nomba sub-account provisioning.
+	// DORMANT-BY-DEFAULT: built only when Nomba creds are present (nombaClient != nil).
+	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
+	if nombaClient != nil {
+		mrh.PMOnboarding = services.NewPMOnboardingService(config.DB, nombaClient)
+		log.Printf("[pm] onboarding service ready (resume-able Nomba provisioning)")
+	} else {
+		log.Printf("[pm] onboarding service dormant: Nomba creds absent — corporate PM approval disabled")
 	}
 
 	// P2P trade service — wired only when the contract address is set.
