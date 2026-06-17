@@ -72,6 +72,20 @@ func WithinPerTradeCap(pm *models.PaymentMerchant, usd float64) bool {
 	return pm.PerTradeCapUSD == 0 || usd <= pm.PerTradeCapUSD
 }
 
+// ListActiveWithSubAccount returns every active PM that has a Nomba sub-account
+// id configured — the rows the NGN reconciler compares against Nomba. PMs
+// without a sub-account id are excluded (nothing to compare against).
+func (s *PMService) ListActiveWithSubAccount(ctx context.Context) ([]models.PaymentMerchant, error) {
+	var pms []models.PaymentMerchant
+	if err := s.db.WithContext(ctx).
+		Where("status = ?", models.PaymentMerchantStatusActive).
+		Where("nomba_sub_account_id IS NOT NULL AND nomba_sub_account_id <> ?", "").
+		Find(&pms).Error; err != nil {
+		return nil, err
+	}
+	return pms, nil
+}
+
 // SeedTSA upserts the single TSA PaymentMerchant row identified by
 // inboundAccount. If a row with that account number already exists its
 // name, status, caps and operator wallet are refreshed; otherwise a new

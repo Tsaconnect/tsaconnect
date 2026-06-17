@@ -429,6 +429,12 @@ func main() {
 	// With none of the PM env set the server boots with all of these nil and the
 	// PM routes either don't register (admin) or 503 (webhook).
 	pmSvc := services.NewPMService(config.DB)
+	// Wire the PM NGN ledger into the trade service so PM sell-opens reserve the
+	// fiat payout from the PM's NGN (and cancels release it). nil-safe: when P2P
+	// is dormant p2pTradeSvc is nil and this is skipped.
+	if p2pTradeSvc != nil {
+		p2pTradeSvc.SetPMService(pmSvc)
+	}
 	pmNameLookup := func(ctx context.Context, id uuid.UUID) (string, error) {
 		var u models.User
 		if err := config.DB.WithContext(ctx).Select("name").First(&u, "id = ?", id).Error; err != nil {
@@ -473,6 +479,7 @@ func main() {
 		// are configured, otherwise the dormant gateway (sell payouts error until
 		// configured). Dormant-by-default per the repo rule.
 		var nombaGateway services.NombaGateway = services.NewDisabledNombaGateway()
+		var pmNombaClient *services.NombaClient
 		if cfg.NombaClientID != "" && cfg.NombaClientSecret != "" && cfg.NombaAccountID != "" {
 			nombaClient := services.NewNombaClient(cfg.NombaBaseURL, cfg.NombaClientID, cfg.NombaClientSecret, cfg.NombaAccountID)
 			if nombaClient == nil {
@@ -481,6 +488,7 @@ func main() {
 				log.Printf("[pm] WARNING: Nomba client returned nil despite creds present — check NOMBA_BASE_URL, NOMBA_CLIENT_ID, NOMBA_CLIENT_SECRET, NOMBA_ACCOUNT_ID; gateway disabled")
 			} else {
 				nombaGateway = services.NewNombaHTTPGateway(nombaClient)
+				pmNombaClient = nombaClient
 				log.Printf("[pm] live Nomba gateway enabled (base=%s)", cfg.NombaBaseURL)
 			}
 		} else {
@@ -505,6 +513,20 @@ func main() {
 		// dispatches.
 		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
 		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
+		// NGN ledger drift reconciler: compares each active PM's off-chain
+		// available_ngn against the live Nomba sub-account balance every 5m and
+		// logs drift (pm_ngn_reconciler_drift_total). Read-only. Only registered
+		// when a live Nomba client exists (it needs FetchSubAccountBalance);
+		// dormant otherwise.
+		if pmNombaClient != nil {
+			scheduler.Register(jobs.NewPMNGNReconciler(
+				&pmNGNLedgerSource{pm: pmSvc, nomba: pmNombaClient},
+				5*time.Minute,
+			))
+			log.Printf("[pm] PM NGN reconciler registered (ledger-vs-Nomba drift, 5m)")
+		} else {
+			log.Printf("[pm] PM NGN reconciler dormant: no live Nomba client to fetch sub-account balances")
+		}
 		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
 	} else {
 		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")
@@ -623,6 +645,35 @@ func main() {
 // verifyEscrowAdmin logs the escrow contract's on-chain owner on startup so
 // operators can sanity-check that the API is pointed at the right deployment.
 // Admin role membership is verified per-request via IsAdmin — there's nothing
+// pmNGNLedgerSource adapts PMService + NombaClient to the
+// jobs.PMNGNLedgerSource interface the NGN reconciler consumes. Kept in cmd/
+// (not services/) so the services package never imports jobs (the dependency
+// runs one way: jobs → services).
+type pmNGNLedgerSource struct {
+	pm    *services.PMService
+	nomba *services.NombaClient
+}
+
+func (s *pmNGNLedgerSource) ActiveLedgerRows(ctx context.Context) ([]jobs.PMLedgerRow, error) {
+	pms, err := s.pm.ListActiveWithSubAccount(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]jobs.PMLedgerRow, 0, len(pms))
+	for i := range pms {
+		rows = append(rows, jobs.PMLedgerRow{
+			Name:         pms[i].Name,
+			SubAccountID: pms[i].NombaSubAccountID,
+			AvailableNGN: pms[i].AvailableNGN,
+		})
+	}
+	return rows, nil
+}
+
+func (s *pmNGNLedgerSource) FetchSubAccountBalance(ctx context.Context, subAccountID string) (string, error) {
+	return s.nomba.FetchSubAccountBalance(ctx, subAccountID)
+}
+
 // to validate statically here.
 func verifyEscrowAdmin(s *services.EscrowService) {
 	onchain, err := s.Owner()

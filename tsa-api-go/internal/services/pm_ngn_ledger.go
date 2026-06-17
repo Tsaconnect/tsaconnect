@@ -50,10 +50,25 @@ func validateNGNAmount(amt string) error {
 //	WHERE id = ?
 //	  AND (CAST(available_ngn AS NUMERIC) - CAST(reserved_ngn AS NUMERIC)) >= CAST(? AS NUMERIC)
 func (s *PMService) ReserveNGN(ctx context.Context, pmID uuid.UUID, amountNGN string) (bool, error) {
+	return s.reserveNGNOn(s.db.WithContext(ctx), pmID, amountNGN)
+}
+
+// ReserveNGNTx is the transaction-aware variant of ReserveNGN: it runs the same
+// atomic conditional UPDATE on the supplied *gorm.DB (typically a transaction
+// handle) so a sell-open can reserve the fiat payout in the SAME transaction as
+// the crypto-capacity update — a rollback of either undoes both. Returns
+// ok=false (no error) on insufficient free balance.
+func (s *PMService) ReserveNGNTx(tx *gorm.DB, pmID uuid.UUID, amountNGN string) (bool, error) {
+	return s.reserveNGNOn(tx, pmID, amountNGN)
+}
+
+// reserveNGNOn is the shared conditional UPDATE used by both ReserveNGN (on
+// s.db) and ReserveNGNTx (on a caller-supplied tx).
+func (s *PMService) reserveNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) (bool, error) {
 	if err := validateNGNAmount(amountNGN); err != nil {
 		return false, err
 	}
-	res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+	res := db.Model(&models.PaymentMerchant{}).
 		Where(
 			"id = ? AND (CAST(available_ngn AS NUMERIC) - CAST(reserved_ngn AS NUMERIC)) >= CAST(? AS NUMERIC)",
 			pmID, amountNGN,
@@ -107,10 +122,23 @@ func (s *PMService) ConsumeNGN(ctx context.Context, pmID uuid.UUID, amountNGN st
 //	WHERE id = ?
 //	  AND CAST(reserved_ngn AS NUMERIC) >= CAST(? AS NUMERIC)
 func (s *PMService) ReleaseNGN(ctx context.Context, pmID uuid.UUID, amountNGN string) error {
+	return s.releaseNGNOn(s.db.WithContext(ctx), pmID, amountNGN)
+}
+
+// ReleaseNGNTx is the transaction-aware variant of ReleaseNGN: it runs the same
+// guarded UPDATE on the supplied *gorm.DB so a cancel can release the held
+// reservation in the SAME transaction as the trade-cancel + capacity restore.
+func (s *PMService) ReleaseNGNTx(tx *gorm.DB, pmID uuid.UUID, amountNGN string) error {
+	return s.releaseNGNOn(tx, pmID, amountNGN)
+}
+
+// releaseNGNOn is the shared guarded UPDATE used by ReleaseNGN (on s.db) and
+// ReleaseNGNTx (on a caller-supplied tx).
+func (s *PMService) releaseNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) error {
 	if err := validateNGNAmount(amountNGN); err != nil {
 		return err
 	}
-	res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+	res := db.Model(&models.PaymentMerchant{}).
 		Where(
 			"id = ? AND CAST(reserved_ngn AS NUMERIC) >= CAST(? AS NUMERIC)",
 			pmID, amountNGN,
