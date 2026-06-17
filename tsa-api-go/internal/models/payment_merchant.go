@@ -14,6 +14,14 @@ const (
 	PaymentMerchantStatusPaused  = "paused"  // kill switch: no new trades, in-flight drain
 )
 
+// PMProvisioningStatus values track the lifecycle of a PM's Nomba sub-account.
+const (
+	PMProvisioningPending      = "pending"
+	PMProvisioningProvisioned  = "provisioned"
+	PMProvisioningActive       = "active"
+	PMProvisioningFailed       = "failed"
+)
+
 // PaymentMerchant is a corporate body that provides AUTOMATED P2P liquidity,
 // settled via its own Nomba account (design §4). Phase 1 holds exactly one row
 // (TSA), seeded manually. Secrets (Nomba client id/secret, the operator private
@@ -36,6 +44,24 @@ type PaymentMerchant struct {
 	// OperatorWalletAddress is the EVM address whose key (held in the secret
 	// manager) the backend uses to sign release/deposit. The key is NEVER stored.
 	OperatorWalletAddress string `gorm:"size:42" json:"operatorWalletAddress"`
+
+	// NombaSubAccountID is the Nomba-assigned sub-account ID for this PM.
+	NombaSubAccountID string `gorm:"size:64;index" json:"nombaSubAccountId"`
+
+	// Settlement bank fields — where the PM's NGN proceeds are swept.
+	SettlementBankCode      string `gorm:"size:16" json:"settlementBankCode"`
+	SettlementAccountNumber string `gorm:"size:32" json:"settlementAccountNumber"`
+	SettlementAccountName   string `gorm:"size:128" json:"settlementAccountName"`
+
+	// NGN ledger — available and reserved naira balances (decimal strings, 2dp).
+	// available_ngn is the total deposited/credited; reserved_ngn is the portion
+	// ear-marked for in-flight sell trades. The free (spendable) balance is
+	// available_ngn - reserved_ngn.
+	AvailableNGN string `gorm:"type:numeric(38,2);not null;default:0" json:"availableNgn"`
+	ReservedNGN  string `gorm:"type:numeric(38,2);not null;default:0" json:"reservedNgn"`
+
+	// ProvisioningStatus tracks the Nomba sub-account lifecycle.
+	ProvisioningStatus string `gorm:"size:16;not null;default:'pending'" json:"provisioningStatus"`
 
 	// Caps (USD). 0 = no cap.
 	PerTradeCapUSD float64 `gorm:"not null;default:0" json:"perTradeCapUsd"`
