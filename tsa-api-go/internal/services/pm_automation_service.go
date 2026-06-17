@@ -454,6 +454,11 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 // pending_payment trade with a confirmed deposit (open_tx_hash set) and a
 // KYC-name-verified payout destination. Idempotent-ish: if a payout id is
 // already recorded, it returns that id without re-initiating.
+//
+// Per-PM routing: when the trade's ad belongs to a PM, the payout is debited
+// from that PM's Nomba sub-account (SubAccountID = pm.NombaSubAccountID,
+// SenderName = pm.Name). For non-PM trades (no pm_id on the ad), the legacy
+// parent-account path is preserved (SubAccountID empty, SenderName = s.senderName).
 func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uuid.UUID) (string, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
@@ -473,14 +478,29 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 	if trade.PayoutAccountNumber == "" || trade.PayoutBank == "" {
 		return "", fmt.Errorf("%w: payout destination missing", ErrInvalidParams)
 	}
-	payoutID, err := s.gateway.InitiatePayout(ctx, PayoutRequest{
+
+	// Resolve the PM (nil for non-PM trades) to determine which Nomba account to debit.
+	pm, err := s.pmForTrade(ctx, tradeID)
+	if err != nil {
+		return "", fmt.Errorf("resolve PM for sell payout: %w", err)
+	}
+
+	// Build payout request; default to parent-account (legacy) path.
+	req := PayoutRequest{
 		BankCode:      trade.PayoutBank,
 		AccountNumber: trade.PayoutAccountNumber,
 		AmountNGN:     trade.FiatAmount,
 		Reference:     trade.ID.String(),
 		AccountName:   trade.PayoutAccountName,
 		SenderName:    s.senderName,
-	})
+	}
+	if pm != nil {
+		// PM trade: debit the PM's own sub-account and use the PM's name as sender.
+		req.SubAccountID = pm.NombaSubAccountID
+		req.SenderName = pm.Name
+	}
+
+	payoutID, err := s.gateway.InitiatePayout(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("initiate nomba payout: %w", err)
 	}

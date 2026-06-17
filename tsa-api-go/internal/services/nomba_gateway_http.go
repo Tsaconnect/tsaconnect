@@ -28,12 +28,16 @@ func NewNombaHTTPGateway(client *NombaClient) *NombaHTTPGateway {
 // API and returns Nomba's transfer id (e.g. "API-TRANSFER-abc…"). Both "SUCCESS"
 // and "PENDING_BILLING" responses are accepted — the final status arrives via the
 // payout webhook. An empty id from Nomba is treated as an error (defense-in-depth).
+//
+// When req.SubAccountID is non-empty the transfer is debited from the PM's own
+// Nomba sub-account (TransferFromSubAccount); otherwise the parent TSA account is
+// debited (Transfer) — preserving back-compat for single-TSA paths.
 func (g *NombaHTTPGateway) InitiatePayout(ctx context.Context, req PayoutRequest) (string, error) {
 	amount, err := strconv.ParseFloat(strings.TrimSpace(req.AmountNGN), 64)
 	if err != nil {
 		return "", fmt.Errorf("bad payout amount %q: %w", req.AmountNGN, err)
 	}
-	res, err := g.client.Transfer(ctx, NombaTransferRequest{
+	transferReq := NombaTransferRequest{
 		Amount:        amount,
 		AccountNumber: req.AccountNumber,
 		AccountName:   req.AccountName,
@@ -41,7 +45,13 @@ func (g *NombaHTTPGateway) InitiatePayout(ctx context.Context, req PayoutRequest
 		MerchantTxRef: req.Reference,
 		SenderName:    req.SenderName,
 		Narration:     "TSA P2P payout",
-	})
+	}
+	var res NombaTransferResult
+	if req.SubAccountID != "" {
+		res, err = g.client.TransferFromSubAccount(ctx, req.SubAccountID, transferReq)
+	} else {
+		res, err = g.client.Transfer(ctx, transferReq)
+	}
 	if err != nil {
 		return "", err
 	}

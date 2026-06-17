@@ -350,6 +350,133 @@ func TestHandlePayoutStatus_EmptyPayoutID_NoOp(t *testing.T) {
 	}
 }
 
+// ─── Sub-account routing ────────────────────────────────────────────────────
+
+// seedActivePMWithSubAccount inserts an active PM with a NombaSubAccountID set,
+// so InitiateSellPayout can route the payout through the PM's sub-account.
+func seedActivePMWithSubAccount(t *testing.T, db *gorm.DB, subAccountID, name string) *models.PaymentMerchant {
+	t.Helper()
+	pm := &models.PaymentMerchant{
+		ID:                uuid.New(),
+		UserID:            uuid.New(),
+		Name:              name,
+		Status:            models.PaymentMerchantStatusActive,
+		NombaSubAccountID: subAccountID,
+		NombaWalletID:     "wallet-" + subAccountID,
+		PerTradeCapUSD:    0,
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatalf("seed PM with sub-account: %v", err)
+	}
+	return pm
+}
+
+// seedSellTradeOnPMAd inserts a deposited, pending_payment sell trade whose ad
+// belongs to the given PM. This is the shape InitiateSellPayout needs for the
+// sub-account routing path.
+func seedSellTradeOnPMAd(t *testing.T, db *gorm.DB, pmID, buyerID, sellerID uuid.UUID, fiat string) *models.P2PTrade {
+	t.Helper()
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	ad := &models.P2PAd{
+		ID: uuid.New(), PMID: &pmID, SellerID: sellerID,
+		Side: models.P2PAdSideBuy, Token: "USDT", ChainID: 146,
+		Amount: "1000000", Remaining: "1000000", Reserved: "0",
+		FiatCurrency: "NGN", Rate: "1300", RateType: models.P2PAdRateTypeFixed,
+		Status: models.P2PAdStatusActive, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(ad).Error; err != nil {
+		t.Fatalf("seed PM buy ad for sell trade: %v", err)
+	}
+	id := uuid.New()
+	trade := &models.P2PTrade{
+		ID: id, AdID: ad.ID, SellerID: sellerID, BuyerID: buyerID,
+		Token: "USDT", ChainID: 146, Funding: models.P2PTradeFundingDepositedByTaker,
+		TokenAmount: "1000000", FiatAmount: fiat, FiatCurrency: "NGN", Rate: "1300",
+		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPendingPayment,
+		OnChainTradeID: HashIDHex(id), OpenTxHash: "0xopen",
+		PayoutAccountNumber: "0123456789", PayoutBank: "044", PayoutAccountName: "JOHN DOE",
+		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(trade).Error; err != nil {
+		t.Fatalf("seed sell trade on PM ad: %v", err)
+	}
+	return trade
+}
+
+// TestInitiateSellPayout_PMTrade_UsesSubAccountID verifies that for a sell trade
+// on a PM ad, InitiateSellPayout resolves the PM, sets SubAccountID =
+// pm.NombaSubAccountID, and sets SenderName = pm.Name on the gateway request.
+func TestInitiateSellPayout_PMTrade_UsesSubAccountID(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+
+	pm := seedActivePMWithSubAccount(t, db, "sub-acct-pm-42", "Acme Merchants Ltd")
+	trade := seedSellTradeOnPMAd(t, db, pm.ID, uuid.New(), uuid.New(), "2000.00")
+
+	gw := &fakeNombaGateway{payoutID: "po_pm_1"}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	got, err := auto.InitiateSellPayout(context.Background(), trade.ID)
+	if err != nil {
+		t.Fatalf("InitiateSellPayout (PM trade): %v", err)
+	}
+	if got != "po_pm_1" {
+		t.Errorf("payoutID = %q, want po_pm_1", got)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1", len(gw.calls))
+	}
+	call := gw.calls[0]
+	// SubAccountID must match the PM's sub-account id.
+	if call.SubAccountID != "sub-acct-pm-42" {
+		t.Errorf("SubAccountID = %q, want sub-acct-pm-42", call.SubAccountID)
+	}
+	// SenderName must be the PM's name, not the service-level senderName.
+	if call.SenderName != "Acme Merchants Ltd" {
+		t.Errorf("SenderName = %q, want Acme Merchants Ltd (pm.Name)", call.SenderName)
+	}
+	// AccountName is the trade's recipient name — unchanged.
+	if call.AccountName != "JOHN DOE" {
+		t.Errorf("AccountName = %q, want JOHN DOE", call.AccountName)
+	}
+}
+
+// TestInitiateSellPayout_NonPMTrade_NoSubAccountID verifies that for a
+// non-PM sell trade (no ad.pm_id), InitiateSellPayout leaves SubAccountID
+// empty (parent Nomba path) and uses the service-level SenderName.
+func TestInitiateSellPayout_NonPMTrade_NoSubAccountID(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+
+	// seedSellTradeOnAd creates a trade with NO ad.pm_id (ad is not linked to a PM).
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1800.00")
+
+	gw := &fakeNombaGateway{payoutID: "po_nonpm_1"}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	got, err := auto.InitiateSellPayout(context.Background(), trade.ID)
+	if err != nil {
+		t.Fatalf("InitiateSellPayout (non-PM trade): %v", err)
+	}
+	if got != "po_nonpm_1" {
+		t.Errorf("payoutID = %q, want po_nonpm_1", got)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1", len(gw.calls))
+	}
+	call := gw.calls[0]
+	// Non-PM: SubAccountID must be empty → parent Nomba path.
+	if call.SubAccountID != "" {
+		t.Errorf("SubAccountID = %q, want empty (non-PM parent path)", call.SubAccountID)
+	}
+	// SenderName falls through to the service-level senderName ("TSA Connect").
+	if call.SenderName != "TSA Connect" {
+		t.Errorf("SenderName = %q, want TSA Connect (service-level, non-PM path)", call.SenderName)
+	}
+}
+
 // TestInitiateSellPayout_EmptyGatewayID_Errors verifies that a gateway returning
 // ("", nil) is treated as an error and does NOT poison the trade's nomba_payout_id.
 func TestInitiateSellPayout_EmptyGatewayID_Errors(t *testing.T) {
