@@ -59,3 +59,14 @@ Design: `docs/superpowers/specs/2026-06-15-pm-payment-merchant-design.md`. Nomba
 - Webhook dedup on `requestId`; benign events (`payment_failed`/reversal) recorded `processed`, not `failed`.
 - Money invariant fail-closed on every release path; release authority is the single admin EOA; conservative single-hit matching.
 - Recovery job for paid-orphans + failed/stale webhooks.
+
+---
+
+## Corporate PM (PR #40) — additional go-live notes
+
+Accepted-risk / deferred items surfaced by the five-axis review of `feat/corporate-pm` (the money-ledger core, auth, validation, and secret hygiene were verified sound; these are explicitly accepted or scheduled, not blocking the PR):
+
+- **[I3 — failed-sell-payout cancellation] The timeout watchdog does NOT auto-cancel a PM sell trade whose Nomba payout failed.** The PM's NGN reservation IS released eagerly + correctly (so `reserved_ngn` conserves), but the *depositing user's escrowed crypto* stays locked until the user personally signs `cancelByTimeout` (the existing Phase-1 user-driven-cancel posture — not introduced by this branch). **Action before scale:** either accept this explicitly in ops, or build the operator-driven cancel (the `DeclineTrade` TODO in `pm_handler.go` + the `pm-phase2` TODO in `pm_automation_service.go` point at the same gap).
+- **[S3 — reconciler scaling] The NGN drift reconciler fetches each active PM's Nomba balance serially over an unbounded list each 5-min tick** (per-call timeout-bounded, so a hung endpoint can't wedge the tick). Fine at Phase-1 (TSA + a few PMs); add a bound / bounded concurrency before onboarding many corporate PMs.
+- **[S5 — settlement idempotency] `SetSubAccountSettlement` is re-invoked on every provisioning retry** with no skip flag (safe only if Nomba's settlement endpoint is idempotent). Add a `settlement_configured` flag once the Nomba sandbox confirms the endpoint semantics (tracked by the `TODO(nomba-facts)` in `pm_onboarding_service.go`).
+- **[ambiguous-gateway compensation]** A payout/withdrawal transfer that succeeded at Nomba but returned an error to us triggers a compensating credit-back (potential over-credit). Mitigated by the `Reference` idempotency key + the NGN drift reconciler; the proper fix is a payout status-check (gated on Nomba facts) + an ops runbook.
