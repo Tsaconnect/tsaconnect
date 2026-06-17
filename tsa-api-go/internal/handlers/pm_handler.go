@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,6 +21,7 @@ type PMAutomation interface {
 	ListBuyManualQueue(ctx context.Context) ([]services.ManualQueueItem, error)
 	ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error)
 	InitiateSellPayout(ctx context.Context, tradeID uuid.UUID) (string, error)
+	WithdrawToSettlement(ctx context.Context, pmID uuid.UUID, amount string) (string, error)
 }
 
 // PMHandler serves the PM operator endpoints (manual-release queue, release
@@ -121,4 +123,59 @@ func (h *PMHandler) DeclineTrade(c *gin.Context) {
 
 	log.Printf("[pm handler] DeclineTrade: operator=%s declined trade=%s; timeout watchdog will cancel+refund on expiry", adminID, id)
 	utils.SuccessResponse(c, http.StatusOK, "declined; will be cancelled by timeout", gin.H{"tradeId": id})
+}
+
+// withdrawRequest is the JSON body for the Withdraw endpoint.
+type withdrawRequest struct {
+	Amount string `json:"amount"`
+}
+
+// Withdraw handles POST /api/admin/pm/:id/withdraw — admin withdraws a PM's
+// available NGN (balance minus open sell reservations) to its settlement bank
+// via Nomba. The debit is atomic: never dips below open exposure.
+//
+// Responses:
+//   - 200 OK: payout initiated successfully → {"payoutId": "..."}
+//   - 400 Bad Request: invalid PM UUID, missing/empty amount, or PM not
+//     configured (no sub-account or settlement bank)
+//   - 409 Conflict: amount exceeds the PM's free (withdrawable) balance
+//   - 500 Internal Server Error: gateway or DB failure
+func (h *PMHandler) Withdraw(c *gin.Context) {
+	pmID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req withdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Amount) == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
+		return
+	}
+
+	payoutID, err := h.auto.WithdrawToSettlement(c.Request.Context(), pmID, req.Amount)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrInsufficientWithdrawable):
+			utils.ErrorResponse(c, http.StatusConflict, "Amount exceeds withdrawable balance (available minus open sell reservations)")
+		case errors.Is(err, services.ErrPMNotFound):
+			utils.ErrorResponse(c, http.StatusBadRequest, "Payment merchant not found")
+		default:
+			// Surface configuration errors (missing sub-account, settlement bank)
+			// as 400 — they are operator-fixable and not a 500.
+			msg := err.Error()
+			if strings.Contains(msg, "no Nomba sub-account configured") ||
+				strings.Contains(msg, "no settlement bank configured") {
+				utils.ErrorResponse(c, http.StatusBadRequest, "PM not configured for withdrawal: "+msg)
+				return
+			}
+			log.Printf("[pm handler] Withdraw pm=%s: %v", pmID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Withdrawal failed")
+		}
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Withdrawal initiated", gin.H{"payoutId": payoutID})
 }
