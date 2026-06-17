@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -141,6 +142,46 @@ func TestCreateAd_NonPMUser_SellAd_NilPMID(t *testing.T) {
 	if res.Ad.PMID != nil {
 		t.Fatalf("ad.PMID = %v, want nil for non-PM user", res.Ad.PMID)
 	}
+	// Symmetric with the PM-tagged tests: confirm the row was actually persisted.
+	var persisted models.P2PAd
+	if err := db.First(&persisted, "id = ?", res.Ad.ID).Error; err != nil {
+		t.Fatalf("load persisted ad: %v", err)
+	}
+	if persisted.PMID != nil {
+		t.Fatalf("persisted ad.PMID = %v, want nil", persisted.PMID)
+	}
+}
+
+// (e) A non-active PM (pending/paused) user creates a sell-ad → NOT tagged
+// (PMID nil) and NOT wallet-gated, even though they use a wallet that differs
+// from the PM's maker wallet. Guards the status='active' filter in
+// GetActiveByUserID against a regression that drops it.
+func TestCreateAd_NonActivePM_SellAd_NotTagged(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, esc, _ := newServiceWithPM(t, db)
+
+	makerWallet := "0xAbCd1234abCd1234abCd1234abCd1234AbCd1234"
+	sellerID := uuid.New()
+	// Seed an active PM first, then flip it to paused so the row exists but is
+	// not active.
+	pm := seedActivePMForUser(t, db, sellerID, makerWallet)
+	if err := db.Model(&models.PaymentMerchant{}).
+		Where("id = ?", pm.ID).
+		Update("status", models.PaymentMerchantStatusPaused).Error; err != nil {
+		t.Fatalf("pause PM: %v", err)
+	}
+
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	_, otherWallet := newSellerKey(t) // deliberately NOT the maker wallet
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}
+
+	res, err := svc.CreateAd(context.Background(), sellerID, otherWallet, makeCreateAdParams(pmID))
+	if err != nil {
+		t.Fatalf("CreateAd (paused PM): %v", err)
+	}
+	if res.Ad.PMID != nil {
+		t.Fatalf("ad.PMID = %v, want nil for a paused PM", res.Ad.PMID)
+	}
 }
 
 // (d) Active-PM user creates a buy-ad with merchantAddress == PM maker wallet
@@ -176,5 +217,36 @@ func TestCreateAd_PMUser_BuyAd_TaggedWithPMID(t *testing.T) {
 	}
 	if persisted.PMID == nil || *persisted.PMID != pm.ID {
 		t.Fatalf("persisted buy-ad.PMID = %v, want %v", persisted.PMID, pm.ID)
+	}
+}
+
+// (f) The wallet match is normalization-insensitive: a PM whose stored
+// OperatorWalletAddress is all-lowercase still tags an ad created with the
+// checksummed form of the same address (and vice-versa). Guards the
+// common.HexToAddress() normalization in applyPMAdTag against a regression to
+// a raw-string compare.
+func TestCreateAd_PMUser_WalletNormalization_Tagged(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, esc, _ := newServiceWithPM(t, db)
+
+	// PM row stores the address in all-lowercase (a common DB-normalization).
+	storedLower := "0xabcd1234abcd1234abcd1234abcd1234abcd1234"
+	// Caller supplies the EIP-55 checksummed form of the SAME address.
+	callerChecksummed := common.HexToAddress(storedLower).Hex()
+	if callerChecksummed == storedLower {
+		t.Fatal("test setup: checksummed form should differ in case from lowercase")
+	}
+
+	sellerID := uuid.New()
+	pm := seedActivePMForUser(t, db, sellerID, storedLower)
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}
+
+	res, err := svc.CreateAd(context.Background(), sellerID, callerChecksummed, makeCreateAdParams(pmID))
+	if err != nil {
+		t.Fatalf("CreateAd: %v", err)
+	}
+	if res.Ad.PMID == nil || *res.Ad.PMID != pm.ID {
+		t.Fatalf("ad.PMID = %v, want %v (normalization should match)", res.Ad.PMID, pm.ID)
 	}
 }
