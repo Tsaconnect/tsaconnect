@@ -170,7 +170,12 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 	//     EventID is dispatched at most once, so the ledger credit fires exactly
 	//     once per settled inbound.
 	if err := s.pm.CreditNGN(ctx, pm.ID, p.AmountNGN); err != nil {
-		return fmt.Errorf("credit PM ledger (pm=%s event=%s): %w", pm.ID, p.EventID, err)
+		// A bad/unparseable amount fails the credit but must not abort the
+		// webhook — failing causes 5xx + retries that never recover. Log and
+		// continue (consistent with unknown-walletId → no-op above). A genuine
+		// DB error is also skipped: losing a credit is less harmful than an
+		// infinite webhook retry loop.
+		log.Printf("[pm automation] CreditNGN skipped (pm=%s event=%s amount=%q): %v", pm.ID, p.EventID, p.AmountNGN, err)
 	}
 
 	// 4. Load candidate trades: this PM's open, pooled, on-chain-opened buy

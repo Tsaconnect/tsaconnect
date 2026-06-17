@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -207,6 +208,10 @@ func (h *PMHandler) Withdraw(c *gin.Context) {
 	}
 	if strings.TrimSpace(req.Amount) == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
+		return
+	}
+	if v, err := strconv.ParseFloat(strings.TrimSpace(req.Amount), 64); err != nil || v <= 0 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount must be greater than zero")
 		return
 	}
 

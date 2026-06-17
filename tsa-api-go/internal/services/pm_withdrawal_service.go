@@ -59,6 +59,7 @@ func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uui
 	// 3. Initiate payout from the PM's Nomba sub-account to its settlement bank.
 	// Use a short unique suffix on the reference to guard idempotency at Nomba's
 	// level (two withdrawals for the same PM on the same day get distinct refs).
+	// Each call gets a distinct reference — Nomba idempotency is per-call, not dedup-on-amount.
 	ref := "withdraw:" + pmID.String() + ":" + shortRef()
 	payoutID, err := s.gateway.InitiatePayout(ctx, PayoutRequest{
 		SubAccountID:  pm.NombaSubAccountID,

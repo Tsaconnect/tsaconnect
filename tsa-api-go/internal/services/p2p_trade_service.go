@@ -2532,11 +2532,11 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 			return err
 		}
 		// PM sell trade: RELEASE the held NGN reservation in BOTH dispute outcomes
-		// (resolve→PM/seller AND resolve→taker/buyer). ConsumeNGN is reserved
-		// exclusively for a confirmed Nomba payout success — which would have
-		// already settled the reservation and moved the trade to `released`, never
-		// reaching a dispute. The guarded release (reserved >= amt) is a safe no-op
-		// if already consumed, so adding release here cannot double-settle.
+		// (resolve→PM/seller AND resolve→taker/buyer). Safe because (1) a consumed
+		// reservation belongs to a `released` trade that never reaches this
+		// status-guarded path, and (2) the `NgnReservationReleased` marker makes any
+		// redundant release a guarded skip — NOT because the ledger UPDATE is a
+		// silent no-op (it errors on RowsAffected==0).
 		return s.releasePMSellReservationTx(ctx, tx, &trade)
 	})
 	if err != nil {
@@ -3093,11 +3093,11 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 			return err
 		}
 		// PM sell trade: RELEASE the held NGN reservation in BOTH dispute outcomes
-		// (refund-to-seller AND release-to-buyer). ConsumeNGN is reserved
-		// exclusively for a confirmed Nomba payout success — which would have
-		// already settled the reservation and moved the trade to `released`, never
-		// reaching a dispute. The guarded release (reserved >= amt) is a safe no-op
-		// if already consumed, so adding release here cannot double-settle.
+		// (refund-to-seller AND release-to-buyer). Safe because (1) a consumed
+		// reservation belongs to a `released` trade that never reaches this
+		// status-guarded path, and (2) the `NgnReservationReleased` marker makes any
+		// redundant release a guarded skip — NOT because the ledger UPDATE is a
+		// silent no-op (it errors on RowsAffected==0).
 		return s.releasePMSellReservationTx(ctx, tx, trade)
 	})
 	if err != nil {
