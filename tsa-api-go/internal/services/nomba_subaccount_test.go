@@ -338,12 +338,8 @@ func TestNombaClient_FetchSubAccountBalance_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchSubAccountBalance error: %v", err)
 	}
-	if ngn == "" {
-		t.Error("ngn balance should not be empty")
-	}
-	// Check it contains the balance value
-	if !strings.Contains(ngn, "15000") {
-		t.Errorf("ngn = %q; want it to contain the balance value", ngn)
+	if ngn != "15000.50" {
+		t.Errorf("balance = %q, want 15000.50", ngn)
 	}
 }
 
@@ -371,6 +367,30 @@ func TestNombaClient_FetchSubAccountBalance_NonOK(t *testing.T) {
 	}
 }
 
+func TestNombaClient_FetchSubAccountBalance_StatusFalse(t *testing.T) {
+	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
+		"/v1/accounts/sub-acct-uuid-001/balance": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"code": "400",
+				"message": "balance fetch failed",
+				"status": false,
+				"data": {}
+			}`)
+		},
+	})
+
+	c := newTestNombaClient(srv.URL)
+	_, err := c.FetchSubAccountBalance(t.Context(), "sub-acct-uuid-001")
+	if err == nil {
+		t.Fatal("expected error for status:false, got nil")
+	}
+	if !strings.Contains(err.Error(), "balance fetch failed") {
+		t.Errorf("error should contain Nomba's message; got: %v", err)
+	}
+}
+
 // ─── TransferFromSubAccount ────────────────────────────────────────────────────
 
 func TestNombaClient_TransferFromSubAccount_Success(t *testing.T) {
@@ -381,9 +401,9 @@ func TestNombaClient_TransferFromSubAccount_Success(t *testing.T) {
 			}
 			// Verify sub-account targeting header
 			subAcctID := r.Header.Get("accountId")
+			// TODO(nomba-facts): confirm exact mechanism (header vs path param); per-request header is current impl.
 			if subAcctID != "sub-acct-uuid-001" {
-				// TODO(nomba-facts): confirm exact mechanism (header vs path param)
-				// For now check it's set to either parent or sub-account ID
+				t.Errorf("accountId header = %q, want sub-account id", subAcctID)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
