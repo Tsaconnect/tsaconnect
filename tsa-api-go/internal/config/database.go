@@ -181,6 +181,13 @@ func AutoMigrate() error {
 	         WHERE provider = 'bank_transfer'
 	           AND lower(bank_name) LIKE '%kuda%'`)
 
+	// One PM per user: the upsert in PMOnboardingService relies on ON CONFLICT on
+	// user_id, which requires a unique constraint (not just a non-unique index).
+	// Idempotent — IF NOT EXISTS keeps repeat boots safe. At most one row exists
+	// (the TSA seed) so there is no uniqueness violation to worry about.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_user
+	    ON payment_merchants (user_id)`)
+
 	// PM (payment-merchant) inbound account must be unique — PMAutomationService
 	// resolves the PM by destination account on every inbound Nomba credit
 	// (GetByInboundAccount assumes a single match). A partial index enforces

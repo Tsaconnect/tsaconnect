@@ -15,10 +15,10 @@ import (
 // (Nomba credentials not configured at startup).
 var ErrPMProvisioningUnavailable = errors.New("PM provisioning unavailable: Nomba not configured")
 
-// nombaProvisioner is the minimal interface PMOnboardingService needs so tests
+// NombaProvisioner is the minimal interface PMOnboardingService needs so tests
 // can inject a fake without depending on *NombaClient directly.
 // *NombaClient satisfies this interface — the three methods were added in Task 2.
-type nombaProvisioner interface {
+type NombaProvisioner interface {
 	CreateSubAccount(ctx context.Context, name string) (subAccountID string, err error)
 	CreateVirtualAccountForSubAccount(ctx context.Context, subAccountID, accountName string) (vaNumber, walletID string, err error)
 	SetSubAccountSettlement(ctx context.Context, subAccountID, bankCode, accountNumber string) error
@@ -32,13 +32,13 @@ type nombaProvisioner interface {
 // steps (idempotency anchor = the stored nomba_sub_account_id).
 type PMOnboardingService struct {
 	db          *gorm.DB
-	provisioner nombaProvisioner
+	provisioner NombaProvisioner
 }
 
 // NewPMOnboardingService returns a PMOnboardingService.
 // provisioner may be nil when Nomba creds are absent; in that case
 // ProvisionAndActivate returns ErrPMProvisioningUnavailable.
-func NewPMOnboardingService(db *gorm.DB, provisioner nombaProvisioner) *PMOnboardingService {
+func NewPMOnboardingService(db *gorm.DB, provisioner NombaProvisioner) *PMOnboardingService {
 	return &PMOnboardingService{db: db, provisioner: provisioner}
 }
 
@@ -69,7 +69,7 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	if pm.NombaSubAccountID == "" {
 		subAcctID, err := s.provisioner.CreateSubAccount(ctx, req.BusinessName)
 		if err != nil {
-			_ = s.savePartial(ctx, pm) // best-effort: persist nothing new
+			// nothing to persist — failed before any ID returned
 			return pm, fmt.Errorf("pm_onboarding: create sub-account: %w", err)
 		}
 		pm.NombaSubAccountID = subAcctID
@@ -95,9 +95,16 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	}
 
 	// ── Step 4: Settlement bank ───────────────────────────────────────────────
+	// TODO(nomba-facts): SetSubAccountSettlement is re-invoked on every retry; safe only if Nomba's settlement endpoint is idempotent — add a settlement_configured flag once confirmed.
 	if err := s.provisioner.SetSubAccountSettlement(ctx, pm.NombaSubAccountID, req.SettlementBankCode, req.SettlementAccountNumber); err != nil {
 		return pm, fmt.Errorf("pm_onboarding: set settlement: %w", err)
 	}
+
+	// ── Step 4b: Mark as provisioned (all Nomba steps complete, pre-activation) ──
+	if err := s.persistField(ctx, pm, "provisioning_status", models.PMProvisioningProvisioned); err != nil {
+		return pm, fmt.Errorf("pm_onboarding: mark provisioned: %w", err)
+	}
+	pm.ProvisioningStatus = models.PMProvisioningProvisioned
 
 	// ── Step 5: Activate ──────────────────────────────────────────────────────
 	activationFields := map[string]interface{}{
@@ -143,6 +150,7 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.
 	pm = models.PaymentMerchant{
 		ID:                      uuid.New(),
 		UserID:                  req.UserID,
+		Name:                    req.BusinessName,
 		Status:                  models.PaymentMerchantStatusPending,
 		ProvisioningStatus:      models.PMProvisioningPending,
 		SettlementBankCode:      req.SettlementBankCode,
@@ -186,9 +194,3 @@ func (s *PMOnboardingService) persistFields(ctx context.Context, pm *models.Paym
 		Updates(fields).Error
 }
 
-// savePartial is a best-effort no-op helper used for error paths where
-// nothing new needs to be persisted (the caller already saved before the call
-// that failed).  Kept so the error-path code reads intentionally.
-func (s *PMOnboardingService) savePartial(_ context.Context, _ *models.PaymentMerchant) error {
-	return nil
-}
