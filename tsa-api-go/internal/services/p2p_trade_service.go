@@ -316,9 +316,18 @@ func (s *P2PTradeService) applyPMAdTag(ctx context.Context, creatorID uuid.UUID,
 	if pm == nil {
 		return nil // non-PM user or feature dormant
 	}
-	if !strings.EqualFold(walletAddress, pm.OperatorWalletAddress) {
-		return fmt.Errorf("%w: ad wallet must be the PM's registered maker wallet (got %s, want %s)",
-			ErrInvalidParams, walletAddress, pm.OperatorWalletAddress)
+	// Normalize both sides through the EVM address parser before comparing so a
+	// format difference between the caller-supplied wallet and the DB-stored
+	// OperatorWalletAddress (casing, checksum, surrounding space) can't produce
+	// a false rejection. EqualFold is belt-and-suspenders for the casing.
+	got := common.HexToAddress(walletAddress).Hex()
+	want := common.HexToAddress(pm.OperatorWalletAddress).Hex()
+	if !strings.EqualFold(got, want) {
+		// Don't leak the PM's registered maker wallet in the client-facing
+		// error; log it server-side for operators instead.
+		log.Printf("[p2p applyPMAdTag] wallet mismatch: pmID=%s creatorWallet=%s makerWallet=%s",
+			pm.ID, got, want)
+		return fmt.Errorf("%w: ad wallet must be the PM's registered maker wallet", ErrInvalidParams)
 	}
 	ad.PMID = &pm.ID
 	return nil
