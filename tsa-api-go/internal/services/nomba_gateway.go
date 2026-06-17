@@ -20,6 +20,10 @@ type PayoutRequest struct {
 	Reference     string // our trade reference (idempotency)
 	AccountName   string // recipient account name (used by live gateway)
 	SenderName    string // sender display name (used by live gateway)
+	// SubAccountID is the PM's Nomba sub-account id. When non-empty the gateway
+	// debits the sub-account (TransferFromSubAccount); when empty it debits the
+	// parent TSA Nomba account (Transfer) — preserving back-compat.
+	SubAccountID string
 }
 
 // InboundPayment is a normalized inbound naira credit (buy flow). The webhook

@@ -272,3 +272,132 @@ func TestNombaHTTPGateway_BadAmount(t *testing.T) {
 		t.Errorf("error should mention bad payout amount; got: %v", err)
 	}
 }
+
+// TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID verifies that when
+// SubAccountID is set the gateway calls TransferFromSubAccount (accountId header
+// = sub-account id), not the parent Transfer.
+func TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID(t *testing.T) {
+	var capturedAccountID string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/token/issue", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"code": "200",
+			"description": "SUCCESS",
+			"data": {
+				"access_token": "fake-test-token",
+				"expires_in": 3600
+			}
+		}`)
+	})
+	mux.HandleFunc("/v2/transfers/bank", func(w http.ResponseWriter, r *http.Request) {
+		capturedAccountID = r.Header.Get("accountId")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"code": "200",
+			"description": "SUCCESS",
+			"message": "Success",
+			"status": true,
+			"data": {
+				"amount": "2000.0",
+				"id": "API-TRANSFER-sub-gw",
+				"status": "SUCCESS",
+				"type": "transfer",
+				"fee": 50,
+				"timeCreated": "2026-06-17T10:00:00Z",
+				"meta": {}
+			}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	gw := newTestGateway(srv.URL)
+	payoutID, err := gw.InitiatePayout(t.Context(), PayoutRequest{
+		BankCode:      "058",
+		AccountNumber: "0123456789",
+		AccountName:   "JOHN DOE",
+		AmountNGN:     "2000",
+		Reference:     "trade-uuid-sub-001",
+		SenderName:    "PM Merchant Ltd",
+		SubAccountID:  "sub-acct-pm-001",
+	})
+	if err != nil {
+		t.Fatalf("InitiatePayout (sub-account): %v", err)
+	}
+	if payoutID != "API-TRANSFER-sub-gw" {
+		t.Errorf("payoutID = %q; want API-TRANSFER-sub-gw", payoutID)
+	}
+	// The accountId header must be the sub-account id, not the parent "test-account-id".
+	if capturedAccountID != "sub-acct-pm-001" {
+		t.Errorf("accountId header = %q; want sub-acct-pm-001 (sub-account path)", capturedAccountID)
+	}
+}
+
+// TestNombaHTTPGateway_SubAccountRouting_NoSubAccountID verifies that when
+// SubAccountID is empty the gateway uses the parent Transfer (accountId header
+// stays as the parent account id, not a sub-account).
+func TestNombaHTTPGateway_SubAccountRouting_NoSubAccountID(t *testing.T) {
+	var capturedAccountID string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/token/issue", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"code": "200",
+			"description": "SUCCESS",
+			"data": {
+				"access_token": "fake-test-token",
+				"expires_in": 3600
+			}
+		}`)
+	})
+	mux.HandleFunc("/v2/transfers/bank", func(w http.ResponseWriter, r *http.Request) {
+		capturedAccountID = r.Header.Get("accountId")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"code": "200",
+			"description": "SUCCESS",
+			"message": "Success",
+			"status": true,
+			"data": {
+				"amount": "3000.0",
+				"id": "API-TRANSFER-parent",
+				"status": "SUCCESS",
+				"type": "transfer",
+				"fee": 50,
+				"timeCreated": "2026-06-17T10:00:00Z",
+				"meta": {}
+			}
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	gw := newTestGateway(srv.URL)
+	payoutID, err := gw.InitiatePayout(t.Context(), PayoutRequest{
+		BankCode:      "044",
+		AccountNumber: "9876543210",
+		AccountName:   "JANE DOE",
+		AmountNGN:     "3000",
+		Reference:     "trade-uuid-parent-001",
+		SenderName:    "TSA Connect",
+		// SubAccountID intentionally empty → parent path
+	})
+	if err != nil {
+		t.Fatalf("InitiatePayout (parent): %v", err)
+	}
+	if payoutID != "API-TRANSFER-parent" {
+		t.Errorf("payoutID = %q; want API-TRANSFER-parent", payoutID)
+	}
+	// The accountId header must be the parent account id ("test-account-id"),
+	// NOT a sub-account id.
+	if capturedAccountID != "test-account-id" {
+		t.Errorf("accountId header = %q; want test-account-id (parent path)", capturedAccountID)
+	}
+}
