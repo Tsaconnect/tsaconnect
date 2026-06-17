@@ -52,6 +52,23 @@ func (s *PMService) GetByWalletID(ctx context.Context, walletID string) (*models
 	return &pm, nil
 }
 
+// GetActiveByUserID looks up the ACTIVE PaymentMerchant whose UserID matches
+// the given user. Non-active rows (pending, paused) are not returned.
+// Returns ErrPMNotFound when no active PM row exists for the user.
+func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).
+		Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive).
+		First(&pm).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPMNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
 // GetByID looks up a PM by its primary key UUID.
 // Returns ErrPMNotFound when no row matches.
 func (s *PMService) GetByID(ctx context.Context, id uuid.UUID) (*models.PaymentMerchant, error) {
