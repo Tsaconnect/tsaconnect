@@ -219,3 +219,91 @@ func TestPMService_SeedTSA_Idempotent(t *testing.T) {
 		t.Fatalf("GetByWalletID resolved %v, want %v", byWallet.ID, pm1.ID)
 	}
 }
+
+func TestPMService_ListAll(t *testing.T) {
+	db := newSQLiteForPM(t)
+	svc := NewPMService(db)
+
+	// Empty table — must return empty slice, not nil, not error.
+	pms, err := svc.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll on empty table: %v", err)
+	}
+	if pms == nil {
+		t.Fatal("ListAll returned nil slice, want empty slice")
+	}
+	if len(pms) != 0 {
+		t.Fatalf("ListAll on empty table: want 0 rows, got %d", len(pms))
+	}
+
+	// Seed two PMs.
+	pm1 := &models.PaymentMerchant{
+		UserID:               uuid.New(),
+		Name:                 "Alpha PM",
+		Status:               models.PaymentMerchantStatusActive,
+		InboundAccountNumber: "1111111111",
+		AvailableNGN:         "5000.00",
+		ReservedNGN:          "1000.00",
+		ProvisioningStatus:   models.PMProvisioningActive,
+		PerTradeCapUSD:       500,
+		DailyCapUSD:          5000,
+	}
+	pm2 := &models.PaymentMerchant{
+		UserID:               uuid.New(),
+		Name:                 "Beta PM",
+		Status:               models.PaymentMerchantStatusPaused,
+		InboundAccountNumber: "2222222222",
+		AvailableNGN:         "12000.00",
+		ReservedNGN:          "3000.00",
+		ProvisioningStatus:   models.PMProvisioningProvisioned,
+		PerTradeCapUSD:       1000,
+		DailyCapUSD:          10000,
+	}
+	if err := db.Create(pm1).Error; err != nil {
+		t.Fatalf("create pm1: %v", err)
+	}
+	if err := db.Create(pm2).Error; err != nil {
+		t.Fatalf("create pm2: %v", err)
+	}
+
+	pms, err = svc.ListAll(context.Background())
+	if err != nil {
+		t.Fatalf("ListAll with 2 rows: %v", err)
+	}
+	if len(pms) != 2 {
+		t.Fatalf("ListAll: want 2 rows, got %d", len(pms))
+	}
+
+	// Verify both rows are present and fields are populated.
+	ids := map[string]bool{pms[0].ID.String(): true, pms[1].ID.String(): true}
+	if !ids[pm1.ID.String()] {
+		t.Errorf("pm1 not in ListAll result")
+	}
+	if !ids[pm2.ID.String()] {
+		t.Errorf("pm2 not in ListAll result")
+	}
+
+	// Spot-check fields on pm1.
+	var got1 *models.PaymentMerchant
+	for i := range pms {
+		if pms[i].ID == pm1.ID {
+			got1 = &pms[i]
+			break
+		}
+	}
+	if got1 == nil {
+		t.Fatal("pm1 not found in result set")
+	}
+	if got1.AvailableNGN != "5000.00" {
+		t.Errorf("pm1 AvailableNGN = %q, want 5000.00", got1.AvailableNGN)
+	}
+	if got1.ReservedNGN != "1000.00" {
+		t.Errorf("pm1 ReservedNGN = %q, want 1000.00", got1.ReservedNGN)
+	}
+	if got1.Status != models.PaymentMerchantStatusActive {
+		t.Errorf("pm1 Status = %q, want active", got1.Status)
+	}
+	if got1.ProvisioningStatus != models.PMProvisioningActive {
+		t.Errorf("pm1 ProvisioningStatus = %q, want active", got1.ProvisioningStatus)
+	}
+}

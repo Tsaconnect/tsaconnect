@@ -1,22 +1,9 @@
 // app/admin/pm-status.tsx
 //
-// Minimal PM status view — shows the active Payment Merchant's status,
-// virtual account (VA / inbound account number), available + reserved NGN
-// balances, and trade caps.
+// PM status view — shows all PaymentMerchant rows with status, VA / inbound
+// account number, available + reserved NGN balances, and trade caps.
 //
-// *** Backend gap note ***
-// There is no dedicated GET /admin/pm or GET /admin/pm/:id list endpoint on
-// the backend. The PMHandler only exposes:
-//   GET  /admin/pm/manual-queue   (returns trade queue items, not PM rows)
-//   POST /admin/pm/:id/withdraw
-// Consequently, this screen derives what it can from the approved MerchantRequest
-// rows with businessType === 'p2p_merchant' (which carry the requested caps) and
-// surfaces a message prompting the operator to check the DB or the backend team
-// to add a PM-list endpoint. See task-8-report.md §Endpoint Gaps.
-//
-// When a PM-list GET endpoint is added to the backend, replace the
-// listApplications call below with the dedicated endpoint and update the types
-// to include inboundAccountNumber / nombaSubAccountId from PaymentMerchant.
+// Data source: GET /admin/pm (PMHandler.ListPMs — safe projection, no secrets).
 //
 // Pattern mirrors app/admin/pm-queue.tsx and app/admin/p2p-disputes.tsx.
 import { useFocusEffect } from '@react-navigation/native';
@@ -27,6 +14,7 @@ import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
+  AmountText,
   Badge,
   Divider,
   EmptyState,
@@ -35,19 +23,16 @@ import {
   SummaryRow,
   Text,
 } from '@/components/ui';
-import { pmAdminApi, type MerchantRequest } from '../../services/p2p';
+import { pmAdminApi, type PaymentMerchant } from '../../services/p2p';
 import { useUserRole } from '../../hooks/useUserRole';
 
 const ADMIN_ROLES = new Set(['admin', 'super_admin', 'superadmin']);
 
-// We fetch all merchant-requests with status=approved|pending (both) to surface
-// activated PMs. The list endpoint only supports status= single value, so we
-// issue one call for approved rows with businessType === 'p2p_merchant'.
 const PMStatusScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
   const { role, loading: roleLoading } = useUserRole();
 
-  const [approvedPMs, setApprovedPMs] = useState<MerchantRequest[]>([]);
+  const [pms, setPMs] = useState<PaymentMerchant[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(false);
@@ -60,12 +45,9 @@ const PMStatusScreen: React.FC = () => {
       return;
     }
     setError(false);
-    // Fetch approved merchant requests; filter client-side to p2p_merchant.
-    // Note: The backend ListMerchantRequests supports only a single status=
-    // query param; "approved" covers provisioned PMs.
-    const res = await pmAdminApi.listApprovedApplications();
+    const res = await pmAdminApi.listPMs();
     if (res.success && res.data) {
-      setApprovedPMs(res.data.requests);
+      setPMs(res.data);
     } else {
       setError(true);
     }
@@ -118,13 +100,8 @@ const PMStatusScreen: React.FC = () => {
           PM Status
         </Text>
         <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.xs }}>
-          Approved Payment Merchants. NGN balance data requires a backend PM-list endpoint (see gap note).
+          All Payment Merchants — live NGN balances, caps, and account details.
         </Text>
-        <Badge
-          label="Read-only · NGN balance not yet available from backend"
-          icon="info"
-          size="sm"
-        />
 
         <View style={{ marginTop: spacing.lg }}>
           {loading || roleLoading ? (
@@ -137,15 +114,15 @@ const PMStatusScreen: React.FC = () => {
                 load();
               }}
             />
-          ) : approvedPMs.length === 0 ? (
+          ) : pms.length === 0 ? (
             <EmptyState
               icon="checkCircle"
-              title="No approved PMs yet"
-              subtitle="Approved p2p_merchant applications will appear here after provisioning."
+              title="No payment merchants yet"
+              subtitle="Payment merchants will appear here once provisioned."
             />
           ) : (
             <View style={{ gap: spacing.md }}>
-              {approvedPMs.map((pm) => (
+              {pms.map((pm) => (
                 <PMStatusCard key={pm.id} pm={pm} />
               ))}
             </View>
@@ -156,85 +133,95 @@ const PMStatusScreen: React.FC = () => {
   );
 };
 
-const PMStatusCard: React.FC<{ pm: MerchantRequest }> = ({ pm }) => {
+const PMStatusCard: React.FC<{ pm: PaymentMerchant }> = ({ pm }) => {
   const { colors, spacing } = useTheme();
 
+  const railColor =
+    pm.status === 'active'
+      ? (colors.success ?? colors.accent)
+      : pm.status === 'paused'
+        ? (colors.warning ?? colors.textSecondary)
+        : colors.textSecondary;
+
   return (
-    <AccentCard railColor={colors.success ?? colors.accent}>
+    <AccentCard railColor={railColor}>
+      {/* Header: name + status badge */}
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm }}>
         <Text variant="bodyMed" weight="700" numberOfLines={1} style={{ flex: 1 }}>
-          {pm.businessName}
+          {pm.name}
         </Text>
         <Badge label={pm.status} size="sm" />
       </View>
 
       <Divider spacing="sm" />
 
-      {/* Caps from the original application */}
-      {(pm.requestedPerTradeCapUsd ?? 0) > 0 || (pm.requestedDailyCapUsd ?? 0) > 0 ? (
+      {/* NGN balances */}
+      <Text variant="overline" color="textMuted">
+        NGN BALANCES
+      </Text>
+      <View style={{ gap: spacing.xs, marginTop: spacing.xs }}>
+        <SummaryRow
+          label="Available"
+          value={<AmountText value={pm.availableNgn} currency="NGN" variant="bodySm" weight="600" />}
+        />
+        <SummaryRow
+          label="Reserved"
+          value={<AmountText value={pm.reservedNgn} currency="NGN" variant="bodySm" weight="600" />}
+        />
+      </View>
+
+      <Divider spacing="sm" />
+
+      {/* Account details */}
+      <Text variant="overline" color="textMuted">
+        ACCOUNT
+      </Text>
+      <View style={{ gap: spacing.xs, marginTop: spacing.xs }}>
+        {pm.inboundAccountNumber ? (
+          <SummaryRow label="VA / inbound account" value={pm.inboundAccountNumber} />
+        ) : null}
+        {pm.nombaWalletId ? (
+          <SummaryRow label="Nomba wallet ID" value={pm.nombaWalletId} />
+        ) : null}
+        <SummaryRow label="Provisioning" value={pm.provisioningStatus} />
+      </View>
+
+      {/* Caps */}
+      {(pm.perTradeCapUsd ?? 0) > 0 || (pm.dailyCapUsd ?? 0) > 0 ? (
         <>
+          <Divider spacing="sm" />
           <Text variant="overline" color="textMuted">
-            REQUESTED CAPS
+            CAPS
           </Text>
           <View style={{ gap: spacing.xs, marginTop: spacing.xs }}>
-            {(pm.requestedPerTradeCapUsd ?? 0) > 0 ? (
+            {(pm.perTradeCapUsd ?? 0) > 0 ? (
               <SummaryRow
                 label="Per-trade cap"
-                value={`$${(pm.requestedPerTradeCapUsd ?? 0).toLocaleString()}`}
+                value={`$${(pm.perTradeCapUsd ?? 0).toLocaleString()}`}
               />
             ) : null}
-            {(pm.requestedDailyCapUsd ?? 0) > 0 ? (
+            {(pm.dailyCapUsd ?? 0) > 0 ? (
               <SummaryRow
                 label="Daily cap"
-                value={`$${(pm.requestedDailyCapUsd ?? 0).toLocaleString()}`}
+                value={`$${(pm.dailyCapUsd ?? 0).toLocaleString()}`}
               />
             ) : null}
           </View>
-          <Divider spacing="sm" />
         </>
       ) : null}
 
-      {/* Settlement bank (last 4 digits only for security) */}
+      {/* Settlement bank (last 4 digits only) */}
       {pm.settlementAccountNumber ? (
-        <SummaryRow
-          label="Settlement account"
-          value={`···${pm.settlementAccountNumber.slice(-4)}`}
-        />
+        <>
+          <Divider spacing="sm" />
+          <SummaryRow
+            label="Settlement account"
+            value={`···${pm.settlementAccountNumber.slice(-4)}`}
+          />
+        </>
       ) : null}
-
-      {/* NGN balance placeholder — requires backend PM-list endpoint */}
-      <View
-        style={{
-          marginTop: spacing.sm,
-          backgroundColor: colors.surface,
-          borderRadius: 8,
-          padding: spacing.sm,
-        }}
-      >
-        <Text variant="caption" color="textMuted">
-          NGN balance (available / reserved) is not yet surfaced — add a GET /admin/pm endpoint to the backend to read PaymentMerchant.availableNgn / reservedNgn.
-        </Text>
-      </View>
-
-      <View style={{ marginTop: spacing.sm }}>
-        <Text variant="caption" color="textMuted">
-          Approved {formatAge(pm.updatedAt)}
-        </Text>
-      </View>
     </AccentCard>
   );
 };
-
-function formatAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return iso;
-  const mins = Math.round(ms / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  return `${days}d ago`;
-}
 
 export default PMStatusScreen;

@@ -194,3 +194,58 @@ describe('pmAdminApi.withdrawPM', () => {
     expect(res.status).toBe(409);
   });
 });
+
+// ─── listPMs ──────────────────────────────────────────────────────────────────
+
+describe('pmAdminApi.listPMs', () => {
+  it('sends GET /admin/pm', async () => {
+    const payload = { success: true, data: [] };
+    global.fetch = mockFetch(payload);
+    await pmAdminApi.listPMs();
+    const calledUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
+    expect(calledUrl).toContain('/admin/pm');
+    const calledInit = (global.fetch as jest.Mock).mock.calls[0][1] as RequestInit;
+    expect(calledInit.method).toBe('GET');
+  });
+
+  it('returns the PaymentMerchant array on success', async () => {
+    const pm: import('../p2p').PaymentMerchant = {
+      id: 'pm-uuid-1',
+      userId: 'user-1',
+      name: 'Alpha Corp',
+      status: 'active',
+      availableNgn: '9500.00',
+      reservedNgn: '500.00',
+      provisioningStatus: 'active',
+      perTradeCapUsd: 300,
+      dailyCapUsd: 3000,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const payload = { success: true, data: [pm] };
+    global.fetch = mockFetch(payload);
+    const res = await pmAdminApi.listPMs();
+    expect(res.success).toBe(true);
+    expect(res.data).toHaveLength(1);
+    expect(res.data?.[0].id).toBe('pm-uuid-1');
+    expect(res.data?.[0].availableNgn).toBe('9500.00');
+    expect(res.data?.[0].reservedNgn).toBe('500.00');
+    expect(res.data?.[0].status).toBe('active');
+  });
+
+  it('returns an empty array when the backend returns []', async () => {
+    const payload = { success: true, data: [] };
+    global.fetch = mockFetch(payload);
+    const res = await pmAdminApi.listPMs();
+    expect(res.success).toBe(true);
+    expect(res.data).toHaveLength(0);
+  });
+
+  it('passes through a backend error response unchanged', async () => {
+    const payload = { success: false, message: 'Forbidden' };
+    global.fetch = mockFetch(payload, 403);
+    const res = await pmAdminApi.listPMs();
+    expect(res.success).toBe(false);
+    expect(res.message).toBe('Forbidden');
+  });
+});

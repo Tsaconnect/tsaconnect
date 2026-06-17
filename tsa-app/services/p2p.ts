@@ -941,6 +941,15 @@ export const pmAdminApi = {
     }),
 
   /**
+   * List all PaymentMerchant rows (admin only).
+   *
+   * Hits: GET /admin/pm
+   * Returns the safe projection (no NombaCredsRef or secret fields).
+   */
+  listPMs: () =>
+    request<PaymentMerchant[]>('GET', '/admin/pm'),
+
+  /**
    * Withdraw NGN from a PM's available balance to its settlement bank.
    *
    * Hits: POST /admin/pm/:id/withdraw
