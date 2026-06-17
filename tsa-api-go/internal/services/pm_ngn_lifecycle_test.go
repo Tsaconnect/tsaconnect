@@ -359,3 +359,255 @@ func TestOpenTradeWithDeposit_PMBuyAd_ReservesNGN(t *testing.T) {
 		t.Errorf("reserved_ngn = %q, want %q (trade fiat)", reserved, trade.FiatAmount)
 	}
 }
+
+// ─── Release on the OTHER terminal paths (reconcile / dispute-resolve) ─────────
+
+// seedPMSellTradeWithReservationAndCapacity is seedPMSellTradeWithReservation
+// plus stamping the ad's reserved capacity to cover the trade's TokenAmount, so
+// the terminal `reserved -= amount` capacity restore stays non-negative.
+func seedPMSellTradeWithReservationAndCapacity(t *testing.T, db *gorm.DB, pm *models.PaymentMerchant, fiat string) *models.P2PTrade {
+	t.Helper()
+	trade := seedPMSellTradeWithReservation(t, db, pm, fiat)
+	if err := db.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).
+		Updates(map[string]any{"remaining": "0", "reserved": trade.TokenAmount}).Error; err != nil {
+		t.Fatalf("set ad capacity: %v", err)
+	}
+	return trade
+}
+
+// assertReleased asserts a release (not a consume) settled the reservation:
+// reserved back to 0, available UNCHANGED at fiat.
+func assertReleased(t *testing.T, svc *PMService, pmID uuid.UUID, fiat string) {
+	t.Helper()
+	avail, reserved := ngnBalances(t, svc, pmID)
+	if avail != fiat && avail != trimZeros(fiat) {
+		t.Errorf("available_ngn = %q, want %q (released, not consumed)", avail, fiat)
+	}
+	if reserved != "0" && reserved != "0.00" {
+		t.Errorf("reserved_ngn = %q, want 0 (released)", reserved)
+	}
+}
+
+func trimZeros(s string) string {
+	// "1500.00" -> "1500" for the SQLite NUMERIC-as-text comparison tolerance.
+	if i := len(s) - 3; i > 0 && s[i] == '.' && s[i+1] == '0' && s[i+2] == '0' {
+		return s[:i]
+	}
+	return s
+}
+
+// TestReconcileToCancelled_PMSell_ReleasesNGN: a PM sell trade reconciled to
+// cancelled releases its held NGN reservation (reserved→0, available unchanged).
+func TestReconcileToCancelled_PMSell_ReleasesNGN(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservationAndCapacity(t, db, pm, "1500.00")
+
+	if _, err := svc.reconcileToCancelled(context.Background(), trade, models.P2PTradeFundingDepositedByTaker); err != nil {
+		t.Fatalf("reconcileToCancelled: %v", err)
+	}
+	assertReleased(t, NewPMService(db), pm.ID, "1500.00")
+}
+
+// TestReconcileToCancelled_NonPM_NoLedgerChange: a non-PM trade through the same
+// path is a clean no-op on the ledger and must not panic.
+func TestReconcileToCancelled_NonPM_NoLedgerChange(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	// A non-PM PaymentMerchant row exists with a balance, but the trade's ad has
+	// no pm_id — the release must not touch it.
+	pm := seedActivePM(t, db, "1234567890", 0)
+	if err := db.Model(&models.PaymentMerchant{}).Where("id = ?", pm.ID).
+		Updates(map[string]any{"available_ngn": "777.00", "reserved_ngn": "0.00"}).Error; err != nil {
+		t.Fatalf("set ledger: %v", err)
+	}
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00") // ad has no pm_id
+	if err := db.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).
+		Updates(map[string]any{"remaining": "0", "reserved": trade.TokenAmount}).Error; err != nil {
+		// ad row may not exist for a bare seed; create a minimal one
+	}
+	// Ensure an ad row exists so the pm_id lookup runs (returns nil pm_id).
+	db.Create(&models.P2PAd{ID: trade.AdID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", ChainID: 146, Amount: "1000000", Remaining: "0", Reserved: trade.TokenAmount,
+		FiatCurrency: "NGN", Rate: "1300", RateType: models.P2PAdRateTypeFixed, Status: models.P2PAdStatusActive})
+
+	if _, err := svc.reconcileToCancelled(context.Background(), trade, models.P2PTradeFundingDepositedByTaker); err != nil {
+		t.Fatalf("reconcileToCancelled (non-PM): %v", err)
+	}
+	avail, reserved := ngnBalances(t, NewPMService(db), pm.ID)
+	if (avail != "777" && avail != "777.00") || (reserved != "0" && reserved != "0.00") {
+		t.Errorf("non-PM path changed ledger: available=%q reserved=%q (want 777.00 / 0)", avail, reserved)
+	}
+}
+
+// TestReconcileOrphanOpen_PMSell_ReleasesNGN: an orphaned (open never landed)
+// PM sell trade reclaimed by the reconciler releases its NGN reservation.
+func TestReconcileOrphanOpen_PMSell_ReleasesNGN(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservationAndCapacity(t, db, pm, "1500.00")
+	// Orphan-reclaim requires an empty open_tx_hash on a pending_payment trade.
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
+		Updates(map[string]any{"open_tx_hash": "", "status": models.P2PTradeStatusPendingPayment}).Error; err != nil {
+		t.Fatalf("set orphan state: %v", err)
+	}
+
+	if _, err := svc.reconcileOrphanOpen(context.Background(), trade); err != nil {
+		t.Fatalf("reconcileOrphanOpen: %v", err)
+	}
+	assertReleased(t, NewPMService(db), pm.ID, "1500.00")
+}
+
+// TestReconcileToResolved_PMSell_ReleasesNGN: a PM sell trade reconciled to
+// resolved (admin refunded to seller) releases its NGN reservation. RELEASE on
+// resolve in both branches — consume is exclusively a confirmed-payout event.
+func TestReconcileToResolved_PMSell_ReleasesNGN(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservationAndCapacity(t, db, pm, "1500.00")
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
+		Update("status", models.P2PTradeStatusDisputed).Error; err != nil {
+		t.Fatalf("set disputed: %v", err)
+	}
+	// reconcileToResolved reads the dispute row's RefundedToBuyer to pick the
+	// branch; seed one with refund-to-seller (false).
+	refundFalse := false
+	if err := db.Create(&models.P2PDispute{
+		ID: uuid.New(), TradeID: trade.ID, RaisedBy: trade.SellerID,
+		RaisedRole: models.P2PDisputeRoleSeller, Reason: "test",
+		Status: models.P2PDisputeStatusOpen, RefundedToBuyer: &refundFalse,
+	}).Error; err != nil {
+		t.Fatalf("seed dispute: %v", err)
+	}
+
+	if _, err := svc.reconcileToResolved(context.Background(), trade, models.P2PTradeFundingDepositedByTaker, big.NewInt(0)); err != nil {
+		t.Fatalf("reconcileToResolved: %v", err)
+	}
+	assertReleased(t, NewPMService(db), pm.ID, "1500.00")
+}
+
+// TestConfirmAdminResolveDispute_PMSell_ReleasesNGN_ToBuyer: admin resolves a PM
+// sell dispute in the buyer's favour (release-to-buyer). The reservation must
+// still be RELEASED (consume is reserved for confirmed Nomba payout success).
+func TestConfirmAdminResolveDispute_PMSell_ReleasesNGN_ToBuyer(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservationAndCapacity(t, db, pm, "1500.00")
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
+		Update("status", models.P2PTradeStatusDisputed).Error; err != nil {
+		t.Fatalf("set disputed: %v", err)
+	}
+	db.Create(&models.P2PDispute{
+		ID: uuid.New(), TradeID: trade.ID, RaisedBy: trade.SellerID,
+		RaisedRole: models.P2PDisputeRoleSeller, Reason: "test",
+		Status: models.P2PDisputeStatusOpen,
+	})
+
+	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	fee := big.NewInt(500)
+	moved := new(big.Int).Sub(tokenAmt, fee)
+	esc.resolvedEvent = &P2PTradeResolvedEvent{
+		TradeID: HashID(trade.ID), ReleasedToBuyer: true, AmountMoved: moved, FeeToSystem: fee,
+	}
+
+	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xres"); err != nil {
+		t.Fatalf("ConfirmAdminResolveDispute(to buyer): %v", err)
+	}
+	assertReleased(t, NewPMService(db), pm.ID, "1500.00")
+}
+
+// TestConfirmAdminResolveDispute_PMSell_ReleasesNGN_ToSeller: admin resolves in
+// the seller's favour (refund to seller). Reservation released.
+func TestConfirmAdminResolveDispute_PMSell_ReleasesNGN_ToSeller(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservationAndCapacity(t, db, pm, "1500.00")
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).
+		Update("status", models.P2PTradeStatusDisputed).Error; err != nil {
+		t.Fatalf("set disputed: %v", err)
+	}
+	db.Create(&models.P2PDispute{
+		ID: uuid.New(), TradeID: trade.ID, RaisedBy: trade.SellerID,
+		RaisedRole: models.P2PDisputeRoleSeller, Reason: "test",
+		Status: models.P2PDisputeStatusOpen,
+	})
+
+	esc.resolvedEvent = &P2PTradeResolvedEvent{
+		TradeID: HashID(trade.ID), ReleasedToBuyer: false,
+		AmountMoved: big.NewInt(0), FeeToSystem: big.NewInt(0),
+	}
+
+	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xres"); err != nil {
+		t.Fatalf("ConfirmAdminResolveDispute(to seller): %v", err)
+	}
+	assertReleased(t, NewPMService(db), pm.ID, "1500.00")
+}
+
+// TestHandlePayoutStatus_Success_Retry_NotWedged: the consume-then-failed-release
+// wedge. First success dispatch consumes the reservation; if the release failed
+// transiently and the SAME success event is re-dispatched, the already-consumed
+// reservation must NOT block AutoRelease (no wedge). available_ngn decremented
+// exactly once.
+func TestHandlePayoutStatus_Success_Retry_NotWedged(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	trade := seedPMSellTradeWithReservation(t, db, pm, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	gw := &fakeNombaGateway{}
+	auto, signer := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	// Simulate the first success dispatch having already CONSUMED the reservation
+	// (available 1500→0, reserved 1500→0) but the release having failed transiently
+	// (trade still pending_payment). This is the exact state a retry sees.
+	if err := auto.pm.ConsumeNGN(context.Background(), pm.ID, trade.FiatAmount); err != nil {
+		t.Fatalf("pre-consume: %v", err)
+	}
+
+	// Re-dispatch the SAME success event.
+	if err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
+		EventID: "evt_ok", MerchantTxRef: trade.ID.String(), Status: "success",
+	}); err != nil {
+		t.Fatalf("HandlePayoutStatus retry: %v", err)
+	}
+
+	// AutoRelease must have been reached on the retry (not wedged on consume).
+	if len(signer.calls) != 1 {
+		t.Errorf("signer called %d times, want 1 (AutoRelease reached on retry)", len(signer.calls))
+	}
+	// available decremented exactly once (consume on pre-step only; retry must NOT
+	// touch available again).
+	avail, reserved := ngnBalances(t, auto.pm, pm.ID)
+	if avail != "0" && avail != "0.00" {
+		t.Errorf("available_ngn = %q, want 0 (consumed exactly once, not twice)", avail)
+	}
+	if reserved != "0" && reserved != "0.00" {
+		t.Errorf("reserved_ngn = %q, want 0", reserved)
+	}
+}

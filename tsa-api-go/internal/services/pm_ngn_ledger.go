@@ -13,6 +13,14 @@ import (
 // that is empty, negative, non-numeric, or has more than two decimal places.
 var ErrInvalidNGNAmount = errors.New("invalid NGN amount: must be a non-negative 2-dp decimal string")
 
+// ErrNGNAlreadySettled is returned by ConsumeNGN (NOT a hard error) when the
+// guarded consume affected zero rows because reserved_ngn < amount — i.e. the
+// reservation was ALREADY settled (consumed or released) by a prior attempt.
+// Callers handling a retried payout-success event treat this as "consume is
+// already done, proceed" rather than aborting; it makes the success path
+// idempotent across webhook re-dispatch (a consume-then-failed-release wedge).
+var ErrNGNAlreadySettled = errors.New("pm_ngn_ledger: NGN reservation already settled (reserved < amount)")
+
 // validateNGNAmount checks that amt is a valid non-negative 2-dp decimal
 // string. It reuses the ngnToKobo logic from pm_automation_service.go to
 // normalise and validate: the amount must parse, be non-negative, and have
@@ -107,7 +115,12 @@ func (s *PMService) ConsumeNGN(ctx context.Context, pmID uuid.UUID, amountNGN st
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return errors.New("pm_ngn_ledger: ConsumeNGN failed — reserved_ngn < amount or PM not found")
+		// Guard failed: reserved_ngn < amount (or PM not found). This is NOT a
+		// hard DB error — most commonly the reservation was already settled by a
+		// prior attempt (consume-then-failed-release retry). Return the
+		// distinguishable sentinel so the retry-tolerant success path can
+		// continue to AutoRelease without double-deducting available_ngn.
+		return ErrNGNAlreadySettled
 	}
 	return nil
 }

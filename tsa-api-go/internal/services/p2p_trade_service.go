@@ -2440,7 +2440,16 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 				"CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)",
 				trade.TokenAmount)
 		}
-		return tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error
+		if err := tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error; err != nil {
+			return err
+		}
+		// PM sell trade: RELEASE the held NGN reservation in BOTH dispute outcomes
+		// (resolve→PM/seller AND resolve→taker/buyer). ConsumeNGN is reserved
+		// exclusively for a confirmed Nomba payout success — which would have
+		// already settled the reservation and moved the trade to `released`, never
+		// reaching a dispute. The guarded release (reserved >= amt) is a safe no-op
+		// if already consumed, so adding release here cannot double-settle.
+		return s.releasePMSellReservationTx(ctx, tx, &trade)
 	})
 	if err != nil {
 		return nil, err
@@ -2786,13 +2795,19 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		if res.RowsAffected == 0 {
 			return nil
 		}
-		return tx.Model(&models.P2PAd{}).
+		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
 				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		// PM sell trade: release the held NGN payout reservation in the SAME
+		// transaction so a cancel never leaks reserved_ngn. Non-PM / dormant PM
+		// is a clean no-op.
+		return s.releasePMSellReservationTx(ctx, tx, trade)
 	})
 	if err != nil {
 		return ReconcileResult{}, err
@@ -2834,13 +2849,19 @@ func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models
 		if res.RowsAffected == 0 {
 			return nil
 		}
-		return tx.Model(&models.P2PAd{}).
+		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
 				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		// PM sell trade: release the held NGN payout reservation in the SAME
+		// transaction as the orphan reclaim so reserved_ngn never leaks. Non-PM /
+		// dormant PM is a clean no-op.
+		return s.releasePMSellReservationTx(ctx, tx, trade)
 	})
 	if err != nil {
 		return ReconcileResult{}, err
@@ -2980,7 +3001,16 @@ func (s *P2PTradeService) reconcileToResolved(ctx context.Context, trade *models
 				"CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)",
 				trade.TokenAmount)
 		}
-		return tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error
+		if err := tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(updates).Error; err != nil {
+			return err
+		}
+		// PM sell trade: RELEASE the held NGN reservation in BOTH dispute outcomes
+		// (refund-to-seller AND release-to-buyer). ConsumeNGN is reserved
+		// exclusively for a confirmed Nomba payout success — which would have
+		// already settled the reservation and moved the trade to `released`, never
+		// reaching a dispute. The guarded release (reserved >= amt) is a safe no-op
+		// if already consumed, so adding release here cannot double-settle.
+		return s.releasePMSellReservationTx(ctx, tx, trade)
 	})
 	if err != nil {
 		return ReconcileResult{}, err
