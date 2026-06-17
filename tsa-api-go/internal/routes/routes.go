@@ -203,6 +203,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPM.POST("/trades/:id/release", pmh.ReleaseTrade)
 			adminPM.POST("/trades/:id/decline", pmh.DeclineTrade)
 			adminPM.POST("/trades/:id/payout", pmh.InitiatePayout)
+			adminPM.POST("/:id/withdraw", pmh.Withdraw)
 		}
 	}
 
