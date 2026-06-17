@@ -495,7 +495,7 @@ func main() {
 			log.Printf("[pm] Nomba gateway disabled (need NOMBA_CLIENT_ID + NOMBA_CLIENT_SECRET + NOMBA_ACCOUNT_ID) — sell payouts will error until configured")
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
-		pmh = handlers.NewPMHandler(pmAuto)
+		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
 				services.NewNombaWebhookVerifier(cfg.NombaWebhookSecret),

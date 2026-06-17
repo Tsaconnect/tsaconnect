@@ -199,6 +199,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminPM := api.Group("/admin/pm")
 		adminPM.Use(adminAuth, middleware.RequireP2PAdmin())
 		{
+			adminPM.GET("", pmh.ListPMs)
 			adminPM.GET("/manual-queue", pmh.GetManualQueue)
 			adminPM.POST("/trades/:id/release", pmh.ReleaseTrade)
 			adminPM.POST("/trades/:id/decline", pmh.DeclineTrade)

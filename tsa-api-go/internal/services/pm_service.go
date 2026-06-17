@@ -103,6 +103,16 @@ func (s *PMService) ListActiveWithSubAccount(ctx context.Context) ([]models.Paym
 	return pms, nil
 }
 
+// ListAll returns every PaymentMerchant row ordered by created_at DESC.
+// Never returns nil; returns an empty slice when the table is empty.
+func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, error) {
+	var pms []models.PaymentMerchant
+	if err := s.db.WithContext(ctx).Order("created_at DESC").Find(&pms).Error; err != nil {
+		return nil, err
+	}
+	return pms, nil
+}
+
 // SeedTSA upserts the single TSA PaymentMerchant row identified by
 // inboundAccount. If a row with that account number already exists its
 // name, status, caps and operator wallet are refreshed; otherwise a new

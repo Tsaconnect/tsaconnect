@@ -25,14 +25,68 @@ type PMAutomation interface {
 }
 
 // PMHandler serves the PM operator endpoints (manual-release queue, release
-// action, sell-payout kick).
+// action, sell-payout kick, and the read-only PM list).
 type PMHandler struct {
 	auto PMAutomation
+	pm   *services.PMService
 }
 
-// NewPMHandler creates a PMHandler backed by the given PMAutomation.
-func NewPMHandler(auto PMAutomation) *PMHandler {
-	return &PMHandler{auto: auto}
+// NewPMHandler creates a PMHandler backed by the given PMAutomation and an
+// optional PMService for read-only PM list queries. Pass nil for pm to keep
+// the handler dormant for list operations (returns empty array instead of 500).
+func NewPMHandler(auto PMAutomation, pm *services.PMService) *PMHandler {
+	return &PMHandler{auto: auto, pm: pm}
+}
+
+// pmListItem is the safe projection returned by ListPMs — excludes secret
+// fields (NombaCredsRef, raw private keys, etc.).
+type pmListItem struct {
+	ID                      string  `json:"id"`
+	Name                    string  `json:"name"`
+	Status                  string  `json:"status"`
+	ProvisioningStatus      string  `json:"provisioningStatus"`
+	InboundAccountNumber    string  `json:"inboundAccountNumber"`
+	NombaWalletID           string  `json:"nombaWalletId"`
+	AvailableNGN            string  `json:"availableNgn"`
+	ReservedNGN             string  `json:"reservedNgn"`
+	PerTradeCapUSD          float64 `json:"perTradeCapUsd"`
+	DailyCapUSD             float64 `json:"dailyCapUsd"`
+	SettlementBankCode      string  `json:"settlementBankCode"`
+	SettlementAccountNumber string  `json:"settlementAccountNumber"`
+}
+
+// ListPMs handles GET /api/admin/pm — returns a JSON array of all PM rows
+// (safe fields only; NombaCredsRef and any secret references are omitted).
+// When h.pm is nil (dormant), returns an empty array with 200 OK.
+func (h *PMHandler) ListPMs(c *gin.Context) {
+	if h.pm == nil {
+		utils.SuccessResponse(c, http.StatusOK, "Payment merchants", []pmListItem{})
+		return
+	}
+	pms, err := h.pm.ListAll(c.Request.Context())
+	if err != nil {
+		log.Printf("[pm handler] ListPMs: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load payment merchants")
+		return
+	}
+	items := make([]pmListItem, 0, len(pms))
+	for _, p := range pms {
+		items = append(items, pmListItem{
+			ID:                      p.ID.String(),
+			Name:                    p.Name,
+			Status:                  p.Status,
+			ProvisioningStatus:      p.ProvisioningStatus,
+			InboundAccountNumber:    p.InboundAccountNumber,
+			NombaWalletID:           p.NombaWalletID,
+			AvailableNGN:            p.AvailableNGN,
+			ReservedNGN:             p.ReservedNGN,
+			PerTradeCapUSD:          p.PerTradeCapUSD,
+			DailyCapUSD:             p.DailyCapUSD,
+			SettlementBankCode:      p.SettlementBankCode,
+			SettlementAccountNumber: p.SettlementAccountNumber,
+		})
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchants", items)
 }
 
 // GetManualQueue handles GET /api/admin/pm/manual-queue — lists PM buy trades
