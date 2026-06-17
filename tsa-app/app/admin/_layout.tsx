@@ -21,6 +21,8 @@ const AdminLayout = () => {
         name="pm-queue/[tradeId]"
         options={{ title: 'Review PM Trade' }}
       />
+      <Stack.Screen name="pm-applications" options={{ title: 'PM Applications' }} />
+      <Stack.Screen name="pm-status" options={{ title: 'PM Status' }} />
     </Stack>
   );
 };

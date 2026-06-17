@@ -799,6 +799,74 @@ export const adminP2pApi = {
 //
 // decline is NOT an immediate refund — it marks the trade so the timeout
 // watchdog will cancel it and return the escrowed funds on its next tick.
+
+// ─── MerchantRequest types (corporate PM application) ───────────────────────
+
+/**
+ * A merchant-request row as returned by GET /admin/merchant-requests.
+ * Only the fields relevant to the PM application screen are typed here;
+ * the full model has address/city/state/country/phone which are omitted.
+ */
+export interface MerchantRequest {
+  id: string;
+  userId: string;
+  businessType: string;
+  businessName: string;
+  businessDescription?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  adminNote?: string;
+  reviewedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  // Corporate PM fields (p2p_merchant applications only)
+  settlementBankCode?: string;
+  settlementAccountNumber?: string;
+  makerWalletAddress?: string;
+  requestedPerTradeCapUsd?: number;
+  requestedDailyCapUsd?: number;
+  // Decorated by the backend on Preload("User")
+  user?: { id: string; username?: string; email?: string };
+}
+
+/**
+ * Paginated list response from GET /admin/merchant-requests.
+ */
+export interface MerchantRequestListResponse {
+  requests: MerchantRequest[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+/**
+ * PaymentMerchant row as returned by the PM manual-queue endpoint context.
+ * Used for the PM status view — note there is no standalone PM-list endpoint
+ * on the backend; status data is surfaced from what the manual-queue + approve
+ * flow provides. See task-8-report.md for the gap note.
+ */
+export interface PaymentMerchant {
+  id: string;
+  userId: string;
+  name: string;
+  status: 'pending' | 'active' | 'paused';
+  nombaAccountId?: string;
+  nombaWalletId?: string;
+  inboundAccountNumber?: string;
+  inboundBank?: string;
+  operatorWalletAddress?: string;
+  nombaSubAccountId?: string;
+  settlementBankCode?: string;
+  settlementAccountNumber?: string;
+  settlementAccountName?: string;
+  availableNgn: string;
+  reservedNgn: string;
+  provisioningStatus: 'pending' | 'provisioned' | 'active' | 'failed';
+  perTradeCapUsd: number;
+  dailyCapUsd: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export const pmAdminApi = {
   manualQueue: () =>
     request<PMManualQueueItem[]>('GET', '/admin/pm/manual-queue'),
@@ -811,6 +879,78 @@ export const pmAdminApi = {
 
   payout: (tradeId: string) =>
     request<void>('POST', `/admin/pm/trades/${encodeURIComponent(tradeId)}/payout`, {}),
+
+  /**
+   * List pending p2p_merchant MerchantRequests.
+   *
+   * Hits: GET /admin/merchant-requests?status=pending
+   * The backend does not filter by businessType server-side, so the result is
+   * filtered to businessType === 'p2p_merchant' in this helper.
+   */
+  listApplications: () =>
+    request<MerchantRequestListResponse>('GET', '/admin/merchant-requests', undefined, {
+      query: { status: 'pending', limit: 100 },
+    }).then((res) => {
+      if (!res.success || !res.data) return res;
+      return {
+        ...res,
+        data: {
+          ...res.data,
+          requests: res.data.requests.filter(
+            (r) => r.businessType === 'p2p_merchant',
+          ),
+        },
+      };
+    }),
+
+  /**
+   * Approve a p2p_merchant MerchantRequest. Triggers backend provisioning of a
+   * Nomba sub-account + VA. The backend may return 5xx on transient Nomba
+   * failure — callers should surface the message and allow retry.
+   *
+   * Hits: POST /admin/merchant-requests/:id/approve
+   */
+  approveApplication: (requestId: string) =>
+    request<MerchantRequest>(
+      'POST',
+      `/admin/merchant-requests/${encodeURIComponent(requestId)}/approve`,
+      {},
+    ),
+
+  /**
+   * List approved p2p_merchant MerchantRequests.
+   * Used by the PM status screen to show activated PMs.
+   *
+   * Hits: GET /admin/merchant-requests?status=approved&limit=100
+   * Filtered to businessType === 'p2p_merchant' client-side.
+   */
+  listApprovedApplications: () =>
+    request<MerchantRequestListResponse>('GET', '/admin/merchant-requests', undefined, {
+      query: { status: 'approved', limit: 100 },
+    }).then((res) => {
+      if (!res.success || !res.data) return res;
+      return {
+        ...res,
+        data: {
+          ...res.data,
+          requests: res.data.requests.filter(
+            (r) => r.businessType === 'p2p_merchant',
+          ),
+        },
+      };
+    }),
+
+  /**
+   * Withdraw NGN from a PM's available balance to its settlement bank.
+   *
+   * Hits: POST /admin/pm/:id/withdraw
+   */
+  withdrawPM: (pmId: string, amount: string) =>
+    request<{ payoutId: string }>(
+      'POST',
+      `/admin/pm/${encodeURIComponent(pmId)}/withdraw`,
+      { amount },
+    ),
 };
 
 // ─── Sellers ────────────────────────────────────────────────────────────────
