@@ -121,6 +121,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			token_amount TEXT, fiat_amount TEXT, fiat_currency TEXT, rate TEXT,
 			payment_method_id TEXT, payment_ref TEXT, nomba_inbound_event_id TEXT, nomba_payout_id TEXT, payout_account_number TEXT, payout_bank TEXT, payout_account_name TEXT, on_chain_trade_id TEXT, open_tx_hash TEXT, release_tx_hash TEXT,
 			status TEXT DEFAULT 'pending_payment', proof_image_url TEXT, cancel_reason TEXT,
+			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT, marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL, expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME

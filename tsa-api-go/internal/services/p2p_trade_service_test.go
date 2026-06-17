@@ -379,6 +379,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			open_tx_hash TEXT, release_tx_hash TEXT,
 			status TEXT DEFAULT 'pending_payment',
 			proof_image_url TEXT, cancel_reason TEXT,
+			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,

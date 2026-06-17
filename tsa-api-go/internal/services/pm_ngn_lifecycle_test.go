@@ -275,6 +275,94 @@ func TestConfirmCancel_PMSell_ReleasesNGN(t *testing.T) {
 	}
 }
 
+// ─── Regression: failed-payout then cancel must NOT double-release ───────────
+
+// TestFailedPayoutThenCancel_NoDoubleRelease is the regression for the
+// cross-cutting double-release bug: HandlePayoutStatus("failed") releases a PM
+// sell trade's NGN reservation but leaves the trade in pending_payment for the
+// watchdog; the subsequent ConfirmCancel would then release the SAME reservation
+// a second time. With two concurrent reservations on one PM, the second release
+// would silently STEAL the other live trade's reservation (reserved_ngn goes to
+// 0 instead of staying at the second trade's amount).
+//
+// Setup: PM with available=3000, two sell trades each reserving 1500 → reserved=3000.
+// Trade A's payout fails (release A → reserved=1500, marker set on A), then
+// Trade A is cancelled. Correct outcome: reserved stays 1500 (B's reservation
+// intact). The buggy outcome was reserved=0 (B's reservation stolen).
+func TestFailedPayoutThenCancel_NoDoubleRelease(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	svc.SetPMService(NewPMService(db))
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	// Two reservations of 1500 each against a 3000 balance.
+	if err := db.Model(&models.PaymentMerchant{}).Where("id = ?", pm.ID).
+		Updates(map[string]any{"available_ngn": "3000.00", "reserved_ngn": "3000.00"}).Error; err != nil {
+		t.Fatalf("set ledger: %v", err)
+	}
+
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	// Ad capacity to satisfy the cancel restore for trade A's 1000000 token amount.
+	if err := db.Model(&models.P2PAd{}).Where("id = ?", ad.ID).
+		Updates(map[string]any{"remaining": "0", "reserved": "1000000"}).Error; err != nil {
+		t.Fatalf("set ad capacity: %v", err)
+	}
+
+	userA := uuid.New()
+	tradeA := seedSellTradeOnAd(t, db, uuid.New(), userA, "1500.00")
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", tradeA.ID).
+		Update("ad_id", ad.ID).Error; err != nil {
+		t.Fatalf("link trade A: %v", err)
+	}
+	tradeA.AdID = ad.ID
+
+	gw := &fakeNombaGateway{}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+
+	// 1) Trade A's payout fails → releases A's 1500 reservation, sets the marker,
+	//    leaves the trade in pending_payment.
+	if err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
+		EventID: "evt_fail_A", MerchantTxRef: tradeA.ID.String(), Status: "failed",
+	}); err != nil {
+		t.Fatalf("HandlePayoutStatus(failed): %v", err)
+	}
+	_, reservedAfterFail := ngnBalances(t, auto.pm, pm.ID)
+	if reservedAfterFail != "1500" && reservedAfterFail != "1500.00" {
+		t.Fatalf("reserved_ngn after failed payout = %q, want 1500 (only A released)", reservedAfterFail)
+	}
+	// The marker must be persisted on trade A.
+	var markerA bool
+	if err := db.Model(&models.P2PTrade{}).Select("ngn_reservation_released").
+		Where("id = ?", tradeA.ID).Scan(&markerA).Error; err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if !markerA {
+		t.Fatalf("ngn_reservation_released = false after failed payout, want true")
+	}
+
+	// 2) Trade A is now cancelled (timeout watchdog → ConfirmCancel). This must
+	//    NOT release a second time.
+	tokenAmt, _ := new(big.Int).SetString(tradeA.TokenAmount, 10)
+	esc.tradeCancelled = &P2PTradeCancelledEvent{
+		TradeID:        HashID(tradeA.ID),
+		Amount:         tokenAmt,
+		ReturnedToPool: false,
+	}
+	if _, err := svc.ConfirmCancel(context.Background(), tradeA.ID, userA, "0xcancelA"); err != nil {
+		t.Fatalf("ConfirmCancel: %v", err)
+	}
+
+	avail, reserved := ngnBalances(t, NewPMService(db), pm.ID)
+	if avail != "3000" && avail != "3000.00" {
+		t.Errorf("available_ngn = %q, want 3000 (release un-reserves only)", avail)
+	}
+	// THE ASSERTION: reserved stays at 1500 (trade B's reservation), NOT 0.
+	if reserved != "1500" && reserved != "1500.00" {
+		t.Errorf("reserved_ngn = %q, want 1500 (B's reservation intact — NOT double-released)", reserved)
+	}
+}
+
 // ─── Sell-open reserves atomically, rolls back on insufficient liquidity ──────
 
 // TestOpenTradeWithDeposit_PMBuyAd_ReservesNGN verifies opening a PM sell trade
