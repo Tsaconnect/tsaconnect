@@ -72,17 +72,27 @@ type P2PTrade struct {
 	Status          string    `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
 	ProofImageURL   string    `gorm:"type:text" json:"proofImageUrl,omitempty"`
 	// PM automation links (design §4). Empty on manual P2P trades.
-	PaymentRef          string     `gorm:"size:32" json:"paymentRef,omitempty"`          // optional buyer reference aid
-	NombaInboundEventID string     `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)
-	NombaPayoutID       string     `gorm:"size:64" json:"nombaPayoutId,omitempty"`       // Nomba payout reference (sell)
-	PayoutAccountNumber string     `gorm:"size:32" json:"payoutAccountNumber,omitempty"` // user's KYC-name-verified bank (sell)
-	PayoutBank          string     `gorm:"size:64" json:"payoutBank,omitempty"`
-	PayoutAccountName   string     `gorm:"size:128" json:"payoutAccountName,omitempty"`
-	CancelReason        string     `gorm:"type:text" json:"cancelReason,omitempty"`
-	ResolvedByAdmin     *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
-	MarkedPaidAt        *time.Time `json:"markedPaidAt,omitempty"`
-	ReleasedAt          *time.Time `json:"releasedAt,omitempty"`
-	ExpiresAt           time.Time  `gorm:"index;not null" json:"expiresAt"`
+	PaymentRef          string `gorm:"size:32" json:"paymentRef,omitempty"`          // optional buyer reference aid
+	NombaInboundEventID string `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)
+	NombaPayoutID       string `gorm:"size:64" json:"nombaPayoutId,omitempty"`       // Nomba payout reference (sell)
+	PayoutAccountNumber string `gorm:"size:32" json:"payoutAccountNumber,omitempty"` // user's KYC-name-verified bank (sell)
+	PayoutBank          string `gorm:"size:64" json:"payoutBank,omitempty"`
+	PayoutAccountName   string `gorm:"size:128" json:"payoutAccountName,omitempty"`
+	CancelReason        string `gorm:"type:text" json:"cancelReason,omitempty"`
+	// NgnReservationReleased records that this sell trade's PM NGN payout
+	// reservation has ALREADY been returned to the PM's free balance (reserved_ngn
+	// -= fiat) outside the normal terminal-cancel path — specifically by the
+	// failed-payout handler (pm_automation_service.go), which releases the
+	// reservation but deliberately leaves the trade in pending_payment for the
+	// timeout watchdog. Without this marker the later cancel path would release a
+	// SECOND time, double-decrementing reserved_ngn (stealing another live trade's
+	// reservation, or hard-erroring and wedging the cancel). releasePMSellReservationTx
+	// skips the release when this is true.
+	NgnReservationReleased bool       `gorm:"not null;default:false" json:"-"`
+	ResolvedByAdmin        *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
+	MarkedPaidAt           *time.Time `json:"markedPaidAt,omitempty"`
+	ReleasedAt             *time.Time `json:"releasedAt,omitempty"`
+	ExpiresAt              time.Time  `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.

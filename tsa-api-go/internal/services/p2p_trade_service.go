@@ -2052,6 +2052,14 @@ func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *go
 	if s.pm == nil {
 		return nil
 	}
+	// Idempotency guard: the failed-payout handler releases the reservation but
+	// leaves the trade in pending_payment for the watchdog, setting this marker.
+	// If it's set, the reservation is already back in the PM's free balance —
+	// releasing again would double-decrement reserved_ngn (steal another live
+	// trade's reservation) or hard-error and wedge this cancel. Skip the release.
+	if trade.NgnReservationReleased {
+		return nil
+	}
 	var row struct{ PMID *uuid.UUID }
 	if err := tx.WithContext(ctx).
 		Table("p2p_ads").
@@ -2063,7 +2071,16 @@ func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *go
 	if row.PMID == nil {
 		return nil // not a PM ad — nothing reserved
 	}
-	return s.pm.ReleaseNGNTx(tx, *row.PMID, trade.FiatAmount)
+	if err := s.pm.ReleaseNGNTx(tx, *row.PMID, trade.FiatAmount); err != nil {
+		return err
+	}
+	// Set the marker so a redundant later release (e.g. reconciler re-running on a
+	// row whose in-memory copy predates this cancel) is a no-op. The persisted
+	// flag is the single source of truth for "reservation already returned".
+	trade.NgnReservationReleased = true
+	return tx.WithContext(ctx).Model(&models.P2PTrade{}).
+		Where("id = ?", trade.ID).
+		Update("ngn_reservation_released", true).Error
 }
 
 // ConfirmCancel verifies the on-chain TradeCancelled event and applies the

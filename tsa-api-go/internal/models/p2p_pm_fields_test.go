@@ -72,6 +72,7 @@ func TestP2PPMFields_Persist(t *testing.T) {
 			status TEXT NOT NULL DEFAULT 'pending_payment',
 			proof_image_url TEXT,
 			cancel_reason TEXT,
+			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
 			marked_paid_at DATETIME,
 			released_at DATETIME,

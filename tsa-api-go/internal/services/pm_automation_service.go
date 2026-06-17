@@ -605,9 +605,21 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 			}
 		}
 		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for watchdog/manual", trade.ID, p.PayoutID, p.EventID)
+		// Mark the reservation as already released so the later cancel path
+		// (timeout watchdog / ConfirmCancel) does NOT release it a second time —
+		// a double-release would steal another live trade's reservation or hard-
+		// error and wedge the cancel. Set in the same UPDATE as cancel_reason.
+		// Only set the marker when there was a PM reservation to release (pm != nil);
+		// a non-PM trade never reserved, so leave the marker false.
+		updates := map[string]any{
+			"cancel_reason": "pm payout failed (nomba payout=" + p.PayoutID + "); routed to manual",
+		}
+		if pm != nil {
+			updates["ngn_reservation_released"] = true
+		}
 		if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 			Where("id = ?", trade.ID).
-			Update("cancel_reason", "pm payout failed (nomba payout="+p.PayoutID+"); routed to manual").Error; err != nil {
+			Updates(updates).Error; err != nil {
 			return err
 		}
 		return nil
