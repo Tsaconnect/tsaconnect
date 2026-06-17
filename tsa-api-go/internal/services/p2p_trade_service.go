@@ -283,6 +283,47 @@ func (s *P2PTradeService) SetPMService(svc *PMService) {
 	s.pm = svc
 }
 
+// lookupActivePM returns the active PaymentMerchant for the given userID, or
+// nil if the PM feature is dormant (s.pm == nil) or no active PM exists for
+// the user (ErrPMNotFound). Any other DB error is propagated.
+func (s *P2PTradeService) lookupActivePM(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
+	if s.pm == nil {
+		return nil, nil // PM feature dormant — treat as non-PM user
+	}
+	pm, err := s.pm.GetActiveByUserID(ctx, userID)
+	if errors.Is(err, ErrPMNotFound) {
+		return nil, nil // no active PM for this user — normal ad
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pm lookup: %w", err)
+	}
+	return pm, nil
+}
+
+// applyPMAdTag looks up an active PM for the creator and, if found:
+//  1. Validates that the ad's wallet address (sellerAddress) matches the PM's
+//     registered maker wallet (case-insensitive). Returns ErrInvalidParams on
+//     mismatch so the caller can reject the request before persisting.
+//  2. Sets ad.PMID to the PM's ID so marketplace queries can filter PM ads.
+//
+// If no active PM exists for the creator, ad.PMID is left nil (normal ad).
+// If the PM feature is dormant (s.pm == nil), this is a no-op.
+func (s *P2PTradeService) applyPMAdTag(ctx context.Context, creatorID uuid.UUID, walletAddress string, ad *models.P2PAd) error {
+	pm, err := s.lookupActivePM(ctx, creatorID)
+	if err != nil {
+		return err
+	}
+	if pm == nil {
+		return nil // non-PM user or feature dormant
+	}
+	if !strings.EqualFold(walletAddress, pm.OperatorWalletAddress) {
+		return fmt.Errorf("%w: ad wallet must be the PM's registered maker wallet (got %s, want %s)",
+			ErrInvalidParams, walletAddress, pm.OperatorWalletAddress)
+	}
+	ad.PMID = &pm.ID
+	return nil
+}
+
 // accrueP2PReleaseFee is the SINGLE seam through which all three P2P release
 // transitions (ConfirmRelease, reconciler auto-release, adminResolve→buyer)
 // accrue the realized on-chain platform fee into the fee/TP v2 engine. Routing
@@ -665,6 +706,12 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	ad.VoucherDeadline = &dt
 	ad.VoucherHash = "0x" + common.Bytes2Hex(hash[:])
 
+	// PM ad-tagging: if the creator is an active PM, stamp PMID and verify that
+	// the ad's seller address matches the PM's registered maker wallet.
+	if err := s.applyPMAdTag(ctx, sellerID, sellerAddress, ad); err != nil {
+		return nil, err
+	}
+
 	if err := s.db.WithContext(ctx).Create(ad).Error; err != nil {
 		return nil, fmt.Errorf("persist ad: %w", err)
 	}
@@ -778,6 +825,12 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 			return nil, err
 		}
 		ad.Rate = effective
+	}
+
+	// PM ad-tagging: if the creator is an active PM, stamp PMID and verify
+	// that the merchant address matches the PM's registered maker wallet.
+	if err := s.applyPMAdTag(ctx, merchantID, merchantAddress, ad); err != nil {
+		return nil, err
 	}
 
 	if err := s.db.WithContext(ctx).Create(ad).Error; err != nil {
