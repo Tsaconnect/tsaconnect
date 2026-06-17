@@ -220,6 +220,41 @@ func TestCreateAd_PMUser_BuyAd_TaggedWithPMID(t *testing.T) {
 	}
 }
 
+// TestCreateAd_PMUser_EmptyMakerWallet_Rejected — an active PM with no registered
+// maker wallet (OperatorWalletAddress == "") must never match any caller-supplied
+// address, including the zero address. Without the zero-address guard, both sides
+// normalise to 0x000...000 and the ad is incorrectly PM-tagged.
+func TestCreateAd_PMUser_EmptyMakerWallet_Rejected(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, esc, _ := newServiceWithPM(t, db)
+
+	// Seed an ACTIVE PM with no registered maker wallet.
+	sellerID := uuid.New()
+	seedActivePMForUser(t, db, sellerID, "" /* empty OperatorWalletAddress */)
+	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
+
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}
+
+	// Caller supplies the zero address — without the guard this passes the
+	// EqualFold check because common.HexToAddress("") == common.Address{}.
+	zeroAddr := "0x0000000000000000000000000000000000000000"
+
+	_, err := svc.CreateAd(context.Background(), sellerID, zeroAddr, makeCreateAdParams(pmID))
+	if err == nil {
+		t.Fatal("expected an error wrapping ErrInvalidParams but got nil")
+	}
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+
+	// No ad row should have been persisted.
+	var count int64
+	db.Model(&models.P2PAd{}).Where("seller_id = ?", sellerID).Count(&count)
+	if count != 0 {
+		t.Fatalf("ad was persisted despite empty maker wallet: count=%d", count)
+	}
+}
+
 // (f) The wallet match is normalization-insensitive: a PM whose stored
 // OperatorWalletAddress is all-lowercase still tags an ad created with the
 // checksummed form of the same address (and vice-versa). Guards the

@@ -316,6 +316,15 @@ func (s *P2PTradeService) applyPMAdTag(ctx context.Context, creatorID uuid.UUID,
 	if pm == nil {
 		return nil // non-PM user or feature dormant
 	}
+	// Fail closed when the PM has no registered maker wallet. An empty
+	// OperatorWalletAddress normalises to the zero address via HexToAddress,
+	// which would produce a false match for any caller that supplies
+	// "0x0000...0000" — corrupting downstream pool/release routing.
+	if common.HexToAddress(pm.OperatorWalletAddress) == (common.Address{}) {
+		// Active PM with no registered maker wallet is a configuration error —
+		// never tag an ad against a zero-address pool.
+		return fmt.Errorf("%w: PM has no registered maker wallet", ErrInvalidParams)
+	}
 	// Normalize both sides through the EVM address parser before comparing so a
 	// format difference between the caller-supplied wallet and the DB-stored
 	// OperatorWalletAddress (casing, checksum, surrounding space) can't produce
