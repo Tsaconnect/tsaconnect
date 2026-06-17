@@ -559,7 +559,16 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// error rather than silently releasing crypto against an unbacked ledger.
 		if pm != nil {
 			if err := s.pm.ConsumeNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
-				return fmt.Errorf("consume PM ledger on payout success (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
+				if errors.Is(err, ErrNGNAlreadySettled) {
+					// Retry-tolerant: a re-dispatched success event (its first
+					// dispatch consumed the reservation but its release failed
+					// transiently). reserved_ngn is already 0, so consume is a
+					// no-op here — do NOT touch available_ngn again. Fall through
+					// to AutoRelease (idempotent) so the wedged trade releases.
+					log.Printf("[pm automation] payout success consume no-op (already settled) for pm=%s trade=%s (event=%s); proceeding to release", pm.ID, trade.ID, p.EventID)
+				} else {
+					return fmt.Errorf("consume PM ledger on payout success (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
+				}
 			}
 		}
 		_, err := s.trades.AutoRelease(ctx, trade.ID, s.signer)
