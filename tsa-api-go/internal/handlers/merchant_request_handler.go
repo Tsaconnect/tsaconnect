@@ -230,35 +230,55 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		return
 	}
 
-	if req.Status != models.MerchantRequestStatusPending {
+	// For non-PM requests: only pending → approved is valid.
+	// For PM (p2p_merchant) requests: also allow a retry when the request is
+	// already approved but the payment_merchants row exists with a non-active
+	// provisioning_status — this is the resume path for a prior failed
+	// ProvisionAndActivate call.  The role-upgrade/status-flip work is skipped
+	// on the retry path (it was already done on attempt 1).
+	isPMRetry := false
+	if req.Status == models.MerchantRequestStatusApproved &&
+		req.BusinessType == models.BusinessTypeP2PMerchant {
+		// Check whether a non-active PM row exists for this user.
+		var pmRow models.PaymentMerchant
+		err := h.DB.Where("user_id = ?", req.UserID).First(&pmRow).Error
+		if err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive {
+			isPMRetry = true
+		}
+	}
+
+	if !isPMRetry && req.Status != models.MerchantRequestStatusPending {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Request is not in pending status")
 		return
 	}
 
 	now := time.Now()
 
-	txErr := h.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&req).Updates(map[string]interface{}{
-			"status":      models.MerchantRequestStatusApproved,
-			"reviewed_by": admin.ID,
-			"reviewed_at": now,
-			"admin_note":  input.Note,
-		}).Error; err != nil {
-			return err
+	if !isPMRetry {
+		// First approval: flip status → approved and upgrade the user's role.
+		txErr := h.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&req).Updates(map[string]interface{}{
+				"status":      models.MerchantRequestStatusApproved,
+				"reviewed_by": admin.ID,
+				"reviewed_at": now,
+				"admin_note":  input.Note,
+			}).Error; err != nil {
+				return err
+			}
+
+			if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
+				Update("role", models.RoleMerchant).Error; err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if txErr != nil {
+			log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
+			return
 		}
-
-		if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
-			Update("role", models.RoleMerchant).Error; err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	if txErr != nil {
-		log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
-		return
 	}
 
 	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
@@ -266,8 +286,8 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	}
 
 	// Corporate PM provisioning: if this is a p2p_merchant request, spin up the
-	// Nomba sub-account + virtual account asynchronously (actually inline — the
-	// request stays approvable for retry if provisioning fails here).
+	// Nomba sub-account + virtual account inline — the request stays re-approvable
+	// for retry (via isPMRetry above) if provisioning fails here.
 	if req.BusinessType == models.BusinessTypeP2PMerchant {
 		if h.PMOnboarding == nil {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
@@ -280,16 +300,18 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	h.EventBus.Publish(events.Event{
-		Type:    events.MerchantApproved,
-		UserID:  req.UserID,
-		Title:   "Merchant Request Approved",
-		Message: "Your merchant application has been approved. You can now list products.",
-		Data: map[string]interface{}{
-			"requestId":    req.ID,
-			"businessName": req.BusinessName,
-		},
-	})
+	if h.EventBus != nil {
+		h.EventBus.Publish(events.Event{
+			Type:    events.MerchantApproved,
+			UserID:  req.UserID,
+			Title:   "Merchant Request Approved",
+			Message: "Your merchant application has been approved. You can now list products.",
+			Data: map[string]interface{}{
+				"requestId":    req.ID,
+				"businessName": req.BusinessName,
+			},
+		})
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 }
@@ -342,17 +364,19 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		log.Printf("RejectMerchantRequest: reload error: %v", err)
 	}
 
-	h.EventBus.Publish(events.Event{
-		Type:    events.MerchantRejected,
-		UserID:  req.UserID,
-		Title:   "Merchant Request Rejected",
-		Message: "Your merchant application has been rejected: " + input.Note,
-		Data: map[string]interface{}{
-			"requestId":    req.ID,
-			"businessName": req.BusinessName,
-			"reason":       input.Note,
-		},
-	})
+	if h.EventBus != nil {
+		h.EventBus.Publish(events.Event{
+			Type:    events.MerchantRejected,
+			UserID:  req.UserID,
+			Title:   "Merchant Request Rejected",
+			Message: "Your merchant application has been rejected: " + input.Note,
+			Data: map[string]interface{}{
+				"requestId":    req.ID,
+				"businessName": req.BusinessName,
+				"reason":       input.Note,
+			},
+		})
+	}
 
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request rejected", req)
 }

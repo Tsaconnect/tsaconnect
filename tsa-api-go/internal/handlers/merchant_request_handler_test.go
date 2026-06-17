@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -11,7 +13,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -38,12 +42,18 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			phone_number TEXT,
 			country TEXT, state TEXT, city TEXT, address TEXT,
 			profile_photo TEXT, referral_code TEXT, referred_by TEXT,
-			documents TEXT, facial_verification TEXT,
+			persona_inquiry_id TEXT,
 			verification_status TEXT DEFAULT 'pending',
 			verification_notes TEXT, account_status TEXT DEFAULT 'active',
 			last_login DATETIME, login_attempts INTEGER DEFAULT 0,
 			lock_until DATETIME, wallet_address TEXT,
 			seed_phrase_backed_up INTEGER DEFAULT 0,
+			mute_notifications INTEGER DEFAULT 0,
+			mute_email INTEGER DEFAULT 0,
+			tp_balance REAL DEFAULT 0,
+			cashback_balance REAL DEFAULT 0,
+			last_settled_global_index INTEGER,
+			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME, submitted_for_verification_at DATETIME,
 			created_at DATETIME, updated_at DATETIME
 		)`,
@@ -63,6 +73,34 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			admin_note TEXT,
 			reviewed_by TEXT,
 			reviewed_at DATETIME,
+			settlement_bank_code TEXT,
+			settlement_account_number TEXT,
+			maker_wallet_address TEXT,
+			requested_per_trade_cap_usd REAL DEFAULT 0,
+			requested_daily_cap_usd REAL DEFAULT 0,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS payment_merchants (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			nomba_account_id TEXT,
+			nomba_wallet_id TEXT,
+			nomba_creds_ref TEXT,
+			inbound_account_number TEXT,
+			inbound_bank TEXT,
+			operator_wallet_address TEXT,
+			nomba_sub_account_id TEXT,
+			settlement_bank_code TEXT,
+			settlement_account_number TEXT,
+			settlement_account_name TEXT,
+			available_ngn TEXT NOT NULL DEFAULT '0',
+			reserved_ngn TEXT NOT NULL DEFAULT '0',
+			provisioning_status TEXT NOT NULL DEFAULT 'pending',
+			per_trade_cap_usd REAL NOT NULL DEFAULT 0,
+			daily_cap_usd REAL NOT NULL DEFAULT 0,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
@@ -594,4 +632,143 @@ func TestListMerchantRequests_WithStatusFilter(t *testing.T) {
 	if len(requests) != 2 {
 		t.Errorf("expected 2 pending requests, got %d", len(requests))
 	}
+}
+
+// ── C1: provisioning retry re-entry test ─────────────────────────────────────
+
+// handlerFakeProvisioner is a test double that satisfies services.NombaProvisioner.
+// The VA-create step fails on the first call and succeeds on subsequent calls,
+// so attempt-1 approval returns 5xx and leaves the request re-approvable.
+type handlerFakeProvisioner struct {
+	vaCallCount          int
+	subAccountCallCount  int
+	settlementCallCount  int
+}
+
+func (f *handlerFakeProvisioner) CreateSubAccount(_ context.Context, _ string) (string, error) {
+	f.subAccountCallCount++
+	return "sub-acct-handler-test", nil
+}
+
+func (f *handlerFakeProvisioner) CreateVirtualAccountForSubAccount(_ context.Context, _, _ string) (string, string, error) {
+	f.vaCallCount++
+	if f.vaCallCount == 1 {
+		return "", "", errors.New("VA create network error (attempt 1)")
+	}
+	return "0011223344", "wallet-handler-test", nil
+}
+
+func (f *handlerFakeProvisioner) SetSubAccountSettlement(_ context.Context, _, _, _ string) error {
+	f.settlementCallCount++
+	return nil
+}
+
+// TestApproveMerchantRequest_PMProvisioningRetry exercises C1:
+//  - The admin approves a p2p_merchant request.
+//  - Attempt 1: VA-create fails → handler returns 5xx; request left in `approved`
+//    state with a non-active payment_merchants row → re-approvable.
+//  - Attempt 2: VA-create succeeds → 200; PM row is now active; sub-account was
+//    created exactly once across both attempts.
+func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	fake := &handlerFakeProvisioner{}
+	svc := services.NewPMOnboardingService(db, fake)
+
+	bus := newTestEventBus(t)
+	h := NewMerchantRequestHandlerWithPM(db, bus, svc)
+
+	user := createMerchantTestUser(t, db, "user")
+	admin := createMerchantTestUser(t, db, "admin")
+
+	// Submit a p2p_merchant request.
+	submitInput := map[string]interface{}{
+		"businessType":        "p2p_merchant",
+		"businessName":        "Retry Corp",
+		"businessDescription": "A PM retry test",
+		"address":             "1 Retry St",
+		"city":                "Lagos",
+		"state":               "Lagos",
+		"country":             "Nigeria",
+		"phone":               "+2341234567890",
+	}
+	w1, c1 := newMerchantContext("POST", "/api/merchant-requests", submitInput, user)
+	h.SubmitMerchantRequest(c1)
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("submit failed: %d: %s", w1.Code, w1.Body.String())
+	}
+	var submitResp map[string]interface{}
+	json.Unmarshal(w1.Body.Bytes(), &submitResp)
+	reqID := submitResp["data"].(map[string]interface{})["id"].(string)
+
+	// ── Attempt 1: VA fails → 5xx ─────────────────────────────────────────────
+	w2, c2 := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
+		map[string]interface{}{"note": "Approved"}, admin)
+	c2.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c2)
+
+	if w2.Code != http.StatusInternalServerError {
+		t.Errorf("attempt 1: expected 500, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	// The merchant_request should now be approved (status flip already committed).
+	var mr models.MerchantRequest
+	if err := db.First(&mr, "id = ?", reqID).Error; err != nil {
+		t.Fatalf("reload merchant request after attempt 1: %v", err)
+	}
+	if mr.Status != models.MerchantRequestStatusApproved {
+		t.Errorf("after attempt 1: request status = %q, want %q", mr.Status, models.MerchantRequestStatusApproved)
+	}
+
+	// The payment_merchants row should exist but NOT be active.
+	var pm models.PaymentMerchant
+	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
+		t.Fatalf("load PM row after attempt 1: %v", err)
+	}
+	if pm.ProvisioningStatus == models.PMProvisioningActive {
+		t.Error("attempt 1: PM row should NOT be active yet")
+	}
+
+	// sub-account created once so far.
+	if fake.subAccountCallCount != 1 {
+		t.Errorf("attempt 1: CreateSubAccount called %d times, want 1", fake.subAccountCallCount)
+	}
+
+	// ── Attempt 2: VA succeeds → 200 ─────────────────────────────────────────
+	w3, c3 := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
+		map[string]interface{}{"note": "Approved retry"}, admin)
+	c3.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c3)
+
+	if w3.Code != http.StatusOK {
+		t.Errorf("attempt 2: expected 200, got %d: %s", w3.Code, w3.Body.String())
+	}
+
+	// PM row is now active.
+	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
+		t.Fatalf("reload PM row after attempt 2: %v", err)
+	}
+	if pm.ProvisioningStatus != models.PMProvisioningActive {
+		t.Errorf("attempt 2: provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
+	}
+	if pm.Status != models.PaymentMerchantStatusActive {
+		t.Errorf("attempt 2: PM status = %q, want %q", pm.Status, models.PaymentMerchantStatusActive)
+	}
+
+	// sub-account created exactly once across both attempts (idempotency).
+	if fake.subAccountCallCount != 1 {
+		t.Errorf("attempt 2: CreateSubAccount total calls = %d, want exactly 1", fake.subAccountCallCount)
+	}
+
+	// VA called twice (once failed, once succeeded).
+	if fake.vaCallCount != 2 {
+		t.Errorf("attempt 2: CreateVirtualAccount total calls = %d, want 2", fake.vaCallCount)
+	}
+}
+
+// newTestEventBus creates a started event bus for use in tests.
+func newTestEventBus(t *testing.T) *events.Bus {
+	t.Helper()
+	bus := events.NewBus()
+	t.Cleanup(bus.Stop)
+	return bus
 }
