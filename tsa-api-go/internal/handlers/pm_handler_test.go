@@ -553,6 +553,26 @@ func TestPMHandler_Withdraw_MissingAmount(t *testing.T) {
 	}
 }
 
+func TestPMHandler_Withdraw_ZeroAmount(t *testing.T) {
+	pmID := uuid.New()
+	fake := &fakePMAutomation{}
+	h := NewPMHandler(fake, nil)
+	router := buildPMRouter(h, testAdminUser())
+
+	body := bytes.NewBufferString(`{"amount":"0"}`)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/withdraw", body)
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for zero amount, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(fake.withdrawCalls) != 0 {
+		t.Errorf("WithdrawToSettlement must not be called for zero amount, got %d calls", len(fake.withdrawCalls))
+	}
+}
+
 func TestPMHandler_Withdraw_NoAdmin(t *testing.T) {
 	pmID := uuid.New()
 	fake := &fakePMAutomation{}
