@@ -163,6 +163,16 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
+	// 3a. Credit the per-PM NGN ledger for EVERY settled inbound — whether or not
+	//     it matches a buy trade below (an unmatched credit is a PM top-up). This
+	//     runs inside the deduped webhook dispatch (WebhookEvent dedup guarantees
+	//     once-per-event), so no extra idempotency guard is needed here: a given
+	//     EventID is dispatched at most once, so the ledger credit fires exactly
+	//     once per settled inbound.
+	if err := s.pm.CreditNGN(ctx, pm.ID, p.AmountNGN); err != nil {
+		return fmt.Errorf("credit PM ledger (pm=%s event=%s): %w", pm.ID, p.EventID, err)
+	}
+
 	// 4. Load candidate trades: this PM's open, pooled, on-chain-opened buy
 	//    trades (i.e. trades on the PM's SELL ads).
 	var rows []inboundCandidateRow
@@ -533,16 +543,38 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		return err
 	}
 
+	// Resolve the PM owning this trade's ad (nil when not a PM trade) so the NGN
+	// ledger can be settled alongside the on-chain release / failure handling.
+	pm, pmErr := s.pmForTrade(ctx, trade.ID)
+	if pmErr != nil {
+		return pmErr
+	}
+
 	switch strings.ToLower(p.Status) {
 	case "success":
-		// Money already left the PM's Nomba account → release token to the PM.
+		// Money already left the PM's Nomba account → consume the held NGN
+		// reservation (available-=fiat, reserved-=fiat) BEFORE releasing the
+		// token, then release the escrowed crypto to the PM. ConsumeNGN is
+		// guarded (reserved >= amount); a missing/short reservation surfaces as an
+		// error rather than silently releasing crypto against an unbacked ledger.
+		if pm != nil {
+			if err := s.pm.ConsumeNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+				return fmt.Errorf("consume PM ledger on payout success (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
+			}
+		}
 		_, err := s.trades.AutoRelease(ctx, trade.ID, s.signer)
 		return err
 	case "failed":
 		// SCOPING: alert + manual/watchdog, NO auto-refund (see TODO above).
-		// Record a marker on the trade so the manual queue / operator sees it,
-		// and WARN-log for alerting. Leave the trade in pending_payment so the
-		// timeout watchdog refunds the deposit on expiry.
+		// Release the held NGN reservation back to the PM's free balance (the
+		// payout did not leave the account), record a marker so the manual queue /
+		// operator sees it, and WARN-log for alerting. Leave the trade in
+		// pending_payment so the timeout watchdog refunds the deposit on expiry.
+		if pm != nil {
+			if err := s.pm.ReleaseNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+				return fmt.Errorf("release PM ledger on payout failure (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
+			}
+		}
 		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for watchdog/manual", trade.ID, p.PayoutID, p.EventID)
 		if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 			Where("id = ?", trade.ID).

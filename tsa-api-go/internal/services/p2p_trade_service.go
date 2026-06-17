@@ -41,6 +41,10 @@ var (
 	ErrDisputeNotFound       = errors.New("p2p: dispute not found")
 	ErrNotApplicableForBuyAd = errors.New("p2p: action not applicable for buy-ads")
 	ErrActiveTradeExists     = errors.New("p2p: you already have an active trade on this ad")
+	// ErrInsufficientPMLiquidity: a PM sell-open could not reserve the fiat
+	// payout from the Payment Merchant's NGN ledger (free balance too low). The
+	// whole open is rolled back so no crypto capacity or trade row leaks.
+	ErrInsufficientPMLiquidity = errors.New("p2p: payment merchant has insufficient NGN liquidity for this sell")
 	// ErrSellerPoolInsufficient: the maker's on-chain available balance can no
 	// longer cover this trade (they withdrew, or another trade drained the
 	// pool). Pre-checked at open so the buyer gets a clear "try another ad"
@@ -182,6 +186,13 @@ type P2PTradeService struct {
 	// reconciler auto-release, adminResolve→buyer) accrues the realized on-chain
 	// fee through accrueP2PReleaseFee. nil fees → no-op.
 	fees *FeeDistributionService
+
+	// pm is the Payment-Merchant NGN ledger (corporate PM feature). Optional/
+	// nil-safe: wired via SetPMService from main.go. When a sell trade opens on a
+	// PM buy-ad (ad.PMID != nil) the fiat payout is reserved from the PM's NGN
+	// ledger inside the open transaction; on cancel it is released. nil pm → no
+	// NGN reservation (non-PM ads, or PM feature dormant).
+	pm *PMService
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -263,6 +274,13 @@ func (s *P2PTradeService) floatOffsetCap() int {
 // main.go. A nil engine makes accrueP2PReleaseFee a no-op.
 func (s *P2PTradeService) SetFeeService(svc *FeeDistributionService) {
 	s.fees = svc
+}
+
+// SetPMService wires the Payment-Merchant NGN ledger (corporate PM feature).
+// Called once at construction from main.go. A nil service makes the PM sell-open
+// reservation + cancel-release no-ops (preserving non-PM behaviour).
+func (s *P2PTradeService) SetPMService(svc *PMService) {
+	s.pm = svc
 }
 
 // accrueP2PReleaseFee is the SINGLE seam through which all three P2P release
@@ -1413,6 +1431,21 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		if res.RowsAffected == 0 {
 			return ErrInsufficientRemaining
 		}
+		// PM sell-open: reserve the fiat payout from the PM's NGN ledger in the
+		// SAME transaction as the crypto-capacity update, so a rollback of either
+		// undoes both. ReserveNGNTx is the atomic conditional UPDATE; ok==false
+		// means insufficient free NGN → roll the whole open back with
+		// ErrInsufficientPMLiquidity (no trade row, no crypto-capacity change
+		// leak). nil pm (non-PM ad, or PM dormant) → skip.
+		if ad.PMID != nil && s.pm != nil {
+			ok, rerr := s.pm.ReserveNGNTx(tx, *ad.PMID, trade.FiatAmount)
+			if rerr != nil {
+				return rerr
+			}
+			if !ok {
+				return ErrInsufficientPMLiquidity
+			}
+		}
 		return tx.Create(trade).Error
 	})
 	if err != nil {
@@ -1937,6 +1970,31 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 	return escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
 }
 
+// releasePMSellReservationTx releases the NGN payout reservation a PM sell trade
+// held, when that trade is cancelled. It resolves the trade's ad pm_id within the
+// supplied transaction and, if the ad is a PM ad and the PM ledger is wired,
+// calls ReleaseNGNTx for the trade's fiat amount in the SAME transaction (so the
+// reservation can never leak past a cancel). A non-PM ad (pm_id NULL) or a
+// dormant PM ledger (s.pm == nil) is a no-op. The reserved amount equals the
+// trade's FiatAmount (what was reserved at open).
+func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *gorm.DB, trade *models.P2PTrade) error {
+	if s.pm == nil {
+		return nil
+	}
+	var row struct{ PMID *uuid.UUID }
+	if err := tx.WithContext(ctx).
+		Table("p2p_ads").
+		Select("pm_id").
+		Where("id = ?", trade.AdID).
+		Scan(&row).Error; err != nil {
+		return err
+	}
+	if row.PMID == nil {
+		return nil // not a PM ad — nothing reserved
+	}
+	return s.pm.ReleaseNGNTx(tx, *row.PMID, trade.FiatAmount)
+}
+
 // ConfirmCancel verifies the on-chain TradeCancelled event and applies the
 // DB transition: trade → cancelled, ad.remaining += amount, ad.reserved
 // -= amount. Idempotent on tx hash.
@@ -2003,13 +2061,20 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		// pooled sell-ad this mirrors the on-chain pool refund; for a buy-ad
 		// the crypto already returned to the user's wallet on-chain and this
 		// only restores the off-chain capacity counter so the ad can be re-taken.
-		return tx.Model(&models.P2PAd{}).
+		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
 				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
 				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
 				"updated_at": now,
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		// PM sell trade: release the held NGN payout reservation back to the PM's
+		// free balance, in the SAME transaction as the cancel + capacity restore
+		// so the reservation can never leak. A non-PM ad (pm_id NULL) or PM
+		// dormant (s.pm == nil) skips this.
+		return s.releasePMSellReservationTx(ctx, tx, &trade)
 	})
 	if err != nil {
 		return nil, err
