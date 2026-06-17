@@ -46,6 +46,15 @@ type MerchantRequest struct {
 	Reviewer            *User      `gorm:"foreignKey:ReviewedBy" json:"reviewer,omitempty"`
 	CreatedAt           time.Time  `json:"createdAt"`
 	UpdatedAt           time.Time  `json:"updatedAt"`
+
+	// Corporate PM (Payment-Merchant) application fields. These are captured at
+	// request time and consumed during approval/provisioning (later tasks).
+	// Zero/empty means "not provided" — they are nullable in practice.
+	SettlementBankCode      string  `gorm:"size:16" json:"settlementBankCode,omitempty"`
+	SettlementAccountNumber string  `gorm:"size:32" json:"settlementAccountNumber,omitempty"`
+	MakerWalletAddress      string  `gorm:"size:42" json:"makerWalletAddress,omitempty"`
+	RequestedPerTradeCapUSD float64 `gorm:"default:0" json:"requestedPerTradeCapUsd,omitempty"`
+	RequestedDailyCapUSD    float64 `gorm:"default:0" json:"requestedDailyCapUsd,omitempty"`
 }
 
 func (MerchantRequest) TableName() string {

@@ -195,5 +195,17 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_wallet
 	    ON payment_merchants (nomba_wallet_id) WHERE nomba_wallet_id <> ''`)
 
+	// NGN ledger integrity: available_ngn and reserved_ngn must be non-negative,
+	// and reserved_ngn must never exceed available_ngn. The DROP+ADD pattern
+	// (like other constraints above) keeps repeat boots idempotent.
+	DB.Exec(`ALTER TABLE payment_merchants
+		DROP CONSTRAINT IF EXISTS chk_payment_merchants_ngn_ledger`)
+	DB.Exec(`ALTER TABLE payment_merchants
+		ADD CONSTRAINT chk_payment_merchants_ngn_ledger CHECK (
+			CAST(available_ngn AS NUMERIC) >= 0 AND
+			CAST(reserved_ngn AS NUMERIC) >= 0 AND
+			CAST(reserved_ngn AS NUMERIC) <= CAST(available_ngn AS NUMERIC)
+		)`)
+
 	return nil
 }

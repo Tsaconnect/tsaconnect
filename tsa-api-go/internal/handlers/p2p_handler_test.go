@@ -321,9 +321,14 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE IF NOT EXISTS payment_merchants (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
-			nomba_account_id TEXT, nomba_creds_ref TEXT,
+			nomba_account_id TEXT, nomba_creds_ref TEXT, nomba_wallet_id TEXT,
 			inbound_account_number TEXT, inbound_bank TEXT,
 			operator_wallet_address TEXT,
+			nomba_sub_account_id TEXT,
+			settlement_bank_code TEXT, settlement_account_number TEXT, settlement_account_name TEXT,
+			available_ngn TEXT NOT NULL DEFAULT '0',
+			reserved_ngn TEXT NOT NULL DEFAULT '0',
+			provisioning_status TEXT NOT NULL DEFAULT 'pending',
 			per_trade_cap_usd REAL NOT NULL DEFAULT 0, daily_cap_usd REAL NOT NULL DEFAULT 0,
 			created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS users (
