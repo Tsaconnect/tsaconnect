@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
@@ -45,6 +46,15 @@ type submitMerchantRequestInput struct {
 	Country             string `json:"country" binding:"required"`
 	Phone               string `json:"phone" binding:"required"`
 	RegistrationNumber  string `json:"registrationNumber"`
+
+	// Corporate Payment-Merchant (business_type='p2p_merchant') fields. Required
+	// and validated only for p2p_merchant submissions (see SubmitMerchantRequest).
+	SettlementBankCode      string  `json:"settlementBankCode"`
+	SettlementAccountNumber string  `json:"settlementAccountNumber"`
+	SettlementAccountName   string  `json:"settlementAccountName"`
+	MakerWalletAddress      string  `json:"makerWalletAddress"`
+	RequestedPerTradeCapUsd float64 `json:"requestedPerTradeCapUsd"`
+	RequestedDailyCapUsd    float64 `json:"requestedDailyCapUsd"`
 }
 
 type adminNoteInput struct {
@@ -83,6 +93,24 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		return
 	}
 
+	// I2: corporate Payment-Merchant applications must supply a complete,
+	// well-formed settlement destination and a valid non-zero maker wallet.
+	// The applicant provides the already-resolved settlement account name — no
+	// server-side Nomba bank lookup happens here (format/presence only).
+	if input.BusinessType == models.BusinessTypeP2PMerchant {
+		if input.SettlementBankCode == "" || input.SettlementAccountNumber == "" || input.SettlementAccountName == "" {
+			utils.ErrorResponse(c, http.StatusBadRequest,
+				"Settlement bank code, account number, and account name are required for a payment merchant")
+			return
+		}
+		if !common.IsHexAddress(input.MakerWalletAddress) ||
+			common.HexToAddress(input.MakerWalletAddress) == (common.Address{}) {
+			utils.ErrorResponse(c, http.StatusBadRequest,
+				"A valid non-zero maker wallet address is required for a payment merchant")
+			return
+		}
+	}
+
 	var existing models.MerchantRequest
 	err := h.DB.Where("user_id = ? AND status IN ?", user.ID,
 		[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
@@ -113,6 +141,14 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		Phone:               input.Phone,
 		RegistrationNumber:  input.RegistrationNumber,
 		Status:              models.MerchantRequestStatusPending,
+
+		// Corporate PM fields (consumed at approval/provisioning time).
+		SettlementBankCode:      input.SettlementBankCode,
+		SettlementAccountNumber: input.SettlementAccountNumber,
+		SettlementAccountName:   input.SettlementAccountName,
+		MakerWalletAddress:      input.MakerWalletAddress,
+		RequestedPerTradeCapUSD: input.RequestedPerTradeCapUsd,
+		RequestedDailyCapUSD:    input.RequestedDailyCapUsd,
 	}
 
 	if err := h.DB.Create(&req).Error; err != nil {
@@ -289,6 +325,14 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// Nomba sub-account + virtual account inline — the request stays re-approvable
 	// for retry (via isPMRetry above) if provisioning fails here.
 	if req.BusinessType == models.BusinessTypeP2PMerchant {
+		// I1: provisioning a corporate PM (Nomba sub-account + balance-gated
+		// money path) is reserved for true admins. The route middleware
+		// (adminAuth) also admits merchant/support for generic merchant
+		// approvals, so we re-check the role here.
+		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a payment merchant")
+			return
+		}
 		if h.PMOnboarding == nil {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
 			return

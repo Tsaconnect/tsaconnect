@@ -88,6 +88,7 @@ func fakeMerchantRequest(userID uuid.UUID) *models.MerchantRequest {
 		BusinessName:            "Acme Corp",
 		SettlementBankCode:      "058",
 		SettlementAccountNumber: "1234567890",
+		SettlementAccountName:   "Acme Corp Ltd",
 		MakerWalletAddress:      "0xDeAdBeEf",
 		RequestedPerTradeCapUSD: 500,
 		RequestedDailyCapUSD:    10000,

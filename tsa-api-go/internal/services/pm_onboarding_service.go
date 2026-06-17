@@ -110,9 +110,10 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	activationFields := map[string]interface{}{
 		"provisioning_status":      models.PMProvisioningActive,
 		"status":                   models.PaymentMerchantStatusActive,
-		"settlement_bank_code":     req.SettlementBankCode,
+		"settlement_bank_code":      req.SettlementBankCode,
 		"settlement_account_number": req.SettlementAccountNumber,
-		"operator_wallet_address":  req.MakerWalletAddress,
+		"settlement_account_name":   req.SettlementAccountName,
+		"operator_wallet_address":   req.MakerWalletAddress,
 		"per_trade_cap_usd":        req.RequestedPerTradeCapUSD,
 		"daily_cap_usd":            req.RequestedDailyCapUSD,
 	}
@@ -123,6 +124,7 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	pm.Status = models.PaymentMerchantStatusActive
 	pm.SettlementBankCode = req.SettlementBankCode
 	pm.SettlementAccountNumber = req.SettlementAccountNumber
+	pm.SettlementAccountName = req.SettlementAccountName
 	pm.OperatorWalletAddress = req.MakerWalletAddress
 	pm.PerTradeCapUSD = req.RequestedPerTradeCapUSD
 	pm.DailyCapUSD = req.RequestedDailyCapUSD
@@ -155,6 +157,7 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.
 		ProvisioningStatus:      models.PMProvisioningPending,
 		SettlementBankCode:      req.SettlementBankCode,
 		SettlementAccountNumber: req.SettlementAccountNumber,
+		SettlementAccountName:   req.SettlementAccountName,
 		OperatorWalletAddress:   req.MakerWalletAddress,
 		PerTradeCapUSD:          req.RequestedPerTradeCapUSD,
 		DailyCapUSD:             req.RequestedDailyCapUSD,

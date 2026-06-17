@@ -75,6 +75,7 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			reviewed_at DATETIME,
 			settlement_bank_code TEXT,
 			settlement_account_number TEXT,
+			settlement_account_name TEXT,
 			maker_wallet_address TEXT,
 			requested_per_trade_cap_usd REAL DEFAULT 0,
 			requested_daily_cap_usd REAL DEFAULT 0,
@@ -171,6 +172,27 @@ func validMerchantInput() map[string]interface{} {
 		"state":               "Lagos",
 		"country":             "Nigeria",
 		"phone":               "+2341234567890",
+	}
+}
+
+// validPMSubmitInput returns a complete, valid p2p_merchant submit body
+// (settlement bank/account/name + a valid non-zero maker wallet + caps).
+func validPMSubmitInput() map[string]interface{} {
+	return map[string]interface{}{
+		"businessType":            "p2p_merchant",
+		"businessName":            "Retry Corp",
+		"businessDescription":     "A PM retry test",
+		"address":                 "1 Retry St",
+		"city":                    "Lagos",
+		"state":                   "Lagos",
+		"country":                 "Nigeria",
+		"phone":                   "+2341234567890",
+		"settlementBankCode":      "058",
+		"settlementAccountNumber": "1234567890",
+		"settlementAccountName":   "Retry Corp Ltd",
+		"makerWalletAddress":      "0x52908400098527886E0F7030069857D2E4169EE7",
+		"requestedPerTradeCapUsd": 500,
+		"requestedDailyCapUsd":    10000,
 	}
 }
 
@@ -681,16 +703,7 @@ func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 	admin := createMerchantTestUser(t, db, "admin")
 
 	// Submit a p2p_merchant request.
-	submitInput := map[string]interface{}{
-		"businessType":        "p2p_merchant",
-		"businessName":        "Retry Corp",
-		"businessDescription": "A PM retry test",
-		"address":             "1 Retry St",
-		"city":                "Lagos",
-		"state":               "Lagos",
-		"country":             "Nigeria",
-		"phone":               "+2341234567890",
-	}
+	submitInput := validPMSubmitInput()
 	w1, c1 := newMerchantContext("POST", "/api/merchant-requests", submitInput, user)
 	h.SubmitMerchantRequest(c1)
 	if w1.Code != http.StatusCreated {
@@ -762,6 +775,180 @@ func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 	// VA called twice (once failed, once succeeded).
 	if fake.vaCallCount != 2 {
 		t.Errorf("attempt 2: CreateVirtualAccount total calls = %d, want 2", fake.vaCallCount)
+	}
+
+	// C1: the activated PM must persist the corporate fields captured at submit.
+	if pm.OperatorWalletAddress == "" {
+		t.Error("activated PM has empty OperatorWalletAddress — maker wallet not wired through")
+	}
+	if pm.SettlementBankCode == "" {
+		t.Error("activated PM has empty SettlementBankCode — settlement bank not wired through")
+	}
+	if pm.SettlementAccountName == "" {
+		t.Error("activated PM has empty SettlementAccountName — settlement account name not wired through")
+	}
+}
+
+// ── I2: corporate-field validation at submit ─────────────────────────────────
+
+// TestSubmitMerchantRequest_PMMissingSettlement: a p2p_merchant submit missing
+// settlement fields is rejected (400) and no PM is provisioned/activated.
+func TestSubmitMerchantRequest_PMMissingSettlement(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	fake := &handlerFakeProvisioner{}
+	svc := services.NewPMOnboardingService(db, fake)
+	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
+	user := createMerchantTestUser(t, db, "user")
+
+	input := validPMSubmitInput()
+	delete(input, "settlementAccountNumber")
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", input, user)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var count int64
+	db.Model(&models.MerchantRequest{}).Count(&count)
+	if count != 0 {
+		t.Errorf("expected no merchant_request persisted, got %d", count)
+	}
+	db.Model(&models.PaymentMerchant{}).Count(&count)
+	if count != 0 {
+		t.Errorf("expected no payment_merchant persisted, got %d", count)
+	}
+}
+
+// TestSubmitMerchantRequest_PMMissingMakerWallet: a p2p_merchant submit with no
+// maker wallet is rejected (400).
+func TestSubmitMerchantRequest_PMMissingMakerWallet(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+	user := createMerchantTestUser(t, db, "user")
+
+	input := validPMSubmitInput()
+	delete(input, "makerWalletAddress")
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", input, user)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// TestSubmitMerchantRequest_PMInvalidMakerWallet: a p2p_merchant submit with an
+// invalid/zero maker wallet is rejected (400).
+func TestSubmitMerchantRequest_PMInvalidMakerWallet(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := &MerchantRequestHandler{DB: db}
+
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"not-hex", "not-an-address"},
+		{"zero", "0x0000000000000000000000000000000000000000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			user := createMerchantTestUser(t, db, "user")
+			input := validPMSubmitInput()
+			input["makerWalletAddress"] = tc.addr
+
+			w, c := newMerchantContext("POST", "/api/merchant-requests", input, user)
+			h.SubmitMerchantRequest(c)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("addr %q: expected %d, got %d: %s", tc.addr, http.StatusBadRequest, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// ── I1: PM approval gated to true admins ─────────────────────────────────────
+
+// submitPMRequest is a helper: submits a valid p2p_merchant request as `user`
+// and returns the created request ID.
+func submitPMRequest(t *testing.T, h *MerchantRequestHandler, user *models.User) string {
+	t.Helper()
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), user)
+	h.SubmitMerchantRequest(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("submit PM request failed: %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	return resp["data"].(map[string]interface{})["id"].(string)
+}
+
+// TestApproveMerchantRequest_PMNonAdminForbidden: a support/merchant caller
+// cannot approve a p2p_merchant request — 403, no PM provisioned.
+func TestApproveMerchantRequest_PMNonAdminForbidden(t *testing.T) {
+	for _, role := range []string{"support", "merchant"} {
+		t.Run(role, func(t *testing.T) {
+			db := setupMerchantTestDB(t)
+			fake := &handlerFakeProvisioner{}
+			svc := services.NewPMOnboardingService(db, fake)
+			h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
+
+			user := createMerchantTestUser(t, db, "user")
+			reqID := submitPMRequest(t, h, user)
+
+			caller := createMerchantTestUser(t, db, role)
+			w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
+				map[string]interface{}{"note": "Approved"}, caller)
+			c.Params = gin.Params{{Key: "id", Value: reqID}}
+			h.ApproveMerchantRequest(c)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("role %q: expected 403, got %d: %s", role, w.Code, w.Body.String())
+			}
+
+			// No PM row should have been provisioned.
+			var count int64
+			db.Model(&models.PaymentMerchant{}).Count(&count)
+			if count != 0 {
+				t.Errorf("role %q: expected no PM provisioned, got %d", role, count)
+			}
+			if fake.subAccountCallCount != 0 {
+				t.Errorf("role %q: provisioning was attempted (CreateSubAccount called %d times)", role, fake.subAccountCallCount)
+			}
+		})
+	}
+}
+
+// TestApproveMerchantRequest_PMAdminSucceeds: a true admin can approve a
+// p2p_merchant request and PM provisioning runs to active.
+func TestApproveMerchantRequest_PMAdminSucceeds(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	fake := &handlerFakeProvisioner{}
+	// Make VA succeed on the first call for this happy-path test.
+	fake.vaCallCount = 1
+	svc := services.NewPMOnboardingService(db, fake)
+	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
+
+	user := createMerchantTestUser(t, db, "user")
+	reqID := submitPMRequest(t, h, user)
+
+	admin := createMerchantTestUser(t, db, "admin")
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
+		map[string]interface{}{"note": "Approved"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("admin approve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var pm models.PaymentMerchant
+	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
+		t.Fatalf("load PM row: %v", err)
+	}
+	if pm.ProvisioningStatus != models.PMProvisioningActive {
+		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
 	}
 }
 
