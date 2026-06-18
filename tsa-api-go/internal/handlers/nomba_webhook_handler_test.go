@@ -423,3 +423,28 @@ func TestNombaWebhook_UnsignedProbe_200_NoSideEffects(t *testing.T) {
 		t.Fatalf("unsigned probe must not be recorded, found %d rows", count)
 	}
 }
+
+// A probe that carries a timestamp header but NO signature (in either
+// nomba-signature or nomba-sig-value) is still an unsigned reachability probe →
+// 200, no side effects. Guards the broadened probe condition (no-signature
+// rather than no-headers).
+func TestNombaWebhook_ProbeWithTimestampNoSig_200(t *testing.T) {
+	db, store := newSQLiteWebhookStore(t)
+	disp := &fakeWebhookDispatcher{}
+	h := newWebhookHandler(store, disp)
+
+	// sig empty, ts present (helper doesn't set nomba-sig-value → also empty).
+	w := postWebhook(t, h, []byte(`{}`), "", testTimestamp)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 for signature-less probe with timestamp, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(disp.inbound) != 0 || len(disp.payouts) != 0 {
+		t.Fatal("signature-less probe must not dispatch")
+	}
+	var count int64
+	db.Table("webhook_events").Count(&count)
+	if count != 0 {
+		t.Fatalf("signature-less probe must not be recorded, found %d rows", count)
+	}
+}
