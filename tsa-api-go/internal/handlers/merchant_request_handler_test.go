@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -944,4 +946,111 @@ func newTestEventBus(t *testing.T) *events.Bus {
 	bus := events.NewBus()
 	t.Cleanup(bus.Stop)
 	return bus
+}
+
+// ── Task 1: PM-upgrade carve-out tests ───────────────────────────────────────
+
+// seedPaymentMerchant inserts a payment_merchants row for the given user with the
+// specified status (and provisioning_status set to the same value for simplicity).
+func seedPaymentMerchant(t *testing.T, db *gorm.DB, userID interface{}, status string) {
+	t.Helper()
+	id := uuid.New()
+	err := db.Exec(`INSERT INTO payment_merchants
+		(id, user_id, name, status, provisioning_status, available_ngn, reserved_ngn,
+		 per_trade_cap_usd, daily_cap_usd, created_at, updated_at)
+		VALUES (?, ?, 'Test PM', ?, ?, '0', '0', 0, 0, datetime('now'), datetime('now'))`,
+		id.String(), fmt.Sprintf("%v", userID), status, status).Error
+	if err != nil {
+		t.Fatalf("seedPaymentMerchant: %v", err)
+	}
+}
+
+// seedMerchantRequest inserts a merchant_requests row directly.
+func seedMerchantRequest(t *testing.T, db *gorm.DB, userID interface{}, businessType, status string) {
+	t.Helper()
+	id := uuid.New()
+	err := db.Exec(`INSERT INTO merchant_requests
+		(id, user_id, business_type, business_name, address, city, state, country, phone, status, created_at, updated_at)
+		VALUES (?, ?, ?, 'Seed Corp', '1 Seed St', 'Lagos', 'Lagos', 'Nigeria', '+2340000000000', ?, datetime('now'), datetime('now'))`,
+		id.String(), fmt.Sprintf("%v", userID), businessType, status).Error
+	if err != nil {
+		t.Fatalf("seedMerchantRequest: %v", err)
+	}
+}
+
+// TestSubmitMerchantRequest_MerchantUpgradeToPM: a role=merchant user with an
+// existing approved general_products request can submit a p2p_merchant upgrade.
+// The seeded stale approved row is load-bearing — without it the unscoped duplicate
+// check would have passed anyway (false assurance), so we explicitly prove Critical-1.
+func TestSubmitMerchantRequest_MerchantUpgradeToPM(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	pmSvc := services.NewPMService(db)
+	h := &MerchantRequestHandler{DB: db, PMService: pmSvc}
+
+	user := createMerchantTestUser(t, db, models.RoleMerchant)
+
+	// Seed the stale approved general_products request — this is what the old
+	// unscoped duplicate check would have caught, proving Critical-1 is fixed.
+	seedMerchantRequest(t, db, user.ID, "general_products", models.MerchantRequestStatusApproved)
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), user)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSubmitMerchantRequest_AlreadyActivePM: a user with an active payment_merchants
+// row cannot submit another p2p_merchant application.
+func TestSubmitMerchantRequest_AlreadyActivePM(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	pmSvc := services.NewPMService(db)
+	h := &MerchantRequestHandler{DB: db, PMService: pmSvc}
+
+	user := createMerchantTestUser(t, db, models.RoleMerchant)
+	seedPaymentMerchant(t, db, user.ID, models.PaymentMerchantStatusActive)
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), user)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "already a payment merchant") {
+		t.Errorf("expected 'already a payment merchant' in body, got: %s", body)
+	}
+}
+
+// TestSubmitMerchantRequest_FailedProvisioningResubmitBlocked: a merchant with a
+// non-active payment_merchants row (failed provisioning) + a stuck approved
+// p2p_merchant request cannot submit another PM application (Critical-2).
+// Asserts exactly one payment_merchants row exists after the attempt.
+func TestSubmitMerchantRequest_FailedProvisioningResubmitBlocked(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	pmSvc := services.NewPMService(db)
+	h := &MerchantRequestHandler{DB: db, PMService: pmSvc}
+
+	user := createMerchantTestUser(t, db, models.RoleMerchant)
+
+	// Seed a non-active PM row (failed provisioning).
+	seedPaymentMerchant(t, db, user.ID, models.PaymentMerchantStatusPending)
+
+	// Seed a stuck approved p2p_merchant request.
+	seedMerchantRequest(t, db, user.ID, models.BusinessTypeP2PMerchant, models.MerchantRequestStatusApproved)
+
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), user)
+	h.SubmitMerchantRequest(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Critical-2: assert exactly one payment_merchants row (no new row created).
+	var count int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 1 {
+		t.Errorf("expected exactly 1 payment_merchants row, got %d", count)
+	}
 }
