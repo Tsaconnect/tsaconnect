@@ -17,6 +17,8 @@ import {
 } from '../../services/p2p';
 import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
+import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
+import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from './pm-cta';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';
@@ -69,6 +71,7 @@ const P2PMarketScreen: React.FC = () => {
   const isPM = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
   const { isMerchant, role, loading: roleLoading } = useUserRole();
+  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
   const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
@@ -242,7 +245,7 @@ const P2PMarketScreen: React.FC = () => {
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
 
-        {adSide === 'sell' && !roleLoading && !isMerchant && (
+        {adSide === 'sell' && !roleLoading && !isMerchant && !isPM && (
           <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginBottom: spacing.lg }}>
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -253,6 +256,25 @@ const P2PMarketScreen: React.FC = () => {
                   </Text>
                   <Text variant="caption" color="textSecondary">
                     Become a merchant to publish P2P ads.
+                  </Text>
+                </View>
+                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+              </View>
+            </AccentCard>
+          </PressableScale>
+        )}
+
+        {shouldShowPmCta({ isPmView: isPM, isPm, loading: pmLoading }) && (
+          <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="storefront" size={24} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Become a Payment Merchant
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Apply to offer instant buy & sell with NGN settlement.
                   </Text>
                 </View>
                 <Icon name="chevronRight" size={20} color={colors.textMuted} />

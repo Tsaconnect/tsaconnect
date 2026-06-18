@@ -16,6 +16,7 @@ import api, { Product } from '../../../components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
+import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
 import {
   AccentCard,
   Badge,
@@ -41,6 +42,7 @@ export default function MerchantDashboard() {
   const [items, setItems] = useState<Product[]>([]);
   const [merchantName, setMerchantName] = useState('Merchant');
   const { formatPrice } = useCurrency();
+  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -195,6 +197,31 @@ export default function MerchantDashboard() {
               />
             </View>
           </AccentCard>
+
+          {/* PM upgrade CTA — visible only to merchants who are not yet an
+              active Payment Merchant. Absent while status is loading or once
+              the user is already a PM. Routes to the locked PM form. */}
+          {!pmLoading && !isPm && (
+            <PressableScale
+              onPress={() => router.push('/merchants/merchant-request?type=p2p_merchant' as any)}
+              style={{ marginBottom: spacing.lg }}
+            >
+              <AccentCard padding="md" railColor={colors.info}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="storefront" size={24} color={colors.info} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      Upgrade to Payment Merchant
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      Offer instant P2P buy &amp; sell with NGN settlement.
+                    </Text>
+                  </View>
+                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                </View>
+              </AccentCard>
+            </PressableScale>
+          )}
 
           {/* Stat tiles — three product KPIs followed by service KPIs. Each tile
               is a Card with a colored top rail keyed to its semantic meaning. */}
