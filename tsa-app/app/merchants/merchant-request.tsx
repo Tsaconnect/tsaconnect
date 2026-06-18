@@ -11,7 +11,13 @@
 // `Input`) because the focus-chain — businessName → … → submit, driven by the
 // onSubmitEditing refs — must keep working, and the Input primitive does not yet
 // forward a ref to its inner TextInput. `Field` mirrors Input's chrome exactly.
-import React, { useState, useEffect, useRef } from 'react';
+//
+// When businessType === 'p2p_merchant', a "Payment Merchant setup" section is
+// rendered that collects the six backend-required corporate PM fields:
+//   settlementBankCode, settlementAccountNumber, settlementAccountName (resolved
+//   via NUBAN name enquiry), makerWalletAddress, requestedPerTradeCapUsd,
+//   requestedDailyCapUsd.
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   TextInput,
@@ -26,8 +32,10 @@ import { Stack, router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
+import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngBanks';
 import { useTheme } from '@/theme';
-import { Button, Chip, Icon, Spinner, Text } from '@/components/ui';
+import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
+import type { PickerItem } from '@/components/ui';
 
 const BUSINESS_TYPES = [
   { label: 'General Products', value: 'general_products' },
@@ -35,6 +43,48 @@ const BUSINESS_TYPES = [
   { label: 'P2P Merchant', value: 'p2p_merchant' },
   { label: 'Service Provider', value: 'service_provider' },
 ];
+
+// ─── EVM address validation ──────────────────────────────────────────────────
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+export function isValidEvmAddress(addr: string): boolean {
+  return EVM_ADDRESS_RE.test(addr) && addr.toLowerCase() !== ZERO_ADDRESS;
+}
+
+// ─── PM field validation helper (exported for tests) ─────────────────────────
+export interface PmFields {
+  settlementBankCode: string;
+  settlementAccountNumber: string;
+  settlementAccountName: string;
+  makerWalletAddress: string;
+}
+
+export interface PmValidationErrors {
+  settlementBank?: string;
+  settlementAccountNumber?: string;
+  settlementAccountName?: string;
+  makerWalletAddress?: string;
+}
+
+export function validatePmFields(fields: PmFields): PmValidationErrors {
+  const errors: PmValidationErrors = {};
+  if (!fields.settlementBankCode) {
+    errors.settlementBank = 'Select a settlement bank';
+  }
+  if (!fields.settlementAccountNumber.trim()) {
+    errors.settlementAccountNumber = 'Enter your settlement account number';
+  }
+  if (!fields.settlementAccountName.trim()) {
+    errors.settlementAccountName = 'Account name is required — verify your account number';
+  }
+  if (!fields.makerWalletAddress.trim()) {
+    errors.makerWalletAddress = 'Enter your maker wallet address';
+  } else if (!isValidEvmAddress(fields.makerWalletAddress.trim())) {
+    errors.makerWalletAddress = 'Enter a valid EVM address (0x… 40 hex chars, not zero address)';
+  }
+  return errors;
+}
 
 export default function MerchantRequestScreen() {
   const { colors, spacing } = useTheme();
@@ -53,6 +103,26 @@ export default function MerchantRequestScreen() {
   const [phone, setPhone] = useState(currentUser?.phoneNumber || '');
   const [registrationNumber, setRegistrationNumber] = useState('');
 
+  // ─── PM fields ──────────────────────────────────────────────────────────────
+  const [banks, setBanks] = useState<NgBank[]>([]);
+  const [banksLoading, setBanksLoading] = useState(false);
+  const [settlementBank, setSettlementBank] = useState<NgBank | null>(null);
+  const [showBankPicker, setShowBankPicker] = useState(false);
+  const [settlementAccountNumber, setSettlementAccountNumber] = useState('');
+  const [settlementAccountName, setSettlementAccountName] = useState('');
+  const [makerWalletAddress, setMakerWalletAddress] = useState('');
+  const [perTradeCap, setPerTradeCap] = useState('');
+  const [dailyCap, setDailyCap] = useState('');
+
+  // Name-enquiry state for settlement account
+  const [settleResolving, setSettleResolving] = useState(false);
+  const [settleResolved, setSettleResolved] = useState(false);
+  const [settleResolveError, setSettleResolveError] = useState<null | 'not_found' | 'unavailable'>(null);
+
+  // Inline validation errors for PM fields (shown after first submit attempt)
+  const [pmErrors, setPmErrors] = useState<PmValidationErrors>({});
+  const [pmValidated, setPmValidated] = useState(false);
+
   const scrollRef = useRef<ScrollView>(null);
   const businessNameRef = useRef<TextInput>(null);
   const descriptionRef = useRef<TextInput>(null);
@@ -62,10 +132,81 @@ export default function MerchantRequestScreen() {
   const countryRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const regNumberRef = useRef<TextInput>(null);
+  const makerWalletRef = useRef<TextInput>(null);
+  const perTradeCapRef = useRef<TextInput>(null);
+  const dailyCapRef = useRef<TextInput>(null);
+
+  const isPm = businessType === 'p2p_merchant';
 
   useEffect(() => {
     fetchExistingRequest();
   }, []);
+
+  // Load bank list when PM type is selected (lazy)
+  useEffect(() => {
+    if (!isPm || banks.length > 0) return;
+    let cancelled = false;
+    setBanksLoading(true);
+    getNigerianBanks().then((list) => {
+      if (!cancelled) {
+        setBanks(list);
+        setBanksLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+    // banks.length is intentionally omitted: we only want to load once when the
+    // PM section is first shown. The banks array is stable after initial fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPm]);
+
+  // Debounced NUBAN name resolution for settlement account
+  useEffect(() => {
+    if (!isPm || !settlementBank || settlementAccountNumber.length !== 10) {
+      setSettleResolving(false);
+      setSettleResolved(false);
+      setSettleResolveError(null);
+      if (settlementAccountNumber.length < 10) {
+        setSettlementAccountName('');
+      }
+      return;
+    }
+    let cancelled = false;
+    setSettleResolving(true);
+    setSettleResolved(false);
+    setSettleResolveError(null);
+    const timer = setTimeout(async () => {
+      const res = await resolveAccountName(settlementBank.code, settlementAccountNumber);
+      if (cancelled) return;
+      setSettleResolving(false);
+      if (res.ok) {
+        setSettlementAccountName(res.accountName);
+        setSettleResolved(true);
+      } else {
+        setSettlementAccountName('');
+        setSettleResolveError(res.reason);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isPm, settlementBank, settlementAccountNumber]);
+
+  // Live-revalidate PM fields after first submit attempt
+  useEffect(() => {
+    if (!pmValidated) return;
+    setPmErrors(validatePmFields({
+      settlementBankCode: settlementBank?.code ?? '',
+      settlementAccountNumber,
+      settlementAccountName,
+      makerWalletAddress,
+    }));
+  }, [pmValidated, settlementBank, settlementAccountNumber, settlementAccountName, makerWalletAddress]);
+
+  const bankItems: PickerItem[] = useMemo(
+    () => banks.map((b) => ({ id: b.code, label: b.name, icon: 'bank' as const })),
+    [banks],
+  );
 
   const fetchExistingRequest = async () => {
     setLoading(true);
@@ -79,7 +220,7 @@ export default function MerchantRequestScreen() {
       } else if (!res.success) {
         Alert.alert('Error', res.message || 'Could not check your application status. Please try again.');
       }
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Network error. Please check your connection and try again.');
     } finally {
       setLoading(false);
@@ -90,6 +231,22 @@ export default function MerchantRequestScreen() {
     if (!businessName || !address || !city || !state || !country || !phone) {
       Alert.alert('Error', 'Please fill in all required fields');
       return;
+    }
+
+    // Validate PM-specific fields before submitting
+    if (isPm) {
+      const errors = validatePmFields({
+        settlementBankCode: settlementBank?.code ?? '',
+        settlementAccountNumber,
+        settlementAccountName,
+        makerWalletAddress,
+      });
+      setPmErrors(errors);
+      setPmValidated(true);
+      if (Object.keys(errors).length > 0) {
+        Alert.alert('Payment Merchant setup incomplete', 'Please fill in all required Payment Merchant fields correctly.');
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -103,6 +260,14 @@ export default function MerchantRequestScreen() {
       country,
       phone,
       registrationNumber: registrationNumber || undefined,
+      ...(isPm ? {
+        settlementBankCode: settlementBank!.code,
+        settlementAccountNumber,
+        settlementAccountName,
+        makerWalletAddress: makerWalletAddress.trim(),
+        requestedPerTradeCapUsd: perTradeCap ? parseFloat(perTradeCap) : 0,
+        requestedDailyCapUsd: dailyCap ? parseFloat(dailyCap) : 0,
+      } : {}),
     });
 
     setSubmitting(false);
@@ -177,6 +342,15 @@ export default function MerchantRequestScreen() {
             setState('');
             setCountry('');
             setRegistrationNumber('');
+            // Reset PM fields too
+            setSettlementBank(null);
+            setSettlementAccountNumber('');
+            setSettlementAccountName('');
+            setMakerWalletAddress('');
+            setPerTradeCap('');
+            setDailyCap('');
+            setPmErrors({});
+            setPmValidated(false);
           }}
         />
       );
@@ -297,9 +471,166 @@ export default function MerchantRequestScreen() {
             value={registrationNumber}
             onChangeText={setRegistrationNumber}
             placeholder="e.g. RC-123456"
-            returnKeyType="done"
-            onSubmitEditing={handleSubmit}
+            returnKeyType={isPm ? 'next' : 'done'}
+            onSubmitEditing={isPm ? () => makerWalletRef.current?.focus() : handleSubmit}
           />
+
+          {/* ─── Payment Merchant setup (p2p_merchant only) ──────────────── */}
+          {isPm && (
+            <View
+              style={{
+                marginTop: spacing.xl,
+                borderTopWidth: 1,
+                borderTopColor: colors.border,
+                paddingTop: spacing.xl,
+              }}
+            >
+              <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
+                Payment Merchant setup
+              </Text>
+              <Text variant="caption" color="textSecondary" style={{ marginBottom: spacing.lg }}>
+                These details are required for your corporate P2P Merchant account.
+              </Text>
+
+              {/* Settlement bank picker */}
+              <SelectRow
+                label="Settlement Bank *"
+                placeholder="Choose your settlement bank"
+                value={settlementBank?.name}
+                leftIcon="bank"
+                onPress={() => setShowBankPicker(true)}
+                error={pmErrors.settlementBank}
+                style={{ marginBottom: spacing.md }}
+              />
+
+              {/* Settlement account number */}
+              <View style={{ marginBottom: spacing.md }}>
+                <Field
+                  label="Settlement Account Number *"
+                  value={settlementAccountNumber}
+                  onChangeText={(v) => {
+                    setSettlementAccountNumber(v.replace(/\D/g, ''));
+                    if (settleResolved) {
+                      setSettleResolved(false);
+                      setSettlementAccountName('');
+                    }
+                  }}
+                  placeholder="10-digit NUBAN"
+                  keyboardType="number-pad"
+                  maxLength={20}
+                  returnKeyType="next"
+                  error={pmErrors.settlementAccountNumber}
+                />
+              </View>
+
+              {/* Settlement account name — auto-resolved */}
+              <View style={{ marginBottom: spacing.md }}>
+                <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
+                  Settlement Account Name *
+                </Text>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    minHeight: 48,
+                    paddingHorizontal: spacing.md,
+                    borderRadius: 8,
+                    borderWidth: pmErrors.settlementAccountName ? 1.5 : settleResolved ? 2 : 1.5,
+                    borderColor: pmErrors.settlementAccountName
+                      ? colors.danger
+                      : settleResolved
+                      ? colors.success
+                      : colors.border,
+                    backgroundColor: colors.surface,
+                  }}
+                >
+                  <TextInput
+                    style={{
+                      flex: 1,
+                      paddingVertical: spacing.md,
+                      color: colors.textPrimary,
+                    }}
+                    value={settlementAccountName}
+                    onChangeText={(v) => {
+                      setSettlementAccountName(v);
+                      if (settleResolved) setSettleResolved(false);
+                    }}
+                    placeholder="Auto-fills when you enter the account number"
+                    placeholderTextColor={colors.textMuted}
+                    editable={!settleResolving && !settleResolved}
+                    autoCapitalize="words"
+                  />
+                  {settleResolving ? (
+                    <Spinner size="small" />
+                  ) : settleResolved ? (
+                    <PressableScale
+                      onPress={() => {
+                        setSettleResolved(false);
+                        setSettlementAccountName('');
+                      }}
+                      hitSlop={10}
+                      accessibilityLabel="Clear and edit name"
+                    >
+                      <Icon name="checkCircle" size={20} color={colors.success} />
+                    </PressableScale>
+                  ) : null}
+                </View>
+                {settleResolveError === 'not_found' && (
+                  <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+                    {"We couldn't find this account at the selected bank. Check the digits or bank."}
+                  </Text>
+                )}
+                {settleResolveError === 'unavailable' && (
+                  <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                    Account verification is offline. You can type the name manually.
+                  </Text>
+                )}
+                {pmErrors.settlementAccountName && !settleResolveError && (
+                  <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+                    {pmErrors.settlementAccountName}
+                  </Text>
+                )}
+              </View>
+
+              {/* Maker wallet address */}
+              <Field
+                ref={makerWalletRef}
+                label="Maker Wallet Address *"
+                value={makerWalletAddress}
+                onChangeText={setMakerWalletAddress}
+                placeholder="0x…"
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="next"
+                onSubmitEditing={() => perTradeCapRef.current?.focus()}
+                error={pmErrors.makerWalletAddress}
+              />
+
+              {/* Per-trade cap */}
+              <Field
+                ref={perTradeCapRef}
+                label="Per-Trade Cap (USD)"
+                value={perTradeCap}
+                onChangeText={(v) => setPerTradeCap(v.replace(/[^0-9.]/g, ''))}
+                placeholder="0 = unlimited"
+                keyboardType="decimal-pad"
+                returnKeyType="next"
+                onSubmitEditing={() => dailyCapRef.current?.focus()}
+              />
+
+              {/* Daily cap */}
+              <Field
+                ref={dailyCapRef}
+                label="Daily Cap (USD)"
+                value={dailyCap}
+                onChangeText={(v) => setDailyCap(v.replace(/[^0-9.]/g, ''))}
+                placeholder="0 = unlimited"
+                keyboardType="decimal-pad"
+                returnKeyType="done"
+                onSubmitEditing={handleSubmit}
+              />
+            </View>
+          )}
 
           <Button
             title="Submit Application"
@@ -310,6 +641,28 @@ export default function MerchantRequestScreen() {
           />
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Bank picker sheet (PM path only) */}
+      <PickerSheet
+        visible={showBankPicker}
+        onClose={() => setShowBankPicker(false)}
+        title="Choose settlement bank"
+        items={bankItems}
+        loading={banksLoading && banks.length === 0}
+        selectedId={settlementBank?.code}
+        emptyText="No banks found."
+        onSelect={(item) => {
+          const b = banks.find((x) => x.code === item.id);
+          if (!b) return;
+          setSettlementBank(b);
+          setShowBankPicker(false);
+          // Clearing account data when bank changes so NUBAN re-resolves
+          setSettlementAccountNumber('');
+          setSettlementAccountName('');
+          setSettleResolved(false);
+          setSettleResolveError(null);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -321,10 +674,11 @@ export default function MerchantRequestScreen() {
 interface FieldProps extends Omit<TextInputProps, 'style'> {
   label: string;
   multilineHeight?: number;
+  error?: string;
 }
 
 const Field = React.forwardRef<TextInput, FieldProps>(
-  ({ label, multilineHeight, onFocus, onBlur, ...rest }, ref) => {
+  ({ label, multilineHeight, error, onFocus, onBlur, ...rest }, ref) => {
     const { colors, radius, spacing, fonts, type } = useTheme();
     const [focused, setFocused] = useState(false);
     return (
@@ -348,7 +702,7 @@ const Field = React.forwardRef<TextInput, FieldProps>(
             paddingVertical: spacing.md,
             borderRadius: radius.md,
             borderWidth: focused ? 2 : 1.5,
-            borderColor: focused ? colors.accent : colors.border,
+            borderColor: error ? colors.danger : focused ? colors.accent : colors.border,
             backgroundColor: colors.surface,
             color: colors.textPrimary,
             fontFamily: fonts['400'],
@@ -357,6 +711,11 @@ const Field = React.forwardRef<TextInput, FieldProps>(
           }}
           {...rest}
         />
+        {error && (
+          <Text variant="caption" color="danger" style={{ marginTop: spacing.xs }}>
+            {error}
+          </Text>
+        )}
       </View>
     );
   }

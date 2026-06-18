@@ -1940,6 +1940,13 @@ export async function submitMerchantRequest(data: {
   country: string;
   phone: string;
   registrationNumber?: string;
+  // Corporate PM fields — required by the backend when businessType === 'p2p_merchant'
+  settlementBankCode?: string;
+  settlementAccountNumber?: string;
+  settlementAccountName?: string;
+  makerWalletAddress?: string;
+  requestedPerTradeCapUsd?: number;
+  requestedDailyCapUsd?: number;
 }): Promise<ApiResponse> {
   try {
     const token = await AsyncStorage.getItem('authToken');
