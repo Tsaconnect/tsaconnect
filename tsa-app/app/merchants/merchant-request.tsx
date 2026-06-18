@@ -312,7 +312,16 @@ export default function MerchantRequestScreen() {
     );
   }
 
-  if (existingRequest) {
+  // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) merchant
+  // request must NOT short-circuit the PM application — an existing merchant is
+  // allowed to upgrade to Payment Merchant. Only a prior PM request (pending/
+  // approved/rejected) gates the PM form. In the normal flow, any existing
+  // request blocks as before. (Mirrors the backend's type-scoped carve-out.)
+  const existingType = existingRequest?.businessType ?? existingRequest?.business_type;
+  const existingIsPm = existingType === 'p2p_merchant';
+  const blockExisting = !!existingRequest && (!isPm || existingIsPm);
+
+  if (blockExisting) {
     const { status } = existingRequest;
 
     if (status === 'pending') {
@@ -321,8 +330,8 @@ export default function MerchantRequestScreen() {
           icon="clock"
           tone={colors.warning}
           toneBg={colors.warningBg}
-          title="Application Under Review"
-          body={`Your merchant application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
+          title={existingIsPm ? 'Payment Merchant Application Under Review' : 'Application Under Review'}
+          body={`Your ${existingIsPm ? 'Payment Merchant' : 'merchant'} application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
           actionTitle="Go Back"
           actionVariant="secondary"
           onAction={() => router.back()}
@@ -336,8 +345,10 @@ export default function MerchantRequestScreen() {
           icon="checkCircle"
           tone={colors.success}
           toneBg={colors.successBg}
-          title="You're a Merchant!"
-          body="Your application has been approved. You now have access to the merchant portal."
+          title={existingIsPm ? "You're a Payment Merchant!" : "You're a Merchant!"}
+          body={existingIsPm
+            ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
+            : 'Your application has been approved. You now have access to the merchant portal.'}
           actionTitle="Go to Merchant Dashboard"
           actionVariant="success"
           onAction={() => router.push('/merchants/dashboard')}
