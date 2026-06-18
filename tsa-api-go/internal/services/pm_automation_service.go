@@ -136,12 +136,20 @@ type inboundCandidateRow struct {
 	FiatAmount string
 }
 
-// resolveInboundPM maps a settled inbound credit to its PaymentMerchant. VA-only
-// model: prefer the VA accountRef (GetByAccountRef) when present; fall back to
-// the single-TSA-parent walletId (GetByWalletID) when accountRef is empty. Both
-// lookups reject an empty key up front, so an empty accountRef never matches an
-// arbitrary PM — it cleanly falls through to the walletId path. Returns
-// ErrPMNotFound when neither key resolves.
+// resolveInboundPM maps a settled inbound credit to its PaymentMerchant.
+//
+// Resolution policy (VA-only corporate model):
+//   - p.AccountRef non-empty → resolve ONLY via GetByAccountRef. On miss the
+//     inbound belongs to an unknown corporate PM — it is NOT the TSA parent's
+//     payment, so we must NOT fall through to the walletId path. Return
+//     ErrPMNotFound (no-op) and log. Falling through would mis-credit a
+//     corporate payment to the TSA ledger.
+//   - p.AccountRef empty → use GetByWalletID(p.WalletID). This is the
+//     single-TSA-parent path (the env-configured TSA PM keyed by its Nomba
+//     walletId). An empty accountRef is never a corporate payment, so the
+//     walletId lookup is safe here.
+//
+// Returns ErrPMNotFound when the applicable key resolves no row.
 func (s *PMAutomationService) resolveInboundPM(ctx context.Context, p InboundPayment) (*models.PaymentMerchant, error) {
 	if strings.TrimSpace(p.AccountRef) != "" {
 		pm, err := s.pm.GetByAccountRef(ctx, p.AccountRef)
@@ -151,9 +159,14 @@ func (s *PMAutomationService) resolveInboundPM(ctx context.Context, p InboundPay
 		if !errors.Is(err, ErrPMNotFound) {
 			return nil, err
 		}
-		// accountRef present but unknown — fall through to the walletId path so a
-		// stray/unmatched accountRef can still resolve the env-configured TSA PM.
+		// accountRef present but unresolved: this payment belongs to an unknown
+		// corporate PM — it is NOT the TSA parent's payment. Do NOT fall through
+		// to the walletId path; doing so would mis-credit a corporate payment to
+		// TSA's NGN ledger. Return not-found so the caller treats it as a no-op.
+		log.Printf("[pm automation] inbound with unknown accountRef=%q (walletId=%q); not the TSA PM — ignoring", p.AccountRef, p.WalletID)
+		return nil, ErrPMNotFound
 	}
+	// Empty accountRef → single-TSA-parent path keyed by walletId.
 	return s.pm.GetByWalletID(ctx, p.WalletID)
 }
 
