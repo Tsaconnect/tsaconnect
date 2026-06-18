@@ -470,7 +470,8 @@ func (h *Handlers) Login(c *gin.Context) {
 	})
 }
 
-// generateToken creates a JWT token with userId and email claims, 7-day expiry.
+// generateToken creates a JWT access token with userId and email claims, 1-hour
+// expiry (refresh-token rotation extends the session; see the refresh flow).
 func generateToken(userID uuid.UUID, email, secret string) (string, error) {
 	claims := jwt.MapClaims{
 		"userId": userID.String(),

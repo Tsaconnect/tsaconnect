@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strconv"
 	"strings"
@@ -381,7 +382,11 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 		var user models.User
 		if err := s.db.WithContext(ctx).
 			Select("id", "wallet_address").
-			First(&user, "id = ?", cl.UserID).Error; err != nil {
+			// deleted_at IS NULL: User.DeletedAt is a plain *time.Time, not
+			// gorm.DeletedAt, so it is NOT auto-scoped. Filter explicitly as
+			// defense-in-depth — a soft-deleted user must never get a leaf even
+			// if the eligibility gate is later loosened.
+			First(&user, "id = ? AND deleted_at IS NULL", cl.UserID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				continue
 			}
@@ -410,6 +415,27 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 			CumulativeBaseUnits: amount,
 		})
 	}
+
+	// 2b) Drop colliding wallet addresses. The on-chain claimed[] mapping is
+	// keyed by ADDRESS, not user — two distinct users sharing one wallet would
+	// produce two leaves for the same address with different cumulatives, making
+	// the proof ambiguous and enabling an on-chain double-claim. We can't tell
+	// which user legitimately owns the address, so exclude ALL claimants on any
+	// duplicated address (they persist to the next epoch) and alert for review.
+	addrCount := make(map[common.Address]int, len(claimants))
+	for _, c := range claimants {
+		addrCount[c.Account]++
+	}
+	deduped := make([]EligibleClaimant, 0, len(claimants))
+	for _, c := range claimants {
+		if addrCount[c.Account] > 1 {
+			log.Printf("[reward-merkle] duplicate_wallet_excluded_total=1 ALERT address=%s userID=%s (multiple eligible users share this wallet — excluding from the root to prevent an ambiguous proof / on-chain double-claim)",
+				c.Account.Hex(), c.UserID)
+			continue
+		}
+		deduped = append(deduped, c)
+	}
+	claimants = deduped
 
 	if len(claimants) == 0 {
 		return nil, ErrNoEligibleClaimants
@@ -889,6 +915,15 @@ func (s *RewardMerkleService) MarkPublished(ctx context.Context, epoch int64, tx
 			return fmt.Errorf("%w: epoch %d on-chain root %s != expected %s (wrong/early txHash — epoch left unpublished)",
 				ErrPublishVerificationFailed, epoch, onChainRoot, dist.MerkleRoot)
 		}
+	} else if s.IsConfigured() {
+		// No verifier wired but the distributor IS configured (production with a
+		// transiently-unavailable chain reader). We cannot confirm the root made
+		// it on-chain, so fail CLOSED rather than trust the admin-supplied hash —
+		// flipping to published would make the app serve a proof for a root that
+		// may not exist on-chain. The nil-verifier trust path is reserved for
+		// explicitly-dormant/test configs (IsConfigured()==false).
+		return fmt.Errorf("%w: epoch %d cannot verify publish — chain reader unavailable; refusing to mark published",
+			ErrPublishVerificationFailed, epoch)
 	}
 
 	res := s.db.WithContext(ctx).Model(&models.RewardDistribution{}).

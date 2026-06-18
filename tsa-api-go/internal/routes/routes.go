@@ -83,9 +83,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminGroup.GET("/stats", h.GetAdminStats)
 	}
 
-	// Admin fee-config routes — unified, tunable fee-rate table.
+	// Admin fee-config routes — unified, tunable fee-rate table. These mutate the
+	// live fee rates the quote/charge path reads, so they are funds-adjacent and
+	// restricted to true admin roles (RequireP2PAdmin) on top of AdminAuth — same
+	// boundary as /admin/fees and /admin/reward-distributions (merchant/support
+	// roles must not be able to edit fee rates).
 	adminFeeConfig := api.Group("/admin/fee-config")
-	adminFeeConfig.Use(adminAuth)
+	adminFeeConfig.Use(adminAuth, middleware.RequireP2PAdmin())
 	{
 		adminFeeConfig.GET("", fch.ListFeeConfigs)
 		adminFeeConfig.PUT("/:id", fch.UpdateFeeConfig)

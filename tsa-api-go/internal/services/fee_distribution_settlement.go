@@ -104,6 +104,22 @@ func (s *FeeDistributionService) SettleGlobalPoolEpoch(ctx context.Context) (Glo
 			return nil
 		}
 
+		// CONVERSION GUARD: deltaTP·scale must stay inside int64. int64() of an
+		// out-of-range float64 is implementation-defined and can wrap NEGATIVE,
+		// which makes perUserScaled negative and slips past the cumulative-index
+		// guard below (that only checks the upper bound) — silently DECREMENTING
+		// every user's owed balance: the exact ledger corruption SP4 must never
+		// do. Above ~9.2e6 TP/epoch deltaTP·1e12 overflows int64; above ~9007 TP
+		// (2^53/scale) float64 loses integer precision and the dust-conservation
+		// invariant drifts. Realistic epochs are far below either bound, so refuse
+		// and alert rather than fold a corrupt value, leaving the delta in the pool.
+		const maxFoldableTP = float64(math.MaxInt64) / float64(models.GlobalTPIndexScale)
+		if deltaTP >= maxFoldableTP {
+			log.Printf("[fee-settlement] global_delta_overflow_total=1 ALERT deltaTP=%g maxFoldableTP=%g userCount=%d (per-epoch delta would overflow int64 when scaled — refusing to fold; SP4 distribution halted until the index scale/units are remediated)",
+				deltaTP, maxFoldableTP, userCount)
+			return fmt.Errorf("global TP delta overflow: deltaTP=%g exceeds the foldable max=%g; refusing to scale to avoid wrapping the ledger negative", deltaTP, maxFoldableTP)
+		}
+
 		// (5) Fold. Scale to integer, floor-divide by the denominator. The dust
 		// (deltaTP·scale mod userCount) is NOT advanced into IndexedTP, so it
 		// rolls into the next epoch's delta — conserved, never minted.
@@ -175,6 +191,35 @@ func (s *FeeDistributionService) SettleGlobalPoolEpoch(ctx context.Context) (Glo
 		return GlobalSettlementResult{}, err
 	}
 	return res, nil
+}
+
+// StrandedGlobalTP measures the global-pool TP owed to users who were SOFT-
+// DELETED after the index folded their share but before SettleUserGlobalShare
+// credited them. There is no reclamation path (deferred), so this owed amount
+// is never claimed and never returned to the pool — Σcredited < IndexedTP drifts
+// upward with user churn, slowly degrading the conservation invariant. This is
+// an OBSERVABILITY gauge for that drift (read-only, never mutates state); the
+// settler logs it each epoch so the leak is visible and bounded rather than
+// silent. Returns stranded TP = Σ(currentIndex − checkpoint) over soft-deleted
+// users, in TP units.
+func (s *FeeDistributionService) StrandedGlobalTP(ctx context.Context) (float64, error) {
+	var pool models.GlobalTPPool
+	err := s.db.WithContext(ctx).First(&pool, "singleton = ?", models.GlobalTPPoolSingletonID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil // no pool yet ⇒ nothing stranded
+	}
+	if err != nil {
+		return 0, fmt.Errorf("load global pool: %w", err)
+	}
+	var result struct{ Stranded int64 }
+	q := s.db.WithContext(ctx).Model(&models.User{}).
+		Select("COALESCE(SUM(? - last_settled_global_index), 0) AS stranded", pool.PerUserIndexScaled).
+		Where("deleted_at IS NOT NULL AND last_settled_global_index IS NOT NULL AND last_settled_global_index < ?",
+			pool.PerUserIndexScaled)
+	if err := q.Scan(&result).Error; err != nil {
+		return 0, fmt.Errorf("sum stranded global TP: %w", err)
+	}
+	return float64(result.Stranded) / float64(models.GlobalTPIndexScale), nil
 }
 
 // SettleUserGlobalShare lazily credits one user's accumulated global-pool share.

@@ -157,9 +157,27 @@ func NewFeeConfigService(db *gorm.DB) *FeeConfigService {
 }
 
 // InitFeeConfigService constructs the singleton and assigns it to Fees.
+//
+// Unlike NewFeeConfigService (which stays non-fatal for tests), production boot
+// HALTS if the replica came up empty. An empty cache means seeding AND the
+// initial load both failed (e.g. a transient DB blip at boot) — in that state
+// RateFor would silently serve hardcoded seed defaults with found=true, quietly
+// reverting every charge to a stale rate while presenting as healthy. Fail
+// closed: refuse to boot rather than charge wrong rates invisibly.
 func InitFeeConfigService(db *gorm.DB) *FeeConfigService {
 	Fees = NewFeeConfigService(db)
+	if db != nil && !Fees.ready() {
+		log.Fatalf("[FeeConfig] FATAL: fee-config replica is empty after seed+load — refusing to boot (RateFor would silently serve stale seed defaults). Check DATABASE connectivity and the fee_configs table.")
+	}
 	return Fees
+}
+
+// ready reports whether the live cache holds at least one rate. False means the
+// replica never populated and the §11 fallback ladder would be the ONLY source.
+func (s *FeeConfigService) ready() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.cache) > 0
 }
 
 // seedIfEmpty inserts the default rows when the table has no rows yet,

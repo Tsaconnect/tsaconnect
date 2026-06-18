@@ -63,9 +63,9 @@ func (w *FeeManagerReconciler) Run(ctx context.Context) error {
 	if res == nil {
 		return nil
 	}
-	if res.DriftCount > 0 || res.ReadErrors > 0 {
-		log.Printf("[fee-manager-reconciler] chains=%d keys=%d drift=%d refreshed=%d readErrors=%d",
-			res.ChainsChecked, res.KeysChecked, res.DriftCount, res.Refreshed, res.ReadErrors)
+	if res.DriftCount > 0 || res.ReadErrors > 0 || res.RefreshErrors > 0 {
+		log.Printf("[fee-manager-reconciler] chains=%d keys=%d drift=%d refreshed=%d readErrors=%d refreshErrors=%d",
+			res.ChainsChecked, res.KeysChecked, res.DriftCount, res.Refreshed, res.ReadErrors, res.RefreshErrors)
 	}
 	return nil
 }

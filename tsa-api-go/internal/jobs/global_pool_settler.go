@@ -12,6 +12,7 @@ import (
 // An interface keeps the job unit-testable without the full service.
 type globalPoolSettler interface {
 	SettleGlobalPoolEpoch(ctx context.Context) (services.GlobalSettlementResult, error)
+	StrandedGlobalTP(ctx context.Context) (float64, error)
 }
 
 // GlobalPoolSettler runs the SP4 global-pool settlement epoch on a periodic
@@ -49,6 +50,14 @@ func (g *GlobalPoolSettler) Run(ctx context.Context) error {
 	if res.Settled {
 		log.Printf("[global-pool-settler] epoch settled: deltaTP=%.6f userCount=%d perUserScaled=%d indexAfter=%d",
 			res.DeltaTP, res.UserCount, res.PerUserScaled, res.IndexAfter)
+	}
+	// Drift gauge: TP folded for users soft-deleted before settlement is never
+	// reclaimed (deferred), so surface it each tick so the leak stays visible and
+	// bounded. Best-effort — a measurement error must not fail the settle tick.
+	if stranded, err := g.svc.StrandedGlobalTP(ctx); err != nil {
+		log.Printf("[global-pool-settler] stranded-TP measure failed: %v", err)
+	} else if stranded > 0 {
+		log.Printf("[global-pool-settler] global_pool_stranded_tp=%.6f (TP owed to soft-deleted users; not yet reclaimed)", stranded)
 	}
 	return nil
 }

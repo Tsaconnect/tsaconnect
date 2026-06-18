@@ -34,7 +34,7 @@ import (
 //
 // The TP pool is split across gen0 (the transacting user) and gen1..gen10
 // uplines using the EXISTING models.GenerationPercentages ladder (gen0 35.4%
-// … gen10 0.4%; handlers.GenerationPercentages aliases the same slice). A
+// … gen10 0.4%). A
 // generation with NO live ancestor (chain shorter than 10, or
 // an inactive/suspended/deleted ancestor) routes its share to the GLOBAL POOL
 // and the climb CONTINUES (route-and-continue — the key behavior change from
@@ -66,6 +66,15 @@ type FeeDistributionService struct {
 	// is never a lost reward). nil by default — the engine stays usable (and unit-
 	// testable) without the reward service wired.
 	onDirty func(ctx context.Context, userID uuid.UUID)
+
+	// settleSem bounds how many EnqueueFeeSettled goroutines run OnFeeSettled
+	// (and thus hold a DB connection) concurrently. Without it a burst of fee
+	// events fans out one unbounded goroutine each, every one able to grab a
+	// connection for up to 30s×retries — exhausting the pool. Goroutines past the
+	// cap block cheaply on this channel rather than piling onto the DB. Buffered
+	// to feeSettleMaxConcurrency; nil only in zero-value structs (acquire is
+	// skipped when nil so tests constructing the struct directly still work).
+	settleSem chan struct{}
 }
 
 // NewFeeDistributionService builds the engine. tpPerUSD <= 0 falls back to 100
@@ -78,7 +87,12 @@ func NewFeeDistributionService(db *gorm.DB, graph *ReferralGraphService, tpPerUS
 	if graph == nil {
 		graph = NewReferralGraphService(db)
 	}
-	return &FeeDistributionService{db: db, graph: graph, tpPerUSD: tpPerUSD}
+	return &FeeDistributionService{
+		db:        db,
+		graph:     graph,
+		tpPerUSD:  tpPerUSD,
+		settleSem: make(chan struct{}, feeSettleMaxConcurrency),
+	}
 }
 
 // TPPerUSD exposes the minting rate in effect (for tests / diagnostics).
@@ -626,6 +640,11 @@ func (s *FeeDistributionService) GlobalPool(ctx context.Context) (models.GlobalT
 	return pool, nil
 }
 
+// feeSettleMaxConcurrency caps concurrent async OnFeeSettled executions so a
+// burst of fee events can't exhaust the DB connection pool (each settlement
+// holds a connection for up to 30s×retries). Sized well below a typical pool.
+const feeSettleMaxConcurrency = 32
+
 // feeEnqueueMaxAttempts bounds how many times EnqueueFeeSettled re-drives a
 // transiently-failing OnFeeSettled before giving up and alerting. OnFeeSettled
 // is idempotent (the guard row), so retrying a partial/failed attempt is always
@@ -666,6 +685,13 @@ func (s *FeeDistributionService) EnqueueFeeSettled(ev FeeEvent) {
 		return
 	}
 	go func() {
+		// Bound concurrent settlements so a burst can't drain the DB pool.
+		// Goroutines past the cap park here cheaply instead of grabbing a
+		// connection. Skipped when nil (zero-value struct in some tests).
+		if s.settleSem != nil {
+			s.settleSem <- struct{}{}
+			defer func() { <-s.settleSem }()
+		}
 		var lastErr error
 		for attempt := 1; attempt <= feeEnqueueMaxAttempts; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

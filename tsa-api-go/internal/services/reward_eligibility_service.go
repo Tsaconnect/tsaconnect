@@ -87,7 +87,7 @@ func (s *RewardEligibilityService) SetVelocityConfig(enabled bool, maxSignups in
 func (s *RewardEligibilityService) IsClaimEligible(ctx context.Context, userID uuid.UUID) (bool, []string, error) {
 	var user models.User
 	if err := s.db.WithContext(ctx).
-		Select("id", "verification_status", "account_status", "referred_by").
+		Select("id", "verification_status", "account_status", "referred_by", "deleted_at").
 		First(&user, "id = ?", userID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, []string{"User not found"}, nil
@@ -96,6 +96,14 @@ func (s *RewardEligibilityService) IsClaimEligible(ctx context.Context, userID u
 	}
 
 	var reasons []string
+
+	// (a0) Soft-delete gate. User.DeletedAt is a plain *time.Time (NOT
+	// gorm.DeletedAt), so GORM's soft-delete scope does not auto-exclude these
+	// rows — and a soft-deleted user can still carry account_status "active".
+	// Gate it explicitly so a deleted account can never land in the merkle root.
+	if user.DeletedAt != nil {
+		reasons = append(reasons, "Account deleted")
+	}
 
 	// (a) KYC gate — must equal the codebase APPROVED value.
 	if user.VerificationStatus != models.VerificationStatusVerified {

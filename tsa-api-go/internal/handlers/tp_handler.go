@@ -278,29 +278,3 @@ func (h *Handlers) GetCashbackSummary(c *gin.Context) {
 	})
 }
 
-// RecordCashbackEarning creates a cashback earning record and updates user balance.
-// Called by handlers when on-chain cashback is paid.
-func RecordCashbackEarning(db *gorm.DB, userID uuid.UUID, sourceUserID uuid.UUID, sourceType string, sourceID uuid.UUID, amountUSD float64, txHash string) error {
-	if amountUSD <= 0 {
-		return nil
-	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		earning := models.CashbackEarning{
-			ID:           uuid.New(),
-			UserID:       userID,
-			SourceUserID: sourceUserID,
-			SourceType:   sourceType,
-			SourceID:     sourceID,
-			AmountUSD:    amountUSD,
-			TxHash:       txHash,
-		}
-		if err := tx.Create(&earning).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", userID).
-			Update("cashback_balance", gorm.Expr("cashback_balance + ?", amountUSD)).Error; err != nil {
-			return err
-		}
-		return nil
-	})
-}
