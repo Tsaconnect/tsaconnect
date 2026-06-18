@@ -19,9 +19,13 @@ import (
 )
 
 type MerchantRequestHandler struct {
-	DB          *gorm.DB
-	EventBus    *events.Bus
+	DB           *gorm.DB
+	EventBus     *events.Bus
 	PMOnboarding *services.PMOnboardingService
+	// PMService is used to check whether the caller already has an active PM
+	// before allowing a p2p_merchant upgrade submit. Optional: if nil, the
+	// active-PM guard is skipped (no ErrPMNotFound check can run).
+	PMService *services.PMService
 }
 
 func NewMerchantRequestHandler(db *gorm.DB, bus *events.Bus) *MerchantRequestHandler {
@@ -68,7 +72,9 @@ var validStatuses = []string{
 }
 
 // SubmitMerchantRequest handles POST /api/merchant-requests.
-// Rejects if the caller is already a merchant or has a pending/approved request.
+// For p2p_merchant submits: existing merchants may upgrade; only an already-active
+// PM is blocked. For non-PM submits: any caller already holding role=merchant is
+// blocked. Both paths enforce a type-scoped duplicate-request check.
 // Users with previously rejected requests may re-apply.
 func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -77,11 +83,8 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		return
 	}
 
-	if user.Role == models.RoleMerchant {
-		utils.ErrorResponse(c, http.StatusBadRequest, "You are already a merchant")
-		return
-	}
-
+	// Bind + validate business type BEFORE role checks so the guard knows
+	// what type of request is being submitted.
 	var input submitMerchantRequestInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
@@ -91,6 +94,32 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	if !slices.Contains(models.ValidBusinessTypes, input.BusinessType) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type")
 		return
+	}
+
+	if input.BusinessType == models.BusinessTypeP2PMerchant {
+		// PM upgrade path: existing merchants are allowed. Only an already-active
+		// PM row blocks the submit (prevents a duplicate active PM).
+		if h.PMService != nil {
+			_, err := h.PMService.GetActiveByUserID(c.Request.Context(), user.ID)
+			if err == nil {
+				// Active PM found — block.
+				utils.ErrorResponse(c, http.StatusBadRequest, "You are already a payment merchant")
+				return
+			}
+			if !errors.Is(err, services.ErrPMNotFound) {
+				log.Printf("SubmitMerchantRequest: GetActiveByUserID error: %v", err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check payment merchant status")
+				return
+			}
+			// ErrPMNotFound — no active PM, allow submission to continue.
+		}
+	} else {
+		// Non-PM path: a user who is already a merchant cannot re-apply as a
+		// general merchant (unchanged behaviour).
+		if user.Role == models.RoleMerchant {
+			utils.ErrorResponse(c, http.StatusBadRequest, "You are already a merchant")
+			return
+		}
 	}
 
 	// I2: corporate Payment-Merchant applications must supply a complete,
@@ -111,11 +140,23 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		}
 	}
 
+	// Type-scoped duplicate-request check (Critical-1).
+	// For p2p_merchant: only a prior pending/approved PM request blocks — a stale
+	// approved general_products row from a prior merchant role must NOT block.
+	// For non-PM: unchanged unscoped check (any prior pending/approved row blocks).
 	var existing models.MerchantRequest
-	err := h.DB.Where("user_id = ? AND status IN ?", user.ID,
-		[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
-		First(&existing).Error
-	if err == nil {
+	var dupErr error
+	if input.BusinessType == models.BusinessTypeP2PMerchant {
+		dupErr = h.DB.Where("user_id = ? AND business_type = ? AND status IN ?", user.ID,
+			models.BusinessTypeP2PMerchant,
+			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
+			First(&existing).Error
+	} else {
+		dupErr = h.DB.Where("user_id = ? AND status IN ?", user.ID,
+			[]string{models.MerchantRequestStatusPending, models.MerchantRequestStatusApproved}).
+			First(&existing).Error
+	}
+	if dupErr == nil {
 		if existing.Status == models.MerchantRequestStatusApproved {
 			utils.ErrorResponse(c, http.StatusBadRequest, "You already have an approved merchant request")
 		} else {
@@ -123,8 +164,8 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		}
 		return
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Printf("SubmitMerchantRequest: failed to check existing requests: %v", err)
+	if !errors.Is(dupErr, gorm.ErrRecordNotFound) {
+		log.Printf("SubmitMerchantRequest: failed to check existing requests: %v", dupErr)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check existing requests")
 		return
 	}
