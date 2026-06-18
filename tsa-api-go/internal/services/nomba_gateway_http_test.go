@@ -273,10 +273,11 @@ func TestNombaHTTPGateway_BadAmount(t *testing.T) {
 	}
 }
 
-// TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID verifies that when
-// SubAccountID is set the gateway calls TransferFromSubAccount (accountId header
-// = sub-account id), not the parent Transfer.
-func TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID(t *testing.T) {
+// TestNombaHTTPGateway_AlwaysParent verifies the VA-only model: every payout is
+// debited from TSA's single parent account (accountId header = parent account
+// id), and a (legacy) SubAccountID on the request is IGNORED — it no longer
+// routes to a sub-account.
+func TestNombaHTTPGateway_AlwaysParent(t *testing.T) {
 	var capturedAccountID string
 
 	mux := http.NewServeMux()
@@ -303,7 +304,7 @@ func TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID(t *testing.T) {
 			"status": true,
 			"data": {
 				"amount": "2000.0",
-				"id": "API-TRANSFER-sub-gw",
+				"id": "API-TRANSFER-parent-va",
 				"status": "SUCCESS",
 				"type": "transfer",
 				"fee": 50,
@@ -321,83 +322,19 @@ func TestNombaHTTPGateway_SubAccountRouting_WithSubAccountID(t *testing.T) {
 		AccountNumber: "0123456789",
 		AccountName:   "JOHN DOE",
 		AmountNGN:     "2000",
-		Reference:     "trade-uuid-sub-001",
+		Reference:     "trade-uuid-va-001",
 		SenderName:    "PM Merchant Ltd",
-		SubAccountID:  "sub-acct-pm-001",
+		SubAccountID:  "sub-acct-legacy-ignored", // must be ignored under VA model
 	})
 	if err != nil {
-		t.Fatalf("InitiatePayout (sub-account): %v", err)
+		t.Fatalf("InitiatePayout: %v", err)
 	}
-	if payoutID != "API-TRANSFER-sub-gw" {
-		t.Errorf("payoutID = %q; want API-TRANSFER-sub-gw", payoutID)
+	if payoutID != "API-TRANSFER-parent-va" {
+		t.Errorf("payoutID = %q; want API-TRANSFER-parent-va", payoutID)
 	}
-	// The accountId header must be the sub-account id, not the parent "test-account-id".
-	if capturedAccountID != "sub-acct-pm-001" {
-		t.Errorf("accountId header = %q; want sub-acct-pm-001 (sub-account path)", capturedAccountID)
-	}
-}
-
-// TestNombaHTTPGateway_SubAccountRouting_NoSubAccountID verifies that when
-// SubAccountID is empty the gateway uses the parent Transfer (accountId header
-// stays as the parent account id, not a sub-account).
-func TestNombaHTTPGateway_SubAccountRouting_NoSubAccountID(t *testing.T) {
-	var capturedAccountID string
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/auth/token/issue", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{
-			"code": "200",
-			"description": "SUCCESS",
-			"data": {
-				"access_token": "fake-test-token",
-				"expires_in": 3600
-			}
-		}`)
-	})
-	mux.HandleFunc("/v2/transfers/bank", func(w http.ResponseWriter, r *http.Request) {
-		capturedAccountID = r.Header.Get("accountId")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{
-			"code": "200",
-			"description": "SUCCESS",
-			"message": "Success",
-			"status": true,
-			"data": {
-				"amount": "3000.0",
-				"id": "API-TRANSFER-parent",
-				"status": "SUCCESS",
-				"type": "transfer",
-				"fee": 50,
-				"timeCreated": "2026-06-17T10:00:00Z",
-				"meta": {}
-			}
-		}`)
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-
-	gw := newTestGateway(srv.URL)
-	payoutID, err := gw.InitiatePayout(t.Context(), PayoutRequest{
-		BankCode:      "044",
-		AccountNumber: "9876543210",
-		AccountName:   "JANE DOE",
-		AmountNGN:     "3000",
-		Reference:     "trade-uuid-parent-001",
-		SenderName:    "TSA Connect",
-		// SubAccountID intentionally empty → parent path
-	})
-	if err != nil {
-		t.Fatalf("InitiatePayout (parent): %v", err)
-	}
-	if payoutID != "API-TRANSFER-parent" {
-		t.Errorf("payoutID = %q; want API-TRANSFER-parent", payoutID)
-	}
-	// The accountId header must be the parent account id ("test-account-id"),
-	// NOT a sub-account id.
+	// The accountId header must always be the parent account id ("test-account-id"),
+	// regardless of the (ignored) SubAccountID.
 	if capturedAccountID != "test-account-id" {
-		t.Errorf("accountId header = %q; want test-account-id (parent path)", capturedAccountID)
+		t.Errorf("accountId header = %q; want test-account-id (parent path, SubAccountID ignored)", capturedAccountID)
 	}
 }

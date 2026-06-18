@@ -32,6 +32,7 @@ func newSQLiteForPM(t *testing.T) *gorm.DB {
 		nomba_creds_ref          TEXT,
 		inbound_account_number   TEXT,
 		inbound_bank             TEXT,
+		nomba_account_ref        TEXT,
 		operator_wallet_address  TEXT,
 		nomba_sub_account_id     TEXT,
 		settlement_bank_code     TEXT,
@@ -113,6 +114,79 @@ func TestPMService_GetByWalletID(t *testing.T) {
 	// wallet id) — it is rejected up front with ErrPMNotFound.
 	if _, err := svc.GetByWalletID(context.Background(), ""); !errors.Is(err, ErrPMNotFound) {
 		t.Fatalf("empty walletId: want ErrPMNotFound, got %v", err)
+	}
+}
+
+func TestPMService_GetByAccountRef(t *testing.T) {
+	db := newSQLiteForPM(t)
+	svc := NewPMService(db)
+
+	pm := &models.PaymentMerchant{
+		UserID:               uuid.New(),
+		Name:                 "Acme Corp",
+		Status:               models.PaymentMerchantStatusActive,
+		InboundAccountNumber: "9012345678",
+		NombaAccountRef:      "pm-abc-123",
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Hit.
+	got, err := svc.GetByAccountRef(context.Background(), "pm-abc-123")
+	if err != nil {
+		t.Fatalf("GetByAccountRef: %v", err)
+	}
+	if got.ID != pm.ID {
+		t.Fatalf("wrong PM: got %v, want %v", got.ID, pm.ID)
+	}
+
+	// Miss.
+	if _, err := svc.GetByAccountRef(context.Background(), "pm-nope"); !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("miss: want ErrPMNotFound, got %v", err)
+	}
+
+	// Empty accountRef must NEVER match an arbitrary PM — rejected up front.
+	if _, err := svc.GetByAccountRef(context.Background(), ""); !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("empty accountRef: want ErrPMNotFound, got %v", err)
+	}
+}
+
+func TestPMService_SumActiveAvailableNGN(t *testing.T) {
+	db := newSQLiteForPM(t)
+	svc := NewPMService(db)
+
+	// Empty table → "0.00", 0.
+	sum, count, err := svc.SumActiveAvailableNGN(context.Background())
+	if err != nil {
+		t.Fatalf("SumActiveAvailableNGN empty: %v", err)
+	}
+	if sum != "0.00" || count != 0 {
+		t.Fatalf("empty: got (%q,%d), want (\"0.00\",0)", sum, count)
+	}
+
+	// Two active PMs + one paused (paused excluded from the sum).
+	mk := func(name, ngn, status string) {
+		if err := db.Create(&models.PaymentMerchant{
+			ID: uuid.New(), UserID: uuid.New(), Name: name, Status: status,
+			AvailableNGN: ngn, ReservedNGN: "0",
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a", "1000.50", models.PaymentMerchantStatusActive)
+	mk("b", "2500.25", models.PaymentMerchantStatusActive)
+	mk("c", "9999.00", models.PaymentMerchantStatusPaused)
+
+	sum, count, err = svc.SumActiveAvailableNGN(context.Background())
+	if err != nil {
+		t.Fatalf("SumActiveAvailableNGN: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (paused excluded)", count)
+	}
+	if sum != "3500.75" {
+		t.Errorf("sum = %q, want 3500.75", sum)
 	}
 }
 

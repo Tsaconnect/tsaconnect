@@ -136,6 +136,27 @@ type inboundCandidateRow struct {
 	FiatAmount string
 }
 
+// resolveInboundPM maps a settled inbound credit to its PaymentMerchant. VA-only
+// model: prefer the VA accountRef (GetByAccountRef) when present; fall back to
+// the single-TSA-parent walletId (GetByWalletID) when accountRef is empty. Both
+// lookups reject an empty key up front, so an empty accountRef never matches an
+// arbitrary PM — it cleanly falls through to the walletId path. Returns
+// ErrPMNotFound when neither key resolves.
+func (s *PMAutomationService) resolveInboundPM(ctx context.Context, p InboundPayment) (*models.PaymentMerchant, error) {
+	if strings.TrimSpace(p.AccountRef) != "" {
+		pm, err := s.pm.GetByAccountRef(ctx, p.AccountRef)
+		if err == nil {
+			return pm, nil
+		}
+		if !errors.Is(err, ErrPMNotFound) {
+			return nil, err
+		}
+		// accountRef present but unknown — fall through to the walletId path so a
+		// stray/unmatched accountRef can still resolve the env-configured TSA PM.
+	}
+	return s.pm.GetByWalletID(ctx, p.WalletID)
+}
+
 // HandleInbound is the buy-flow entry point. Idempotency at the event level is
 // the webhook ledger's job (caller); HandleInbound itself is safe to re-run —
 // a re-run on an already-paid/released trade is absorbed (ErrInvalidTransition
@@ -147,12 +168,14 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
-	// 2. Resolve the PM by the Nomba walletId (data.merchant.walletId). This is
-	//    the real inbound key — NOT a destination account number.
-	pm, err := s.pm.GetByWalletID(ctx, p.WalletID)
+	// 2. Resolve the PM. Under the VA-only corporate model a credit is attributed
+	//    by the VA accountRef (GetByAccountRef) when present; otherwise fall back to
+	//    the single-TSA-parent path keyed by walletId (data.merchant.walletId) so
+	//    the existing env-configured TSA flow keeps working unchanged.
+	pm, err := s.resolveInboundPM(ctx, p)
 	if err != nil {
 		if errors.Is(err, ErrPMNotFound) {
-			log.Printf("[pm automation] inbound to unknown walletId %q (event=%s); ignoring", p.WalletID, p.EventID)
+			log.Printf("[pm automation] inbound to unknown PM (accountRef=%q walletId=%q event=%s); ignoring", p.AccountRef, p.WalletID, p.EventID)
 			return nil
 		}
 		return err
@@ -460,10 +483,10 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 // KYC-name-verified payout destination. Idempotent-ish: if a payout id is
 // already recorded, it returns that id without re-initiating.
 //
-// Per-PM routing: when the trade's ad belongs to a PM, the payout is debited
-// from that PM's Nomba sub-account (SubAccountID = pm.NombaSubAccountID,
-// SenderName = pm.Name). For non-PM trades (no pm_id on the ad), the legacy
-// parent-account path is preserved (SubAccountID empty, SenderName = s.senderName).
+// VA-only model: all payouts come from TSA's single parent Nomba account (no
+// per-PM sub-account routing). When the trade's ad belongs to a PM, SenderName
+// is set to pm.Name for the transfer's display; for non-PM trades the
+// service-level senderName is used. The debit account is always the parent.
 func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uuid.UUID) (string, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
@@ -500,8 +523,7 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 		SenderName:    s.senderName,
 	}
 	if pm != nil {
-		// PM trade: debit the PM's own sub-account and use the PM's name as sender.
-		req.SubAccountID = pm.NombaSubAccountID
+		// PM trade: parent-debited (VA model); use the PM's name as the sender.
 		req.SenderName = pm.Name
 	}
 

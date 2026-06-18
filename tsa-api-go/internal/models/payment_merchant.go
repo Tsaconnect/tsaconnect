@@ -16,10 +16,10 @@ const (
 
 // PMProvisioningStatus values track the lifecycle of a PM's Nomba sub-account.
 const (
-	PMProvisioningPending      = "pending"
-	PMProvisioningProvisioned  = "provisioned"
-	PMProvisioningActive       = "active"
-	PMProvisioningFailed       = "failed"
+	PMProvisioningPending     = "pending"
+	PMProvisioningProvisioned = "provisioned"
+	PMProvisioningActive      = "active"
+	PMProvisioningFailed      = "failed"
 )
 
 // PaymentMerchant is a corporate body that provides AUTOMATED P2P liquidity,
@@ -41,11 +41,20 @@ type PaymentMerchant struct {
 	InboundAccountNumber string `gorm:"size:32" json:"inboundAccountNumber"`
 	InboundBank          string `gorm:"size:64" json:"inboundBank"`
 
+	// NombaAccountRef is the deterministic virtual-account (VA) reference under
+	// TSA's single parent Nomba business. Funds paid into this PM's VA land in the
+	// parent balance and are attributed back to the PM by this accountRef — it is
+	// the VA-model match key. InboundAccountNumber holds the VA's pay-into number.
+	NombaAccountRef string `gorm:"size:64;index" json:"nombaAccountRef"`
+
 	// OperatorWalletAddress is the EVM address whose key (held in the secret
 	// manager) the backend uses to sign release/deposit. The key is NEVER stored.
 	OperatorWalletAddress string `gorm:"size:42" json:"operatorWalletAddress"`
 
-	// NombaSubAccountID is the Nomba-assigned sub-account ID for this PM.
+	// Deprecated: NombaSubAccountID is no longer set under the VA-only corporate
+	// model — corporate PMs are virtual accounts under the single parent, not
+	// heavyweight sub-accounts. The column is retained (not migrate-dropped) for
+	// back-compat with any seeded rows; provisioning never populates it now.
 	NombaSubAccountID string `gorm:"size:64;index" json:"nombaSubAccountId"`
 
 	// Settlement bank fields — where the PM's NGN proceeds are swept.

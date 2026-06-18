@@ -44,6 +44,7 @@ func newSQLiteForPMHandler(t *testing.T) *gorm.DB {
 		nomba_creds_ref          TEXT,
 		inbound_account_number   TEXT,
 		inbound_bank             TEXT,
+		nomba_account_ref        TEXT,
 		operator_wallet_address  TEXT,
 		nomba_sub_account_id     TEXT,
 		settlement_bank_code     TEXT,

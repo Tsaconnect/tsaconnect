@@ -33,6 +33,7 @@ func newSQLiteForOnboarding(t *testing.T) *gorm.DB {
 			nomba_creds_ref           TEXT,
 			inbound_account_number    TEXT,
 			inbound_bank              TEXT,
+			nomba_account_ref         TEXT,
 			operator_wallet_address   TEXT,
 			nomba_sub_account_id      TEXT,
 			settlement_bank_code      TEXT,
@@ -95,48 +96,33 @@ func fakeMerchantRequest(userID uuid.UUID) *models.MerchantRequest {
 	}
 }
 
-// ── fakeNombaProvisioner ──────────────────────────────────────────────────────
+// ── fakeNombaProvisioner (VA-only) ─────────────────────────────────────────────
 
 type fakeNombaProvisioner struct {
-	// Controls behaviour per call type.
-	createSubAccountFn          func(ctx context.Context, name string) (string, error)
-	createVirtualAccountFn      func(ctx context.Context, subAccountID, accountName string) (string, string, error)
-	setSubAccountSettlementFn   func(ctx context.Context, subAccountID, bankCode, accountNumber string) error
+	// Controls VA-create behaviour.
+	createVirtualAccountFn func(ctx context.Context, accountRef, accountName string) (string, error)
 
-	// Call counters so tests can assert idempotency.
-	createSubAccountCalls        int
-	createVirtualAccountCalls    int
-	setSettlementCalls           int
+	// Records so tests can assert idempotency + the accountRef passed.
+	createVirtualAccountCalls int
+	lastAccountRef            string
+	lastAccountName           string
 }
 
-func (f *fakeNombaProvisioner) CreateSubAccount(ctx context.Context, name string) (string, error) {
-	f.createSubAccountCalls++
-	if f.createSubAccountFn != nil {
-		return f.createSubAccountFn(ctx, name)
-	}
-	return "sub-acct-001", nil
-}
-
-func (f *fakeNombaProvisioner) CreateVirtualAccountForSubAccount(ctx context.Context, subAccountID, accountName string) (string, string, error) {
+func (f *fakeNombaProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (string, error) {
 	f.createVirtualAccountCalls++
+	f.lastAccountRef = accountRef
+	f.lastAccountName = accountName
 	if f.createVirtualAccountFn != nil {
-		return f.createVirtualAccountFn(ctx, subAccountID, accountName)
+		return f.createVirtualAccountFn(ctx, accountRef, accountName)
 	}
-	return "0012345678", "wallet-001", nil
-}
-
-func (f *fakeNombaProvisioner) SetSubAccountSettlement(ctx context.Context, subAccountID, bankCode, accountNumber string) error {
-	f.setSettlementCalls++
-	if f.setSubAccountSettlementFn != nil {
-		return f.setSubAccountSettlementFn(ctx, subAccountID, bankCode, accountNumber)
-	}
-	return nil
+	return "0012345678", nil
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-// TestProvisionAndActivate_HappyPath verifies the full success path:
-// row ends active, all Nomba IDs stored, each Nomba method called exactly once.
+// TestProvisionAndActivate_HappyPath verifies the full VA-only success path:
+// row ends active, VA number + accountRef stored, CreateVirtualAccount called
+// exactly once with the deterministic accountRef and business name.
 func TestProvisionAndActivate_HappyPath(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 	fake := &fakeNombaProvisioner{}
@@ -158,15 +144,16 @@ func TestProvisionAndActivate_HappyPath(t *testing.T) {
 		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
 	}
 
-	// Nomba IDs must be stored.
-	if pm.NombaSubAccountID == "" {
-		t.Error("NombaSubAccountID is empty")
+	// VA fields stored: accountRef is the match key, inbound is the VA number.
+	if pm.NombaAccountRef != pmAccountRef(userID) {
+		t.Errorf("NombaAccountRef = %q, want %q", pm.NombaAccountRef, pmAccountRef(userID))
 	}
 	if pm.InboundAccountNumber == "" {
-		t.Error("InboundAccountNumber is empty")
+		t.Error("InboundAccountNumber (VA number) is empty")
 	}
-	if pm.NombaWalletID == "" {
-		t.Error("NombaWalletID is empty")
+	// Sub-account id must NOT be set under the VA-only model.
+	if pm.NombaSubAccountID != "" {
+		t.Errorf("NombaSubAccountID = %q, want empty (VA-only model never sets it)", pm.NombaSubAccountID)
 	}
 
 	// Settlement bank copied from request.
@@ -195,15 +182,16 @@ func TestProvisionAndActivate_HappyPath(t *testing.T) {
 		t.Errorf("UserID = %v, want %v", pm.UserID, userID)
 	}
 
-	// Each Nomba method called exactly once.
-	if fake.createSubAccountCalls != 1 {
-		t.Errorf("CreateSubAccount called %d times, want 1", fake.createSubAccountCalls)
-	}
+	// CreateVirtualAccount called exactly once with the deterministic accountRef
+	// and the business name.
 	if fake.createVirtualAccountCalls != 1 {
 		t.Errorf("CreateVirtualAccount called %d times, want 1", fake.createVirtualAccountCalls)
 	}
-	if fake.setSettlementCalls != 1 {
-		t.Errorf("SetSettlement called %d times, want 1", fake.setSettlementCalls)
+	if fake.lastAccountRef != pmAccountRef(userID) {
+		t.Errorf("CreateVirtualAccount accountRef = %q, want %q", fake.lastAccountRef, pmAccountRef(userID))
+	}
+	if fake.lastAccountName != req.BusinessName {
+		t.Errorf("CreateVirtualAccount accountName = %q, want %q", fake.lastAccountName, req.BusinessName)
 	}
 
 	// Exactly one row in DB.
@@ -217,8 +205,9 @@ func TestProvisionAndActivate_HappyPath(t *testing.T) {
 }
 
 // TestProvisionAndActivate_Resume verifies the idempotency / resume logic:
-// first attempt fails at CreateVirtualAccount → sub-account is stored, row pending.
-// Second attempt does NOT re-create the sub-account, completes VA + settlement → active.
+// first attempt fails at CreateVirtualAccount → row pending, no accountRef.
+// Second attempt creates the VA → active. The VA create runs only on the second
+// attempt (no double-create) because the first never persisted an accountRef.
 func TestProvisionAndActivate_Resume(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 
@@ -226,12 +215,12 @@ func TestProvisionAndActivate_Resume(t *testing.T) {
 	vaErr := errors.New("va network timeout")
 
 	fake := &fakeNombaProvisioner{
-		createVirtualAccountFn: func(ctx context.Context, subAccountID, accountName string) (string, string, error) {
+		createVirtualAccountFn: func(ctx context.Context, accountRef, accountName string) (string, error) {
 			if vaErrOnFirst {
 				vaErrOnFirst = false
-				return "", "", vaErr
+				return "", vaErr
 			}
-			return "0098765432", "wallet-resume", nil
+			return "0098765432", nil
 		},
 	}
 	svc := NewPMOnboardingService(db, fake)
@@ -239,7 +228,7 @@ func TestProvisionAndActivate_Resume(t *testing.T) {
 	userID := uuid.New()
 	req := fakeMerchantRequest(userID)
 
-	// Attempt 1 — VA creation fails.
+	// Attempt 1 — VA creation fails (before any number returned → nothing persisted).
 	_, err := svc.ProvisionAndActivate(context.Background(), req)
 	if err == nil {
 		t.Fatal("attempt 1: expected error, got nil")
@@ -248,25 +237,19 @@ func TestProvisionAndActivate_Resume(t *testing.T) {
 		t.Fatalf("attempt 1: expected vaErr, got %v", err)
 	}
 
-	// After attempt 1: sub-account stored, row still pending/not-active.
+	// After attempt 1: row exists, not active, no accountRef (VA create failed).
 	var pm models.PaymentMerchant
 	if err := db.First(&pm, "user_id = ?", userID).Error; err != nil {
 		t.Fatalf("load pm after attempt 1: %v", err)
 	}
-	if pm.NombaSubAccountID == "" {
-		t.Error("after attempt 1: NombaSubAccountID should be stored (idempotency anchor)")
-	}
 	if pm.Status == models.PaymentMerchantStatusActive {
 		t.Error("after attempt 1: status should not be active")
 	}
-	if pm.ProvisioningStatus == models.PMProvisioningActive {
-		t.Error("after attempt 1: provisioning_status should not be active")
+	if pm.NombaAccountRef != "" {
+		t.Error("after attempt 1: NombaAccountRef should be empty (VA create failed)")
 	}
-	subAcctAfterAttempt1 := pm.NombaSubAccountID
-
-	// CreateSubAccount must have been called exactly once.
-	if fake.createSubAccountCalls != 1 {
-		t.Errorf("after attempt 1: CreateSubAccount called %d times, want 1", fake.createSubAccountCalls)
+	if fake.createVirtualAccountCalls != 1 {
+		t.Errorf("after attempt 1: CreateVirtualAccount called %d times, want 1", fake.createVirtualAccountCalls)
 	}
 
 	// Attempt 2 — same request; VA now succeeds.
@@ -274,83 +257,40 @@ func TestProvisionAndActivate_Resume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attempt 2: unexpected error: %v", err)
 	}
-
-	// Row is now active.
 	if pm2.Status != models.PaymentMerchantStatusActive {
 		t.Errorf("attempt 2: status = %q, want %q", pm2.Status, models.PaymentMerchantStatusActive)
 	}
-	if pm2.ProvisioningStatus != models.PMProvisioningActive {
-		t.Errorf("attempt 2: provisioning_status = %q, want %q", pm2.ProvisioningStatus, models.PMProvisioningActive)
+	if pm2.NombaAccountRef != pmAccountRef(userID) {
+		t.Errorf("attempt 2: NombaAccountRef = %q, want %q", pm2.NombaAccountRef, pmAccountRef(userID))
 	}
-
-	// CreateSubAccount must NOT have been called again (total = 1).
-	if fake.createSubAccountCalls != 1 {
-		t.Errorf("attempt 2: CreateSubAccount called %d times total, want exactly 1 (no re-create)", fake.createSubAccountCalls)
-	}
-
-	// VA stored.
 	if pm2.InboundAccountNumber == "" {
 		t.Error("attempt 2: InboundAccountNumber is empty")
 	}
-	if pm2.NombaWalletID == "" {
-		t.Error("attempt 2: NombaWalletID is empty")
+	// VA create ran exactly twice total (once-failed, once-succeeded). The third
+	// time below must NOT re-create.
+	if fake.createVirtualAccountCalls != 2 {
+		t.Errorf("attempt 2: CreateVirtualAccount called %d times total, want 2", fake.createVirtualAccountCalls)
 	}
 
-	// Sub-account ID unchanged from attempt 1.
-	if pm2.NombaSubAccountID != subAcctAfterAttempt1 {
-		t.Errorf("attempt 2: NombaSubAccountID changed: got %q, want %q", pm2.NombaSubAccountID, subAcctAfterAttempt1)
+	// Attempt 3 — already provisioned: must NOT re-create the VA (resume skips it).
+	pm3, err := svc.ProvisionAndActivate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("attempt 3: unexpected error: %v", err)
+	}
+	if pm3.NombaAccountRef != pm2.NombaAccountRef {
+		t.Errorf("attempt 3: NombaAccountRef changed: got %q, want %q", pm3.NombaAccountRef, pm2.NombaAccountRef)
+	}
+	if fake.createVirtualAccountCalls != 2 {
+		t.Errorf("attempt 3: CreateVirtualAccount called %d times total, want still 2 (resume skips re-create)", fake.createVirtualAccountCalls)
 	}
 
-	// Exactly one row in DB (upsert, not duplicate insert).
+	// Exactly one row in DB.
 	var count int64
 	if err := db.Model(&models.PaymentMerchant{}).Count(&count).Error; err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("expected 1 payment_merchants row, got %d", count)
-	}
-}
-
-// TestProvisionAndActivate_GatesOnAllSteps verifies that activation (status=active)
-// ONLY happens when all four steps complete. We simulate settlement failing — the
-// row must not be active even though sub-account + VA succeeded.
-func TestProvisionAndActivate_GatesOnAllSteps(t *testing.T) {
-	db := newSQLiteForOnboarding(t)
-
-	settlementErr := errors.New("settlement bank unavailable")
-	fake := &fakeNombaProvisioner{
-		setSubAccountSettlementFn: func(ctx context.Context, subAccountID, bankCode, accountNumber string) error {
-			return settlementErr
-		},
-	}
-	svc := NewPMOnboardingService(db, fake)
-
-	userID := uuid.New()
-	req := fakeMerchantRequest(userID)
-
-	_, err := svc.ProvisionAndActivate(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error when settlement fails, got nil")
-	}
-
-	// Row must NOT be active.
-	var pm models.PaymentMerchant
-	if err := db.First(&pm, "user_id = ?", userID).Error; err != nil {
-		t.Fatalf("load pm after settlement failure: %v", err)
-	}
-	if pm.Status == models.PaymentMerchantStatusActive {
-		t.Error("status must not be active when settlement fails")
-	}
-	if pm.ProvisioningStatus == models.PMProvisioningActive {
-		t.Error("provisioning_status must not be active when settlement fails")
-	}
-
-	// But sub-account + VA were stored (persisted before the failure).
-	if pm.NombaSubAccountID == "" {
-		t.Error("NombaSubAccountID should be stored even after settlement failure")
-	}
-	if pm.InboundAccountNumber == "" {
-		t.Error("InboundAccountNumber should be stored even after settlement failure")
 	}
 }
 

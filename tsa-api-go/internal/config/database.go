@@ -202,6 +202,13 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_wallet
 	    ON payment_merchants (nomba_wallet_id) WHERE nomba_wallet_id <> ''`)
 
+	// VA-only corporate model: a corporate PM is a Nomba virtual account under the
+	// single parent, matched on every settled inbound by its accountRef. A partial
+	// unique index enforces one PM per non-blank accountRef (idempotent, like the
+	// others above) so an inbound accountRef resolves to exactly one PM.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_account_ref
+	    ON payment_merchants (nomba_account_ref) WHERE nomba_account_ref <> ''`)
+
 	// NGN ledger integrity: available_ngn and reserved_ngn must be non-negative,
 	// and reserved_ngn must never exceed available_ngn. The DROP+ADD pattern
 	// (like other constraints above) keeps repeat boots idempotent.

@@ -513,11 +513,11 @@ func main() {
 		// dispatches.
 		scheduler.Register(jobs.NewPMRecoveryJob(pmAuto))
 		log.Printf("[pm] PM recovery job registered (paid-orphan re-drive + webhook re-dispatch)")
-		// NGN ledger drift reconciler: compares each active PM's off-chain
-		// available_ngn against the live Nomba sub-account balance every 5m and
-		// logs drift (pm_ngn_reconciler_drift_total). Read-only. Only registered
-		// when a live Nomba client exists (it needs FetchSubAccountBalance);
-		// dormant otherwise.
+		// NGN ledger drift reconciler (VA-only model): compares the SUM of all
+		// active PMs' off-chain available_ngn against the live single-parent Nomba
+		// balance every 5m and logs drift (pm_ngn_reconciler_drift_total).
+		// Read-only. Only registered when a live Nomba client exists (it needs
+		// FetchParentBalance); dormant otherwise.
 		if pmNombaClient != nil {
 			scheduler.Register(jobs.NewPMNGNReconciler(
 				&pmNGNLedgerSource{pm: pmSvc, nomba: pmNombaClient},
@@ -525,7 +525,7 @@ func main() {
 			))
 			log.Printf("[pm] PM NGN reconciler registered (ledger-vs-Nomba drift, 5m)")
 		} else {
-			log.Printf("[pm] PM NGN reconciler dormant: no live Nomba client to fetch sub-account balances")
+			log.Printf("[pm] PM NGN reconciler dormant: no live Nomba client to fetch the parent balance")
 		}
 		log.Printf("[pm] PM automation ACTIVE (sell-payout fails until live Nomba gateway lands)")
 	} else {
@@ -654,24 +654,12 @@ type pmNGNLedgerSource struct {
 	nomba *services.NombaClient
 }
 
-func (s *pmNGNLedgerSource) ActiveLedgerRows(ctx context.Context) ([]jobs.PMLedgerRow, error) {
-	pms, err := s.pm.ListActiveWithSubAccount(ctx)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]jobs.PMLedgerRow, 0, len(pms))
-	for i := range pms {
-		rows = append(rows, jobs.PMLedgerRow{
-			Name:         pms[i].Name,
-			SubAccountID: pms[i].NombaSubAccountID,
-			AvailableNGN: pms[i].AvailableNGN,
-		})
-	}
-	return rows, nil
+func (s *pmNGNLedgerSource) SumActiveAvailableNGN(ctx context.Context) (string, int, error) {
+	return s.pm.SumActiveAvailableNGN(ctx)
 }
 
-func (s *pmNGNLedgerSource) FetchSubAccountBalance(ctx context.Context, subAccountID string) (string, error) {
-	return s.nomba.FetchSubAccountBalance(ctx, subAccountID)
+func (s *pmNGNLedgerSource) FetchParentBalance(ctx context.Context) (string, error) {
+	return s.nomba.FetchParentBalance(ctx)
 }
 
 // to validate statically here.

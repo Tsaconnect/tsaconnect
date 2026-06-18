@@ -17,17 +17,20 @@ var ErrInsufficientWithdrawable = errors.New("pm_withdrawal: amount exceeds with
 
 // WithdrawToSettlement atomically debits amountNGN from the PM's available
 // balance (guarded against open sell reservations) and initiates a Nomba
-// payout from the PM's sub-account to its settlement bank.
+// payout from TSA's single parent account to the PM's settlement bank.
+//
+// VA-only model: there is no per-PM sub-account to debit — the parent account
+// holds all PM funds (attributed off-chain by the available_ngn ledger), so the
+// withdrawal payout comes from the parent via the gateway's parent Transfer.
 //
 // Preconditions:
-//   - pm.NombaSubAccountID must be set (withdrawal needs a sub-account to debit)
 //   - pm.SettlementBankCode + pm.SettlementAccountNumber must be configured
 //
 // Flow:
-//  1. Load the PM via GetByID. Missing sub-account or settlement bank → clear error.
+//  1. Load the PM via GetByID. Missing settlement bank → clear error.
 //  2. WithdrawNGN debits available_ngn atomically, guarded by (available - reserved) >= amount.
 //     ok=false → ErrInsufficientWithdrawable; WithdrawNGN already failed — no compensation needed.
-//  3. InitiatePayout via the gateway with SubAccountID = pm.NombaSubAccountID.
+//  3. InitiatePayout via the gateway (parent account).
 //     On gateway error → CreditNGN compensates the debited balance before returning.
 //  4. Return the payout id.
 func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uuid.UUID, amount string) (string, error) {
@@ -37,10 +40,7 @@ func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uui
 		return "", fmt.Errorf("pm_withdrawal: load PM %s: %w", pmID, err)
 	}
 
-	// Validate sub-account and settlement bank are configured.
-	if strings.TrimSpace(pm.NombaSubAccountID) == "" {
-		return "", fmt.Errorf("pm_withdrawal: PM %s has no Nomba sub-account configured; cannot withdraw", pmID)
-	}
+	// Validate the settlement bank is configured (VA model: no sub-account check).
 	if strings.TrimSpace(pm.SettlementBankCode) == "" || strings.TrimSpace(pm.SettlementAccountNumber) == "" {
 		return "", fmt.Errorf("pm_withdrawal: PM %s has no settlement bank configured; cannot withdraw", pmID)
 	}
@@ -56,13 +56,12 @@ func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uui
 		return "", ErrInsufficientWithdrawable
 	}
 
-	// 3. Initiate payout from the PM's Nomba sub-account to its settlement bank.
+	// 3. Initiate payout from TSA's parent account to the PM's settlement bank.
 	// Use a short unique suffix on the reference to guard idempotency at Nomba's
 	// level (two withdrawals for the same PM on the same day get distinct refs).
 	// Each call gets a distinct reference — Nomba idempotency is per-call, not dedup-on-amount.
 	ref := "withdraw:" + pmID.String() + ":" + shortRef()
 	payoutID, err := s.gateway.InitiatePayout(ctx, PayoutRequest{
-		SubAccountID:  pm.NombaSubAccountID,
 		BankCode:      pm.SettlementBankCode,
 		AccountNumber: pm.SettlementAccountNumber,
 		AccountName:   pm.SettlementAccountName,

@@ -14,23 +14,22 @@ import (
 
 // ─── WithdrawToSettlement tests ───────────────────────────────────────────────
 
-// TestWithdrawToSettlement_Success verifies:
+// TestWithdrawToSettlement_Success verifies (VA-only model):
 //   - WithdrawNGN debits available_ngn atomically
-//   - InitiatePayout is called with SubAccountID = pm.NombaSubAccountID and
-//     the settlement bank details
+//   - InitiatePayout is called from the parent (no SubAccountID) with the
+//     settlement bank details and the PM's name as sender
 //   - The payout id is returned
 func TestWithdrawToSettlement_Success(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)
 	pmSvc := NewPMService(db)
 
-	// Seed a PM with a sub-account, settlement bank, and enough balance.
+	// Seed a PM with a settlement bank and enough balance (VA model: no sub-account).
 	pm := &models.PaymentMerchant{
 		ID:                      uuid.New(),
 		UserID:                  uuid.New(),
 		Name:                    "Acme PM",
 		Status:                  models.PaymentMerchantStatusActive,
-		NombaSubAccountID:       "sub-acct-withdraw-1",
 		SettlementBankCode:      "044",
 		SettlementAccountNumber: "0123456789",
 		SettlementAccountName:   "ACME CORP",
@@ -54,13 +53,13 @@ func TestWithdrawToSettlement_Success(t *testing.T) {
 		t.Errorf("payoutID = %q, want po_withdraw_ok", payoutID)
 	}
 
-	// Verify gateway was called with the correct sub-account and bank details.
+	// Verify gateway was called from the parent (no sub-account) with bank details.
 	if len(gw.calls) != 1 {
 		t.Fatalf("gateway calls = %d, want 1", len(gw.calls))
 	}
 	call := gw.calls[0]
-	if call.SubAccountID != "sub-acct-withdraw-1" {
-		t.Errorf("SubAccountID = %q, want sub-acct-withdraw-1", call.SubAccountID)
+	if call.SubAccountID != "" {
+		t.Errorf("SubAccountID = %q, want empty (VA model debits parent)", call.SubAccountID)
 	}
 	if call.BankCode != "044" {
 		t.Errorf("BankCode = %q, want 044", call.BankCode)
@@ -198,9 +197,11 @@ func TestWithdrawToSettlement_GatewayFailureCompensates(t *testing.T) {
 	}
 }
 
-// TestWithdrawToSettlement_MissingSubAccount verifies that a PM with no
-// NombaSubAccountID returns a clear error and does NOT debit the balance.
-func TestWithdrawToSettlement_MissingSubAccount(t *testing.T) {
+// TestWithdrawToSettlement_MissingSettlementBank verifies that a PM with no
+// settlement bank configured returns a clear error and does NOT debit the
+// balance. (VA model: there is no sub-account requirement — the only payout
+// precondition is a configured settlement bank.)
+func TestWithdrawToSettlement_MissingSettlementBank(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)
 	pmSvc := NewPMService(db)
@@ -210,9 +211,8 @@ func TestWithdrawToSettlement_MissingSubAccount(t *testing.T) {
 		UserID:                  uuid.New(),
 		Name:                    "Unconfigured PM",
 		Status:                  models.PaymentMerchantStatusActive,
-		NombaSubAccountID:       "", // no sub-account configured
-		SettlementBankCode:      "044",
-		SettlementAccountNumber: "0123456789",
+		SettlementBankCode:      "", // no settlement bank configured
+		SettlementAccountNumber: "",
 		SettlementAccountName:   "ACME CORP",
 		AvailableNGN:            "5000.00",
 		ReservedNGN:             "0",
@@ -227,7 +227,7 @@ func TestWithdrawToSettlement_MissingSubAccount(t *testing.T) {
 
 	_, err := auto.WithdrawToSettlement(context.Background(), pm.ID, "1000.00")
 	if err == nil {
-		t.Fatalf("expected error for missing sub-account, got nil")
+		t.Fatalf("expected error for missing settlement bank, got nil")
 	}
 
 	// Gateway must NOT have been called.
