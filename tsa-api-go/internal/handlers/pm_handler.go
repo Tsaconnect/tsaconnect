@@ -75,10 +75,9 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 		return
 	}
 
-	pm, err := h.pmStatus.GetActiveByUserID(c.Request.Context(), user.ID)
+	_, err := h.pmStatus.GetActiveByUserID(c.Request.Context(), user.ID)
 	if err == nil {
 		// Active PM found.
-		_ = pm
 		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: true, Status: "active"})
 		return
 	}
