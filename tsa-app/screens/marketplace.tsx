@@ -33,6 +33,7 @@ import {
   Text,
   type IconName,
 } from '@/components/ui';
+import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_GAP = 10;
@@ -89,6 +90,9 @@ const MarketplaceScreen: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  // Whether the current user is already an active Payment Merchant — gates the
+  // "Become a Payment Merchant" banner so existing PMs don't see it.
+  const { isPm } = useIsPaymentMerchant();
   const [error, setError] = useState<string | null>(null);
 
   const transformCategories = useCallback((raw: any[]): CategoryItem[] => {
@@ -197,7 +201,7 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'services', label: 'Services' },
     { key: 'trade', label: 'Trade & Earn', route: '/trade' },
     { key: 'p2p', label: 'P2P', route: '/p2p' },
-    { key: 'pm', label: 'PM', route: '/pm' },
+    { key: 'pm', label: 'Payment Merchants', route: '/pm' },
   ];
 
   // ── Loading ──
@@ -394,22 +398,43 @@ const MarketplaceScreen: React.FC = () => {
 
             {/* Merchant Banner */}
             {userRole === 'merchant' ? (
-              <PressableScale onPress={() => router.push('/merchants/dashboard')} style={{ marginTop: spacing.xl }}>
-                <AccentCard padding="md" railColor={colors.success}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                    <Icon name="storefront" size={26} color={colors.success} />
-                    <View style={{ flex: 1 }}>
-                      <Text variant="bodyMed" weight="700">
-                        Merchant Dashboard
-                      </Text>
-                      <Text variant="caption" color="textSecondary">
-                        Manage products, orders & inventory
-                      </Text>
+              <>
+                <PressableScale onPress={() => router.push('/merchants/dashboard')} style={{ marginTop: spacing.xl }}>
+                  <AccentCard padding="md" railColor={colors.success}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                      <Icon name="storefront" size={26} color={colors.success} />
+                      <View style={{ flex: 1 }}>
+                        <Text variant="bodyMed" weight="700">
+                          Merchant Dashboard
+                        </Text>
+                        <Text variant="caption" color="textSecondary">
+                          Manage products, orders & inventory
+                        </Text>
+                      </View>
+                      <Icon name="chevronRight" size={20} color={colors.textMuted} />
                     </View>
-                    <Icon name="chevronRight" size={20} color={colors.textMuted} />
-                  </View>
-                </AccentCard>
-              </PressableScale>
+                  </AccentCard>
+                </PressableScale>
+                {/* Become a Payment Merchant — only for merchants not already a PM. */}
+                {!isPm && (
+                  <PressableScale onPress={() => router.push('/merchants/merchant-request?type=p2p_merchant' as any)} style={{ marginTop: spacing.md }}>
+                    <AccentCard padding="md" railColor={colors.accent}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                        <Icon name="bolt" size={26} color={colors.accent} />
+                        <View style={{ flex: 1 }}>
+                          <Text variant="bodyMed" weight="700" color="accent">
+                            Become a Payment Merchant
+                          </Text>
+                          <Text variant="caption" color="textSecondary">
+                            Settle P2P trades instantly via bank transfer
+                          </Text>
+                        </View>
+                        <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                      </View>
+                    </AccentCard>
+                  </PressableScale>
+                )}
+              </>
             ) : userRole !== 'admin' && userRole !== 'superadmin' ? (
               <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginTop: spacing.xl }}>
                 <AccentCard padding="md">
