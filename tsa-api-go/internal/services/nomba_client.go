@@ -38,9 +38,9 @@ type NombaClient struct {
 	token      string
 	tokenExpAt time.Time
 
-	banksMu  sync.Mutex
-	banks    []NombaBank
-	banksAt  time.Time
+	banksMu sync.Mutex
+	banks   []NombaBank
+	banksAt time.Time
 
 	lookupMu sync.Mutex
 	lookups  map[string]lookupEntry
@@ -355,76 +355,15 @@ func (c *NombaClient) Transfer(ctx context.Context, req NombaTransferRequest) (N
 	}, nil
 }
 
-// ─── Sub-account provisioning ─────────────────────────────────────────────
-
-// createSubAccountReq is the request body for POST /v1/accounts/sub.
-// TODO(nomba-facts): confirm path and field names against sandbox.
-type createSubAccountReq struct {
-	AccountName string `json:"accountName"`
-}
-
-type subAccountResp struct {
-	Code        string `json:"code"`
-	Description string `json:"description"`
-	Message     string `json:"message"`
-	Status      bool   `json:"status"`
-	Data        struct {
-		AccountID   string `json:"accountId"`
-		AccountName string `json:"accountName"`
-	} `json:"data"`
-}
-
-// CreateSubAccount provisions a Nomba sub-account under the parent business.
-// Returns the sub-account ID (accountId) on success.
-// TODO(nomba-facts): confirm POST /v1/accounts/sub path + request/response field names against sandbox.
-func (c *NombaClient) CreateSubAccount(ctx context.Context, name string) (string, error) {
-	if !c.IsEnabled() {
-		return "", ErrNombaDisabled
-	}
-	raw, err := json.Marshal(createSubAccountReq{AccountName: name})
-	if err != nil {
-		return "", fmt.Errorf("nomba create-sub-account marshal: %w", err)
-	}
-	resp, body, err := c.authedRequest(ctx, http.MethodPost, "/v1/accounts/sub", raw)
-	if err != nil {
-		return "", fmt.Errorf("nomba create-sub-account: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp subAccountResp
-		_ = json.Unmarshal(body, &errResp)
-		msg := errResp.Message
-		if msg == "" {
-			msg = errResp.Description
-		}
-		if msg == "" {
-			msg = string(body)
-		}
-		return "", fmt.Errorf("nomba create-sub-account: HTTP %d: %s", resp.StatusCode, msg)
-	}
-	var parsed subAccountResp
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("nomba create-sub-account decode: %w", err)
-	}
-	if !parsed.Status {
-		msg := parsed.Message
-		if msg == "" {
-			msg = parsed.Description
-		}
-		return "", fmt.Errorf("nomba create-sub-account failed: %s", msg)
-	}
-	if parsed.Data.AccountID == "" {
-		return "", fmt.Errorf("nomba create-sub-account: empty sub-account id in response")
-	}
-	return parsed.Data.AccountID, nil
-}
+// ─── Virtual-account provisioning (VA-only corporate model) ────────────────
 
 // createVirtualAccountReq is the request body for POST /v1/accounts/virtual.
-// TODO(nomba-facts): confirm path, field names, and sub-account targeting mechanism against sandbox.
+// A corporate PM is a virtual account under TSA's single parent business —
+// funds paid in land in the parent balance, attributed by accountRef. No
+// sub-account prerequisite. Sandbox-validated shape: {accountRef, accountName}.
 type createVirtualAccountReq struct {
-	// TODO(nomba-facts): confirm whether subAccountId is the correct field name
-	// or if the sub-account is targeted via a header/path param.
-	SubAccountID string `json:"subAccountId"`
-	AccountName  string `json:"accountName"`
+	AccountRef  string `json:"accountRef"`
+	AccountName string `json:"accountName"`
 }
 
 type virtualAccountResp struct {
@@ -433,30 +372,32 @@ type virtualAccountResp struct {
 	Message     string `json:"message"`
 	Status      bool   `json:"status"`
 	Data        struct {
-		AccountNumber string `json:"accountNumber"`
-		WalletID      string `json:"walletId"`
-		AccountName   string `json:"accountName"`
+		BankAccountNumber string `json:"bankAccountNumber"`
+		BankName          string `json:"bankName"`
+		BankAccountName   string `json:"bankAccountName"`
+		AccountRef        string `json:"accountRef"`
 	} `json:"data"`
 }
 
-// CreateVirtualAccountForSubAccount creates a virtual (inbound) bank account
-// linked to the given sub-account. Returns the VA number and wallet ID.
-// TODO(nomba-facts): confirm POST /v1/accounts/virtual path, request fields,
-// and whether subAccountId belongs in body vs header vs URL path.
-func (c *NombaClient) CreateVirtualAccountForSubAccount(ctx context.Context, subAccountID, accountName string) (vaNumber, walletID string, err error) {
+// CreateVirtualAccount provisions a Nomba virtual account (VA) under TSA's
+// single parent business via POST /v1/accounts/virtual. accountRef is a
+// deterministic, unique reference the inbound webhook uses to attribute paid-in
+// funds back to this PM. Returns the VA's pay-into bank account number
+// (data.bankAccountNumber). There is NO walletId in the VA response.
+func (c *NombaClient) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (bankAccountNumber string, err error) {
 	if !c.IsEnabled() {
-		return "", "", ErrNombaDisabled
+		return "", ErrNombaDisabled
 	}
 	raw, err := json.Marshal(createVirtualAccountReq{
-		SubAccountID: subAccountID,
-		AccountName:  accountName,
+		AccountRef:  accountRef,
+		AccountName: accountName,
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("nomba create-virtual-account marshal: %w", err)
+		return "", fmt.Errorf("nomba create-virtual-account marshal: %w", err)
 	}
 	resp, body, err := c.authedRequest(ctx, http.MethodPost, "/v1/accounts/virtual", raw)
 	if err != nil {
-		return "", "", fmt.Errorf("nomba create-virtual-account: %w", err)
+		return "", fmt.Errorf("nomba create-virtual-account: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errResp virtualAccountResp
@@ -468,117 +409,51 @@ func (c *NombaClient) CreateVirtualAccountForSubAccount(ctx context.Context, sub
 		if msg == "" {
 			msg = string(body)
 		}
-		return "", "", fmt.Errorf("nomba create-virtual-account: HTTP %d: %s", resp.StatusCode, msg)
+		return "", fmt.Errorf("nomba create-virtual-account: HTTP %d: %s", resp.StatusCode, msg)
 	}
 	var parsed virtualAccountResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", "", fmt.Errorf("nomba create-virtual-account decode: %w", err)
+		return "", fmt.Errorf("nomba create-virtual-account decode: %w", err)
 	}
 	if !parsed.Status {
 		msg := parsed.Message
 		if msg == "" {
 			msg = parsed.Description
 		}
-		return "", "", fmt.Errorf("nomba create-virtual-account failed: %s", msg)
+		return "", fmt.Errorf("nomba create-virtual-account failed: %s", msg)
 	}
-	if parsed.Data.AccountNumber == "" || parsed.Data.WalletID == "" {
-		return "", "", fmt.Errorf("nomba create-virtual-account: empty accountNumber or walletId in response")
+	if parsed.Data.BankAccountNumber == "" {
+		return "", fmt.Errorf("nomba create-virtual-account: empty bankAccountNumber in response")
 	}
-	return parsed.Data.AccountNumber, parsed.Data.WalletID, nil
+	return parsed.Data.BankAccountNumber, nil
 }
 
-// setSettlementReq is the request body for POST /v1/accounts/sub/settlement.
-// TODO(nomba-facts): confirm path and field names against sandbox.
-type setSettlementReq struct {
-	// TODO(nomba-facts): confirm whether subAccountId is in body, header, or URL path.
-	SubAccountID  string `json:"subAccountId"`
-	BankCode      string `json:"bankCode"`
-	AccountNumber string `json:"accountNumber"`
-}
-
-type settlementResp struct {
-	Code        string `json:"code"`
-	Description string `json:"description"`
-	Message     string `json:"message"`
-	Status      bool   `json:"status"`
-	Data        interface{} `json:"data"`
-}
-
-// SetSubAccountSettlement configures where Nomba settles the sub-account's
-// collected funds (Nigerian bank account).
-// TODO(nomba-facts): confirm POST /v1/accounts/sub/settlement path, request fields,
-// and sub-account targeting mechanism against sandbox.
-func (c *NombaClient) SetSubAccountSettlement(ctx context.Context, subAccountID, bankCode, accountNumber string) error {
-	if !c.IsEnabled() {
-		return ErrNombaDisabled
-	}
-	raw, err := json.Marshal(setSettlementReq{
-		SubAccountID:  subAccountID,
-		BankCode:      bankCode,
-		AccountNumber: accountNumber,
-	})
-	if err != nil {
-		return fmt.Errorf("nomba set-settlement marshal: %w", err)
-	}
-	resp, body, err := c.authedRequest(ctx, http.MethodPost, "/v1/accounts/sub/settlement", raw)
-	if err != nil {
-		return fmt.Errorf("nomba set-settlement: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp settlementResp
-		_ = json.Unmarshal(body, &errResp)
-		msg := errResp.Message
-		if msg == "" {
-			msg = errResp.Description
-		}
-		if msg == "" {
-			msg = string(body)
-		}
-		return fmt.Errorf("nomba set-settlement: HTTP %d: %s", resp.StatusCode, msg)
-	}
-	var parsed settlementResp
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return fmt.Errorf("nomba set-settlement decode: %w", err)
-	}
-	if !parsed.Status {
-		msg := parsed.Message
-		if msg == "" {
-			msg = parsed.Description
-		}
-		return fmt.Errorf("nomba set-settlement failed: %s", msg)
-	}
-	return nil
-}
-
-// subAccountBalanceResp is the response for GET /v1/accounts/{subAccountId}/balance.
-// TODO(nomba-facts): confirm path and field names against sandbox.
-type subAccountBalanceResp struct {
+// parentBalanceResp is the response for GET /v1/accounts/balance — the single
+// parent business balance. data.amount is a decimal NGN string.
+type parentBalanceResp struct {
 	Code        string `json:"code"`
 	Description string `json:"description"`
 	Message     string `json:"message"`
 	Status      bool   `json:"status"`
 	Data        struct {
-		// TODO(nomba-facts): confirm whether availableBalance is correct field name.
-		AvailableBalance float64 `json:"availableBalance"`
-		Currency         string  `json:"currency"`
+		Amount   string `json:"amount"`
+		Currency string `json:"currency"`
 	} `json:"data"`
 }
 
-// FetchSubAccountBalance returns the NGN available balance for the given
-// sub-account, formatted as a string (e.g. "15000.50").
-// TODO(nomba-facts): confirm GET /v1/accounts/{subAccountId}/balance path
-// and response field names against sandbox.
-func (c *NombaClient) FetchSubAccountBalance(ctx context.Context, subAccountID string) (string, error) {
+// FetchParentBalance returns the live NGN balance of TSA's single parent Nomba
+// business via GET /v1/accounts/balance (data.amount). The aggregate NGN
+// reconciler compares this against the SUM of all active PMs' available_ngn.
+func (c *NombaClient) FetchParentBalance(ctx context.Context) (ngn string, err error) {
 	if !c.IsEnabled() {
 		return "", ErrNombaDisabled
 	}
-	path := fmt.Sprintf("/v1/accounts/%s/balance", subAccountID)
-	resp, body, err := c.authedRequest(ctx, http.MethodGet, path, nil)
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/v1/accounts/balance", nil)
 	if err != nil {
-		return "", fmt.Errorf("nomba fetch-balance: %w", err)
+		return "", fmt.Errorf("nomba fetch-parent-balance: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp subAccountBalanceResp
+		var errResp parentBalanceResp
 		_ = json.Unmarshal(body, &errResp)
 		msg := errResp.Message
 		if msg == "" {
@@ -587,91 +462,23 @@ func (c *NombaClient) FetchSubAccountBalance(ctx context.Context, subAccountID s
 		if msg == "" {
 			msg = string(body)
 		}
-		return "", fmt.Errorf("nomba fetch-balance: HTTP %d: %s", resp.StatusCode, msg)
+		return "", fmt.Errorf("nomba fetch-parent-balance: HTTP %d: %s", resp.StatusCode, msg)
 	}
-	var parsed subAccountBalanceResp
+	var parsed parentBalanceResp
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("nomba fetch-balance decode: %w", err)
+		return "", fmt.Errorf("nomba fetch-parent-balance decode: %w", err)
 	}
 	if !parsed.Status {
 		msg := parsed.Message
 		if msg == "" {
 			msg = parsed.Description
 		}
-		return "", fmt.Errorf("nomba fetch-balance failed: %s", msg)
+		return "", fmt.Errorf("nomba fetch-parent-balance failed: %s", msg)
 	}
-	return fmt.Sprintf("%.2f", parsed.Data.AvailableBalance), nil
-}
-
-// TransferFromSubAccount initiates a Nigerian bank transfer debiting the given
-// sub-account (rather than the parent). Mirrors Transfer but targets the
-// sub-account via the accountId header.
-// TODO(nomba-facts): confirm the sub-account targeting mechanism — whether it's
-// an accountId header override, a path param, or a body field — against sandbox.
-func (c *NombaClient) TransferFromSubAccount(ctx context.Context, subAccountID string, req NombaTransferRequest) (NombaTransferResult, error) {
-	if !c.IsEnabled() {
-		return NombaTransferResult{}, ErrNombaDisabled
+	if strings.TrimSpace(parsed.Data.Amount) == "" {
+		return "", fmt.Errorf("nomba fetch-parent-balance: empty amount in response")
 	}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer marshal: %w", err)
-	}
-
-	// TODO(nomba-facts): confirm targeting mechanism. Current assumption: override
-	// the accountId header with the sub-account ID so Nomba debits the sub-account.
-	// This requires a custom request rather than authedRequest, which always sends
-	// the parent accountId.
-	token, err := c.ensureToken(ctx)
-	if err != nil {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer token: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v2/transfers/bank", bytes.NewReader(raw))
-	if err != nil {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer build request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	// TODO(nomba-facts): confirm whether accountId should be subAccountID here or
-	// if there's a separate subAccountId header/field. Using subAccountID for now.
-	httpReq.Header.Set("accountId", subAccountID)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer: %w", err)
-	}
-	body, _ := io.ReadAll(httpResp.Body)
-	httpResp.Body.Close()
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		var errResp transferResp
-		_ = json.Unmarshal(body, &errResp)
-		msg := errResp.Message
-		if msg == "" {
-			msg = errResp.Description
-		}
-		if msg == "" {
-			msg = string(body)
-		}
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer: HTTP %d: %s", httpResp.StatusCode, msg)
-	}
-	var parsed transferResp
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer decode: %w", err)
-	}
-	if !parsed.Status {
-		msg := parsed.Message
-		if msg == "" {
-			msg = parsed.Description
-		}
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer failed: %s", msg)
-	}
-	if parsed.Data.ID == "" {
-		return NombaTransferResult{}, fmt.Errorf("nomba sub-account transfer: empty id in response")
-	}
-	return NombaTransferResult{
-		ID:     parsed.Data.ID,
-		Status: parsed.Data.Status,
-	}, nil
+	return parsed.Data.Amount, nil
 }
 
 // ─── Account lookup ────────────────────────────────────────────────────────

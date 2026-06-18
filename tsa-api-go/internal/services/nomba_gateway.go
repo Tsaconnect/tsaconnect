@@ -20,9 +20,10 @@ type PayoutRequest struct {
 	Reference     string // our trade reference (idempotency)
 	AccountName   string // recipient account name (used by live gateway)
 	SenderName    string // sender display name (used by live gateway)
-	// SubAccountID is the PM's Nomba sub-account id. When non-empty the gateway
-	// debits the sub-account (TransferFromSubAccount); when empty it debits the
-	// parent TSA Nomba account (Transfer) — preserving back-compat.
+	// Deprecated: SubAccountID is UNUSED under the VA-only corporate model — all
+	// payouts (sell + withdrawal) come from TSA's single parent Nomba account via
+	// client.Transfer. The field is retained so existing call sites compile, but
+	// nothing sets it and the gateway ignores it.
 	SubAccountID string
 }
 
@@ -31,7 +32,8 @@ type PayoutRequest struct {
 // credit is final (we only auto-release on settled — design §9).
 type InboundPayment struct {
 	EventID             string
-	WalletID            string // data.merchant.walletId — identifies which PM was paid
+	WalletID            string // data.merchant.walletId — the single-TSA-parent inbound key (env-configured)
+	AccountRef          string // VA accountRef — the corporate-PM (VA-model) inbound key
 	DestinationAccount  string // kept for back-compat with existing references; not populated by the real parser
 	SenderAccountName   string
 	SenderAccountNumber string
@@ -41,8 +43,8 @@ type InboundPayment struct {
 
 // PayoutStatus is a normalized payout-result webhook (sell flow).
 type PayoutStatus struct {
-	EventID        string
-	PayoutID       string
-	MerchantTxRef  string // data.transaction.merchantTxRef — matches our trade UUID
-	Status         string // "success" | "failed" | "pending"
+	EventID       string
+	PayoutID      string
+	MerchantTxRef string // data.transaction.merchantTxRef — matches our trade UUID
+	Status        string // "success" | "failed" | "pending"
 }

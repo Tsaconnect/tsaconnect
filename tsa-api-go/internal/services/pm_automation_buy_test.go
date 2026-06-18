@@ -131,6 +131,7 @@ func createPaymentMerchantsTable(t *testing.T, db *gorm.DB) {
 		nomba_creds_ref          TEXT,
 		inbound_account_number   TEXT,
 		inbound_bank             TEXT,
+		nomba_account_ref        TEXT,
 		operator_wallet_address  TEXT,
 		nomba_sub_account_id     TEXT,
 		settlement_bank_code     TEXT,
@@ -338,6 +339,112 @@ func TestHandleInbound_KeysByWalletId(t *testing.T) {
 	}
 	if len(signer.calls) != 1 {
 		t.Fatalf("signer called %d times after unknown-wallet inbound, want still 1", len(signer.calls))
+	}
+}
+
+// TestHandleInbound_MatchesByAccountRef verifies the VA-only model: a corporate
+// PM is resolved by its NombaAccountRef when the inbound carries an AccountRef,
+// and the matched trade is released.
+func TestHandleInbound_MatchesByAccountRef(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	// Seed an active corporate PM with an accountRef (no walletId match here).
+	pm := &models.PaymentMerchant{
+		ID:                   uuid.New(),
+		UserID:               uuid.New(),
+		Name:                 "Acme Corp",
+		Status:               models.PaymentMerchantStatusActive,
+		InboundAccountNumber: "9012345678",
+		NombaAccountRef:      "pm-acme-ref",
+		PerTradeCapUSD:       0,
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatalf("seed PM: %v", err)
+	}
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
+		buyerID: "JOHN DOE",
+	}))
+
+	// Inbound carries AccountRef (VA model), no WalletID.
+	if err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:            "settled",
+		AccountRef:        "pm-acme-ref",
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_va_1",
+	}); err != nil {
+		t.Fatalf("HandleInbound (by accountRef): %v", err)
+	}
+	var released models.P2PTrade
+	db.First(&released, "id = ?", trade.ID)
+	if released.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("status = %q, want released (keyed by accountRef)", released.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Fatalf("signer called %d times, want 1", len(signer.calls))
+	}
+
+	// An unknown accountRef with no walletId is a no-op.
+	trade2 := seedBuyTradeOnAd(t, db, ad, buyerID, "2500.00")
+	if err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:            "settled",
+		AccountRef:        "pm-unknown-ref",
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "2500.00",
+		EventID:           "evt_va_unknown",
+	}); err != nil {
+		t.Fatalf("HandleInbound (unknown accountRef): %v", err)
+	}
+	var stuck models.P2PTrade
+	db.First(&stuck, "id = ?", trade2.ID)
+	if stuck.Status != models.P2PTradeStatusPendingPayment {
+		t.Fatalf("status = %q, want pending_payment (unknown accountRef must no-op)", stuck.Status)
+	}
+}
+
+// TestHandleInbound_WalletIDFallbackStillWorks verifies the single-TSA-parent
+// path keeps working unchanged: an inbound with an empty AccountRef but a known
+// WalletID resolves the PM via the walletId fallback and releases.
+func TestHandleInbound_WalletIDFallbackStillWorks(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0) // sets NombaWalletID = "wallet-1234567890"
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
+		buyerID: "JOHN DOE",
+	}))
+
+	// Empty AccountRef → falls back to walletId resolution (unchanged TSA path).
+	if err := auto.HandleInbound(context.Background(), InboundPayment{
+		Status:            "settled",
+		AccountRef:        "",
+		WalletID:          pm.NombaWalletID,
+		SenderAccountName: "JOHN DOE",
+		AmountNGN:         "1500.00",
+		EventID:           "evt_fallback_1",
+	}); err != nil {
+		t.Fatalf("HandleInbound (walletId fallback): %v", err)
+	}
+	var released models.P2PTrade
+	db.First(&released, "id = ?", trade.ID)
+	if released.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("status = %q, want released (walletId fallback)", released.Status)
+	}
+	if len(signer.calls) != 1 {
+		t.Fatalf("signer called %d times, want 1", len(signer.calls))
 	}
 }
 

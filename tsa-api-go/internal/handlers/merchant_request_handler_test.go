@@ -92,6 +92,7 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			nomba_creds_ref TEXT,
 			inbound_account_number TEXT,
 			inbound_bank TEXT,
+			nomba_account_ref TEXT,
 			operator_wallet_address TEXT,
 			nomba_sub_account_id TEXT,
 			settlement_bank_code TEXT,
@@ -658,39 +659,28 @@ func TestListMerchantRequests_WithStatusFilter(t *testing.T) {
 
 // ── C1: provisioning retry re-entry test ─────────────────────────────────────
 
-// handlerFakeProvisioner is a test double that satisfies services.NombaProvisioner.
-// The VA-create step fails on the first call and succeeds on subsequent calls,
-// so attempt-1 approval returns 5xx and leaves the request re-approvable.
+// handlerFakeProvisioner is a test double that satisfies services.NombaProvisioner
+// under the VA-only model. CreateVirtualAccount fails on the first call and
+// succeeds on subsequent calls, so attempt-1 approval returns 5xx and leaves the
+// request re-approvable.
 type handlerFakeProvisioner struct {
-	vaCallCount          int
-	subAccountCallCount  int
-	settlementCallCount  int
+	vaCallCount int
 }
 
-func (f *handlerFakeProvisioner) CreateSubAccount(_ context.Context, _ string) (string, error) {
-	f.subAccountCallCount++
-	return "sub-acct-handler-test", nil
-}
-
-func (f *handlerFakeProvisioner) CreateVirtualAccountForSubAccount(_ context.Context, _, _ string) (string, string, error) {
+func (f *handlerFakeProvisioner) CreateVirtualAccount(_ context.Context, _, _ string) (string, error) {
 	f.vaCallCount++
 	if f.vaCallCount == 1 {
-		return "", "", errors.New("VA create network error (attempt 1)")
+		return "", errors.New("VA create network error (attempt 1)")
 	}
-	return "0011223344", "wallet-handler-test", nil
-}
-
-func (f *handlerFakeProvisioner) SetSubAccountSettlement(_ context.Context, _, _, _ string) error {
-	f.settlementCallCount++
-	return nil
+	return "0011223344", nil
 }
 
 // TestApproveMerchantRequest_PMProvisioningRetry exercises C1:
-//  - The admin approves a p2p_merchant request.
-//  - Attempt 1: VA-create fails → handler returns 5xx; request left in `approved`
-//    state with a non-active payment_merchants row → re-approvable.
-//  - Attempt 2: VA-create succeeds → 200; PM row is now active; sub-account was
-//    created exactly once across both attempts.
+//   - The admin approves a p2p_merchant request.
+//   - Attempt 1: VA-create fails → handler returns 5xx; request left in `approved`
+//     state with a non-active payment_merchants row → re-approvable.
+//   - Attempt 2: VA-create succeeds → 200; PM row is now active; sub-account was
+//     created exactly once across both attempts.
 func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	fake := &handlerFakeProvisioner{}
@@ -741,9 +731,9 @@ func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 		t.Error("attempt 1: PM row should NOT be active yet")
 	}
 
-	// sub-account created once so far.
-	if fake.subAccountCallCount != 1 {
-		t.Errorf("attempt 1: CreateSubAccount called %d times, want 1", fake.subAccountCallCount)
+	// VA-create attempted once so far (it failed).
+	if fake.vaCallCount != 1 {
+		t.Errorf("attempt 1: CreateVirtualAccount called %d times, want 1", fake.vaCallCount)
 	}
 
 	// ── Attempt 2: VA succeeds → 200 ─────────────────────────────────────────
@@ -767,12 +757,8 @@ func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 		t.Errorf("attempt 2: PM status = %q, want %q", pm.Status, models.PaymentMerchantStatusActive)
 	}
 
-	// sub-account created exactly once across both attempts (idempotency).
-	if fake.subAccountCallCount != 1 {
-		t.Errorf("attempt 2: CreateSubAccount total calls = %d, want exactly 1", fake.subAccountCallCount)
-	}
-
-	// VA called twice (once failed, once succeeded).
+	// VA called twice (once failed, once succeeded) — the first attempt persisted
+	// no accountRef, so attempt 2 retried the create exactly once.
 	if fake.vaCallCount != 2 {
 		t.Errorf("attempt 2: CreateVirtualAccount total calls = %d, want 2", fake.vaCallCount)
 	}
@@ -913,8 +899,8 @@ func TestApproveMerchantRequest_PMNonAdminForbidden(t *testing.T) {
 			if count != 0 {
 				t.Errorf("role %q: expected no PM provisioned, got %d", role, count)
 			}
-			if fake.subAccountCallCount != 0 {
-				t.Errorf("role %q: provisioning was attempted (CreateSubAccount called %d times)", role, fake.subAccountCallCount)
+			if fake.vaCallCount != 0 {
+				t.Errorf("role %q: provisioning was attempted (CreateVirtualAccount called %d times)", role, fake.vaCallCount)
 			}
 		})
 	}

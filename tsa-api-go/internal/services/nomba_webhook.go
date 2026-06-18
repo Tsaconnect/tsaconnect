@@ -232,6 +232,14 @@ type nombaInboundRaw struct {
 			Time              string      `json:"time"`
 			ResponseCode      string      `json:"responseCode"`
 			Narration         string      `json:"narration"`
+			// TODO(nomba-facts): confirm the accountRef field in the real inbound
+			// payload. Under the VA-only model a paid-into VA attributes the credit
+			// by accountRef; the EXACT field/location is UNCONFIRMED and must be
+			// verified against a real inbound webhook. aliasAccountNumber and
+			// accountRef are the two best guesses — both parsed; AccountRef below
+			// prefers a non-empty accountRef, falling back to aliasAccountNumber.
+			AliasAccountNumber string `json:"aliasAccountNumber"`
+			AccountRef         string `json:"accountRef"`
 		} `json:"transaction"`
 		Customer struct {
 			SenderName    string `json:"senderName"`
@@ -351,8 +359,17 @@ func ParseNombaInbound(raw []byte) (*InboundPayment, error) {
 	if r.RequestID == "" {
 		return nil, errors.New("parse nomba inbound: missing requestId")
 	}
-	if r.Data.Merchant.WalletID == "" {
-		return nil, errors.New("parse nomba inbound: missing data.merchant.walletId")
+	// Under the VA-only model a corporate-PM credit is keyed by accountRef while
+	// the single-TSA-parent path is keyed by walletId. Require at least one usable
+	// key — a payload with neither cannot be attributed to any PM.
+	// TODO(nomba-facts): confirm the accountRef field location in the real inbound
+	// payload (see nombaInboundRaw.Data.Transaction above).
+	accountRef := strings.TrimSpace(r.Data.Transaction.AccountRef)
+	if accountRef == "" {
+		accountRef = strings.TrimSpace(r.Data.Transaction.AliasAccountNumber)
+	}
+	if r.Data.Merchant.WalletID == "" && accountRef == "" {
+		return nil, errors.New("parse nomba inbound: missing both data.merchant.walletId and accountRef")
 	}
 	eventType := strings.ToLower(strings.TrimSpace(r.EventType))
 	if eventType != "payment_success" {
@@ -367,7 +384,8 @@ func ParseNombaInbound(raw []byte) (*InboundPayment, error) {
 	return &InboundPayment{
 		EventID:             r.RequestID,
 		WalletID:            r.Data.Merchant.WalletID,
-		DestinationAccount:  "", // not present in real Nomba payload; walletId is the PM key
+		AccountRef:          accountRef,
+		DestinationAccount:  "", // not present in real Nomba payload; walletId/accountRef are the PM keys
 		SenderAccountName:   r.Data.Customer.SenderName,
 		SenderAccountNumber: r.Data.Customer.AccountNumber,
 		AmountNGN:           formatNaira(r.Data.Transaction.TransactionAmount.String()),

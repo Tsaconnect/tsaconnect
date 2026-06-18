@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,7 @@ import (
 )
 
 // newNombaSubAccountServer creates a test HTTP server mocking /v1/auth/token/issue
-// and the sub-account related endpoints. Each endpoint handler is caller-supplied.
+// and the VA/balance endpoints. Each endpoint handler is caller-supplied.
 func newNombaSubAccountServer(t *testing.T, handlers map[string]http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -40,14 +41,17 @@ func newTestNombaClient(serverURL string) *NombaClient {
 	return NewNombaClient(serverURL, "test-client-id", "test-client-secret", "test-account-id")
 }
 
-// ─── CreateSubAccount ──────────────────────────────────────────────────────────
+// ─── CreateVirtualAccount (VA-only model) ──────────────────────────────────────
 
-func TestNombaClient_CreateSubAccount_Success(t *testing.T) {
+func TestNombaClient_CreateVirtualAccount_Success(t *testing.T) {
+	var capturedBody map[string]interface{}
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				t.Errorf("method = %s; want POST", r.Method)
 			}
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &capturedBody)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{
@@ -55,32 +59,40 @@ func TestNombaClient_CreateSubAccount_Success(t *testing.T) {
 				"description": "SUCCESS",
 				"status": true,
 				"data": {
-					"accountId": "sub-acct-uuid-001",
-					"accountName": "Test Merchant"
+					"bankAccountNumber": "9012345678",
+					"bankName": "Sterling Bank",
+					"bankAccountName": "TSA-Acme Corp",
+					"accountRef": "pm-abc-123"
 				}
 			}`)
 		},
 	})
 
 	c := newTestNombaClient(srv.URL)
-	subAccountID, err := c.CreateSubAccount(t.Context(), "Test Merchant")
+	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
 	if err != nil {
-		t.Fatalf("CreateSubAccount error: %v", err)
+		t.Fatalf("CreateVirtualAccount error: %v", err)
 	}
-	if subAccountID != "sub-acct-uuid-001" {
-		t.Errorf("subAccountID = %q; want %q", subAccountID, "sub-acct-uuid-001")
+	if acctNo != "9012345678" {
+		t.Errorf("bankAccountNumber = %q; want %q", acctNo, "9012345678")
+	}
+	// The body must carry accountRef + accountName (sandbox-validated shape).
+	if capturedBody["accountRef"] != "pm-abc-123" {
+		t.Errorf("accountRef = %v; want pm-abc-123", capturedBody["accountRef"])
+	}
+	if capturedBody["accountName"] != "Acme Corp" {
+		t.Errorf("accountName = %v; want Acme Corp", capturedBody["accountName"])
 	}
 }
 
-func TestNombaClient_CreateSubAccount_NonOK(t *testing.T) {
+func TestNombaClient_CreateVirtualAccount_NonOK(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{
 				"code": "400",
-				"description": "Bad Request",
-				"message": "invalid account name",
+				"message": "duplicate accountRef",
 				"status": false,
 				"data": {}
 			}`)
@@ -88,24 +100,23 @@ func TestNombaClient_CreateSubAccount_NonOK(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateSubAccount(t.Context(), "Test Merchant")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
 	if err == nil {
 		t.Fatal("expected error for 400 response, got nil")
 	}
-	if !strings.Contains(err.Error(), "invalid account name") {
+	if !strings.Contains(err.Error(), "duplicate accountRef") {
 		t.Errorf("error should contain Nomba's message; got: %v", err)
 	}
 }
 
-func TestNombaClient_CreateSubAccount_StatusFalse(t *testing.T) {
+func TestNombaClient_CreateVirtualAccount_StatusFalse(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{
 				"code": "400",
-				"description": "Failed",
-				"message": "sub-account creation failed",
+				"message": "VA creation failed",
 				"status": false,
 				"data": {}
 			}`)
@@ -113,18 +124,18 @@ func TestNombaClient_CreateSubAccount_StatusFalse(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateSubAccount(t.Context(), "Test Merchant")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
 	if err == nil {
 		t.Fatal("expected error for status:false, got nil")
 	}
-	if !strings.Contains(err.Error(), "sub-account creation failed") {
+	if !strings.Contains(err.Error(), "VA creation failed") {
 		t.Errorf("error should contain Nomba's message; got: %v", err)
 	}
 }
 
-func TestNombaClient_CreateSubAccount_EmptyID(t *testing.T) {
+func TestNombaClient_CreateVirtualAccount_EmptyNumber(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{
@@ -132,190 +143,28 @@ func TestNombaClient_CreateSubAccount_EmptyID(t *testing.T) {
 				"description": "SUCCESS",
 				"status": true,
 				"data": {
-					"accountId": "",
-					"accountName": "Test Merchant"
+					"bankAccountNumber": "",
+					"accountRef": "pm-abc-123"
 				}
 			}`)
 		},
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateSubAccount(t.Context(), "Test Merchant")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
 	if err == nil {
-		t.Fatal("expected error for empty sub-account id, got nil")
+		t.Fatal("expected error for empty bankAccountNumber, got nil")
 	}
 	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error should mention empty id; got: %v", err)
+		t.Errorf("error should mention empty bankAccountNumber; got: %v", err)
 	}
 }
 
-// ─── CreateVirtualAccountForSubAccount ────────────────────────────────────────
+// ─── FetchParentBalance ────────────────────────────────────────────────────────
 
-func TestNombaClient_CreateVirtualAccountForSubAccount_Success(t *testing.T) {
+func TestNombaClient_FetchParentBalance_Success(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("method = %s; want POST", r.Method)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "200",
-				"description": "SUCCESS",
-				"status": true,
-				"data": {
-					"accountNumber": "9012345678",
-					"walletId": "wallet-uuid-001",
-					"accountName": "Test Merchant"
-				}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	vaNumber, walletID, err := c.CreateVirtualAccountForSubAccount(t.Context(), "sub-acct-uuid-001", "Test Merchant")
-	if err != nil {
-		t.Fatalf("CreateVirtualAccountForSubAccount error: %v", err)
-	}
-	if vaNumber != "9012345678" {
-		t.Errorf("vaNumber = %q; want %q", vaNumber, "9012345678")
-	}
-	if walletID != "wallet-uuid-001" {
-		t.Errorf("walletID = %q; want %q", walletID, "wallet-uuid-001")
-	}
-}
-
-func TestNombaClient_CreateVirtualAccountForSubAccount_NonOK(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, `{
-				"code": "400",
-				"message": "sub-account not found",
-				"status": false,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	_, _, err := c.CreateVirtualAccountForSubAccount(t.Context(), "sub-acct-uuid-001", "Test Merchant")
-	if err == nil {
-		t.Fatal("expected error for 400 response, got nil")
-	}
-	if !strings.Contains(err.Error(), "sub-account not found") {
-		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-func TestNombaClient_CreateVirtualAccountForSubAccount_EmptyIDs(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "200",
-				"description": "SUCCESS",
-				"status": true,
-				"data": {
-					"accountNumber": "",
-					"walletId": "",
-					"accountName": "Test Merchant"
-				}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	_, _, err := c.CreateVirtualAccountForSubAccount(t.Context(), "sub-acct-uuid-001", "Test Merchant")
-	if err == nil {
-		t.Fatal("expected error for empty vaNumber/walletId, got nil")
-	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error should mention empty fields; got: %v", err)
-	}
-}
-
-// ─── SetSubAccountSettlement ───────────────────────────────────────────────────
-
-func TestNombaClient_SetSubAccountSettlement_Success(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub/settlement": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("method = %s; want POST", r.Method)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "200",
-				"description": "SUCCESS",
-				"status": true,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	err := c.SetSubAccountSettlement(t.Context(), "sub-acct-uuid-001", "058", "0123456789")
-	if err != nil {
-		t.Fatalf("SetSubAccountSettlement error: %v", err)
-	}
-}
-
-func TestNombaClient_SetSubAccountSettlement_NonOK(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub/settlement": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, `{
-				"code": "400",
-				"message": "invalid bank code",
-				"status": false,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	err := c.SetSubAccountSettlement(t.Context(), "sub-acct-uuid-001", "XXX", "0123456789")
-	if err == nil {
-		t.Fatal("expected error for 400 response, got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid bank code") {
-		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-func TestNombaClient_SetSubAccountSettlement_StatusFalse(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub/settlement": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "400",
-				"message": "settlement update failed",
-				"status": false,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	err := c.SetSubAccountSettlement(t.Context(), "sub-acct-uuid-001", "058", "0123456789")
-	if err == nil {
-		t.Fatal("expected error for status:false, got nil")
-	}
-	if !strings.Contains(err.Error(), "settlement update failed") {
-		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-// ─── FetchSubAccountBalance ────────────────────────────────────────────────────
-
-func TestNombaClient_FetchSubAccountBalance_Success(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub-acct-uuid-001/balance": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/balance": func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				t.Errorf("method = %s; want GET", r.Method)
 			}
@@ -326,7 +175,7 @@ func TestNombaClient_FetchSubAccountBalance_Success(t *testing.T) {
 				"description": "SUCCESS",
 				"status": true,
 				"data": {
-					"availableBalance": 15000.50,
+					"amount": "150000.50",
 					"currency": "NGN"
 				}
 			}`)
@@ -334,23 +183,23 @@ func TestNombaClient_FetchSubAccountBalance_Success(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	ngn, err := c.FetchSubAccountBalance(t.Context(), "sub-acct-uuid-001")
+	ngn, err := c.FetchParentBalance(t.Context())
 	if err != nil {
-		t.Fatalf("FetchSubAccountBalance error: %v", err)
+		t.Fatalf("FetchParentBalance error: %v", err)
 	}
-	if ngn != "15000.50" {
-		t.Errorf("balance = %q, want 15000.50", ngn)
+	if ngn != "150000.50" {
+		t.Errorf("balance = %q, want 150000.50", ngn)
 	}
 }
 
-func TestNombaClient_FetchSubAccountBalance_NonOK(t *testing.T) {
+func TestNombaClient_FetchParentBalance_NonOK(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub-acct-uuid-001/balance": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/balance": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, `{
-				"code": "404",
-				"message": "sub-account not found",
+				"code": "500",
+				"message": "balance unavailable",
 				"status": false,
 				"data": {}
 			}`)
@@ -358,18 +207,18 @@ func TestNombaClient_FetchSubAccountBalance_NonOK(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.FetchSubAccountBalance(t.Context(), "sub-acct-uuid-001")
+	_, err := c.FetchParentBalance(t.Context())
 	if err == nil {
-		t.Fatal("expected error for 404 response, got nil")
+		t.Fatal("expected error for 500 response, got nil")
 	}
-	if !strings.Contains(err.Error(), "sub-account not found") {
+	if !strings.Contains(err.Error(), "balance unavailable") {
 		t.Errorf("error should contain Nomba's message; got: %v", err)
 	}
 }
 
-func TestNombaClient_FetchSubAccountBalance_StatusFalse(t *testing.T) {
+func TestNombaClient_FetchParentBalance_StatusFalse(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v1/accounts/sub-acct-uuid-001/balance": func(w http.ResponseWriter, r *http.Request) {
+		"/v1/accounts/balance": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{
@@ -382,164 +231,11 @@ func TestNombaClient_FetchSubAccountBalance_StatusFalse(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.FetchSubAccountBalance(t.Context(), "sub-acct-uuid-001")
+	_, err := c.FetchParentBalance(t.Context())
 	if err == nil {
 		t.Fatal("expected error for status:false, got nil")
 	}
 	if !strings.Contains(err.Error(), "balance fetch failed") {
 		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-// ─── TransferFromSubAccount ────────────────────────────────────────────────────
-
-func TestNombaClient_TransferFromSubAccount_Success(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v2/transfers/bank": func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				t.Errorf("method = %s; want POST", r.Method)
-			}
-			// Verify sub-account targeting header
-			subAcctID := r.Header.Get("accountId")
-			// TODO(nomba-facts): confirm exact mechanism (header vs path param); per-request header is current impl.
-			if subAcctID != "sub-acct-uuid-001" {
-				t.Errorf("accountId header = %q, want sub-account id", subAcctID)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "200",
-				"description": "SUCCESS",
-				"message": "Success",
-				"status": true,
-				"data": {
-					"amount": "5000.0",
-					"id": "API-TRANSFER-sub-001",
-					"status": "SUCCESS",
-					"type": "transfer",
-					"fee": 50,
-					"timeCreated": "2026-06-17T10:00:00Z",
-					"meta": {}
-				}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	result, err := c.TransferFromSubAccount(t.Context(), "sub-acct-uuid-001", NombaTransferRequest{
-		Amount:        5000.0,
-		AccountNumber: "0123456789",
-		AccountName:   "JOHN DOE",
-		BankCode:      "058",
-		MerchantTxRef: "trade-sub-001",
-		SenderName:    "TSA Merchant",
-		Narration:     "Payout",
-	})
-	if err != nil {
-		t.Fatalf("TransferFromSubAccount error: %v", err)
-	}
-	if result.ID != "API-TRANSFER-sub-001" {
-		t.Errorf("result.ID = %q; want %q", result.ID, "API-TRANSFER-sub-001")
-	}
-	if result.Status != "SUCCESS" {
-		t.Errorf("result.Status = %q; want %q", result.Status, "SUCCESS")
-	}
-}
-
-func TestNombaClient_TransferFromSubAccount_NonOK(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v2/transfers/bank": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, `{
-				"code": "400",
-				"message": "insufficient sub-account balance",
-				"status": false,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	_, err := c.TransferFromSubAccount(t.Context(), "sub-acct-uuid-001", NombaTransferRequest{
-		Amount:        99999999.0,
-		AccountNumber: "0123456789",
-		AccountName:   "JOHN DOE",
-		BankCode:      "058",
-		MerchantTxRef: "trade-sub-002",
-		SenderName:    "TSA Merchant",
-	})
-	if err == nil {
-		t.Fatal("expected error for 400 response, got nil")
-	}
-	if !strings.Contains(err.Error(), "insufficient sub-account balance") {
-		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-func TestNombaClient_TransferFromSubAccount_StatusFalse(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v2/transfers/bank": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "400",
-				"description": "Failed",
-				"message": "sub-account transfer rejected",
-				"status": false,
-				"data": {}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	_, err := c.TransferFromSubAccount(t.Context(), "sub-acct-uuid-001", NombaTransferRequest{
-		Amount:        100.0,
-		AccountNumber: "0123456789",
-		AccountName:   "JOHN DOE",
-		BankCode:      "058",
-		MerchantTxRef: "trade-sub-003",
-		SenderName:    "TSA Merchant",
-	})
-	if err == nil {
-		t.Fatal("expected error for status:false, got nil")
-	}
-	if !strings.Contains(err.Error(), "sub-account transfer rejected") {
-		t.Errorf("error should contain Nomba's message; got: %v", err)
-	}
-}
-
-func TestNombaClient_TransferFromSubAccount_EmptyID(t *testing.T) {
-	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
-		"/v2/transfers/bank": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{
-				"code": "200",
-				"description": "SUCCESS",
-				"message": "Success",
-				"status": true,
-				"data": {
-					"id": "",
-					"status": "SUCCESS"
-				}
-			}`)
-		},
-	})
-
-	c := newTestNombaClient(srv.URL)
-	_, err := c.TransferFromSubAccount(t.Context(), "sub-acct-uuid-001", NombaTransferRequest{
-		Amount:        100.0,
-		AccountNumber: "0123456789",
-		AccountName:   "JOHN DOE",
-		BankCode:      "058",
-		MerchantTxRef: "trade-sub-004",
-		SenderName:    "TSA Merchant",
-	})
-	if err == nil {
-		t.Fatal("expected error for empty transfer id, got nil")
-	}
-	if !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error should mention empty id; got: %v", err)
 	}
 }

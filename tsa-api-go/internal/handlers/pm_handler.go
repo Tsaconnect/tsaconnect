@@ -48,6 +48,7 @@ type pmListItem struct {
 	ProvisioningStatus      string  `json:"provisioningStatus"`
 	InboundAccountNumber    string  `json:"inboundAccountNumber"`
 	NombaWalletID           string  `json:"nombaWalletId"`
+	NombaAccountRef         string  `json:"nombaAccountRef"`
 	AvailableNGN            string  `json:"availableNgn"`
 	ReservedNGN             string  `json:"reservedNgn"`
 	PerTradeCapUSD          float64 `json:"perTradeCapUsd"`
@@ -79,6 +80,7 @@ func (h *PMHandler) ListPMs(c *gin.Context) {
 			ProvisioningStatus:      p.ProvisioningStatus,
 			InboundAccountNumber:    p.InboundAccountNumber,
 			NombaWalletID:           p.NombaWalletID,
+			NombaAccountRef:         p.NombaAccountRef,
 			AvailableNGN:            p.AvailableNGN,
 			ReservedNGN:             p.ReservedNGN,
 			PerTradeCapUSD:          p.PerTradeCapUSD,

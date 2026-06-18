@@ -29,9 +29,10 @@ func NewNombaHTTPGateway(client *NombaClient) *NombaHTTPGateway {
 // and "PENDING_BILLING" responses are accepted — the final status arrives via the
 // payout webhook. An empty id from Nomba is treated as an error (defense-in-depth).
 //
-// When req.SubAccountID is non-empty the transfer is debited from the PM's own
-// Nomba sub-account (TransferFromSubAccount); otherwise the parent TSA account is
-// debited (Transfer) — preserving back-compat for single-TSA paths.
+// VA-only model: ALL payouts (sell + withdrawal) are debited from TSA's single
+// parent Nomba account via client.Transfer. req.SubAccountID is ignored (the
+// per-PM sub-account routing is gone — corporate PMs are virtual accounts, not
+// sub-accounts).
 func (g *NombaHTTPGateway) InitiatePayout(ctx context.Context, req PayoutRequest) (string, error) {
 	amount, err := strconv.ParseFloat(strings.TrimSpace(req.AmountNGN), 64)
 	if err != nil {
@@ -46,12 +47,7 @@ func (g *NombaHTTPGateway) InitiatePayout(ctx context.Context, req PayoutRequest
 		SenderName:    req.SenderName,
 		Narration:     "TSA P2P payout",
 	}
-	var res NombaTransferResult
-	if req.SubAccountID != "" {
-		res, err = g.client.TransferFromSubAccount(ctx, req.SubAccountID, transferReq)
-	} else {
-		res, err = g.client.Transfer(ctx, transferReq)
-	}
+	res, err := g.client.Transfer(ctx, transferReq)
 	if err != nil {
 		return "", err
 	}

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -52,6 +53,26 @@ func (s *PMService) GetByWalletID(ctx context.Context, walletID string) (*models
 	return &pm, nil
 }
 
+// GetByAccountRef looks up the PM by its Nomba virtual-account reference
+// (NombaAccountRef). This is the VA-model inbound match key: a settled credit
+// into a PM's VA is attributed back by accountRef. An empty ref is rejected with
+// ErrPMNotFound up front — an empty accountRef must NEVER match an arbitrary PM
+// row (mirroring the GetByWalletID empty guard). Returns ErrPMNotFound on miss.
+func (s *PMService) GetByAccountRef(ctx context.Context, ref string) (*models.PaymentMerchant, error) {
+	if ref == "" {
+		return nil, ErrPMNotFound
+	}
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).First(&pm, "nomba_account_ref = ?", ref).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPMNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
 // GetActiveByUserID looks up the ACTIVE PaymentMerchant whose UserID matches
 // the given user. Non-active rows (pending, paused) are not returned.
 // Returns ErrPMNotFound when no active PM row exists for the user.
@@ -89,18 +110,50 @@ func WithinPerTradeCap(pm *models.PaymentMerchant, usd float64) bool {
 	return pm.PerTradeCapUSD == 0 || usd <= pm.PerTradeCapUSD
 }
 
-// ListActiveWithSubAccount returns every active PM that has a Nomba sub-account
-// id configured — the rows the NGN reconciler compares against Nomba. PMs
-// without a sub-account id are excluded (nothing to compare against).
-func (s *PMService) ListActiveWithSubAccount(ctx context.Context) ([]models.PaymentMerchant, error) {
+// SumActiveAvailableNGN returns the SUM of available_ngn over all ACTIVE PMs as
+// a 2-dp NGN decimal string, plus the count of active PMs summed. Under the
+// VA-only model the NGN reconciler compares this aggregate against the single
+// parent Nomba balance (Σ ledgers vs parent), rather than per-PM sub-account
+// balances. An empty/zero table yields ("0.00", 0). Summation is done in integer
+// kobo to avoid float drift; an unparseable available_ngn row is skipped (and
+// reflected in a lower count) rather than corrupting the sum.
+func (s *PMService) SumActiveAvailableNGN(ctx context.Context) (sumNGN string, count int, err error) {
 	var pms []models.PaymentMerchant
 	if err := s.db.WithContext(ctx).
 		Where("status = ?", models.PaymentMerchantStatusActive).
-		Where("nomba_sub_account_id IS NOT NULL AND nomba_sub_account_id <> ?", "").
 		Find(&pms).Error; err != nil {
-		return nil, err
+		return "", 0, err
 	}
-	return pms, nil
+	var totalKobo int64
+	for i := range pms {
+		k, ok := sumKoboParse(pms[i].AvailableNGN)
+		if !ok {
+			continue // skip unparseable; do not corrupt the aggregate
+		}
+		totalKobo += k
+		count++
+	}
+	return koboToNGNString(totalKobo), count, nil
+}
+
+// sumKoboParse parses a 2-dp NGN decimal string into integer kobo (naira×100),
+// truncating to 2dp. Returns ok=false on empty/non-numeric/negative input. A
+// local copy of the matcher's ngnToKobo kept beside its sole caller.
+func sumKoboParse(s string) (int64, bool) { return ngnToKobo(s) }
+
+// koboToNGNString renders integer kobo back to a 2-dp NGN decimal string.
+func koboToNGNString(kobo int64) string {
+	neg := kobo < 0
+	if neg {
+		kobo = -kobo
+	}
+	whole := kobo / 100
+	frac := kobo % 100
+	out := fmt.Sprintf("%d.%02d", whole, frac)
+	if neg {
+		out = "-" + out
+	}
+	return out
 }
 
 // ListAll returns every PaymentMerchant row ordered by created_at DESC.

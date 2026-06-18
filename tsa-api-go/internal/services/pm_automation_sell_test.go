@@ -403,10 +403,10 @@ func seedSellTradeOnPMAd(t *testing.T, db *gorm.DB, pmID, buyerID, sellerID uuid
 	return trade
 }
 
-// TestInitiateSellPayout_PMTrade_UsesSubAccountID verifies that for a sell trade
-// on a PM ad, InitiateSellPayout resolves the PM, sets SubAccountID =
-// pm.NombaSubAccountID, and sets SenderName = pm.Name on the gateway request.
-func TestInitiateSellPayout_PMTrade_UsesSubAccountID(t *testing.T) {
+// TestInitiateSellPayout_PMTrade_ParentWithPMSender verifies the VA-only model:
+// for a sell trade on a PM ad, InitiateSellPayout debits the parent account (no
+// SubAccountID set) but stamps SenderName = pm.Name on the gateway request.
+func TestInitiateSellPayout_PMTrade_ParentWithPMSender(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)
 	svc, _, _ := newService(t, db)
@@ -428,9 +428,9 @@ func TestInitiateSellPayout_PMTrade_UsesSubAccountID(t *testing.T) {
 		t.Fatalf("gateway called %d times, want 1", len(gw.calls))
 	}
 	call := gw.calls[0]
-	// SubAccountID must match the PM's sub-account id.
-	if call.SubAccountID != "sub-acct-pm-42" {
-		t.Errorf("SubAccountID = %q, want sub-acct-pm-42", call.SubAccountID)
+	// VA model: no sub-account routing — SubAccountID must stay empty (parent debit).
+	if call.SubAccountID != "" {
+		t.Errorf("SubAccountID = %q, want empty (VA model debits parent)", call.SubAccountID)
 	}
 	// SenderName must be the PM's name, not the service-level senderName.
 	if call.SenderName != "Acme Merchants Ltd" {
