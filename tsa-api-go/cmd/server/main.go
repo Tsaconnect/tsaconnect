@@ -429,6 +429,15 @@ func main() {
 	// With none of the PM env set the server boots with all of these nil and the
 	// PM routes either don't register (admin) or 503 (webhook).
 	pmSvc := services.NewPMService(config.DB)
+	// Wire the active-PM lookup into the merchant-request handler so the PM-upgrade
+	// submit guard runs in PRODUCTION (active PM → 400 "You are already a payment
+	// merchant"), not just in tests. Without this, an already-active PM submitting a
+	// p2p_merchant body would instead hit the duplicate-request check with a
+	// different message. pmSvc is constructed unconditionally, so this preserves
+	// dormant-by-default: GetActiveByUserID returns ErrPMNotFound when no PM exists
+	// and the submit proceeds normally.
+	mrh.PMService = pmSvc
+	log.Printf("[pm] merchant-request handler wired with active-PM guard")
 	// Wire the PM NGN ledger into the trade service so PM sell-opens reserve the
 	// fiat payout from the PM's NGN (and cancels release it). nil-safe: when P2P
 	// is dormant p2pTradeSvc is nil and this is skipped.
