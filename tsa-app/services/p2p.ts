@@ -962,6 +962,33 @@ export const pmAdminApi = {
     ),
 };
 
+// ─── PM user-facing read ─────────────────────────────────────────────────────
+
+export interface MyPmStatus {
+  isPm: boolean;
+  status: string;
+}
+
+/**
+ * Read the current user's PM status from GET /p2p/pm/me.
+ *
+ * Returns { isPm, status } on success. On ANY error (network, 401, non-200)
+ * returns { isPm: false, status: '' } — never throws to the UI. The route is
+ * dormant-safe: if the PM/Nomba stack is unconfigured the backend returns
+ * 200 { isPm: false } rather than 503, so this function always resolves.
+ */
+export async function getMyPmStatus(): Promise<MyPmStatus> {
+  try {
+    const res = await request<{ isPm: boolean; status: string }>('GET', '/p2p/pm/me');
+    if (res.success && res.data != null) {
+      return { isPm: !!res.data.isPm, status: res.data.status ?? '' };
+    }
+    return { isPm: false, status: '' };
+  } catch {
+    return { isPm: false, status: '' };
+  }
+}
+
 // ─── Sellers ────────────────────────────────────────────────────────────────
 
 export const sellersApi = {

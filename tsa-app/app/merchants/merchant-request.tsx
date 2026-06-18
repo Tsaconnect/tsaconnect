@@ -28,7 +28,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Stack, router } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
@@ -86,14 +86,36 @@ export function validatePmFields(fields: PmFields): PmValidationErrors {
   return errors;
 }
 
+// ─── PM entry-point param helpers (exported for tests) ───────────────────────
+
+/**
+ * Returns the initial businessType state value from the URL `type` param.
+ * When `type === 'p2p_merchant'` the form opens in locked PM mode; all other
+ * values (including absent) default to `'general_products'`.
+ */
+export function initBusinessType(type: string | undefined): string {
+  return type === 'p2p_merchant' ? 'p2p_merchant' : 'general_products';
+}
+
+/**
+ * Returns true when the business-type picker should be locked to a single
+ * static "P2P Merchant" chip (no `onPress`). This happens when the form was
+ * reached via a `?type=p2p_merchant` URL param — the user explicitly chose
+ * the PM path, so we prevent switching away.
+ */
+export function isPickerLocked(type: string | undefined): boolean {
+  return type === 'p2p_merchant';
+}
+
 export default function MerchantRequestScreen() {
   const { colors, spacing } = useTheme();
   const { currentUser } = useAuth();
+  const { type } = useLocalSearchParams<{ type?: string }>();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [existingRequest, setExistingRequest] = useState<any>(null);
 
-  const [businessType, setBusinessType] = useState('general_products');
+  const [businessType, setBusinessType] = useState(() => initBusinessType(type));
   const [businessName, setBusinessName] = useState('');
   const [businessDescription, setBusinessDescription] = useState('');
   const [address, setAddress] = useState('');
@@ -380,16 +402,27 @@ export default function MerchantRequestScreen() {
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
             Business Type *
           </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-            {BUSINESS_TYPES.map((bt) => (
+          {isPickerLocked(type) ? (
+            // Locked single-chip: entered via ?type=p2p_merchant — cannot be changed.
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
               <Chip
-                key={bt.value}
-                label={bt.label}
-                selected={businessType === bt.value}
-                onPress={() => setBusinessType(bt.value)}
+                label="P2P Merchant"
+                selected
               />
-            ))}
-          </View>
+            </View>
+          ) : (
+            // Normal selectable chip row (no type param).
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+              {BUSINESS_TYPES.map((bt) => (
+                <Chip
+                  key={bt.value}
+                  label={bt.label}
+                  selected={businessType === bt.value}
+                  onPress={() => setBusinessType(bt.value)}
+                />
+              ))}
+            </View>
+          )}
 
           <Field
             ref={businessNameRef}

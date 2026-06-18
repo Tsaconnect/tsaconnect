@@ -446,6 +446,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
+	// User PM-status read — dormant-safe, always registered so the app can
+	// gate "Become a PM" CTAs even when the PM/Nomba stack is unconfigured.
+	// When pmh is nil (dormant) the inline wrapper returns {isPm:false} 200.
+	{
+		p2pUserGroup := api.Group("/p2p")
+		p2pUserGroup.Use(auth)
+		p2pUserGroup.GET("/pm/me", func(c *gin.Context) {
+			if pmh == nil {
+				// Dormant path handled inline so the route exists even when the
+				// PM handler was never constructed.
+				c.JSON(http.StatusOK, gin.H{"success": true, "message": "PM status", "data": gin.H{"isPm": false, "status": ""}})
+				return
+			}
+			pmh.GetMyPMStatus(c)
+		})
+	}
+
 	// Nomba-backed Nigerian bank directory + name enquiry. Registered as
 	// long as Nomba credentials are configured, even when the P2P escrow
 	// contract isn't deployed — the form for adding a payment method
