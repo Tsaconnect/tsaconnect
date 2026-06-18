@@ -10,6 +10,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // FeeRateIntentService is the off-chain authoring + plan/apply engine for
@@ -582,14 +583,25 @@ func (s *FeeRateIntentService) inScopeChainsConfirmedTx(db *gorm.DB, global *mod
 // Cancel marks the intent (and its sibling override rows) cancelled, allowed
 // only while NOT fully applied (design §5). Returns an error if already applied.
 func (s *FeeRateIntentService) Cancel(intentID uuid.UUID) error {
-	global, err := s.Get(intentID)
-	if err != nil {
-		return err
-	}
-	if global.State == models.FeeRateIntentApplied {
-		return fmt.Errorf("intent %s is already fully applied; cannot cancel", intentID)
-	}
-	return s.db.Model(&models.FeeRateIntent{}).
-		Where("feature = ? AND token = ?", global.Feature, global.Token).
-		Update("state", models.FeeRateIntentCancelled).Error
+	// One transaction so the read-check and the bulk update can't race a
+	// concurrent ConfirmChain (which would otherwise apply a sibling row between
+	// our Get and Update). FOR UPDATE on the summary row serializes cancels.
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var global models.FeeRateIntent
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&global, "id = ?", intentID).Error; err != nil {
+			return err
+		}
+		if global.State == models.FeeRateIntentApplied {
+			return fmt.Errorf("intent %s is already fully applied; cannot cancel", intentID)
+		}
+		// Cancel only NOT-yet-applied rows. An applied per-chain override is live
+		// on-chain and reflected in the replica; flipping its intent row to
+		// cancelled would desync the ledger from on-chain truth. Leave it; only
+		// the pending/planned siblings are cancellable.
+		return tx.Model(&models.FeeRateIntent{}).
+			Where("feature = ? AND token = ? AND state <> ?",
+				global.Feature, global.Token, models.FeeRateIntentApplied).
+			Update("state", models.FeeRateIntentCancelled).Error
+	})
 }

@@ -330,6 +330,54 @@ func TestBuildDistribution_ExcludesNoWallet(t *testing.T) {
 	}
 }
 
+// TestBuildDistribution_ExcludesSoftDeleted asserts a soft-deleted user (deleted_at
+// set, but still account_status=active and eligible per the gate) NEVER gets a
+// merkle leaf — User.DeletedAt is a plain *time.Time, so the build query must
+// filter deleted_at IS NULL explicitly. Without it a deleted account could claim.
+func TestBuildDistribution_ExcludesSoftDeleted(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	live := mkMerkleUser(t, db, walletA, 100)
+	deleted := mkMerkleUser(t, db, walletB, 250)
+	// Soft-delete the second user, leaving account_status active (the hole this
+	// guards: deletion that sets deleted_at but not status).
+	if err := db.Model(&models.User{}).Where("id = ?", deleted).
+		Update("deleted_at", time.Now()).Error; err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	// fakeEligibility (nil map) deems everyone eligible, so this isolates the
+	// build-query defense-in-depth (not the eligibility gate).
+	svc := NewRewardMerkleService(db, &fakeEligibility{}, "0xdist0000000000000000000000000000000000a1", 146)
+	build, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if build.Distribution.LeafCount != 1 || build.Entries[0].UserID != live {
+		t.Fatalf("expected only the live user, got leafCount=%d entries=%+v", build.Distribution.LeafCount, build.Entries)
+	}
+}
+
+// TestBuildDistribution_ExcludesDuplicateWallet asserts that when two eligible
+// users share one wallet address, BOTH are excluded — the on-chain claimed[]
+// mapping is keyed by address, so two leaves for one address are an ambiguous
+// proof / double-claim. A third user on a unique wallet is unaffected.
+func TestBuildDistribution_ExcludesDuplicateWallet(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	const shared = "0x3333333333333333333333333333333333333333"
+	mkMerkleUser(t, db, shared, 100) // dup A
+	mkMerkleUser(t, db, shared, 250) // dup B (same wallet)
+	unique := mkMerkleUser(t, db, walletA, 75)
+
+	svc := NewRewardMerkleService(db, &fakeEligibility{}, "0xdist0000000000000000000000000000000000a1", 146)
+	build, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if build.Distribution.LeafCount != 1 || build.Entries[0].UserID != unique {
+		t.Fatalf("expected only the unique-wallet user, got leafCount=%d entries=%+v", build.Distribution.LeafCount, build.Entries)
+	}
+}
+
 // TestBuildDistribution_RootMatchesIndependentTree builds a distribution and
 // verifies the persisted root equals an independently-built tree over the same
 // leaves — and that each persisted proof verifies against the root.
@@ -524,6 +572,7 @@ func TestClaimData_IncludedAndExcluded(t *testing.T) {
 	}
 
 	// Admin confirms the root on-chain → the epoch is now the live published root.
+	svc.SetPublishVerifier(okPublishVerifier{root: build.Distribution.MerkleRoot})
 	if err := svc.MarkPublished(context.Background(), build.Distribution.Epoch, "0xtxhash"); err != nil {
 		t.Fatalf("mark published: %v", err)
 	}
@@ -640,6 +689,7 @@ func TestPrepareClaimForUser_EncodesClaimTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	svc.SetPublishVerifier(okPublishVerifier{root: build.Distribution.MerkleRoot})
 	if err := svc.MarkPublished(context.Background(), build.Distribution.Epoch, "0xtxhash"); err != nil {
 		t.Fatalf("mark published: %v", err)
 	}
@@ -733,6 +783,7 @@ func TestClaimData_GatesOnRemainingClaimable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	svc.SetPublishVerifier(okPublishVerifier{root: build.Distribution.MerkleRoot})
 	if err := svc.MarkPublished(context.Background(), build.Distribution.Epoch, "0xtxhash"); err != nil {
 		t.Fatalf("mark published: %v", err)
 	}

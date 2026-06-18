@@ -407,6 +407,27 @@ describe("FeeManager ⇄ Escrows (A1 live-read + legacySplitEnabled)", () => {
         ctx.escrow.connect(ctx.bob).openTrade(ethers.id("gastoohigh"), v, sig, ethers.parseUnits("100", 18))
       ).to.be.revertedWithCustomError(ctx.escrow, "SnapshotFeeTooHigh");
     });
+
+    it("a combined platform+gas above MAX_FEE_BPS (500) reverts even when each leg is within its own cap", async () => {
+      // Each leg is <= its per-leg cap (300) but the TOTAL (300+300=600) exceeds
+      // MAX_FEE_BPS (500) — the contract must not let a buyer be charged 6%.
+      const [owner] = await ethers.getSigners();
+      const ctx = await deployP2PV3();
+      const fm = await deployFeeManager(owner);
+      await ctx.escrow.connect(owner).setFeeManager(await fm.getAddress());
+
+      await fm.connect(owner).setRate("p2p_platform", "USDT", rate(300, 0, false, true)); // == cap
+      await fm.connect(owner).setRate("p2p", "USDT", rate(300, 0, false, true)); // == cap; sum 600 > 500
+
+      const dep = ethers.parseUnits("1000", 18);
+      await ctx.token.connect(ctx.alice).approve(await ctx.escrow.getAddress(), dep);
+      await ctx.escrow.connect(ctx.alice).deposit(await ctx.token.getAddress(), dep);
+      const v = makeVoucher(ctx.alice.address, await ctx.token.getAddress());
+      const sig = await signVoucher(ctx.escrow, ctx.alice, v);
+      await expect(
+        ctx.escrow.connect(ctx.bob).openTrade(ethers.id("combinedtoohigh"), v, sig, ethers.parseUnits("100", 18))
+      ).to.be.revertedWithCustomError(ctx.escrow, "SnapshotFeeTooHigh");
+    });
   });
 
   // ── (4) Product: legacySplitEnabled true reproduces today; false = 100% to owner ──

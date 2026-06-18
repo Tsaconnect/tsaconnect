@@ -676,3 +676,46 @@ func TestPendingUserGlobalShare_NewUserAndErrors(t *testing.T) {
 		t.Fatalf("expected error on nil user id")
 	}
 }
+
+// TestStrandedGlobalTP_CountsOnlySoftDeletedOwed verifies the drift gauge sums
+// the owed global TP of SOFT-DELETED users (currentIndex − checkpoint) and
+// excludes live users (whose owed is still claimable, not stranded).
+func TestStrandedGlobalTP_CountsOnlySoftDeletedOwed(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+	ctx := context.Background()
+	scale := float64(models.GlobalTPIndexScale)
+
+	// Pool cumulative index at 3.0 TP.
+	seedGlobalPool(t, db, 0)
+	if err := db.Model(&models.GlobalTPPool{}).
+		Where("singleton = ?", models.GlobalTPPoolSingletonID).
+		Update("per_user_index_scaled", int64(3*scale)).Error; err != nil {
+		t.Fatalf("set index: %v", err)
+	}
+
+	// Soft-deleted user checkpointed at 1.0 → owed (3−1)=2.0 TP is STRANDED.
+	del := mkFeeUser(t, db, "del", nil, models.AccountStatusActive)
+	if err := db.Model(&models.User{}).Where("id = ?", del.ID).
+		Updates(map[string]interface{}{
+			"last_settled_global_index": int64(1 * scale),
+			"deleted_at":                time.Now(),
+		}).Error; err != nil {
+		t.Fatalf("setup deleted: %v", err)
+	}
+
+	// Live user checkpointed at 1.0 → also owed 2.0 but still claimable, NOT counted.
+	live := mkFeeUser(t, db, "live", nil, models.AccountStatusActive)
+	if err := db.Model(&models.User{}).Where("id = ?", live.ID).
+		Update("last_settled_global_index", int64(1*scale)).Error; err != nil {
+		t.Fatalf("setup live: %v", err)
+	}
+
+	stranded, err := svc.StrandedGlobalTP(ctx)
+	if err != nil {
+		t.Fatalf("stranded: %v", err)
+	}
+	if math.Abs(stranded-2.0) > 1e-9 {
+		t.Fatalf("stranded = %v, want 2.0 (only the soft-deleted user's owed)", stranded)
+	}
+}

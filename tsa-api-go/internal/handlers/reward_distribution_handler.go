@@ -93,11 +93,16 @@ func (h *RewardDistributionHandler) ListDistributions(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Reward distributor not configured")
 		return
 	}
+	const maxLimit = 500
 	limit := 100
 	if v := strings.TrimSpace(c.Query("limit")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit // enforce the documented cap; an unbounded limit lets a
+		// privileged caller pull the whole table into memory.
 	}
 	rows, err := h.merkle.ListDistributions(c.Request.Context(), limit)
 	if err != nil {

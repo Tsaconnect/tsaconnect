@@ -108,6 +108,28 @@ func TestEligibility_VerifiedClean_Eligible(t *testing.T) {
 	}
 }
 
+// TestEligibility_SoftDeleted_Ineligible: a soft-deleted user (deleted_at set)
+// that is otherwise verified + active must be rejected. User.DeletedAt is a
+// plain *time.Time, so GORM's soft-delete scope does NOT auto-exclude it — the
+// gate must check deleted_at explicitly, else a deleted account could claim.
+func TestEligibility_SoftDeleted_Ineligible(t *testing.T) {
+	svc, db := newEligTestService(t)
+
+	u := mkVerifiedUser(t, db, "deleted_user", nil)
+	if err := db.Model(&models.User{}).Where("id = ?", u.ID).
+		Update("deleted_at", time.Now()).Error; err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	eligible, reasons, err := svc.IsClaimEligible(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("IsClaimEligible: %v", err)
+	}
+	if eligible {
+		t.Fatalf("a soft-deleted user must be ineligible; got eligible (reasons %v)", reasons)
+	}
+}
+
 // TestEligibility_VerifiedValueIsReal pins that the gate accepts ONLY the real
 // approved constant. A user set to any other status (e.g. "approved", a common
 // wrong guess) must remain ineligible.

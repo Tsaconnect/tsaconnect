@@ -11,14 +11,21 @@ import (
 
 // fakeSettler records calls and returns a canned result/error.
 type fakeSettler struct {
-	calls  int
-	result services.GlobalSettlementResult
-	err    error
+	calls         int
+	result        services.GlobalSettlementResult
+	err           error
+	strandedTP    float64
+	strandedCalls int
 }
 
 func (f *fakeSettler) SettleGlobalPoolEpoch(_ context.Context) (services.GlobalSettlementResult, error) {
 	f.calls++
 	return f.result, f.err
+}
+
+func (f *fakeSettler) StrandedGlobalTP(_ context.Context) (float64, error) {
+	f.strandedCalls++
+	return f.strandedTP, nil
 }
 
 func TestGlobalPoolSettler_RunDelegates(t *testing.T) {

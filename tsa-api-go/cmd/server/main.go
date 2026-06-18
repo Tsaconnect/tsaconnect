@@ -191,10 +191,19 @@ func main() {
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
 
 	// Wire the fee/TP engine (SP3) into the fiat/on-chain fee-settled handlers.
-	// Each site routes through handlers.settleFeeEarnings.
-	h.FeeService = feeDistributionService
-	ch.FeeService = feeDistributionService
-	sch.FeeService = feeDistributionService
+	// Each site routes through handlers.settleFeeEarnings. GATED on the v2
+	// kill-switch: when FEE_MODEL_V2_ENABLED is OFF (default) these stay nil and
+	// every live charge path no-ops the engine, behaving exactly as v1. The
+	// reward subsystem (SP4/SP5/SP6) keeps its dependency on the constructed
+	// service but is independently dormant (no accrual ⇒ nothing to compute).
+	if cfg.FeeModelV2Enabled {
+		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=true — wiring the v2 fee/TP engine into live charge paths")
+		h.FeeService = feeDistributionService
+		ch.FeeService = feeDistributionService
+		sch.FeeService = feeDistributionService
+	} else {
+		log.Printf("[fee-v2] FEE_MODEL_V2_ENABLED=false — v2 fee/TP engine DORMANT; live fee paths run v1 behavior")
+	}
 	// SP7 — make the claim-eligibility gate available to the signup velocity hook.
 	h.EligibilityService = rewardEligibilityService
 	// PMOnboarding is wired below after nombaClient is initialised; pass nil for now.
@@ -204,7 +213,9 @@ func main() {
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
 	slh.Config = cfg
-	slh.FeeService = feeDistributionService
+	if cfg.FeeModelV2Enabled {
+		slh.FeeService = feeDistributionService
+	}
 	psh := handlers.NewPrivateSaleHandler(config.DB, emailService, cfg)
 	fch := handlers.NewFeeConfigHandler(config.DB, feeConfigService, cfg)
 
@@ -225,8 +236,10 @@ func main() {
 	// §5/§10). DORMANT-BY-DEFAULT: a multi-chain FeeManager reader is built only
 	// over the configured FeeManagerChains that also have a reachable RPC client.
 	// With no FeeManager chain configured the reader is nil → the admin endpoints
-	// surface "not configured" and the reconciler no-ops (gated like other dormant
-	// integrations). The endpoints stay 409-gated on FEE_MODEL_V2_ENABLED too.
+	// surface "not configured" (503) and the reconciler no-ops (gated like other
+	// dormant integrations). NOTE: these admin endpoints are gated by FeeManager
+	// chain configuration, NOT by FEE_MODEL_V2_ENABLED — the v2 kill-switch only
+	// governs whether the engine is wired into live charge paths.
 	var feeManagerReader services.FeeManagerChainReader
 	if len(cfg.FeeManagerChains) > 0 {
 		rpcByChain := map[int64]services.FeeManagerRPCClient{}
@@ -382,8 +395,11 @@ func main() {
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.
 		// Every release transition (ConfirmRelease, reconciler auto-release,
-		// adminResolve→buyer) accrues the realized on-chain fee through a single seam.
-		p2pTradeSvc.SetFeeService(feeDistributionService)
+		// adminResolve→buyer) accrues the realized on-chain fee through a single
+		// seam. Gated on the v2 kill-switch (dormant by default).
+		if cfg.FeeModelV2Enabled {
+			p2pTradeSvc.SetFeeService(feeDistributionService)
+		}
 		// Chat service — system messages auto-emitted on every trade
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)

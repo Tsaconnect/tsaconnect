@@ -28,6 +28,12 @@ type FeeManagerReconcileResult struct {
 	Refreshed int
 	// ReadErrors is how many on-chain reads failed (last-known-good kept; escalated).
 	ReadErrors int
+	// RefreshErrors is how many replica REWRITES failed after a successful on-chain
+	// read (drift detected but the replica could not be updated). Tracked apart
+	// from ReadErrors so a persistently failing replica write — which keeps the
+	// charge path on a stale rate and never converges — is visible as a WRITE
+	// problem rather than being miscounted as a read failure.
+	RefreshErrors int
 }
 
 // fmReconcileFeatures is the canonical set of (feature, token) replica keys the
@@ -137,7 +143,7 @@ func (s *FeeConfigService) ReconcileChains(ctx context.Context, cfg *config.Conf
 				onchain.BPS, onchain.FlatUSD, onchain.MCGPExempt, onchain.Active)
 
 			if err := s.RefreshFromConfirmedRate(k.feature, k.token, &cid, onchain.BPS, flatUnitsToUSD(onchain.FlatUSD), onchain.MCGPExempt, onchain.Active); err != nil {
-				res.ReadErrors++
+				res.RefreshErrors++
 				fmReconcileLog("fee_rate_refresh_error_total=1 chain=%d feature=%s token=%s err=%v (replica NOT updated; keeping last-known-good)",
 					chainID, k.feature, k.token, err)
 				continue

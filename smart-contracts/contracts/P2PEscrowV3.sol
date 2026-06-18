@@ -397,6 +397,13 @@ contract P2PEscrowV3 is
         // active==false → not configured → fall back to legacy rather than charge 0 silently.
         platformBps = !pActive ? legacyPlatform : ((isMcgp && pExempt) ? 0 : pBps);
         gasBps = !gActive ? 0 : ((isMcgp && gExempt) ? 0 : gBps);
+
+        // Combined ceiling. The per-leg caps above (300+300) sum to 600 bps, which
+        // would let a misconfigured FeeManager charge a buyer 6% — breaking the
+        // contract's own MAX_FEE_BPS (5%) guarantee that the legacy setFeeBps path
+        // enforces. Bound the TOTAL snapshot (including any legacy fallback) so no
+        // trade can ever release above MAX_FEE_BPS regardless of FeeManager config.
+        if (uint256(platformBps) + uint256(gasBps) > MAX_FEE_BPS) revert SnapshotFeeTooHigh();
     }
 
     /// @dev Snapshot the live fee bps and write a fresh Pending trade. Shared by all open paths so

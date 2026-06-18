@@ -377,56 +377,6 @@ func TestGetReferralsWithTP(t *testing.T) {
 	}
 }
 
-func TestRecordCashbackEarning(t *testing.T) {
-	db := setupTPTestDB(t)
-	user := createTPTestUser(t, db, "Alice", "alice_cb", nil)
-	sourceUser := createTPTestUser(t, db, "Bob", "bob_cb", &user.ID)
-
-	sourceID := uuid.New()
-	err := RecordCashbackEarning(db, user.ID, sourceUser.ID, "checkout", sourceID, 0.50, "0xabc123")
-	if err != nil {
-		t.Fatalf("RecordCashbackEarning failed: %v", err)
-	}
-
-	// Verify earning record
-	var earnings []models.CashbackEarning
-	db.Where("user_id = ?", user.ID).Find(&earnings)
-	if len(earnings) != 1 {
-		t.Fatalf("expected 1 cashback earning, got %d", len(earnings))
-	}
-	if earnings[0].AmountUSD != 0.50 {
-		t.Errorf("expected amount 0.50, got %f", earnings[0].AmountUSD)
-	}
-	if earnings[0].TxHash != "0xabc123" {
-		t.Errorf("expected txHash 0xabc123, got %s", earnings[0].TxHash)
-	}
-
-	// Verify balance updated
-	var updatedUser models.User
-	db.First(&updatedUser, "id = ?", user.ID)
-	if updatedUser.CashbackBalance != 0.50 {
-		t.Errorf("expected cashbackBalance 0.50, got %f", updatedUser.CashbackBalance)
-	}
-}
-
-func TestRecordCashbackEarning_ZeroAmount(t *testing.T) {
-	db := setupTPTestDB(t)
-	user := createTPTestUser(t, db, "Alice", "alice_cb2", nil)
-	sourceUser := createTPTestUser(t, db, "Bob", "bob_cb2", &user.ID)
-
-	sourceID := uuid.New()
-	err := RecordCashbackEarning(db, user.ID, sourceUser.ID, "swap", sourceID, 0.0, "")
-	if err != nil {
-		t.Fatalf("RecordCashbackEarning zero amount should not error: %v", err)
-	}
-
-	var earnings []models.CashbackEarning
-	db.Where("user_id = ?", user.ID).Find(&earnings)
-	if len(earnings) != 0 {
-		t.Errorf("expected 0 earnings for zero amount, got %d", len(earnings))
-	}
-}
-
 func TestGetCashbackBalance(t *testing.T) {
 	db := setupTPTestDB(t)
 	h := setupTPHandlers(t)

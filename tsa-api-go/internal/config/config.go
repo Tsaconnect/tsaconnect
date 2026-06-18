@@ -316,6 +316,14 @@ type Config struct {
 	RewardVelocityMaxSignups int
 	RewardVelocityWindow     time.Duration
 
+	// FeeModelV2Enabled is the master kill-switch for the v2 fee/TP engine
+	// (SP3). DEFAULT OFF: until an explicit cutover, the engine is NOT wired
+	// into any live fee-settled path (checkout, withdrawal, swap, service,
+	// wallet, P2P), so those paths behave exactly as the v1 codebase did. When
+	// true, the engine is wired and the per-feature split + TP accrual go live.
+	// Set FEE_MODEL_V2_ENABLED=true only as part of the documented cutover.
+	FeeModelV2Enabled bool
+
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
 
@@ -535,6 +543,9 @@ func Load() *Config {
 	cfg.RewardVelocityEnabled = getEnvBool("REWARD_VELOCITY_ENABLED", true)
 	cfg.RewardVelocityMaxSignups = int(getEnvInt64("REWARD_VELOCITY_MAX_SIGNUPS", 20))
 	cfg.RewardVelocityWindow = getEnvDuration("REWARD_VELOCITY_WINDOW", 24*time.Hour)
+
+	// v2 fee/TP engine kill-switch — DEFAULT OFF until the documented cutover.
+	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
 
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public

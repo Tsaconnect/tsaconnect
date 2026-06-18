@@ -29,6 +29,27 @@ func (f *fakeRewardChainReader) MCGPBalanceOf(_ context.Context, _ string) (*big
 	return new(big.Int).Set(f.balance), nil
 }
 
+// okPublishVerifier is a permissive RewardPublishVerifier for fixtures: the tx
+// "succeeded" and the on-chain root matches the expected one. Configured
+// services now fail closed in MarkPublished unless a verifier is wired, so
+// fixtures that publish must supply one.
+type okPublishVerifier struct{ root string }
+
+func (v okPublishVerifier) TxSucceeded(context.Context, string) (bool, error) { return true, nil }
+func (v okPublishVerifier) OnChainMerkleRoot(context.Context, string) (string, error) {
+	return v.root, nil
+}
+
+// publishEpoch marks a built epoch published, wiring a matching verifier so the
+// configured service's fail-closed publish gate is satisfied.
+func publishEpoch(t *testing.T, svc *RewardMerkleService, b *BuildResult) {
+	t.Helper()
+	svc.SetPublishVerifier(okPublishVerifier{root: b.Distribution.MerkleRoot})
+	if err := svc.MarkPublished(context.Background(), b.Distribution.Epoch, "0xtx"); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+}
+
 // buildPublishedEpoch builds a distribution and marks it published so the
 // reconciler (which reads only PUBLISHED epochs) sees it.
 func buildPublishedEpoch(t *testing.T, svc *RewardMerkleService) *BuildResult {
@@ -37,9 +58,7 @@ func buildPublishedEpoch(t *testing.T, svc *RewardMerkleService) *BuildResult {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if err := svc.MarkPublished(context.Background(), b.Distribution.Epoch, "0xtx"); err != nil {
-		t.Fatalf("mark published: %v", err)
-	}
+	publishEpoch(t, svc, b)
 	return b
 }
 
