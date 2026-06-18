@@ -633,6 +633,141 @@ func TestPMHandler_ListPMs_NilService(t *testing.T) {
 	}
 }
 
+// ─── GetMyPMStatus ────────────────────────────────────────────────────────────
+
+// fakePMStatusGetter is a narrow fake for the PMStatusGetter interface used by
+// GetMyPMStatus; avoids depending on the full PMService.
+type fakePMStatusGetter struct {
+	pm  *models.PaymentMerchant
+	err error
+}
+
+func (f *fakePMStatusGetter) GetActiveByUserID(_ context.Context, _ uuid.UUID) (*models.PaymentMerchant, error) {
+	return f.pm, f.err
+}
+
+// buildPMStatusRouter wires a GET /p2p/pm/me route and injects the given user
+// into context (nil = unauthenticated).
+func buildPMStatusRouter(h *PMHandler, user *models.User) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	if user != nil {
+		r.Use(func(c *gin.Context) {
+			c.Set("user", user)
+			c.Next()
+		})
+	}
+	r.GET("/p2p/pm/me", h.GetMyPMStatus)
+	return r
+}
+
+func testRegularUser() *models.User {
+	return &models.User{
+		ID:    uuid.New(),
+		Name:  "Regular User",
+		Role:  models.RoleUser,
+		Email: "user@test.com",
+	}
+}
+
+// TestGetMyPMStatus_ActivePM: when the caller has an active PM, returns
+// {isPm:true, status:"active"}.
+func TestGetMyPMStatus_ActivePM(t *testing.T) {
+	user := testRegularUser()
+	activePM := &models.PaymentMerchant{
+		ID:     uuid.New(),
+		UserID: user.ID,
+		Status: models.PaymentMerchantStatusActive,
+	}
+	fake := &fakePMStatusGetter{pm: activePM, err: nil}
+	h := &PMHandler{auto: &fakePMAutomation{}, pm: nil}
+	h.pmStatus = fake
+
+	router := buildPMStatusRouter(h, user)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an object, got %T: %v", resp["data"], resp)
+	}
+	if data["isPm"] != true {
+		t.Errorf("isPm = %v, want true", data["isPm"])
+	}
+	if data["status"] != "active" {
+		t.Errorf("status = %v, want active", data["status"])
+	}
+}
+
+// TestGetMyPMStatus_NoPM: when the caller has no PM, returns
+// {isPm:false, status:""}.
+func TestGetMyPMStatus_NoPM(t *testing.T) {
+	user := testRegularUser()
+	fake := &fakePMStatusGetter{pm: nil, err: services.ErrPMNotFound}
+	h := &PMHandler{auto: &fakePMAutomation{}, pm: nil}
+	h.pmStatus = fake
+
+	router := buildPMStatusRouter(h, user)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an object, got %T: %v", resp["data"], resp)
+	}
+	if data["isPm"] != false {
+		t.Errorf("isPm = %v, want false", data["isPm"])
+	}
+	if data["status"] != "" {
+		t.Errorf("status = %v, want empty string", data["status"])
+	}
+}
+
+// TestGetMyPMStatus_NilPMService: handler constructed without a PMStatusGetter
+// (dormant/unconfigured stack) returns 200 {isPm:false} and does NOT panic/503.
+func TestGetMyPMStatus_NilPMService(t *testing.T) {
+	user := testRegularUser()
+	// pmStatus intentionally left nil — simulates dormant PM stack.
+	h := &PMHandler{auto: &fakePMAutomation{}, pm: nil}
+	// h.pmStatus is the zero value (nil)
+
+	router := buildPMStatusRouter(h, user)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for nil PMService, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be an object, got %T: %v", resp["data"], resp)
+	}
+	if data["isPm"] != false {
+		t.Errorf("isPm = %v, want false for dormant handler", data["isPm"])
+	}
+}
+
 // TestPMHandler_ListPMs_WithData seeds 2 PMs via a real PMService over SQLite
 // and verifies the JSON response contains both rows with the expected fields.
 // It also asserts that NombaCredsRef (a secret field) is NOT present in the

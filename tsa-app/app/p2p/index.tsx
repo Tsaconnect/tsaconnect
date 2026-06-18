@@ -17,6 +17,8 @@ import {
 } from '../../services/p2p';
 import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
+import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
+import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from './pm-cta';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';
@@ -66,9 +68,10 @@ const P2PMarketScreen: React.FC = () => {
   // "I want to SELL crypto" → browse buy-ads (adSide 'buy').
   // ?pm=1 → Payment Merchant mode (PM-filtered feed); absent/0 → normal P2P.
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
-  const isPM = pmParam === '1';
+  const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
   const { isMerchant, role, loading: roleLoading } = useUserRole();
+  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
   const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
@@ -123,7 +126,7 @@ const P2PMarketScreen: React.FC = () => {
       ...(chainFilter != null ? { chainId: chainFilter } : {}),
       // PM mode: include only PM ads (pm_id set). Normal P2P: exclude PM ads.
       // This keeps PM ads out of the regular feed and the PM tab out of normal P2P.
-      pm: isPM ? true : false,
+      pm: isPmView ? true : false,
     });
     if (res.success && res.data) {
       setAds(res.data);
@@ -132,7 +135,7 @@ const P2PMarketScreen: React.FC = () => {
     }
     setLoading(false);
     setRefreshing(false);
-  }, [adSide, token, currency.code, chainFilter, isPM]);
+  }, [adSide, token, currency.code, chainFilter, isPmView]);
 
   useEffect(() => {
     load();
@@ -201,9 +204,9 @@ const P2PMarketScreen: React.FC = () => {
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View style={{ flex: 1 }}>
             <Text variant="title1" weight="700">
-              {isPM ? 'Payment Merchant' : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
+              {isPmView ? 'Payment Merchant' : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
             </Text>
-            {isPM && (
+            {isPmView && (
               <Text variant="caption" color="textSecondary">
                 Instant buy / sell with verified merchants
               </Text>
@@ -242,7 +245,7 @@ const P2PMarketScreen: React.FC = () => {
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
 
-        {adSide === 'sell' && !roleLoading && !isMerchant && (
+        {adSide === 'sell' && !roleLoading && !isMerchant && !isPmView && (
           <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginBottom: spacing.lg }}>
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -253,6 +256,25 @@ const P2PMarketScreen: React.FC = () => {
                   </Text>
                   <Text variant="caption" color="textSecondary">
                     Become a merchant to publish P2P ads.
+                  </Text>
+                </View>
+                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+              </View>
+            </AccentCard>
+          </PressableScale>
+        )}
+
+        {shouldShowPmCta({ isPmView, isPm, loading: pmLoading }) && (
+          <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>
+            <AccentCard padding="md">
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="storefront" size={24} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Become a Payment Merchant
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Apply to offer instant buy & sell with NGN settlement.
                   </Text>
                 </View>
                 <Icon name="chevronRight" size={20} color={colors.textMuted} />

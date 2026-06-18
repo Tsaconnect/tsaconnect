@@ -25,18 +25,69 @@ type PMAutomation interface {
 	WithdrawToSettlement(ctx context.Context, pmID uuid.UUID, amount string) (string, error)
 }
 
+// PMStatusGetter is the narrow interface used by GetMyPMStatus to look up an
+// active PaymentMerchant by user ID. *services.PMService satisfies it; tests
+// can inject a fake without the full service graph.
+type PMStatusGetter interface {
+	GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error)
+}
+
 // PMHandler serves the PM operator endpoints (manual-release queue, release
-// action, sell-payout kick, and the read-only PM list).
+// action, sell-payout kick, and the read-only PM list) plus the dormant-safe
+// user-facing PM-status read.
 type PMHandler struct {
-	auto PMAutomation
-	pm   *services.PMService
+	auto     PMAutomation
+	pm       *services.PMService
+	pmStatus PMStatusGetter // nil when PM stack is unconfigured (dormant)
 }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
-// optional PMService for read-only PM list queries. Pass nil for pm to keep
-// the handler dormant for list operations (returns empty array instead of 500).
+// optional PMService for read-only PM list queries and the GetMyPMStatus read.
+// Pass nil for pm to keep the handler dormant for those operations.
 func NewPMHandler(auto PMAutomation, pm *services.PMService) *PMHandler {
-	return &PMHandler{auto: auto, pm: pm}
+	h := &PMHandler{auto: auto, pm: pm}
+	if pm != nil {
+		h.pmStatus = pm
+	}
+	return h
+}
+
+// pmStatusResponse is the JSON payload for GetMyPMStatus.
+type pmStatusResponse struct {
+	IsPm   bool   `json:"isPm"`
+	Status string `json:"status"`
+}
+
+// GetMyPMStatus handles GET /p2p/pm/me — returns the caller's PM status.
+// Always responds 200; {isPm:false, status:""} is the safe default for any
+// non-active / unconfigured / error case so the UI can render without
+// special-casing errors.
+func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+
+	// Dormant path: PM stack is not configured — return safe default.
+	if h.pmStatus == nil {
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
+		return
+	}
+
+	_, err := h.pmStatus.GetActiveByUserID(c.Request.Context(), user.ID)
+	if err == nil {
+		// Active PM found.
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: true, Status: "active"})
+		return
+	}
+	if errors.Is(err, services.ErrPMNotFound) {
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
+		return
+	}
+	// Unexpected error — log and fail open (UX-safe; never 503).
+	log.Printf("[pm handler] GetMyPMStatus user=%s: %v", user.ID, err)
+	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
 }
 
 // pmListItem is the safe projection returned by ListPMs — excludes secret
