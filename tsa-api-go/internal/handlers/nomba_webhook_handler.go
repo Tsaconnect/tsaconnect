@@ -76,6 +76,20 @@ func (h *NombaWebhookHandler) Handle(c *gin.Context) {
 
 	sig := c.GetHeader("nomba-signature")
 	ts := c.GetHeader("nomba-timestamp")
+
+	// Nomba's dashboard "Create webhook" performs an UNSIGNED reachability probe
+	// (a POST carrying neither nomba-signature nor nomba-timestamp) and will only
+	// save the URL if it returns 2xx. Real Nomba events ALWAYS carry both headers.
+	// Treat a header-less request as that probe: acknowledge 200 and do nothing.
+	// This is side-effect-free — we return before Record/Dispatch, so no event is
+	// ever acted on without a valid signature. A request that DOES carry a
+	// signature but fails verification still gets 401 (genuine tamper/mismatch;
+	// Nomba retries those).
+	if sig == "" && ts == "" {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "ok"})
+		return
+	}
+
 	if !h.verifier.Verify(body, sig, ts) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
 		return
