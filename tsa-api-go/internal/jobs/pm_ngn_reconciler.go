@@ -48,10 +48,20 @@ type PMNGNReconcileResult struct {
 
 // PMNGNReconciler is the corporate-PM money-safety net (design §7): once per
 // tick it compares the SUM of every active PM's off-chain NGN ledger
-// (available_ngn) against the live single-parent Nomba balance and logs drift
-// beyond a small tolerance as pm_ngn_reconciler_drift_total (mirroring
-// p2p_reconciler_drift_total). It is read-only — no ledger mutation, no
-// transfers — so a missed tick is harmless and recovered next tick.
+// (available_ngn) against the live single-parent Nomba balance and alerts when
+// the ledger overclaims — Σ available_ngn > parent balance + tolerance.
+//
+// Why only the over-credit direction?  In the commingled-parent model the parent
+// Nomba account holds ALL corporate PMs' VA-credited funds PLUS TSA's own float.
+// Therefore Σ available_ngn is normally LESS than the parent balance (the surplus
+// is TSA float), and equality can never hold. Flagging ledger < parent (i.e.
+// abs(diff) > tolerance) would fire on every tick — pure alarm fatigue — while
+// telling ops nothing useful.  The real safety invariant is: our ledgers must
+// never claim MORE than Nomba actually holds (an over-credit means we could pay
+// out funds that don't exist). Only that direction is flagged here.
+//
+// It is read-only — no ledger mutation, no transfers — so a missed tick is
+// harmless and recovered next tick.
 type PMNGNReconciler struct {
 	src      PMNGNLedgerSource
 	interval time.Duration
@@ -106,13 +116,16 @@ func (w *PMNGNReconciler) RunOnce(ctx context.Context) (PMNGNReconcileResult, er
 	}
 
 	res.Checked = 1
-	diff := ledgerKobo - parentKobo
-	if abs64(diff) > pmNGNDriftToleranceKobo {
+	// Alert only on over-credit: ledger > parent + tolerance.
+	// Under-balance (ledger < parent) is the healthy commingled state — the surplus
+	// is TSA's own float and must NOT trigger an alarm (see type doc above).
+	overCredit := ledgerKobo - parentKobo
+	if overCredit > pmNGNDriftToleranceKobo {
 		res.DriftCount = 1
 		// pm_ngn_reconciler_drift_total — log-metric token mirroring
-		// p2p_reconciler_drift_total so ops can alert on drift.
-		log.Printf("[pm-ngn-reconciler] pm_ngn_reconciler_drift_total=1 pms=%d ledgerSum=%s parent=%s diffKobo=%d",
-			count, ledgerSum, parentBal, diff)
+		// p2p_reconciler_drift_total so ops can alert on over-credit.
+		log.Printf("[pm-ngn-reconciler] pm_ngn_reconciler_drift_total=1 pms=%d ledgerSum=%s parent=%s overCreditKobo=%d",
+			count, ledgerSum, parentBal, overCredit)
 	}
 	if res.DriftCount > 0 {
 		log.Printf("[pm-ngn-reconciler] checked=%d drift=%d pms=%d", res.Checked, res.DriftCount, count)
@@ -157,9 +170,3 @@ func ngnToKoboReconcile(s string) (int64, bool) {
 	return w*100 + f, true
 }
 
-func abs64(v int64) int64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}

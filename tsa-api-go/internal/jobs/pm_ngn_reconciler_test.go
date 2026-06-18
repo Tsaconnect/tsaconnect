@@ -110,6 +110,50 @@ func TestPMNGNReconciler_SumError_Returns(t *testing.T) {
 	}
 }
 
+// TestPMNGNReconciler_LedgerLessThanParent_IsHealthy is the Prove-It test for
+// FIX 2: when Σ available_ngn is LESS than the parent balance (the normal
+// commingled-parent case — parent holds PMs' VA funds + TSA float), the
+// reconciler must NOT flag drift. Before the fix abs64(diff) > tolerance fires
+// on the negative direction, producing alarm fatigue on every tick.
+func TestPMNGNReconciler_LedgerLessThanParent_IsHealthy(t *testing.T) {
+	// Σ = 1000 NGN, parent = 3500 NGN (2500 NGN surplus = TSA float). This is the
+	// normal healthy state in a commingled-parent model.
+	src := &fakePMLedgerSource{sumNGN: "1000.00", pmCount: 1, parentNGN: "3500.00"}
+	rec := NewPMNGNReconciler(src, time.Minute)
+
+	res, err := rec.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if res.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", res.Checked)
+	}
+	// Healthy: ledger < parent → no drift (parent surplus is TSA float, not a problem).
+	if res.DriftCount != 0 {
+		t.Errorf("DriftCount = %d, want 0 (ledger < parent is healthy, must not alarm)", res.DriftCount)
+	}
+}
+
+// TestPMNGNReconciler_LedgerExceedsParent_FlagsDrift verifies the over-credit
+// direction (FIX 2): when Σ available_ngn exceeds the parent balance beyond
+// tolerance, drift IS flagged — we claim more than Nomba holds.
+func TestPMNGNReconciler_LedgerExceedsParent_FlagsDrift(t *testing.T) {
+	// Σ = 3500 NGN, parent = 1000 NGN → ledger overclaims by 2500 NGN — real danger.
+	src := &fakePMLedgerSource{sumNGN: "3500.00", pmCount: 2, parentNGN: "1000.00"}
+	rec := NewPMNGNReconciler(src, time.Minute)
+
+	res, err := rec.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if res.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", res.Checked)
+	}
+	if res.DriftCount != 1 {
+		t.Errorf("DriftCount = %d, want 1 (ledger > parent is over-credit, must alarm)", res.DriftCount)
+	}
+}
+
 func TestPMNGNReconciler_WorkerMetadata(t *testing.T) {
 	rec := NewPMNGNReconciler(&fakePMLedgerSource{parentNGN: "0.00", sumNGN: "0.00"}, 0)
 	if rec.Name() != "pm-ngn-reconciler" {
