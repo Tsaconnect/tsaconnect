@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -952,27 +951,27 @@ func newTestEventBus(t *testing.T) *events.Bus {
 
 // seedPaymentMerchant inserts a payment_merchants row for the given user with the
 // specified status (and provisioning_status set to the same value for simplicity).
-func seedPaymentMerchant(t *testing.T, db *gorm.DB, userID interface{}, status string) {
+func seedPaymentMerchant(t *testing.T, db *gorm.DB, userID uuid.UUID, status string) {
 	t.Helper()
 	id := uuid.New()
 	err := db.Exec(`INSERT INTO payment_merchants
 		(id, user_id, name, status, provisioning_status, available_ngn, reserved_ngn,
 		 per_trade_cap_usd, daily_cap_usd, created_at, updated_at)
 		VALUES (?, ?, 'Test PM', ?, ?, '0', '0', 0, 0, datetime('now'), datetime('now'))`,
-		id.String(), fmt.Sprintf("%v", userID), status, status).Error
+		id.String(), userID.String(), status, status).Error
 	if err != nil {
 		t.Fatalf("seedPaymentMerchant: %v", err)
 	}
 }
 
 // seedMerchantRequest inserts a merchant_requests row directly.
-func seedMerchantRequest(t *testing.T, db *gorm.DB, userID interface{}, businessType, status string) {
+func seedMerchantRequest(t *testing.T, db *gorm.DB, userID uuid.UUID, businessType, status string) {
 	t.Helper()
 	id := uuid.New()
 	err := db.Exec(`INSERT INTO merchant_requests
 		(id, user_id, business_type, business_name, address, city, state, country, phone, status, created_at, updated_at)
 		VALUES (?, ?, ?, 'Seed Corp', '1 Seed St', 'Lagos', 'Lagos', 'Nigeria', '+2340000000000', ?, datetime('now'), datetime('now'))`,
-		id.String(), fmt.Sprintf("%v", userID), businessType, status).Error
+		id.String(), userID.String(), businessType, status).Error
 	if err != nil {
 		t.Fatalf("seedMerchantRequest: %v", err)
 	}
@@ -1048,6 +1047,9 @@ func TestSubmitMerchantRequest_FailedProvisioningResubmitBlocked(t *testing.T) {
 	}
 
 	// Critical-2: assert exactly one payment_merchants row (no new row created).
+	// The schema's UNIQUE(user_id) is a backstop, not the thing under test — the
+	// real signal is that the type-scoped duplicate check returns 400 before the
+	// submit ever reaches PM provisioning, so no second row is even attempted.
 	var count int64
 	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user.ID).Count(&count)
 	if count != 1 {
