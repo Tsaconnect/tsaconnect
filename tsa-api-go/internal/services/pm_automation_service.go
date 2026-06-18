@@ -138,16 +138,13 @@ type inboundCandidateRow struct {
 
 // resolveInboundPM maps a settled inbound credit to its PaymentMerchant.
 //
-// Resolution policy (VA-only corporate model):
-//   - p.AccountRef non-empty → resolve ONLY via GetByAccountRef. On miss the
-//     inbound belongs to an unknown corporate PM — it is NOT the TSA parent's
-//     payment, so we must NOT fall through to the walletId path. Return
-//     ErrPMNotFound (no-op) and log. Falling through would mis-credit a
-//     corporate payment to the TSA ledger.
-//   - p.AccountRef empty → use GetByWalletID(p.WalletID). This is the
-//     single-TSA-parent path (the env-configured TSA PM keyed by its Nomba
-//     walletId). An empty accountRef is never a corporate payment, so the
-//     walletId lookup is safe here.
+// Resolution policy (accountRef-only):
+//   - p.AccountRef non-empty → resolve via GetByAccountRef. On miss the
+//     inbound belongs to an unknown corporate PM — return ErrPMNotFound (no-op)
+//     and log.
+//   - p.AccountRef empty → log and return ErrPMNotFound (no-op). An empty
+//     accountRef is never a valid corporate-PM payment; there is no walletId
+//     fallback.
 //
 // Returns ErrPMNotFound when the applicable key resolves no row.
 func (s *PMAutomationService) resolveInboundPM(ctx context.Context, p InboundPayment) (*models.PaymentMerchant, error) {
@@ -159,15 +156,13 @@ func (s *PMAutomationService) resolveInboundPM(ctx context.Context, p InboundPay
 		if !errors.Is(err, ErrPMNotFound) {
 			return nil, err
 		}
-		// accountRef present but unresolved: this payment belongs to an unknown
-		// corporate PM — it is NOT the TSA parent's payment. Do NOT fall through
-		// to the walletId path; doing so would mis-credit a corporate payment to
-		// TSA's NGN ledger. Return not-found so the caller treats it as a no-op.
-		log.Printf("[pm automation] inbound with unknown accountRef=%q (walletId=%q); not the TSA PM — ignoring", p.AccountRef, p.WalletID)
+		// accountRef present but unresolved: unknown corporate PM — no-op.
+		log.Printf("[pm automation] inbound with unknown accountRef=%q (walletId=%q); not a known corporate PM — ignoring", p.AccountRef, p.WalletID)
 		return nil, ErrPMNotFound
 	}
-	// Empty accountRef → single-TSA-parent path keyed by walletId.
-	return s.pm.GetByWalletID(ctx, p.WalletID)
+	// Empty accountRef — no corporate PM match; ignoring.
+	log.Printf("[pm automation] inbound with empty accountRef (walletId=%q) — no corporate PM match; ignoring", p.WalletID)
+	return nil, ErrPMNotFound
 }
 
 // HandleInbound is the buy-flow entry point. Idempotency at the event level is
@@ -181,10 +176,9 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 		return nil
 	}
 
-	// 2. Resolve the PM. Under the VA-only corporate model a credit is attributed
-	//    by the VA accountRef (GetByAccountRef) when present; otherwise fall back to
-	//    the single-TSA-parent path keyed by walletId (data.merchant.walletId) so
-	//    the existing env-configured TSA flow keeps working unchanged.
+	// 2. Resolve the PM. Under the accountRef-only model a credit is attributed
+	//    by the VA accountRef (GetByAccountRef). An empty accountRef is a no-op
+	//    (no walletId fallback).
 	pm, err := s.resolveInboundPM(ctx, p)
 	if err != nil {
 		if errors.Is(err, ErrPMNotFound) {
