@@ -87,7 +87,13 @@ func (s *MerchantStatsService) upsertDelta(ctx context.Context, userID uuid.UUID
 	}
 	assignments := map[string]any{"updated_at": time.Now().UTC()}
 	for k, v := range cols {
-		assignments[k] = gorm.Expr(k+" + ?", v)
+		// Qualify the existing-row column with the table name: in an
+		// ON CONFLICT DO UPDATE, Postgres treats a bare RHS column reference as
+		// ambiguous (SQLSTATE 42702) and rejects the whole upsert, so the
+		// counter never increments. Table-qualifying resolves it to the target
+		// row. (k is an internal constant — released_count / cancelled_count /
+		// thumbs_up / thumbs_down — never user input.)
+		assignments[k] = gorm.Expr("p2p_merchant_stats."+k+" + ?", v)
 	}
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "user_id"}},
