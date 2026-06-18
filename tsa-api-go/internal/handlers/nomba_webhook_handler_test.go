@@ -398,3 +398,28 @@ func TestNombaWebhook_EmptyEventID_400(t *testing.T) {
 		t.Fatal("empty-event-id must not dispatch")
 	}
 }
+
+// Nomba's dashboard "Create webhook" sends an UNSIGNED reachability probe (no
+// nomba-signature / nomba-timestamp headers) and will only save the URL if it
+// returns 2xx. The probe must get 200 — and must NOT be recorded or dispatched
+// (no event is acted on without a valid signature).
+func TestNombaWebhook_UnsignedProbe_200_NoSideEffects(t *testing.T) {
+	db, store := newSQLiteWebhookStore(t)
+	disp := &fakeWebhookDispatcher{}
+	h := newWebhookHandler(store, disp)
+
+	// No signature headers at all — body shape is irrelevant to a reachability probe.
+	w := postWebhook(t, h, []byte(`{}`), "", "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200 for unsigned probe, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(disp.inbound) != 0 || len(disp.payouts) != 0 {
+		t.Fatal("unsigned probe must not dispatch")
+	}
+	var count int64
+	db.Table("webhook_events").Count(&count)
+	if count != 0 {
+		t.Fatalf("unsigned probe must not be recorded, found %d rows", count)
+	}
+}
