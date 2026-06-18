@@ -532,18 +532,6 @@ func main() {
 		log.Printf("[pm] PM automation dormant: no release signer or P2P trade service unavailable")
 	}
 
-	// Seed the single TSA PaymentMerchant row (idempotent). Best-effort: a seed
-	// failure must NEVER fail boot.
-	if cfg.PMTSAEnabled {
-		if uid, perr := uuid.Parse(cfg.PMTSAUserID); perr != nil {
-			log.Printf("[pm] TSA seed skipped: invalid PM_TSA_USER_ID %q: %v", cfg.PMTSAUserID, perr)
-		} else if _, serr := pmSvc.SeedTSA(context.Background(), uid, cfg.PMTSAName, cfg.PMTSAInboundAccount, cfg.PMTSAInboundBank, cfg.PMTSAMakerWallet, cfg.PMTSANombaWalletID, cfg.PMTSAPerTradeCapUSD, cfg.PMTSADailyCapUSD); serr != nil {
-			log.Printf("[pm] TSA seed failed (continuing): %v", serr)
-		} else {
-			log.Printf("[pm] TSA payment-merchant seeded (account=%s)", cfg.PMTSAInboundAccount)
-		}
-	}
-
 	// SP4 — global-pool settlement epoch. Folds the global TP pool's accrued
 	// share into the per-user cumulative index once per epoch (default daily,
 	// FEE_GLOBAL_POOL_SETTLE_INTERVAL).
