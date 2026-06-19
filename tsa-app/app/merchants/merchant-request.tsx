@@ -320,6 +320,21 @@ export default function MerchantRequestScreen() {
     [banks],
   );
 
+  // Populate the shared business fields from an existing merchant request,
+  // tolerating both camelCase (API default) and snake_case. Only fills empty
+  // values so it never clobbers anything the user has already typed.
+  const prefillFromExistingRequest = (r: any) => {
+    const pick = (camel: string, snake: string) => (r?.[camel] ?? r?.[snake] ?? '') as string;
+    setBusinessName((prev: string) => prev || pick('businessName', 'business_name'));
+    setBusinessDescription((prev: string) => prev || pick('businessDescription', 'business_description'));
+    setAddress((prev: string) => prev || pick('address', 'address'));
+    setCity((prev: string) => prev || pick('city', 'city'));
+    setState((prev: string) => prev || pick('state', 'state'));
+    setCountry((prev: string) => prev || pick('country', 'country'));
+    setPhone((prev: string) => prev || pick('phone', 'phone'));
+    setRegistrationNumber((prev: string) => prev || pick('registrationNumber', 'registration_number'));
+  };
+
   const fetchExistingRequest = async () => {
     setLoading(true);
     try {
@@ -332,6 +347,12 @@ export default function MerchantRequestScreen() {
         if (res.data.status === 'approved') {
           await AsyncStorage.setItem('role', 'merchant');
         }
+        // Pre-fill the shared business fields from the existing request. This
+        // matters on the PM-upgrade path (?type=p2p_merchant): an existing
+        // general merchant falls through to the form, and shouldn't have to
+        // re-type details they already submitted. Values are ignored on the
+        // gate status screens, so populating unconditionally is harmless.
+        prefillFromExistingRequest(res.data);
       } else if (!res.success) {
         Alert.alert('Error', res.message || 'Could not check your application status. Please try again.');
       }
