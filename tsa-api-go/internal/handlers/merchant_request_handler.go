@@ -307,19 +307,54 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		return
 	}
 
+	// Pre-flight gate for corporate PM (p2p_merchant) approvals. These checks
+	// run BEFORE any state mutation so that an approval which cannot provision a
+	// PM never half-commits — i.e. never leaves the request "approved" with the
+	// user upgraded to merchant but no active payment_merchants row. A half-
+	// commit split-brains the UI: the dashboard (GET /p2p/pm/me) finds no active
+	// PM and shows "Upgrade", while the application screen (GET /merchant-
+	// requests/my-request) sees an approved PM request and claims the user is
+	// already a Payment Merchant.
+	if req.BusinessType == models.BusinessTypeP2PMerchant {
+		// I1: provisioning a corporate PM (Nomba sub-account + balance-gated
+		// money path) is reserved for true admins. The route middleware
+		// (adminAuth) also admits merchant/support for generic merchant
+		// approvals, so we re-check the role here.
+		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
+			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a payment merchant")
+			return
+		}
+		if h.PMOnboarding == nil {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
+			return
+		}
+	}
+
 	// For non-PM requests: only pending → approved is valid.
 	// For PM (p2p_merchant) requests: also allow a retry when the request is
-	// already approved but the payment_merchants row exists with a non-active
-	// provisioning_status — this is the resume path for a prior failed
-	// ProvisionAndActivate call.  The role-upgrade/status-flip work is skipped
-	// on the retry path (it was already done on attempt 1).
+	// already approved but the user has no ACTIVE payment_merchants row — this is
+	// the resume path for a prior failed/skipped ProvisionAndActivate call. Two
+	// shapes qualify:
+	//   - a PM row exists with a non-active provisioning_status (Nomba failed
+	//     partway), or
+	//   - no PM row exists at all (approval happened while PM was dormant, so
+	//     provisioning never ran — true of accounts approved before the pre-flight
+	//     gate above existed).
+	// Without this second case, a stuck "approved-but-not-provisioned" account
+	// could never be activated: the 400 below would reject every re-approval.
+	// The role-upgrade/status-flip work is skipped on the retry path (it was
+	// already done on attempt 1).
 	isPMRetry := false
 	if req.Status == models.MerchantRequestStatusApproved &&
 		req.BusinessType == models.BusinessTypeP2PMerchant {
-		// Check whether a non-active PM row exists for this user.
 		var pmRow models.PaymentMerchant
 		err := h.DB.Where("user_id = ?", req.UserID).First(&pmRow).Error
-		if err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			// No PM row at all — resume by provisioning from scratch.
+			isPMRetry = true
+		case err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive:
+			// Partially-provisioned row — resume where it left off.
 			isPMRetry = true
 		}
 	}
@@ -364,20 +399,9 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 
 	// Corporate PM provisioning: if this is a p2p_merchant request, spin up the
 	// Nomba sub-account + virtual account inline — the request stays re-approvable
-	// for retry (via isPMRetry above) if provisioning fails here.
+	// for retry (via isPMRetry above) if provisioning fails here. Admin-role and
+	// PMOnboarding-availability are already enforced in the pre-flight gate above.
 	if req.BusinessType == models.BusinessTypeP2PMerchant {
-		// I1: provisioning a corporate PM (Nomba sub-account + balance-gated
-		// money path) is reserved for true admins. The route middleware
-		// (adminAuth) also admits merchant/support for generic merchant
-		// approvals, so we re-check the role here.
-		if admin.Role != models.RoleAdmin && admin.Role != models.RoleSuperAdmin {
-			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a payment merchant")
-			return
-		}
-		if h.PMOnboarding == nil {
-			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM provisioning unavailable: Nomba not configured")
-			return
-		}
 		if _, err := h.PMOnboarding.ProvisionAndActivate(c.Request.Context(), &req); err != nil {
 			log.Printf("ApproveMerchantRequest: PM provisioning failed for request %s: %v", req.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM provisioning failed — retry the approval to resume")

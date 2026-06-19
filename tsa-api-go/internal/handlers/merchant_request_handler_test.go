@@ -894,6 +894,16 @@ func TestApproveMerchantRequest_PMNonAdminForbidden(t *testing.T) {
 				t.Errorf("role %q: expected 403, got %d: %s", role, w.Code, w.Body.String())
 			}
 
+			// The request must stay pending — a forbidden caller must not
+			// half-approve it (approved request with no provisioned PM).
+			var mr models.MerchantRequest
+			if err := db.First(&mr, "id = ?", reqID).Error; err != nil {
+				t.Fatalf("role %q: load merchant request: %v", role, err)
+			}
+			if mr.Status != models.MerchantRequestStatusPending {
+				t.Errorf("role %q: request status = %q, want %q", role, mr.Status, models.MerchantRequestStatusPending)
+			}
+
 			// No PM row should have been provisioned.
 			var count int64
 			db.Model(&models.PaymentMerchant{}).Count(&count)
@@ -933,6 +943,98 @@ func TestApproveMerchantRequest_PMAdminSucceeds(t *testing.T) {
 	var pm models.PaymentMerchant
 	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
 		t.Fatalf("load PM row: %v", err)
+	}
+	if pm.ProvisioningStatus != models.PMProvisioningActive {
+		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
+	}
+}
+
+// TestApproveMerchantRequest_PMDormantNoHalfApprove: when the PM onboarding
+// service is dormant (Nomba unconfigured → PMOnboarding == nil), approving a
+// p2p_merchant request must fail cleanly with 503 and leave the request PENDING
+// with the user's role unchanged. It must never commit a half-approval — an
+// "approved" request with no active payment_merchants row — which would split-
+// brain the UI (dashboard sees no active PM and shows "Upgrade", while the
+// application screen sees an approved PM request and claims "You're a PM").
+func TestApproveMerchantRequest_PMDormantNoHalfApprove(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), nil) // dormant: no Nomba
+
+	user := createMerchantTestUser(t, db, "user")
+	reqID := submitPMRequest(t, h, user)
+
+	admin := createMerchantTestUser(t, db, "admin")
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
+		map[string]interface{}{"note": "Approved"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var mr models.MerchantRequest
+	if err := db.First(&mr, "id = ?", reqID).Error; err != nil {
+		t.Fatalf("load merchant request: %v", err)
+	}
+	if mr.Status != models.MerchantRequestStatusPending {
+		t.Errorf("request status = %q, want %q (must not half-approve)", mr.Status, models.MerchantRequestStatusPending)
+	}
+
+	var u models.User
+	if err := db.First(&u, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if u.Role == models.RoleMerchant {
+		t.Errorf("user role = %q, want unchanged (not upgraded to merchant)", u.Role)
+	}
+
+	var count int64
+	db.Model(&models.PaymentMerchant{}).Count(&count)
+	if count != 0 {
+		t.Errorf("expected no PM row, got %d", count)
+	}
+}
+
+// TestApproveMerchantRequest_ResumesStuckApprovedNoPMRow: an account that was
+// approved while PM was dormant (request 'approved', NO payment_merchants row)
+// must be resumable once Nomba is configured — re-approving provisions it to
+// active rather than 400-ing on "not pending". This unsticks the split-brain
+// accounts created before the pre-flight gate existed.
+func TestApproveMerchantRequest_ResumesStuckApprovedNoPMRow(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	fake := &handlerFakeProvisioner{vaCallCount: 1} // VA succeeds
+	svc := services.NewPMOnboardingService(db, fake)
+	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
+
+	// Seed the stuck state directly: an approved p2p_merchant request and NO
+	// payment_merchants row (provisioning never ran under the old dormant path).
+	user := createMerchantTestUser(t, db, "merchant")
+	seedMerchantRequest(t, db, user.ID, "p2p_merchant", "approved")
+	var req models.MerchantRequest
+	if err := db.Where("user_id = ?", user.ID).First(&req).Error; err != nil {
+		t.Fatalf("load seeded request: %v", err)
+	}
+
+	var count int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("precondition: expected no PM row, got %d", count)
+	}
+
+	admin := createMerchantTestUser(t, db, "admin")
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+req.ID.String()+"/approve",
+		map[string]interface{}{"note": "Resume"}, admin)
+	c.Params = gin.Params{{Key: "id", Value: req.ID.String()}}
+	h.ApproveMerchantRequest(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("resume approve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var pm models.PaymentMerchant
+	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
+		t.Fatalf("load PM row after resume: %v", err)
 	}
 	if pm.ProvisioningStatus != models.PMProvisioningActive {
 		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
