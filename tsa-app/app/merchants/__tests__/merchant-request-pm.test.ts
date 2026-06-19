@@ -321,11 +321,27 @@ describe('resolveMerchantGate', () => {
       .toEqual({ screen: 'approved', pm: false });
   });
 
-  it('approved PM request WITHOUT an active PM → provisioning, NOT success', () => {
-    // This is the exact bug: approved p2p_merchant request, but pmActive=false.
-    const existingRequest = { status: 'approved', business_type: 'p2p_merchant' };
+  it('approved PM request WITH provisioning data but no active PM → provisioning', () => {
+    // Genuine in-flight (or failed) provisioning: the request carries the
+    // corporate data, so the Nomba VA create is the only thing outstanding.
+    const existingRequest = {
+      status: 'approved',
+      business_type: 'p2p_merchant',
+      makerWalletAddress: '0x1111111111111111111111111111111111111111',
+      settlementBankCode: '058',
+    };
     expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
       .toEqual({ screen: 'provisioning' });
+  });
+
+  it('approved PM request with NO provisioning data and no active PM → form (stranded legacy)', () => {
+    // Legacy p2p_merchant approved before the corporate fields existed: empty
+    // settlement/maker data and no PM row → nothing will ever provision it.
+    // Must route back to the form so the user can supply the missing details,
+    // NOT dead-end on the "Activating…" screen.
+    const existingRequest = { status: 'approved', business_type: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'form' });
   });
 
   it('approved PM request WITH an active PM → real success screen', () => {
@@ -347,7 +363,11 @@ describe('resolveMerchantGate', () => {
   });
 
   it('reads businessType (camelCase) as well as business_type (snake_case)', () => {
-    const existingRequest = { status: 'approved', businessType: 'p2p_merchant' };
+    const existingRequest = {
+      status: 'approved',
+      businessType: 'p2p_merchant',
+      makerWalletAddress: '0x1111111111111111111111111111111111111111',
+    };
     expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
       .toEqual({ screen: 'provisioning' });
   });
