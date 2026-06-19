@@ -127,6 +127,23 @@ export interface ExistingRequestLike {
   status?: string;
   businessType?: string;
   business_type?: string;
+  // Corporate-PM provisioning data (camelCase from the API, snake_case tolerated).
+  // Their presence distinguishes a genuinely in-flight activation from a legacy
+  // PM request approved before these fields existed (which carries none).
+  makerWalletAddress?: string;
+  maker_wallet_address?: string;
+  settlementBankCode?: string;
+  settlement_bank_code?: string;
+}
+
+// A PM request carries the data provisioning needs only if it was submitted
+// through the corporate-PM form (settlement bank + maker wallet required there).
+// Legacy p2p_merchant requests approved before those fields existed have neither —
+// nothing will ever activate them, so they must be routed back to the form.
+function hasPmProvisioningData(r: ExistingRequestLike): boolean {
+  const maker = (r.makerWalletAddress ?? r.maker_wallet_address ?? '').trim();
+  const bank = (r.settlementBankCode ?? r.settlement_bank_code ?? '').trim();
+  return maker !== '' || bank !== '';
 }
 
 export type MerchantGate =
@@ -160,7 +177,15 @@ export function resolveMerchantGate(args: {
     case 'approved':
       // An approved PM request only means "you're a Payment Merchant" once the
       // PM is actually active. Otherwise the activation is still pending/failed.
-      if (existingIsPm && !pmActive) return { screen: 'provisioning' };
+      if (existingIsPm && !pmActive) {
+        // Only show "Activating…" when there is real provisioning data in flight.
+        // A legacy approval with no settlement/maker data will never activate on
+        // its own — send the user back to the form to supply the missing details
+        // instead of dead-ending them on the provisioning screen.
+        return hasPmProvisioningData(existingRequest)
+          ? { screen: 'provisioning' }
+          : { screen: 'form' };
+      }
       return { screen: 'approved', pm: existingIsPm };
     case 'rejected':
       return { screen: 'rejected' };
