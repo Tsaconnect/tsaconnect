@@ -28,6 +28,7 @@ import {
   validatePmFields,
   initBusinessType,
   isPickerLocked,
+  resolveMerchantGate,
   type PmFields,
 } from '../merchant-request';
 
@@ -292,6 +293,63 @@ describe('isPickerLocked — locked single-chip mode vs selectable chip row', ()
 
   it('returns false when type param is an unknown/general value', () => {
     expect(isPickerLocked('general_products')).toBe(false);
+  });
+});
+
+// ─── resolveMerchantGate — existing-request gate w/ real PM status ────────────
+//
+// The core fix for the "Upgrade to Payment Merchant just shows the success
+// screen" bug: an approved p2p_merchant *request* must NOT be shown as
+// "You're a Payment Merchant!" unless the user actually has an ACTIVE PM (the
+// dashboard reads the real status from /p2p/pm/me — the two must agree).
+
+describe('resolveMerchantGate', () => {
+  it('shows the form when there is no existing request', () => {
+    expect(resolveMerchantGate({ existingRequest: null, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('PM-upgrade mode: a prior GENERAL request does not block the PM form', () => {
+    const existingRequest = { status: 'approved', business_type: 'general_products' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('normal mode: any existing approved request blocks with approved screen', () => {
+    const existingRequest = { status: 'approved', business_type: 'general_products' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: false, pmActive: false }))
+      .toEqual({ screen: 'approved', pm: false });
+  });
+
+  it('approved PM request WITHOUT an active PM → provisioning, NOT success', () => {
+    // This is the exact bug: approved p2p_merchant request, but pmActive=false.
+    const existingRequest = { status: 'approved', business_type: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'provisioning' });
+  });
+
+  it('approved PM request WITH an active PM → real success screen', () => {
+    const existingRequest = { status: 'approved', businessType: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: true }))
+      .toEqual({ screen: 'approved', pm: true });
+  });
+
+  it('pending PM request → pending screen (pm flag set)', () => {
+    const existingRequest = { status: 'pending', business_type: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'pending', pm: true });
+  });
+
+  it('rejected request → rejected screen', () => {
+    const existingRequest = { status: 'rejected', business_type: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'rejected' });
+  });
+
+  it('reads businessType (camelCase) as well as business_type (snake_case)', () => {
+    const existingRequest = { status: 'approved', businessType: 'p2p_merchant' };
+    expect(resolveMerchantGate({ existingRequest, formIsPm: true, pmActive: false }))
+      .toEqual({ screen: 'provisioning' });
   });
 });
 

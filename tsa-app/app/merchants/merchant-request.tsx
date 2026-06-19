@@ -33,6 +33,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
 import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngBanks';
+import { getMyPmStatus } from '../../services/p2p';
 import { useTheme } from '@/theme';
 import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
@@ -107,6 +108,67 @@ export function isPickerLocked(type: string | undefined): boolean {
   return type === 'p2p_merchant';
 }
 
+// ─── Existing-request gate (exported for tests) ──────────────────────────────
+//
+// Decides which screen to render given the caller's existing merchant request,
+// whether the form is in PM-upgrade mode, and the user's ACTUAL Payment Merchant
+// status (GET /p2p/pm/me).
+//
+// Why pmActive is needed: an approved p2p_merchant *request* is NOT the same as
+// being an active Payment Merchant. Approval flips the request to "approved" but
+// PM activation (Nomba sub-account + virtual account) is a separate step that can
+// still be in progress or have failed. Trusting request.status alone produced a
+// false "You're a Payment Merchant!" success screen for users with no active PM
+// row — while the dashboard (which reads the real PM status) correctly still
+// showed the "Upgrade" CTA. We gate the success screen on pmActive so the two
+// surfaces agree, and surface a 'provisioning' state in the gap.
+
+export interface ExistingRequestLike {
+  status?: string;
+  businessType?: string;
+  business_type?: string;
+}
+
+export type MerchantGate =
+  | { screen: 'form' }
+  | { screen: 'pending'; pm: boolean }
+  | { screen: 'approved'; pm: boolean }
+  | { screen: 'provisioning' }
+  | { screen: 'rejected' };
+
+export function resolveMerchantGate(args: {
+  existingRequest: ExistingRequestLike | null | undefined;
+  formIsPm: boolean;
+  pmActive: boolean;
+}): MerchantGate {
+  const { existingRequest, formIsPm, pmActive } = args;
+  if (!existingRequest) return { screen: 'form' };
+
+  const existingType = existingRequest.businessType ?? existingRequest.business_type;
+  const existingIsPm = existingType === 'p2p_merchant';
+
+  // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) request must
+  // NOT short-circuit the PM application — an existing merchant may upgrade to
+  // PM. Only a prior PM request gates the PM form. In the normal flow, any
+  // existing request blocks. (Mirrors the backend's type-scoped carve-out.)
+  const blockExisting = !formIsPm || existingIsPm;
+  if (!blockExisting) return { screen: 'form' };
+
+  switch (existingRequest.status) {
+    case 'pending':
+      return { screen: 'pending', pm: existingIsPm };
+    case 'approved':
+      // An approved PM request only means "you're a Payment Merchant" once the
+      // PM is actually active. Otherwise the activation is still pending/failed.
+      if (existingIsPm && !pmActive) return { screen: 'provisioning' };
+      return { screen: 'approved', pm: existingIsPm };
+    case 'rejected':
+      return { screen: 'rejected' };
+    default:
+      return { screen: 'form' };
+  }
+}
+
 export default function MerchantRequestScreen() {
   const { colors, spacing } = useTheme();
   const { currentUser } = useAuth();
@@ -114,6 +176,9 @@ export default function MerchantRequestScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [existingRequest, setExistingRequest] = useState<any>(null);
+  // Actual Payment Merchant status (GET /p2p/pm/me) — distinct from an approved
+  // PM *request*. Used to gate the "You're a Payment Merchant!" success screen.
+  const [pmActive, setPmActive] = useState(false);
 
   const [businessType, setBusinessType] = useState(() => initBusinessType(type));
   const [businessName, setBusinessName] = useState('');
@@ -233,7 +298,10 @@ export default function MerchantRequestScreen() {
   const fetchExistingRequest = async () => {
     setLoading(true);
     try {
-      const res = await getMyMerchantRequest();
+      // Fetch the existing request and the real PM status together. getMyPmStatus
+      // is dormant-safe (returns {isPm:false} on any error), so it never blocks.
+      const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
+      setPmActive(pmStatus.isPm);
       if (res.success && res.data) {
         setExistingRequest(res.data);
         if (res.data.status === 'approved') {
@@ -312,82 +380,89 @@ export default function MerchantRequestScreen() {
     );
   }
 
-  // PM-upgrade mode (?type=p2p_merchant): a prior GENERAL (non-PM) merchant
-  // request must NOT short-circuit the PM application — an existing merchant is
-  // allowed to upgrade to Payment Merchant. Only a prior PM request (pending/
-  // approved/rejected) gates the PM form. In the normal flow, any existing
-  // request blocks as before. (Mirrors the backend's type-scoped carve-out.)
-  const existingType = existingRequest?.businessType ?? existingRequest?.business_type;
-  const existingIsPm = existingType === 'p2p_merchant';
-  const blockExisting = !!existingRequest && (!isPm || existingIsPm);
+  // Decide which gate screen (if any) to show. resolveMerchantGate also factors
+  // in the real PM-active status so an approved-but-not-yet-active PM request
+  // shows a "provisioning" state rather than a false "You're a Payment Merchant!".
+  const gate = resolveMerchantGate({ existingRequest, formIsPm: isPm, pmActive });
 
-  if (blockExisting) {
-    const { status } = existingRequest;
+  if (gate.screen === 'pending') {
+    return (
+      <StatusScreen
+        icon="clock"
+        tone={colors.warning}
+        toneBg={colors.warningBg}
+        title={gate.pm ? 'Payment Merchant Application Under Review' : 'Application Under Review'}
+        body={`Your ${gate.pm ? 'Payment Merchant' : 'merchant'} application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
+        actionTitle="Go Back"
+        actionVariant="secondary"
+        onAction={() => router.back()}
+      />
+    );
+  }
 
-    if (status === 'pending') {
-      return (
-        <StatusScreen
-          icon="clock"
-          tone={colors.warning}
-          toneBg={colors.warningBg}
-          title={existingIsPm ? 'Payment Merchant Application Under Review' : 'Application Under Review'}
-          body={`Your ${existingIsPm ? 'Payment Merchant' : 'merchant'} application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
-          actionTitle="Go Back"
-          actionVariant="secondary"
-          onAction={() => router.back()}
-        />
-      );
-    }
+  if (gate.screen === 'provisioning') {
+    return (
+      <StatusScreen
+        icon="clock"
+        tone={colors.warning}
+        toneBg={colors.warningBg}
+        title="Activating your Payment Merchant account"
+        body={`Your Payment Merchant application for "${existingRequest.businessName}" is approved, but your account is still being set up. This usually completes within a few minutes. If it doesn't, please contact support.`}
+        actionTitle="Go Back"
+        actionVariant="secondary"
+        onAction={() => router.back()}
+      />
+    );
+  }
 
-    if (status === 'approved') {
-      return (
-        <StatusScreen
-          icon="checkCircle"
-          tone={colors.success}
-          toneBg={colors.successBg}
-          title={existingIsPm ? "You're a Payment Merchant!" : "You're a Merchant!"}
-          body={existingIsPm
-            ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
-            : 'Your application has been approved. You now have access to the merchant portal.'}
-          actionTitle="Go to Merchant Dashboard"
-          actionVariant="success"
-          onAction={() => router.push('/merchants/dashboard')}
-        />
-      );
-    }
+  if (gate.screen === 'approved') {
+    return (
+      <StatusScreen
+        icon="checkCircle"
+        tone={colors.success}
+        toneBg={colors.successBg}
+        title={gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
+        body={gate.pm
+          ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
+          : 'Your application has been approved. You now have access to the merchant portal.'}
+        actionTitle="Go to Merchant Dashboard"
+        actionVariant="success"
+        onAction={() => router.push('/merchants/dashboard')}
+      />
+    );
+  }
 
-    if (status === 'rejected') {
-      return (
-        <StatusScreen
-          icon="closeCircle"
-          tone={colors.danger}
-          toneBg={colors.dangerBg}
-          title="Application Rejected"
-          body={`Reason: ${existingRequest.adminNote || 'No reason provided'}`}
-          actionTitle="Apply Again"
-          actionVariant="primary"
-          onAction={() => {
-            setExistingRequest(null);
-            setBusinessName('');
-            setBusinessDescription('');
-            setAddress('');
-            setCity('');
-            setState('');
-            setCountry('');
-            setRegistrationNumber('');
-            // Reset PM fields too
-            setSettlementBank(null);
-            setSettlementAccountNumber('');
-            setSettlementAccountName('');
-            setMakerWalletAddress('');
-            setPerTradeCap('');
-            setDailyCap('');
-            setPmErrors({});
-            setPmValidated(false);
-          }}
-        />
-      );
-    }
+  if (gate.screen === 'rejected') {
+    return (
+      <StatusScreen
+        icon="closeCircle"
+        tone={colors.danger}
+        toneBg={colors.dangerBg}
+        title="Application Rejected"
+        body={`Reason: ${existingRequest.adminNote || 'No reason provided'}`}
+        actionTitle="Apply Again"
+        actionVariant="primary"
+        onAction={() => {
+          setExistingRequest(null);
+          setBusinessName('');
+          setBusinessDescription('');
+          setAddress('');
+          setCity('');
+          setState('');
+          setCountry('');
+          setRegistrationNumber('');
+          // Reset PM fields too
+          setSettlementBank(null);
+          setSettlementAccountNumber('');
+          setSettlementAccountName('');
+          setMakerWalletAddress('');
+          setPerTradeCap('');
+          setDailyCap('');
+          setPmErrors({});
+          setPmValidated(false);
+        }}
+      />
+    );
   }
 
   return (
