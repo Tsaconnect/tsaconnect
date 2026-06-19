@@ -2,9 +2,9 @@
 //
 // P2P marketplace — browse sell-ads (user buys crypto) and buy-ads (user sells
 // crypto to a merchant). Restyled onto the TSA Signature design system.
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import { RefreshControl, ScrollView, View } from 'react-native';
+import { BackHandler, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
@@ -140,6 +140,27 @@ const P2PMarketScreen: React.FC = () => {
   useEffect(() => {
     load();
   }, [load]);
+
+  // The P2P marketplace is entered as a section takeover (the marketplace tab
+  // redirects here via router.replace), so the root back-stack is empty on this
+  // screen — without this, Android's hardware back would exit the app. Route a
+  // hardware-back press to the main app home instead (or pop if real history
+  // exists). Detail/flow screens are pushed onto this stack and keep their
+  // normal back behaviour, so the handler only runs while the index is focused.
+  useFocusEffect(
+    useCallback(() => {
+      const onBackPress = () => {
+        if (router.canGoBack()) {
+          router.back();
+        } else {
+          router.replace('/home');
+        }
+        return true;
+      };
+      const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+      return () => sub.remove();
+    }, []),
+  );
 
   // Clear stale filters when currency/token/side changes (the amount filter is
   // denominated in the current currency, so it can't carry across switches).

@@ -1,20 +1,42 @@
 // app/p2p/_layout.tsx
 //
-// Stack layout for the P2P trading subsection. Screens registered here
-// share consistent navigation chrome via `defaultScreenOptions`. A persistent
+// Stack layout for the P2P trading subsection. Header chrome (background / tint
+// / title color / font) is sourced from useTheme() tokens so it tracks light &
+// dark automatically — mirrors the wallet/(productgroup) layouts and replaces
+// the legacy hardcoded-white `defaultScreenOptions` constant. A persistent
 // bottom nav (P2PTabBar) is rendered below the Stack — it stays mounted across
 // P2P screens and self-hides on detail/flow screens.
 import React from 'react';
 import { View } from 'react-native';
 import { Stack } from 'expo-router';
-import { defaultScreenOptions } from '../../constants/navigation';
+import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
+import { useTheme, fontFamily } from '@/theme';
 import { P2PTabBar } from '../../components/p2p/P2PTabBar';
 
 const P2PLayout = () => {
+  const { colors, type } = useTheme();
+
+  const screenOptions: NativeStackNavigationOptions = {
+    headerTitleAlign: 'center',
+    headerTintColor: colors.accent,
+    headerTitleStyle: {
+      fontSize: type.title3.fontSize,
+      fontFamily: fontFamily['600'],
+      color: colors.textPrimary,
+    },
+    headerStyle: {
+      backgroundColor: colors.surface,
+    },
+    headerShadowVisible: false,
+    contentStyle: {
+      backgroundColor: colors.background,
+    },
+  };
+
   return (
     <View style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
-        <Stack screenOptions={defaultScreenOptions}>
+        <Stack screenOptions={screenOptions}>
           <Stack.Screen name="index" options={{ title: 'P2P Marketplace' }} />
           <Stack.Screen name="my-ads" options={{ title: 'My Ads' }} />
           <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
