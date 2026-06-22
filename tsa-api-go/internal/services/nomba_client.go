@@ -308,6 +308,16 @@ type transferResp struct {
 	} `json:"data"`
 }
 
+// nombaSuccessCode reports whether a Nomba response code denotes success.
+// Nomba signals success via code "00" (and "200" in some environments) while
+// leaving the boolean `status` field false EVEN ON SUCCESS — observed on the
+// token, virtual-account, and transfer endpoints alike. Callers must therefore
+// key success on the code, never on `status`, or successful calls are wrongly
+// rejected (e.g. a created VA discarded, a completed payout marked failed).
+func nombaSuccessCode(code string) bool {
+	return code == "00" || code == "200"
+}
+
 // Transfer initiates a Nigerian bank transfer via POST /v2/transfers/bank.
 // Both "SUCCESS" and "PENDING_BILLING" are accepted terminal-enough states
 // for the caller; the final payout status arrives later via a webhook.
@@ -342,7 +352,10 @@ func (c *NombaClient) Transfer(ctx context.Context, req NombaTransferRequest) (N
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return NombaTransferResult{}, fmt.Errorf("nomba transfer decode: %w", err)
 	}
-	if !parsed.Status {
+	// Key success on Nomba's code, not the `status` flag (status:false even on a
+	// successful transfer). An empty id is still rejected by the gateway as
+	// defense-in-depth.
+	if !nombaSuccessCode(parsed.Code) {
 		msg := parsed.Message
 		if msg == "" {
 			msg = parsed.Description
@@ -415,7 +428,10 @@ func (c *NombaClient) CreateVirtualAccount(ctx context.Context, accountRef, acco
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", fmt.Errorf("nomba create-virtual-account decode: %w", err)
 	}
-	if !parsed.Status {
+	// Key success on Nomba's code, NOT the `status` flag — Nomba returns
+	// status:false even on a successful create (code "00", description
+	// "Successful"). Then require the account number we provisioned for.
+	if !nombaSuccessCode(parsed.Code) {
 		msg := parsed.Message
 		if msg == "" {
 			msg = parsed.Description
@@ -468,7 +484,9 @@ func (c *NombaClient) FetchParentBalance(ctx context.Context) (ngn string, err e
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", fmt.Errorf("nomba fetch-parent-balance decode: %w", err)
 	}
-	if !parsed.Status {
+	// Key success on Nomba's code, not the `status` flag (status:false even on a
+	// successful balance read).
+	if !nombaSuccessCode(parsed.Code) {
 		msg := parsed.Message
 		if msg == "" {
 			msg = parsed.Description
