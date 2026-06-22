@@ -133,6 +133,40 @@ func TestNombaClient_CreateVirtualAccount_StatusFalse(t *testing.T) {
 	}
 }
 
+// Regression: Nomba (sandbox especially) returns status:false even on a
+// SUCCESSFUL virtual-account create — it signals success via code "00" + a
+// populated bankAccountNumber, the same quirk the token endpoint exhibits.
+// The client must trust the account number we got back, not the `status` flag,
+// or every PM provisioning wrongly fails after Nomba already created the VA.
+func TestNombaClient_CreateVirtualAccount_SuccessWithStatusFalse(t *testing.T) {
+	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
+		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"code": "00",
+				"description": "Successful",
+				"status": false,
+				"data": {
+					"bankAccountNumber": "1234567890",
+					"bankName": "Sandbox Bank",
+					"bankAccountName": "TSA-Test PM",
+					"accountRef": "pm-abc-123"
+				}
+			}`)
+		},
+	})
+
+	c := newTestNombaClient(srv.URL)
+	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Test PM")
+	if err != nil {
+		t.Fatalf("CreateVirtualAccount error: %v", err)
+	}
+	if acctNo != "1234567890" {
+		t.Errorf("bankAccountNumber = %q; want 1234567890", acctNo)
+	}
+}
+
 func TestNombaClient_CreateVirtualAccount_EmptyNumber(t *testing.T) {
 	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
 		"/v1/accounts/virtual": func(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +208,36 @@ func TestNombaClient_FetchParentBalance_Success(t *testing.T) {
 				"code": "200",
 				"description": "SUCCESS",
 				"status": true,
+				"data": {
+					"amount": "150000.50",
+					"currency": "NGN"
+				}
+			}`)
+		},
+	})
+
+	c := newTestNombaClient(srv.URL)
+	ngn, err := c.FetchParentBalance(t.Context())
+	if err != nil {
+		t.Fatalf("FetchParentBalance error: %v", err)
+	}
+	if ngn != "150000.50" {
+		t.Errorf("balance = %q, want 150000.50", ngn)
+	}
+}
+
+func TestNombaClient_FetchParentBalance_SuccessWithStatusFalse(t *testing.T) {
+	// Regression: a successful balance read can come back status:false (code
+	// "00") — the reconciler must read the amount, not treat it as a failure
+	// (which would raise false drift alerts).
+	srv := newNombaSubAccountServer(t, map[string]http.HandlerFunc{
+		"/v1/accounts/balance": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"code": "00",
+				"description": "Successful",
+				"status": false,
 				"data": {
 					"amount": "150000.50",
 					"currency": "NGN"

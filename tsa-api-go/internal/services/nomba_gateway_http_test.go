@@ -221,6 +221,42 @@ func TestNombaHTTPGateway_EmptyId(t *testing.T) {
 	}
 }
 
+func TestNombaHTTPGateway_SuccessWithStatusFalse(t *testing.T) {
+	// Regression: Nomba returns status:false even on a SUCCESSFUL transfer,
+	// signalling success via code "00" + a populated data.id. The gateway must
+	// accept it (return the id), not mark the payout failed — otherwise a real
+	// payout that already left the parent account is misread as a failure.
+	srv := newNombaTestServer(t, func(w http.ResponseWriter, _ map[string]interface{}) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"code": "00",
+			"description": "Successful",
+			"status": false,
+			"data": {
+				"id": "API-TRANSFER-statusfalse",
+				"status": "SUCCESS"
+			}
+		}`)
+	})
+
+	gw := newTestGateway(srv.URL)
+	id, err := gw.InitiatePayout(t.Context(), PayoutRequest{
+		BankCode:      "058",
+		AccountNumber: "0123456789",
+		AccountName:   "JOHN DOE",
+		AmountNGN:     "1500",
+		Reference:     "trade-uuid-006",
+		SenderName:    "TSA Connect",
+	})
+	if err != nil {
+		t.Fatalf("InitiatePayout error: %v", err)
+	}
+	if id != "API-TRANSFER-statusfalse" {
+		t.Errorf("id = %q; want API-TRANSFER-statusfalse", id)
+	}
+}
+
 func TestNombaHTTPGateway_StatusFalseBadRequest(t *testing.T) {
 	// Some Nomba errors come back as 200 HTTP status but status:false in the body.
 	srv := newNombaTestServer(t, func(w http.ResponseWriter, _ map[string]interface{}) {
