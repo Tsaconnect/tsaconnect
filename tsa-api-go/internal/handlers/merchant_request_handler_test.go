@@ -104,6 +104,9 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			provisioning_status TEXT NOT NULL DEFAULT 'pending',
 			per_trade_cap_usd REAL NOT NULL DEFAULT 0,
 			daily_cap_usd REAL NOT NULL DEFAULT 0,
+			reviewed_by TEXT,
+			reviewed_at DATETIME,
+			review_note TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,

@@ -521,6 +521,15 @@ func main() {
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
+		// Wire admin PM approval (provision + activate). Needs a Nomba client to
+		// create the virtual account; pmNombaClient is nil when creds are absent,
+		// in which case ApprovePM 503s while reject/pause/resume still work.
+		if pmNombaClient != nil {
+			pmh.SetApprover(services.NewPMOnboardingService(config.DB, pmNombaClient))
+			log.Printf("[pm] admin PM approval ready (provision + activate)")
+		} else {
+			log.Printf("[pm] admin PM approval dormant: Nomba client absent — approve will 503 (reject/pause/resume still available)")
+		}
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
 				services.NewNombaWebhookVerifier(cfg.NombaWebhookSecret),
