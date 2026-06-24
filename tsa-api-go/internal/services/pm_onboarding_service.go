@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -117,6 +118,71 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	pm.DailyCapUSD = req.RequestedDailyCapUSD
 
 	return pm, nil
+}
+
+// ProvisionAndActivatePM approves an existing PENDING payment_merchants row by
+// id (admin-driven from the Payment Merchants page). Unlike ProvisionAndActivate
+// — which is keyed on a MerchantRequest and runs as part of merchant approval —
+// this works directly off the PM row whose settlement bank / maker wallet / caps
+// are already populated. It re-runs Nomba provisioning if it never completed and
+// flips the row to active. Idempotent on the VA create (anchored on the stored
+// nomba_account_ref), so a retry of a previously-failed approval is safe.
+//
+// Errors:
+//   - ErrPMProvisioningUnavailable: Nomba not configured (provisioner nil).
+//   - ErrPMNotFound: no PM row with that id.
+//   - ErrInvalidPMTransition: PM is not currently pending.
+//   - wrapped Nomba error: VA creation failed (row left non-active, retry-safe).
+func (s *PMOnboardingService) ProvisionAndActivatePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
+	if s.provisioner == nil {
+		return nil, ErrPMProvisioningUnavailable
+	}
+
+	var pm models.PaymentMerchant
+	if err := s.db.WithContext(ctx).First(&pm, "id = ?", pmID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPMNotFound
+		}
+		return nil, err
+	}
+	if pm.Status != models.PaymentMerchantStatusPending {
+		return nil, ErrInvalidPMTransition
+	}
+
+	// ── Virtual account (skip if a prior attempt already created it) ──────────
+	if pm.NombaAccountRef == "" {
+		accountRef := pmAccountRef(pm.UserID)
+		vaNumber, err := s.provisioner.CreateVirtualAccount(ctx, accountRef, pm.Name)
+		if err != nil {
+			return &pm, fmt.Errorf("pm_onboarding: create virtual account: %w", err)
+		}
+		pm.NombaAccountRef = accountRef
+		pm.InboundAccountNumber = vaNumber
+		if err := s.persistFields(ctx, &pm, map[string]interface{}{
+			"nomba_account_ref":      accountRef,
+			"inbound_account_number": vaNumber,
+			"provisioning_status":    models.PMProvisioningProvisioned,
+		}); err != nil {
+			return &pm, fmt.Errorf("pm_onboarding: persist virtual account: %w", err)
+		}
+	}
+
+	// ── Activate ──────────────────────────────────────────────────────────────
+	now := time.Now()
+	if err := s.persistFields(ctx, &pm, map[string]interface{}{
+		"provisioning_status": models.PMProvisioningActive,
+		"status":              models.PaymentMerchantStatusActive,
+		"reviewed_by":         adminID,
+		"reviewed_at":         now,
+	}); err != nil {
+		return &pm, fmt.Errorf("pm_onboarding: activate: %w", err)
+	}
+	pm.ProvisioningStatus = models.PMProvisioningActive
+	pm.Status = models.PaymentMerchantStatusActive
+	pm.ReviewedBy = adminID
+	pm.ReviewedAt = &now
+
+	return &pm, nil
 }
 
 // upsertPendingRow finds or creates a payment_merchants row for req.UserID.

@@ -9,9 +9,10 @@ import (
 
 // Payment-merchant status values.
 const (
-	PaymentMerchantStatusPending = "pending" // approved but not yet configured/activated
-	PaymentMerchantStatusActive  = "active"  // live: automation runs
-	PaymentMerchantStatusPaused  = "paused"  // kill switch: no new trades, in-flight drain
+	PaymentMerchantStatusPending  = "pending"  // awaiting admin approval/provisioning
+	PaymentMerchantStatusActive   = "active"   // live: automation runs
+	PaymentMerchantStatusPaused   = "paused"   // kill switch: no new trades, in-flight drain
+	PaymentMerchantStatusRejected = "rejected" // declined at onboarding; never activated
 )
 
 // PMProvisioningStatus values track the lifecycle of a PM's Nomba sub-account.
@@ -75,6 +76,12 @@ type PaymentMerchant struct {
 	// Caps (USD). 0 = no cap.
 	PerTradeCapUSD float64 `gorm:"not null;default:0" json:"perTradeCapUsd"`
 	DailyCapUSD    float64 `gorm:"not null;default:0" json:"dailyCapUsd"`
+
+	// Admin review audit — who last actioned this PM's lifecycle (approve /
+	// reject / pause / resume), when, and the note (required on reject).
+	ReviewedBy uuid.UUID  `gorm:"type:uuid" json:"reviewedBy"`
+	ReviewedAt *time.Time `json:"reviewedAt"`
+	ReviewNote string     `gorm:"size:512" json:"reviewNote"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

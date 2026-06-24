@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -32,6 +33,13 @@ type PMStatusGetter interface {
 	GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error)
 }
 
+// PMApprover provisions + activates a pending PaymentMerchant by id (admin
+// approval from the Payment Merchants page). *services.PMOnboardingService
+// satisfies it. nil when Nomba is unconfigured — approval then returns 503.
+type PMApprover interface {
+	ProvisionAndActivatePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error)
+}
+
 // PMHandler serves the PM operator endpoints (manual-release queue, release
 // action, sell-payout kick, and the read-only PM list) plus the dormant-safe
 // user-facing PM-status read.
@@ -39,6 +47,7 @@ type PMHandler struct {
 	auto     PMAutomation
 	pm       *services.PMService
 	pmStatus PMStatusGetter // nil when PM stack is unconfigured (dormant)
+	approver PMApprover     // nil when Nomba unconfigured: approve returns 503
 }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
@@ -51,6 +60,10 @@ func NewPMHandler(auto PMAutomation, pm *services.PMService) *PMHandler {
 	}
 	return h
 }
+
+// SetApprover wires the PM provisioning service used by ApprovePM. Left nil
+// (the default) when Nomba creds are absent, in which case ApprovePM 503s.
+func (h *PMHandler) SetApprover(a PMApprover) { h.approver = a }
 
 // pmStatusResponse is the JSON payload for GetMyPMStatus.
 type pmStatusResponse struct {
@@ -90,22 +103,47 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: false, Status: ""})
 }
 
-// pmListItem is the safe projection returned by ListPMs — excludes secret
-// fields (NombaCredsRef, raw private keys, etc.).
+// pmListItem is the safe projection returned by ListPMs and the lifecycle
+// actions — excludes secret/internal fields (NombaCredsRef, NombaAccountID,
+// operator wallet, raw private keys, etc.).
 type pmListItem struct {
-	ID                      string  `json:"id"`
-	Name                    string  `json:"name"`
-	Status                  string  `json:"status"`
-	ProvisioningStatus      string  `json:"provisioningStatus"`
-	InboundAccountNumber    string  `json:"inboundAccountNumber"`
-	NombaWalletID           string  `json:"nombaWalletId"`
-	NombaAccountRef         string  `json:"nombaAccountRef"`
-	AvailableNGN            string  `json:"availableNgn"`
-	ReservedNGN             string  `json:"reservedNgn"`
-	PerTradeCapUSD          float64 `json:"perTradeCapUsd"`
-	DailyCapUSD             float64 `json:"dailyCapUsd"`
-	SettlementBankCode      string  `json:"settlementBankCode"`
-	SettlementAccountNumber string  `json:"settlementAccountNumber"`
+	ID                      string     `json:"id"`
+	Name                    string     `json:"name"`
+	Status                  string     `json:"status"`
+	ProvisioningStatus      string     `json:"provisioningStatus"`
+	InboundAccountNumber    string     `json:"inboundAccountNumber"`
+	NombaWalletID           string     `json:"nombaWalletId"`
+	NombaAccountRef         string     `json:"nombaAccountRef"`
+	AvailableNGN            string     `json:"availableNgn"`
+	ReservedNGN             string     `json:"reservedNgn"`
+	PerTradeCapUSD          float64    `json:"perTradeCapUsd"`
+	DailyCapUSD             float64    `json:"dailyCapUsd"`
+	SettlementBankCode      string     `json:"settlementBankCode"`
+	SettlementAccountNumber string     `json:"settlementAccountNumber"`
+	ReviewNote              string     `json:"reviewNote"`
+	ReviewedAt              *time.Time `json:"reviewedAt"`
+}
+
+// toPMListItem maps a PaymentMerchant to the safe projection. Single source of
+// truth so ListPMs and every lifecycle action expose the exact same fields.
+func toPMListItem(p *models.PaymentMerchant) pmListItem {
+	return pmListItem{
+		ID:                      p.ID.String(),
+		Name:                    p.Name,
+		Status:                  p.Status,
+		ProvisioningStatus:      p.ProvisioningStatus,
+		InboundAccountNumber:    p.InboundAccountNumber,
+		NombaWalletID:           p.NombaWalletID,
+		NombaAccountRef:         p.NombaAccountRef,
+		AvailableNGN:            p.AvailableNGN,
+		ReservedNGN:             p.ReservedNGN,
+		PerTradeCapUSD:          p.PerTradeCapUSD,
+		DailyCapUSD:             p.DailyCapUSD,
+		SettlementBankCode:      p.SettlementBankCode,
+		SettlementAccountNumber: p.SettlementAccountNumber,
+		ReviewNote:              p.ReviewNote,
+		ReviewedAt:              p.ReviewedAt,
+	}
 }
 
 // ListPMs handles GET /api/admin/pm — returns a JSON array of all PM rows
@@ -123,22 +161,8 @@ func (h *PMHandler) ListPMs(c *gin.Context) {
 		return
 	}
 	items := make([]pmListItem, 0, len(pms))
-	for _, p := range pms {
-		items = append(items, pmListItem{
-			ID:                      p.ID.String(),
-			Name:                    p.Name,
-			Status:                  p.Status,
-			ProvisioningStatus:      p.ProvisioningStatus,
-			InboundAccountNumber:    p.InboundAccountNumber,
-			NombaWalletID:           p.NombaWalletID,
-			NombaAccountRef:         p.NombaAccountRef,
-			AvailableNGN:            p.AvailableNGN,
-			ReservedNGN:             p.ReservedNGN,
-			PerTradeCapUSD:          p.PerTradeCapUSD,
-			DailyCapUSD:             p.DailyCapUSD,
-			SettlementBankCode:      p.SettlementBankCode,
-			SettlementAccountNumber: p.SettlementAccountNumber,
-		})
+	for i := range pms {
+		items = append(items, toPMListItem(&pms[i]))
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchants", items)
 }
@@ -290,4 +314,136 @@ func (h *PMHandler) Withdraw(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Withdrawal initiated", gin.H{"payoutId": payoutID})
+}
+
+// ApprovePM handles POST /api/admin/pm/:id/approve — provisions the PM's Nomba
+// virtual account (if not already done) and activates it. Only valid from
+// pending. 503 when Nomba/approver is unconfigured.
+func (h *PMHandler) ApprovePM(c *gin.Context) {
+	pmID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.approver == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: Nomba not configured")
+		return
+	}
+
+	pm, err := h.approver.ProvisionAndActivatePM(c.Request.Context(), pmID, admin.ID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrPMProvisioningUnavailable):
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: Nomba not configured")
+		case errors.Is(err, services.ErrPMNotFound):
+			utils.ErrorResponse(c, http.StatusNotFound, "Payment merchant not found")
+		case errors.Is(err, services.ErrInvalidPMTransition):
+			utils.ErrorResponse(c, http.StatusConflict, "Only a pending payment merchant can be approved")
+		default:
+			log.Printf("[pm handler] ApprovePM pm=%s: %v", pmID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Approval failed")
+		}
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchant approved", toPMListItem(pm))
+}
+
+// RejectPM handles POST /api/admin/pm/:id/reject — declines a pending PM. A
+// note explaining the reason is required.
+func (h *PMHandler) RejectPM(c *gin.Context) {
+	pmID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.pm == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Payment merchants unavailable")
+		return
+	}
+	var input adminNoteInput
+	if err := c.ShouldBindJSON(&input); err != nil || strings.TrimSpace(input.Note) == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Note is required for rejection")
+		return
+	}
+	if len(input.Note) > 512 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Note is too long (max 512 characters)")
+		return
+	}
+
+	pm, err := h.pm.RejectPM(c.Request.Context(), pmID, admin.ID, input.Note)
+	if err != nil {
+		h.respondLifecycleErr(c, "RejectPM", pmID, err, "Only a pending payment merchant can be rejected")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchant rejected", toPMListItem(pm))
+}
+
+// PausePM handles POST /api/admin/pm/:id/pause — kill switch for an active PM.
+func (h *PMHandler) PausePM(c *gin.Context) {
+	pmID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.pm == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Payment merchants unavailable")
+		return
+	}
+	pm, err := h.pm.PausePM(c.Request.Context(), pmID, admin.ID)
+	if err != nil {
+		h.respondLifecycleErr(c, "PausePM", pmID, err, "Only an active payment merchant can be paused")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchant paused", toPMListItem(pm))
+}
+
+// ResumePM handles POST /api/admin/pm/:id/resume — re-activates a paused PM.
+func (h *PMHandler) ResumePM(c *gin.Context) {
+	pmID, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.pm == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Payment merchants unavailable")
+		return
+	}
+	pm, err := h.pm.ResumePM(c.Request.Context(), pmID, admin.ID)
+	if err != nil {
+		h.respondLifecycleErr(c, "ResumePM", pmID, err, "Only a paused payment merchant can be resumed")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchant resumed", toPMListItem(pm))
+}
+
+// respondLifecycleErr maps the shared PMService lifecycle errors to HTTP
+// responses. invalidMsg is the 409 message for an invalid status transition.
+func (h *PMHandler) respondLifecycleErr(c *gin.Context, op string, pmID uuid.UUID, err error, invalidMsg string) {
+	switch {
+	case errors.Is(err, services.ErrReviewNoteRequired):
+		utils.ErrorResponse(c, http.StatusBadRequest, "Note is required for rejection")
+	case errors.Is(err, services.ErrPMNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, "Payment merchant not found")
+	case errors.Is(err, services.ErrInvalidPMTransition):
+		utils.ErrorResponse(c, http.StatusConflict, invalidMsg)
+	default:
+		log.Printf("[pm handler] %s pm=%s: %v", op, pmID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Action failed")
+	}
 }

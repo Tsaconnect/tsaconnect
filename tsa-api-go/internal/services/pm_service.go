@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -12,6 +14,13 @@ import (
 
 // ErrPMNotFound is returned when a PaymentMerchant lookup finds no row.
 var ErrPMNotFound = errors.New("payment merchant not found")
+
+// ErrInvalidPMTransition is returned when a lifecycle action (reject / pause /
+// resume) is attempted from a status that does not allow it.
+var ErrInvalidPMTransition = errors.New("invalid payment merchant status transition")
+
+// ErrReviewNoteRequired is returned when a reject is attempted without a note.
+var ErrReviewNoteRequired = errors.New("a note is required to reject a payment merchant")
 
 // PMService handles lookups, cap checks and seeding for PaymentMerchant rows.
 type PMService struct{ db *gorm.DB }
@@ -154,6 +163,81 @@ func koboToNGNString(kobo int64) string {
 		out = "-" + out
 	}
 	return out
+}
+
+// RejectPM declines a PENDING payment merchant. A non-empty note is required
+// (recorded for audit). The row is kept (status='rejected') rather than deleted
+// so the decision is auditable. Returns ErrInvalidPMTransition unless the PM is
+// currently pending, and ErrReviewNoteRequired when note is blank.
+func (s *PMService) RejectPM(ctx context.Context, pmID, adminID uuid.UUID, note string) (*models.PaymentMerchant, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return nil, ErrReviewNoteRequired
+	}
+	return s.transition(ctx, pmID, adminID, note,
+		[]string{models.PaymentMerchantStatusPending},
+		models.PaymentMerchantStatusRejected)
+}
+
+// PausePM flips an ACTIVE payment merchant to 'paused' (kill switch — no new
+// trades). Returns ErrInvalidPMTransition unless the PM is currently active.
+func (s *PMService) PausePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
+	return s.transition(ctx, pmID, adminID, "",
+		[]string{models.PaymentMerchantStatusActive},
+		models.PaymentMerchantStatusPaused)
+}
+
+// ResumePM flips a PAUSED payment merchant back to 'active'. Returns
+// ErrInvalidPMTransition unless the PM is currently paused.
+func (s *PMService) ResumePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
+	return s.transition(ctx, pmID, adminID, "",
+		[]string{models.PaymentMerchantStatusPaused},
+		models.PaymentMerchantStatusActive)
+}
+
+// transition loads the PM, verifies its current status is in `from`, and flips
+// it to `to` while recording the reviewer (and optional note). The status guard
+// and write run in one transaction so two concurrent admins can't both win.
+func (s *PMService) transition(ctx context.Context, pmID, adminID uuid.UUID, note string, from []string, to string) (*models.PaymentMerchant, error) {
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&pm, "id = ?", pmID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrPMNotFound
+			}
+			return err
+		}
+		if !contains(from, pm.Status) {
+			return ErrInvalidPMTransition
+		}
+		now := time.Now()
+		fields := map[string]interface{}{
+			"status":      to,
+			"reviewed_by": adminID,
+			"reviewed_at": now,
+		}
+		if note != "" {
+			fields["review_note"] = note
+		}
+		if err := tx.Model(&pm).Updates(fields).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
+// contains reports whether s is present in xs.
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // ListAll returns every PaymentMerchant row ordered by created_at DESC.

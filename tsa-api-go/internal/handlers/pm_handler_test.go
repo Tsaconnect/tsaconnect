@@ -55,6 +55,9 @@ func newSQLiteForPMHandler(t *testing.T) *gorm.DB {
 		provisioning_status      TEXT NOT NULL DEFAULT 'pending',
 		per_trade_cap_usd        REAL NOT NULL DEFAULT 0,
 		daily_cap_usd            REAL NOT NULL DEFAULT 0,
+		reviewed_by              TEXT,
+		reviewed_at              DATETIME,
+		review_note              TEXT,
 		created_at               DATETIME,
 		updated_at               DATETIME
 	)`).Error; err != nil {
@@ -136,7 +139,44 @@ func buildPMRouter(h *PMHandler, adminUser *models.User) *gin.Engine {
 	g.POST("/trades/:id/payout", h.InitiatePayout)
 	g.POST("/trades/:id/decline", h.DeclineTrade)
 	g.POST("/:id/withdraw", h.Withdraw)
+	g.POST("/:id/approve", h.ApprovePM)
+	g.POST("/:id/reject", h.RejectPM)
+	g.POST("/:id/pause", h.PausePM)
+	g.POST("/:id/resume", h.ResumePM)
 	return r
+}
+
+// fakePMApprover is an injectable PMApprover for ApprovePM handler tests.
+type fakePMApprover struct {
+	pm    *models.PaymentMerchant
+	err   error
+	calls []approveCall
+}
+
+type approveCall struct {
+	pmID    uuid.UUID
+	adminID uuid.UUID
+}
+
+func (f *fakePMApprover) ProvisionAndActivatePM(_ context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
+	f.calls = append(f.calls, approveCall{pmID: pmID, adminID: adminID})
+	return f.pm, f.err
+}
+
+// seedPMRow inserts a payment_merchants row in the given status, returning its id.
+func seedPMRow(t *testing.T, db *gorm.DB, status string) uuid.UUID {
+	t.Helper()
+	pm := &models.PaymentMerchant{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Name:               "Acme Corp",
+		Status:             status,
+		ProvisioningStatus: models.PMProvisioningPending,
+	}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatalf("seed pm: %v", err)
+	}
+	return pm.ID
 }
 
 func testAdminUser() *models.User {
@@ -893,5 +933,201 @@ func TestPMHandler_ListPMs_WithData(t *testing.T) {
 		if _, hasSecret := m["nombaCredsRef"]; hasSecret {
 			t.Errorf("nombaCredsRef leaked in response for PM %v", m["name"])
 		}
+	}
+}
+
+// ─── Lifecycle: ApprovePM ─────────────────────────────────────────────────────
+
+func TestPMHandler_ApprovePM_Success(t *testing.T) {
+	pmID := uuid.New()
+	now := time.Now()
+	approver := &fakePMApprover{pm: &models.PaymentMerchant{
+		ID:                 pmID,
+		Name:               "Acme Corp",
+		Status:             models.PaymentMerchantStatusActive,
+		ProvisioningStatus: models.PMProvisioningActive,
+		NombaCredsRef:      "secret-ref",
+		ReviewedAt:         &now,
+	}}
+	h := NewPMHandler(&fakePMAutomation{}, nil)
+	h.SetApprover(approver)
+	router := buildPMRouter(h, testAdminUser())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/approve", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(approver.calls) != 1 || approver.calls[0].pmID != pmID {
+		t.Fatalf("expected approve called with pmID %v, got %+v", pmID, approver.calls)
+	}
+	// Response uses the safe projection — no secret fields.
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data, _ := resp["data"].(map[string]interface{})
+	if data["status"] != models.PaymentMerchantStatusActive {
+		t.Errorf("status = %v, want active", data["status"])
+	}
+	if _, leaked := data["nombaCredsRef"]; leaked {
+		t.Errorf("nombaCredsRef leaked in approve response")
+	}
+	if _, leaked := data["operatorWalletAddress"]; leaked {
+		t.Errorf("operatorWalletAddress leaked in approve response (not in safe projection)")
+	}
+}
+
+func TestPMHandler_ApprovePM_DormantWhenNoApprover(t *testing.T) {
+	h := NewPMHandler(&fakePMAutomation{}, nil) // no SetApprover → approver nil
+	router := buildPMRouter(h, testAdminUser())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+uuid.New().String()+"/approve", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPMHandler_ApprovePM_ErrorMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"not found", services.ErrPMNotFound, http.StatusNotFound},
+		{"invalid transition", services.ErrInvalidPMTransition, http.StatusConflict},
+		{"provisioning unavailable", services.ErrPMProvisioningUnavailable, http.StatusServiceUnavailable},
+		{"unexpected", errors.New("nomba boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewPMHandler(&fakePMAutomation{}, nil)
+			h.SetApprover(&fakePMApprover{err: tc.err})
+			router := buildPMRouter(h, testAdminUser())
+
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("POST", "/api/admin/pm/"+uuid.New().String()+"/approve", nil)
+			router.ServeHTTP(w, req)
+
+			if w.Code != tc.want {
+				t.Fatalf("err %v: expected %d, got %d: %s", tc.err, tc.want, w.Code, w.Body.String())
+			}
+			// The internal error string must never leak to the client.
+			if tc.err.Error() == "nomba boom" && bytes.Contains(w.Body.Bytes(), []byte("nomba boom")) {
+				t.Errorf("internal error string leaked in response: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// ─── Lifecycle: RejectPM ──────────────────────────────────────────────────────
+
+func TestPMHandler_RejectPM_Success(t *testing.T) {
+	db := newSQLiteForPMHandler(t)
+	pmID := seedPMRow(t, db, models.PaymentMerchantStatusPending)
+	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
+	router := buildPMRouter(h, testAdminUser())
+
+	w := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"note":"incomplete KYC"}`)
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/reject", body)
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data, _ := resp["data"].(map[string]interface{})
+	if data["status"] != models.PaymentMerchantStatusRejected {
+		t.Errorf("status = %v, want rejected", data["status"])
+	}
+	if data["reviewNote"] != "incomplete KYC" {
+		t.Errorf("reviewNote = %v, want 'incomplete KYC' (must be exposed in projection)", data["reviewNote"])
+	}
+}
+
+func TestPMHandler_RejectPM_NoteRequired(t *testing.T) {
+	db := newSQLiteForPMHandler(t)
+	pmID := seedPMRow(t, db, models.PaymentMerchantStatusPending)
+	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
+	router := buildPMRouter(h, testAdminUser())
+
+	for _, body := range []string{`{"note":""}`, `{"note":"   "}`, `{}`} {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/reject", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %q: expected 400, got %d", body, w.Code)
+		}
+	}
+}
+
+func TestPMHandler_RejectPM_InvalidTransition(t *testing.T) {
+	db := newSQLiteForPMHandler(t)
+	pmID := seedPMRow(t, db, models.PaymentMerchantStatusActive) // not pending
+	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
+	router := buildPMRouter(h, testAdminUser())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/reject", bytes.NewBufferString(`{"note":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPMHandler_RejectPM_NotFound(t *testing.T) {
+	db := newSQLiteForPMHandler(t)
+	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
+	router := buildPMRouter(h, testAdminUser())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+uuid.New().String()+"/reject", bytes.NewBufferString(`{"note":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Lifecycle: Pause / Resume ────────────────────────────────────────────────
+
+func TestPMHandler_PauseResume(t *testing.T) {
+	db := newSQLiteForPMHandler(t)
+	pmID := seedPMRow(t, db, models.PaymentMerchantStatusActive)
+	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
+	router := buildPMRouter(h, testAdminUser())
+
+	// pause active → 200
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/pause", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("pause: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// pause again (already paused) → 409
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/pause", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("double pause: expected 409, got %d", w.Code)
+	}
+
+	// resume paused → 200
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/api/admin/pm/"+pmID.String()+"/resume", nil)
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("resume: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
