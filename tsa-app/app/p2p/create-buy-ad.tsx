@@ -33,6 +33,7 @@ import { getActiveWallet } from '../../services/wallet';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import { useUserRole } from '../../hooks/useUserRole';
+import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getNetworkDisplayName } from '../../constants/chains';
 import { useTheme } from '@/theme';
@@ -81,6 +82,10 @@ const CreateBuyAdScreen: React.FC = () => {
   const { isMerchant, loading: roleLoading } = useUserRole();
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
+  // Active PMs pay sellers automatically from their Nomba account, so no manual
+  // payment method is selected — the picker is replaced by an info card and the
+  // publish requirement is waived (the backend waives it for PM ads too).
+  const { isPm } = useIsPaymentMerchant();
 
   const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
   const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
@@ -180,7 +185,7 @@ const CreateBuyAdScreen: React.FC = () => {
   const valid =
     parseFloat(amountInput || '0') > 0 &&
     parseFloat(rateInput || '0') > 0 &&
-    selectedPmIds.length > 0;
+    (isPm || selectedPmIds.length > 0);
 
   const handleSubmit = async () => {
     if (!valid || submitting) return;
@@ -380,9 +385,23 @@ const CreateBuyAdScreen: React.FC = () => {
 
           {/* ── Payment methods — where you'll send fiat FROM ────────── */}
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-            Your payment methods (where you&apos;ll pay from)
+            {isPm ? 'Payouts' : "Your payment methods (where you'll pay from)"}
           </Text>
-          {loadingPms ? (
+          {isPm ? (
+            // PM buy ad: sellers are paid automatically from the merchant's Nomba
+            // account when they respond and deposit — no manual method to pick.
+            <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="checkCircle" size={20} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">Auto-paid from your Nomba account</Text>
+                  <Text variant="caption" color="textSecondary">
+                    Sellers are paid out automatically once they respond and deposit — no payment method needed.
+                  </Text>
+                </View>
+              </View>
+            </Card>
+          ) : loadingPms ? (
             <View style={{ paddingVertical: spacing.lg }}>
               <Spinner />
             </View>
