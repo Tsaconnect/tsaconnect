@@ -94,6 +94,54 @@ func TestCreateAd_PMUser_SellAd_TaggedWithPMID(t *testing.T) {
 	}
 }
 
+// (a-2) Active-PM user creates a sell-ad with NO payment method → allowed. A PM
+// settles through its Nomba VA (buyers pay the VA), so a manual payment method
+// is not required for PM ads.
+func TestCreateAd_PMUser_SellAd_NoPaymentMethod_OK(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, esc, _ := newServiceWithPM(t, db)
+
+	makerWallet := "0xAbCd1234abCd1234abCd1234abCd1234AbCd1234"
+	sellerID := uuid.New()
+	pm := seedActivePMForUser(t, db, sellerID, makerWallet)
+
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}
+
+	params := makeCreateAdParams(uuid.Nil)
+	params.PaymentMethodIDs = nil // PM ad: no manual payment method attached
+
+	res, err := svc.CreateAd(context.Background(), sellerID, makerWallet, params)
+	if err != nil {
+		t.Fatalf("CreateAd (PM, no payment method) rejected: %v", err)
+	}
+	if res.Ad.PMID == nil || *res.Ad.PMID != pm.ID {
+		t.Fatalf("ad.PMID = %v, want %v", res.Ad.PMID, pm.ID)
+	}
+}
+
+// (a-3) Non-PM user creates a sell-ad with NO payment method → still rejected.
+// The waiver applies only to PMs; normal sellers must attach one.
+func TestCreateAd_NonPMUser_SellAd_NoPaymentMethod_Rejected(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, esc, _ := newServiceWithPM(t, db)
+
+	sellerID := uuid.New()
+	sellerAddr := "0x2222222222222222222222222222222222222222"
+
+	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}
+
+	params := makeCreateAdParams(uuid.Nil)
+	params.PaymentMethodIDs = nil
+
+	_, err := svc.CreateAd(context.Background(), sellerID, sellerAddr, params)
+	if err == nil {
+		t.Fatal("expected error for non-PM sell-ad with no payment method, got nil")
+	}
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
 // (b) Active-PM user creates a sell-ad with sellerAddress != PM maker wallet
 // → rejected with ErrInvalidParams, no ad row created.
 func TestCreateAd_PMUser_SellAd_WrongWallet_Rejected(t *testing.T) {
@@ -186,6 +234,29 @@ func TestCreateAd_NonActivePM_SellAd_NotTagged(t *testing.T) {
 
 // (d) Active-PM user creates a buy-ad with merchantAddress == PM maker wallet
 // → ad.PMID is set to the PM's ID.
+// PM buy-ad with NO payment method → allowed (the PM pays users out via Nomba),
+// mirroring the sell-ad waiver. Non-PM buy-ads still require a method.
+func TestCreateAd_PMUser_BuyAd_NoPaymentMethod_OK(t *testing.T) {
+	db := setupAdTaggingDB(t)
+	svc, _, _ := newServiceWithPM(t, db)
+
+	makerWallet := "0xAbCd1234abCd1234abCd1234abCd1234AbCd1234"
+	merchantID := uuid.New()
+	pm := seedActivePMForUser(t, db, merchantID, makerWallet)
+
+	params := makeCreateAdParams(uuid.Nil)
+	params.Side = models.P2PAdSideBuy
+	params.PaymentMethodIDs = nil // PM buy-ad: no manual payment method attached
+
+	res, err := svc.CreateAd(context.Background(), merchantID, makerWallet, params)
+	if err != nil {
+		t.Fatalf("CreateAd (PM buy-ad, no payment method) rejected: %v", err)
+	}
+	if res.Ad.PMID == nil || *res.Ad.PMID != pm.ID {
+		t.Fatalf("buy-ad.PMID = %v, want %v", res.Ad.PMID, pm.ID)
+	}
+}
+
 func TestCreateAd_PMUser_BuyAd_TaggedWithPMID(t *testing.T) {
 	db := setupAdTaggingDB(t)
 	svc, esc, _ := newServiceWithPM(t, db)

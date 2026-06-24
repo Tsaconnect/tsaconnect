@@ -300,19 +300,17 @@ func (s *P2PTradeService) lookupActivePM(ctx context.Context, userID uuid.UUID) 
 	return pm, nil
 }
 
-// applyPMAdTag looks up an active PM for the creator and, if found:
+// applyPMAdTag stamps an ad as a PM ad when the creator is an active PM. The
+// caller passes the already-resolved PM (from lookupActivePM) so we don't
+// re-query it. When pm is non-nil it:
 //  1. Validates that the ad's wallet address (sellerAddress) matches the PM's
 //     registered maker wallet (case-insensitive). Returns ErrInvalidParams on
 //     mismatch so the caller can reject the request before persisting.
 //  2. Sets ad.PMID to the PM's ID so marketplace queries can filter PM ads.
 //
-// If no active PM exists for the creator, ad.PMID is left nil (normal ad).
-// If the PM feature is dormant (s.pm == nil), this is a no-op.
-func (s *P2PTradeService) applyPMAdTag(ctx context.Context, creatorID uuid.UUID, walletAddress string, ad *models.P2PAd) error {
-	pm, err := s.lookupActivePM(ctx, creatorID)
-	if err != nil {
-		return err
-	}
+// pm == nil (no active PM for the creator, or the PM feature is dormant) is a
+// no-op — ad.PMID is left nil (normal ad).
+func (s *P2PTradeService) applyPMAdTag(pm *models.PaymentMerchant, walletAddress string, ad *models.P2PAd) error {
 	if pm == nil {
 		return nil // non-PM user or feature dormant
 	}
@@ -582,7 +580,14 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		return s.createBuyAd(ctx, sellerID, sellerAddress, params)
 	}
 
-	if err := s.validateCreateAd(params); err != nil {
+	// An active PM settles via its Nomba VA, so it needn't attach a manual
+	// payment method (validateCreateAd skips the requirement). Non-PM sellers
+	// still need one.
+	sellerPM, err := s.lookupActivePM(ctx, sellerID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateCreateAd(params, sellerPM == nil); err != nil {
 		return nil, err
 	}
 	if !common.IsHexAddress(sellerAddress) {
@@ -726,7 +731,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 
 	// PM ad-tagging: if the creator is an active PM, stamp PMID and verify that
 	// the ad's seller address matches the PM's registered maker wallet.
-	if err := s.applyPMAdTag(ctx, sellerID, sellerAddress, ad); err != nil {
+	if err := s.applyPMAdTag(sellerPM, sellerAddress, ad); err != nil {
 		return nil, err
 	}
 
@@ -759,7 +764,13 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 // who receives crypto on release. It's captured here so OpenTrade can pass it
 // as the `merchant` arg without a User lookup.
 func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID, merchantAddress string, params CreateAdParams) (*CreateAdResult, error) {
-	if err := s.validateCreateAd(params); err != nil {
+	// PM buy-ads pay users out via the PM's Nomba transfer, so a manual payment
+	// method isn't required for an active PM. Non-PM merchants still need one.
+	merchantPM, err := s.lookupActivePM(ctx, merchantID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateCreateAd(params, merchantPM == nil); err != nil {
 		return nil, err
 	}
 	if !common.IsHexAddress(merchantAddress) {
@@ -847,7 +858,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 
 	// PM ad-tagging: if the creator is an active PM, stamp PMID and verify
 	// that the merchant address matches the PM's registered maker wallet.
-	if err := s.applyPMAdTag(ctx, merchantID, merchantAddress, ad); err != nil {
+	if err := s.applyPMAdTag(merchantPM, merchantAddress, ad); err != nil {
 		return nil, err
 	}
 
@@ -3513,7 +3524,7 @@ func (s *P2PTradeService) countActiveTradesForOpener(tx *gorm.DB, adID uuid.UUID
 	return n, err
 }
 
-func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
+func (s *P2PTradeService) validateCreateAd(p CreateAdParams, requirePaymentMethod bool) error {
 	if strings.TrimSpace(p.Token) == "" {
 		return fmt.Errorf("%w: token", ErrInvalidParams)
 	}
@@ -3523,7 +3534,10 @@ func (s *P2PTradeService) validateCreateAd(p CreateAdParams) error {
 	if strings.TrimSpace(p.FiatCurrency) == "" {
 		return fmt.Errorf("%w: fiat_currency", ErrInvalidParams)
 	}
-	if len(p.PaymentMethodIDs) == 0 {
+	// PM ads settle through the merchant's Nomba VA (buyers pay the VA; the PM
+	// pays users out via Nomba), so a manual payment method is neither used nor
+	// required. Non-PM ads still require at least one.
+	if requirePaymentMethod && len(p.PaymentMethodIDs) == 0 {
 		return fmt.Errorf("%w: at least one payment_method_id required", ErrInvalidParams)
 	}
 

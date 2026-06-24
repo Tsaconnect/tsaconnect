@@ -586,7 +586,9 @@ type createAdRequest struct {
 	FloatAnchor      string   `json:"floatAnchor"`
 	MinLimit         string   `json:"minLimit"`
 	MaxLimit         string   `json:"maxLimit"`
-	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"required,min=1"`
+	// Optional at the binding layer: PM ads settle via the merchant's Nomba VA
+	// and need no manual method. The service requires >=1 for non-PM ads.
+	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"omitempty"`
 	Terms            string   `json:"terms"`
 	SellerAddress    string   `json:"sellerAddress" binding:"required"`
 	// ChainID selects the P2P chain. Omit (or send 0) to default to Sonic.

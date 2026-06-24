@@ -1755,10 +1755,10 @@ func TestValidateCreateAd_RejectsNonNumeric(t *testing.T) {
 		RateType: "fixed", Rate: "1500", MinLimit: "100", MaxLimit: "5000",
 		PaymentMethodIDs: []uuid.UUID{pmID},
 	}
-	if err := svc.validateCreateAd(base); err != nil {
+	if err := svc.validateCreateAd(base, true); err != nil {
 		t.Fatalf("valid params rejected: %v", err)
 	}
-	bad := func(mut func(*CreateAdParams)) error { p := base; mut(&p); return svc.validateCreateAd(p) }
+	bad := func(mut func(*CreateAdParams)) error { p := base; mut(&p); return svc.validateCreateAd(p, true) }
 	cases := map[string]func(*CreateAdParams){
 		"non-numeric rate":     func(p *CreateAdParams) { p.Rate = "abc" },
 		"non-positive rate":    func(p *CreateAdParams) { p.Rate = "0" },
