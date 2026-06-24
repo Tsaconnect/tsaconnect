@@ -23,6 +23,42 @@ func markAdAsPM(t *testing.T, svc *P2PTradeService, adID uuid.UUID) {
 	}
 }
 
+// TestOpenTrade_PMSellAd_NoPaymentMethod_OK: a buyer opening a trade against a
+// PM SELL ad with NO payment method is allowed — the buyer pays the PM's Nomba
+// VA (pmPayTo), so the sell-ad open path must skip the payment-method allowlist
+// check when the ad is a PM ad.
+func TestOpenTrade_PMSellAd_NoPaymentMethod_OK(t *testing.T) {
+	svc, _, adID, _ := setupSignedAd(t)
+	markAdAsPM(t, svc, adID) // stamp pm_id → treat as a PM ad
+
+	buyerID := uuid.New()
+	trade, raw, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
+		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
+	if err != nil {
+		t.Fatalf("OpenTrade(PM sell-ad, no payment method): %v", err)
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("trade status = %q, want pending_payment", trade.Status)
+	}
+	if len(raw) == 0 {
+		t.Fatal("expected unsigned tx")
+	}
+}
+
+// TestOpenTrade_NonPMSellAd_NoPaymentMethod_Rejected: the waiver is PM-only — a
+// normal sell-ad still requires the buyer to reference a method in the ad's
+// allowlist.
+func TestOpenTrade_NonPMSellAd_NoPaymentMethod_Rejected(t *testing.T) {
+	svc, _, adID, _ := setupSignedAd(t) // pm_id stays NULL
+
+	buyerID := uuid.New()
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
+		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
+	if !errors.Is(err, ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams for non-PM sell-ad with no method, got %v", err)
+	}
+}
+
 // TestOpenTradeWithDeposit_PMBuyAd_StoresPayout verifies that opening a sell
 // trade against a PM buy-ad persists the payout destination onto the trade so
 // PMAutomationService.InitiateSellPayout can later pay the user.

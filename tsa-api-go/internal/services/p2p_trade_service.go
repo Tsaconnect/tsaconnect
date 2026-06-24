@@ -1225,8 +1225,13 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return nil, nil, fmt.Errorf("%w: derived token_amount=0", ErrInvalidParams)
 	}
 
-	if err := s.validateAdPaymentMethod(&ad, params.PaymentMethodID); err != nil {
-		return nil, nil, err
+	// PM ads settle to the merchant's Nomba VA — the buyer pays the VA (shown as
+	// pmPayTo), so there is no manual payment method to validate. Non-PM ads must
+	// reference a method in the ad's allowlist.
+	if ad.PMID == nil {
+		if err := s.validateAdPaymentMethod(&ad, params.PaymentMethodID); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	trade := &models.P2PTrade{
