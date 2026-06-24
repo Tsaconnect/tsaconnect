@@ -100,6 +100,9 @@ export interface P2PAd {
   isPm?: boolean;
   /** ID of the PM that owns this ad. Populated server-side alongside isPm. */
   pmId?: string;
+  /** For a PM ad, the merchant's Nomba VA the buyer pays into (auto-settled).
+   *  Surfaced on the ad detail so a buyer sees the pay-to before opening. */
+  pmPayTo?: { accountNumber: string; bank: string; accountName: string } | null;
   status: 'pending' | 'active' | 'paused' | 'exhausted' | 'cancelled';
   expiresAt?: string;
   createdAt: string;

@@ -1061,8 +1061,10 @@ func (h *P2PHandler) ConfirmCancelAd(c *gin.Context) {
 // app approves exactly this, and the service derives fiat from it; on the
 // sell-ad path TokenAmount is empty and the amount is derived from fiat.
 type openTradeRequest struct {
-	FiatAmount      string `json:"fiatAmount"`
-	PaymentMethodID string `json:"paymentMethodId" binding:"required"`
+	FiatAmount string `json:"fiatAmount"`
+	// Optional: PM ads settle to the merchant's Nomba VA, so the buyer selects
+	// no manual method. The service waives it when the ad is a PM ad.
+	PaymentMethodID string `json:"paymentMethodId" binding:"omitempty"`
 	BuyerAddress    string `json:"buyerAddress"`
 	SellerAddress   string `json:"sellerAddress"`
 	TokenAmount     string `json:"tokenAmount"`
@@ -1089,10 +1091,16 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	pmID, err := uuid.Parse(req.PaymentMethodID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid paymentMethodId"})
-		return
+	// paymentMethodId is optional — PM ads carry no manual method (the service
+	// waives it). Parse only when present; leave uuid.Nil otherwise.
+	var pmID uuid.UUID
+	if rawPM := strings.TrimSpace(req.PaymentMethodID); rawPM != "" {
+		parsed, perr := uuid.Parse(rawPM)
+		if perr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid paymentMethodId"})
+			return
+		}
+		pmID = parsed
 	}
 	// One of fiatAmount / tokenAmount must be present: sell-ad takes are
 	// fiat-driven; buy-ad (JIT sell) opens are tokenAmount-authoritative. The

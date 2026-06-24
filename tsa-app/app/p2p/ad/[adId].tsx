@@ -156,6 +156,10 @@ const AdDetailScreen: React.FC = () => {
 
   // Load bank list when the ad is a PM buy-ad (deferred until needed).
   const isPmBuyAd = ad?.side === 'buy' && !!ad?.isPm;
+  // PM SELL ad: the buyer pays the merchant's Nomba VA (pmPayTo), so there's no
+  // manual payment method to pick — the picker is replaced by the VA card and
+  // the method requirement is waived.
+  const isPmSellAd = ad?.side === 'sell' && !!ad?.isPm;
   useEffect(() => {
     if (!isPmBuyAd) return;
     let cancelled = false;
@@ -244,7 +248,7 @@ const AdDetailScreen: React.FC = () => {
     !!ad &&
     !ad.rateStale &&
     parseFloat(amountInput || '0') > 0 &&
-    !!selectedPmId &&
+    (isPmSellAd || !!selectedPmId) &&
     // FIX 1: sell flow (buy-ad path) requires a known token.
     (isBuyAd ? tokenSupported : minOk && maxOk) &&
     pmPayoutValid;
@@ -734,7 +738,27 @@ const AdDetailScreen: React.FC = () => {
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.sm }}>
             {isBuyAd ? 'Receive fiat via (your account)' : 'Pay via'}
           </Text>
-          {loadingUserPms ? (
+          {isPmSellAd ? (
+            // PM sell ad: the buyer pays the merchant's Nomba VA and USDT
+            // releases automatically. Show the pay-to instead of a method picker.
+            <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted, gap: spacing.xs }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="checkCircle" size={20} color={colors.accent} />
+                <Text variant="bodyMed" weight="700">Auto-settled · pay the merchant&apos;s account</Text>
+              </View>
+              {ad?.pmPayTo ? (
+                <View style={{ marginLeft: spacing.lg + spacing.sm }}>
+                  <Text variant="bodyMed" weight="700" numeric>{ad.pmPayTo.accountNumber}</Text>
+                  <Text variant="caption" color="textSecondary">
+                    {[ad.pmPayTo.bank, ad.pmPayTo.accountName].filter(Boolean).join(' · ')}
+                  </Text>
+                </View>
+              ) : null}
+              <Text variant="caption" color="textMuted">
+                After you open the trade, send the exact amount to this account. Your {ad?.token ?? 'crypto'} releases automatically once the merchant receives it.
+              </Text>
+            </Card>
+          ) : loadingUserPms ? (
             <View style={{ paddingVertical: spacing.md }}>
               <Spinner inline label="Loading payment methods…" />
             </View>
