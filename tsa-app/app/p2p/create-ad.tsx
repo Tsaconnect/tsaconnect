@@ -42,6 +42,7 @@ import { getActiveWallet, signTypedData, verifyWalletKey } from '../../services/
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
+import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
@@ -106,6 +107,10 @@ const CreateAdScreen: React.FC = () => {
   // config off supportedCurrencies so we have the right symbol for display.
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
+  // Active PMs settle via their Nomba VA (buyers pay the VA, auto-settled), so
+  // they don't attach a manual payment method — the selector is replaced by an
+  // info card and the publish requirement is waived for them.
+  const { isPm } = useIsPaymentMerchant();
   const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
   const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
   const currencyConfig =
@@ -489,7 +494,7 @@ const CreateAdScreen: React.FC = () => {
 
   const valid =
     parseFloat(amountInput || '0') > 0 &&
-    selectedPmIds.length > 0 &&
+    (isPm || selectedPmIds.length > 0) &&
     (rateType === 'fixed'
       ? parseFloat(rateInput || '0') > 0
       : floatOffsetPctValid && floatSupported && suggestedRate != null && !rateStale);
@@ -1052,9 +1057,26 @@ const CreateAdScreen: React.FC = () => {
 
           {/* ── Payment methods ──────────────────────────────────────── */}
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-            Payment methods
+            {isPm ? 'Payment method' : 'Payment methods'}
           </Text>
-          {loadingPms ? (
+          {isPm ? (
+            // PM ads settle through the merchant's Nomba virtual account — buyers
+            // are shown the VA to pay, and settlement is automatic. No manual
+            // payment method is selected or required.
+            <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Icon name="checkCircle" size={22} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Auto-settled via your Nomba account
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Buyers pay your virtual account and crypto releases automatically — no manual payment method needed.
+                  </Text>
+                </View>
+              </View>
+            </Card>
+          ) : loadingPms ? (
             <View style={{ paddingVertical: spacing.lg }}>
               <Spinner />
             </View>
