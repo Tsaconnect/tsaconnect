@@ -463,6 +463,59 @@ export async function submitTransaction(
   }
 }
 
+/** Injectable steps of the prepare → sign → submit send flow. */
+export interface SendTxOps {
+  /** Fetch a freshly-prepared tx (with a server-computed nonce) from the backend. */
+  prepare: () => Promise<ApiResponse<PreparedTransaction>>;
+  /** Sign the prepared tx locally, returning the serialized signed tx. */
+  sign: (tx: PreparedTransaction) => Promise<string>;
+  /** Broadcast the signed tx via the backend. */
+  submit: (signedTx: string) => Promise<ApiResponse<{ txHash: string }>>;
+  /** Pause before re-preparing on a nonce error (default 1500ms) — lets a lagging RPC node catch up. */
+  retryDelayMs?: number;
+}
+
+const isNonceError = (message: string | undefined): boolean =>
+  (message ?? '').toLowerCase().includes('nonce too low');
+
+/**
+ * Run the prepare → sign → submit send flow with one automatic retry on a
+ * "nonce too low" broadcast failure.
+ *
+ * The nonce is computed server-side at prepare time (PendingNonceAt) and baked
+ * into the tx the wallet signs. On Sonic's load-balanced public RPC the node
+ * that served `prepare-tx` can lag the node that later accepts the broadcast,
+ * so the signed nonce ends up below the confirmed count → "nonce too low". The
+ * signed tx can't be patched after the fact, so recovery means re-preparing
+ * (fresh nonce) and re-signing. We retry exactly once; only nonce errors are
+ * retried — everything else (insufficient funds, revert, …) surfaces as-is.
+ */
+export async function sendPreparedTransaction(
+  ops: SendTxOps
+): Promise<ApiResponse<{ txHash: string }>> {
+  const retryDelayMs = ops.retryDelayMs ?? 1500;
+  let lastResult: ApiResponse<{ txHash: string }> = { success: false, message: 'Failed' };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0 && retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+
+    const prepared = await ops.prepare();
+    if (!prepared.success || !prepared.data) {
+      return { success: false, message: prepared.message || 'Failed to prepare transaction' };
+    }
+
+    const signed = await ops.sign(prepared.data);
+    lastResult = await ops.submit(signed);
+
+    if (lastResult.success) return lastResult;
+    if (!isNonceError(lastResult.message)) return lastResult;
+  }
+
+  return lastResult;
+}
+
 /**
  * Fetch transaction history with pagination.
  * Pass chainId to filter by chain.

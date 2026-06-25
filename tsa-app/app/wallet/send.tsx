@@ -24,6 +24,7 @@ import {
   getWalletBalances,
   normalizeWalletBalances,
   prepareSendTransaction,
+  sendPreparedTransaction,
   submitTransaction,
   type WalletBalanceWithChain,
 } from '../../services/walletApi';
@@ -281,27 +282,37 @@ const SendToken = () => {
   const handleSend = async () => {
 
     setScreen('sending'); setError('');
+    const chainId = activeChain?.chainId || CHAINS.sonic.chainId;
+    const recipient = toAddress.trim();
     try {
-      const r = await prepareSendTransaction(
-        selectedToken,
-        toAddress.trim(),
-        tokenAmount,
-        activeChain?.chainId || CHAINS.sonic.chainId,
-        isDiscovered
-          ? {
-              tokenAddress: navParams.contractAddress,
-              decimals: discoveredDecimals,
-            }
-          : undefined,
-      );
-      if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
-      const signed = await signTransaction({
-        type: 0, // legacy transaction format
-        to: r.data.to, data: r.data.data, value: r.data.value,
-        gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
-        nonce: r.data.nonce, chainId: r.data.chainId,
+      // Nonce is computed server-side at prepare time and can go stale before
+      // broadcast on Sonic's load-balanced RPC ("nonce too low"). The signed tx
+      // can't be patched, so on a nonce error we re-prepare (fresh nonce),
+      // re-sign, and retry once.
+      const res = await sendPreparedTransaction({
+        prepare: () =>
+          prepareSendTransaction(
+            selectedToken,
+            recipient,
+            tokenAmount,
+            chainId,
+            isDiscovered
+              ? {
+                  tokenAddress: navParams.contractAddress,
+                  decimals: discoveredDecimals,
+                }
+              : undefined,
+          ),
+        sign: (tx) =>
+          signTransaction({
+            type: 0, // legacy transaction format
+            to: tx.to, data: tx.data, value: tx.value,
+            gasLimit: tx.gasLimit, gasPrice: tx.gasPrice,
+            nonce: tx.nonce, chainId: tx.chainId,
+          }),
+        submit: (signed) =>
+          submitTransaction(signed, 'send', selectedToken, recipient, tokenAmount, chainId),
       });
-      const res = await submitTransaction(signed, 'send', selectedToken, toAddress.trim(), tokenAmount, activeChain?.chainId || CHAINS.sonic.chainId);
       if (res.success && res.data?.txHash) { setTxHash(res.data.txHash); setScreen('success'); }
       else throw new Error(res.message || 'Failed');
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
@@ -358,6 +369,7 @@ const SendToken = () => {
             title="Back to Wallet"
             onPress={() => router.replace('/tokenization')}
             fullWidth={false}
+            style={{ alignSelf: 'center', marginTop: spacing.lg }}
           />
         </View>
       </SafeAreaView>

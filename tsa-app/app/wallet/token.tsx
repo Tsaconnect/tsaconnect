@@ -13,19 +13,17 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import { View, ScrollView, Dimensions, Image } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CHAINS, type ChainKey, type ChainConfig } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
-import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
-import { getTokenPriceHistory } from '../../services/walletApi';
+import { getWalletBalances, normalizeWalletBalances, getTokenPriceHistory } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import {
   AmountText,
   Button,
   Card,
   Chip,
-  Divider,
   Icon,
   Spinner,
   Text,
@@ -33,7 +31,10 @@ import {
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CHART_WIDTH = SCREEN_WIDTH - 64;
-const CHART_HEIGHT = 180;
+const CHART_HEIGHT = 150;
+// Empty/loading states don't need the full chart height — a tall blank box
+// dominates the viewport and reads as "broken". Keep the placeholder compact.
+const CHART_PLACEHOLDER_HEIGHT = 96;
 
 // ── Time range options ──
 const TIME_RANGES = [
@@ -59,7 +60,7 @@ const MiniChart: React.FC<{
       <View
         style={{
           width,
-          height,
+          height: CHART_PLACEHOLDER_HEIGHT,
           justifyContent: 'center',
           alignItems: 'center',
           backgroundColor: colors.surfaceAlt,
@@ -76,15 +77,17 @@ const MiniChart: React.FC<{
       <View
         style={{
           width,
-          height,
+          height: CHART_PLACEHOLDER_HEIGHT,
           justifyContent: 'center',
           alignItems: 'center',
+          gap: 6,
           backgroundColor: colors.surfaceAlt,
           borderRadius: radius.sm,
         }}
       >
+        <Icon name="trendingUp" size={20} color={colors.textMuted} />
         <Text variant="bodySm" color="textMuted">
-          No price data available
+          No price data yet
         </Text>
       </View>
     );
@@ -145,6 +148,7 @@ const MiniChart: React.FC<{
 // ── Main Screen ──
 const TokenDetailScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
+  const insets = useSafeAreaInsets();
 
   const params = useLocalSearchParams<{
     symbol: string;
@@ -262,127 +266,160 @@ const TokenDetailScreen: React.FC = () => {
   const changeBg = isUp ? colors.successBg : colors.dangerBg;
   const displayColor = iconColor || activeChainConfig?.iconColor || colors.textMuted;
 
+  const sendParams = {
+    pathname: '/wallet/send',
+    params: {
+      token: symbol,
+      chainKey: activeChainKey,
+      ...(isDiscovered && contractAddress
+        ? {
+            contractAddress,
+            discovered: '1',
+            decimals: discoveredDecimals != null ? String(discoveredDecimals) : '',
+            balance: String(balance),
+            usdValue: String(usdValue),
+            name,
+          }
+        : {}),
+    },
+  } as any;
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScrollView
-        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+      {/* ── Fixed hero: identity, balance, price, chains ── */}
+      <View
+        style={{
+          paddingHorizontal: spacing.lg,
+          paddingTop: spacing.sm,
+          paddingBottom: spacing.md,
+          borderBottomWidth: 1,
+          borderBottomColor: colors.hairline,
+        }}
       >
-        {/* Token Header */}
-        <Card padding="xl" style={{ marginBottom: spacing.md }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xl }}>
-            <View
-              style={{
-                width: 52,
-                height: 52,
-                borderRadius: radius.pill,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginRight: spacing.md,
-                backgroundColor: displayColor + '20',
-              }}
-            >
-              {iconUrl ? (
-                <Image source={{ uri: iconUrl }} style={{ width: 32, height: 32, borderRadius: radius.pill }} />
-              ) : (
-                <Text variant="title2" weight="700" style={{ color: displayColor }}>
-                  {symbol?.charAt(0)}
-                </Text>
-              )}
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text variant="title2" weight="700">
-                {symbol}
-              </Text>
-              <Text variant="bodySm" color="textMuted">
-                {name}
-              </Text>
-            </View>
-          </View>
-
-          {/* Balance */}
-          <View style={{ alignItems: 'center', marginBottom: spacing.xl }}>
-            {loadingBalance ? (
-              <View style={{ marginVertical: spacing.md }}>
-                <Spinner color={displayColor} />
-              </View>
+        {/* Identity row + 24h change pill */}
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <View
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: radius.pill,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginRight: spacing.md,
+              backgroundColor: displayColor + '20',
+            }}
+          >
+            {iconUrl ? (
+              <Image source={{ uri: iconUrl }} style={{ width: 28, height: 28, borderRadius: radius.pill }} />
             ) : (
-              <>
-                <Text variant="display" weight="700">
-                  {balance.toFixed(isNative ? 4 : 2)} {symbol}
-                </Text>
-                <AmountText
-                  value={usdValue}
-                  currency="USD"
-                  variant="bodyMed"
-                  weight="400"
-                  color="textMuted"
-                  minimumFractionDigits={2}
-                  maximumFractionDigits={2}
-                  style={{ marginTop: spacing.xs }}
-                />
-              </>
+              <Text variant="title3" weight="700" style={{ color: displayColor }}>
+                {symbol?.charAt(0)}
+              </Text>
             )}
           </View>
+          <View style={{ flex: 1 }}>
+            <Text variant="title3" weight="700">
+              {symbol}
+            </Text>
+            <Text variant="caption" color="textMuted">
+              {name}
+            </Text>
+          </View>
+          {priceHistory.length >= 2 && (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                paddingHorizontal: spacing.sm,
+                paddingVertical: 4,
+                borderRadius: radius.sm,
+                backgroundColor: changeBg,
+              }}
+            >
+              <Icon name={isUp ? 'trendingUp' : 'trendingDown'} size={14} color={changeColor} />
+              <Text variant="caption" weight="600" style={{ color: changeColor }}>
+                {Math.abs(priceChange).toFixed(2)}%
+              </Text>
+            </View>
+          )}
+        </View>
 
-          {/* Price Info */}
-          <Divider spacing="md" />
+        {/* Balance */}
+        <View style={{ marginTop: spacing.md }}>
+          {loadingBalance ? (
+            <View style={{ height: 44, justifyContent: 'center' }}>
+              <Spinner color={displayColor} />
+            </View>
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm }}>
+              <Text variant="display" weight="700">
+                {balance.toFixed(isNative ? 4 : 2)}
+              </Text>
+              <Text variant="title3" weight="600" color="textSecondary" style={{ marginBottom: 4 }}>
+                {symbol}
+              </Text>
+            </View>
+          )}
+          {!loadingBalance && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs }}>
+              <AmountText
+                value={usdValue}
+                currency="USD"
+                variant="bodyMed"
+                weight="500"
+                color="textSecondary"
+                minimumFractionDigits={2}
+                maximumFractionDigits={2}
+              />
+              <Text variant="bodySm" color="textMuted">·</Text>
+              <AmountText
+                value={usdPrice}
+                currency="USD"
+                variant="bodySm"
+                weight="400"
+                color="textMuted"
+                minimumFractionDigits={2}
+                maximumFractionDigits={6}
+              />
+              <Text variant="bodySm" color="textMuted">each</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Chain Selector */}
+        {availableChains.length > 1 && (
+          <View style={{ marginTop: spacing.md }}>
+            <ChainSelector
+              availableChains={availableChains}
+              selectedChain={activeChainKey}
+              onSelect={(chain) => setActiveChainKey(chain)}
+              size="compact"
+            />
+          </View>
+        )}
+      </View>
+
+      {/* ── Scrolling detail: chart, info, activity ── */}
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['2xl'] }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Chart */}
+        <Card padding="lg" style={{ marginBottom: spacing.md }}>
           <View
             style={{
               flexDirection: 'row',
               justifyContent: 'space-between',
               alignItems: 'center',
+              marginBottom: spacing.md,
             }}
           >
-            <Text variant="bodySm" color="textMuted">
-              Price
+            <Text variant="title3" weight="700">
+              Price Chart
             </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-              <AmountText
-                value={usdPrice}
-                currency="USD"
-                variant="bodyMed"
-                weight="600"
-                minimumFractionDigits={2}
-                maximumFractionDigits={6}
-              />
-              {priceHistory.length >= 2 && (
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: spacing.xs,
-                    paddingHorizontal: spacing.sm,
-                    paddingVertical: 2,
-                    borderRadius: radius.sm,
-                    backgroundColor: changeBg,
-                  }}
-                >
-                  <Icon name={isUp ? 'trendingUp' : 'trendingDown'} size={14} color={changeColor} />
-                  <Text variant="caption" weight="600" style={{ color: changeColor }}>
-                    {Math.abs(priceChange).toFixed(2)}%
-                  </Text>
-                </View>
-              )}
-            </View>
           </View>
-        </Card>
-
-        {/* Chain Selector */}
-        {availableChains.length > 1 && (
-          <View style={{ marginBottom: spacing.md }}>
-            <ChainSelector
-              availableChains={availableChains}
-              selectedChain={activeChainKey}
-              onSelect={(chain) => setActiveChainKey(chain)}
-            />
-          </View>
-        )}
-
-        {/* Chart */}
-        <Card padding="lg" style={{ marginBottom: spacing.md }}>
-          <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
-            Price Chart
-          </Text>
           <MiniChart
             data={priceHistory}
             width={CHART_WIDTH}
@@ -418,12 +455,12 @@ const TokenDetailScreen: React.FC = () => {
           <InfoRow label="Symbol" value={symbol} />
           {isNative && <InfoRow label="Decimals" value="18" />}
           {activeChainConfig?.explorerUrl && (
-            <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} />
+            <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} last />
           )}
         </Card>
 
         {/* Transaction History */}
-        <Card padding="lg" style={{ marginBottom: spacing.md }}>
+        <Card padding="lg">
           <Text variant="title3" weight="700" style={{ marginBottom: spacing.md }}>
             Recent Activity
           </Text>
@@ -433,46 +470,41 @@ const TokenDetailScreen: React.FC = () => {
             onSeeAll={() => router.push('/wallet/history' as any)}
           />
         </Card>
-
-        {/* Actions */}
-        <View style={{ flexDirection: 'row', gap: spacing.md }}>
-          <Button
-            title="Send"
-            leftIcon="send"
-            style={{ flex: 1 }}
-            onPress={() => router.push({
-              pathname: '/wallet/send',
-              params: {
-                token: symbol,
-                chainKey: activeChainKey,
-                ...(isDiscovered && contractAddress
-                  ? {
-                      contractAddress,
-                      discovered: '1',
-                      decimals: discoveredDecimals != null ? String(discoveredDecimals) : '',
-                      balance: String(balance),
-                      usdValue: String(usdValue),
-                      name,
-                    }
-                  : {}),
-              },
-            } as any)}
-          />
-          <Button
-            title="Receive"
-            variant="secondary"
-            leftIcon="arrowDown"
-            style={{ flex: 1 }}
-            onPress={() => router.push('/wallet/receive')}
-          />
-        </View>
       </ScrollView>
+
+      {/* ── Pinned actions ── */}
+      <View
+        style={{
+          flexDirection: 'row',
+          gap: spacing.md,
+          paddingHorizontal: spacing.lg,
+          paddingTop: spacing.md,
+          paddingBottom: Math.max(insets.bottom, spacing.md),
+          borderTopWidth: 1,
+          borderTopColor: colors.hairline,
+          backgroundColor: colors.surface,
+        }}
+      >
+        <Button
+          title="Send"
+          leftIcon="send"
+          style={{ flex: 1 }}
+          onPress={() => router.push(sendParams)}
+        />
+        <Button
+          title="Receive"
+          variant="secondary"
+          leftIcon="arrowDown"
+          style={{ flex: 1 }}
+          onPress={() => router.push('/wallet/receive')}
+        />
+      </View>
     </SafeAreaView>
   );
 };
 
 // ── Info Row ──
-const InfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
+const InfoRow: React.FC<{ label: string; value: string; last?: boolean }> = ({ label, value, last }) => {
   const { colors, spacing } = useTheme();
   return (
     <View
@@ -480,7 +512,7 @@ const InfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) =
         flexDirection: 'row',
         justifyContent: 'space-between',
         paddingVertical: spacing.sm,
-        borderBottomWidth: 1,
+        borderBottomWidth: last ? 0 : 1,
         borderBottomColor: colors.hairline,
       }}
     >
