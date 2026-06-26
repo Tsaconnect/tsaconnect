@@ -180,6 +180,11 @@ type Config struct {
 	// and project memory project_mcgp-differentiated-swap.
 	MCGPSwapBAddress string
 
+	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
+	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
+	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
+	ITOperatorPrivateKey string
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -385,6 +390,9 @@ func Load() *Config {
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
 	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
+	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
+	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
+	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if

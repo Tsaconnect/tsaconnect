@@ -121,10 +121,31 @@ func main() {
 	// legacy redeem. Dormant unless MCGP_SWAP_B_ADDRESS is set; the handler is
 	// nil in that case so its /api/mcgp routes are not registered.
 	var mcgpSwapHandler *handlers.MCGPSwapHandler
+	var itHandler *handlers.ITHandler
 	mcgpSwapService := services.NewMCGPSwapService(sonicClient, cfg)
 	if mcgpSwapService.IsConfigured() {
 		mcgpSwapHandler = handlers.NewMCGPSwapHandler(config.DB, mcgpSwapService)
 		log.Printf("[config] MCGP swap (Contract B) enabled: %s", cfg.MCGPSwapBAddress)
+
+		// IT (Instant Transfer) operator signer — dev path uses the local key
+		// (prod MUST use KMS). Built only when the key is set AND a chain client
+		// exists; otherwise IT stays dormant.
+		if cfg.Env == "production" && cfg.ITOperatorPrivateKey != "" {
+			// The raw-env-key local signer is dev-only. Refuse it in production —
+			// the operator key MUST come from KMS (review L4). IT stays dormant.
+			log.Printf("[config] IT dormant: raw IT_OPERATOR_PRIVATE_KEY refused in production (use KMS)")
+		} else if cfg.ITOperatorPrivateKey != "" && sonicClient != nil {
+			if key, kerr := crypto.HexToECDSA(cfg.ITOperatorPrivateKey); kerr != nil {
+				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
+			} else {
+				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+				itService := services.NewITService(config.DB, mcgpSwapService)
+				itHandler = handlers.NewITHandler(config.DB, itService)
+				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
+			}
+		} else {
+			log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY not set")
+		}
 	} else {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
 	}
@@ -633,7 +654,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
