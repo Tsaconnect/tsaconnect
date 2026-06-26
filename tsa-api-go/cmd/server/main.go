@@ -117,6 +117,18 @@ func main() {
 
 	verifyEscrowAdmin(escrowService)
 
+	// MCGP Swap Contract B (entitlement-ledger swap) — premium buy/spend/sell +
+	// legacy redeem. Dormant unless MCGP_SWAP_B_ADDRESS is set; the handler is
+	// nil in that case so its /api/mcgp routes are not registered.
+	var mcgpSwapHandler *handlers.MCGPSwapHandler
+	mcgpSwapService := services.NewMCGPSwapService(sonicClient, cfg)
+	if mcgpSwapService.IsConfigured() {
+		mcgpSwapHandler = handlers.NewMCGPSwapHandler(config.DB, mcgpSwapService)
+		log.Printf("[config] MCGP swap (Contract B) enabled: %s", cfg.MCGPSwapBAddress)
+	} else {
+		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
+	}
+
 	// Initialize the P2P escrow adapter (separate contract; safe to no-op
 	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
 	// Kept only for the on-chain owner log below; the trade service now resolves
@@ -152,6 +164,12 @@ func main() {
 	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
 	// path to River.
 	scheduler := jobs.NewScheduler()
+
+	// MCGP swap (Contract B) read-only backing/stale-pending reconciler. Gated on
+	// the swap being configured; never moves money (alerts only).
+	if mcgpSwapService.IsConfigured() {
+		scheduler.Register(jobs.NewMCGPSwapReconciler(mcgpSwapService, config.DB, time.Minute))
+	}
 
 	// Fee/TP overhaul v2 — SP5 payout-computation engine. Turns accrued TP +
 	// cashback into a per-user claimable-MCGP ledger. It settles the user's
@@ -615,7 +633,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

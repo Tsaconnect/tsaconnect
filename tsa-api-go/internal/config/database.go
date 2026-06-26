@@ -92,6 +92,9 @@ func AutoMigrate() error {
 		&models.P2PRating{},
 		// PM (Payment Merchant) — automated P2P liquidity provider (Phase 1: TSA).
 		&models.PaymentMerchant{},
+		// MCGP Swap Contract B — entitlement-ledger swap (premium buy/spend/sell,
+		// legacy redeem). Append-only audit + idempotency for /api/mcgp.
+		&models.MCGPSwapLedgerEntry{},
 	); err != nil {
 		return err
 	}
@@ -220,6 +223,18 @@ func AutoMigrate() error {
 			CAST(reserved_ngn AS NUMERIC) >= 0 AND
 			CAST(reserved_ngn AS NUMERIC) <= CAST(available_ngn AS NUMERIC)
 		)`)
+
+	// MCGP swap (Contract B) spend idempotency: the on-chain bytes32 ref is
+	// single-use, so its ledger mirror must be unique. Partial index over
+	// non-blank refs (buy/sell/legacy/withdraw entries carry no ref). Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_mcgp_swap_ledger_ref
+	    ON mcgp_swap_ledger_entries (ref_hash) WHERE ref_hash <> ''`)
+
+	// Buy/sell/legacy/withdraw confirms carry no ref but must still be
+	// single-write per (tx, user, direction) — a DB backstop behind the
+	// handler's idempotency check. Partial over non-blank tx_hash. Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_mcgp_swap_ledger_tx
+	    ON mcgp_swap_ledger_entries (tx_hash, user_id, direction) WHERE tx_hash <> ''`)
 
 	return nil
 }

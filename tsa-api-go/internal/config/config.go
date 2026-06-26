@@ -173,6 +173,13 @@ type Config struct {
 	OTCMarketplaceAddress  string
 	P2PEscrowAddress       string
 
+	// MCGPSwapBAddress is the deployed McgpEntitlementSwap ("Swap Contract B")
+	// proxy/contract — the entitlement-ledger swap that mints spendable premium
+	// MCGP (buyPremium) and redeems legacy holders at the legacy price. UNSET =
+	// the /api/mcgp routes are dormant (not registered). See the approved plan
+	// and project memory project_mcgp-differentiated-swap.
+	MCGPSwapBAddress string
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -376,6 +383,8 @@ func Load() *Config {
 		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
+	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
+	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
