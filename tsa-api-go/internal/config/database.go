@@ -95,6 +95,9 @@ func AutoMigrate() error {
 		// MCGP Swap Contract B — entitlement-ledger swap (premium buy/spend/sell,
 		// legacy redeem). Append-only audit + idempotency for /api/mcgp.
 		&models.MCGPSwapLedgerEntry{},
+		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
+		&models.ITIntent{},
+		&models.ITRate{},
 	); err != nil {
 		return err
 	}
@@ -235,6 +238,11 @@ func AutoMigrate() error {
 	// handler's idempotency check. Partial over non-blank tx_hash. Idempotent.
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_mcgp_swap_ledger_tx
 	    ON mcgp_swap_ledger_entries (tx_hash, user_id, direction) WHERE tx_hash <> ''`)
+
+	// IT (Instant Transfer) buy intents carry a unique NGN payment reference (the
+	// strong attribution key). Partial over non-blank refs. Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_payment_ref
+	    ON it_intents (payment_ref) WHERE payment_ref <> ''`)
 
 	return nil
 }

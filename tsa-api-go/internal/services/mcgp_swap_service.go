@@ -23,9 +23,10 @@ import (
 // Dormant-by-default: when MCGP_SWAP_B_ADDRESS is unset, IsConfigured() is false
 // and the routes are not registered.
 type MCGPSwapService struct {
-	client  *blockchain.EVMClient
-	address string
-	cfg     *config.Config
+	client   *blockchain.EVMClient
+	address  string
+	cfg      *config.Config
+	operator ReleaseSigner // signs+broadcasts the IT operator ops; nil = IT dormant
 }
 
 // NewMCGPSwapService returns a service bound to cfg.MCGPSwapBAddress on the
@@ -36,6 +37,23 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 		addr = cfg.MCGPSwapBAddress
 	}
 	return &MCGPSwapService{client: client, address: addr, cfg: cfg}
+}
+
+// SetOperatorSigner wires the operator EOA signer used for the IT/NGN path
+// (creditPremium/debitPremium/settleDebit/reverseDebit). The backend signs and
+// broadcasts these directly (they are NOT app-signed). Must be an `operators[]`
+// member on-chain. nil ⇒ IT operator ops disabled.
+func (s *MCGPSwapService) SetOperatorSigner(signer ReleaseSigner) { s.operator = signer }
+
+// HasOperator reports whether the IT operator signer is configured.
+func (s *MCGPSwapService) HasOperator() bool { return s != nil && s.operator != nil }
+
+// OperatorAddress returns the IT operator EOA address (empty if unset).
+func (s *MCGPSwapService) OperatorAddress() string {
+	if s == nil || s.operator == nil {
+		return ""
+	}
+	return s.operator.Address()
 }
 
 // IsConfigured reports whether the swap contract address is set (gates routes).
@@ -216,9 +234,24 @@ func (s *MCGPSwapService) callUint(method string, args ...interface{}) (*big.Int
 	return v, nil
 }
 
-// PremiumBalance returns the spendable premium MCGP balance of user (18dp).
+// PremiumBalance returns the total spendable premium (bought + credited, 18dp).
 func (s *MCGPSwapService) PremiumBalance(user string) (*big.Int, error) {
-	return s.callUint("premiumBalance", common.HexToAddress(user))
+	return s.callUint("premiumBalanceOf", common.HexToAddress(user))
+}
+
+// PremiumBought returns the self-exitable (USDC-bought) premium bucket (18dp).
+func (s *MCGPSwapService) PremiumBought(user string) (*big.Int, error) {
+	return s.callUint("premiumBought", common.HexToAddress(user))
+}
+
+// PremiumCredited returns the spend-only (operator/IT) premium bucket (18dp).
+func (s *MCGPSwapService) PremiumCredited(user string) (*big.Int, error) {
+	return s.callUint("premiumCredited", common.HexToAddress(user))
+}
+
+// PendingSettle returns the in-flight NGN-sell amount awaiting payout (18dp).
+func (s *MCGPSwapService) PendingSettle(user string) (*big.Int, error) {
+	return s.callUint("pendingSettle", common.HexToAddress(user))
 }
 
 // LegacyEntitlement returns user's snapshot legacy entitlement cap (18dp).
@@ -268,6 +301,98 @@ func (s *MCGPSwapService) Backing() (held, owed *big.Int, err error) {
 		return nil, nil, fmt.Errorf("backing returned unexpected types")
 	}
 	return held, owed, nil
+}
+
+// ───────────────────── operator ops (IT / NGN, backend-signed) ────────────
+// Unlike the user-signed prepare* methods, these are signed+broadcast by the
+// operator EOA (s.operator) — the backend drives them after an off-chain NGN
+// event. Each returns the broadcast tx hash; callers should then verify the
+// event (VerifyOperatorEvent) before writing the audit ledger.
+
+func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte) (string, error) {
+	if s.operator == nil {
+		return "", fmt.Errorf("IT operator signer not configured")
+	}
+	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
+	if err != nil {
+		return "", err
+	}
+	return s.operator.SignAndBroadcast(ctx, unsigned)
+}
+
+// OperatorCreditPremium credits spend-only premium after an NGN payment settles.
+func (s *MCGPSwapService) OperatorCreditPremium(ctx context.Context, user string, amount *big.Int, ref [32]byte) (string, error) {
+	data, err := s.pack("creditPremium", common.HexToAddress(user), amount, ref)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// OperatorDebitPremium begins an NGN sell (credited → pendingSettle), keyed by debitRef.
+func (s *MCGPSwapService) OperatorDebitPremium(ctx context.Context, user string, amount *big.Int, debitRef [32]byte) (string, error) {
+	data, err := s.pack("debitPremium", common.HexToAddress(user), amount, debitRef)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// OperatorSettleDebit finalizes a debit after a confirmed Nomba payout.
+func (s *MCGPSwapService) OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error) {
+	data, err := s.pack("settleDebit", debitRef)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// OperatorReverseDebit reverses a debit whose payout failed (user made whole).
+func (s *MCGPSwapService) OperatorReverseDebit(ctx context.Context, debitRef [32]byte) (string, error) {
+	data, err := s.pack("reverseDebit", debitRef)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// VerifyOperatorEvent confirms an operator event (PremiumCredited /
+// PremiumDebitPending / PremiumDebitSettled / PremiumDebitReversed) by matching
+// the indexed user + indexed ref in the receipt, returning the MCGP amount.
+func (s *MCGPSwapService) VerifyOperatorEvent(eventName, txHash string, user common.Address, ref [32]byte) (*big.Int, error) {
+	ev, ok := parsedMCGPSwapABI.Events[eventName]
+	if !ok {
+		return nil, fmt.Errorf("unknown event %s", eventName)
+	}
+	receipt, err := s.receipt(txHash)
+	if err != nil {
+		return nil, err
+	}
+	contractAddr := common.HexToAddress(s.address)
+	for _, lg := range receipt.Logs {
+		// topics: [sig, user(indexed), ref(indexed)]
+		if lg.Address != contractAddr || len(lg.Topics) < 3 || lg.Topics[0] != ev.ID {
+			continue
+		}
+		if common.BytesToAddress(lg.Topics[1].Bytes()) != user {
+			continue
+		}
+		var evRef [32]byte
+		copy(evRef[:], lg.Topics[2].Bytes())
+		if evRef != ref {
+			continue
+		}
+		nonIndexed, err := ev.Inputs.NonIndexed().Unpack(lg.Data)
+		if err != nil || len(nonIndexed) < 1 {
+			return nil, fmt.Errorf("decode %s data: %w", eventName, err)
+		}
+		amt, _ := nonIndexed[0].(*big.Int)
+		if amt == nil {
+			return nil, fmt.Errorf("%s amount not *big.Int", eventName)
+		}
+		return amt, nil
+	}
+	return nil, fmt.Errorf("%s for %s not found in receipt", eventName, user.Hex())
 }
 
 // ──────────────────────────── confirm (verify event) ──────────────────────

@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -669,5 +669,31 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	} else {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
+	}
+
+	// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
+	// Registered only when IT is configured (operator signer present); admin
+	// endpoints (rate, approve credit, settle/reverse) gated to P2P admins.
+	if ith != nil {
+		it := api.Group("/it")
+		it.Use(auth)
+		{
+			it.GET("/rate", ith.GetRate)
+			it.GET("/balance", ith.GetBalance)
+			it.POST("/buy", ith.Buy)
+			it.POST("/sell", ith.Sell)
+			it.GET("/intents", ith.ListIntents)
+			it.GET("/intents/:id", ith.GetIntent)
+		}
+		adminIT := api.Group("/it/admin")
+		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminIT.POST("/rate", ith.AdminSetRate)
+			adminIT.POST("/credit/:id", ith.AdminApproveCredit)
+			adminIT.POST("/settle/:id", ith.AdminSettle)
+			adminIT.POST("/reverse/:id", ith.AdminReverse)
+		}
+	} else {
+		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
 	}
 }
