@@ -186,8 +186,9 @@ type Config struct {
 	ITOperatorPrivateKey string
 
 	// ITPMID names the company Payment Merchant (PaymentMerchant UUID) whose Nomba
-	// inbound account IT buyers pay into. UNSET ⇒ fall back to the first active PM
-	// with an inbound account.
+	// inbound account IT buyers pay into. IT ALWAYS uses this exact PM — there is
+	// no fallback. UNSET (or not an active PM with an inbound account) ⇒ IT buy
+	// reports payments unavailable rather than misrouting to another merchant.
 	ITPMID string
 
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/

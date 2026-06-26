@@ -18,7 +18,7 @@ func newITTestService(t *testing.T) *ITService {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
@@ -89,6 +89,7 @@ func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
 	if _, err := s.SetRate(ctx, uuid.New(), "100", "90"); err != nil { // 100 kobo (₦1) per MCGP
 		t.Fatalf("set rate: %v", err)
 	}
+	seedCompanyPM(t, s) // IT requires a configured pay-into PM
 	user := uuid.New()
 	intent, err := s.CreateBuyIntent(ctx, user, "0xWALLET", "5000", nil) // ₦50
 	if err != nil {
@@ -125,5 +126,57 @@ func TestCreateBuyIntent_NoRate(t *testing.T) {
 	s := newITTestService(t)
 	if _, err := s.CreateBuyIntent(context.Background(), uuid.New(), "0xWALLET", "1000", nil); err == nil {
 		t.Fatal("expected ErrITNoRate when no rate set")
+	}
+}
+
+// seedCompanyPM inserts an active PM with an inbound account and pins it as the
+// IT company PM (IT_PM_ID). Returns the PM id.
+func seedCompanyPM(t *testing.T, s *ITService) uuid.UUID {
+	t.Helper()
+	pm := &models.PaymentMerchant{
+		ID: uuid.New(), UserID: uuid.New(), Name: "Company PM",
+		Status: models.PaymentMerchantStatusActive, InboundAccountNumber: "2998287753", InboundBank: "Nomba",
+	}
+	if err := s.db.Create(pm).Error; err != nil {
+		t.Fatalf("seed pm: %v", err)
+	}
+	s.SetCompanyPMID(pm.ID.String())
+	return pm.ID
+}
+
+func TestCompanyPM_AlwaysConfiguredNoFallback(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	// Another active PM exists, but IT must NOT pick it.
+	other := &models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "Other", Status: models.PaymentMerchantStatusActive, InboundAccountNumber: "111"}
+	s.db.Create(other)
+
+	// IT_PM_ID unset -> nil (no fallback to `other`).
+	pm, err := s.CompanyPM(ctx)
+	if err != nil || pm != nil {
+		t.Fatalf("expected nil when IT_PM_ID unset, got pm=%v err=%v", pm, err)
+	}
+	// IT_PM_ID pinned -> exactly that PM.
+	id := seedCompanyPM(t, s)
+	pm, err = s.CompanyPM(ctx)
+	if err != nil || pm == nil || pm.ID != id {
+		t.Fatalf("expected the configured PM, got pm=%v err=%v", pm, err)
+	}
+}
+
+func TestCreateBuyIntent_NoPM(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	if _, err := s.SetRate(ctx, uuid.New(), "100", "90"); err != nil {
+		t.Fatalf("set rate: %v", err)
+	}
+	// Rate set but no IT_PM_ID configured -> buy fails fast (no orphan intent).
+	if _, err := s.CreateBuyIntent(ctx, uuid.New(), "0xWALLET", "1000", nil); err != ErrITNoPM {
+		t.Fatalf("expected ErrITNoPM, got %v", err)
+	}
+	var n int64
+	s.db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("no intent should be created when PM missing, got %d", n)
 	}
 }
