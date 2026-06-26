@@ -140,6 +140,7 @@ func main() {
 			} else {
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
 				itService := services.NewITService(config.DB, mcgpSwapService)
+				itService.SetCompanyPMID(cfg.ITPMID)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}

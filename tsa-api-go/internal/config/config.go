@@ -185,6 +185,11 @@ type Config struct {
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
 	ITOperatorPrivateKey string
 
+	// ITPMID names the company Payment Merchant (PaymentMerchant UUID) whose Nomba
+	// inbound account IT buyers pay into. UNSET ⇒ fall back to the first active PM
+	// with an inbound account.
+	ITPMID string
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -393,6 +398,7 @@ func Load() *Config {
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
 	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
+	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if

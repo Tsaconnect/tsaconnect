@@ -60,9 +60,17 @@ export const getITBalance = () => req<ITBalance>('GET', '/it/balance');
 export const listITIntents = () => req<{ intents: ITIntent[] }>('GET', '/it/intents');
 export const getITIntent = (id: string) => req<{ intent: ITIntent }>('GET', `/it/intents/${id}`);
 
-// ngnKobo = naira * 100 (string). Returns the created intent + paymentRef.
+export interface ITPayTo {
+  accountNumber: string;
+  bank: string;
+  accountName: string;
+  reference: string;
+}
+
+// ngnKobo = naira * 100 (string). Returns the intent + paymentRef + the company
+// pay-into account (payTo is null when no payment account is configured).
 export const itBuy = (ngnKobo: string) =>
-  req<{ intent: ITIntent; paymentRef: string; note: string }>('POST', '/it/buy', { ngnKobo });
+  req<{ intent: ITIntent; paymentRef: string; payTo: ITPayTo | null }>('POST', '/it/buy', { ngnKobo });
 
 // mcgpAmount is base-unit wei (string).
 export const itSell = (mcgpAmount: string) =>
