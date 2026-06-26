@@ -19,6 +19,7 @@ import (
 var (
 	ErrITNotConfigured = errors.New("IT not configured")
 	ErrITNoRate        = errors.New("IT rate not set")
+	ErrITNoPM          = errors.New("Instant Transfer is unavailable: no payment account configured")
 	ErrITBadState      = errors.New("invalid IT intent state")
 	ErrITInsufficient  = errors.New("insufficient credited premium")
 )
@@ -56,15 +57,17 @@ func (s *ITService) Swap() *MCGPSwapService { return s.swap }
 // none is configured so callers surface a clear "not configured" message rather
 // than a hardcoded account.
 func (s *ITService) CompanyPM(ctx context.Context) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	q := s.db.WithContext(ctx).
-		Where("status = ? AND inbound_account_number <> ''", models.PaymentMerchantStatusActive)
-	if s.companyPMID != "" {
-		q = q.Where("id = ?", s.companyPMID) // deterministic: the configured company PM
-	} else {
-		q = q.Order("created_at ASC") // fallback: first active with an inbound account
+	// IT ALWAYS uses the explicitly-configured IT_PM_ID — never auto-pick another
+	// merchant. If it's unset or not an active PM with an inbound account, return
+	// nil so callers surface "payments unavailable" rather than misrouting funds.
+	if s.companyPMID == "" {
+		return nil, nil
 	}
-	err := q.First(&pm).Error
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).
+		Where("id = ? AND status = ? AND inbound_account_number <> ''",
+			s.companyPMID, models.PaymentMerchantStatusActive).
+		First(&pm).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -140,11 +143,17 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	if mcgp.Sign() <= 0 {
 		return nil, fmt.Errorf("amount too small")
 	}
-	// Resolve the company PM (the pay-into account) when not supplied.
+	// Resolve the company PM (the pay-into account). IT requires it — fail fast
+	// rather than create an unpayable intent with no destination account.
 	if pmID == nil {
-		if pm, e := s.CompanyPM(ctx); e == nil && pm != nil {
-			pmID = &pm.ID
+		pm, e := s.CompanyPM(ctx)
+		if e != nil {
+			return nil, e
 		}
+		if pm == nil {
+			return nil, ErrITNoPM
+		}
+		pmID = &pm.ID
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
