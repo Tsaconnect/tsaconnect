@@ -10,7 +10,7 @@ import { router } from 'expo-router';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AmountInput, Button, Card, CopyableField, Divider, Icon, SummaryCard, SummaryRow, Text } from '@/components/ui';
-import { getITRate, itBuy, type ITIntent } from '@/services/itApi';
+import { itBuy, type ITIntent, type ITPayTo } from '@/services/itApi';
 
 type Screen = 'form' | 'submitting' | 'instructions' | 'error';
 
@@ -20,6 +20,7 @@ export default function ITBuy() {
   const [naira, setNaira] = useState('');
   const [error, setError] = useState('');
   const [intent, setIntent] = useState<ITIntent | null>(null);
+  const [payTo, setPayTo] = useState<ITPayTo | null>(null);
   const [estMcgp, setEstMcgp] = useState('');
 
   const submit = async () => {
@@ -31,7 +32,6 @@ export default function ITBuy() {
     }
     setScreen('submitting');
     const kobo = String(Math.round(amt * 100));
-    const rate = await getITRate();
     const r = await itBuy(kobo);
     if (!r.success || !r.data) {
       setError(r.message || 'Could not create the buy');
@@ -39,12 +39,12 @@ export default function ITBuy() {
       return;
     }
     setIntent(r.data.intent);
+    setPayTo(r.data.payTo ?? null);
     try {
       setEstMcgp(Number(ethers.formatUnits(r.data.intent.mcgpAmount, 18)).toLocaleString(undefined, { maximumFractionDigits: 4 }));
     } catch {
       setEstMcgp('');
     }
-    void rate;
     setScreen('instructions');
   };
 
@@ -69,16 +69,41 @@ export default function ITBuy() {
               <Divider spacing="xs" />
               <SummaryRow label="Status" value="Awaiting payment" />
             </SummaryCard>
-            <View style={{ marginTop: spacing.md }}>
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
-                Payment reference (include this in your transfer)
+
+            {payTo ? (
+              <>
+                <View style={{ marginTop: spacing.md }}>
+                  <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+                    Pay into this account
+                  </Text>
+                  <SummaryCard>
+                    <SummaryRow label="Bank" value={payTo.bank || '—'} />
+                    <SummaryRow label="Account name" value={payTo.accountName || '—'} />
+                  </SummaryCard>
+                  <View style={{ marginTop: spacing.xs }}>
+                    <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+                      Account number
+                    </Text>
+                    <CopyableField value={payTo.accountNumber || ''} />
+                  </View>
+                </View>
+                <View style={{ marginTop: spacing.md }}>
+                  <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+                    Payment reference (include this in your transfer)
+                  </Text>
+                  <CopyableField value={payTo.reference || intent.paymentRef || ''} />
+                </View>
+                <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
+                  Transfer exactly ₦{Number(naira).toLocaleString()} to the account above and include
+                  the reference. Your spendable MCGP appears once the payment is confirmed.
+                </Text>
+              </>
+            ) : (
+              <Text variant="bodySm" style={{ color: colors.danger, marginTop: spacing.md }}>
+                Payments are temporarily unavailable — no payout account is configured. Please try
+                again later. (Reference {intent.paymentRef})
               </Text>
-              <CopyableField value={intent.paymentRef || ''} />
-            </View>
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-              Transfer the exact amount to the company MCGP merchant and include the reference above.
-              Your spendable MCGP appears once the payment is confirmed.
-            </Text>
+            )}
           </Card>
           <Button title="Done" onPress={() => router.replace('/wallet/it')} />
         </ScrollView>

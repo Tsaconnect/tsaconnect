@@ -31,13 +31,17 @@ var oneE18 = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 // the confirmed strong attribution key (see the spec §7.1 blocker), so credit
 // and settle/reverse are explicit approvals here, not webhook-automatic.
 type ITService struct {
-	db   *gorm.DB
-	swap *MCGPSwapService
+	db          *gorm.DB
+	swap        *MCGPSwapService
+	companyPMID string // PaymentMerchant UUID for the IT pay-into account (optional)
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService) *ITService {
 	return &ITService{db: db, swap: swap}
 }
+
+// SetCompanyPMID pins which PaymentMerchant IT buyers pay into (from IT_PM_ID).
+func (s *ITService) SetCompanyPMID(id string) { s.companyPMID = strings.TrimSpace(id) }
 
 // IsConfigured reports whether IT can operate (swap + operator signer present).
 func (s *ITService) IsConfigured() bool {
@@ -46,6 +50,29 @@ func (s *ITService) IsConfigured() bool {
 
 // Swap exposes the underlying swap service for balance reads.
 func (s *ITService) Swap() *MCGPSwapService { return s.swap }
+
+// CompanyPM resolves the active company Payment Merchant whose Nomba inbound
+// account buyers pay into (Phase 1: the single seeded TSA PM). Returns nil if
+// none is configured so callers surface a clear "not configured" message rather
+// than a hardcoded account.
+func (s *ITService) CompanyPM(ctx context.Context) (*models.PaymentMerchant, error) {
+	var pm models.PaymentMerchant
+	q := s.db.WithContext(ctx).
+		Where("status = ? AND inbound_account_number <> ''", models.PaymentMerchantStatusActive)
+	if s.companyPMID != "" {
+		q = q.Where("id = ?", s.companyPMID) // deterministic: the configured company PM
+	} else {
+		q = q.Order("created_at ASC") // fallback: first active with an inbound account
+	}
+	err := q.First(&pm).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
 
 // ─────────────────────────────── rate ─────────────────────────────────────
 func (s *ITService) GetActiveRate(ctx context.Context) (*models.ITRate, error) {
@@ -112,6 +139,12 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	mcgp := mcgpForNgn(ngn, buyRate)
 	if mcgp.Sign() <= 0 {
 		return nil, fmt.Errorf("amount too small")
+	}
+	// Resolve the company PM (the pay-into account) when not supplied.
+	if pmID == nil {
+		if pm, e := s.CompanyPM(ctx); e == nil && pm != nil {
+			pmID = &pm.ID
+		}
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),

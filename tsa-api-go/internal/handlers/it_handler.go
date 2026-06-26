@@ -97,10 +97,22 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Surface the real pay-into account (the company PM's Nomba VA), not a
+	// hardcoded note. payTo is null when no PM is configured so the app can show
+	// a clear "payments unavailable" state instead of a fake account.
+	var payTo interface{}
+	if pm, _ := h.it.CompanyPM(c.Request.Context()); pm != nil {
+		payTo = gin.H{
+			"accountNumber": pm.InboundAccountNumber,
+			"bank":          pm.InboundBank,
+			"accountName":   pm.Name,
+			"reference":     intent.PaymentRef,
+		}
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Buy intent created", gin.H{
 		"intent":     intent,
 		"paymentRef": intent.PaymentRef,
-		"note":       "Pay the company MCGP merchant via Nomba and include the payment reference.",
+		"payTo":      payTo,
 	})
 }
 
