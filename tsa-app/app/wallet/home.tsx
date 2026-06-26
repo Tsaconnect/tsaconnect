@@ -482,6 +482,7 @@ const WalletHome = () => {
         >
           {[
             { label: 'Send', icon: 'send' as const, onPress: () => router.push('/wallet/send') },
+            { label: 'MCGP', icon: 'bolt' as const, onPress: () => router.push('/wallet/mcgp') },
             { label: 'Swap', icon: 'swapVertical' as const, onPress: () => router.push('/easyswap?tab=allswap') },
             { label: 'Receive', icon: 'arrowRight' as const, onPress: () => router.push('/wallet/receive') },
           ].map((action) => (

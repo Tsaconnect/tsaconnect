@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -642,5 +642,32 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			go client.WritePump()
 			go client.ReadPump()
 		})
+	}
+
+	// MCGP Swap Contract B (entitlement-ledger swap) — premium buy/spend/sell,
+	// legacy redeem, withdraw. Registered only when MCGP_SWAP_B_ADDRESS is set
+	// (msh != nil); dormant otherwise. All endpoints require JWT auth; the
+	// prepare→sign→confirm pattern means the app signs + broadcasts the returned
+	// unsigned txs.
+	if msh != nil {
+		mcgp := api.Group("/mcgp")
+		mcgp.Use(auth)
+		{
+			mcgp.GET("/balance", msh.GetBalance)
+			mcgp.GET("/quote", msh.GetQuote)
+			mcgp.GET("/ledger", msh.GetLedger)
+			mcgp.POST("/approve/prepare", msh.PrepareApprove)
+			mcgp.POST("/buy/prepare", msh.PrepareBuy)
+			mcgp.POST("/sell/prepare", msh.PrepareSell)
+			mcgp.POST("/legacy/sell/prepare", msh.PrepareLegacySell)
+			mcgp.POST("/withdraw/prepare", msh.PrepareWithdraw)
+			// Generic confirm for buy/sell/legacy/withdraw (writes the audit row
+			// after verifying the on-chain event).
+			mcgp.POST("/confirm", msh.ConfirmSwap)
+			mcgp.POST("/pay/prepare", msh.PreparePay)
+			mcgp.POST("/pay/confirm", msh.ConfirmPay)
+		}
+	} else {
+		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
 	}
 }

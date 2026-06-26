@@ -1,0 +1,31 @@
+package services
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+)
+
+// mcgpSwapABI is the trimmed ABI of McgpEntitlementSwap ("Swap Contract B") —
+// only the methods the backend builds unsigned txs for or reads, plus the
+// events the confirm/reconcile paths verify. The full ABI lives in the
+// mcgp-otc-contracts repo artifacts.
+const mcgpSwapABI = `[{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"user","type":"address"},{"indexed":false,"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"usdcAmount","type":"uint256"}],"name":"LegacyRedeemed","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"buyer","type":"address"},{"indexed":false,"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"usdcAmount","type":"uint256"}],"name":"PremiumBought","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"seller","type":"address"},{"indexed":false,"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"usdcAmount","type":"uint256"}],"name":"PremiumSold","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"from","type":"address"},{"indexed":true,"internalType":"address","name":"to","type":"address"},{"indexed":false,"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"indexed":true,"internalType":"bytes32","name":"ref","type":"bytes32"}],"name":"PremiumSpent","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"user","type":"address"},{"indexed":false,"internalType":"uint256","name":"mcgpAmount","type":"uint256"}],"name":"PremiumWithdrawn","type":"event"},{"inputs":[],"name":"accountedMcgp","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"backing","outputs":[{"internalType":"uint256","name":"held","type":"uint256"},{"internalType":"uint256","name":"owed","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"internalType":"uint256","name":"maxUsdc","type":"uint256"}],"name":"buyPremium","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"legacyEntitlement","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"legacyRedeemed","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"user","type":"address"}],"name":"legacyRemaining","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"premiumBalance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint8","name":"kind","type":"uint8"},{"internalType":"uint256","name":"mcgpAmount","type":"uint256"}],"name":"quote","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"internalType":"uint256","name":"minUsdc","type":"uint256"}],"name":"sellLegacy","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"mcgpAmount","type":"uint256"},{"internalType":"uint256","name":"minUsdc","type":"uint256"}],"name":"sellPremium","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"bytes32","name":"ref","type":"bytes32"}],"name":"spend","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"mcgpAmount","type":"uint256"}],"name":"withdrawPremiumToWallet","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
+
+// PriceKind mirrors the on-chain enum McgpEntitlementSwap.PriceKind.
+const (
+	PriceKindPremiumBuy  uint8 = 0
+	PriceKindPremiumSell uint8 = 1
+	PriceKindLegacySell  uint8 = 2
+)
+
+var parsedMCGPSwapABI abi.ABI
+
+func init() {
+	var err error
+	parsedMCGPSwapABI, err = abi.JSON(strings.NewReader(mcgpSwapABI))
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse McgpEntitlementSwap ABI: %v", err))
+	}
+}
