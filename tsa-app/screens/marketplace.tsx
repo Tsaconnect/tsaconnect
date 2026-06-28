@@ -202,6 +202,7 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'trade', label: 'Trade & Earn', route: '/trade' },
     { key: 'p2p', label: 'P2P', route: '/p2p' },
     { key: 'pm', label: 'Payment Merchants', route: '/pm' },
+    { key: 'it', label: 'Instant Transfer', route: '/wallet/it' },
   ];
 
   // ── Loading ──
