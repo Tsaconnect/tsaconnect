@@ -80,8 +80,6 @@ export default function McgpHub() {
           </View>
         </View>
 
-        <Button title="Buy / Sell with Naira (Instant Transfer)" variant="ghost" onPress={() => router.push('/wallet/it')} />
-
         <Card>
           <SummaryCard>
             <SummaryRow label="Premium (spendable)" value={`${fmtMcgp(bal?.premiumBalance)} MCGP`} />
