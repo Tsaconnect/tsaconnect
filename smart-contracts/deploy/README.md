@@ -14,7 +14,12 @@ until `chains.js` has a BSC MCGP address. Upgrades:
 
 Deployed addresses are recorded in `deployments/<network>.json` (git-ignored).
 
-**Re-running a deploy script is NOT idempotent** — it deploys a fresh proxy and overwrites the ledger entry. To upgrade an existing proxy instead, use `deploy/upgrade.js`.
+**Re-runs:** `deploy/all.js` reuses any contract already recorded in
+`deployments/<network>.json`, so re-running it after a mid-sequence failure
+resumes rather than orphaning fresh proxies. Set `FORCE_REDEPLOY=1` to redeploy
+everything. Running a single `deploy/<contract>.js` module directly always
+deploys a fresh proxy and overwrites its ledger entry — to update an existing
+proxy in place, use `deploy/upgrade.js`.
 
 ## Note on upgrade.js vs upgrade-p2p-escrow-v3.js
 
