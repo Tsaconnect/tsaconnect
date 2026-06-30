@@ -112,6 +112,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			buyer_id TEXT NOT NULL,
 			seller_id TEXT NOT NULL,
 			product_id TEXT NOT NULL,
+			kind TEXT DEFAULT 'product',
 			quantity INTEGER DEFAULT 1,
 			token TEXT NOT NULL,
 			product_amount TEXT NOT NULL,
@@ -146,6 +147,42 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			notes TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS categories (
+			id TEXT PRIMARY KEY,
+			title TEXT,
+			description TEXT,
+			type TEXT,
+			service_fee_mode TEXT DEFAULT 'standard',
+			parent_category_id TEXT,
+			icon TEXT,
+			image TEXT,
+			color TEXT,
+			is_active INTEGER DEFAULT 1,
+			sort_order INTEGER DEFAULT 0,
+			product_count INTEGER DEFAULT 0,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS category_booking_fees (
+			id TEXT PRIMARY KEY,
+			category_id TEXT NOT NULL,
+			tier TEXT NOT NULL,
+			amount_usd REAL DEFAULT 0,
+			created_at DATETIME,
+			updated_at DATETIME,
+			UNIQUE(category_id, tier)
+		)`,
+		`CREATE TABLE IF NOT EXISTS service_contact_payments (
+			id TEXT PRIMARY KEY,
+			caller_id TEXT NOT NULL,
+			service_provider_id TEXT,
+			service_id TEXT NOT NULL,
+			token TEXT,
+			fee_amount TEXT,
+			approve_tx_hash TEXT,
+			pay_fee_tx_hash TEXT,
+			created_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS carts (
 			id TEXT PRIMARY KEY,

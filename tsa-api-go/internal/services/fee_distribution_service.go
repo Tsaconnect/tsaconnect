@@ -163,6 +163,10 @@ var featureSplits = map[string]FeeShares{
 	models.FeatureProductMerchant: {System: 0.50, Buyer: 0.15, Upline: 0.15, Provider: 0.00, TP: 0.20},
 	models.FeatureP2PPlatform:     {System: 0.50, Buyer: 0.15, Upline: 0.15, Provider: 0.00, TP: 0.20},
 	models.FeatureServiceContact:  {System: 0.50, Buyer: 0.10, Upline: 0.10, Provider: 0.10, TP: 0.20},
+	// service_other (0.5%): the platform fee on a paid SERVICE order's escrowed
+	// price. Carved split, mirroring product_merchant (services are the service
+	// analogue of a product sale).
+	models.FeatureServiceOther:    {System: 0.50, Buyer: 0.15, Upline: 0.15, Provider: 0.00, TP: 0.20},
 	models.FeatureInstantTransfer: {System: 0.75, Buyer: 0.0625, Upline: 0.0625, Provider: 0.00, TP: 0.125},
 	models.FeatureOTC:             {System: 0.70, Buyer: 0.00, Upline: 0.00, Provider: 0.00, TP: 0.30},
 	models.FeatureSpot:            {System: 0.70, Buyer: 0.00, Upline: 0.00, Provider: 0.00, TP: 0.30},

@@ -271,10 +271,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		categoryGroup.GET("/all", h.GetCategories)
 		categoryGroup.GET("/tree", h.GetCategoryTree)
 		categoryGroup.GET("/:categoryId", h.GetCategoryByID)
+		// Public read of a booking-mode category's per-area fare schedule (buyer checkout).
+		categoryGroup.GET("/:categoryId/booking-fees", h.GetCategoryBookingFees)
 		categoryGroup.POST("", adminAuth, h.CreateCategory)
 		categoryGroup.PUT("/:categoryId", adminAuth, h.UpdateCategory)
 		categoryGroup.DELETE("/:categoryId", adminAuth, h.DeleteCategory)
 		categoryGroup.PATCH("/reorder", adminAuth, h.ReorderCategories)
+		// Admin upsert of the booking fare schedule.
+		categoryGroup.PUT("/:categoryId/booking-fees", adminAuth, h.UpsertCategoryBookingFees)
 	}
 
 	// Product routes (public + auth + admin)

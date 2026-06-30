@@ -20,6 +20,7 @@ import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import api, { CartItem, CartSummary, ItemsBySeller } from "@/components/services/cart";
+import { decodeServiceNotes } from "@/components/services/serviceCart";
 import { useCurrency } from "@/contexts/CurrencyContext";
 import { formatPrice as formatPriceUtil } from "@/utils/formatPrice";
 import { useTheme } from "@/theme";
@@ -495,7 +496,13 @@ const Cart = () => {
                         <SummaryRow label="Subtotal" value={formatPrice(summary?.subtotal || 0)} />
 
                         <SummaryRow
-                            label="Shipping"
+                            label={
+                                cartItems.some((it) => decodeServiceNotes(it.notes) != null)
+                                    ? cartItems.some((it) => decodeServiceNotes(it.notes) == null)
+                                        ? 'Shipping & call-out'
+                                        : 'Call-out fee'
+                                    : 'Shipping'
+                            }
                             value={summary?.shipping ? formatPrice(summary.shipping) : 'To be calculated'}
                         />
 

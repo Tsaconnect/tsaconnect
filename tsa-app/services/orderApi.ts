@@ -20,6 +20,9 @@ export interface Order {
   buyerId: string;
   sellerId: string;
   productId: string;
+  // "product" (default) or "service". A service order skips shipping and is
+  // confirmed by the buyer after the provider marks it rendered.
+  kind?: 'product' | 'service';
   quantity: number;
   token: string;
   productAmount: string;
@@ -114,14 +117,18 @@ export async function createOrders(
   token: string,
   buyerCity?: string,
   buyerState?: string,
-  buyerCountry?: string
+  buyerCountry?: string,
+  // serviceTiers optionally maps a service product ID → the buyer-declared area
+  // tier ("residential", "same_lga", …) so a "provider is in my area" / LGA
+  // declaration reaches the backend. Honored only when geographically plausible.
+  serviceTiers?: Record<string, string>
 ): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ token, buyerCity, buyerState, buyerCountry }),
+      body: JSON.stringify({ token, buyerCity, buyerState, buyerCountry, serviceTiers }),
     });
     return await handleResponse(response);
   } catch (error: any) {

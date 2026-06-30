@@ -99,6 +99,9 @@ function buildTimeline(order: Order): TimelineStep[] {
     ];
   }
 
+  // Services skip the "Shipped" step and read "Delivered" as "Rendered".
+  const isService = order.kind === 'service';
+
   const steps: TimelineStep[] = [
     { key: 'created', label: 'Order Placed', timestamp: order.createdAt, isComplete: true },
     {
@@ -107,15 +110,19 @@ function buildTimeline(order: Order): TimelineStep[] {
       timestamp: order.escrowExpiresAt ? undefined : undefined, // backend doesn't store an escrow timestamp explicitly
       isComplete: ['escrowed', 'shipped', 'delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
     },
-    {
-      key: 'shipped',
-      label: 'Shipped',
-      timestamp: order.sellerShippedAt,
-      isComplete: ['shipped', 'delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
-    },
+    ...(isService
+      ? []
+      : [
+          {
+            key: 'shipped',
+            label: 'Shipped',
+            timestamp: order.sellerShippedAt,
+            isComplete: ['shipped', 'delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
+          } as TimelineStep,
+        ]),
     {
       key: 'delivered',
-      label: 'Delivered',
+      label: isService ? 'Rendered' : 'Delivered',
       timestamp: order.sellerDeliveredAt,
       isComplete: ['delivered', 'completed', 'refund_requested', 'refunded'].includes(order.status),
     },
@@ -308,6 +315,21 @@ const MerchantOrderDetail = () => {
     }
   };
 
+  // Service orders have no physical delivery proof — the backend makes the
+  // proof optional for services. Mark rendered with no proof, no image modal.
+  const handleMarkRendered = async () => {
+    if (!order) return;
+    setActionLoading(true);
+    const result = await markOrderDelivered(order.id, '');
+    setActionLoading(false);
+    if (result.success) {
+      Alert.alert('Service Rendered', 'Marked as rendered. The buyer can now confirm completion.');
+      fetchOrder();
+    } else {
+      Alert.alert('Error', result.message || 'Failed to mark service rendered');
+    }
+  };
+
   const handleRefundDecision = async () => {
     if (!order || !refundModalVisible) return;
     setActionLoading(true);
@@ -452,8 +474,13 @@ const MerchantOrderDetail = () => {
   const statusVisual = toneColorMap[tone];
 
   const isDisputed = !!order.disputedAt;
-  const canShip = !isDisputed && order.status === 'escrowed';
-  const canDeliver = !isDisputed && order.status === 'shipped';
+  // Service orders skip the shipping leg: no "Mark shipped"; the provider taps
+  // "Mark service rendered" (reuses markOrderDelivered, proof optional) straight
+  // from escrowed; "Delivered" reads as "Rendered" (spec §6).
+  const isService = order.kind === 'service';
+  const canShip = !isDisputed && !isService && order.status === 'escrowed';
+  const canDeliver =
+    !isDisputed && (isService ? order.status === 'escrowed' : order.status === 'shipped');
   const canResolveRefund = !isDisputed && order.status === 'refund_requested';
   const canHandleCancel = !isDisputed && order.status === 'cancel_requested';
   const canRaiseDispute = !isDisputed && ['escrowed', 'shipped', 'delivered', 'cancel_requested', 'refund_requested'].includes(order.status);
@@ -497,7 +524,11 @@ const MerchantOrderDetail = () => {
       >
         {/* Status card */}
         <Card style={{ marginBottom: spacing.md, alignItems: 'center' }}>
-          <Badge label={formatStatus(order.status)} color={statusVisual.fg} background={statusVisual.bg} />
+          <Badge
+            label={isService && order.status === 'delivered' ? 'Rendered' : formatStatus(order.status)}
+            color={statusVisual.fg}
+            background={statusVisual.bg}
+          />
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm }}>
             Order #{order.id.slice(0, 8)}
           </Text>
@@ -627,7 +658,7 @@ const MerchantOrderDetail = () => {
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
               <Text variant="bodySm" color="textSecondary">
-                Shipping ({formatStatus(order.shippingZone || '')})
+                {isService ? 'Call-out fee' : 'Shipping'} ({formatStatus(order.shippingZone || '')})
               </Text>
               <Text variant="bodySm" numeric>
                 {formatTokenAmount(order.shippingAmount, order.token)}
@@ -855,7 +886,17 @@ const MerchantOrderDetail = () => {
             <Button title="Mark as Shipped" leftIcon="send" onPress={() => setShipModalVisible(true)} />
           )}
           {canDeliver && (
-            <Button title="Mark as Delivered" leftIcon="checkCircle" onPress={() => setDeliverModalVisible(true)} />
+            isService ? (
+              <Button
+                title="Mark service rendered"
+                leftIcon="checkCircle"
+                loading={actionLoading}
+                disabled={actionLoading}
+                onPress={handleMarkRendered}
+              />
+            ) : (
+              <Button title="Mark as Delivered" leftIcon="checkCircle" onPress={() => setDeliverModalVisible(true)} />
+            )
           )}
           {canResolveRefund && !order.merchantApprovedRefund && (
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>

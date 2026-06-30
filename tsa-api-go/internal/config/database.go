@@ -50,6 +50,7 @@ func AutoMigrate() error {
 		&models.Product{},
 		&models.Cart{},
 		&models.Category{},
+		&models.CategoryBookingFee{},
 		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},

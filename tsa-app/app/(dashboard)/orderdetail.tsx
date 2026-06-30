@@ -100,9 +100,12 @@ const OrderDetailScreen = () => {
   }, [fetchOrder]);
 
   const handleConfirmReceipt = () => {
+    const svc = order?.kind === 'service';
     Alert.alert(
-      'Confirm Receipt',
-      'This will release funds to the seller. Are you sure you received the item?',
+      svc ? 'Confirm Service Completed' : 'Confirm Receipt',
+      svc
+        ? 'This will release funds to the provider. Are you sure the service was completed?'
+        : 'This will release funds to the seller. Are you sure you received the item?',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -303,6 +306,12 @@ const OrderDetailScreen = () => {
   }
 
   const tone = ORDER_STATUS_TONE[order.status] ?? 'neutral';
+  // Service orders skip the shipping leg: the call-out/booking fee rides in the
+  // shipping amount, "delivered" reads as "rendered", and the buyer may confirm
+  // completion straight from `escrowed` (confirmReceipt has no on-chain
+  // delivered precondition — spec §6).
+  const isService = order.kind === 'service';
+  const feeLabel = isService ? 'Call-out fee' : 'Shipping';
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -314,7 +323,11 @@ const OrderDetailScreen = () => {
       >
         {/* Status badge */}
         <View style={{ alignItems: 'center', marginBottom: spacing.xl, gap: spacing.sm }}>
-          <StatusBadge status={order.status} tone={tone} />
+          <StatusBadge
+            status={order.status}
+            tone={tone}
+            label={isService && order.status === 'delivered' ? 'Rendered' : undefined}
+          />
           {order.status === 'completed' && (
             <Icon name="checkCircle" size={32} color={colors.success} />
           )}
@@ -337,8 +350,8 @@ const OrderDetailScreen = () => {
             Amounts
           </Text>
           <SummaryCard dividerBeforeLast>
-            <SummaryRow label="Product" value={formatTokenAmount(order.productAmount, order.token)} />
-            <SummaryRow label="Shipping" value={formatTokenAmount(order.shippingAmount, order.token)} />
+            <SummaryRow label={isService ? 'Service' : 'Product'} value={formatTokenAmount(order.productAmount, order.token)} />
+            <SummaryRow label={feeLabel} value={formatTokenAmount(order.shippingAmount, order.token)} />
             <SummaryRow label="Platform Fee" value={formatTokenAmount(order.platformFee, order.token)} />
             <SummaryRow label="Total" value={formatTokenAmount(order.totalAmount, order.token)} total />
           </SummaryCard>
@@ -388,7 +401,7 @@ const OrderDetailScreen = () => {
           </Text>
           <InfoRow label="Created" value={formatDate(order.createdAt, true)} />
           {order.sellerDeliveredAt && (
-            <InfoRow label="Delivered" value={formatDate(order.sellerDeliveredAt, true)} />
+            <InfoRow label={isService ? 'Rendered' : 'Delivered'} value={formatDate(order.sellerDeliveredAt, true)} />
           )}
           {order.buyerConfirmedAt && (
             <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt, true)} />
@@ -420,7 +433,22 @@ const OrderDetailScreen = () => {
           <>
             {order.status === 'escrowed' && (
               <View style={{ gap: spacing.md }}>
-                <Banner tone="info" icon="clock" text="Waiting for seller to ship" />
+                <Banner
+                  tone="info"
+                  icon="clock"
+                  text={isService ? 'Payment escrowed — waiting for the provider to perform the service' : 'Waiting for seller to ship'}
+                />
+                {/* Services can be confirmed straight from escrowed (no shipping
+                    leg). For products the buyer waits for ship/deliver first. */}
+                {isService && (
+                  <Button
+                    title="Confirm service completed"
+                    variant="success"
+                    leftIcon="checkCircle"
+                    size="lg"
+                    onPress={handleConfirmReceipt}
+                  />
+                )}
                 <Button
                   title="Request Cancel"
                   variant="danger"
@@ -483,8 +511,11 @@ const OrderDetailScreen = () => {
 
             {order.status === 'delivered' && (
               <View style={{ gap: spacing.md }}>
+                {isService && (
+                  <Banner tone="success" icon="checkCircle" text="Service rendered by the provider. Confirm to release funds." />
+                )}
                 <Button
-                  title="Confirm Receipt"
+                  title={isService ? 'Confirm service completed' : 'Confirm Receipt'}
                   variant="success"
                   leftIcon="checkCircle"
                   size="lg"
@@ -622,12 +653,12 @@ const OrderDetailScreen = () => {
 };
 
 // Large status badge driven by the shared StatusTone palette.
-const StatusBadge = ({ status, tone }: { status: string; tone: StatusTone }) => {
+const StatusBadge = ({ status, tone, label }: { status: string; tone: StatusTone; label?: string }) => {
   const { color, bg } = useToneColors(tone);
   const { spacing } = useTheme();
   return (
     <Badge
-      label={formatStatus(status)}
+      label={label ?? formatStatus(status)}
       color={color}
       background={bg}
       style={{ paddingHorizontal: spacing.xl, paddingVertical: spacing.sm }}
