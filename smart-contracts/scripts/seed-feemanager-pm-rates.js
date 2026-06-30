@@ -17,13 +17,17 @@
 //   - P0-3: p2p (gas) + p2p_platform bps   → env P2P_GAS_BPS / P2P_PLATFORM_BPS
 //   - P0-4: product gas (0.5% vs $0.10 flat) → env PRODUCT_GAS_BPS (+ PRODUCT_GAS_FLAT_USD)
 //
-// Run (dry-run / diff):
+// Run (dry-run / diff — address resolved from deployments ledger automatically):
+//   npx hardhat run scripts/seed-feemanager-pm-rates.js --network sonicTestnet
+// Override address:
 //   FEE_MANAGER_ADDRESS=0x... npx hardhat run scripts/seed-feemanager-pm-rates.js --network sonicTestnet
 // Apply (only after P0-3/P0-4 resolved + flag ON):
 //   APPLY=1 P2P_GAS_BPS=.. P2P_PLATFORM_BPS=.. PRODUCT_GAS_BPS=.. FEE_MANAGER_ADDRESS=0x... \
 //     npx hardhat run scripts/seed-feemanager-pm-rates.js --network sonicTestnet
 
-const { ethers, network } = require("hardhat");
+const hre = require("hardhat");
+const { ethers, network } = hre;
+const { readLedger } = require("../deploy/lib");
 
 const ESCROW_SYMBOLS = ["USDT", "USDC"]; // non-MCGP escrow tokens get the PM bps
 const MCGP_SYMBOL = "MCGP";              // exempt everywhere (invariant #6)
@@ -71,8 +75,9 @@ function expand(table) {
 }
 
 async function main() {
-  const fmAddr = process.env.FEE_MANAGER_ADDRESS;
-  if (!fmAddr || !ethers.isAddress(fmAddr)) throw new Error("Set FEE_MANAGER_ADDRESS");
+  const fmAddr = process.env.FEE_MANAGER_ADDRESS || readLedger(hre.network.name).FeeManager?.proxy;
+  if (!fmAddr) throw new Error("seed: FeeManager address not found (deploy it or set FEE_MANAGER_ADDRESS)");
+  if (!ethers.isAddress(fmAddr)) throw new Error(`seed: FeeManager address is invalid: ${fmAddr}`);
   const apply = process.env.APPLY === "1";
   const [signer] = await ethers.getSigners();
   const fm = await ethers.getContractAt("FeeManager", fmAddr);
