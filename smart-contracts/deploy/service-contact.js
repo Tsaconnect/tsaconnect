@@ -1,14 +1,17 @@
 // smart-contracts/deploy/service-contact.js
-const { resolveChain, writeLedger, readLedger } = require("./lib");
+const { resolveChain, writeLedger, readLedger, transferOwnershipIfNeeded } = require("./lib");
 
 async function deploy(hre, { chain, feeManager, feeAmount = 0n } = {}) {
   const { ethers, upgrades, network } = hre;
   const cfg = chain || resolveChain(hre);
   const [deployer] = await ethers.getSigners();
-  const owner = cfg.owner || (await deployer.getAddress());
+  const deployerAddr = await deployer.getAddress();
+  const finalOwner = cfg.owner || deployerAddr;
 
+  // Deploy owned by the deployer so it can run the onlyOwner wiring; ownership
+  // is transferred to finalOwner at the end.
   const Factory = await ethers.getContractFactory("ServiceContactV2");
-  const sc = await upgrades.deployProxy(Factory, [owner], { kind: "uups", unsafeAllow: ["constructor"] });
+  const sc = await upgrades.deployProxy(Factory, [deployerAddr], { kind: "uups", unsafeAllow: ["constructor"] });
   await sc.waitForDeployment();
   const proxy = await sc.getAddress();
 
@@ -21,9 +24,11 @@ async function deploy(hre, { chain, feeManager, feeAmount = 0n } = {}) {
   const fm = feeManager || (chain ? null : readLedger(network.name).FeeManager?.proxy);
   if (fm) await (await sc.setFeeManager(fm)).wait();
 
+  await transferOwnershipIfNeeded(sc, deployerAddr, finalOwner);
+
   const impl = await upgrades.erc1967.getImplementationAddress(proxy);
   if (!chain) writeLedger(network.name, "ServiceContactV2", { proxy, impl });
-  console.log(`ServiceContactV2 proxy=${proxy} impl=${impl}`);
+  console.log(`ServiceContactV2 proxy=${proxy} impl=${impl} owner=${finalOwner}`);
   return { proxy, impl };
 }
 
