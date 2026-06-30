@@ -15,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import { useLocalSearchParams } from 'expo-router';
 import ServiceDetailCard from '../../components/services/ServiceDetail';
+import ServicePricingSheet from '../../components/services/ServicePricingSheet';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { signTransaction, broadcastTransaction } from '../../services/wallet';
 import {
@@ -128,7 +129,7 @@ const TOKEN_SEGMENTS = [
 
 const ServiceDetail = () => {
   const { colors, spacing, radius } = useTheme();
-  const { token } = useAuth();
+  const { token, currentUser } = useAuth();
   const { title, image, description, id: serviceId } = useLocalSearchParams<{
     title: string;
     image: string;
@@ -148,6 +149,9 @@ const ServiceDetail = () => {
   // a modal with the rest of the gallery.
   const [catalogueImages, setCatalogueImages] = useState<string[]>([]);
   const [showCatalogue, setShowCatalogue] = useState(false);
+  // Service pricing sheet (price + call-out / booking fare → escrow checkout).
+  // Only opened after the contact fee is paid (gated in ServiceDetailCard).
+  const [showPricing, setShowPricing] = useState(false);
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -331,8 +335,21 @@ const ServiceDetail = () => {
           onRevealPress={handleRevealPress}
           onCopyPress={handleCopy}
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
+          onPricingPress={() => setShowPricing(true)}
         />
       </ScrollView>
+
+      {/* Service pricing & escrow checkout sheet (gated by contactPaid above) */}
+      {serviceId ? (
+        <ServicePricingSheet
+          visible={showPricing}
+          onClose={() => setShowPricing(false)}
+          serviceId={serviceId}
+          buyerCity={currentUser?.city}
+          buyerState={currentUser?.state}
+          buyerCountry={currentUser?.country}
+        />
+      ) : null}
 
       {/* Payment Confirmation Sheet */}
       <Sheet visible={showModal} onClose={() => setShowModal(false)} title="Reveal Contact Details">

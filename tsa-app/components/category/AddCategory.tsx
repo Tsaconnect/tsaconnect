@@ -31,6 +31,12 @@ import {
   Toggle,
   type PickerItem,
 } from "@/components/ui";
+import {
+  BOOKING_TIERS,
+  BOOKING_TIER_LABELS,
+  upsertCategoryBookingFees,
+  type BookingFees,
+} from "../../services/bookingFeeApi";
 
 const TYPE_OPTIONS: PickerItem[] = [
   { id: "Product", label: "Product" },
@@ -39,6 +45,12 @@ const TYPE_OPTIONS: PickerItem[] = [
   // for a generator product AND a generator-repair service). Listings stay in
   // their own marketplace section — the type filter prevents cross-leakage.
   { id: "Both", label: "Both (Product & Service)" },
+];
+
+// Service fee mode picker (shown only when type is Service or Both).
+const FEE_MODE_OPTIONS: PickerItem[] = [
+  { id: "standard", label: "Standard (merchant sets price + call-out)" },
+  { id: "booking", label: "Booking (admin sets merged per-area fare)" },
 ];
 
 const AddCategoryScreen = () => {
@@ -58,6 +70,17 @@ const AddCategoryScreen = () => {
   // Sheet visibility for the SelectRow-backed pickers (UI-only state).
   const [typeSheetOpen, setTypeSheetOpen] = useState(false);
   const [parentSheetOpen, setParentSheetOpen] = useState(false);
+
+  // Service-pricing config (only meaningful for Service/Both categories).
+  const [serviceFeeMode, setServiceFeeMode] = useState<"standard" | "booking">(
+    "standard"
+  );
+  const [feeModeSheetOpen, setFeeModeSheetOpen] = useState(false);
+  // Per-tier booking fares (USD), keyed by BOOKING_TIERS — raw input strings.
+  const [bookingFares, setBookingFares] = useState<Record<string, string>>({});
+
+  const isServiceType = type === "Service" || type === "Both";
+  const showFareEditor = isServiceType && serviceFeeMode === "booking";
 
   const fetchParentCategories = async () => {
     try {
@@ -127,11 +150,29 @@ const AddCategoryScreen = () => {
     if (parentCategory) {
       formData.append("parentCategory", parentCategory);
     }
+    // Service-fee mode only applies to Service/Both categories.
+    if (isServiceType) {
+      formData.append("serviceFeeMode", serviceFeeMode);
+    }
 
     try {
       setLoading(true);
       const response = await registerCategory(formData);
       if (response.status === 201) {
+        // For a booking-mode service category, persist the per-tier fare
+        // schedule against the freshly created category.
+        if (isServiceType && serviceFeeMode === "booking") {
+          const newCategoryId = String(
+            response.data?.id ?? response.data?.result?.id ?? ""
+          );
+          if (newCategoryId) {
+            const fees: BookingFees = {};
+            for (const tier of BOOKING_TIERS) {
+              fees[tier] = Number(bookingFares[tier]) || 0;
+            }
+            await upsertCategoryBookingFees(newCategoryId, fees);
+          }
+        }
         Alert.alert("success", "The category was created successfully.");
         setTitle("");
         setDescription("");
@@ -140,6 +181,8 @@ const AddCategoryScreen = () => {
         setParentCategory("");
         setIsFeatured(false);
         setIsParent(false);
+        setServiceFeeMode("standard");
+        setBookingFares({});
         await fetchParentCategories();
         setLoading(false);
       }
@@ -162,6 +205,8 @@ const AddCategoryScreen = () => {
     TYPE_OPTIONS.find((o) => o.id === type)?.label ?? "";
   const selectedParentLabel =
     parentItems.find((o) => o.id === parentCategory)?.label ?? "";
+  const selectedFeeModeLabel =
+    FEE_MODE_OPTIONS.find((o) => o.id === serviceFeeMode)?.label ?? "";
 
   return (
     <SafeAreaView
@@ -198,6 +243,43 @@ const AddCategoryScreen = () => {
           placeholder="Select Type"
           onPress={() => setTypeSheetOpen(true)}
         />
+
+        {/* Service fee mode — only for Service / Both categories */}
+        {isServiceType && (
+          <SelectRow
+            label="Service fee mode"
+            value={selectedFeeModeLabel}
+            placeholder="Select fee mode"
+            onPress={() => setFeeModeSheetOpen(true)}
+          />
+        )}
+
+        {/* Booking fare editor — one USD input per area tier */}
+        {showFareEditor && (
+          <Card padding="lg" style={{ gap: spacing.md }}>
+            <View style={{ gap: spacing.xs }}>
+              <Text variant="bodyMed" weight="600">
+                Booking fares (USD)
+              </Text>
+              <Text variant="caption" color="textMuted">
+                Set the merged call-out + booking fee per area tier. Blank counts
+                as 0.
+              </Text>
+            </View>
+            {BOOKING_TIERS.map((tier) => (
+              <Input
+                key={tier}
+                label={BOOKING_TIER_LABELS[tier]}
+                value={bookingFares[tier] ?? ""}
+                onChangeText={(v) =>
+                  setBookingFares((prev) => ({ ...prev, [tier]: v }))
+                }
+                keyboardType="numeric"
+                placeholder="0.00"
+              />
+            ))}
+          </Card>
+        )}
 
         {/* Featured image upload — same expo-image-picker flow, restyled tile */}
         <View style={{ gap: spacing.sm }}>
@@ -331,6 +413,20 @@ const AddCategoryScreen = () => {
         onSelect={(item) => {
           setType(item.id);
           setTypeSheetOpen(false);
+        }}
+      />
+
+      {/* Service-fee-mode picker */}
+      <PickerSheet
+        visible={feeModeSheetOpen}
+        onClose={() => setFeeModeSheetOpen(false)}
+        title="Service fee mode"
+        items={FEE_MODE_OPTIONS}
+        selectedId={serviceFeeMode}
+        searchable={false}
+        onSelect={(item) => {
+          setServiceFeeMode(item.id as "standard" | "booking");
+          setFeeModeSheetOpen(false);
         }}
       />
 

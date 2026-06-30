@@ -224,12 +224,21 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		}
 	}
 
+	// Service fee mode (only meaningful for Service/Both categories): "standard"
+	// (merchant sets price + call-out) or "booking" (admin sets a merged per-area
+	// fare schedule). Defaults to standard.
+	serviceFeeMode := c.PostForm("serviceFeeMode")
+	if serviceFeeMode != models.ServiceFeeModeBooking {
+		serviceFeeMode = models.ServiceFeeModeStandard
+	}
+
 	now := time.Now()
 	category := models.Category{
 		ID:               uuid.New(),
 		Title:            title,
 		Description:      description,
 		Type:             catType,
+		ServiceFeeMode:   serviceFeeMode,
 		ParentCategoryID: parentCategoryID,
 		Icon:             iconURL,
 		Image:            imageURL,
@@ -290,6 +299,12 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 	}
 	if catType := c.PostForm("type"); catType != "" {
 		updates["type"] = catType
+	}
+	if mode := c.PostForm("serviceFeeMode"); mode != "" {
+		if mode != models.ServiceFeeModeBooking {
+			mode = models.ServiceFeeModeStandard
+		}
+		updates["service_fee_mode"] = mode
 	}
 	if color := c.PostForm("color"); color != "" {
 		updates["color"] = color

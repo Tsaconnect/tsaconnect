@@ -167,6 +167,52 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 	}
 }
 
+// --- Service call-out / booking tier resolution ---
+
+// GetCalloutRate returns the STANDARD-mode call-out fee for a service at a given
+// area tier. "residential" is always free; the remaining tiers reuse the product
+// shipping columns (relabelled "Call-out fee" in the service UI).
+func GetCalloutRate(service *models.Product, tier string) float64 {
+	if tier == models.BookingTierResidential {
+		return 0
+	}
+	return GetShippingRate(service, tier)
+}
+
+// resolveServiceTier maps the auto-detected shipping zone (same_city/state/
+// country/international) to a service area tier, honoring a buyer-DECLARED finer
+// tier when it is geographically plausible. The buyer may only refine DOWN within
+// proximity the server can sanity-check: "residential" only refines "same_city",
+// and "same_lga" (booking only) refines same_city/same_state. Implausible
+// declarations are ignored (charge the detected zone); the provider dispute path
+// is the backstop for the residual cases the server can't verify (design §4.2).
+func resolveServiceTier(detectedZone, declared string, booking bool) string {
+	switch declared {
+	case models.BookingTierResidential:
+		if detectedZone == ShippingZoneSameCity {
+			return models.BookingTierResidential
+		}
+	case models.BookingTierSameLGA:
+		if booking && (detectedZone == ShippingZoneSameCity || detectedZone == ShippingZoneSameState) {
+			return models.BookingTierSameLGA
+		}
+	}
+	if booking && detectedZone == ShippingZoneInternational {
+		return models.BookingTierOutsideCountry
+	}
+	return detectedZone
+}
+
+// GetBookingFee returns the admin-set merged call-out+booking fare (USD) for a
+// booking-mode category at the resolved tier, or 0 if no row exists.
+func GetBookingFee(db *gorm.DB, categoryID uuid.UUID, tier string) float64 {
+	var bf models.CategoryBookingFee
+	if err := db.Where("category_id = ? AND tier = ?", categoryID, tier).First(&bf).Error; err != nil {
+		return 0
+	}
+	return bf.AmountUSD
+}
+
 // --- Fee calculation (big.Int) ---
 
 // CalculatePlatformFee returns the merchant fee (2% for non-MCGP tokens, 0 for
@@ -178,12 +224,26 @@ func GetShippingRate(product *models.Product, zone string) float64 {
 // as the previous explicit MCGP branch. This is the SAME read the cart quote
 // (CalculateCartSummary's MerchantFee) makes, so quote == charge (design §6).
 func CalculatePlatformFee(productAmount *big.Int, token string) *big.Int {
-	// Product settlement is Sonic-only with no per-call chain context here, so
-	// this reads the documented-GLOBAL (chainID nil) product_merchant row —
-	// design §6.
-	bps, _ := services.FeeRate(models.FeatureProductMerchant, token, nil)
-	// fee = productAmount * bps / 10000
-	fee := new(big.Int).Mul(productAmount, big.NewInt(int64(bps)))
+	return calculateFeeForFeature(productAmount, token, models.FeatureProductMerchant)
+}
+
+// CalculateServiceFee is the platform fee for a SERVICE order — the 0.5%
+// service_other rate rather than the 2% product_merchant rate. The escrowed
+// ProductAmount of a service is the service price (or, for price-less/booking
+// listings, the call-out/booking fare per design §3.3), so the fee is computed
+// on that. MCGP resolves to bps=0/exempt, same as products.
+func CalculateServiceFee(productAmount *big.Int, token string) *big.Int {
+	return calculateFeeForFeature(productAmount, token, models.FeatureServiceOther)
+}
+
+// calculateFeeForFeature reads the documented-GLOBAL (chainID nil) fee_config
+// row for the given feature and applies it to amount. Product/service settlement
+// is Sonic-only with no per-call chain context here (design §6). This is the
+// SAME read the cart quote makes, so quote == charge.
+func calculateFeeForFeature(amount *big.Int, token, feature string) *big.Int {
+	bps, _ := services.FeeRate(feature, token, nil)
+	// fee = amount * bps / 10000
+	fee := new(big.Int).Mul(amount, big.NewInt(int64(bps)))
 	fee.Div(fee, big.NewInt(10000))
 	return fee
 }
@@ -251,7 +311,11 @@ func floatToDecimalStr(f float64, decimals int) string {
 
 // isValidTransition checks whether a status transition is allowed.
 func isValidTransition(currentStatus, newStatus string) bool {
-	for _, s := range models.ValidNextStatuses(currentStatus) {
+	return isValidTransitionForKind(currentStatus, newStatus, models.OrderKindProduct)
+}
+
+func isValidTransitionForKind(currentStatus, newStatus, kind string) bool {
+	for _, s := range models.ValidNextStatusesForKind(currentStatus, kind) {
 		if s == newStatus {
 			return true
 		}
@@ -266,6 +330,11 @@ type createOrderRequest struct {
 	BuyerCity    string `json:"buyerCity"`
 	BuyerState   string `json:"buyerState"`
 	BuyerCountry string `json:"buyerCountry"`
+	// ServiceTiers optionally maps a service product ID → the buyer-declared area
+	// tier ("residential", "same_lga", …) for that line item, letting the buyer's
+	// "provider is in my area" / LGA declaration reach the server. Honored only
+	// when geographically plausible (resolveServiceTier); absent → detected zone.
+	ServiceTiers map[string]string `json:"serviceTiers"`
 }
 
 type submitEscrowRequest struct {
@@ -274,7 +343,10 @@ type submitEscrowRequest struct {
 }
 
 type deliverRequest struct {
-	DeliveryProofURL string `json:"deliveryProofUrl" binding:"required"`
+	// DeliveryProofURL is required for PRODUCT orders (proof of shipment/delivery)
+	// and optional for SERVICE orders ("mark service rendered" — there is nothing
+	// to ship). Enforced per-kind in MarkDelivered rather than via binding.
+	DeliveryProofURL string `json:"deliveryProofUrl"`
 }
 
 type submitConfirmRequest struct {
@@ -372,21 +444,46 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
-			// Stock validation
-			if product.Stock < item.Quantity {
-				tx.Rollback()
-				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Insufficient stock for %s (available: %d, requested: %d)", product.Name, product.Stock, item.Quantity))
-				return
+			// Listing kind: a service skips stock + shipping and is gated behind
+			// the one-time contact-reveal payment.
+			isService := product.Type == models.ProductTypeService
+			kind := models.OrderKindProduct
+			quantity := item.Quantity
+
+			if isService {
+				kind = models.OrderKindService
+				quantity = 1 // services have no inventory/quantity
+
+				// Contact-fee gate (in-transaction): the buyer must already have
+				// paid the one-time contact-reveal fee for this service.
+				var contactCount int64
+				if err := tx.Model(&models.ServiceContactPayment{}).
+					Where("caller_id = ? AND service_id = ?", user.ID, product.ID).
+					Count(&contactCount).Error; err != nil {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify service access")
+					return
+				}
+				if contactCount == 0 {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before booking it", product.Name))
+					return
+				}
+			} else {
+				// Stock validation + decrement (products only).
+				if product.Stock < item.Quantity {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Insufficient stock for %s (available: %d, requested: %d)", product.Name, product.Stock, item.Quantity))
+					return
+				}
+				if err := tx.Model(&product).Update("stock", product.Stock-item.Quantity).Error; err != nil {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update product stock")
+					return
+				}
 			}
 
-			// Decrement stock
-			if err := tx.Model(&product).Update("stock", product.Stock-item.Quantity).Error; err != nil {
-				tx.Rollback()
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update product stock")
-				return
-			}
-
-			// Get seller for shipping zone detection
+			// Get seller for zone detection
 			var seller models.User
 			if err := tx.First(&seller, "id = ?", group.sellerID).Error; err != nil {
 				tx.Rollback()
@@ -395,7 +492,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			}
 
 			origin := resolveShippingOrigin(&product, &seller)
-			zone := DetectShippingZone(
+			detectedZone := DetectShippingZone(
 				buyerCity,
 				buyerState,
 				buyerCountry,
@@ -403,11 +500,57 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				origin.State,
 				origin.Country,
 			)
-			shippingRate := GetShippingRate(&product, zone)
 
-			// Convert to wei using string-based math (no float64 precision loss)
-			productTotal := product.Price * float64(item.Quantity)
-			shippingTotal := shippingRate * float64(item.Quantity)
+			// Resolve the two USD charge components: priceUSD lands in
+			// ProductAmount (platform fee applies, must be > 0 on-chain);
+			// calloutUSD lands in ShippingAmount (pass-through to the merchant).
+			var priceUSD, calloutUSD float64
+			zone := detectedZone
+
+			if isService {
+				feeMode := models.ServiceFeeModeStandard
+				if product.CategoryID != nil {
+					var cat models.Category
+					if err := tx.First(&cat, "id = ?", *product.CategoryID).Error; err != nil {
+						// Don't silently downgrade a booking listing to standard on a
+						// transient/data error — surface the misconfig.
+						log.Printf("CreateOrderFromCart: category %s load failed for service %s: %v", *product.CategoryID, product.ID, err)
+					} else if cat.ServiceFeeMode != "" {
+						feeMode = cat.ServiceFeeMode
+					}
+				}
+				booking := feeMode == models.ServiceFeeModeBooking
+				declared := ""
+				if req.ServiceTiers != nil {
+					declared = req.ServiceTiers[product.ID.String()]
+				}
+				zone = resolveServiceTier(detectedZone, declared, booking)
+
+				if booking {
+					// Admin-set merged fare is the sole charge → ProductAmount.
+					priceUSD = GetBookingFee(tx, *product.CategoryID, zone)
+					calloutUSD = 0
+				} else if product.Price > 0 {
+					priceUSD = product.Price
+					calloutUSD = GetCalloutRate(&product, zone)
+				} else {
+					// Price-less standard service: the call-out is the sole charge
+					// and must land in ProductAmount (createOrder requires > 0).
+					priceUSD = GetCalloutRate(&product, zone)
+					calloutUSD = 0
+				}
+
+				// A zero-charge service is not escrowable (createOrder requires
+				// productAmount > 0); free bookings/services have no payment step.
+				if priceUSD+calloutUSD <= 0 {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s has no payable amount for your area", product.Name))
+					return
+				}
+			} else {
+				priceUSD = product.Price * float64(item.Quantity)
+				calloutUSD = GetShippingRate(&product, zone) * float64(item.Quantity)
+			}
 
 			var productAmountWei, shippingAmountWei *big.Int
 
@@ -421,30 +564,46 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				}
 
 				// Convert product USD to MCGP: (usd * 1e6 * 1e18) / pricePerMCGP
-				usdProductWei, _ := toWei(floatToDecimalStr(productTotal, 6), 6)
+				usdProductWei, _ := toWei(floatToDecimalStr(priceUSD, 6), 6)
 				productAmountWei = new(big.Int).Mul(usdProductWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 				productAmountWei.Div(productAmountWei, pricePerMCGP)
 
-				usdShipWei, _ := toWei(floatToDecimalStr(shippingTotal, 6), 6)
+				usdShipWei, _ := toWei(floatToDecimalStr(calloutUSD, 6), 6)
 				shippingAmountWei = new(big.Int).Mul(usdShipWei, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
 				shippingAmountWei.Div(shippingAmountWei, pricePerMCGP)
 			} else {
 				// USDC/USDT: 1:1 with USD
 				var err error
-				productAmountWei, err = toWei(floatToDecimalStr(productTotal, decimals), decimals)
+				productAmountWei, err = toWei(floatToDecimalStr(priceUSD, decimals), decimals)
 				if err != nil {
 					tx.Rollback()
 					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert product amount")
 					return
 				}
-				shippingAmountWei, err = toWei(floatToDecimalStr(shippingTotal, decimals), decimals)
+				shippingAmountWei, err = toWei(floatToDecimalStr(calloutUSD, decimals), decimals)
 				if err != nil {
 					tx.Rollback()
 					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert shipping amount")
 					return
 				}
 			}
-			platformFeeWei := CalculatePlatformFee(productAmountWei, token)
+
+			// The on-chain createOrder requires productAmount > 0. A sub-unit
+			// amount (e.g. a tiny fare divided by a high MCGP price) can round to
+			// zero wei here and would revert at escrow time — reject up front with
+			// a clear error. Guards products and services alike.
+			if productAmountWei == nil || productAmountWei.Sign() <= 0 {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token))
+				return
+			}
+
+			var platformFeeWei *big.Int
+			if isService {
+				platformFeeWei = CalculateServiceFee(productAmountWei, token)
+			} else {
+				platformFeeWei = CalculatePlatformFee(productAmountWei, token)
+			}
 			totalAmountWei := new(big.Int).Add(productAmountWei, shippingAmountWei)
 			totalAmountWei.Add(totalAmountWei, platformFeeWei)
 
@@ -462,7 +621,8 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				BuyerID:         user.ID,
 				SellerID:        group.sellerID,
 				ProductID:       item.Product,
-				Quantity:        item.Quantity,
+				Kind:            kind,
+				Quantity:        quantity,
 				Token:           token,
 				ProductAmount:   productAmountWei.String(),
 				ShippingAmount:  shippingAmountWei.String(),
@@ -578,7 +738,7 @@ func (ch *CheckoutHandler) getOrderForEscrow(c *gin.Context) (*models.Order, *mo
 		return nil, nil, nil, "", false
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusEscrowed) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot prepare escrow: order is in %s status", order.Status))
 		return nil, nil, nil, "", false
 	}
@@ -730,7 +890,7 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusEscrowed) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusEscrowed, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit escrow: order is in %s status", order.Status))
 		return
 	}
@@ -761,12 +921,12 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	escrowExpires := time.Now().Add(30 * 24 * time.Hour)
 	updates := map[string]interface{}{
-		"status":                   models.OrderStatusEscrowed,
-		"approve_tx_hash":          req.ApproveTxHash,
-		"escrow_tx_hash":           req.EscrowTxHash,
-		"contract_order_id":        fmt.Sprintf("0x%x", contractOrderID),
-		"escrow_contract_address":  ch.EscrowService.CurrentEscrowAddress(),
-		"escrow_expires_at":        escrowExpires,
+		"status":                  models.OrderStatusEscrowed,
+		"approve_tx_hash":         req.ApproveTxHash,
+		"escrow_tx_hash":          req.EscrowTxHash,
+		"contract_order_id":       fmt.Sprintf("0x%x", contractOrderID),
+		"escrow_contract_address": ch.EscrowService.CurrentEscrowAddress(),
+		"escrow_expires_at":       escrowExpires,
 	}
 
 	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
@@ -785,11 +945,17 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 			"escrowExpiresAt": escrowExpires,
 		},
 	})
+	sellerTitle := "Payment Received — Ship Order"
+	sellerMsg := fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8])
+	if order.Kind == models.OrderKindService {
+		sellerTitle = "Payment Received — Provide Service"
+		sellerMsg = fmt.Sprintf("Payment for service order #%s has been escrowed. Provide the service, then mark it rendered.", order.ID.String()[:8])
+	}
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderEscrowed,
 		UserID:  order.SellerID,
-		Title:   "Payment Received — Ship Order",
-		Message: fmt.Sprintf("Payment for order #%s has been escrowed. Please ship the item to the buyer.", order.ID.String()[:8]),
+		Title:   sellerTitle,
+		Message: sellerMsg,
 		Data: map[string]interface{}{
 			"orderId":         order.ID.String(),
 			"status":          models.OrderStatusEscrowed,
@@ -847,15 +1013,20 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusShipped) {
+	if order.Kind == models.OrderKindService {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Services are not shipped — use 'Mark service rendered' instead")
+		return
+	}
+
+	if !isValidTransitionForKind(order.Status, models.OrderStatusShipped, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as shipped: order is in %s status", order.Status))
 		return
 	}
 
 	now := time.Now()
 	updates := map[string]interface{}{
-		"status":             models.OrderStatusShipped,
-		"seller_shipped_at":  now,
+		"status":            models.OrderStatusShipped,
+		"seller_shipped_at": now,
 	}
 	if strings.TrimSpace(req.TrackingNumber) != "" {
 		updates["tracking_number"] = strings.TrimSpace(req.TrackingNumber)
@@ -909,10 +1080,7 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	}
 
 	var req deliverRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "deliveryProofUrl is required")
-		return
-	}
+	_ = c.ShouldBindJSON(&req)
 
 	var order models.Order
 	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
@@ -925,12 +1093,18 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		return
 	}
 
+	// Products require delivery proof; services ("rendered") do not.
+	if order.Kind != models.OrderKindService && req.DeliveryProofURL == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "deliveryProofUrl is required")
+		return
+	}
+
 	if order.DisputedAt != nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusDelivered) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
 		return
 	}
@@ -951,11 +1125,17 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		log.Printf("MarkDelivered reload error: %v", err)
 	}
 
+	deliveredTitle := "Order Delivered"
+	deliveredMsg := fmt.Sprintf("Your order %s has been marked as delivered by the seller", order.ID)
+	if order.Kind == models.OrderKindService {
+		deliveredTitle = "Service Rendered"
+		deliveredMsg = fmt.Sprintf("The provider marked service order %s as rendered. Confirm to release payment.", order.ID)
+	}
 	ch.EventBus.Publish(events.Event{
 		Type:    events.OrderDelivered,
 		UserID:  order.BuyerID,
-		Title:   "Order Delivered",
-		Message: fmt.Sprintf("Your order %s has been marked as delivered by the seller", order.ID),
+		Title:   deliveredTitle,
+		Message: deliveredMsg,
 		Data: map[string]interface{}{
 			"orderId": order.ID.String(),
 			"status":  models.OrderStatusDelivered,
@@ -1079,7 +1259,7 @@ func (ch *CheckoutHandler) RejectRefund(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusDelivered) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot transition back to delivered")
 		return
 	}
@@ -1143,7 +1323,7 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusCompleted) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusCompleted, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot confirm receipt: order is in %s status", order.Status))
 		return
 	}
@@ -1207,7 +1387,7 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusCompleted) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusCompleted, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot confirm receipt: order is in %s status", order.Status))
 		return
 	}
@@ -1247,7 +1427,14 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		// SEPARATE 100%-system fee that must NOT generate TP/cashback. We feed the
 		// merchant fee here; the gas component is intentionally not settled into the
 		// engine (it would only ever credit system, producing no recipients).
+		// A service order's platform fee is settled under service_other (0.5%),
+		// not product_merchant (2%); order.PlatformFee already holds the
+		// service fee (CreateOrderFromCart used CalculateServiceFee), so the USD
+		// amount is read the same way.
 		feeFeature := models.FeatureProductMerchant
+		if order.Kind == models.OrderKindService {
+			feeFeature = models.FeatureServiceOther
+		}
 		feeUSD := orderMerchantFeeUSD(&order)
 		// Fee settlement: the realized merchant fee is handed to the engine
 		// (async, idempotent on checkout/order.ID). tp_distributed_at is stamped as
@@ -1408,7 +1595,7 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransition(order.Status, models.OrderStatusCancelled) {
+	if !isValidTransitionForKind(order.Status, models.OrderStatusCancelled, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot cancel: order is in %s status", order.Status))
 		return
 	}
@@ -1435,13 +1622,16 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
 			return
 		}
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", order.ProductID).
-			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-			tx.Rollback()
-			log.Printf("CancelOrder stock restore error for order %s: %v", order.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-			return
+		// Services hold no inventory, so there is nothing to restore.
+		if order.Kind != models.OrderKindService {
+			if err := tx.Model(&models.Product{}).
+				Where("id = ?", order.ProductID).
+				UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+				tx.Rollback()
+				log.Printf("CancelOrder stock restore error for order %s: %v", order.ID, err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+				return
+			}
 		}
 		if err := tx.Commit().Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
@@ -1458,9 +1648,9 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			Title:   "Order Cancelled",
 			Message: fmt.Sprintf("Order #%s was cancelled (by %s).", order.ID.String()[:8], role),
 			Data: map[string]interface{}{
-				"orderId":      order.ID.String(),
-				"status":       models.OrderStatusCancelled,
-				"cancelledBy":  role,
+				"orderId":     order.ID.String(),
+				"status":      models.OrderStatusCancelled,
+				"cancelledBy": role,
 			},
 		})
 		ch.EventBus.Publish(events.Event{
@@ -1469,9 +1659,9 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			Title:   "Order Cancelled",
 			Message: fmt.Sprintf("Order #%s was cancelled (by %s).", order.ID.String()[:8], role),
 			Data: map[string]interface{}{
-				"orderId":      order.ID.String(),
-				"status":       models.OrderStatusCancelled,
-				"cancelledBy":  role,
+				"orderId":     order.ID.String(),
+				"status":      models.OrderStatusCancelled,
+				"cancelledBy": role,
 			},
 		})
 
@@ -1933,7 +2123,8 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 		return
 	}
 	// Restore stock if the buyer was refunded (item never reached them or is being returned).
-	if body.RefundBuyer {
+	// Services hold no inventory, so there is nothing to restore.
+	if body.RefundBuyer && order.Kind != models.OrderKindService {
 		if err := tx.Model(&models.Product{}).
 			Where("id = ?", order.ProductID).
 			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
@@ -2104,8 +2295,8 @@ func (ch *CheckoutHandler) DismissRequest(c *gin.Context) {
 		Title:   "Request Dismissed",
 		Message: summary,
 		Data: map[string]interface{}{
-			"orderId":  order.ID.String(),
-			"status":   revertedStatus,
+			"orderId":     order.ID.String(),
+			"status":      revertedStatus,
 			"dismissedBy": "admin",
 		},
 	})
@@ -2115,8 +2306,8 @@ func (ch *CheckoutHandler) DismissRequest(c *gin.Context) {
 		Title:   "Request Dismissed",
 		Message: summary,
 		Data: map[string]interface{}{
-			"orderId":  order.ID.String(),
-			"status":   revertedStatus,
+			"orderId":     order.ID.String(),
+			"status":      revertedStatus,
 			"dismissedBy": "admin",
 		},
 	})
@@ -2186,9 +2377,9 @@ func (ch *CheckoutHandler) RequestCancelOrder(c *gin.Context) {
 
 	now := time.Now()
 	updates := map[string]interface{}{
-		"status":               models.OrderStatusCancelRequested,
-		"cancel_reason":        strings.TrimSpace(body.Reason),
-		"cancel_requested_at":  now,
+		"status":              models.OrderStatusCancelRequested,
+		"cancel_reason":       strings.TrimSpace(body.Reason),
+		"cancel_requested_at": now,
 	}
 	if err := config.DB.Model(&order).Updates(updates).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
@@ -2356,13 +2547,16 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
-	if err := tx.Model(&models.Product{}).
-		Where("id = ?", order.ProductID).
-		UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
-		tx.Rollback()
-		log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-		return
+	// Services hold no inventory, so there is nothing to restore.
+	if order.Kind != models.OrderKindService {
+		if err := tx.Model(&models.Product{}).
+			Where("id = ?", order.ProductID).
+			UpdateColumn("stock", gorm.Expr("stock + ?", order.Quantity)).Error; err != nil {
+			tx.Rollback()
+			log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+			return
+		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")

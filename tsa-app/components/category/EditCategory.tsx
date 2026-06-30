@@ -7,9 +7,8 @@
 // useLocalSearchParams prefill, the title/type validation, the expo-image-picker
 // flow, FormData assembly, and the post-update navigation are preserved verbatim.
 import React, { useState, useEffect } from "react";
-import { View, ScrollView, Image } from "react-native";
+import { View, ScrollView, Image, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Alert } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { router, useLocalSearchParams } from "expo-router";
@@ -29,6 +28,13 @@ import {
   Toggle,
   type PickerItem,
 } from "@/components/ui";
+import {
+  BOOKING_TIERS,
+  BOOKING_TIER_LABELS,
+  getCategoryBookingFees,
+  upsertCategoryBookingFees,
+  type BookingFees,
+} from "../../services/bookingFeeApi";
 
 const TYPE_OPTIONS: PickerItem[] = [
   { id: "Product", label: "Product" },
@@ -36,6 +42,12 @@ const TYPE_OPTIONS: PickerItem[] = [
   // "Both" lets a same-titled category serve both marketplace sections without
   // listings leaking across them (the type filter keeps them separated).
   { id: "Both", label: "Both (Product & Service)" },
+];
+
+// Service fee mode picker (shown only when type is Service or Both).
+const FEE_MODE_OPTIONS: PickerItem[] = [
+  { id: "standard", label: "Standard (merchant sets price + call-out)" },
+  { id: "booking", label: "Booking (admin sets merged per-area fare)" },
 ];
 
 const EditCategoryScreen = () => {
@@ -64,6 +76,17 @@ const EditCategoryScreen = () => {
   const [typeSheetVisible, setTypeSheetVisible] = useState(false);
   const [parentSheetVisible, setParentSheetVisible] = useState(false);
 
+  // Service-pricing config (only meaningful for Service/Both categories).
+  const [serviceFeeMode, setServiceFeeMode] = useState<"standard" | "booking">(
+    item.serviceFeeMode === "booking" ? "booking" : "standard"
+  );
+  const [feeModeSheetVisible, setFeeModeSheetVisible] = useState(false);
+  // Per-tier booking fares (USD), keyed by BOOKING_TIERS — raw input strings.
+  const [bookingFares, setBookingFares] = useState<Record<string, string>>({});
+
+  const isServiceType = type === "Service" || type === "Both";
+  const showFareEditor = isServiceType && serviceFeeMode === "booking";
+
   const fetchParentCategories = async () => {
     try {
       const response = await axios.get(`${baseUrl}/category?isParent=true`, {
@@ -80,6 +103,26 @@ const EditCategoryScreen = () => {
   useEffect(() => {
     fetchParentCategories();
   }, []);
+
+  // Prefill the booking fare editor for a booking-mode service category.
+  useEffect(() => {
+    if (!item.id || serviceFeeMode !== "booking") return;
+    let cancelled = false;
+    (async () => {
+      const res = await getCategoryBookingFees(String(item.id));
+      if (cancelled || !res.success || !res.data?.fees) return;
+      const prefilled: Record<string, string> = {};
+      for (const tier of BOOKING_TIERS) {
+        const amount = res.data.fees[tier];
+        if (amount != null && amount !== 0) prefilled[tier] = String(amount);
+      }
+      setBookingFares(prefilled);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Re-fetch only when the category or its mode changes.
+  }, [item.id, serviceFeeMode]);
 
   const pickImageAsync = async () => {
     try {
@@ -138,6 +181,11 @@ const EditCategoryScreen = () => {
       //@ts-ignore
       formData.append("parentCategory", parentCategory);
     }
+    // Service-fee mode only applies to Service/Both categories.
+    if (isServiceType) {
+      //@ts-ignore
+      formData.append("serviceFeeMode", serviceFeeMode);
+    }
 
     try {
       setLoading(true);
@@ -152,6 +200,15 @@ const EditCategoryScreen = () => {
         }
       );
       if (response) {
+        // For a booking-mode service category, persist the per-tier fare
+        // schedule against the category.
+        if (isServiceType && serviceFeeMode === "booking" && item.id) {
+          const fees: BookingFees = {};
+          for (const tier of BOOKING_TIERS) {
+            fees[tier] = Number(bookingFares[tier]) || 0;
+          }
+          await upsertCategoryBookingFees(String(item.id), fees);
+        }
         Alert.alert("success", "The category was updated successfully.");
         //@ts-ignore
         router.push("/category");
@@ -171,6 +228,9 @@ const EditCategoryScreen = () => {
   }));
   const selectedParentLabel = parentItems.find(
     (p) => p.id === parentCategory
+  )?.label;
+  const selectedFeeModeLabel = FEE_MODE_OPTIONS.find(
+    (o) => o.id === serviceFeeMode
   )?.label;
 
   return (
@@ -207,6 +267,43 @@ const EditCategoryScreen = () => {
             value={type ? String(type) : undefined}
             onPress={() => setTypeSheetVisible(true)}
           />
+
+          {/* Service fee mode — only for Service / Both categories */}
+          {isServiceType && (
+            <SelectRow
+              label="Service fee mode"
+              placeholder="Select fee mode"
+              value={selectedFeeModeLabel}
+              onPress={() => setFeeModeSheetVisible(true)}
+            />
+          )}
+
+          {/* Booking fare editor — one USD input per area tier */}
+          {showFareEditor && (
+            <View style={{ gap: spacing.md }}>
+              <View style={{ gap: spacing.xs }}>
+                <Text variant="bodyMed" weight="600">
+                  Booking fares (USD)
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  Set the merged call-out + booking fee per area tier. Blank
+                  counts as 0.
+                </Text>
+              </View>
+              {BOOKING_TIERS.map((tier) => (
+                <Input
+                  key={tier}
+                  label={BOOKING_TIER_LABELS[tier]}
+                  value={bookingFares[tier] ?? ""}
+                  onChangeText={(v) =>
+                    setBookingFares((prev) => ({ ...prev, [tier]: v }))
+                  }
+                  keyboardType="numeric"
+                  placeholder="0.00"
+                />
+              ))}
+            </View>
+          )}
 
           {/* Featured image */}
           <View style={{ gap: spacing.sm }}>
@@ -361,6 +458,20 @@ const EditCategoryScreen = () => {
         onSelect={(it) => {
           setType(it.id);
           setTypeSheetVisible(false);
+        }}
+      />
+
+      {/* Service-fee-mode picker */}
+      <PickerSheet
+        visible={feeModeSheetVisible}
+        onClose={() => setFeeModeSheetVisible(false)}
+        title="Service fee mode"
+        items={FEE_MODE_OPTIONS}
+        selectedId={serviceFeeMode}
+        searchable={false}
+        onSelect={(it) => {
+          setServiceFeeMode(it.id as "standard" | "booking");
+          setFeeModeSheetVisible(false);
         }}
       />
 

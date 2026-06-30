@@ -36,6 +36,12 @@ interface ServiceDetailCardProps {
    * uploaded the hero image and there's no additional gallery).
    */
   onCataloguePress?: () => void;
+  /**
+   * Opens the service pricing sheet (price + call-out / booking fare → escrow
+   * checkout). Gated behind the one-time contact fee: actionable only once
+   * `contactPaid` is true; locked/disabled before, matching the contact card.
+   */
+  onPricingPress?: () => void;
 }
 
 const ServiceDetailCard = ({
@@ -49,6 +55,7 @@ const ServiceDetailCard = ({
   onRevealPress,
   onCopyPress,
   onCataloguePress,
+  onPricingPress,
 }: ServiceDetailCardProps) => {
   const { colors, spacing, radius } = useTheme();
 
@@ -159,6 +166,41 @@ const ServiceDetailCard = ({
             />
           </AccentCard>
         )}
+
+        {/* Pricing services — View / PayNow. Pay the service price + call-out
+            (or a booking fare) through escrow. Gated behind the contact fee:
+            actionable only once contactPaid, otherwise shown locked. */}
+        {onPricingPress ? (
+          contactPaid ? (
+            <Button
+              title="Pricing services — View / Pay Now"
+              variant="secondary"
+              leftIcon="pricetag"
+              onPress={onPricingPress}
+              style={{ marginBottom: spacing.lg }}
+            />
+          ) : (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.sm,
+                paddingVertical: spacing.md,
+                paddingHorizontal: spacing.md,
+                borderRadius: radius.md,
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: colors.surfaceAlt,
+                marginBottom: spacing.lg,
+              }}
+            >
+              <Icon name="lock" size={16} color={colors.textMuted} />
+              <Text variant="bodySm" color="textMuted" style={{ flex: 1 }}>
+                Pricing & Pay Now — pay the contact fee first to unlock
+              </Text>
+            </View>
+          )
+        ) : null}
 
         {onCataloguePress ? (
           <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center' }}>

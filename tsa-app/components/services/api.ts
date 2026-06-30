@@ -121,6 +121,9 @@ export interface Category {
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';
+  // How a Service/Both category charges at checkout: "standard" (merchant sets
+  // price + per-zone call-out) or "booking" (admin sets a merged per-area fare).
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string | Category;
   icon?: string;
   color: string;
@@ -142,6 +145,7 @@ export interface CreateCategoryRequest {
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string;
   icon?: string;
   color?: string;
@@ -155,6 +159,7 @@ export interface UpdateCategoryRequest {
   title?: string;
   description?: string;
   type?: 'Product' | 'Service' | 'Both';
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string | null;
   icon?: string;
   color?: string;
@@ -1688,6 +1693,7 @@ class APIService {
     title: string;
     description?: string;
     type: 'Product' | 'Service' | 'Both';
+    serviceFeeMode?: 'standard' | 'booking';
     parentCategory?: string;
     icon?: string;
     color?: string;
@@ -1719,6 +1725,10 @@ class APIService {
     }
 
     formData.append('type', data.type);
+
+    if (data.serviceFeeMode) {
+      formData.append('serviceFeeMode', data.serviceFeeMode);
+    }
 
     if (data.parentCategory) {
       formData.append('parentCategory', data.parentCategory);
@@ -1843,6 +1853,9 @@ export interface Category {
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';
+  // How a Service/Both category charges at checkout: "standard" (merchant sets
+  // price + per-zone call-out) or "booking" (admin sets a merged per-area fare).
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string | Category;
   icon?: string;
   color: string;
@@ -1864,6 +1877,7 @@ export interface CreateCategoryRequest {
   title: string;
   description?: string;
   type: 'Product' | 'Service' | 'Both';
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string;
   icon?: string;
   color?: string;
@@ -1877,6 +1891,7 @@ export interface UpdateCategoryRequest {
   title?: string;
   description?: string;
   type?: 'Product' | 'Service' | 'Both';
+  serviceFeeMode?: 'standard' | 'booking';
   parentCategory?: string | null;
   icon?: string;
   color?: string;

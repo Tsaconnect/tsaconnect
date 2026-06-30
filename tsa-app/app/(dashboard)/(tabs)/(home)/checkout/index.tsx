@@ -39,6 +39,7 @@ import {
   Order,
 } from '@/services/orderApi';
 import { signAndBroadcast } from '@/services/transaction';
+import { decodeServiceNotes } from '@/components/services/serviceCart';
 import LocationPicker from '@/components/common/LocationPicker';
 import { getActiveWallet } from '@/services/wallet';
 import { useKycVerification } from '../../../../../hooks/useKycVerification';
@@ -234,11 +235,24 @@ const CheckoutScreen = () => {
     setCompletedOrders([]);
 
     try {
+      // Build the per-service declared-tier map (productId → tier) from the
+      // service line items in the cart. Plain product items carry no service
+      // note and are skipped. This threads the buyer's residential/booking
+      // declaration through to the backend (spec §6.5, "quote == charge").
+      const serviceTiers: Record<string, string> = {};
+      for (const item of items) {
+        const meta = decodeServiceNotes(item.notes);
+        if (meta) {
+          serviceTiers[getProductId(item)] = meta.tier;
+        }
+      }
+
       const createResult = await createOrders(
         selectedToken,
         shippingLocation.city,
         shippingLocation.state,
         shippingLocation.country,
+        Object.keys(serviceTiers).length > 0 ? serviceTiers : undefined,
       );
       if (!createResult.success || !createResult.data?.orders) {
         throw new Error(createResult.message || 'Failed to create orders');
@@ -430,6 +444,16 @@ const CheckoutScreen = () => {
     shippingLocation.state,
     shippingLocation.country,
   ]);
+
+  // Service line items charge a "Call-out fee", not "Shipping". Relabel the
+  // aggregated fee row accordingly (mixed carts read "Shipping & call-out").
+  const hasServiceItem = items.some((it) => decodeServiceNotes(it.notes) != null);
+  const hasProductItem = items.some((it) => decodeServiceNotes(it.notes) == null);
+  const feeRowLabel = hasServiceItem
+    ? hasProductItem
+      ? 'Shipping & call-out'
+      : 'Call-out fee'
+    : 'Shipping';
 
   const shippingTotal = shippingEstimateTotal ?? summary.shipping;
   const estimatedTotal =
@@ -1026,7 +1050,7 @@ const CheckoutScreen = () => {
 
             <SummaryRow label="Subtotal" value={fmtPrice(summary.subtotal)} />
             <SummaryRow
-              label="Shipping"
+              label={feeRowLabel}
               value={
                 shippingEstimateLoading
                   ? 'Calculating...'
