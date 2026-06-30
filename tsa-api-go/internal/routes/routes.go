@@ -688,6 +688,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminIT := api.Group("/it/admin")
 		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())
 		{
+			adminIT.GET("/rate", ith.AdminGetRate)
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.POST("/credit/:id", ith.AdminApproveCredit)
 			adminIT.POST("/settle/:id", ith.AdminSettle)
