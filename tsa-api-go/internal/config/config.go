@@ -42,10 +42,12 @@ var sonicPresets = map[string]chainPreset{
 		usdcAddress: "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
 		usdtAddress: "0x6047828dc181963ba44974801ff68e538da5eaf9",
 		mcgpAddress: "0x517600323e5E2938207fA2e2e915B9D80e5B2b21",
-		// Still the v1 (sell-only) escrow — mainnet v2 awaits the external
-		// re-audit. Domain version stays "1" to match it.
-		p2pEscrow:     "0x1Dc47600C713B216686dd20c349fDCd2575D3cE1",
-		eip712Version: "1",
+		// P2PEscrowV3 (two-sided) — deployed to Sonic mainnet 2026-06-30. The
+		// contract initializes its EIP-712 domain as version "2"
+		// (P2PEscrowV3.sol: __EIP712_init("TSAConnectP2PEscrow", "2")), so the
+		// voucher domain version stays "2" despite the V3 contract name.
+		p2pEscrow:     "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324",
+		eip712Version: "2",
 	},
 	"testnet": {
 		rpcURL:      "https://rpc.testnet.soniclabs.com",
@@ -390,8 +392,8 @@ func Load() *Config {
 		BSCChainID: getEnvInt64("BSC_CHAIN_ID", 97),
 
 		// Smart contract addresses
-		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"),
-		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0x1304d7e287deB233131A9F75aA5867af1D9591d1"),
+		ProductEscrowAddress:   getEnv("PRODUCT_ESCROW_ADDRESS", "0x42C3c60F40c48497D023166C6088e27872D63fcb"),
+		ServiceContractAddress: getEnv("SERVICE_CONTACT_ADDRESS", "0xAb3574501d41940cD860Ecbfc535BFa6D9e13Ff3"),
 	}
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
