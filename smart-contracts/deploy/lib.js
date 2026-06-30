@@ -1,7 +1,7 @@
 // smart-contracts/deploy/lib.js
 const fs = require("fs");
 const path = require("path");
-const { isAddress } = require("ethers");
+const { isAddress, getAddress } = require("ethers");
 const { chains } = require("./chains");
 
 const LEDGER_DIR = path.join(__dirname, "..", "deployments");
@@ -67,6 +67,15 @@ function reuseFromLedger(hre, key, chain) {
   return readLedger(hre.network.name)[key] || null;
 }
 
+// transferOwnershipIfNeeded hands a freshly-wired contract from the deployer
+// (which must own it to run the onlyOwner setup) to the configured owner. It is
+// a no-op when they are the same address. Returns true if a transfer happened.
+async function transferOwnershipIfNeeded(contract, deployerAddr, finalOwner) {
+  if (getAddress(finalOwner) === getAddress(deployerAddr)) return false;
+  await (await contract.transferOwnership(finalOwner)).wait();
+  return true;
+}
+
 module.exports = {
   resolveChain,
   validateAddresses,
@@ -74,4 +83,5 @@ module.exports = {
   readLedger,
   writeLedger,
   reuseFromLedger,
+  transferOwnershipIfNeeded,
 };

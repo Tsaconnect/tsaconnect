@@ -28,4 +28,15 @@ describe("deploy/p2p-escrow", () => {
     const esc = await hre.ethers.getContractAt("P2PEscrowV3", proxy);
     expect(await esc.systemWallet()).to.equal(chain.owner);
   });
+
+  it("wires as deployer then transfers ownership to a separate owner", async () => {
+    const [, second] = await hre.ethers.getSigners();
+    const owner2 = await second.getAddress();
+    const chain = await testChain({ owner: owner2 }); // owner != deployer (the mainnet case)
+    const { proxy } = await deploy(hre, { chain });
+    const esc = await hre.ethers.getContractAt("P2PEscrowV3", proxy);
+    expect(await esc.owner()).to.equal(owner2); // ownership handed over after wiring
+    expect(await esc.systemWallet()).to.equal(chain.systemWallet); // wiring succeeded (deployer owned it)
+    expect(await esc.acceptedTokens(chain.tokens.USDC)).to.equal(true);
+  });
 });
