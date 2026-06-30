@@ -11,11 +11,15 @@
 // deployer EOA owner signs. After writing, every row is read back via rateFor
 // and asserted equal — the same verify-then-trust the admin /fees/confirm uses.
 //
-// Run:
+// Run (address resolved from deployments ledger automatically):
+//   npx hardhat run scripts/seed-feemanager-rates.js --network sonicTestnet
+// Override address:
 //   FEE_MANAGER_ADDRESS=0x... npx hardhat run scripts/seed-feemanager-rates.js --network sonicTestnet
 //   CHECK_ONLY=1 FEE_MANAGER_ADDRESS=0x... npx hardhat run scripts/seed-feemanager-rates.js --network sonicTestnet
 
-const { ethers, network } = require("hardhat");
+const hre = require("hardhat");
+const { ethers, network } = hre;
+const { readLedger } = require("../deploy/lib");
 
 const TOKEN_ANY = "*";
 const flat = (usd) => BigInt(Math.round(usd * 1e6)); // human USD -> 1e6 micros
@@ -37,10 +41,9 @@ const CURRENT_RATES = [
 ];
 
 async function main() {
-  const fmAddr = process.env.FEE_MANAGER_ADDRESS;
-  if (!fmAddr || !ethers.isAddress(fmAddr)) {
-    throw new Error("Set FEE_MANAGER_ADDRESS to the deployed FeeManager proxy.");
-  }
+  const fmAddr = process.env.FEE_MANAGER_ADDRESS || readLedger(hre.network.name).FeeManager?.proxy;
+  if (!fmAddr) throw new Error("seed: FeeManager address not found (deploy it or set FEE_MANAGER_ADDRESS)");
+  if (!ethers.isAddress(fmAddr)) throw new Error(`seed: FeeManager address is invalid: ${fmAddr}`);
   const checkOnly = process.env.CHECK_ONLY === "1";
   const [signer] = await ethers.getSigners();
   const fm = await ethers.getContractAt("FeeManager", fmAddr);
