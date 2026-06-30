@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -35,15 +36,25 @@ func (h *ITHandler) userWallet(userID uuid.UUID) string {
 	return u.WalletAddress
 }
 
-// GET /api/it/rate
+// GET /api/it/rate — the live Naira buy/sell rates, derived from the admin-set
+// USD price and the current FX feed. Same JSON shape as before so the app is
+// unchanged. 404 when no price is set; 503 when FX pricing is unavailable.
 func (h *ITHandler) GetRate(c *gin.Context) {
-	rate, err := h.it.GetActiveRate(c.Request.Context())
+	buyKobo, sellKobo, fx, err := h.it.EffectiveKoboRates(c.Request.Context())
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusNotFound, "IT rate not set")
+		if errors.Is(err, services.ErrITNoRate) {
+			utils.ErrorResponse(c, http.StatusNotFound, "IT rate not set")
+			return
+		}
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer pricing is temporarily unavailable")
 		return
 	}
+	// `stale` is additive (existing keys unchanged). The display tolerates a stale
+	// rate, but the app should refuse to quote money against it — buy/sell on the
+	// server reject stale FX outright.
 	utils.SuccessResponse(c, http.StatusOK, "Rate", gin.H{
-		"buyRateKobo": rate.BuyRateKobo, "sellRateKobo": rate.SellRateKobo,
+		"buyRateKobo": buyKobo.String(), "sellRateKobo": sellKobo.String(),
+		"stale": fx.Stale,
 	})
 }
 
@@ -178,8 +189,33 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 // ──────────────────────────────── admin ───────────────────────────────────
 
 type itRateReq struct {
-	BuyRateKobo  string `json:"buyRateKobo"`
-	SellRateKobo string `json:"sellRateKobo"`
+	BuyPriceUsdMicros int64 `json:"buyPriceUsdMicros"`
+	SellDiscountBps   int   `json:"sellDiscountBps"`
+}
+
+// GET /api/it/admin/rate — the raw USD config plus a derived Naira preview for
+// the admin dashboard. 404 when no price is set yet.
+func (h *ITHandler) AdminGetRate(c *gin.Context) {
+	rate, err := h.it.GetActiveRate(c.Request.Context())
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "IT rate not set")
+		return
+	}
+	out := gin.H{
+		"buyPriceUsdMicros": rate.BuyPriceUsdMicros,
+		"sellDiscountBps":   rate.SellDiscountBps,
+	}
+	// Best-effort live preview; omit (not error) when the FX feed is down so the
+	// admin can still see and edit the configured USD price.
+	if buyKobo, sellKobo, fx, derr := h.it.EffectiveKoboRates(c.Request.Context()); derr == nil {
+		out["derived"] = gin.H{
+			"buyRateKobo":  buyKobo.String(),
+			"sellRateKobo": sellKobo.String(),
+			"ngnPerUsd":    fx.NgnPerUsd,
+			"fxStale":      fx.Stale,
+		}
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Rate", out)
 }
 
 // POST /api/it/admin/rate
@@ -194,7 +230,7 @@ func (h *ITHandler) AdminSetRate(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	rate, err := h.it.SetRate(c.Request.Context(), admin.ID, req.BuyRateKobo, req.SellRateKobo)
+	rate, err := h.it.SetRate(c.Request.Context(), admin.ID, req.BuyPriceUsdMicros, req.SellDiscountBps)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return

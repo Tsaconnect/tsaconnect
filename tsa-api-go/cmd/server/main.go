@@ -117,6 +117,15 @@ func main() {
 
 	verifyEscrowAdmin(escrowService)
 
+	// Exchange-rate service (OER + Bybit P2P hybrid). Constructed early because IT
+	// pricing (below) converts MCGP's USD price to Naira against this feed.
+	p2pService := services.NewP2PService(
+		cfg.OpenExchangeRatesAppID,
+		cfg.SupportedCurrencies,
+		cfg.BybitP2PCurrencies,
+		cfg.BybitProbeAmounts,
+	)
+
 	// MCGP Swap Contract B (entitlement-ledger swap) — premium buy/spend/sell +
 	// legacy redeem. Dormant unless MCGP_SWAP_B_ADDRESS is set; the handler is
 	// nil in that case so its /api/mcgp routes are not registered.
@@ -139,7 +148,7 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
-				itService := services.NewITService(config.DB, mcgpSwapService)
+				itService := services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
@@ -167,14 +176,6 @@ func main() {
 
 	// Initialize OTC service
 	otcService := services.NewOTCService(sonicClient, cfg)
-
-	// Initialize exchange rate service (OER + Bybit P2P hybrid)
-	p2pService := services.NewP2PService(
-		cfg.OpenExchangeRatesAppID,
-		cfg.SupportedCurrencies,
-		cfg.BybitP2PCurrencies,
-		cfg.BybitProbeAmounts,
-	)
 
 	// Initialize event bus and WebSocket hub
 	eventBus := events.NewBus()

@@ -66,16 +66,21 @@ func (i *ITIntent) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-// ITRate is the admin-set MCGP↔NGN rate for IT (singleton). Rates are kobo per
-// 1 MCGP; sell < buy = TSA spread. Only the active row is used.
+// ITRate is the admin-set MCGP price for IT (singleton). MCGP is priced in USD;
+// the Naira buy/sell rates are derived at request time from the live NGN/USD FX
+// feed (same as other P2P assets). Only the active row is used.
+//
+//   - BuyPriceUsdMicros: USD per 1 MCGP in 6dp micro-dollars ($0.02 = 20000).
+//   - SellDiscountBps:   discount applied to the sell leg vs buy; 5% = 500. The
+//     company margin = the spread between buy and the discounted sell price.
 type ITRate struct {
-	ID          uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	BuyRateKobo string     `gorm:"type:numeric(38,0);not null" json:"buyRateKobo"`
-	SellRateKobo string    `gorm:"type:numeric(38,0);not null" json:"sellRateKobo"`
-	Active      bool       `gorm:"not null;default:true;index" json:"active"`
-	UpdatedBy   *uuid.UUID `gorm:"type:uuid" json:"updatedBy,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	ID                uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	BuyPriceUsdMicros int64      `gorm:"not null" json:"buyPriceUsdMicros"`
+	SellDiscountBps   int        `gorm:"not null;default:0" json:"sellDiscountBps"`
+	Active            bool       `gorm:"not null;default:true;index" json:"active"`
+	UpdatedBy         *uuid.UUID `gorm:"type:uuid" json:"updatedBy,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
 func (r *ITRate) BeforeCreate(tx *gorm.DB) error {

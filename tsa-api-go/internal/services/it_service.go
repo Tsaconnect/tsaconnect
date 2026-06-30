@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -22,9 +23,30 @@ var (
 	ErrITNoPM          = errors.New("Instant Transfer is unavailable: no payment account configured")
 	ErrITBadState      = errors.New("invalid IT intent state")
 	ErrITInsufficient  = errors.New("insufficient credited premium")
+	ErrITFxUnavailable = errors.New("Instant Transfer pricing is temporarily unavailable")
 )
 
+const bpsDenom = 10000
+
+// maxBuyPriceUsdMicros caps the admin-set MCGP price at $1,000,000 per MCGP — an
+// absurd ceiling that exists only to keep the sell-discount arithmetic
+// (price * bps) well clear of int64 overflow.
+const maxBuyPriceUsdMicros = 1_000_000 * 1_000_000
+
 var oneE18 = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+// FxProvider supplies the NGN/USD rate IT uses to convert MCGP's USD price into
+// Naira. It returns the same value other P2P assets quote against, whether that
+// value is being served stale, and an error when the feed is unavailable.
+type FxProvider interface {
+	NgnPerUsd(ctx context.Context) (ngnPerUsd float64, stale bool, err error)
+}
+
+// FxMeta describes the FX rate used for a conversion, surfaced to admins.
+type FxMeta struct {
+	NgnPerUsd float64
+	Stale     bool
+}
 
 // ITService orchestrates Instant Transfer: rate-locked intents + the operator
 // credit/debit/settle/reverse on Contract B. The NGN legs (Nomba pay-in match
@@ -34,11 +56,12 @@ var oneE18 = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 type ITService struct {
 	db          *gorm.DB
 	swap        *MCGPSwapService
-	companyPMID string // PaymentMerchant UUID for the IT pay-into account (optional)
+	fx          FxProvider // NGN/USD source for USD→Naira conversion
+	companyPMID string     // PaymentMerchant UUID for the IT pay-into account (optional)
 }
 
-func NewITService(db *gorm.DB, swap *MCGPSwapService) *ITService {
-	return &ITService{db: db, swap: swap}
+func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
+	return &ITService{db: db, swap: swap, fx: fx}
 }
 
 // SetCompanyPMID pins which PaymentMerchant IT buyers pay into (from IT_PM_ID).
@@ -87,20 +110,21 @@ func (s *ITService) GetActiveRate(ctx context.Context) (*models.ITRate, error) {
 	return &r, err
 }
 
-// SetRate deactivates prior rows and inserts a new active rate (kobo per MCGP).
-func (s *ITService) SetRate(ctx context.Context, adminID uuid.UUID, buyKobo, sellKobo string) (*models.ITRate, error) {
-	b, ok := new(big.Int).SetString(strings.TrimSpace(buyKobo), 10)
-	if !ok || b.Sign() <= 0 {
-		return nil, fmt.Errorf("invalid buyRateKobo")
+// SetRate deactivates prior rows and inserts a new active rate. The price is the
+// MCGP buy price in USD micro-dollars; sellDiscountBps is the sell-leg discount.
+func (s *ITService) SetRate(ctx context.Context, adminID uuid.UUID, buyPriceUsdMicros int64, sellDiscountBps int) (*models.ITRate, error) {
+	if buyPriceUsdMicros <= 0 || buyPriceUsdMicros > maxBuyPriceUsdMicros {
+		return nil, fmt.Errorf("invalid buyPriceUsdMicros")
 	}
-	sell, ok := new(big.Int).SetString(strings.TrimSpace(sellKobo), 10)
-	if !ok || sell.Sign() <= 0 {
-		return nil, fmt.Errorf("invalid sellRateKobo")
+	if sellDiscountBps < 0 || sellDiscountBps >= bpsDenom {
+		return nil, fmt.Errorf("invalid sellDiscountBps")
 	}
-	if sell.Cmp(b) > 0 {
-		return nil, fmt.Errorf("sell rate must not exceed buy rate")
+	rate := &models.ITRate{
+		BuyPriceUsdMicros: buyPriceUsdMicros,
+		SellDiscountBps:   sellDiscountBps,
+		Active:            true,
+		UpdatedBy:         &adminID,
 	}
-	rate := &models.ITRate{BuyRateKobo: b.String(), SellRateKobo: sell.String(), Active: true, UpdatedBy: &adminID}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := tx.Model(&models.ITRate{}).Where("active = ?", true).Update("active", false).Error; e != nil {
 			return e
@@ -108,6 +132,45 @@ func (s *ITService) SetRate(ctx context.Context, adminID uuid.UUID, buyKobo, sel
 		return tx.Create(rate).Error
 	})
 	return rate, err
+}
+
+// EffectiveKoboRates resolves the live Naira buy/sell rates (kobo per 1 MCGP)
+// from the admin-set USD price and the current NGN/USD FX feed. Buy rounds up
+// and sell rounds down (vault-favorable, matching the on-chain math). Returns
+// ErrITNoRate when no price is set and ErrITFxUnavailable when the FX feed is
+// down (stale-but-served data is used and flagged, mirroring other P2P assets).
+func (s *ITService) EffectiveKoboRates(ctx context.Context) (buyKobo, sellKobo *big.Int, fx FxMeta, err error) {
+	rate, err := s.GetActiveRate(ctx)
+	if err != nil {
+		return nil, nil, FxMeta{}, err
+	}
+	if s.fx == nil {
+		return nil, nil, FxMeta{}, ErrITFxUnavailable
+	}
+	ngnPerUsd, stale, ferr := s.fx.NgnPerUsd(ctx)
+	if ferr != nil || ngnPerUsd <= 0 {
+		return nil, nil, FxMeta{}, ErrITFxUnavailable
+	}
+	sellPriceUsdMicros := rate.BuyPriceUsdMicros * int64(bpsDenom-rate.SellDiscountBps) / int64(bpsDenom)
+	buyKobo = usdMicrosToKobo(rate.BuyPriceUsdMicros, ngnPerUsd, true)
+	sellKobo = usdMicrosToKobo(sellPriceUsdMicros, ngnPerUsd, false)
+	return buyKobo, sellKobo, FxMeta{NgnPerUsd: ngnPerUsd, Stale: stale}, nil
+}
+
+// usdMicrosToKobo converts a USD price (micro-dollars per MCGP) to kobo per MCGP
+// at the given NGN/USD rate: kobo = usdMicros/1e6 * ngnPerUsd * 100. roundUp
+// favors the vault on the buy leg; the sell leg rounds down.
+func usdMicrosToKobo(usdMicros int64, ngnPerUsd float64, roundUp bool) *big.Int {
+	kobo := float64(usdMicros) / 1e6 * ngnPerUsd * 100
+	if roundUp {
+		kobo = math.Ceil(kobo)
+	} else {
+		kobo = math.Floor(kobo)
+	}
+	if kobo < 0 {
+		kobo = 0
+	}
+	return new(big.Int).SetInt64(int64(kobo))
 }
 
 // mcgpForNgn = ngnKobo * 1e18 / buyRateKobo (round DOWN — vault never over-issues).
@@ -134,11 +197,16 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	if !ok || ngn.Sign() <= 0 {
 		return nil, fmt.Errorf("invalid ngnKobo")
 	}
-	rate, err := s.GetActiveRate(ctx)
+	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	buyRate, _ := new(big.Int).SetString(rate.BuyRateKobo, 10)
+	// Refuse to lock a real money quote against a stale FX rate — the admin
+	// preview may show stale data, but the transactional paths must not (mirrors
+	// the P2P trade service's requireFreshRate).
+	if fx.Stale {
+		return nil, ErrITFxUnavailable
+	}
 	mcgp := mcgpForNgn(ngn, buyRate)
 	if mcgp.Sign() <= 0 {
 		return nil, fmt.Errorf("amount too small")
@@ -258,11 +326,13 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	if credited.Cmp(amount) < 0 {
 		return nil, ErrITInsufficient
 	}
-	rate, err := s.GetActiveRate(ctx)
+	_, sellRate, fx, err := s.EffectiveKoboRates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	sellRate, _ := new(big.Int).SetString(rate.SellRateKobo, 10)
+	if fx.Stale {
+		return nil, ErrITFxUnavailable
+	}
 	ngn := ngnForMcgp(amount, sellRate)
 	if ngn.Sign() <= 0 {
 		return nil, fmt.Errorf("amount too small")

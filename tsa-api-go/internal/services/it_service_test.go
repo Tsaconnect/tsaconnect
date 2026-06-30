@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -11,6 +12,16 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+// stubFx is a fixed NGN/USD source for tests; fields are set directly on the
+// service (s.fx) to simulate stale or unavailable feeds.
+type stubFx struct {
+	ngn   float64
+	stale bool
+	err   error
+}
+
+func (f stubFx) NgnPerUsd(context.Context) (float64, bool, error) { return f.ngn, f.stale, f.err }
 
 func newITTestService(t *testing.T) *ITService {
 	t.Helper()
@@ -23,7 +34,7 @@ func newITTestService(t *testing.T) *ITService {
 	}
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
 	swap.SetOperatorSigner(&fakeReleaseSigner{addr: "0x000000000000000000000000000000000000A11CE", hash: "0xdead"})
-	return NewITService(db, swap)
+	return NewITService(db, swap, stubFx{ngn: 1500}) // FX = ₦1500/$
 }
 
 func TestRateMath_RoundsDown(t *testing.T) {
@@ -52,13 +63,19 @@ func TestSetRate_Validation(t *testing.T) {
 	ctx := context.Background()
 	admin := uuid.New()
 
-	if _, err := s.SetRate(ctx, admin, "0", "100"); err == nil {
-		t.Fatal("expected invalid buy rate")
+	if _, err := s.SetRate(ctx, admin, 0, 500); err == nil {
+		t.Fatal("expected invalid buy price")
 	}
-	if _, err := s.SetRate(ctx, admin, "100", "200"); err == nil {
-		t.Fatal("expected sell>buy rejection")
+	if _, err := s.SetRate(ctx, admin, 20000, 10000); err == nil {
+		t.Fatal("expected discount >= 100% rejection")
 	}
-	r, err := s.SetRate(ctx, admin, "20000", "18000")
+	if _, err := s.SetRate(ctx, admin, 20000, -1); err == nil {
+		t.Fatal("expected negative discount rejection")
+	}
+	if _, err := s.SetRate(ctx, admin, maxBuyPriceUsdMicros+1, 0); err == nil {
+		t.Fatal("expected over-max buy price rejection")
+	}
+	r, err := s.SetRate(ctx, admin, 20000, 500) // $0.02, 5% discount
 	if err != nil {
 		t.Fatalf("set rate: %v", err)
 	}
@@ -66,15 +83,15 @@ func TestSetRate_Validation(t *testing.T) {
 		t.Fatal("rate should be active")
 	}
 	// Setting again deactivates the old one.
-	if _, err := s.SetRate(ctx, admin, "21000", "18500"); err != nil {
+	if _, err := s.SetRate(ctx, admin, 21000, 300); err != nil {
 		t.Fatalf("set rate 2: %v", err)
 	}
 	active, err := s.GetActiveRate(ctx)
 	if err != nil {
 		t.Fatalf("get active: %v", err)
 	}
-	if active.BuyRateKobo != "21000" {
-		t.Fatalf("active buy = %s want 21000", active.BuyRateKobo)
+	if active.BuyPriceUsdMicros != 21000 || active.SellDiscountBps != 300 {
+		t.Fatalf("active = %d/%d want 21000/300", active.BuyPriceUsdMicros, active.SellDiscountBps)
 	}
 	var count int64
 	s.db.Model(&models.ITRate{}).Where("active = ?", true).Count(&count)
@@ -83,10 +100,55 @@ func TestSetRate_Validation(t *testing.T) {
 	}
 }
 
-func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
-	s := newITTestService(t)
+func TestEffectiveKoboRates(t *testing.T) {
+	s := newITTestService(t) // FX = ₦1500/$
 	ctx := context.Background()
-	if _, err := s.SetRate(ctx, uuid.New(), "100", "90"); err != nil { // 100 kobo (₦1) per MCGP
+
+	// No rate yet -> ErrITNoRate.
+	if _, _, _, err := s.EffectiveKoboRates(ctx); !errors.Is(err, ErrITNoRate) {
+		t.Fatalf("expected ErrITNoRate, got %v", err)
+	}
+
+	// $0.02 buy, 5% discount: buy = 0.02*1500*100 = 3000 kobo; sell = 0.019*1500*100 = 2850.
+	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil {
+		t.Fatalf("set rate: %v", err)
+	}
+	buy, sell, fx, err := s.EffectiveKoboRates(ctx)
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	if buy.String() != "3000" || sell.String() != "2850" {
+		t.Fatalf("got buy=%s sell=%s want 3000/2850", buy, sell)
+	}
+	if fx.NgnPerUsd != 1500 || fx.Stale {
+		t.Fatalf("fx meta = %+v", fx)
+	}
+
+	// Zero discount: sell == buy.
+	if _, err := s.SetRate(ctx, uuid.New(), 20000, 0); err != nil {
+		t.Fatalf("set rate: %v", err)
+	}
+	if _, sell0, _, _ := s.EffectiveKoboRates(ctx); sell0.String() != "3000" {
+		t.Fatalf("zero-discount sell = %s want 3000", sell0)
+	}
+
+	// Stale FX is served but flagged.
+	s.fx = stubFx{ngn: 1500, stale: true}
+	if _, _, fx2, err := s.EffectiveKoboRates(ctx); err != nil || !fx2.Stale {
+		t.Fatalf("stale should serve+flag, got err=%v fx=%+v", err, fx2)
+	}
+
+	// Unavailable FX blocks pricing.
+	s.fx = stubFx{err: errors.New("feed down")}
+	if _, _, _, err := s.EffectiveKoboRates(ctx); !errors.Is(err, ErrITFxUnavailable) {
+		t.Fatalf("expected ErrITFxUnavailable, got %v", err)
+	}
+}
+
+func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
+	s := newITTestService(t) // FX = ₦1500/$
+	ctx := context.Background()
+	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil { // $0.02 -> ₦30/MCGP (3000 kobo)
 		t.Fatalf("set rate: %v", err)
 	}
 	seedCompanyPM(t, s) // IT requires a configured pay-into PM
@@ -95,18 +157,38 @@ func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create buy: %v", err)
 	}
-	want := new(big.Int).Mul(big.NewInt(50), oneE18).String()
+	// ₦50 (5000 kobo) at 3000 kobo/MCGP, rounded down to wei.
+	want := new(big.Int).Div(new(big.Int).Mul(big.NewInt(5000), oneE18), big.NewInt(3000)).String()
 	if intent.McgpAmount != want {
 		t.Fatalf("mcgp = %s want %s", intent.McgpAmount, want)
 	}
-	if intent.RateKobo != "100" {
-		t.Fatalf("rate not locked: %s", intent.RateKobo)
+	if intent.RateKobo != "3000" {
+		t.Fatalf("rate not locked: %s want 3000", intent.RateKobo)
 	}
 	if intent.Status != models.ITStatusPendingPayment {
 		t.Fatalf("status = %s", intent.Status)
 	}
 	if len(intent.PaymentRef) == 0 {
 		t.Fatal("paymentRef missing")
+	}
+}
+
+func TestCreateBuyIntent_BlocksOnStaleFx(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil {
+		t.Fatalf("set rate: %v", err)
+	}
+	seedCompanyPM(t, s)
+	// Stale FX must not lock a real buy quote — the money path refuses it.
+	s.fx = stubFx{ngn: 1500, stale: true}
+	if _, err := s.CreateBuyIntent(ctx, uuid.New(), "0xWALLET", "5000", nil); err != ErrITFxUnavailable {
+		t.Fatalf("expected ErrITFxUnavailable on stale FX, got %v", err)
+	}
+	var n int64
+	s.db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("no intent should be created on stale FX, got %d", n)
 	}
 }
 
@@ -167,7 +249,7 @@ func TestCompanyPM_AlwaysConfiguredNoFallback(t *testing.T) {
 func TestCreateBuyIntent_NoPM(t *testing.T) {
 	s := newITTestService(t)
 	ctx := context.Background()
-	if _, err := s.SetRate(ctx, uuid.New(), "100", "90"); err != nil {
+	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil {
 		t.Fatalf("set rate: %v", err)
 	}
 	// Rate set but no IT_PM_ID configured -> buy fails fast (no orphan intent).
