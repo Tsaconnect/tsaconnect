@@ -223,6 +223,101 @@ func TestResolveOverrideBeatsGlobal(t *testing.T) {
 	}
 }
 
+// TestListViewsGroupsRowsIntoLogicalIntents: the flat default + override rows for
+// a (feature, token) collapse into one IntentView whose IntentID/State come from
+// the global row and whose per-chain overrides are keyed by chainId.
+func TestListViewsGroupsRowsIntoLogicalIntents(t *testing.T) {
+	db := setupIntentTestDB(t)
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC, bscC), nil)
+
+	wIntent, err := svc.Create(models.FeatureWithdrawal, "*",
+		FeeManagerRate{BPS: 50, Active: true},
+		map[int64]FeeManagerRate{bscC: {BPS: 60, Active: true}})
+	if err != nil {
+		t.Fatalf("create withdrawal: %v", err)
+	}
+	if _, err := svc.Create(models.FeatureP2P, "*", FeeManagerRate{BPS: 100, Active: true}, nil); err != nil {
+		t.Fatalf("create p2p: %v", err)
+	}
+
+	views, err := svc.ListViews()
+	if err != nil {
+		t.Fatalf("ListViews: %v", err)
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected 2 logical intents, got %d", len(views))
+	}
+
+	byFeature := map[string]IntentView{}
+	for _, v := range views {
+		byFeature[v.Feature] = v
+	}
+
+	w := byFeature[models.FeatureWithdrawal]
+	if w.IntentID != wIntent.ID.String() {
+		t.Fatalf("withdrawal intentId = %s, want the global row id %s", w.IntentID, wIntent.ID)
+	}
+	if w.State != string(models.FeeRateIntentPending) {
+		t.Fatalf("withdrawal state = %s, want pending", w.State)
+	}
+	if w.Default == nil || w.Default.BPS != 50 {
+		t.Fatalf("withdrawal default = %+v, want bps 50", w.Default)
+	}
+	ov, ok := w.Overrides[strconv.FormatInt(bscC, 10)]
+	if !ok || ov.BPS != 60 {
+		t.Fatalf("withdrawal bsc override = %+v ok=%v, want bps 60", ov, ok)
+	}
+
+	p := byFeature[models.FeatureP2P]
+	if p.Default == nil || p.Default.BPS != 100 || len(p.Overrides) != 0 {
+		t.Fatalf("p2p view = %+v, want default bps 100 and no overrides", p)
+	}
+
+	// State filter: nothing is applied yet.
+	if applied, _ := svc.ListViews(models.FeeRateIntentApplied); len(applied) != 0 {
+		t.Fatalf("expected 0 applied intents, got %d", len(applied))
+	}
+	if pending, _ := svc.ListViews(models.FeeRateIntentPending); len(pending) != 2 {
+		t.Fatalf("expected 2 pending intents, got %d", len(pending))
+	}
+}
+
+// TestListViewsMultiStateFilterIsOR: ListViews(pending, partially_applied) must
+// return intents in EITHER state (the OR filter the dashboard's pending-changes
+// panel depends on), while a single-state filter narrows to just that state.
+func TestListViewsMultiStateFilterIsOR(t *testing.T) {
+	db := setupIntentTestDB(t)
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC), nil)
+
+	if _, err := svc.Create(models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true}, nil); err != nil {
+		t.Fatalf("create withdrawal: %v", err)
+	}
+	p2p, err := svc.Create(models.FeatureP2P, "*", FeeManagerRate{BPS: 100, Active: true}, nil)
+	if err != nil {
+		t.Fatalf("create p2p: %v", err)
+	}
+	// Advance the p2p intent's summary (global) row to partially_applied.
+	if err := svc.UpdateState(p2p.ID, models.FeeRateIntentPartiallyApplied); err != nil {
+		t.Fatalf("update state: %v", err)
+	}
+
+	both, err := svc.ListViews(models.FeeRateIntentPending, models.FeeRateIntentPartiallyApplied)
+	if err != nil {
+		t.Fatalf("ListViews OR: %v", err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("OR filter returned %d, want 2 (one pending + one partially_applied)", len(both))
+	}
+
+	pending, err := svc.ListViews(models.FeeRateIntentPending)
+	if err != nil {
+		t.Fatalf("ListViews pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Feature != models.FeatureWithdrawal {
+		t.Fatalf("single-state filter = %+v, want only the pending withdrawal", pending)
+	}
+}
+
 // TestPlanMultiChainOverride: a global default + a BSC override yields a per-chain
 // plan that proposes 50 on Sonic and 60 on BSC.
 func TestPlanMultiChainOverride(t *testing.T) {

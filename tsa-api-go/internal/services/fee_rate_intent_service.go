@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -147,6 +149,75 @@ func (s *FeeRateIntentService) List() ([]models.FeeRateIntent, error) {
 		return nil, err
 	}
 	return intents, nil
+}
+
+// IntentView is one logical intent (per feature/token) for the admin dashboard:
+// the flat rows grouped so the consumer never regroups them. IntentID + State +
+// Default come from the GLOBAL (chain=NULL) row — the same id Plan/Confirm use —
+// and non-NULL rows become per-chain Overrides. Rates use the 1e6-flat-unit
+// FeeManagerRate shape (identical to Plan/Confirm), keyed by chainId string.
+type IntentView struct {
+	IntentID  string                    `json:"intentId"`
+	Feature   string                    `json:"feature"`
+	Token     string                    `json:"token"`
+	State     string                    `json:"state"`
+	Default   *FeeManagerRate           `json:"default"`
+	Overrides map[string]FeeManagerRate `json:"overrides"`
+	CreatedAt time.Time                 `json:"createdAt"`
+	UpdatedAt time.Time                 `json:"updatedAt"`
+}
+
+// ListViews groups the flat intent rows into per-(feature, token) logical intents
+// for the dashboard's pending-changes view. The global (chain=NULL) row supplies
+// IntentID/State/Default; non-NULL rows become Overrides. When `states` is
+// non-empty, only intents whose summary state is in the set are returned. Order
+// follows List() (most-recently-touched first).
+func (s *FeeRateIntentService) ListViews(states ...models.FeeRateIntentState) ([]IntentView, error) {
+	rows, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	type key struct{ feature, token string }
+	order := make([]key, 0)
+	groups := map[key][]models.FeeRateIntent{}
+	for _, r := range rows {
+		k := key{r.Feature, r.Token}
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], r)
+	}
+	want := map[models.FeeRateIntentState]bool{}
+	for _, st := range states {
+		want[st] = true
+	}
+	views := make([]IntentView, 0, len(order))
+	for _, k := range order {
+		v := IntentView{Feature: k.feature, Token: k.token, Overrides: map[string]FeeManagerRate{}}
+		globalFound := false
+		for _, r := range groups[k] {
+			if r.ChainID == nil {
+				rate := rateFromIntent(r)
+				v.IntentID, v.State, v.Default = r.ID.String(), string(r.State), &rate
+				v.CreatedAt, v.UpdatedAt = r.CreatedAt, r.UpdatedAt
+				globalFound = true
+			} else {
+				v.Overrides[strconv.FormatInt(*r.ChainID, 10)] = rateFromIntent(r)
+			}
+		}
+		if !globalFound {
+			// Only per-chain overrides exist (no global row) — still surface the
+			// intent using its first row so it stays visible/actionable.
+			r := groups[k][0]
+			v.IntentID, v.State = r.ID.String(), string(r.State)
+			v.CreatedAt, v.UpdatedAt = r.CreatedAt, r.UpdatedAt
+		}
+		if len(want) > 0 && !want[models.FeeRateIntentState(v.State)] {
+			continue
+		}
+		views = append(views, v)
+	}
+	return views, nil
 }
 
 // UpdateState advances an intent ROW's lifecycle state.

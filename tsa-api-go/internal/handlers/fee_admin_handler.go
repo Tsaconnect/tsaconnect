@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
@@ -110,6 +111,30 @@ func (h *FeeAdminHandler) CreateIntent(c *gin.Context) {
 		"intentId": intent.ID.String(),
 		"status":   string(intent.State),
 	})
+}
+
+// ListIntents handles GET /api/admin/fees/intents — the grouped desired-state
+// intents (per feature/token) driving the dashboard's pending-changes view.
+// Optional ?state=pending,partially_applied filters by summary state.
+func (h *FeeAdminHandler) ListIntents(c *gin.Context) {
+	if h.intents == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
+		return
+	}
+	var states []models.FeeRateIntentState
+	if raw := strings.TrimSpace(c.Query("state")); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				states = append(states, models.FeeRateIntentState(s))
+			}
+		}
+	}
+	views, err := h.intents.ListViews(states...)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list fee rate intents")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Fee rate intents", gin.H{"intents": views})
 }
 
 // planRequest is POST /api/admin/fees/plan.
