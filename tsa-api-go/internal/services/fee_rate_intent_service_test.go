@@ -318,6 +318,68 @@ func TestListViewsMultiStateFilterIsOR(t *testing.T) {
 	}
 }
 
+// TestPlanAllBundlesPendingIntoOneSetRates: two pending intents collapse into a
+// single setRates tx (one per chain) carrying both features + both intent ids;
+// when the on-chain rates already match, PlanAll returns no chains.
+func TestPlanAllBundlesPendingIntoOneSetRates(t *testing.T) {
+	db := setupIntentTestDB(t)
+	reader := newStubReader() // unset features read back as 0/inactive on-chain
+	svc := NewFeeRateIntentService(db, cfgWithChains(sonicC), reader)
+
+	w, err := svc.Create(models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true}, nil)
+	if err != nil {
+		t.Fatalf("create withdrawal: %v", err)
+	}
+	p, err := svc.Create(models.FeatureP2P, "*", FeeManagerRate{BPS: 100, Active: true}, nil)
+	if err != nil {
+		t.Fatalf("create p2p: %v", err)
+	}
+
+	plan, err := svc.PlanAll(context.Background())
+	if err != nil {
+		t.Fatalf("PlanAll: %v", err)
+	}
+	if len(plan.Chains) != 1 {
+		t.Fatalf("expected 1 chain, got %d", len(plan.Chains))
+	}
+	ch := plan.Chains[0]
+	if ch.ChainID != sonicC || ch.Function != SetRatesFunctionSig {
+		t.Fatalf("chain=%d fn=%s", ch.ChainID, ch.Function)
+	}
+	if len(ch.IntentIDs) != 2 {
+		t.Fatalf("expected 2 intentIds, got %v", ch.IntentIDs)
+	}
+	ids := map[string]bool{ch.IntentIDs[0]: true, ch.IntentIDs[1]: true}
+	if !ids[w.ID.String()] || !ids[p.ID.String()] {
+		t.Fatalf("intentIds %v missing %s / %s", ch.IntentIDs, w.ID, p.ID)
+	}
+
+	// The single calldata decodes back to a setRates over both features.
+	method := parsedFeeManagerABI.Methods["setRates"]
+	raw := common.FromHex(ch.Data)
+	if len(raw) < 4 || common.Bytes2Hex(raw[:4]) != common.Bytes2Hex(method.ID) {
+		t.Fatalf("data does not start with the setRates selector")
+	}
+	args, uerr := method.Inputs.Unpack(raw[4:])
+	if uerr != nil {
+		t.Fatalf("unpack setRates: %v", uerr)
+	}
+	if features, ok := args[0].([]string); !ok || len(features) != 2 {
+		t.Fatalf("decoded features = %v (want 2)", args[0])
+	}
+
+	// When on-chain already matches every intent, PlanAll is empty (idempotent).
+	reader.set(sonicC, models.FeatureWithdrawal, "*", FeeManagerRate{BPS: 50, Active: true})
+	reader.set(sonicC, models.FeatureP2P, "*", FeeManagerRate{BPS: 100, Active: true})
+	empty, err := svc.PlanAll(context.Background())
+	if err != nil {
+		t.Fatalf("PlanAll (matched): %v", err)
+	}
+	if len(empty.Chains) != 0 {
+		t.Fatalf("expected no chains when on-chain matches, got %d", len(empty.Chains))
+	}
+}
+
 // TestPlanMultiChainOverride: a global default + a BSC override yields a per-chain
 // plan that proposes 50 on Sonic and 60 on BSC.
 func TestPlanMultiChainOverride(t *testing.T) {

@@ -120,6 +120,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminFees.GET("/intents", fah.ListIntents)
 			adminFees.POST("/intent", fah.CreateIntent)
 			adminFees.POST("/plan", fah.Plan)
+			adminFees.POST("/plan-all", fah.PlanAll)
 			adminFees.POST("/confirm", fah.Confirm)
 			adminFees.DELETE("/intent/:id", fah.CancelIntent)
 		}

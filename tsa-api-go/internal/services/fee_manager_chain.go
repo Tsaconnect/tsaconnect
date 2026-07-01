@@ -33,6 +33,10 @@ const feeManagerABIJSON = `[
    "inputs":[{"name":"feature","type":"string"},{"name":"token","type":"string"},
      {"name":"r","type":"tuple","components":[
        {"name":"bps","type":"uint16"},{"name":"flatUSD","type":"uint64"},{"name":"mcgpExempt","type":"bool"},{"name":"active","type":"bool"}]}]},
+  {"type":"function","name":"setRates","stateMutability":"nonpayable",
+   "inputs":[{"name":"features","type":"string[]"},{"name":"tokens","type":"string[]"},
+     {"name":"rates","type":"tuple[]","components":[
+       {"name":"bps","type":"uint16"},{"name":"flatUSD","type":"uint64"},{"name":"mcgpExempt","type":"bool"},{"name":"active","type":"bool"}]}]},
   {"type":"event","name":"RateSet","anonymous":false,
    "inputs":[{"name":"key","type":"bytes32","indexed":true},{"name":"feature","type":"string","indexed":false},{"name":"token","type":"string","indexed":false},
      {"name":"bps","type":"uint16","indexed":false},{"name":"flatUSD","type":"uint64","indexed":false},{"name":"mcgpExempt","type":"bool","indexed":false},{"name":"active","type":"bool","indexed":false}]}
@@ -102,6 +106,28 @@ func PackSetRate(feature, token string, r FeeManagerRate) ([]byte, error) {
 // SetRateFunctionSig is the human-readable function signature surfaced in the
 // plan response (advisory for the signer UI; `data` is load-bearing).
 const SetRateFunctionSig = "setRate(string,string,(uint16,uint64,bool,bool))"
+
+// PackSetRates ABI-encodes the batch setRates(features[], tokens[], rates[]) —
+// the single tx that applies every pending fee change in one signature (the
+// "sign once" path). The three slices are parallel and MUST be equal length.
+func PackSetRates(features, tokens []string, rates []FeeManagerRate) ([]byte, error) {
+	if len(features) != len(tokens) || len(features) != len(rates) {
+		return nil, fmt.Errorf("pack setRates: mismatched lengths (features=%d tokens=%d rates=%d)", len(features), len(tokens), len(rates))
+	}
+	tuples := make([]feeManagerRateTuple, len(rates))
+	for i, r := range rates {
+		tuples[i] = feeManagerRateTuple{Bps: r.BPS, FlatUSD: r.FlatUSD, McgpExempt: r.MCGPExempt, Active: r.Active}
+	}
+	data, err := parsedFeeManagerABI.Pack("setRates", features, tokens, tuples)
+	if err != nil {
+		return nil, fmt.Errorf("pack setRates(%d rows): %w", len(features), err)
+	}
+	return data, nil
+}
+
+// SetRatesFunctionSig is the human-readable signature for the batch call
+// (advisory for the signer UI; `data` is load-bearing).
+const SetRatesFunctionSig = "setRates(string[],string[],(uint16,uint64,bool,bool)[])"
 
 // FeeManagerChainReader is the read-only on-chain surface the set-fee confirm
 // step + drift reconciler need. Kept narrow + injectable so both are unit-

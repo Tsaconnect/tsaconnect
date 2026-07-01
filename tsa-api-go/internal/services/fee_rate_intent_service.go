@@ -397,6 +397,101 @@ func ratesEqual(a, b FeeManagerRate) bool {
 	return a.BPS == b.BPS && a.FlatUSD == b.FlatUSD && a.MCGPExempt == b.MCGPExempt && a.Active == b.Active
 }
 
+// BatchPlanChain is one chain's aggregated update: a single unsigned setRates tx
+// that applies every pending change on that chain in ONE signature, plus the
+// before→after diff and the intent ids to confirm afterward (against the same
+// tx hash).
+type BatchPlanChain struct {
+	ChainID   int64      `json:"chainId"`
+	To        string     `json:"to"`
+	Value     string     `json:"value"`
+	Data      string     `json:"data"`
+	Function  string     `json:"function"`
+	Diff      []PlanDiff `json:"diff"`
+	IntentIDs []string   `json:"intentIds"`
+}
+
+// BatchPlan is the /plan-all response: one setRates per configured chain that has
+// at least one pending change differing on-chain. Empty Chains when everything
+// already matches (idempotent).
+type BatchPlan struct {
+	Chains []BatchPlanChain `json:"chains"`
+}
+
+// PlanAll bundles ALL pending / partially_applied intents into a single setRates
+// tx per configured chain — the "make all changes, sign once" path. For each
+// chain it resolves every intent's effective rate, diffs it against the on-chain
+// rateFor, keeps only the features that differ, and encodes ONE setRates covering
+// them. A chain with no differing features is omitted. Reuses the same per-chain
+// resolve/diff logic as Plan; the backend never signs or broadcasts.
+func (s *FeeRateIntentService) PlanAll(ctx context.Context) (*BatchPlan, error) {
+	if s.cfg == nil || len(s.cfg.FeeManagerChains) == 0 || s.chainReader == nil {
+		return nil, ErrFeeManagerNotConfigured
+	}
+	views, err := s.ListViews(models.FeeRateIntentPending, models.FeeRateIntentPartiallyApplied)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &BatchPlan{Chains: []BatchPlanChain{}}
+
+	// Deterministic chain order for stable plans/tests.
+	chainIDs := make([]int64, 0, len(s.cfg.FeeManagerChains))
+	for cid := range s.cfg.FeeManagerChains {
+		chainIDs = append(chainIDs, cid)
+	}
+	sort.Slice(chainIDs, func(i, j int) bool { return chainIDs[i] < chainIDs[j] })
+
+	for _, chainID := range chainIDs {
+		fmChain := s.cfg.FeeManagerChains[chainID]
+		var (
+			features, tokens []string
+			rates            []FeeManagerRate
+			diffs            []PlanDiff
+			intentIDs        []string
+		)
+		for _, v := range views {
+			after, found, rerr := s.Resolve(v.Feature, v.Token, chainID)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if !found {
+				continue // intent doesn't scope this chain
+			}
+			before, cerr := s.chainReader.RateFor(ctx, chainID, fmChain.Address, v.Feature, v.Token)
+			if cerr != nil {
+				return nil, fmt.Errorf("read on-chain rateFor chain=%d: %w", chainID, cerr)
+			}
+			noop := ratesEqual(before, after)
+			diffs = append(diffs, PlanDiff{Feature: v.Feature, Token: v.Token, ChainID: chainID, Before: before, After: after, Noop: noop})
+			if noop {
+				continue // already matches — not in the setRates batch
+			}
+			features = append(features, v.Feature)
+			tokens = append(tokens, v.Token)
+			rates = append(rates, after)
+			intentIDs = append(intentIDs, v.IntentID)
+		}
+		if len(features) == 0 {
+			continue // nothing differs on this chain
+		}
+		data, perr := PackSetRates(features, tokens, rates)
+		if perr != nil {
+			return nil, perr
+		}
+		out.Chains = append(out.Chains, BatchPlanChain{
+			ChainID:   chainID,
+			To:        fmChain.Address,
+			Value:     "0",
+			Data:      "0x" + common.Bytes2Hex(data),
+			Function:  SetRatesFunctionSig,
+			Diff:      diffs,
+			IntentIDs: intentIDs,
+		})
+	}
+	return out, nil
+}
+
 // ConfirmAndApply atomically (a) writes the CONFIRMED on-chain rate into the
 // fee_config read replica AND (b) advances the intent state machine for one
 // chain, in a SINGLE database transaction (findings #3 + #7). The fee_admin

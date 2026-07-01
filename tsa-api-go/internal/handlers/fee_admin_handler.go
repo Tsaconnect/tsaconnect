@@ -175,6 +175,26 @@ func (h *FeeAdminHandler) Plan(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Fee rate plan", plan)
 }
 
+// PlanAll handles POST /api/admin/fees/plan-all — bundles every pending intent
+// into a single setRates tx per configured chain (the "make all changes, sign
+// once" path). Empty chains when nothing differs on-chain (idempotent).
+func (h *FeeAdminHandler) PlanAll(c *gin.Context) {
+	if h.intents == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Fee admin not configured")
+		return
+	}
+	plan, err := h.intents.PlanAll(c.Request.Context())
+	if err != nil {
+		if errors.Is(err, services.ErrFeeManagerNotConfigured) {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "FeeManager not configured for any chain")
+			return
+		}
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to build batch plan")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Fee rate batch plan", plan)
+}
+
 // confirmRequest is POST /api/admin/fees/confirm.
 type confirmRequest struct {
 	IntentID string `json:"intentId" binding:"required"`
