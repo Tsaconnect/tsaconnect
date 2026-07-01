@@ -117,6 +117,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminFees := api.Group("/admin/fees")
 		adminFees.Use(adminAuth, middleware.RequireP2PAdmin())
 		{
+			adminFees.GET("/intents", fah.ListIntents)
 			adminFees.POST("/intent", fah.CreateIntent)
 			adminFees.POST("/plan", fah.Plan)
 			adminFees.POST("/confirm", fah.Confirm)
