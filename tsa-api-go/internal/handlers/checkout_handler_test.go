@@ -147,6 +147,8 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			tp_distributed_at DATETIME,
 			notes TEXT,
 			menu_selections TEXT,
+			selected_attributes TEXT,
+			purchase_note TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,

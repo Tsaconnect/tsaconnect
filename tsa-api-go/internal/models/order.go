@@ -56,8 +56,41 @@ type Order struct {
 	// which ship/refund handlers overwrite) so the merchant can fulfil the order.
 	// Empty for products, contact and booking services.
 	MenuSelections datatypes.JSON `gorm:"type:jsonb" json:"menuSelections,omitempty"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	// SelectedAttributes carries the buyer's chosen product specs (colour/size/
+	// other) for a PRODUCT order — a JSON array of OrderAttribute — so the merchant
+	// knows how to arrange the purchase. Copied from the cart item at checkout.
+	SelectedAttributes datatypes.JSON `gorm:"type:jsonb" json:"selectedAttributes,omitempty"`
+	// PurchaseNote is the buyer's free-text arrangement note, captured at checkout.
+	// Kept SEPARATE from Notes (which ship/refund handlers overwrite with
+	// merchant-side notes) so the buyer's instructions are never clobbered.
+	PurchaseNote string    `json:"purchaseNote,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// OrderAttribute is one selected product spec on an order (e.g. Color → "White, Blue").
+type OrderAttribute struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// SetSelectedAttributes serializes the selected specs into the JSONB column.
+func (o *Order) SetSelectedAttributes(attrs []OrderAttribute) {
+	if len(attrs) == 0 {
+		o.SelectedAttributes = nil
+		return
+	}
+	data, _ := json.Marshal(attrs)
+	o.SelectedAttributes = data
+}
+
+// GetSelectedAttributes deserializes the JSONB column.
+func (o *Order) GetSelectedAttributes() []OrderAttribute {
+	var attrs []OrderAttribute
+	if o.SelectedAttributes != nil {
+		_ = json.Unmarshal(o.SelectedAttributes, &attrs)
+	}
+	return attrs
 }
 
 // OrderMenuSelection is one line of a menu order: the menu item, the quantity,

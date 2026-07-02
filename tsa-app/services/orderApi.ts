@@ -53,6 +53,12 @@ export interface Order {
   sellerDeliveredAt?: string;
   escrowExpiresAt?: string;
   notes?: string;
+  // Buyer's chosen product specs (colour/size/other) for a product order, so the
+  // merchant knows how to arrange the purchase. Carried from the cart at checkout.
+  selectedAttributes?: { name: string; value: string }[];
+  // Buyer's free-text arrangement note (separate from `notes`, which holds
+  // merchant-side ship/refund notes).
+  purchaseNote?: string;
   createdAt: string;
   updatedAt: string;
   // Enriched (returned by backend with related entities)

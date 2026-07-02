@@ -684,6 +684,38 @@ const MerchantOrderDetail = () => {
           </View>
         </Card>
 
+        {/* Buyer's arrangement — selected specs + purchase note (product orders) */}
+        {((order.selectedAttributes && order.selectedAttributes.length > 0) || order.purchaseNote) && (
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('HOW TO ARRANGE')}
+            <View style={{ marginTop: spacing.xs }}>
+              {order.selectedAttributes?.map((a, i) => (
+                <View
+                  key={i}
+                  style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}
+                >
+                  <Text variant="bodySm" color="textSecondary">
+                    {a.name}
+                  </Text>
+                  <Text variant="bodySm" weight="600">
+                    {a.value}
+                  </Text>
+                </View>
+              ))}
+              {order.purchaseNote ? (
+                <>
+                  <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.sm }}>
+                    Buyer note
+                  </Text>
+                  <Text variant="bodySm" style={{ marginTop: spacing.xs }}>
+                    {order.purchaseNote}
+                  </Text>
+                </>
+              ) : null}
+            </View>
+          </Card>
+        )}
+
         {/* Shipping info */}
         {(order.trackingNumber || order.notes) && (
           <Card style={{ marginBottom: spacing.md }}>

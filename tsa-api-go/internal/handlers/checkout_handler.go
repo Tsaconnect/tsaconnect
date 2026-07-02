@@ -904,6 +904,20 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			// which ship/refund handlers overwrite — F2).
 			order.SetMenuSelections(menuSelections)
 
+			// Carry the buyer's product spec selections + purchase note onto the
+			// order so the merchant knows how to arrange the purchase. PRODUCT items
+			// only — service items reuse item.Notes to encode tier meta (serviceCart).
+			if !isService {
+				order.PurchaseNote = item.Notes
+				if len(item.SelectedAttributes) > 0 {
+					attrs := make([]models.OrderAttribute, 0, len(item.SelectedAttributes))
+					for _, a := range item.SelectedAttributes {
+						attrs = append(attrs, models.OrderAttribute{Name: a.Name, Value: a.Value})
+					}
+					order.SetSelectedAttributes(attrs)
+				}
+			}
+
 			if err := tx.Create(&order).Error; err != nil {
 				tx.Rollback()
 				log.Printf("Failed to create order: %v", err)
