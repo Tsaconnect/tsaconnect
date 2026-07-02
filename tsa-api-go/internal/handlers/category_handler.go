@@ -125,6 +125,8 @@ func (h *Handlers) GetCategoryByID(c *gin.Context) {
 		"title":          category.Title,
 		"description":    category.Description,
 		"type":           category.Type,
+		"serviceFeeMode": category.ServiceFeeMode,
+		"serviceType":    category.ServiceType,
 		"parentCategory": category.ParentCategoryID,
 		"icon":           category.Icon,
 		"color":          category.Color,
@@ -232,6 +234,13 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		serviceFeeMode = models.ServiceFeeModeStandard
 	}
 
+	// ServiceType classifies a Service/Both category into contact/order/booking
+	// (the three marketplace sub-tabs). Defaults to contact.
+	serviceType := c.PostForm("serviceType")
+	if !models.ValidServiceType(serviceType) {
+		serviceType = models.ServiceTypeContact
+	}
+
 	now := time.Now()
 	category := models.Category{
 		ID:               uuid.New(),
@@ -239,6 +248,7 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		Description:      description,
 		Type:             catType,
 		ServiceFeeMode:   serviceFeeMode,
+		ServiceType:      serviceType,
 		ParentCategoryID: parentCategoryID,
 		Icon:             iconURL,
 		Image:            imageURL,
@@ -305,6 +315,12 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 			mode = models.ServiceFeeModeStandard
 		}
 		updates["service_fee_mode"] = mode
+	}
+	if st := c.PostForm("serviceType"); st != "" {
+		if !models.ValidServiceType(st) {
+			st = models.ServiceTypeContact
+		}
+		updates["service_type"] = st
 	}
 	if color := c.PostForm("color"); color != "" {
 		updates["color"] = color

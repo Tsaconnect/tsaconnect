@@ -213,6 +213,272 @@ func GetBookingFee(db *gorm.DB, categoryID uuid.UUID, tier string) float64 {
 	return bf.AmountUSD
 }
 
+// GetServiceTierFee returns the merchant-set distance fee (USD) for an
+// order/booking service at the given tier. Unlike GetCalloutRate (contact /
+// legacy standard), residential is a PRICEABLE tier here (reads
+// ShippingResidential) — the PM's new booking/delivery fee schedule prices every
+// tier including "same residential area" (design DV3/F6).
+func GetServiceTierFee(service *models.Product, tier string) float64 {
+	switch tier {
+	case models.BookingTierResidential:
+		return service.ShippingResidential
+	case models.BookingTierSameCity, models.BookingTierSameLGA:
+		// The merchant sets five columns (residential/city/state/country/intl);
+		// "same_lga" is a refinement of the city tier (PM grouped "same city/LGA").
+		return service.ShippingSameCity
+	case models.BookingTierSameState:
+		return service.ShippingSameState
+	case models.BookingTierSameCountry:
+		return service.ShippingSameCountry
+	case models.BookingTierOutsideCountry:
+		return service.ShippingInternational
+	default:
+		// Detected zones (same_state/same_country/international) also land here via
+		// GetShippingRate, which maps them correctly. Guards against a tier without
+		// a dedicated column silently falling through to the most expensive rate.
+		return GetShippingRate(service, tier)
+	}
+}
+
+// slotBookedCountTx returns the total party-size reserved for a (product, slot)
+// within a transaction, counting only bookings whose order is not cancelled or
+// refunded so a cancel/refund frees capacity automatically (design §4/F4).
+func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) int {
+	var total *int
+	tx.Model(&models.ServiceBooking{}).
+		Joins("JOIN orders ON orders.id = service_bookings.order_id").
+		Where("service_bookings.product_id = ? AND service_bookings.slot_start = ?", productID, slotStart).
+		Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded}).
+		Select("COALESCE(SUM(service_bookings.party_size),0)").
+		Scan(&total)
+	if total == nil {
+		return 0
+	}
+	return *total
+}
+
+// slotWithinAvailability reports whether [slotStart, slotStart+duration] falls
+// inside a configured weekly availability window, and returns the matched
+// window's start-minute (for grid-alignment checks). windowStart is -1 when no
+// window covers the slot.
+func slotWithinAvailability(tx *gorm.DB, productID uuid.UUID, slotStart time.Time, durationMin int) (ok bool, windowStart int) {
+	dow := int(slotStart.Weekday())
+	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
+	slotEndMin := slotStartMin + durationMin
+	var windows []models.ServiceAvailability
+	tx.Where("product_id = ? AND day_of_week = ?", productID, dow).Find(&windows)
+	for _, w := range windows {
+		ws, ok1 := parseHHMM(w.StartTime)
+		we, ok2 := parseHHMM(w.EndTime)
+		if ok1 && ok2 && slotStartMin >= ws && slotEndMin <= we {
+			return true, ws
+		}
+	}
+	return false, -1
+}
+
+// parseHHMM parses "HH:MM" into minutes-since-midnight.
+func parseHHMM(s string) (int, bool) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0, false
+	}
+	return t.Hour()*60 + t.Minute(), true
+}
+
+// priceMenuSelection recomputes the total (USD) for an Order-type service from
+// the ServiceMenuItem rows in the DB — never trusting client-sent prices — and
+// returns the captured line items. Every requested item must belong to the
+// product and be available (F3). Returns a non-empty errMsg on any problem.
+func (ch *CheckoutHandler) priceMenuSelection(tx *gorm.DB, productID uuid.UUID, lines []menuLineRequest) (float64, []models.OrderMenuSelection, string) {
+	if len(lines) == 0 {
+		return 0, nil, "Select at least one item to order"
+	}
+	qtyByID := map[uuid.UUID]int{}
+	ids := make([]uuid.UUID, 0, len(lines))
+	for _, l := range lines {
+		id, err := uuid.Parse(l.ItemID)
+		if err != nil {
+			return 0, nil, "Invalid menu item selected"
+		}
+		if l.Quantity <= 0 {
+			return 0, nil, "Item quantity must be at least 1"
+		}
+		if _, dup := qtyByID[id]; !dup {
+			ids = append(ids, id)
+		}
+		qtyByID[id] += l.Quantity
+	}
+
+	var items []models.ServiceMenuItem
+	if err := tx.Where("product_id = ? AND id IN ? AND is_available = ?", productID, ids, true).
+		Find(&items).Error; err != nil {
+		return 0, nil, "Failed to price the order"
+	}
+	if len(items) != len(ids) {
+		return 0, nil, "One or more selected items are unavailable"
+	}
+
+	var total float64
+	sel := make([]models.OrderMenuSelection, 0, len(items))
+	for _, it := range items {
+		qty := qtyByID[it.ID]
+		total += it.PriceUSD * float64(qty)
+		sel = append(sel, models.OrderMenuSelection{
+			ItemID: it.ID, Name: it.Name, Quantity: qty, UnitPriceUSD: it.PriceUSD,
+		})
+	}
+	return total, sel, ""
+}
+
+// reserveBookingSlot validates a Booking-type service's requested slot (within an
+// availability window, capacity not exceeded) and returns an unsaved
+// ServiceBooking (OrderID is set by the caller after the order is created).
+// Returns a non-empty errMsg on any problem.
+func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profile *models.ServiceProfile, req bookingSlotRequest) (*models.ServiceBooking, string) {
+	partySize := req.PartySize
+	if partySize <= 0 {
+		partySize = 1
+	}
+	duration := profile.SlotDurationMinutes
+	if duration <= 0 {
+		return nil, fmt.Sprintf("%s is not configured for booking yet", product.Name)
+	}
+	slotStart := req.SlotStart.UTC()
+	slotEnd := slotStart.Add(time.Duration(duration) * time.Minute)
+
+	// Reject slots in the past (a booking must be for a future time).
+	if !slotStart.After(time.Now().UTC()) {
+		return nil, fmt.Sprintf("%s is in the past", formatSlot(slotStart))
+	}
+
+	within, windowStart := slotWithinAvailability(tx, product.ID, slotStart, duration)
+	if !within {
+		return nil, fmt.Sprintf("%s is not available at %s", product.Name, formatSlot(slotStart))
+	}
+	// Grid alignment: the slot must sit on the duration grid measured from the
+	// window start, otherwise a buyer could send offset starts (10:00, 10:01, …)
+	// that each count as a distinct slot and bypass per-slot capacity entirely.
+	slotStartMin := slotStart.Hour()*60 + slotStart.Minute()
+	if (slotStartMin-windowStart)%duration != 0 {
+		return nil, fmt.Sprintf("%s is not a valid slot time", formatSlot(slotStart))
+	}
+
+	if profile.MaxCapacityPerSlot > 0 {
+		// Serialize concurrent bookings for the SAME slot so the read-then-write
+		// capacity check can't be raced into overbooking. Postgres transaction-
+		// scoped advisory lock keyed on (product, slot); auto-released at commit/
+		// rollback. No-op on SQLite (tests) — single-writer there anyway.
+		if tx.Dialector.Name() == "postgres" {
+			lockKey := fmt.Sprintf("svcbooking:%s:%d", product.ID.String(), slotStart.Unix())
+			tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", lockKey)
+		}
+		booked := slotBookedCountTx(tx, product.ID, slotStart)
+		if booked+partySize > profile.MaxCapacityPerSlot {
+			return nil, fmt.Sprintf("The %s slot is full", formatSlot(slotStart))
+		}
+	}
+	return &models.ServiceBooking{
+		ID:        uuid.New(),
+		ProductID: product.ID,
+		BuyerID:   buyerID,
+		SlotStart: slotStart,
+		SlotEnd:   slotEnd,
+		PartySize: partySize,
+		Status:    models.ServiceBookingStatusReserved,
+	}, ""
+}
+
+// resolveServiceTypeAndProfile loads a service product's category-derived type
+// (falling back to the legacy ServiceFeeMode) and its ServiceProfile.
+func resolveServiceTypeAndProfile(tx *gorm.DB, product *models.Product) (string, models.ServiceProfile) {
+	var cat models.Category
+	if product.CategoryID != nil {
+		if err := tx.First(&cat, "id = ?", *product.CategoryID).Error; err != nil {
+			log.Printf("service pricing: category %s load failed for service %s: %v", *product.CategoryID, product.ID, err)
+		}
+	}
+	serviceType := cat.ServiceType
+	if !models.ValidServiceType(serviceType) {
+		if cat.ServiceFeeMode == models.ServiceFeeModeBooking {
+			serviceType = models.ServiceTypeBooking
+		} else {
+			serviceType = models.ServiceTypeContact
+		}
+	}
+	var profile models.ServiceProfile
+	tx.Where("product_id = ?", product.ID).First(&profile)
+	return serviceType, profile
+}
+
+// serviceContactGatePaid reports whether the buyer has paid the one-time
+// contact-reveal fee for a contact-type service (the checkout gate).
+func serviceContactGatePaid(tx *gorm.DB, buyerID, productID uuid.UUID) bool {
+	var n int64
+	tx.Model(&models.ServiceContactPayment{}).
+		Where("caller_id = ? AND service_id = ?", buyerID, productID).Count(&n)
+	return n > 0
+}
+
+// resolveServicePricing computes the escrow charge (ProductAmount=priceUSD,
+// ShippingAmount=calloutUSD) for a service line item by its type, plus the
+// resolved area zone, any recorded menu selections, and an unsaved booking to
+// attach after the order row is created. Shared by the cart checkout and the
+// single-service checkout so the pricing/capacity rules live in one place.
+// A non-empty errMsg means reject the order with 400.
+func (ch *CheckoutHandler) resolveServicePricing(
+	tx *gorm.DB, buyerID uuid.UUID, product *models.Product, serviceType string,
+	profile *models.ServiceProfile, detectedZone, declared string,
+	menuLines []menuLineRequest, slotReq *bookingSlotRequest,
+) (priceUSD, calloutUSD float64, zone string, menuSel []models.OrderMenuSelection, booking *models.ServiceBooking, errMsg string) {
+	zone = resolveServiceTier(detectedZone, declared, serviceType == models.ServiceTypeBooking)
+
+	switch serviceType {
+	case models.ServiceTypeOrder:
+		sum, sel, perr := ch.priceMenuSelection(tx, product.ID, menuLines)
+		if perr != "" {
+			return 0, 0, zone, nil, nil, perr
+		}
+		priceUSD = sum
+		menuSel = sel
+		calloutUSD = GetServiceTierFee(product, zone) // residential priceable (F6)
+
+	case models.ServiceTypeBooking:
+		fee := GetServiceTierFee(product, zone)
+		if fee <= 0 && product.CategoryID != nil {
+			fee = GetBookingFee(tx, *product.CategoryID, zone) // legacy admin fare
+		}
+		priceUSD = fee + profile.AccessFeeUSD
+		calloutUSD = profile.CalloutFeeUSD
+		if profile.SlotDurationMinutes > 0 {
+			if slotReq == nil || slotReq.SlotStart.IsZero() {
+				return 0, 0, zone, nil, nil, fmt.Sprintf("Pick a time slot for %s", product.Name)
+			}
+			b, berr := ch.reserveBookingSlot(tx, buyerID, product, profile, *slotReq)
+			if berr != "" {
+				return 0, 0, zone, nil, nil, berr
+			}
+			booking = b
+		}
+
+	default: // contact
+		if profile.AccessFeeUSD > 0 {
+			priceUSD = profile.AccessFeeUSD
+			calloutUSD = profile.CalloutFeeUSD
+		} else if product.Price > 0 {
+			priceUSD = product.Price
+			calloutUSD = GetCalloutRate(product, zone)
+		} else {
+			priceUSD = GetCalloutRate(product, zone)
+		}
+	}
+
+	if priceUSD+calloutUSD <= 0 {
+		return 0, 0, zone, nil, nil, fmt.Sprintf("%s has no payable amount for your selection", product.Name)
+	}
+	return priceUSD, calloutUSD, zone, menuSel, booking, ""
+}
+
 // --- Fee calculation (big.Int) ---
 
 // CalculatePlatformFee returns the merchant fee (2% for non-MCGP tokens, 0 for
@@ -335,6 +601,22 @@ type createOrderRequest struct {
 	// "provider is in my area" / LGA declaration reach the server. Honored only
 	// when geographically plausible (resolveServiceTier); absent → detected zone.
 	ServiceTiers map[string]string `json:"serviceTiers"`
+	// MenuSelections maps an Order-type service product ID → the picked menu items.
+	// The server recomputes the price from ServiceMenuItem rows in the DB and never
+	// trusts a client-sent price (design §5/F2/F3).
+	MenuSelections map[string][]menuLineRequest `json:"menuSelections"`
+	// BookingSlots maps a Booking-type service product ID → the reserved slot.
+	BookingSlots map[string]bookingSlotRequest `json:"bookingSlots"`
+}
+
+type menuLineRequest struct {
+	ItemID   string `json:"itemId"`
+	Quantity int    `json:"quantity"`
+}
+
+type bookingSlotRequest struct {
+	SlotStart time.Time `json:"slotStart"` // RFC3339
+	PartySize int       `json:"partySize"`
 }
 
 type submitEscrowRequest struct {
@@ -444,29 +726,28 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
-			// Listing kind: a service skips stock + shipping and is gated behind
-			// the one-time contact-reveal payment.
+			// Listing kind: a service skips stock + shipping. The three service
+			// types (contact/order/booking) branch on the category's ServiceType.
 			isService := product.Type == models.ProductTypeService
 			kind := models.OrderKindProduct
 			quantity := item.Quantity
+			serviceType := ""
+			var serviceProfile models.ServiceProfile
+			var menuSelections []models.OrderMenuSelection
+			var bookingToCreate *models.ServiceBooking
 
 			if isService {
 				kind = models.OrderKindService
 				quantity = 1 // services have no inventory/quantity
 
-				// Contact-fee gate (in-transaction): the buyer must already have
-				// paid the one-time contact-reveal fee for this service.
-				var contactCount int64
-				if err := tx.Model(&models.ServiceContactPayment{}).
-					Where("caller_id = ? AND service_id = ?", user.ID, product.ID).
-					Count(&contactCount).Error; err != nil {
+				serviceType, serviceProfile = resolveServiceTypeAndProfile(tx, &product)
+
+				// Contact-fee gate (in-transaction) applies ONLY to contact-type
+				// services: the buyer must have paid the one-time contact-reveal fee
+				// before engaging. Order/booking services are NOT contact-gated (F1).
+				if serviceType == models.ServiceTypeContact && !serviceContactGatePaid(tx, user.ID, product.ID) {
 					tx.Rollback()
-					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify service access")
-					return
-				}
-				if contactCount == 0 {
-					tx.Rollback()
-					utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before booking it", product.Name))
+					utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
 					return
 				}
 			} else {
@@ -508,45 +789,26 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			zone := detectedZone
 
 			if isService {
-				feeMode := models.ServiceFeeModeStandard
-				if product.CategoryID != nil {
-					var cat models.Category
-					if err := tx.First(&cat, "id = ?", *product.CategoryID).Error; err != nil {
-						// Don't silently downgrade a booking listing to standard on a
-						// transient/data error — surface the misconfig.
-						log.Printf("CreateOrderFromCart: category %s load failed for service %s: %v", *product.CategoryID, product.ID, err)
-					} else if cat.ServiceFeeMode != "" {
-						feeMode = cat.ServiceFeeMode
-					}
-				}
-				booking := feeMode == models.ServiceFeeModeBooking
 				declared := ""
 				if req.ServiceTiers != nil {
 					declared = req.ServiceTiers[product.ID.String()]
 				}
-				zone = resolveServiceTier(detectedZone, declared, booking)
-
-				if booking {
-					// Admin-set merged fare is the sole charge → ProductAmount.
-					priceUSD = GetBookingFee(tx, *product.CategoryID, zone)
-					calloutUSD = 0
-				} else if product.Price > 0 {
-					priceUSD = product.Price
-					calloutUSD = GetCalloutRate(&product, zone)
-				} else {
-					// Price-less standard service: the call-out is the sole charge
-					// and must land in ProductAmount (createOrder requires > 0).
-					priceUSD = GetCalloutRate(&product, zone)
-					calloutUSD = 0
+				var slotReq *bookingSlotRequest
+				if req.BookingSlots != nil {
+					if s, ok := req.BookingSlots[product.ID.String()]; ok {
+						slotReq = &s
+					}
 				}
-
-				// A zero-charge service is not escrowable (createOrder requires
-				// productAmount > 0); free bookings/services have no payment step.
-				if priceUSD+calloutUSD <= 0 {
+				p, co, z, sel, booking, perr := ch.resolveServicePricing(
+					tx, user.ID, &product, serviceType, &serviceProfile,
+					detectedZone, declared, req.MenuSelections[product.ID.String()], slotReq,
+				)
+				if perr != "" {
 					tx.Rollback()
-					utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s has no payable amount for your area", product.Name))
+					utils.ErrorResponse(c, http.StatusBadRequest, perr)
 					return
 				}
+				priceUSD, calloutUSD, zone, menuSelections, bookingToCreate = p, co, z, sel, booking
 			} else {
 				priceUSD = product.Price * float64(item.Quantity)
 				calloutUSD = GetShippingRate(&product, zone) * float64(item.Quantity)
@@ -638,11 +900,26 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				UpdatedAt:       time.Now(),
 			}
 
+			// Persist Order-type menu selections in the dedicated column (not Notes,
+			// which ship/refund handlers overwrite — F2).
+			order.SetMenuSelections(menuSelections)
+
 			if err := tx.Create(&order).Error; err != nil {
 				tx.Rollback()
 				log.Printf("Failed to create order: %v", err)
 				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
 				return
+			}
+
+			// A booking-type order reserves its slot in the same transaction.
+			if bookingToCreate != nil {
+				bookingToCreate.OrderID = order.ID
+				if err := tx.Create(bookingToCreate).Error; err != nil {
+					tx.Rollback()
+					log.Printf("Failed to create service booking: %v", err)
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reserve slot")
+					return
+				}
 			}
 
 			orders = append(orders, order)
@@ -694,6 +971,215 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Orders created successfully", gin.H{
 		"orders": orders,
 	})
+}
+
+type createServiceOrderRequest struct {
+	Token          string              `json:"token" binding:"required"`
+	ProductID      string              `json:"productId" binding:"required"`
+	BuyerCity      string              `json:"buyerCity"`
+	BuyerState     string              `json:"buyerState"`
+	BuyerCountry   string              `json:"buyerCountry"`
+	ServiceTier    string              `json:"serviceTier"`
+	MenuSelections []menuLineRequest   `json:"menuSelections"`
+	BookingSlot    *bookingSlotRequest `json:"bookingSlot"`
+}
+
+// CreateServiceOrder creates a SINGLE service order directly (no cart) for the
+// order/booking/contact "Pay now" flows, which carry per-item menu selections /
+// booking slots the shared cart route cannot thread. It reuses the exact same
+// service pricing + capacity rules as the cart checkout (resolveServicePricing).
+func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	var req createServiceOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "token and productId are required")
+		return
+	}
+	token := strings.ToUpper(req.Token)
+	if token != "USDC" && token != "USDT" && token != "MCGP" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported token. Use USDC, USDT, or MCGP")
+		return
+	}
+	productID, err := uuid.Parse(req.ProductID)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid product ID")
+		return
+	}
+
+	buyerCity, buyerState, buyerCountry := req.BuyerCity, req.BuyerState, req.BuyerCountry
+	if buyerCity == "" {
+		buyerCity = user.City
+	}
+	if buyerState == "" {
+		buyerState = user.State
+	}
+	if buyerCountry == "" {
+		buyerCountry = user.Country
+	}
+
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	var product models.Product
+	if err := tx.First(&product, "id = ?", productID).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusNotFound, "Service not found")
+		return
+	}
+	if product.Type != models.ProductTypeService {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "Not a service listing")
+		return
+	}
+
+	var seller models.User
+	if err := tx.First(&seller, "id = ?", product.UserID).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "Seller not found")
+		return
+	}
+
+	serviceType, profile := resolveServiceTypeAndProfile(tx, &product)
+	if serviceType == models.ServiceTypeContact && !serviceContactGatePaid(tx, user.ID, product.ID) {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
+		return
+	}
+
+	origin := resolveShippingOrigin(&product, &seller)
+	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)
+
+	priceUSD, calloutUSD, zone, menuSel, booking, perr := ch.resolveServicePricing(
+		tx, user.ID, &product, serviceType, &profile, detectedZone, req.ServiceTier, req.MenuSelections, req.BookingSlot,
+	)
+	if perr != "" {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, perr)
+		return
+	}
+
+	decimals := tokenDecimals(token)
+	productAmountWei, shippingAmountWei, err := ch.serviceAmountsToWei(priceUSD, calloutUSD, token, decimals)
+	if err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if productAmountWei == nil || productAmountWei.Sign() <= 0 {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token))
+		return
+	}
+
+	platformFeeWei := CalculateServiceFee(productAmountWei, token)
+	totalAmountWei := new(big.Int).Add(productAmountWei, shippingAmountWei)
+	totalAmountWei.Add(totalAmountWei, platformFeeWei)
+
+	buyerUpline := ""
+	if user.ReferredBy != nil {
+		var referrer models.User
+		if err := tx.First(&referrer, "id = ?", *user.ReferredBy).Error; err == nil {
+			buyerUpline = referrer.WalletAddress
+		}
+	}
+
+	order := models.Order{
+		ID:              uuid.New(),
+		BuyerID:         user.ID,
+		SellerID:        product.UserID,
+		ProductID:       product.ID,
+		Kind:            models.OrderKindService,
+		Quantity:        1,
+		Token:           token,
+		ProductAmount:   productAmountWei.String(),
+		ShippingAmount:  shippingAmountWei.String(),
+		PlatformFee:     platformFeeWei.String(),
+		TotalAmount:     totalAmountWei.String(),
+		ShippingZone:    zone,
+		ShippingCity:    buyerCity,
+		ShippingState:   buyerState,
+		ShippingCountry: buyerCountry,
+		BuyerUpline:     buyerUpline,
+		Status:          models.OrderStatusPendingPayment,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	order.SetMenuSelections(menuSel)
+
+	if err := tx.Create(&order).Error; err != nil {
+		tx.Rollback()
+		log.Printf("Failed to create service order: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+		return
+	}
+	if booking != nil {
+		booking.OrderID = order.ID
+		if err := tx.Create(booking).Error; err != nil {
+			tx.Rollback()
+			log.Printf("Failed to create service booking: %v", err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reserve slot")
+			return
+		}
+	}
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	ch.EventBus.Publish(events.Event{
+		Type: events.OrderPlaced, UserID: order.BuyerID, Title: "Order Placed",
+		Message: fmt.Sprintf("Your service order #%s has been placed. Complete payment to proceed.", shortID),
+		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "buyer"},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type: events.OrderPlaced, UserID: order.SellerID, Title: "New Service Order",
+		Message: fmt.Sprintf("You have a new service order #%s. Awaiting buyer payment.", shortID),
+		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "seller"},
+	})
+
+	utils.SuccessResponse(c, http.StatusCreated, "Order created successfully", gin.H{"orders": []models.Order{order}})
+}
+
+// serviceAmountsToWei converts the USD price/call-out to on-chain wei for the
+// given token (USDC/USDT 1:1; MCGP via the OTC buy rate), matching the cart
+// checkout's conversion so quote == charge.
+func (ch *CheckoutHandler) serviceAmountsToWei(priceUSD, calloutUSD float64, token string, decimals int) (*big.Int, *big.Int, error) {
+	if token == "MCGP" {
+		pricePerMCGP, rateErr := ch.otcService.GetBuyPricePerToken()
+		if rateErr != nil || pricePerMCGP.Sign() == 0 {
+			return nil, nil, fmt.Errorf("Failed to get MCGP exchange rate")
+		}
+		e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+		usdP, _ := toWei(floatToDecimalStr(priceUSD, 6), 6)
+		pWei := new(big.Int).Mul(usdP, e18)
+		pWei.Div(pWei, pricePerMCGP)
+		usdS, _ := toWei(floatToDecimalStr(calloutUSD, 6), 6)
+		sWei := new(big.Int).Mul(usdS, e18)
+		sWei.Div(sWei, pricePerMCGP)
+		return pWei, sWei, nil
+	}
+	pWei, err := toWei(floatToDecimalStr(priceUSD, decimals), decimals)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to convert product amount")
+	}
+	sWei, err := toWei(floatToDecimalStr(calloutUSD, decimals), decimals)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to convert shipping amount")
+	}
+	return pWei, sWei, nil
 }
 
 // orderSystemFeeUSD computes the USD-denominated system fee for TP distribution.

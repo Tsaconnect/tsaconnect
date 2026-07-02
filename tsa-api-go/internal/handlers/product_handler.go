@@ -173,6 +173,7 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	}
 
 	// Parse shipping rates
+	shippingResidential, _ := strconv.ParseFloat(c.PostForm("shippingResidential"), 64)
 	shippingSameCity, _ := strconv.ParseFloat(c.PostForm("shippingSameCity"), 64)
 	shippingSameState, _ := strconv.ParseFloat(c.PostForm("shippingSameState"), 64)
 	shippingSameCountry, _ := strconv.ParseFloat(c.PostForm("shippingSameCountry"), 64)
@@ -192,6 +193,7 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		PhoneNumber:           phoneNumber,
 		Email:                 strings.ToLower(strings.TrimSpace(email)),
 		CompanyName:           companyName,
+		ShippingResidential:   shippingResidential,
 		ShippingSameCity:      shippingSameCity,
 		ShippingSameState:     shippingSameState,
 		ShippingSameCountry:   shippingSameCountry,
@@ -405,6 +407,9 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	}
 
 	// Shipping rates
+	if v := c.PostForm("shippingResidential"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_residential"] = f }
+	}
 	if v := c.PostForm("shippingSameCity"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_city"] = f }
 	}

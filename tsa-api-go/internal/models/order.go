@@ -1,9 +1,11 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 type Order struct {
@@ -49,8 +51,41 @@ type Order struct {
 	EscrowExpiresAt        *time.Time `json:"escrowExpiresAt,omitempty"`
 	TPDistributedAt        *time.Time `json:"tpDistributedAt,omitempty"`
 	Notes                  string     `json:"notes,omitempty"`
-	CreatedAt              time.Time  `json:"createdAt"`
-	UpdatedAt              time.Time  `json:"updatedAt"`
+	// MenuSelections records the ordered items for an Order-type service order as
+	// a JSON array of OrderMenuSelection. Kept in a dedicated column (NOT Notes,
+	// which ship/refund handlers overwrite) so the merchant can fulfil the order.
+	// Empty for products, contact and booking services.
+	MenuSelections datatypes.JSON `gorm:"type:jsonb" json:"menuSelections,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
+}
+
+// OrderMenuSelection is one line of a menu order: the menu item, the quantity,
+// and the server-recomputed unit price (USD) captured at checkout time.
+type OrderMenuSelection struct {
+	ItemID     uuid.UUID `json:"itemId"`
+	Name       string    `json:"name"`
+	Quantity   int       `json:"quantity"`
+	UnitPriceUSD float64 `json:"unitPriceUsd"`
+}
+
+// SetMenuSelections serializes selections into the JSONB column.
+func (o *Order) SetMenuSelections(sel []OrderMenuSelection) {
+	if len(sel) == 0 {
+		o.MenuSelections = nil
+		return
+	}
+	data, _ := json.Marshal(sel)
+	o.MenuSelections = data
+}
+
+// GetMenuSelections deserializes the JSONB column.
+func (o *Order) GetMenuSelections() []OrderMenuSelection {
+	var sel []OrderMenuSelection
+	if o.MenuSelections != nil {
+		_ = json.Unmarshal(o.MenuSelections, &sel)
+	}
+	return sel
 }
 
 func (Order) TableName() string {

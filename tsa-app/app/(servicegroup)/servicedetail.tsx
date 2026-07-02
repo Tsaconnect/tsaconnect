@@ -150,8 +150,12 @@ const ServiceDetail = () => {
   const [catalogueImages, setCatalogueImages] = useState<string[]>([]);
   const [showCatalogue, setShowCatalogue] = useState(false);
   // Service pricing sheet (price + call-out / booking fare → escrow checkout).
-  // Only opened after the contact fee is paid (gated in ServiceDetailCard).
+  // Gated in ServiceDetailCard: contact-type still requires the contact fee
+  // first; order/booking types unlock the pricing flow immediately.
   const [showPricing, setShowPricing] = useState(false);
+  // The category's serviceType drives the buyer flow. Resolved from the product
+  // below; missing/unknown defaults to 'contact' (the legacy behavior).
+  const [serviceType, setServiceType] = useState<'contact' | 'order' | 'booking'>('contact');
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -188,11 +192,38 @@ const ServiceDetail = () => {
       const res = await api.getProductById(serviceId);
       if (cancelled) return;
       const imgs = res.data?.images;
-      if (!Array.isArray(imgs)) return;
-      const urls = imgs
-        .map((img: any) => (typeof img === 'string' ? img : img?.url))
-        .filter((u: unknown): u is string => typeof u === 'string' && u.length > 0);
-      setCatalogueImages(urls);
+      if (Array.isArray(imgs)) {
+        const urls = imgs
+          .map((img: any) => (typeof img === 'string' ? img : img?.url))
+          .filter((u: unknown): u is string => typeof u === 'string' && u.length > 0);
+        setCatalogueImages(urls);
+      }
+
+      // Resolve the category's serviceType (contact/order/booking) so the
+      // pricing flow branches correctly and the pricing button ungates for
+      // order/booking (which don't require the contact fee). Prefer an embedded
+      // category object; else look the category up by id. Default: 'contact'.
+      const cat = res.data?.category as any;
+      const embedded =
+        cat && typeof cat === 'object' && typeof cat.serviceType === 'string'
+          ? (cat.serviceType as string)
+          : undefined;
+      let resolved: 'contact' | 'order' | 'booking' = 'contact';
+      if (embedded === 'order' || embedded === 'booking' || embedded === 'contact') {
+        resolved = embedded;
+      } else {
+        const catId = typeof cat === 'string' ? cat : cat?.id;
+        if (catId) {
+          const cats = await api.getCategories({});
+          if (cancelled) return;
+          if (cats.success && Array.isArray(cats.data)) {
+            const match = cats.data.find((c) => c.id === catId || c._id === catId);
+            const st = match?.serviceType;
+            if (st === 'order' || st === 'booking' || st === 'contact') resolved = st;
+          }
+        }
+      }
+      if (!cancelled) setServiceType(resolved);
     })();
     return () => {
       cancelled = true;
@@ -336,6 +367,7 @@ const ServiceDetail = () => {
           onCopyPress={handleCopy}
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
           onPricingPress={() => setShowPricing(true)}
+          serviceType={serviceType}
         />
       </ScrollView>
 

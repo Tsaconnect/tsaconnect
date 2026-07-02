@@ -312,6 +312,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	orderGroup.Use(auth)
 	if ch != nil {
 		orderGroup.POST("", ch.CreateOrderFromCart)
+		// Single-service "Pay now" (no cart) for order/booking/contact flows that
+		// carry menu selections / booking slots the cart route can't thread.
+		orderGroup.POST("/service", ch.CreateServiceOrder)
 		orderGroup.GET("", ch.GetUserOrders)
 		orderGroup.GET("/shipping-estimate", ch.GetShippingEstimate)
 		orderGroup.GET("/:id", ch.GetOrderDetail)
@@ -430,6 +433,22 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// the literal path keeps it from colliding with /:id routes.
 			serviceGroup.GET("/contact-payments", sch.ListContactPayments)
 		}
+	}
+
+	// Service listing config routes (three service types): per-service profile,
+	// menu items (order), availability + computed slots (booking). Reads are
+	// public; writes are gated by auth and the handler's owner check.
+	{
+		svc := api.Group("/services")
+		svc.GET("/:id/profile", h.GetServiceProfile)
+		svc.GET("/:id/menu", h.ListServiceMenu)
+		svc.GET("/:id/availability", h.GetServiceAvailability)
+		svc.GET("/:id/slots", h.GetServiceSlots)
+		svc.PUT("/:id/profile", auth, h.UpsertServiceProfile)
+		svc.POST("/:id/menu", auth, h.CreateServiceMenuItem)
+		svc.PUT("/:id/menu/:itemId", auth, h.UpdateServiceMenuItem)
+		svc.DELETE("/:id/menu/:itemId", auth, h.DeleteServiceMenuItem)
+		svc.PUT("/:id/availability", auth, h.ReplaceServiceAvailability)
 	}
 
 	// Notification routes (authenticated)

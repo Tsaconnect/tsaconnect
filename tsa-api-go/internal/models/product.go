@@ -66,6 +66,11 @@ type Product struct {
 	Sales        int            `json:"sales"`
 	Rating       datatypes.JSON `gorm:"type:jsonb" json:"rating"`
 	Metadata              datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	// ShippingResidential is the "same residential area/street" tier of a
+	// merchant-set distance fee. For products it is unused (0). For order/booking
+	// services it holds the residential-tier delivery/booking fee — the one tier
+	// PR #61 hard-coded to free. Defaults 0 → still free unless the merchant sets it.
+	ShippingResidential   float64        `gorm:"default:0" json:"shippingResidential"`
 	ShippingSameCity      float64        `gorm:"default:0" json:"shippingSameCity"`
 	ShippingSameState     float64        `gorm:"default:0" json:"shippingSameState"`
 	ShippingSameCountry   float64        `gorm:"default:0" json:"shippingSameCountry"`
