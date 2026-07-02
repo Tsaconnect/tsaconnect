@@ -32,13 +32,33 @@ import {
   Badge,
   Button,
   Card,
+  Chip,
   Divider,
   EmptyState,
   Icon,
+  Input,
   PressableScale,
   Spinner,
   Text,
 } from '@/components/ui';
+
+// parseSpecOptions splits a spec value ("White pink black blue" or "S, M, L")
+// into individual, selectable options. Prefers comma separation, falls back to
+// whitespace; trims, drops blanks, de-dupes while preserving order.
+function parseSpecOptions(value: string): string[] {
+  if (!value) return [];
+  const raw = value.includes(',') ? value.split(',') : value.split(/\s+/);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of raw) {
+    const v = t.trim();
+    if (v && !seen.has(v.toLowerCase())) {
+      seen.add(v.toLowerCase());
+      out.push(v);
+    }
+  }
+  return out;
+}
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const IMAGE_HEIGHT = SCREEN_WIDTH * 0.85;
@@ -58,6 +78,30 @@ export default function ProductDetailsScreen() {
   const [quantity, setQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [cartCount, setCartCount] = useState(0);
+  // Buyer-selected specs (attribute name → chosen option values) + a free-text
+  // purchase note, so the merchant knows how to arrange the order.
+  const [selectedSpecs, setSelectedSpecs] = useState<Record<string, string[]>>({});
+  const [purchaseNotes, setPurchaseNotes] = useState('');
+
+  const toggleSpec = useCallback((name: string, option: string) => {
+    setSelectedSpecs((prev) => {
+      const cur = prev[name] ?? [];
+      const next = cur.includes(option)
+        ? cur.filter((v) => v !== option)
+        : [...cur, option];
+      return { ...prev, [name]: next };
+    });
+  }, []);
+
+  // Flatten the selection into one {name, value} per attribute (values joined),
+  // matching the backend CartItemAttribute shape. Only attributes with a pick.
+  const buildSelectedAttributes = useCallback(
+    (): { name: string; value: string }[] =>
+      Object.entries(selectedSpecs)
+        .filter(([, vals]) => vals.length > 0)
+        .map(([name, vals]) => ({ name, value: vals.join(', ') })),
+    [selectedSpecs],
+  );
   const { currency, rate } = useCurrency();
 
   const formatPrice = (price: number) =>
@@ -177,9 +221,12 @@ export default function ProductDetailsScreen() {
     if (!product) return;
 
     try {
+      const selectedAttributes = buildSelectedAttributes();
       const cartResponse = await cartService.addToCart({
         productId: product._id || product.id || '',
         quantity,
+        ...(selectedAttributes.length > 0 ? { selectedAttributes } : {}),
+        ...(purchaseNotes.trim() ? { notes: purchaseNotes.trim() } : {}),
       });
       if (cartResponse.success) {
         loadCartCount();
@@ -195,7 +242,7 @@ export default function ProductDetailsScreen() {
     }
   };
 
-  const handleBuyNow = () => {
+  const handleBuyNow = async () => {
     if (!token) {
       Alert.alert('Login Required', 'Please login to continue', [
         { text: 'Cancel', style: 'cancel' },
@@ -204,9 +251,25 @@ export default function ProductDetailsScreen() {
       return;
     }
     if (!product) return;
-    router.push(
-      `/checkout?productId=${product._id || product.id}&quantity=${quantity}`,
-    );
+    // Checkout builds orders from the cart, so add this item (with the buyer's
+    // spec selections + note) first, then go straight to checkout.
+    try {
+      const selectedAttributes = buildSelectedAttributes();
+      const res = await cartService.addToCart({
+        productId: product._id || product.id || '',
+        quantity,
+        ...(selectedAttributes.length > 0 ? { selectedAttributes } : {}),
+        ...(purchaseNotes.trim() ? { notes: purchaseNotes.trim() } : {}),
+      });
+      if (!res.success) {
+        Alert.alert('Error', res.message || 'Failed to start checkout');
+        return;
+      }
+      loadCartCount();
+      router.push('/checkout');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to start checkout');
+    }
   };
 
   const handleContactSeller = () => {
@@ -554,32 +617,52 @@ export default function ProductDetailsScreen() {
           </Card>
         ) : null}
 
-        {/* ===== Specifications ===== */}
+        {/* ===== Specifications (tap to select colour/size/other) ===== */}
         {product.attributes && product.attributes.length > 0 && (
           <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
-            <Text variant="title3" weight="700" style={{ marginBottom: spacing.sm }}>
-              Specifications
-            </Text>
-            {product.attributes.map((attr, i) => (
-              <View key={i}>
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    paddingVertical: spacing.md,
-                  }}
-                >
-                  <Text variant="bodySm" color="textMuted">
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: spacing.xs,
+              }}
+            >
+              <Text variant="title3" weight="700">
+                Specifications
+              </Text>
+              <Text variant="caption" color="textMuted">
+                Tap to select
+              </Text>
+            </View>
+            {product.attributes.map((attr, i) => {
+              const options = parseSpecOptions(attr.value);
+              const picked = selectedSpecs[attr.name] ?? [];
+              return (
+                <View key={i} style={{ paddingVertical: spacing.md }}>
+                  <Text variant="bodySm" color="textMuted" style={{ marginBottom: spacing.sm }}>
                     {attr.name}
                   </Text>
-                  <Text variant="bodySm" weight="500">
-                    {attr.value}
-                  </Text>
+                  {options.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                      {options.map((opt) => (
+                        <Chip
+                          key={opt}
+                          label={opt}
+                          selected={picked.includes(opt)}
+                          onPress={() => toggleSpec(attr.name, opt)}
+                        />
+                      ))}
+                    </View>
+                  ) : (
+                    <Text variant="bodySm" weight="500">
+                      {attr.value}
+                    </Text>
+                  )}
+                  {i < product.attributes!.length - 1 && <Divider spacing="sm" />}
                 </View>
-                {i < product.attributes!.length - 1 && <Divider />}
-              </View>
-            ))}
+              );
+            })}
           </Card>
         )}
 
@@ -687,6 +770,23 @@ export default function ProductDetailsScreen() {
                 of {product.stock}
               </Text>
             </View>
+          </Card>
+        )}
+
+        {/* ===== Purchase notes ===== */}
+        {isInStock && (
+          <Card padding="lg" style={{ marginTop: spacing.sm, borderRadius: 0 }}>
+            <Input
+              label="Purchase notes (optional)"
+              value={purchaseNotes}
+              onChangeText={setPurchaseNotes}
+              placeholder="Tell the seller how to arrange your order — e.g. 2 white size 42, 1 blue size 43"
+              multiline
+              numberOfLines={3}
+              maxLength={500}
+              counter
+              inputStyle={{ minHeight: 72, textAlignVertical: 'top' }}
+            />
           </Card>
         )}
 

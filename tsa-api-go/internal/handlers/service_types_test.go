@@ -571,3 +571,50 @@ func TestCreateServiceOrder_ContactStillGated(t *testing.T) {
 		t.Fatalf("expected 403 (contact gate), got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// ---------- product order carries selected specs + purchase note ----------
+
+func TestCreateOrderFromCart_Product_CarriesSpecsAndNote(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+
+	product := &models.Product{
+		ID: uuid.New(), UserID: seller.ID, Name: "Sneakers", Price: 20, Stock: 10,
+		Status: "active", Type: models.ProductTypeProduct, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := db.Create(product).Error; err != nil {
+		t.Fatalf("create product: %v", err)
+	}
+
+	createTestCart(t, db, buyer.ID, []models.CartItem{{
+		ID: uuid.New(), Product: product.ID, Seller: seller.ID, Quantity: 1, Price: 20,
+		SelectedAttributes: []models.CartItemAttribute{
+			{Name: "Color", Value: "White, Blue"},
+			{Name: "Size", Value: "42"},
+		},
+		Notes:   "Please pack the white pair on top",
+		AddedAt: time.Now(),
+	}})
+
+	w := postCheckout(t, ch, buyer, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var order models.Order
+	if err := db.Where("buyer_id = ?", buyer.ID).First(&order).Error; err != nil {
+		t.Fatalf("load order: %v", err)
+	}
+	if order.PurchaseNote != "Please pack the white pair on top" {
+		t.Errorf("expected purchase note carried onto order, got %q", order.PurchaseNote)
+	}
+	attrs := order.GetSelectedAttributes()
+	if len(attrs) != 2 {
+		t.Fatalf("expected 2 selected attributes, got %d", len(attrs))
+	}
+	if attrs[0].Name != "Color" || attrs[0].Value != "White, Blue" {
+		t.Errorf("unexpected first attribute: %+v", attrs[0])
+	}
+}

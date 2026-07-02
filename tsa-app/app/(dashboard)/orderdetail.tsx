@@ -344,6 +344,26 @@ const OrderDetailScreen = () => {
           <InfoRow label="Shipping Zone" value={formatStatus(order.shippingZone || 'N/A')} />
         </Card>
 
+        {/* Selected specs + purchase note (product orders) */}
+        {((order.selectedAttributes && order.selectedAttributes.length > 0) || order.purchaseNote) && (
+          <Card style={{ marginBottom: spacing.lg }}>
+            <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
+              Your selections
+            </Text>
+            {order.selectedAttributes?.map((a, i) => (
+              <InfoRow key={i} label={a.name} value={a.value} />
+            ))}
+            {order.purchaseNote ? (
+              <View style={{ marginTop: spacing.sm }}>
+                <Text variant="caption" color="textMuted" style={{ marginBottom: spacing.xs }}>
+                  Note to seller
+                </Text>
+                <Text variant="bodySm">{order.purchaseNote}</Text>
+              </View>
+            ) : null}
+          </Card>
+        )}
+
         {/* Amounts */}
         <Card style={{ marginBottom: spacing.lg }}>
           <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
