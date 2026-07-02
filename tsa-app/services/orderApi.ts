@@ -121,19 +121,59 @@ export async function createOrders(
   // serviceTiers optionally maps a service product ID → the buyer-declared area
   // tier ("residential", "same_lga", …) so a "provider is in my area" / LGA
   // declaration reaches the backend. Honored only when geographically plausible.
-  serviceTiers?: Record<string, string>
+  serviceTiers?: Record<string, string>,
+  // menuSelections maps an Order-type service product ID → the picked items.
+  // The server recomputes prices from the DB (never trusts client totals).
+  menuSelections?: Record<string, { itemId: string; quantity: number }[]>,
+  // bookingSlots maps a Booking-type service product ID → the reserved slot.
+  bookingSlots?: Record<string, { slotStart: string; partySize: number }>
 ): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ token, buyerCity, buyerState, buyerCountry, serviceTiers }),
+      body: JSON.stringify({
+        token,
+        buyerCity,
+        buyerState,
+        buyerCountry,
+        serviceTiers,
+        menuSelections,
+        bookingSlots,
+      }),
     });
     return await handleResponse(response);
   } catch (error: any) {
     console.error('Create orders error:', error);
     return { success: false, message: error.message || 'Failed to create orders' };
+  }
+}
+
+// createServiceOrder creates a SINGLE service order directly (no cart) for the
+// order/booking/contact "Pay now" flows. The server recomputes price from
+// menuSelections / bookingSlot / serviceTier and returns one order.
+export async function createServiceOrder(params: {
+  token: string;
+  productId: string;
+  buyerCity?: string;
+  buyerState?: string;
+  buyerCountry?: string;
+  serviceTier?: string;
+  menuSelections?: { itemId: string; quantity: number }[];
+  bookingSlot?: { slotStart: string; partySize: number };
+}): Promise<ApiResponse<{ orders: Order[] }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/service`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(params),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Create service order error:', error);
+    return { success: false, message: error.message || 'Failed to create service order' };
   }
 }
 

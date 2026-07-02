@@ -124,6 +124,9 @@ export interface Category {
   // How a Service/Both category charges at checkout: "standard" (merchant sets
   // price + per-zone call-out) or "booking" (admin sets a merged per-area fare).
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string | Category;
   icon?: string;
   color: string;
@@ -146,6 +149,9 @@ export interface CreateCategoryRequest {
   description?: string;
   type: 'Product' | 'Service' | 'Both';
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string;
   icon?: string;
   color?: string;
@@ -160,6 +166,9 @@ export interface UpdateCategoryRequest {
   description?: string;
   type?: 'Product' | 'Service' | 'Both';
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string | null;
   icon?: string;
   color?: string;
@@ -298,6 +307,9 @@ export interface Product {
     average: number;
     count: number;
   } | null;
+  // Residential tier of the distance fee. Now priceable for order/booking
+  // service types (previously an implicit free tier).
+  shippingResidential?: number;
   shippingSameCity?: number;
   shippingSameState?: number;
   shippingSameCountry?: number;
@@ -1694,6 +1706,9 @@ class APIService {
     description?: string;
     type: 'Product' | 'Service' | 'Both';
     serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
     parentCategory?: string;
     icon?: string;
     color?: string;
@@ -1728,6 +1743,10 @@ class APIService {
 
     if (data.serviceFeeMode) {
       formData.append('serviceFeeMode', data.serviceFeeMode);
+    }
+
+    if (data.serviceType) {
+      formData.append('serviceType', data.serviceType);
     }
 
     if (data.parentCategory) {
@@ -1856,6 +1875,9 @@ export interface Category {
   // How a Service/Both category charges at checkout: "standard" (merchant sets
   // price + per-zone call-out) or "booking" (admin sets a merged per-area fare).
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string | Category;
   icon?: string;
   color: string;
@@ -1878,6 +1900,9 @@ export interface CreateCategoryRequest {
   description?: string;
   type: 'Product' | 'Service' | 'Both';
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string;
   icon?: string;
   color?: string;
@@ -1892,6 +1917,9 @@ export interface UpdateCategoryRequest {
   description?: string;
   type?: 'Product' | 'Service' | 'Both';
   serviceFeeMode?: 'standard' | 'booking';
+  // The three marketplace service types (contact/order/booking) — drives the
+  // merchant form and buyer flow. Only meaningful for Service/Both categories.
+  serviceType?: 'contact' | 'order' | 'booking';
   parentCategory?: string | null;
   icon?: string;
   color?: string;

@@ -50,6 +50,15 @@ const FEE_MODE_OPTIONS: PickerItem[] = [
   { id: "booking", label: "Booking (admin sets merged per-area fare)" },
 ];
 
+// Service-type picker (shown only when type is Service or Both). Determines
+// how customers engage a listing in this category.
+type ServiceType = "contact" | "order" | "booking";
+const SERVICE_TYPE_OPTIONS: PickerItem[] = [
+  { id: "contact", label: "Contact (pay to unlock & engage)" },
+  { id: "order", label: "Order (select menu items)" },
+  { id: "booking", label: "Booking (reserve a date/time)" },
+];
+
 const EditCategoryScreen = () => {
   const { colors, spacing, radius } = useTheme();
   const { token } = useAuth();
@@ -81,6 +90,13 @@ const EditCategoryScreen = () => {
     item.serviceFeeMode === "booking" ? "booking" : "standard"
   );
   const [feeModeSheetVisible, setFeeModeSheetVisible] = useState(false);
+  // Service type — prefilled from the category, defaults to "contact".
+  const [serviceType, setServiceType] = useState<ServiceType>(
+    item.serviceType === "order" || item.serviceType === "booking"
+      ? item.serviceType
+      : "contact"
+  );
+  const [serviceTypeSheetVisible, setServiceTypeSheetVisible] = useState(false);
   // Per-tier booking fares (USD), keyed by BOOKING_TIERS — raw input strings.
   const [bookingFares, setBookingFares] = useState<Record<string, string>>({});
 
@@ -181,10 +197,12 @@ const EditCategoryScreen = () => {
       //@ts-ignore
       formData.append("parentCategory", parentCategory);
     }
-    // Service-fee mode only applies to Service/Both categories.
+    // Service-fee mode & service type only apply to Service/Both categories.
     if (isServiceType) {
       //@ts-ignore
       formData.append("serviceFeeMode", serviceFeeMode);
+      //@ts-ignore
+      formData.append("serviceType", serviceType);
     }
 
     try {
@@ -232,6 +250,9 @@ const EditCategoryScreen = () => {
   const selectedFeeModeLabel = FEE_MODE_OPTIONS.find(
     (o) => o.id === serviceFeeMode
   )?.label;
+  const selectedServiceTypeLabel = SERVICE_TYPE_OPTIONS.find(
+    (o) => o.id === serviceType
+  )?.label;
 
   return (
     <SafeAreaView
@@ -267,6 +288,16 @@ const EditCategoryScreen = () => {
             value={type ? String(type) : undefined}
             onPress={() => setTypeSheetVisible(true)}
           />
+
+          {/* Service type — only for Service / Both categories */}
+          {isServiceType && (
+            <SelectRow
+              label="Service type"
+              placeholder="Select service type"
+              value={selectedServiceTypeLabel}
+              onPress={() => setServiceTypeSheetVisible(true)}
+            />
+          )}
 
           {/* Service fee mode — only for Service / Both categories */}
           {isServiceType && (
@@ -458,6 +489,20 @@ const EditCategoryScreen = () => {
         onSelect={(it) => {
           setType(it.id);
           setTypeSheetVisible(false);
+        }}
+      />
+
+      {/* Service-type picker */}
+      <PickerSheet
+        visible={serviceTypeSheetVisible}
+        onClose={() => setServiceTypeSheetVisible(false)}
+        title="Service type"
+        items={SERVICE_TYPE_OPTIONS}
+        selectedId={serviceType}
+        searchable={false}
+        onSelect={(it) => {
+          setServiceType(it.id as ServiceType);
+          setServiceTypeSheetVisible(false);
         }}
       />
 

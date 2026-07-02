@@ -18,11 +18,18 @@ import (
 
 func createTestCategory(t *testing.T, db *gorm.DB, catType, feeMode string) *models.Category {
 	t.Helper()
+	// Mirror the production backfill: a booking fee-mode category maps to the
+	// booking service type; everything else defaults to contact.
+	serviceType := models.ServiceTypeContact
+	if feeMode == models.ServiceFeeModeBooking {
+		serviceType = models.ServiceTypeBooking
+	}
 	cat := &models.Category{
 		ID:             uuid.New(),
 		Title:          "Cat " + uuid.New().String()[:8],
 		Type:           catType,
 		ServiceFeeMode: feeMode,
+		ServiceType:    serviceType,
 		IsActive:       true,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),

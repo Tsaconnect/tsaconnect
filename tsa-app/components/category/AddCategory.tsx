@@ -53,6 +53,15 @@ const FEE_MODE_OPTIONS: PickerItem[] = [
   { id: "booking", label: "Booking (admin sets merged per-area fare)" },
 ];
 
+// Service-type picker (shown only when type is Service or Both). Determines
+// how customers engage a listing in this category.
+type ServiceType = "contact" | "order" | "booking";
+const SERVICE_TYPE_OPTIONS: PickerItem[] = [
+  { id: "contact", label: "Contact (pay to unlock & engage)" },
+  { id: "order", label: "Order (select menu items)" },
+  { id: "booking", label: "Booking (reserve a date/time)" },
+];
+
 const AddCategoryScreen = () => {
   const { colors, spacing, radius } = useTheme();
   const [description, setDescription] = useState("");
@@ -76,6 +85,9 @@ const AddCategoryScreen = () => {
     "standard"
   );
   const [feeModeSheetOpen, setFeeModeSheetOpen] = useState(false);
+  // Service type — how customers engage listings in this category.
+  const [serviceType, setServiceType] = useState<ServiceType>("contact");
+  const [serviceTypeSheetOpen, setServiceTypeSheetOpen] = useState(false);
   // Per-tier booking fares (USD), keyed by BOOKING_TIERS — raw input strings.
   const [bookingFares, setBookingFares] = useState<Record<string, string>>({});
 
@@ -150,9 +162,10 @@ const AddCategoryScreen = () => {
     if (parentCategory) {
       formData.append("parentCategory", parentCategory);
     }
-    // Service-fee mode only applies to Service/Both categories.
+    // Service-fee mode & service type only apply to Service/Both categories.
     if (isServiceType) {
       formData.append("serviceFeeMode", serviceFeeMode);
+      formData.append("serviceType", serviceType);
     }
 
     try {
@@ -182,6 +195,7 @@ const AddCategoryScreen = () => {
         setIsFeatured(false);
         setIsParent(false);
         setServiceFeeMode("standard");
+        setServiceType("contact");
         setBookingFares({});
         await fetchParentCategories();
         setLoading(false);
@@ -207,6 +221,8 @@ const AddCategoryScreen = () => {
     parentItems.find((o) => o.id === parentCategory)?.label ?? "";
   const selectedFeeModeLabel =
     FEE_MODE_OPTIONS.find((o) => o.id === serviceFeeMode)?.label ?? "";
+  const selectedServiceTypeLabel =
+    SERVICE_TYPE_OPTIONS.find((o) => o.id === serviceType)?.label ?? "";
 
   return (
     <SafeAreaView
@@ -243,6 +259,16 @@ const AddCategoryScreen = () => {
           placeholder="Select Type"
           onPress={() => setTypeSheetOpen(true)}
         />
+
+        {/* Service type — only for Service / Both categories */}
+        {isServiceType && (
+          <SelectRow
+            label="Service type"
+            value={selectedServiceTypeLabel}
+            placeholder="Select service type"
+            onPress={() => setServiceTypeSheetOpen(true)}
+          />
+        )}
 
         {/* Service fee mode — only for Service / Both categories */}
         {isServiceType && (
@@ -413,6 +439,20 @@ const AddCategoryScreen = () => {
         onSelect={(item) => {
           setType(item.id);
           setTypeSheetOpen(false);
+        }}
+      />
+
+      {/* Service-type picker */}
+      <PickerSheet
+        visible={serviceTypeSheetOpen}
+        onClose={() => setServiceTypeSheetOpen(false)}
+        title="Service type"
+        items={SERVICE_TYPE_OPTIONS}
+        selectedId={serviceType}
+        searchable={false}
+        onSelect={(item) => {
+          setServiceType(item.id as ServiceType);
+          setServiceTypeSheetOpen(false);
         }}
       />
 

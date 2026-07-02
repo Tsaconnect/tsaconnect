@@ -24,9 +24,20 @@ type Category struct {
 	// the listing; "booking" — the admin sets a merged per-area fare schedule on
 	// the category (CategoryBookingFee), which is the sole charge. Ignored for
 	// Product categories. Defaults to standard so existing categories are unchanged.
-	ServiceFeeMode string    `gorm:"default:'standard'" json:"serviceFeeMode"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ServiceFeeMode string `gorm:"default:'standard'" json:"serviceFeeMode"`
+	// ServiceType classifies a Service/Both category into one of the three
+	// first-class service interaction types the marketplace surfaces as sub-tabs:
+	//   "contact" — pay to unlock the provider's contact and engage (default);
+	//   "order"   — pick items from a menu and place an order + delivery;
+	//   "booking" — reserve a date/time slot.
+	// It drives the merchant listing form and the buyer flow. Ignored for Product
+	// categories. Defaults to "contact" so existing Service categories keep their
+	// current pay-to-reveal behaviour; the booking backfill maps legacy fare
+	// categories (see config/database.go). Supersedes ServiceFeeMode for the new
+	// flows, which is retained for legacy standard/booking pricing fallbacks.
+	ServiceType string    `gorm:"default:'contact'" json:"serviceType"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.
@@ -54,6 +65,23 @@ const (
 	ServiceFeeModeStandard = "standard" // merchant sets price + per-zone call-out (default)
 	ServiceFeeModeBooking  = "booking"  // admin sets merged per-area fare; sole charge
 )
+
+// Service-type constants for Category.ServiceType (the three marketplace tabs).
+const (
+	ServiceTypeContact = "contact" // pay access fee → unlock/engage (default)
+	ServiceTypeOrder   = "order"   // select menu items → order + delivery
+	ServiceTypeBooking = "booking" // reserve a date/time slot
+)
+
+// ValidServiceType reports whether s is one of the three service types.
+func ValidServiceType(s string) bool {
+	switch s {
+	case ServiceTypeContact, ServiceTypeOrder, ServiceTypeBooking:
+		return true
+	default:
+		return false
+	}
+}
 
 // Booking-fee area tiers (Category booking mode). Ordered coarsest-last for UI.
 const (

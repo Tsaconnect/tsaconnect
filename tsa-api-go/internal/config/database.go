@@ -51,6 +51,12 @@ func AutoMigrate() error {
 		&models.Cart{},
 		&models.Category{},
 		&models.CategoryBookingFee{},
+		// Three service types (booking/order/contact) — per-service config, menus,
+		// availability windows and reserved slots. Additive; only services use them.
+		&models.ServiceProfile{},
+		&models.ServiceMenuItem{},
+		&models.ServiceAvailability{},
+		&models.ServiceBooking{},
 		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},
@@ -256,6 +262,15 @@ func AutoMigrate() error {
 	// strong attribution key). Partial over non-blank refs. Idempotent.
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_payment_ref
 	    ON it_intents (payment_ref) WHERE payment_ref <> ''`)
+
+	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
+	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
+	// flow. All other Service categories default to 'contact' (the AutoMigrate
+	// column default), preserving their pay-to-reveal behaviour. Idempotent —
+	// only touches rows still on the default.
+	DB.Exec(`UPDATE categories SET service_type = 'booking'
+	         WHERE service_fee_mode = 'booking'
+	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
 
 	return nil
 }

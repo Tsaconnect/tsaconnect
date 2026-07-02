@@ -37,11 +37,17 @@ interface ServiceDetailCardProps {
    */
   onCataloguePress?: () => void;
   /**
-   * Opens the service pricing sheet (price + call-out / booking fare → escrow
-   * checkout). Gated behind the one-time contact fee: actionable only once
-   * `contactPaid` is true; locked/disabled before, matching the contact card.
+   * Opens the service pricing sheet (price + call-out / booking fare / menu /
+   * slots → escrow checkout). For contact-type services this is gated behind the
+   * one-time contact fee (actionable only once `contactPaid`). For order/booking
+   * types it is available immediately — those flows don't require the fee.
    */
   onPricingPress?: () => void;
+  /**
+   * The category's service type. 'contact' (default) keeps the fee-gated
+   * behavior; 'order'/'booking' ungate the pricing flow (no contact fee needed).
+   */
+  serviceType?: 'contact' | 'order' | 'booking';
 }
 
 const ServiceDetailCard = ({
@@ -56,8 +62,12 @@ const ServiceDetailCard = ({
   onCopyPress,
   onCataloguePress,
   onPricingPress,
+  serviceType = 'contact',
 }: ServiceDetailCardProps) => {
   const { colors, spacing, radius } = useTheme();
+  // Order/booking services are not contact-gated — their pricing/booking flow is
+  // reachable without paying the $0.10 contact reveal. Only contact services gate.
+  const pricingUnlocked = serviceType !== 'contact' || contactPaid;
 
   // A single tap-to-copy contact row. Keeps the exact onCopyPress(value)
   // contract — the parent owns clipboard + toast, so this row only forwards.
@@ -171,9 +181,15 @@ const ServiceDetailCard = ({
             (or a booking fare) through escrow. Gated behind the contact fee:
             actionable only once contactPaid, otherwise shown locked. */}
         {onPricingPress ? (
-          contactPaid ? (
+          pricingUnlocked ? (
             <Button
-              title="Pricing services — View / Pay Now"
+              title={
+                serviceType === 'order'
+                  ? 'View menu & order'
+                  : serviceType === 'booking'
+                    ? 'Book a slot'
+                    : 'Pricing services — View / Pay Now'
+              }
               variant="secondary"
               leftIcon="pricetag"
               onPress={onPricingPress}

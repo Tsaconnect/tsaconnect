@@ -32,7 +32,7 @@ import {
   Toggle,
   useToast,
 } from '@/components/ui';
-import { api, type Product } from './api';
+import { api, type Category, type Product } from './api';
 import { cartService } from './cart';
 import { getShippingEstimate } from '../../services/orderApi';
 import {
@@ -42,8 +42,17 @@ import {
   type BookingTier,
 } from '../../services/bookingFeeApi';
 import { encodeServiceNotes } from './serviceCart';
+import { getServiceProfile, type ServiceProfile } from '../../services/serviceListingApi';
+import { runServiceCheckout } from '../../services/serviceCheckout';
+import MenuPicker from './MenuPicker';
+import SlotPicker from './SlotPicker';
 
 type FeeMode = 'standard' | 'booking';
+// The three marketplace service types drive which buyer flow the sheet shows.
+// 'contact' keeps the existing standard/booking-fare (access-fee) flow; 'order'
+// shows the menu picker; 'booking' shows the slot picker (fare-only when the
+// profile has slotDurationMinutes == 0).
+type ServiceType = 'contact' | 'order' | 'booking';
 
 interface ServicePricingSheetProps {
   visible: boolean;
@@ -74,8 +83,12 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [product, setProduct] = useState<Product | null>(null);
   const [mode, setMode] = useState<FeeMode>('standard');
+  const [serviceType, setServiceType] = useState<ServiceType>('contact');
+  const [profile, setProfile] = useState<ServiceProfile | null>(null);
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // Inline escrow checkout state for the order/booking/access-fee flows.
+  const [checkingOut, setCheckingOut] = useState(false);
 
   // STANDARD state
   const [residential, setResidential] = useState(false);
@@ -123,24 +136,50 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       const catId = resolveCategoryId(svc.category);
       setCategoryId(catId);
 
-      // Determine the category's serviceFeeMode. The product payload may embed
-      // it on the category object; otherwise look it up among service/both
-      // categories by id. Defaults to 'standard'.
+      // Determine the category's serviceFeeMode + serviceType. Both may be
+      // embedded on the product's category object; otherwise look the category
+      // up by id. serviceFeeMode defaults to 'standard'; serviceType (which
+      // branches the whole buyer flow) defaults to 'contact' when missing.
       let feeMode: FeeMode = 'standard';
-      const embedded =
+      let svcType: ServiceType = 'contact';
+      const embeddedCat =
         typeof svc.category === 'object'
-          ? (svc.category as { serviceFeeMode?: FeeMode }).serviceFeeMode
+          ? (svc.category as Partial<Category>)
           : undefined;
-      if (embedded === 'booking' || embedded === 'standard') {
-        feeMode = embedded;
-      } else if (catId) {
+      if (embeddedCat?.serviceFeeMode === 'booking' || embeddedCat?.serviceFeeMode === 'standard') {
+        feeMode = embeddedCat.serviceFeeMode;
+      }
+      if (
+        embeddedCat?.serviceType === 'order' ||
+        embeddedCat?.serviceType === 'booking' ||
+        embeddedCat?.serviceType === 'contact'
+      ) {
+        svcType = embeddedCat.serviceType;
+      }
+      // Fall back to a category fetch when either field wasn't embedded.
+      if ((!embeddedCat?.serviceFeeMode || !embeddedCat?.serviceType) && catId) {
         const cats = await api.getCategories({});
         if (cats.success && Array.isArray(cats.data)) {
           const match = cats.data.find((c) => c.id === catId || c._id === catId);
           if (match?.serviceFeeMode === 'booking') feeMode = 'booking';
+          if (
+            match?.serviceType === 'order' ||
+            match?.serviceType === 'booking' ||
+            match?.serviceType === 'contact'
+          ) {
+            svcType = match.serviceType;
+          }
         }
       }
       setMode(feeMode);
+      setServiceType(svcType);
+
+      // The service profile carries the access/call-out fees, slot config, and
+      // booking policies. Public read; missing profile is non-fatal (the flows
+      // degrade gracefully — e.g. legacy fare-only booking).
+      const profRes = await getServiceProfile(serviceId);
+      const prof = profRes.success && profRes.data ? profRes.data : null;
+      setProfile(prof);
 
       if (feeMode === 'booking' && catId) {
         const feeRes = await getCategoryBookingFees(catId);
@@ -248,6 +287,60 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     }
   };
 
+  // Inline escrow checkout for the order / booking flows (and access-fee-only
+  // bookings). These carry menuSelections / bookingSlots that the shared cart
+  // route can't thread, so they run their own single-order escrow flow here.
+  // Money is recomputed server-side; the app default token is USDC (same as the
+  // cart checkout default). On success the order is escrowed and we route to the
+  // buyer's order list.
+  const productIdOf = () => product?.id || product?._id || serviceId;
+
+  const runInlineCheckout = useCallback(
+    async (extra: {
+      menuSelections?: { itemId: string; quantity: number }[];
+      bookingSlot?: { slotStart: string; partySize: number };
+    }) => {
+      setCheckingOut(true);
+      try {
+        await runServiceCheckout({
+          token: 'USDC',
+          productId: productIdOf(),
+          buyerCity,
+          buyerState,
+          buyerCountry,
+          menuSelections: extra.menuSelections,
+          bookingSlot: extra.bookingSlot,
+        });
+        toast.show('Order placed & funded via escrow', 'success');
+        onClose();
+        router.push('/(dashboard)/orderlist');
+      } catch (e: any) {
+        toast.show(e.message || 'Checkout failed', 'error');
+      } finally {
+        setCheckingOut(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [buyerCity, buyerState, buyerCountry, toast, onClose, router],
+  );
+
+  const handleMenuCheckout = (menuItems: { itemId: string; quantity: number }[]) =>
+    runInlineCheckout({ menuSelections: menuItems });
+
+  const handleSlotCheckout = (slot: { slotStart: string; partySize: number }) =>
+    runInlineCheckout({ bookingSlot: slot });
+
+  // Access-fee-only checkout (contact flow after unlock, and legacy fare-only
+  // booking): no menu/slot payload — the server charges the profile access/
+  // call-out fee for this service. The declared area tier still rides the cart
+  // path for the standard/booking-fare sheet below, so this is used only for the
+  // simple access-fee confirmation buttons.
+  const handleAccessFeeCheckout = () => runInlineCheckout({});
+
+  // Legacy fare-only booking: profile has no slot duration → skip the slot grid
+  // and charge the booking fare directly.
+  const isFareOnlyBooking = serviceType === 'booking' && (profile?.slotDurationMinutes ?? 0) === 0;
+
   // Only offer the tiers the backend will actually honor for this buyer: the
   // detected coarse tier, plus a "residential" refinement when in the same city
   // and "same_lga" when in the same city/state. Picking a farther/closer tier the
@@ -284,6 +377,73 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
             </Text>
             <Button title="Retry" variant="secondary" onPress={load} />
           </View>
+        ) : serviceType === 'order' ? (
+          /* ORDER — menu picker; checks out with menuSelections. */
+          <MenuPicker
+            productId={productIdOf()}
+            onCheckout={handleMenuCheckout}
+            submitting={checkingOut}
+          />
+        ) : serviceType === 'booking' && !isFareOnlyBooking ? (
+          /* BOOKING — slot picker + policies; checks out with bookingSlots. */
+          <>
+            <SlotPicker
+              productId={productIdOf()}
+              onCheckout={handleSlotCheckout}
+              submitting={checkingOut}
+            />
+            {(profile?.cancellationPolicy ||
+              profile?.reschedulePolicy ||
+              profile?.refundPolicy ||
+              profile?.bookingRules) && (
+              <View style={{ gap: spacing.sm }}>
+                <Divider />
+                <Text variant="bodyMed" weight="600">
+                  Booking policies
+                </Text>
+                {profile?.cancellationPolicy ? (
+                  <View>
+                    <Text variant="caption" weight="600" color="textSecondary">
+                      Cancellation
+                    </Text>
+                    <Text variant="bodySm" color="textSecondary">
+                      {profile.cancellationPolicy}
+                    </Text>
+                  </View>
+                ) : null}
+                {profile?.reschedulePolicy ? (
+                  <View>
+                    <Text variant="caption" weight="600" color="textSecondary">
+                      Reschedule
+                    </Text>
+                    <Text variant="bodySm" color="textSecondary">
+                      {profile.reschedulePolicy}
+                    </Text>
+                  </View>
+                ) : null}
+                {profile?.refundPolicy ? (
+                  <View>
+                    <Text variant="caption" weight="600" color="textSecondary">
+                      Refund
+                    </Text>
+                    <Text variant="bodySm" color="textSecondary">
+                      {profile.refundPolicy}
+                    </Text>
+                  </View>
+                ) : null}
+                {profile?.bookingRules ? (
+                  <View>
+                    <Text variant="caption" weight="600" color="textSecondary">
+                      Rules
+                    </Text>
+                    <Text variant="bodySm" color="textSecondary">
+                      {profile.bookingRules}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            )}
+          </>
         ) : mode === 'booking' ? (
           <>
             <Text variant="bodySm" color="textSecondary">
@@ -342,6 +502,9 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
             <Divider />
 
             <SummaryCard dividerBeforeLast>
+              {profile?.accessFeeUsd ? (
+                <SummaryRow label="Access fee" value={fmtUsd(profile.accessFeeUsd)} />
+              ) : null}
               {servicePrice > 0 && (
                 <SummaryRow label="Service price" value={fmtUsd(servicePrice)} />
               )}
@@ -351,29 +514,44 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           </>
         )}
 
-        {!loading && !error && (
-          <View style={{ gap: spacing.sm }}>
-            {!canPay && (
-              <Text variant="caption" color="textMuted" align="center">
-                No charge for this selection — nothing to pay.
-              </Text>
-            )}
-            <Button
-              title="Pay now"
-              size="lg"
-              leftIcon="shield"
-              onPress={handlePayNow}
-              loading={adding}
-              disabled={adding || !canPay}
-            />
-            <Button
-              title="Add to cart"
-              variant="secondary"
-              onPress={handleAddToCart}
-              loading={adding}
-              disabled={adding || !canPay}
-            />
-          </View>
+        {/* Order / non-fare booking render their own Pay button inside the
+            picker — only the contact + legacy-fare paths use the shared footer. */}
+        {!loading && !error && serviceType !== 'order' && !(serviceType === 'booking' && !isFareOnlyBooking) && (
+          isFareOnlyBooking ? (
+            <View style={{ gap: spacing.sm }}>
+              <Button
+                title="Pay now"
+                size="lg"
+                leftIcon="shield"
+                onPress={handleAccessFeeCheckout}
+                loading={checkingOut}
+                disabled={checkingOut}
+              />
+            </View>
+          ) : (
+            <View style={{ gap: spacing.sm }}>
+              {!canPay && (
+                <Text variant="caption" color="textMuted" align="center">
+                  No charge for this selection — nothing to pay.
+                </Text>
+              )}
+              <Button
+                title="Pay now"
+                size="lg"
+                leftIcon="shield"
+                onPress={handlePayNow}
+                loading={adding}
+                disabled={adding || !canPay}
+              />
+              <Button
+                title="Add to cart"
+                variant="secondary"
+                onPress={handleAddToCart}
+                loading={adding}
+                disabled={adding || !canPay}
+              />
+            </View>
+          )
         )}
       </View>
     </Sheet>

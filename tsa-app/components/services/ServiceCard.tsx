@@ -10,16 +10,26 @@ import React from 'react';
 import { Image, View } from 'react-native';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
-import { Button, Card, Icon, PressableScale, Text } from '@/components/ui';
+import { Badge, Button, Card, Icon, PressableScale, Text } from '@/components/ui';
+
+type ServiceType = 'contact' | 'order' | 'booking';
+
+// Human-facing label for the subtle type badge shown on the card.
+const SERVICE_TYPE_LABEL: Record<ServiceType, string> = {
+  contact: 'Contact',
+  order: 'Ordering',
+  booking: 'Booking',
+};
 
 interface ServiceCardProps {
   id: string;
   title: string;
   image?: string;
   description?: string;
+  serviceType?: ServiceType;
 }
 
-const ServiceCard: React.FC<ServiceCardProps> = ({ id, title, image, description }) => {
+const ServiceCard: React.FC<ServiceCardProps> = ({ id, title, image, description, serviceType }) => {
   const { colors, spacing, radius } = useTheme();
   const hasImage = typeof image === 'string' && image.length > 0;
 
@@ -59,6 +69,15 @@ const ServiceCard: React.FC<ServiceCardProps> = ({ id, title, image, description
           )}
         </View>
 
+        {serviceType ? (
+          <Badge
+            label={SERVICE_TYPE_LABEL[serviceType]}
+            size="sm"
+            color={colors.accent}
+            background={colors.accentMuted}
+            style={{ marginBottom: spacing.xs }}
+          />
+        ) : null}
         <Text variant="title3" weight="700" numberOfLines={2}>
           {title}
         </Text>

@@ -40,6 +40,8 @@ const GRID_GAP = 10;
 const GRID_PADDING = 16;
 const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
 
+type ServiceType = 'contact' | 'order' | 'booking';
+
 interface CategoryItem {
   id: string;
   title: string;
@@ -48,8 +50,21 @@ interface CategoryItem {
   image?: string;
   color: string;
   productCount: number;
+  // The marketplace service type this category belongs to. Legacy/missing values
+  // default to 'contact' so pre-serviceType categories still show under a tab.
+  serviceType: ServiceType;
   children: CategoryItem[];
 }
+
+// Service sub-tabs — UI-only filters over the already-fetched Service categories.
+const SERVICE_SUBTABS: { key: ServiceType; label: string }[] = [
+  { key: 'contact', label: 'Contact service' },
+  { key: 'order', label: 'Ordering service' },
+  { key: 'booking', label: 'Booking service' },
+];
+
+const normalizeServiceType = (raw: any): ServiceType =>
+  raw === 'order' || raw === 'booking' ? raw : 'contact';
 
 const ICON_MAP: Record<string, string> = {
   'Agricultural & Food Products': 'agriculture',
@@ -86,6 +101,9 @@ const MarketplaceScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTab, setSelectedTab] = useState<string>('products');
+  // Active service sub-tab (Contact/Order/Booking); only used when the Services
+  // tab is selected. Defaults to 'contact'.
+  const [serviceSubTab, setServiceSubTab] = useState<ServiceType>('contact');
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -104,6 +122,7 @@ const MarketplaceScreen: React.FC = () => {
       image: typeof cat.image === 'string' && cat.image.trim() !== '' ? cat.image : undefined,
       color: cat.color || '#666',
       productCount: cat.productCount || 0,
+      serviceType: normalizeServiceType(cat.serviceType),
       children: cat.children
         ? cat.children.map((child: any) => ({
             id: child.id || child._id,
@@ -113,6 +132,7 @@ const MarketplaceScreen: React.FC = () => {
             image: typeof child.image === 'string' && child.image.trim() !== '' ? child.image : undefined,
             color: child.color || '#666',
             productCount: child.productCount || 0,
+            serviceType: normalizeServiceType(child.serviceType),
             children: [],
           }))
         : [],
@@ -205,6 +225,13 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'it', label: 'Instant Transfer', route: '/wallet/it' },
   ];
 
+  // On the Services tab, filter the grid to the selected sub-tab's serviceType.
+  // Products (and the Services tab before serviceType lands) show everything.
+  const visibleCategories =
+    selectedTab === 'services'
+      ? categories.filter((cat) => cat.serviceType === serviceSubTab)
+      : categories;
+
   // ── Loading ──
   if (loading && !refreshing && (selectedTab === 'products' || selectedTab === 'services')) {
     return (
@@ -273,6 +300,25 @@ const MarketplaceScreen: React.FC = () => {
           ))}
         </ScrollView>
 
+        {/* Service sub-tabs — filter the grid by serviceType (Services tab only) */}
+        {selectedTab === 'services' && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: spacing.sm }}
+            style={{ marginBottom: spacing.md }}
+          >
+            {SERVICE_SUBTABS.map((sub) => (
+              <Chip
+                key={sub.key}
+                label={sub.label}
+                selected={serviceSubTab === sub.key}
+                onPress={() => setServiceSubTab(sub.key)}
+              />
+            ))}
+          </ScrollView>
+        )}
+
         {/* Content */}
         {(selectedTab === 'products' || selectedTab === 'services') && (
           <View style={{ paddingHorizontal: spacing.lg }}>
@@ -292,7 +338,7 @@ const MarketplaceScreen: React.FC = () => {
               </PressableScale>
             )}
 
-            {categories.length === 0 && !loading ? (
+            {visibleCategories.length === 0 && !loading ? (
               <EmptyState
                 icon="list"
                 title="No categories found"
@@ -300,7 +346,7 @@ const MarketplaceScreen: React.FC = () => {
               />
             ) : (
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP }}>
-                {categories.map((cat) => (
+                {visibleCategories.map((cat) => (
                   <PressableScale
                     key={cat.id}
                     onPress={() => handleCategoryPress(cat)}
