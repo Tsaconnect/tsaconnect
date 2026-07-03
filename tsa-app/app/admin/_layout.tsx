@@ -23,6 +23,9 @@ const AdminLayout = () => {
       />
       <Stack.Screen name="pm-applications" options={{ title: 'PM Applications' }} />
       <Stack.Screen name="pm-status" options={{ title: 'PM Status' }} />
+      <Stack.Screen name="spot-listings" options={{ title: 'Spot Listings' }} />
+      <Stack.Screen name="spot-listings/add" options={{ title: 'Add Listing' }} />
+      <Stack.Screen name="spot-listings/[id]" options={{ title: 'Edit Listing' }} />
     </Stack>
   );
 };

@@ -12,8 +12,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import SwapScreen from '@/screens/swap';
 import AllSwapScreen from '@/screens/all-swap';
+import SpotList from '@/components/spot/SpotList';
 import { useTheme } from '@/theme';
-import { Badge, EmptyState, SegmentedControl } from '@/components/ui';
+import { SegmentedControl } from '@/components/ui';
 
 type Tab = 'swap' | 'spot' | 'allswap';
 
@@ -22,18 +23,6 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'spot', label: 'Spot Trade' },
   { key: 'allswap', label: 'All Swap' },
 ];
-
-const ComingSoon = ({ title, description }: { title: string; description: string }) => {
-  const { colors, spacing } = useTheme();
-  return (
-    <View style={{ flex: 1, justifyContent: 'center' }}>
-      <EmptyState icon="clock" title={title} subtitle={description} />
-      <View style={{ alignItems: 'center', marginTop: spacing.md }}>
-        <Badge label="Coming Soon" color={colors.accent} background={colors.accentMuted} />
-      </View>
-    </View>
-  );
-};
 
 const EasySwap = () => {
   const { colors, spacing } = useTheme();
@@ -59,9 +48,7 @@ const EasySwap = () => {
       </View>
 
       {activeTab === 'swap' && <SwapScreen />}
-      {activeTab === 'spot' && (
-        <ComingSoon title="Spot Trade" description="Trade platform-listed assets. Coming soon!" />
-      )}
+      {activeTab === 'spot' && <SpotList />}
       {activeTab === 'allswap' && <AllSwapScreen />}
     </SafeAreaView>
   );

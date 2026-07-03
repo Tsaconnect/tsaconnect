@@ -117,6 +117,9 @@ func AutoMigrate() error {
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
 		&models.ITRate{},
+		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
+		// existing swap flows. Composite unique index on (base,quote,chain).
+		&models.SpotListing{},
 	); err != nil {
 		return err
 	}
@@ -271,6 +274,17 @@ func AutoMigrate() error {
 	DB.Exec(`UPDATE categories SET service_type = 'booking'
 	         WHERE service_fee_mode = 'booking'
 	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
+
+	// Seed the first Spot Trade listing (MCGP/USDC on Sonic) once, at startup —
+	// NOT on every read, so an admin who deletes it stays deleted. Guarded on an
+	// empty table + a unique (base,quote,chain) index, so repeat boots are no-ops.
+	var spotCount int64
+	if DB.Model(&models.SpotListing{}).Count(&spotCount); spotCount == 0 {
+		DB.Create(&models.SpotListing{
+			BaseSymbol: "MCGP", QuoteSymbol: "USDC", Chain: "sonic",
+			Route: models.SpotRouteMCGP, Enabled: true, DisplayOrder: 0,
+		})
+	}
 
 	return nil
 }

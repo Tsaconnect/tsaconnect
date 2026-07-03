@@ -283,6 +283,23 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		categoryGroup.PUT("/:categoryId/booking-fees", adminAuth, h.UpsertCategoryBookingFees)
 	}
 
+	// Spot Trade listings — admin-curated pairs shown on the Spot tab. Reads are
+	// auth-only (enriched with price + 24h change); CRUD is admin-gated.
+	spotGroup := api.Group("/spot-listings")
+	spotGroup.Use(auth)
+	{
+		spotGroup.GET("", h.GetSpotListings)
+	}
+	adminSpotGroup := api.Group("/admin/spot-listings")
+	adminSpotGroup.Use(adminAuth)
+	{
+		adminSpotGroup.GET("", h.ListSpotListingsAdmin)
+		adminSpotGroup.POST("", h.CreateSpotListing)
+		adminSpotGroup.PUT("/:id", h.UpdateSpotListing)
+		adminSpotGroup.DELETE("/:id", h.DeleteSpotListing)
+		adminSpotGroup.POST("/reorder", h.ReorderSpotListings)
+	}
+
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
