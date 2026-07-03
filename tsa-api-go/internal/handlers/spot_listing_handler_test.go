@@ -39,6 +39,15 @@ func setupSpotTestDB(t *testing.T) {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_spot_pair
 			ON spot_listings (base_symbol, quote_symbol, chain)`,
+		`CREATE TABLE IF NOT EXISTS it_rates (
+			id TEXT PRIMARY KEY,
+			buy_price_usd_micros INTEGER NOT NULL,
+			sell_discount_bps INTEGER NOT NULL DEFAULT 0,
+			active INTEGER NOT NULL DEFAULT 1,
+			updated_by TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
@@ -168,5 +177,42 @@ func TestGetSpotListings_EnabledOnlyAndNullPrice(t *testing.T) {
 	}
 	if l.Price != nil || l.Change24h != nil {
 		t.Fatalf("price/change should be null without a price source; got %v/%v", l.Price, l.Change24h)
+	}
+}
+
+func TestGetSpotListings_MCGPPriceFromITRate(t *testing.T) {
+	setupSpotTestDB(t)
+	config.DB.Create(&models.SpotListing{BaseSymbol: "MCGP", QuoteSymbol: "USDC", Chain: "sonic", Route: "mcgp", Enabled: true})
+	// Active IT rate: $0.02 per MCGP (20000 micro-dollars).
+	config.DB.Create(&models.ITRate{BuyPriceUsdMicros: 20000, Active: true})
+
+	h := newSpotHandlers() // nil PriceService: MCGP must still price from the IT rate
+	c, w := spotCtx(t, http.MethodGet, ``, adminUser())
+	h.GetSpotListings(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Listings []struct {
+				BaseSymbol string   `json:"baseSymbol"`
+				Price      *float64 `json:"price"`
+				Change24h  *float64 `json:"change24h"`
+			} `json:"listings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data.Listings) != 1 {
+		t.Fatalf("listings = %d, want 1", len(resp.Data.Listings))
+	}
+	l := resp.Data.Listings[0]
+	if l.Price == nil || *l.Price != 0.02 {
+		t.Fatalf("MCGP price = %v, want 0.02 (from IT rate)", l.Price)
+	}
+	if l.Change24h != nil {
+		t.Fatalf("MCGP should have no 24h change; got %v", *l.Change24h)
 	}
 }

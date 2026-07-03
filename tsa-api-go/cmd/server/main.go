@@ -227,6 +227,9 @@ func main() {
 
 	// Initialize handlers with dependency injection
 	h := handlers.NewHandlers(priceService, blockchainService, cfg, eventBus, emailService, otcService, p2pService)
+	// Spot-listing reads price MCGP from Contract B's on-chain quote (nil-safe;
+	// falls back to the IT rate when the swap isn't configured).
+	h.MCGPSwap = mcgpSwapService
 	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)

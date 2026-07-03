@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"math/big"
 	"net/http"
 	"sort"
 	"strings"
@@ -39,13 +40,42 @@ type spotListingInput struct {
 	DisplayOrder *int   `json:"displayOrder"`
 }
 
-// enrichSpotListings attaches price + 24h change (best-effort) from PriceService.
-// Price/Change24h are left nil when a symbol has no price (fetch failure or a
-// symbol the price service doesn't know), so the UI can show "—" rather than $0.
+// oneMCGP is 1 MCGP in base units (18 decimals).
+var oneMCGP = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+// mcgpUsdPrice returns MCGP's USD price. MCGP isn't on CoinGecko, so its price
+// comes from the platform: primarily Contract B's on-chain quote for buying
+// 1 MCGP (the same price the Buy flow at /wallet/mcgp/buy pays), falling back to
+// the admin-set IT rate. USDC and IT micro-dollars are both 6dp. Returns nil when
+// neither source is available.
+func (h *Handlers) mcgpUsdPrice() *float64 {
+	// Primary: the on-chain premium-buy quote (USDC for 1 MCGP).
+	if h.MCGPSwap != nil && h.MCGPSwap.IsConfigured() {
+		if usdc, err := h.MCGPSwap.Quote(services.PriceKindPremiumBuy, oneMCGP); err == nil && usdc != nil && usdc.Sign() > 0 {
+			p, _ := new(big.Float).Quo(new(big.Float).SetInt(usdc), big.NewFloat(1e6)).Float64()
+			return &p
+		}
+	}
+	// Fallback: the admin-set IT rate (BuyPriceUsdMicros, e.g. 20000 = $0.02).
+	var r models.ITRate
+	if err := config.DB.Where("active = ?", true).Order("created_at DESC").First(&r).Error; err == nil && r.BuyPriceUsdMicros > 0 {
+		p := float64(r.BuyPriceUsdMicros) / 1_000_000
+		return &p
+	}
+	return nil
+}
+
+// enrichSpotListings attaches price + 24h change. MCGP is priced from the
+// platform's IT rate (it isn't on CoinGecko); every other symbol comes from
+// PriceService. Fields are left nil when no price is available so the UI shows
+// "—" rather than a misleading $0 / +0.00%.
 func (h *Handlers) enrichSpotListings(rows []models.SpotListing) []spotListingResponse {
 	seen := map[string]struct{}{}
 	for _, r := range rows {
-		seen[strings.ToUpper(r.BaseSymbol)] = struct{}{}
+		sym := strings.ToUpper(r.BaseSymbol)
+		if sym != "MCGP" { // MCGP isn't a CoinGecko symbol; priced separately
+			seen[sym] = struct{}{}
+		}
 	}
 	symbols := make([]string, 0, len(seen))
 	for s := range seen {
@@ -56,10 +86,21 @@ func (h *Handlers) enrichSpotListings(rows []models.SpotListing) []spotListingRe
 	if h.PriceService != nil && len(symbols) > 0 {
 		prices, _ = h.PriceService.GetPrices(symbols) // best-effort; nil map on error
 	}
+
+	// Resolve MCGP once (only if any row needs it), not per row.
+	var mcgp *float64
+	mcgpResolved := false
+
 	out := make([]spotListingResponse, 0, len(rows))
 	for _, r := range rows {
 		resp := spotListingResponse{SpotListing: r}
-		if pd, ok := prices[strings.ToUpper(r.BaseSymbol)]; ok {
+		if strings.ToUpper(r.BaseSymbol) == "MCGP" {
+			if !mcgpResolved {
+				mcgp = h.mcgpUsdPrice()
+				mcgpResolved = true
+			}
+			resp.Price = mcgp // no 24h change for an admin-set OTC price
+		} else if pd, ok := prices[strings.ToUpper(r.BaseSymbol)]; ok {
 			price, change := pd.USD, pd.USD24hChange
 			resp.Price = &price
 			resp.Change24h = &change

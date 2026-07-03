@@ -25,6 +25,10 @@ type Handlers struct {
 	// wired from main.go. Signup uses it to run the bounded velocity heuristic on
 	// the referrer (best-effort, advisory) when a referred user joins.
 	EligibilityService *services.RewardEligibilityService
+
+	// MCGPSwap is the Contract B swap service (optional/nil-safe; wired from
+	// main.go). Spot-listing reads use its on-chain quote for MCGP's price.
+	MCGPSwap *services.MCGPSwapService
 }
 
 // NewHandlers creates a new Handlers instance with the given services.
