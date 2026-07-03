@@ -25,7 +25,7 @@ export default function McgpLayout() {
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ title: 'MCGP' }} />
       <Stack.Screen name="buy" options={{ title: 'Buy MCGP' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell / Redeem' }} />
+      <Stack.Screen name="sell" options={{ title: 'Sell MCGP' }} />
       <Stack.Screen name="pay" options={{ title: 'Pay with MCGP' }} />
     </Stack>
   );

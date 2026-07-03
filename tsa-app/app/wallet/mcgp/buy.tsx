@@ -9,11 +9,12 @@ import { router } from 'expo-router';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
-  AmountInput, Button, Card, Divider, Icon, Spinner, SummaryCard, SummaryRow, Text,
+  AmountInput, Button, Card, Divider, Icon, PressableScale, Spinner, SummaryCard, SummaryRow, Text,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getMcgpQuote } from '@/services/mcgpSwapApi';
 import { executeBuy } from '@/services/mcgpFlow';
+import { useMcgpBalances } from '@/hooks/useMcgpBalances';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
@@ -22,12 +23,35 @@ const fromUsdc = (b: string) => Number(ethers.formatUnits(b || '0', 6)).toFixed(
 
 export default function BuyMcgp() {
   const { colors, spacing } = useTheme();
+  const { usdc, mcgpPremium } = useMcgpBalances();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [usdcCost, setUsdcCost] = useState('0'); // base units (6dp)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showAuth, setShowAuth] = useState(false);
+
+  // Max buy = how much MCGP the USDC balance affords, from a 1-MCGP quote.
+  const handleMax = async () => {
+    setError('');
+    if (usdc <= 0) {
+      setError('No USDC balance');
+      return;
+    }
+    try {
+      setLoading(true);
+      const q = await getMcgpQuote('premiumBuy', toBase('1', 18));
+      if (!q.success || !q.data) throw new Error(q.message || 'Quote failed');
+      const perMcgp = Number(ethers.formatUnits(q.data.usdcAmount, 6)); // USDC for 1 MCGP
+      if (perMcgp <= 0) throw new Error('No price available');
+      const maxMcgp = Math.floor((usdc / perMcgp) * 1e6) / 1e6; // floor to 6dp
+      setAmount(String(maxMcgp));
+    } catch (e: any) {
+      setError(e.message || 'Could not compute max');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const mcgpBase = (() => {
     try {
@@ -141,6 +165,14 @@ export default function BuyMcgp() {
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text variant="bodySm" color="textSecondary">
+            Balance: ${usdc.toFixed(2)} USDC · {mcgpPremium.toLocaleString(undefined, { maximumFractionDigits: 2 })} MCGP
+          </Text>
+          <PressableScale onPress={handleMax} accessibilityLabel="Use max">
+            <Text variant="bodySm" weight="700" color="accent">Max</Text>
+          </PressableScale>
+        </View>
         <AmountInput
           label="Amount to buy"
           value={amount}

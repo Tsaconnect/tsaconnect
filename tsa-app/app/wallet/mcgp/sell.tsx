@@ -1,10 +1,7 @@
 // app/wallet/mcgp/sell.tsx
 //
-// Three "reduce a balance" actions in one screen:
-//   • Sell premium  — premium MCGP -> USDC at the premium sell price.
-//   • Redeem legacy — pre-launch legacy MCGP -> USDC at the legacy price
-//                     (redeem-only; capped at the snapshot entitlement).
-//   • Withdraw      — premium MCGP -> your wallet (becomes non-spendable).
+// Sell spendable premium MCGP back for USDC at the premium sell price.
+// (Redeem-legacy and withdraw-to-wallet are not offered.)
 import React, { useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -12,27 +9,21 @@ import { router } from 'expo-router';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
-  AmountInput, Button, Card, Divider, Icon, SegmentedControl, Spinner,
+  AmountInput, Button, Card, Divider, Icon, PressableScale, Spinner,
   SummaryCard, SummaryRow, Text,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getMcgpQuote } from '@/services/mcgpSwapApi';
-import { executeSellPremium, executeLegacyRedeem, executeWithdraw } from '@/services/mcgpFlow';
+import { executeSellPremium } from '@/services/mcgpFlow';
+import { useMcgpBalances } from '@/hooks/useMcgpBalances';
 
-type Mode = 'premium' | 'legacy' | 'withdraw';
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
 const fromUsdc = (b: string) => Number(ethers.formatUnits(b || '0', 6)).toFixed(2);
 
-const MODES: { key: Mode; label: string }[] = [
-  { key: 'premium', label: 'Sell' },
-  { key: 'legacy', label: 'Redeem' },
-  { key: 'withdraw', label: 'Withdraw' },
-];
-
 export default function SellMcgp() {
   const { colors, spacing } = useTheme();
-  const [mode, setMode] = useState<Mode>('premium');
+  const { usdc, mcgpPremium, mcgpPremiumStr } = useMcgpBalances();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [usdcOut, setUsdcOut] = useState('0');
@@ -56,13 +47,9 @@ export default function SellMcgp() {
     }
     try {
       setLoading(true);
-      if (mode === 'premium' || mode === 'legacy') {
-        const q = await getMcgpQuote(mode === 'premium' ? 'premiumSell' : 'legacySell', base);
-        if (!q.success || !q.data) throw new Error(q.message || 'Quote failed');
-        setUsdcOut(q.data.usdcAmount);
-      } else {
-        setUsdcOut('0');
-      }
+      const q = await getMcgpQuote('premiumSell', base);
+      if (!q.success || !q.data) throw new Error(q.message || 'Quote failed');
+      setUsdcOut(q.data.usdcAmount);
       setScreen('confirm');
     } catch (e: any) {
       setError(e.message || 'Could not get a quote');
@@ -76,17 +63,13 @@ export default function SellMcgp() {
     setScreen('sending');
     setError('');
     try {
-      if (mode === 'premium') await executeSellPremium(base, usdcOut);
-      else if (mode === 'legacy') await executeLegacyRedeem(base, usdcOut);
-      else await executeWithdraw(base);
+      await executeSellPremium(base, usdcOut);
       setScreen('success');
     } catch (e: any) {
       setError(e.message || 'Transaction failed');
       setScreen('failure');
     }
   };
-
-  const verb = mode === 'withdraw' ? 'Withdraw' : mode === 'legacy' ? 'Redeem' : 'Sell';
 
   if (screen === 'sending') {
     return (
@@ -105,7 +88,7 @@ export default function SellMcgp() {
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: colors.background }}>
         <Icon name={ok ? 'checkCircle' : 'closeCircle'} size={64} color={ok ? colors.success : colors.danger} />
         <Text variant="title1" weight="700" style={{ marginTop: spacing.lg, color: colors.textPrimary }}>
-          {ok ? 'Done' : `${verb} failed`}
+          {ok ? 'Done' : 'Sell failed'}
         </Text>
         {!ok ? (
           <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.danger, textAlign: 'center' }}>
@@ -129,28 +112,18 @@ export default function SellMcgp() {
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
           <Card>
             <SummaryCard>
-              <SummaryRow label={mode === 'withdraw' ? 'Withdraw' : 'You give'} value={`${amount} MCGP`} />
-              {mode !== 'withdraw' ? (
-                <>
-                  <Divider spacing="xs" />
-                  <SummaryRow label="You receive" value={`$${fromUsdc(usdcOut)} USDC`} />
-                </>
-              ) : (
-                <SummaryRow label="To" value="Your wallet (non-spendable)" />
-              )}
+              <SummaryRow label="You give" value={`${amount} MCGP`} />
+              <Divider spacing="xs" />
+              <SummaryRow label="You receive" value={`$${fromUsdc(usdcOut)} USDC`} />
             </SummaryCard>
           </Card>
-          <Button title={verb} onPress={() => setShowAuth(true)} />
+          <Button title="Sell" onPress={() => setShowAuth(true)} />
           <Button title="Back" variant="ghost" onPress={() => setScreen('form')} />
         </ScrollView>
         <AuthorizationModal
           visible={showAuth}
-          title={`Authorize ${verb.toLowerCase()}`}
-          description={
-            mode === 'withdraw'
-              ? `Withdraw ${amount} MCGP to your wallet`
-              : `${verb} ${amount} MCGP for $${fromUsdc(usdcOut)} USDC`
-          }
+          title="Authorize sell"
+          description={`Sell ${amount} MCGP for $${fromUsdc(usdcOut)} USDC`}
           onAuthorized={handleGo}
           onCancel={() => setShowAuth(false)}
         />
@@ -162,14 +135,17 @@ export default function SellMcgp() {
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
-        <SegmentedControl segments={MODES} value={mode} onChange={(m) => { setMode(m); setError(''); }} />
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          {mode === 'premium'
-            ? 'Sell spendable premium MCGP back for USDC.'
-            : mode === 'legacy'
-              ? 'Redeem your pre-launch legacy MCGP for USDC (capped at your entitlement).'
-              : 'Move premium MCGP to your wallet. Withdrawn MCGP is no longer spendable in the app.'}
+          Sell spendable premium MCGP back for USDC.
         </Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text variant="bodySm" color="textSecondary">
+            Balance: {mcgpPremium.toLocaleString(undefined, { maximumFractionDigits: 2 })} MCGP · ${usdc.toFixed(2)} USDC
+          </Text>
+          <PressableScale onPress={() => { setAmount(mcgpPremiumStr); setError(''); }} accessibilityLabel="Use max">
+            <Text variant="bodySm" weight="700" color="accent">Max</Text>
+          </PressableScale>
+        </View>
         <AmountInput
           label="Amount"
           value={amount}
