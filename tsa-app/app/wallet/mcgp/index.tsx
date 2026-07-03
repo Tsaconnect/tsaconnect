@@ -1,7 +1,6 @@
 // app/wallet/mcgp/index.tsx
 //
-// MCGP hub: shows the two entitlement buckets (spendable PREMIUM balance and the
-// REDEEM-ONLY legacy entitlement) and routes to buy / sell-redeem / pay.
+// MCGP hub: shows the spendable PREMIUM balance and routes to buy / sell / pay.
 import React, { useCallback, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -41,8 +40,6 @@ export default function McgpHub() {
       load();
     }, [load]),
   );
-
-  const hasLegacy = !!bal && BigInt(bal.legacyRemaining || '0') > 0n;
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
@@ -87,12 +84,6 @@ export default function McgpHub() {
             <SummaryRow label="Legacy redeemable" value={`${fmtMcgp(bal?.legacyRemaining)} MCGP`} />
             <SummaryRow label="Legacy entitlement" value={`${fmtMcgp(bal?.legacyEntitlement)} MCGP`} />
           </SummaryCard>
-          {hasLegacy ? (
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-              You hold legacy MCGP from before launch. It isn&apos;t spendable, but you can redeem it
-              for USDC at the legacy price under Sell → Redeem legacy.
-            </Text>
-          ) : null}
         </Card>
 
         {loading ? <Spinner /> : null}
