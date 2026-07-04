@@ -6,11 +6,12 @@
 // inside each screen, not here, so a clear "not authorized" UI can render.
 import React from 'react';
 import { Stack } from 'expo-router';
-import { defaultScreenOptions } from '../../constants/navigation';
+import { useDefaultScreenOptions } from '../../constants/navigation';
 
 const AdminLayout = () => {
+  const screenOptions = useDefaultScreenOptions();
   return (
-    <Stack screenOptions={defaultScreenOptions}>
+    <Stack screenOptions={screenOptions}>
       <Stack.Screen name="p2p-disputes" options={{ title: 'P2P Disputes' }} />
       <Stack.Screen
         name="p2p-disputes/[tradeId]"

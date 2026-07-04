@@ -1,9 +1,10 @@
 import { Stack } from "expo-router";
-import { defaultScreenOptions } from "../../constants/navigation";
+import { useDefaultScreenOptions } from "../../constants/navigation";
 
 const CategoryLayout = () => {
+  const screenOptions = useDefaultScreenOptions();
   return (
-    <Stack screenOptions={defaultScreenOptions}>
+    <Stack screenOptions={screenOptions}>
       <Stack.Screen name="add" options={{ title: "Add Category" }} />
       <Stack.Screen name="edit" options={{ title: "Edit Category" }} />
     </Stack>
