@@ -284,9 +284,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.bookingRules = policies.bookingRules;
       if (operatingCompany) profile.operatingCompany = operatingCompany;
     }
-    if (isContact || isBooking) {
-      if (serviceAddress) profile.serviceAddress = serviceAddress;
-    }
+    if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
 
     if (Object.keys(profile).length > 0) {
@@ -321,8 +319,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       }
     }
 
-    // Availability windows (order + booking).
-    if ((isOrder || isBooking) && availability.length > 0) {
+    // Availability windows (contact + order + booking).
+    if (availability.length > 0) {
       await replaceServiceAvailability(productId, availability);
     }
   };
@@ -768,6 +766,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                     "Call-out fee ($)",
                     "Mobilisation/transport by buyer area. All optional — blank = free."
                   )}
+
+                  {sectionTitle("Available days & hours")}
+                  <AvailabilityEditor windows={availability} onChange={setAvailability} />
+
                   {renderCoverage(true)}
                 </>
               )}
@@ -786,7 +788,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                   {sectionTitle("Operating days & hours")}
                   <AvailabilityEditor windows={availability} onChange={setAvailability} />
 
-                  {renderCoverage(false)}
+                  {renderCoverage(true)}
                 </>
               )}
 
