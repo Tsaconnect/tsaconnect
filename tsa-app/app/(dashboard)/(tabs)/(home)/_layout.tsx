@@ -1,11 +1,12 @@
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Stack } from "expo-router";
-import { defaultScreenOptions } from "../../../../constants/navigation";
+import { useDefaultScreenOptions } from "../../../../constants/navigation";
 
 export default function Layout() {
+  const screenOptions = useDefaultScreenOptions();
   return (
     <GestureHandlerRootView>
-      <Stack screenOptions={defaultScreenOptions}>
+      <Stack screenOptions={screenOptions}>
         <Stack.Screen
           name="home"
           options={{ headerShown: false }}

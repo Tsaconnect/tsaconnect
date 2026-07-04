@@ -9,12 +9,13 @@ export const MaterialTopTabs = withLayoutContext(Navigator);
 
 import { Stack } from "expo-router";
 import { useAuth } from "../../../../AuthContext/AuthContext";
-import { defaultScreenOptions } from "../../../../constants/navigation";
+import { useDefaultScreenOptions } from "../../../../constants/navigation";
 
 export default function Layout() {
   const { appService } = useAuth();
+  const screenOptions = useDefaultScreenOptions();
   return (
-    <Stack screenOptions={defaultScreenOptions}>
+    <Stack screenOptions={screenOptions}>
       <Stack.Screen name="serviceshome" options={{ headerShown: false }} />
       <Stack.Screen name="serviceaction" options={{ title: `${appService}` }} />
     </Stack>

@@ -1,7 +1,7 @@
 import React, { useContext } from "react";
 import { Stack } from "expo-router";
 import { AppContext } from "../../AuthContext/AuthContext";
-import { defaultScreenOptions } from "../../constants/navigation";
+import { useDefaultScreenOptions } from "../../constants/navigation";
 
 // Avoid double-suffixing titles like "Car rental services Services" when the
 // category name already ends with "service"/"services".
@@ -14,8 +14,9 @@ function categoryTitle(category: string | undefined): string {
 
 const Layout = () => {
   const { category } = useContext(AppContext);
+  const screenOptions = useDefaultScreenOptions();
   return (
-    <Stack screenOptions={defaultScreenOptions}>
+    <Stack screenOptions={screenOptions}>
       <Stack.Screen
         name="categoryservice"
         options={{ title: categoryTitle(category) }}

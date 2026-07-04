@@ -1,9 +1,10 @@
 import { Stack } from "expo-router";
-import { defaultScreenOptions } from "../../constants/navigation";
+import { useDefaultScreenOptions } from "../../constants/navigation";
 
 const ProfileLayout = () => {
+  const screenOptions = useDefaultScreenOptions();
   return (
-    <Stack screenOptions={defaultScreenOptions}>
+    <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="edit" options={{ title: "Edit Profile" }} />
       <Stack.Screen name="edit-advert" options={{ title: "Edit Advert" }} />
