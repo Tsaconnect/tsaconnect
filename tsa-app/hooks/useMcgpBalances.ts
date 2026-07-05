@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import { getMcgpBalance } from '@/services/mcgpSwapApi';
-import { getWalletBalances } from '@/services/walletApi';
+import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
 import { getNetwork } from '@/hooks/useNetwork';
 
 export interface McgpBalancesState {
@@ -40,8 +40,13 @@ export function useMcgpBalances(): McgpBalancesState {
         setMcgpPremium(0);
       }
     }
-    if (balRes.success && Array.isArray(balRes.data)) {
-      const u = balRes.data.find((b) => b.symbol?.toUpperCase() === 'USDC');
+    if (balRes.success && balRes.data) {
+      // /wallet/balances returns { balances: { <chain>: { <symbol>: {...} } } },
+      // not a flat array — normalize before reading Sonic USDC.
+      const flat = normalizeWalletBalances(balRes.data, 'sonic');
+      const u = flat.find(
+        (b) => b.symbol?.toUpperCase() === 'USDC' && b.chainKey === 'sonic',
+      );
       setUsdc(u ? parseFloat(u.balance || '0') || 0 : 0);
     }
     setLoading(false);
