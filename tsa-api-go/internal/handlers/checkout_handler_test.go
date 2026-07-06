@@ -149,6 +149,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			menu_selections TEXT,
 			selected_attributes TEXT,
 			purchase_note TEXT,
+			service_answers TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
@@ -227,6 +228,13 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			reschedule_policy TEXT,
 			refund_policy TEXT,
 			booking_rules TEXT,
+			booking_type TEXT DEFAULT 'instant',
+			pricing_method TEXT DEFAULT 'fixed',
+			workflow TEXT DEFAULT 'auto_accept',
+			payment_timing TEXT DEFAULT 'pay_before',
+			deposit_percent INTEGER DEFAULT 0,
+			booking_fee_usd REAL DEFAULT 0,
+			field_config TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,

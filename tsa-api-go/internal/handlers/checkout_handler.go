@@ -989,6 +989,10 @@ type createServiceOrderRequest struct {
 	ServiceTier    string              `json:"serviceTier"`
 	MenuSelections []menuLineRequest   `json:"menuSelections"`
 	BookingSlot    *bookingSlotRequest `json:"bookingSlot"`
+	// Answers are the buyer's auto-generated booking-form answers, keyed by the
+	// service's FieldConfig field keys (unified booking engine). Validated against
+	// the config and stored on the order for the merchant to fulfil.
+	Answers map[string]interface{} `json:"answers"`
 }
 
 // CreateServiceOrder creates a SINGLE service order directly (no cart) for the
@@ -1065,6 +1069,14 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		return
 	}
 
+	// Validate the auto-generated booking-form answers against the merchant's
+	// field config (unified booking engine). No config → no validation (legacy).
+	if err := models.ValidateAnswers(profile.GetFieldConfig(), req.Answers); err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	origin := resolveShippingOrigin(&product, &seller)
 	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)
 
@@ -1124,6 +1136,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		UpdatedAt:       time.Now(),
 	}
 	order.SetMenuSelections(menuSel)
+	order.SetServiceAnswers(req.Answers)
 
 	if err := tx.Create(&order).Error; err != nil {
 		tx.Rollback()

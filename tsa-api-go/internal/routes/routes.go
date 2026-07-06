@@ -457,7 +457,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// public; writes are gated by auth and the handler's owner check.
 	{
 		svc := api.Group("/services")
+		svc.GET("/booking-catalog", h.GetBookingCatalog)
 		svc.GET("/:id/profile", h.GetServiceProfile)
+		svc.GET("/:id/form-schema", h.GetBookingFormSchema)
 		svc.GET("/:id/menu", h.ListServiceMenu)
 		svc.GET("/:id/availability", h.GetServiceAvailability)
 		svc.GET("/:id/slots", h.GetServiceSlots)
