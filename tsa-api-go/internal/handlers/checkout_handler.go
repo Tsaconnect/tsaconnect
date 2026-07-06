@@ -398,14 +398,7 @@ func resolveServiceTypeAndProfile(tx *gorm.DB, product *models.Product) (string,
 			log.Printf("service pricing: category %s load failed for service %s: %v", *product.CategoryID, product.ID, err)
 		}
 	}
-	serviceType := cat.ServiceType
-	if !models.ValidServiceType(serviceType) {
-		if cat.ServiceFeeMode == models.ServiceFeeModeBooking {
-			serviceType = models.ServiceTypeBooking
-		} else {
-			serviceType = models.ServiceTypeContact
-		}
-	}
+	serviceType := models.EffectiveServiceType(cat)
 	var profile models.ServiceProfile
 	tx.Where("product_id = ?", product.ID).First(&profile)
 	return serviceType, profile
@@ -996,6 +989,10 @@ type createServiceOrderRequest struct {
 	ServiceTier    string              `json:"serviceTier"`
 	MenuSelections []menuLineRequest   `json:"menuSelections"`
 	BookingSlot    *bookingSlotRequest `json:"bookingSlot"`
+	// Answers are the buyer's auto-generated booking-form answers, keyed by the
+	// service's FieldConfig field keys (unified booking engine). Validated against
+	// the config and stored on the order for the merchant to fulfil.
+	Answers map[string]interface{} `json:"answers"`
 }
 
 // CreateServiceOrder creates a SINGLE service order directly (no cart) for the
@@ -1072,29 +1069,72 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		return
 	}
 
-	origin := resolveShippingOrigin(&product, &seller)
+	order, errMsg, status := ch.placeServiceOrder(
+		tx, user, &seller, &product, serviceType, &profile,
+		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
+		req.MenuSelections, req.BookingSlot, req.Answers,
+	)
+	if errMsg != "" {
+		tx.Rollback()
+		utils.ErrorResponse(c, status, errMsg)
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
+
+	shortID := order.ID.String()[:8]
+	ch.EventBus.Publish(events.Event{
+		Type: events.OrderPlaced, UserID: order.BuyerID, Title: "Order Placed",
+		Message: fmt.Sprintf("Your service order #%s has been placed. Complete payment to proceed.", shortID),
+		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "buyer"},
+	})
+	ch.EventBus.Publish(events.Event{
+		Type: events.OrderPlaced, UserID: order.SellerID, Title: "New Service Order",
+		Message: fmt.Sprintf("You have a new service order #%s. Awaiting buyer payment.", shortID),
+		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "seller"},
+	})
+
+	utils.SuccessResponse(c, http.StatusCreated, "Order created successfully", gin.H{"orders": []models.Order{*order}})
+}
+
+// placeServiceOrder runs the service pricing → on-chain amount conversion →
+// Order (+ optional ServiceBooking) creation for a single service inside an open
+// transaction, and returns the created order. It does NOT commit or publish
+// events — the caller owns those. Shared by the inline "Pay now" checkout
+// (CreateServiceOrder) and the pay-a-booking-request conversion so the money
+// path lives in one place. On failure it returns a non-empty errMsg + HTTP
+// status and leaves the tx open for the caller to roll back.
+func (ch *CheckoutHandler) placeServiceOrder(
+	tx *gorm.DB, buyer, seller *models.User, product *models.Product,
+	serviceType string, profile *models.ServiceProfile,
+	token, serviceTier, buyerCity, buyerState, buyerCountry string,
+	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
+) (*models.Order, string, int) {
+	// Validate the auto-generated booking-form answers against the merchant's
+	// field config (unified booking engine). No config → no validation (legacy).
+	if err := models.ValidateAnswers(profile.GetFieldConfig(), answers); err != nil {
+		return nil, err.Error(), http.StatusBadRequest
+	}
+
+	origin := resolveShippingOrigin(product, seller)
 	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)
 
 	priceUSD, calloutUSD, zone, menuSel, booking, perr := ch.resolveServicePricing(
-		tx, user.ID, &product, serviceType, &profile, detectedZone, req.ServiceTier, req.MenuSelections, req.BookingSlot,
+		tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
 	)
 	if perr != "" {
-		tx.Rollback()
-		utils.ErrorResponse(c, http.StatusBadRequest, perr)
-		return
+		return nil, perr, http.StatusBadRequest
 	}
 
 	decimals := tokenDecimals(token)
 	productAmountWei, shippingAmountWei, err := ch.serviceAmountsToWei(priceUSD, calloutUSD, token, decimals)
 	if err != nil {
-		tx.Rollback()
-		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err.Error(), http.StatusInternalServerError
 	}
 	if productAmountWei == nil || productAmountWei.Sign() <= 0 {
-		tx.Rollback()
-		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token))
-		return
+		return nil, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token), http.StatusBadRequest
 	}
 
 	platformFeeWei := CalculateServiceFee(productAmountWei, token)
@@ -1102,16 +1142,16 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	totalAmountWei.Add(totalAmountWei, platformFeeWei)
 
 	buyerUpline := ""
-	if user.ReferredBy != nil {
+	if buyer.ReferredBy != nil {
 		var referrer models.User
-		if err := tx.First(&referrer, "id = ?", *user.ReferredBy).Error; err == nil {
+		if err := tx.First(&referrer, "id = ?", *buyer.ReferredBy).Error; err == nil {
 			buyerUpline = referrer.WalletAddress
 		}
 	}
 
 	order := models.Order{
 		ID:              uuid.New(),
-		BuyerID:         user.ID,
+		BuyerID:         buyer.ID,
 		SellerID:        product.UserID,
 		ProductID:       product.ID,
 		Kind:            models.OrderKindService,
@@ -1131,40 +1171,20 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		UpdatedAt:       time.Now(),
 	}
 	order.SetMenuSelections(menuSel)
+	order.SetServiceAnswers(answers)
 
 	if err := tx.Create(&order).Error; err != nil {
-		tx.Rollback()
 		log.Printf("Failed to create service order: %v", err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
-		return
+		return nil, "Failed to create order", http.StatusInternalServerError
 	}
 	if booking != nil {
 		booking.OrderID = order.ID
 		if err := tx.Create(booking).Error; err != nil {
-			tx.Rollback()
 			log.Printf("Failed to create service booking: %v", err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reserve slot")
-			return
+			return nil, "Failed to reserve slot", http.StatusInternalServerError
 		}
 	}
-	if err := tx.Commit().Error; err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
-		return
-	}
-
-	shortID := order.ID.String()[:8]
-	ch.EventBus.Publish(events.Event{
-		Type: events.OrderPlaced, UserID: order.BuyerID, Title: "Order Placed",
-		Message: fmt.Sprintf("Your service order #%s has been placed. Complete payment to proceed.", shortID),
-		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "buyer"},
-	})
-	ch.EventBus.Publish(events.Event{
-		Type: events.OrderPlaced, UserID: order.SellerID, Title: "New Service Order",
-		Message: fmt.Sprintf("You have a new service order #%s. Awaiting buyer payment.", shortID),
-		Data:    map[string]interface{}{"orderId": order.ID.String(), "status": order.Status, "role": "seller"},
-	})
-
-	utils.SuccessResponse(c, http.StatusCreated, "Order created successfully", gin.H{"orders": []models.Order{order}})
+	return &order, "", 0
 }
 
 // serviceAmountsToWei converts the USD price/call-out to on-chain wei for the
