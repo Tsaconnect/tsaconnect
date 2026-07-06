@@ -28,6 +28,7 @@ One atomic refactor: trim the enums everywhere they're referenced (model, handle
 - Modify: `internal/models/booking_request.go` (drop `QuoteExpiresAt`, `quoted` status)
 - Modify: `internal/handlers/service_profile_handler.go` (`serviceProfileRequest`, `UpsertServiceProfile`, `GetServiceProfile`)
 - Modify: `internal/handlers/booking_form_handler.go` (`bookingFormSchema`, `GetBookingFormSchema`)
+- Modify: `internal/handlers/booking_request_handler.go` (`PayBookingRequest` atomic-claim references the deleted `BookingRequestQuoted` — must be updated in this task or the package won't compile)
 - Modify: `internal/handlers/booking_request_handler_test.go` (`writeBookingProfile` helper, constant renames, existing tests)
 - Modify: `internal/handlers/booking_form_handler_test.go` (`writeFieldConfig` helper)
 - Create: `internal/models/service_profile_test.go`
@@ -133,6 +134,18 @@ func ValidNextBookingRequestStatuses(current string) []string {
 }
 ```
 
+- [ ] **Step 4b: Fix the live `BookingRequestQuoted` reference in `booking_request_handler.go`**
+
+`PayBookingRequest`'s atomic status-claim (currently line 361) reads `[]string{models.BookingRequestApproved, models.BookingRequestQuoted}`. `BookingRequestQuoted` is deleted in Step 4, so this line must change or the `internal/handlers` package won't compile. With `quoted` gone, `approved` is the only payable state:
+
+```go
+	claim := tx.Model(&models.BookingRequest{}).
+		Where("id = ? AND status = ?", r.ID, models.BookingRequestApproved).
+		Updates(map[string]interface{}{
+```
+
+(Change only the `Where(...)` line — the `IN ?` + two-element slice becomes `= ?` + the single `BookingRequestApproved`. Leave the rest of the `Updates(...)` call unchanged.)
+
 - [ ] **Step 5: Edit `service_profile_handler.go`**
 
 In `serviceProfileRequest`, remove `Workflow`, `PaymentTiming`, `DepositPercent` (keep `BookingType`, `PricingMethod`, `BookingFeeUSD`, `FieldConfig`).
@@ -180,7 +193,10 @@ In `booking_form_handler_test.go`, `writeFieldConfig` builds a `models.ServicePr
 
 In `booking_request_handler_test.go`:
 - `writeBookingProfile(t, db, productID, bookingType string)` — change its signature to add a pricing method: `writeBookingProfile(t, db, productID, bookingType, pricingMethod string)`, drop the `Workflow`/`PaymentTiming` fields from the literal, and set `PricingMethod: pricingMethod`.
-- Update its callers: `TestBookingRequestLifecycle` and `TestBookingRequestReject` pass `models.PricingMethodFixed`.
+- Update **all three** callers to pass a pricing method (the new arity is required for every call — a missed caller fails the package compile):
+  - `TestBookingRequestLifecycle` → `models.PricingMethodFixed`
+  - `TestBookingRequestReject` → `models.PricingMethodFixed`
+  - `TestCreateBookingRequest_RejectsInstant` (currently `writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant)`) → `writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant, models.PricingMethodFixed)`
 - Replace every `models.BookingTypeRequestApproval` with `models.BookingTypeRequest` (in `TestBookingRequestLifecycle`, `TestBookingRequestReject`, `TestUpsertServiceProfile_RejectsSlottedRequestMode`).
 
 - [ ] **Step 8: Add the invalid-combo handler test**
@@ -223,7 +239,7 @@ Expected: build clean, vet clean, all listed tests PASS (validators pass; existi
 - [ ] **Step 10: Commit**
 
 ```bash
-git add internal/models/service_profile.go internal/models/booking_request.go internal/models/service_profile_test.go internal/handlers/service_profile_handler.go internal/handlers/booking_form_handler.go internal/handlers/booking_request_handler_test.go internal/handlers/booking_form_handler_test.go
+git add internal/models/service_profile.go internal/models/booking_request.go internal/models/service_profile_test.go internal/handlers/service_profile_handler.go internal/handlers/booking_form_handler.go internal/handlers/booking_request_handler.go internal/handlers/booking_request_handler_test.go internal/handlers/booking_form_handler_test.go
 git commit -m "refactor(service): reduce booking-engine config to two dimensions"
 ```
 
@@ -413,7 +429,7 @@ Remove the `Workflow` and `PaymentTiming` type exports. In `ServiceProfile`, rem
 
 - [ ] **Step 2: Edit `bookingRequestApi.ts`**
 
-Add `quotedAmountUsd?: number;` to the `BookingRequest` interface. Replace `approveBookingRequest`:
+Add `quotedAmountUsd?: number;` to the `BookingRequest` interface. Remove `| 'quoted'` from the `BookingRequestStatus` union (the `quoted` state was dropped server-side). Note: this makes `STATUS_TONE` in `booking-requests.tsx` a transient `tsc` error until Task 7 removes its `quoted` entry — expected, like the other consumer errors below. Replace `approveBookingRequest`:
 
 ```ts
 export async function approveBookingRequest(
@@ -561,9 +577,9 @@ git commit -m "refactor(service): buyer request path uses reduced booking enum"
 - Consumes: `approveBookingRequest(reqId, amountUsd?)`, `BookingRequest.quotedAmountUsd` (Task 4).
 - Produces: buyer sees the quoted price above Pay on an approved row; seller enters an optional price when approving (ignored server-side for fixed listings).
 
-- [ ] **Step 1: Add price-draft state + Input import**
+- [ ] **Step 1: Add price-draft state + Input import; drop the dead `quoted` tone**
 
-Import `Input` from `@/components/ui`. Add near the other hooks: `const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});`.
+Import `Input` from `@/components/ui`. Add near the other hooks: `const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});`. Remove the `quoted: { label: 'Quoted', tone: 'info' },` entry from the `STATUS_TONE` map (the `quoted` status was dropped from the `BookingRequestStatus` union in Task 4, so this key no longer type-checks).
 
 - [ ] **Step 2: Update `handleApprove`**
 
@@ -685,5 +701,7 @@ gh pr create --base main --title "Simplify service model: two dimensions + price
 
 - **Do not** re-introduce `Workflow`, `PaymentTiming`, `DepositPercent`, `starting_from`, `dynamic`, `quote_before_payment`, `request_approval`, `quote_later`, `BookingRequestQuoted`, or `QuoteExpiresAt` anywhere — they are deliberately deleted in Task 1.
 - The `booking_requests` / `service_profiles` test DDL keeps the now-orphan columns (`workflow`, `payment_timing`, `deposit_percent`, `quote_expires_at`); leave them — extra columns are harmless and removing them is unnecessary churn.
-- Task 1 is intentionally the largest — it's a single atomic enum refactor that must land green. Do not split it; a partial removal leaves `internal/handlers` uncompilable.
+- Task 1 is intentionally the largest — it's a single atomic enum refactor that must land green. Do not split it; a partial removal leaves `internal/handlers` uncompilable. It edits **five** source files (`service_profile.go`, `booking_request.go`, `service_profile_handler.go`, `booking_form_handler.go`, `booking_request_handler.go`) plus three test files — every one of them references a removed symbol.
+- **Intentional spec/plan divergence:** the spec lists `BookingConfigBuilder.tsx` among touched components, but the pricing/engagement toggles go in `AddService.tsx` (which already hosts the booking-workflow `SegmentedControl`); `BookingConfigBuilder` remains the form-field builder. This is deliberate, not an oversight.
+- **Baseline before starting:** run `npx tsc --noEmit -p tsconfig.json 2>&1 | grep -c 'error TS'` from `tsa-app/` once at the start and record the number — the "≤ baseline" gate in Task 8 Step 2 anchors to that actual value (expected ~22, but confirm).
 - Out of scope (unchanged): slotted bookings remain instant-only (already guarded); native date/time picker; cancellation/refund enforcement.
