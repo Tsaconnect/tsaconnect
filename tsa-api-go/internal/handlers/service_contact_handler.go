@@ -62,6 +62,21 @@ type submitContactFeeRequest struct {
 	Token         string `json:"token"`
 }
 
+// contactFeeApplies reports whether the pay-to-unlock contact fee applies to a
+// service. Only "contact" services are gated; "order"/"booking" are fixed-price
+// and check out like products (no contact-reveal step). Resolves the type via
+// the service's category, reusing models.EffectiveServiceType so the rule lives
+// in one place (shared with the checkout pricing resolver).
+func contactFeeApplies(service *models.Product) bool {
+	var cat models.Category
+	if service.CategoryID != nil {
+		if err := config.DB.First(&cat, "id = ?", *service.CategoryID).Error; err != nil {
+			log.Printf("contact fee: category %s load failed for service %s: %v", *service.CategoryID, service.ID, err)
+		}
+	}
+	return models.EffectiveServiceType(cat) == models.ServiceTypeContact
+}
+
 // tokenSymbolFromAddress returns the token symbol for a known address, or empty string.
 func (h *ServiceContactHandler) tokenSymbolFromAddress(addr string) string {
 	lower := strings.ToLower(addr)
@@ -105,6 +120,11 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 
 	if service.Type != models.ProductTypeService {
 		utils.ErrorResponse(c, http.StatusBadRequest, "This listing is not a service")
+		return
+	}
+
+	if !contactFeeApplies(&service) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Contact fee does not apply to this service")
 		return
 	}
 
@@ -260,6 +280,16 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		} else {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
 		}
+		return
+	}
+
+	if service.Type != models.ProductTypeService {
+		utils.ErrorResponse(c, http.StatusBadRequest, "This listing is not a service")
+		return
+	}
+
+	if !contactFeeApplies(&service) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Contact fee does not apply to this service")
 		return
 	}
 
@@ -422,6 +452,18 @@ func (h *ServiceContactHandler) GetServiceContact(c *gin.Context) {
 				"email":   user.Email,
 				"address": user.Address,
 			},
+		})
+		return
+	}
+
+	// Order/booking services are fixed-price and check out like products — they
+	// have no pay-to-unlock contact fee. Report as ungated (paid, zero fee) so
+	// the buyer flow never hits the 402 path; provider contact stays hidden.
+	if !contactFeeApplies(&service) {
+		utils.SuccessResponse(c, http.StatusOK, "No contact fee for this service", gin.H{
+			"paid":      true,
+			"feeAmount": "0",
+			"contact":   nil,
 		})
 		return
 	}
