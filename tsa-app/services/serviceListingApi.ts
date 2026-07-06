@@ -13,10 +13,8 @@ export interface ApiResponse<T = any> {
 }
 
 // Unified booking-engine config dimensions (mirror the Go enums).
-export type BookingType = 'instant' | 'request_approval' | 'quote_before_payment';
-export type PricingMethod = 'fixed' | 'starting_from' | 'dynamic' | 'quote_later';
-export type Workflow = 'auto_accept' | 'manual_accept' | 'quote_required';
-export type PaymentTiming = 'pay_before' | 'pay_after' | 'deposit';
+export type BookingType = 'instant' | 'request';
+export type PricingMethod = 'fixed' | 'on_request';
 
 export type BookingFieldType =
   | 'location'
@@ -60,9 +58,6 @@ export interface ServiceProfile {
   // Booking-engine config (Phase 1: instant/fixed defaults).
   bookingType?: BookingType;
   pricingMethod?: PricingMethod;
-  workflow?: Workflow;
-  paymentTiming?: PaymentTiming;
-  depositPercent?: number;
   bookingFeeUsd?: number;
   fieldConfig?: BookingFieldConfig | null;
 }
@@ -73,8 +68,6 @@ export interface BookingFormSchema {
   serviceType: 'contact' | 'order' | 'booking';
   bookingType: BookingType;
   pricingMethod: PricingMethod;
-  workflow: Workflow;
-  paymentTiming: PaymentTiming;
   fields: BookingField[];
   policies: {
     cancellation?: string;
