@@ -249,6 +249,23 @@ func (ch *CheckoutHandler) ApproveBookingRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusConflict, fmt.Sprintf("Cannot approve a %s request", r.Status))
 		return
 	}
+
+	var body struct {
+		AmountUSD *float64 `json:"amountUsd"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	// Price-on-request listings require the provider to name a price at approval.
+	var profile models.ServiceProfile
+	config.DB.Where("product_id = ?", r.ProductID).First(&profile)
+	if profile.PricingMethod == models.PricingMethodOnRequest {
+		if body.AmountUSD == nil || *body.AmountUSD <= 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Set a price to approve this request")
+			return
+		}
+		r.QuotedAmountUSD = body.AmountUSD
+	}
+
 	r.Status = models.BookingRequestApproved
 	r.UpdatedAt = time.Now()
 	if err := config.DB.Save(r).Error; err != nil {
@@ -345,7 +362,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, user, &seller, &product, serviceType, &profile,
 		r.Token, r.ServiceTier, r.BuyerCity, r.BuyerState, r.BuyerCountry,
-		nil, nil, r.GetAnswers(), nil,
+		nil, nil, r.GetAnswers(), r.QuotedAmountUSD,
 	)
 	if errMsg != "" {
 		tx.Rollback()
