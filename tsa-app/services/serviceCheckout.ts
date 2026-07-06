@@ -34,6 +34,9 @@ export interface ServiceCheckoutParams {
   serviceTier?: string;
   menuSelections?: { itemId: string; quantity: number }[];
   bookingSlot?: { slotStart: string; partySize: number };
+  // Auto-generated booking-form answers (unified booking engine), keyed by the
+  // service's FieldConfig field keys.
+  answers?: Record<string, any>;
 }
 
 /** Human-friendly signing/broadcast error copy (mirrors the checkout screen). */
@@ -78,6 +81,7 @@ export async function runServiceCheckout(
     serviceTier: params.serviceTier,
     menuSelections: params.menuSelections?.length ? params.menuSelections : undefined,
     bookingSlot: params.bookingSlot,
+    answers: params.answers && Object.keys(params.answers).length ? params.answers : undefined,
   });
   if (!createResult.success || !createResult.data?.orders?.length) {
     throw new Error(createResult.message || 'Failed to create order');

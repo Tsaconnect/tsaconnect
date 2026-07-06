@@ -168,6 +168,7 @@ export async function createServiceOrder(params: {
   serviceTier?: string;
   menuSelections?: { itemId: string; quantity: number }[];
   bookingSlot?: { slotStart: string; partySize: number };
+  answers?: Record<string, any>;
 }): Promise<ApiResponse<{ orders: Order[] }>> {
   try {
     const headers = await getAuthHeaders();
