@@ -245,6 +245,34 @@ func TestUpsertServiceProfile_RejectsInstantOnRequest_PartialUpdate(t *testing.T
 	}
 }
 
+// A partial update that adds a slot duration to an existing request-mode listing
+// must be rejected on the merged values — a request booking can't reserve a slot,
+// so persisting request+slot would strand the buyer at the (slot-less) pay step.
+func TestUpsertServiceProfile_RejectsRequestPlusSlot_PartialUpdate(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"slotDurationMinutes": 60,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for partial update merging into request+slot, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // A price-on-request booking: approval must carry a price, which becomes the
 // escrowed amount the buyer pays.
 func TestBookingRequestOnRequestQuote(t *testing.T) {
