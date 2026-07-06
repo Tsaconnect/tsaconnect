@@ -216,6 +216,35 @@ func TestUpsertServiceProfile_RejectsInstantOnRequest(t *testing.T) {
 	}
 }
 
+// instant + on_request must also be rejected when it only arises after
+// merging a partial update onto an existing profile (preserve-existing
+// semantics on BookingType/PricingMethod means a body carrying only
+// bookingType can silently combine with a stored on_request pricing method).
+func TestUpsertServiceProfile_RejectsInstantOnRequest_PartialUpdate(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodOnRequest)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"bookingType": models.BookingTypeInstant,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for partial update merging into instant+on_request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // A price-on-request booking: approval must carry a price, which becomes the
 // escrowed amount the buyer pays.
 func TestBookingRequestOnRequestQuote(t *testing.T) {

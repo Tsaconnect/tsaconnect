@@ -96,13 +96,6 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Slot-based bookings must use instant booking; request/approval bookings cannot reserve a time slot")
 		return
 	}
-	// instant + on_request is invalid: you can't pay a listing price up front
-	// when the price is only named on approval.
-	if req.BookingType == models.BookingTypeInstant && req.PricingMethod == models.PricingMethodOnRequest {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Instant booking requires a fixed price; use 'request' for price-on-request")
-		return
-	}
-
 	var profile models.ServiceProfile
 	err = config.DB.Where("product_id = ?", productID).First(&profile).Error
 	profile.ProductID = productID
@@ -131,6 +124,13 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	}
 	if profile.PricingMethod == "" {
 		profile.PricingMethod = models.PricingMethodFixed
+	}
+	// Reject the invalid combination on the EFFECTIVE (merged) values, so a
+	// partial update can't slip instant+on_request through preserve-existing
+	// semantics.
+	if profile.BookingType == models.BookingTypeInstant && profile.PricingMethod == models.PricingMethodOnRequest {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Instant booking requires a fixed price; use 'request' for price-on-request")
+		return
 	}
 	profile.SetFieldConfig(req.FieldConfig)
 
