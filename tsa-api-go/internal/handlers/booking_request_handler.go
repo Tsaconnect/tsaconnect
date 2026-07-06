@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,7 +124,12 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Booking request submitted", request)
 }
 
-// ListBookingRequests handles GET /api/services/requests?role=buyer|seller&status=
+// ListBookingRequests handles GET /api/services/requests
+//
+// Query params:
+//   - role=buyer (default) | seller
+//   - status (optional) — filter by BookingRequest status
+//   - page (default 1), limit (default 20, capped at 100)
 func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -131,18 +137,46 @@ func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 		return
 	}
 	role := strings.ToLower(strings.TrimSpace(c.DefaultQuery("role", "buyer")))
-	q := config.DB.Model(&models.BookingRequest{})
-	if role == "seller" {
-		q = q.Where("seller_id = ?", user.ID)
-	} else {
-		q = q.Where("buyer_id = ?", user.ID)
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
 	}
-	if status := strings.TrimSpace(c.Query("status")); status != "" {
-		q = q.Where("status = ?", status)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	// scoped applies the role + optional status filters, so the count and the
+	// page query share identical conditions.
+	scoped := func() *gorm.DB {
+		q := config.DB.Model(&models.BookingRequest{})
+		if role == "seller" {
+			q = q.Where("seller_id = ?", user.ID)
+		} else {
+			q = q.Where("buyer_id = ?", user.ID)
+		}
+		if status := strings.TrimSpace(c.Query("status")); status != "" {
+			q = q.Where("status = ?", status)
+		}
+		return q
+	}
+
+	var total int64
+	if err := scoped().Count(&total).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to count booking requests")
+		return
 	}
 
 	var requests []models.BookingRequest
-	if err := q.Order("created_at DESC").Find(&requests).Error; err != nil {
+	if err := scoped().
+		Order("created_at DESC").
+		Offset((page - 1) * limit).
+		Limit(limit).
+		Find(&requests).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load booking requests")
 		return
 	}
@@ -162,7 +196,14 @@ func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 		}
 		out = append(out, gin.H{"request": r, "serviceName": name})
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Booking requests fetched", gin.H{"requests": out})
+	utils.SuccessResponse(c, http.StatusOK, "Booking requests fetched", gin.H{
+		"requests": out,
+		"pagination": gin.H{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+	})
 }
 
 // loadOwnedRequest loads a booking request and enforces that the caller plays
@@ -312,12 +353,25 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 		return
 	}
 
-	r.Status = models.BookingRequestConverted
-	r.OrderID = &order.ID
-	r.UpdatedAt = time.Now()
-	if err := tx.Save(r).Error; err != nil {
+	// Atomically claim the payable → converted transition. The status check
+	// above is only a cheap pre-flight; this conditional update is what actually
+	// guards against two concurrent pay calls both creating an order (the order
+	// created above is rolled back if we lose the race).
+	claim := tx.Model(&models.BookingRequest{}).
+		Where("id = ? AND status IN ?", r.ID, []string{models.BookingRequestApproved, models.BookingRequestQuoted}).
+		Updates(map[string]interface{}{
+			"status":     models.BookingRequestConverted,
+			"order_id":   order.ID,
+			"updated_at": time.Now(),
+		})
+	if claim.Error != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to convert request")
+		return
+	}
+	if claim.RowsAffected == 0 {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusConflict, "This request is not ready for payment")
 		return
 	}
 	if err := tx.Commit().Error; err != nil {

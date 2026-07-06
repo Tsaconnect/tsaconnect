@@ -20,14 +20,17 @@ import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
 
 type Tab = 'buyer' | 'seller';
 
-const STATUS_TONE: Record<BookingRequestStatus, { label: string; color: string }> = {
-  requested: { label: 'Pending', color: '#B7791F' },
-  approved: { label: 'Approved', color: '#2F855A' },
-  rejected: { label: 'Declined', color: '#C53030' },
-  quoted: { label: 'Quoted', color: '#2B6CB0' },
-  expired: { label: 'Expired', color: '#718096' },
-  converted: { label: 'Paid', color: '#2F855A' },
-  cancelled: { label: 'Cancelled', color: '#718096' },
+// Map each status to a label + a semantic theme-color token (resolved against
+// the active theme inside the component, so it tracks light/dark).
+type ToneKey = 'warning' | 'success' | 'danger' | 'info' | 'textMuted';
+const STATUS_TONE: Record<BookingRequestStatus, { label: string; tone: ToneKey }> = {
+  requested: { label: 'Pending', tone: 'warning' },
+  approved: { label: 'Approved', tone: 'success' },
+  rejected: { label: 'Declined', tone: 'danger' },
+  quoted: { label: 'Quoted', tone: 'info' },
+  expired: { label: 'Expired', tone: 'textMuted' },
+  converted: { label: 'Paid', tone: 'success' },
+  cancelled: { label: 'Cancelled', tone: 'textMuted' },
 };
 
 export default function BookingRequestsScreen() {
@@ -133,7 +136,8 @@ export default function BookingRequestsScreen() {
             />
           ) : (
             rows.map(({ request, serviceName }) => {
-              const tone = STATUS_TONE[request.status];
+              const tone = STATUS_TONE[request.status] ?? { label: request.status, tone: 'textMuted' as ToneKey };
+              const toneColor = colors[tone.tone];
               const answers = request.answers || {};
               const answerKeys = Object.keys(answers);
               return (
@@ -142,7 +146,7 @@ export default function BookingRequestsScreen() {
                     <Text variant="bodyMed" weight="700" style={{ flex: 1 }} numberOfLines={1}>
                       {serviceName || 'Service'}
                     </Text>
-                    <Badge label={tone.label} background={tone.color} color="#fff" size="sm" />
+                    <Badge label={tone.label} background={toneColor} color={colors.onAccent} size="sm" />
                   </View>
 
                   {answerKeys.length > 0 ? (

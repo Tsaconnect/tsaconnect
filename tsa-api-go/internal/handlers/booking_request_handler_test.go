@@ -107,6 +107,44 @@ func TestBookingRequestLifecycle(t *testing.T) {
 	if order.Kind != models.OrderKindService || order.Status != models.OrderStatusPendingPayment {
 		t.Errorf("unexpected order: kind=%s status=%s", order.Kind, order.Status)
 	}
+
+	// 6. Paying an already-converted request is rejected (idempotency guard
+	// against a double-pay creating a duplicate order).
+	if w := postJSON(t, buyer, reqParams, nil, ch.PayBookingRequest); w.Code != http.StatusConflict {
+		t.Fatalf("second pay: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var orderCount int64
+	db.Model(&models.Order{}).Where("buyer_id = ?", buyer.ID).Count(&orderCount)
+	if orderCount != 1 {
+		t.Fatalf("expected exactly 1 order after double-pay, got %d", orderCount)
+	}
+}
+
+// A slotted booking cannot be set to request/approval mode (the pay step can't
+// reserve a slot, which would strand the buyer).
+func TestUpsertServiceProfile_RejectsSlottedRequestMode(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"bookingType":         models.BookingTypeRequestApproval,
+		"slotDurationMinutes": 60,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for slotted request-mode, got %d: %s", w.Code, w.Body.String())
+	}
 }
 
 // A rejected request cannot be paid.
