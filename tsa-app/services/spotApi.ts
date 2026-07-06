@@ -24,16 +24,6 @@ export interface SpotListing {
   change24h?: number | null;
 }
 
-export interface SpotListingInput {
-  baseSymbol: string;
-  quoteSymbol: string;
-  chain: string;
-  route: SpotRoute;
-  logoUrl?: string;
-  enabled?: boolean;
-  displayOrder?: number;
-}
-
 export type ApiResult<T> = { success: boolean; data?: T; message?: string };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
@@ -60,19 +50,3 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<Api
 // Public (auth) — the list users see on the Spot tab, with price + 24h change.
 export const getSpotListings = () =>
   req<{ listings: SpotListing[] }>('GET', '/spot-listings');
-
-// Admin CRUD.
-export const listSpotListingsAdmin = () =>
-  req<{ listings: SpotListing[] }>('GET', '/admin/spot-listings');
-
-export const createSpotListing = (body: SpotListingInput) =>
-  req<SpotListing>('POST', '/admin/spot-listings', body);
-
-export const updateSpotListing = (id: string, body: Partial<SpotListingInput>) =>
-  req<SpotListing>('PUT', `/admin/spot-listings/${id}`, body);
-
-export const deleteSpotListing = (id: string) =>
-  req<null>('DELETE', `/admin/spot-listings/${id}`);
-
-export const reorderSpotListings = (items: { id: string; displayOrder: number }[]) =>
-  req<null>('POST', '/admin/spot-listings/reorder', { items });

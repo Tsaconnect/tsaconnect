@@ -32,8 +32,6 @@ app/
 ├── index.tsx                    # Entry: auth check → role-based redirect
 ├── login.tsx / signup.tsx       # Auth screens
 ├── (dashboard)/(tabs)/          # User tabs: Home, Marketplace, Services, Easyswap, Wallet
-├── admin/                       # Admin panel (drawer navigation)
-│   └── dashboard, category, advert-request, deposit-requests, profile
 ├── merchants/                   # Merchant panel
 │   └── dashboard, inventory, profile, buy-usdt, sell-usdt, digital
 ├── profile/                     # User profile management
@@ -41,7 +39,9 @@ app/
 └── adverts/                     # Product listings
 ```
 
-Role-based routing: `index.tsx` checks stored role → redirects to `/admin/dashboard`, `/merchants/dashboard`, or `/(dashboard)/(tabs)/(home)`.
+Admin operations live in the standalone web dashboard (`tsa-admin`), not in the app — there is no in-app admin panel.
+
+Role-based routing: `index.tsx` checks stored role → redirects to `/merchants/dashboard` or `/(dashboard)/(tabs)/(home)`.
 
 #### Navigation Gotchas
 
