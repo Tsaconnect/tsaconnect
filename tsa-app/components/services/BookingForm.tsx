@@ -57,7 +57,14 @@ const BookingForm: React.FC<BookingFormProps> = ({
   const validate = (): boolean => {
     const next: Record<string, string> = {};
     for (const f of fields) {
-      if (f.required && isEmpty(answers[f.key])) {
+      if (!f.required) continue;
+      // A required counter must be at least 1 (0 is a valid number but means
+      // "none selected"); other required fields just need a non-empty value.
+      if (f.type === 'counter') {
+        if (!(typeof answers[f.key] === 'number' && answers[f.key] >= 1)) {
+          next[f.key] = `${f.label} is required`;
+        }
+      } else if (isEmpty(answers[f.key])) {
         next[f.key] = `${f.label} is required`;
       }
     }

@@ -177,11 +177,28 @@ func ValidateFieldConfig(cfg *BookingFieldConfig) error {
 	return nil
 }
 
+// Bounds on a submitted answers payload — enforced regardless of the field
+// config so a crafted client can't persist an unbounded JSONB blob (answers are
+// stored even for services with no FieldConfig).
+const (
+	maxAnswerKeys      = 50
+	maxAnswerStringLen = 2000
+)
+
 // ValidateAnswers checks a buyer's submitted answers against the field config:
 // required fields present, select values within options, counter/number numeric.
 // Unknown answer keys (not in the config) are ignored. Lenient on optional
-// fields. Returns the first problem found.
+// fields. The payload size bounds are enforced even when cfg is nil. Returns the
+// first problem found.
 func ValidateAnswers(cfg *BookingFieldConfig, answers map[string]interface{}) error {
+	if len(answers) > maxAnswerKeys {
+		return fmt.Errorf("too many answer fields (max %d)", maxAnswerKeys)
+	}
+	for k, v := range answers {
+		if s, ok := v.(string); ok && len(s) > maxAnswerStringLen {
+			return fmt.Errorf("answer %q is too long (max %d characters)", k, maxAnswerStringLen)
+		}
+	}
 	if cfg == nil {
 		return nil
 	}

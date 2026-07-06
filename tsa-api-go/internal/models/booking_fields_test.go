@@ -1,6 +1,10 @@
 package models
 
-import "testing"
+import (
+	"strconv"
+	"strings"
+	"testing"
+)
 
 func TestValidateFieldConfig(t *testing.T) {
 	cases := []struct {
@@ -59,5 +63,25 @@ func TestValidateAnswers(t *testing.T) {
 				t.Errorf("ValidateAnswers() err = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateAnswers_PayloadBounds(t *testing.T) {
+	// Bounds apply even with no config (answers are stored regardless).
+	tooMany := map[string]interface{}{}
+	for i := 0; i <= maxAnswerKeys; i++ {
+		tooMany["field"+strconv.Itoa(i)] = "x"
+	}
+	if err := ValidateAnswers(nil, tooMany); err == nil {
+		t.Error("expected error for too many answer keys")
+	}
+
+	if err := ValidateAnswers(nil, map[string]interface{}{"notes": strings.Repeat("x", maxAnswerStringLen+1)}); err == nil {
+		t.Error("expected error for over-long answer string")
+	}
+
+	// A reasonable payload with no config passes.
+	if err := ValidateAnswers(nil, map[string]interface{}{"notes": "fine"}); err != nil {
+		t.Errorf("expected nil for small payload, got %v", err)
 	}
 }
