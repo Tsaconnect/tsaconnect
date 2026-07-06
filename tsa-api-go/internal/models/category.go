@@ -83,6 +83,21 @@ func ValidServiceType(s string) bool {
 	}
 }
 
+// EffectiveServiceType resolves a category's service type, falling back to the
+// legacy ServiceFeeMode when ServiceType is unset/invalid. A zero-value Category
+// (e.g. a service whose CategoryID is nil) resolves to "contact" — the default
+// pay-to-reveal behaviour. This is the single source of truth for both the
+// checkout pricing resolver and the contact-fee handlers.
+func EffectiveServiceType(cat Category) string {
+	if ValidServiceType(cat.ServiceType) {
+		return cat.ServiceType
+	}
+	if cat.ServiceFeeMode == ServiceFeeModeBooking {
+		return ServiceTypeBooking
+	}
+	return ServiceTypeContact
+}
+
 // Booking-fee area tiers (Category booking mode). Ordered coarsest-last for UI.
 const (
 	BookingTierResidential    = "residential"

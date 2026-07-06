@@ -398,14 +398,7 @@ func resolveServiceTypeAndProfile(tx *gorm.DB, product *models.Product) (string,
 			log.Printf("service pricing: category %s load failed for service %s: %v", *product.CategoryID, product.ID, err)
 		}
 	}
-	serviceType := cat.ServiceType
-	if !models.ValidServiceType(serviceType) {
-		if cat.ServiceFeeMode == models.ServiceFeeModeBooking {
-			serviceType = models.ServiceTypeBooking
-		} else {
-			serviceType = models.ServiceTypeContact
-		}
-	}
+	serviceType := models.EffectiveServiceType(cat)
 	var profile models.ServiceProfile
 	tx.Where("product_id = ?", product.ID).First(&profile)
 	return serviceType, profile

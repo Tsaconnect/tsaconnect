@@ -156,6 +156,10 @@ const ServiceDetail = () => {
   // The category's serviceType drives the buyer flow. Resolved from the product
   // below; missing/unknown defaults to 'contact' (the legacy behavior).
   const [serviceType, setServiceType] = useState<'contact' | 'order' | 'booking'>('contact');
+  // serviceType is resolved asynchronously (see the product-fetch effect). Until
+  // it's known we must not render the contact-fee block, or an order/booking
+  // listing would briefly flash "Reveal Contact — $fee" before hiding it.
+  const [serviceTypeResolved, setServiceTypeResolved] = useState(false);
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -176,11 +180,14 @@ const ServiceDetail = () => {
     }
   }, [serviceId]);
 
-  // Check if user already paid on mount
+  // Check if user already paid — only for contact services, and only once the
+  // type is resolved. Order/booking have no contact fee, so we never hit the
+  // pay-to-unlock (402) path for them.
   useEffect(() => {
     if (!serviceId || !token) return;
+    if (!serviceTypeResolved || serviceType !== 'contact') return;
     checkContactStatus();
-  }, [serviceId, token, checkContactStatus]);
+  }, [serviceId, token, serviceTypeResolved, serviceType, checkContactStatus]);
 
   // Fetch the full product so we can render the catalogue gallery — the
   // navigation params only carry the hero image. Network failure leaves
@@ -224,7 +231,15 @@ const ServiceDetail = () => {
         }
       }
       if (!cancelled) setServiceType(resolved);
-    })();
+    })()
+      .catch(() => {
+        // Network failure — keep the default 'contact' type (legacy behavior).
+      })
+      .finally(() => {
+        // Mark resolved either way so the contact block can render for contact
+        // services; on failure the default 'contact' preserves legacy behavior.
+        if (!cancelled) setServiceTypeResolved(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -368,6 +383,7 @@ const ServiceDetail = () => {
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
           onPricingPress={() => setShowPricing(true)}
           serviceType={serviceType}
+          serviceTypeResolved={serviceTypeResolved}
         />
       </ScrollView>
 
