@@ -215,3 +215,49 @@ func TestUpsertServiceProfile_RejectsInstantOnRequest(t *testing.T) {
 		t.Fatalf("expected 400 for instant+on_request, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// A price-on-request booking: approval must carry a price, which becomes the
+// escrowed amount the buyer pays.
+func TestBookingRequestOnRequestQuote(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 0)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodOnRequest)
+
+	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var reqRow models.BookingRequest
+	db.Where("buyer_id = ?", buyer.ID).First(&reqRow)
+	reqParams := gin.Params{{Key: "reqId", Value: reqRow.ID.String()}}
+
+	// Approve without a price → 400.
+	if w := postJSON(t, seller, reqParams, nil, ch.ApproveBookingRequest); w.Code != http.StatusBadRequest {
+		t.Fatalf("approve without price: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Approve with a price → 200, stored.
+	if w := postJSON(t, seller, reqParams, map[string]interface{}{"amountUsd": 42.0}, ch.ApproveBookingRequest); w.Code != http.StatusOK {
+		t.Fatalf("approve with price: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	db.First(&reqRow, "id = ?", reqRow.ID)
+	if reqRow.QuotedAmountUSD == nil || *reqRow.QuotedAmountUSD != 42.0 {
+		t.Fatalf("expected quoted 42, got %v", reqRow.QuotedAmountUSD)
+	}
+
+	// Pay → order escrows the quoted price (42 USDC → 42000000 in 6 decimals).
+	w = postJSON(t, buyer, reqParams, nil, ch.PayBookingRequest)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("pay: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var order models.Order
+	db.Where("buyer_id = ?", buyer.ID).First(&order)
+	if order.ProductAmount != "42000000" {
+		t.Errorf("expected productAmount 42000000, got %s", order.ProductAmount)
+	}
+}
