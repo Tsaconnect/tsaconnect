@@ -57,6 +57,7 @@ func AutoMigrate() error {
 		&models.ServiceMenuItem{},
 		&models.ServiceAvailability{},
 		&models.ServiceBooking{},
+		&models.BookingRequest{},
 		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},

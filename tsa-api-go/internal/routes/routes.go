@@ -468,6 +468,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		svc.PUT("/:id/menu/:itemId", auth, h.UpdateServiceMenuItem)
 		svc.DELETE("/:id/menu/:itemId", auth, h.DeleteServiceMenuItem)
 		svc.PUT("/:id/availability", auth, h.ReplaceServiceAvailability)
+
+		// Booking requests (unified booking engine, Phase 2 — request & approval).
+		// The literal "requests" paths coexist with the "/:id/..." param routes
+		// (same pattern as /contact-payments above).
+		svc.POST("/:id/requests", auth, ch.CreateBookingRequest)
+		svc.GET("/requests", auth, ch.ListBookingRequests)
+		svc.POST("/requests/:reqId/approve", auth, ch.ApproveBookingRequest)
+		svc.POST("/requests/:reqId/reject", auth, ch.RejectBookingRequest)
+		svc.POST("/requests/:reqId/pay", auth, ch.PayBookingRequest)
 	}
 
 	// Notification routes (authenticated)

@@ -271,6 +271,25 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS booking_requests (
+			id TEXT PRIMARY KEY,
+			product_id TEXT NOT NULL,
+			buyer_id TEXT NOT NULL,
+			seller_id TEXT NOT NULL,
+			token TEXT,
+			service_tier TEXT,
+			buyer_city TEXT,
+			buyer_state TEXT,
+			buyer_country TEXT,
+			answers TEXT,
+			status TEXT DEFAULT 'requested',
+			reject_reason TEXT,
+			quoted_amount_usd REAL,
+			quote_expires_at DATETIME,
+			order_id TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
 	}
 	for _, s := range sqls {
 		if err := db.Exec(s).Error; err != nil {
