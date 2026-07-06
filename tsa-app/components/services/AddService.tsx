@@ -50,9 +50,11 @@ import {
   getServiceAvailability,
   replaceServiceAvailability,
   AvailabilityWindow,
+  type BookingField,
 } from "@/services/serviceListingApi";
 import MenuBuilder, { MenuDraft, emptyMenuDraft } from "./MenuBuilder";
 import AvailabilityEditor from "./AvailabilityEditor";
+import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
 type ServiceType = "contact" | "order" | "booking";
@@ -104,6 +106,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const [coverageArea, setCoverageArea] = useState("");
   const [operatingCompany, setOperatingCompany] = useState("");
   const [policies, setPolicies] = useState<PolicyValues>(emptyPolicyValues());
+  // Booking-form field config (unified booking engine) — the enabled customer
+  // form fields the marketplace auto-generates the booking form from.
+  const [bookingFields, setBookingFields] = useState<BookingField[]>([]);
 
   // Menu (order) + availability (order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
@@ -208,6 +213,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
             refundPolicy: prof.refundPolicy ?? "",
             bookingRules: prof.bookingRules ?? "",
           });
+          if (prof.fieldConfig?.fields?.length) setBookingFields(prof.fieldConfig.fields);
         }
 
         // Menu.
@@ -283,6 +289,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.refundPolicy = policies.refundPolicy;
       profile.bookingRules = policies.bookingRules;
       if (operatingCompany) profile.operatingCompany = operatingCompany;
+      // FieldConfig for the auto-generated customer booking form. Null clears it
+      // (→ legacy slot/fare flow); a non-empty set enables the schema-driven form.
+      profile.fieldConfig = bookingFields.length ? { fields: bookingFields } : null;
     }
     if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
@@ -834,6 +843,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                     value={policies}
                     onChange={(patch) => setPolicies((prev) => ({ ...prev, ...patch }))}
                   />
+
+                  {sectionTitle("Booking form")}
+                  <BookingConfigBuilder value={bookingFields} onChange={setBookingFields} />
 
                   {renderCoverage(true)}
 
