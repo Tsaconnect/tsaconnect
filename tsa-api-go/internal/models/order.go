@@ -63,9 +63,13 @@ type Order struct {
 	// PurchaseNote is the buyer's free-text arrangement note, captured at checkout.
 	// Kept SEPARATE from Notes (which ship/refund handlers overwrite with
 	// merchant-side notes) so the buyer's instructions are never clobbered.
-	PurchaseNote string    `json:"purchaseNote,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	PurchaseNote string `json:"purchaseNote,omitempty"`
+	// ServiceAnswers records the buyer's submitted booking-form answers for a
+	// service order (unified booking engine) as a JSON object keyed by the
+	// service's FieldConfig field keys. Empty for products and legacy services.
+	ServiceAnswers datatypes.JSON `gorm:"type:jsonb" json:"serviceAnswers,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
 }
 
 // OrderAttribute is one selected product spec on an order (e.g. Color → "White, Blue").
@@ -96,10 +100,10 @@ func (o *Order) GetSelectedAttributes() []OrderAttribute {
 // OrderMenuSelection is one line of a menu order: the menu item, the quantity,
 // and the server-recomputed unit price (USD) captured at checkout time.
 type OrderMenuSelection struct {
-	ItemID     uuid.UUID `json:"itemId"`
-	Name       string    `json:"name"`
-	Quantity   int       `json:"quantity"`
-	UnitPriceUSD float64 `json:"unitPriceUsd"`
+	ItemID       uuid.UUID `json:"itemId"`
+	Name         string    `json:"name"`
+	Quantity     int       `json:"quantity"`
+	UnitPriceUSD float64   `json:"unitPriceUsd"`
 }
 
 // SetMenuSelections serializes selections into the JSONB column.
@@ -119,6 +123,25 @@ func (o *Order) GetMenuSelections() []OrderMenuSelection {
 		_ = json.Unmarshal(o.MenuSelections, &sel)
 	}
 	return sel
+}
+
+// SetServiceAnswers serializes the booking-form answers into the JSONB column.
+func (o *Order) SetServiceAnswers(answers map[string]interface{}) {
+	if len(answers) == 0 {
+		o.ServiceAnswers = nil
+		return
+	}
+	data, _ := json.Marshal(answers)
+	o.ServiceAnswers = data
+}
+
+// GetServiceAnswers deserializes the JSONB column.
+func (o *Order) GetServiceAnswers() map[string]interface{} {
+	answers := map[string]interface{}{}
+	if o.ServiceAnswers != nil {
+		_ = json.Unmarshal(o.ServiceAnswers, &answers)
+	}
+	return answers
 }
 
 func (Order) TableName() string {

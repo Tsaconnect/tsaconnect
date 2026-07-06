@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // ServiceProfile holds the service-specific configuration for a service listing
@@ -42,8 +43,80 @@ type ServiceProfile struct {
 	RefundPolicy       string `json:"refundPolicy,omitempty"`
 	BookingRules       string `json:"bookingRules,omitempty"`
 
+	// Unified booking-engine config (Phase 1: only the instant/fixed/auto_accept/
+	// pay_before defaults are exercised; the other enum values are forward-compat
+	// for the request/quote/deposit phases). Defaults keep every existing listing
+	// behaving exactly as before.
+	BookingType    string  `gorm:"default:'instant'" json:"bookingType"`      // instant | request_approval | quote_before_payment
+	PricingMethod  string  `gorm:"default:'fixed'" json:"pricingMethod"`      // fixed | starting_from | dynamic | quote_later
+	Workflow       string  `gorm:"default:'auto_accept'" json:"workflow"`     // auto_accept | manual_accept | quote_required
+	PaymentTiming  string  `gorm:"default:'pay_before'" json:"paymentTiming"` // pay_before | pay_after | deposit
+	DepositPercent int     `gorm:"default:0" json:"depositPercent"`           // 0..100, meaningful when PaymentTiming=deposit
+	BookingFeeUSD  float64 `gorm:"default:0" json:"bookingFeeUsd"`            // PM "Booking Fee" (distinct from access/callout)
+
+	// FieldConfig is the declarative set of enabled customer-form fields (a
+	// BookingFieldConfig). Null means "use the legacy per-serviceType flow" so the
+	// rollout is non-breaking. See booking_fields.go.
+	FieldConfig datatypes.JSON `gorm:"type:jsonb" json:"fieldConfig,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// Booking-engine enum constants (ServiceProfile config dimensions).
+const (
+	BookingTypeInstant         = "instant"
+	BookingTypeRequestApproval = "request_approval"
+	BookingTypeQuoteFirst      = "quote_before_payment"
+
+	PricingMethodFixed        = "fixed"
+	PricingMethodStartingFrom = "starting_from"
+	PricingMethodDynamic      = "dynamic"
+	PricingMethodQuoteLater   = "quote_later"
+
+	WorkflowAutoAccept    = "auto_accept"
+	WorkflowManualAccept  = "manual_accept"
+	WorkflowQuoteRequired = "quote_required"
+
+	PaymentTimingBefore  = "pay_before"
+	PaymentTimingAfter   = "pay_after"
+	PaymentTimingDeposit = "deposit"
+)
+
+// ValidBookingType reports whether s is a known booking type.
+func ValidBookingType(s string) bool {
+	switch s {
+	case BookingTypeInstant, BookingTypeRequestApproval, BookingTypeQuoteFirst:
+		return true
+	}
+	return false
+}
+
+// ValidPricingMethod reports whether s is a known pricing method.
+func ValidPricingMethod(s string) bool {
+	switch s {
+	case PricingMethodFixed, PricingMethodStartingFrom, PricingMethodDynamic, PricingMethodQuoteLater:
+		return true
+	}
+	return false
+}
+
+// ValidWorkflow reports whether s is a known workflow.
+func ValidWorkflow(s string) bool {
+	switch s {
+	case WorkflowAutoAccept, WorkflowManualAccept, WorkflowQuoteRequired:
+		return true
+	}
+	return false
+}
+
+// ValidPaymentTiming reports whether s is a known payment timing.
+func ValidPaymentTiming(s string) bool {
+	switch s {
+	case PaymentTimingBefore, PaymentTimingAfter, PaymentTimingDeposit:
+		return true
+	}
+	return false
 }
 
 // TableName overrides the default table name.
