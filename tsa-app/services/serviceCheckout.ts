@@ -34,6 +34,9 @@ export interface ServiceCheckoutParams {
   serviceTier?: string;
   menuSelections?: { itemId: string; quantity: number }[];
   bookingSlot?: { slotStart: string; partySize: number };
+  // Auto-generated booking-form answers (unified booking engine), keyed by the
+  // service's FieldConfig field keys.
+  answers?: Record<string, any>;
 }
 
 /** Human-friendly signing/broadcast error copy (mirrors the checkout screen). */
@@ -78,6 +81,7 @@ export async function runServiceCheckout(
     serviceTier: params.serviceTier,
     menuSelections: params.menuSelections?.length ? params.menuSelections : undefined,
     bookingSlot: params.bookingSlot,
+    answers: params.answers && Object.keys(params.answers).length ? params.answers : undefined,
   });
   if (!createResult.success || !createResult.data?.orders?.length) {
     throw new Error(createResult.message || 'Failed to create order');
@@ -85,7 +89,16 @@ export async function runServiceCheckout(
 
   // A single service product yields a single order.
   const order = createResult.data.orders[0];
+  return escrowOrder(order, onPhase);
+}
 
+/**
+ * Fund an already-created service order through escrow (approve → escrow →
+ * submit). Split out of runServiceCheckout so the booking-request pay flow —
+ * where the server creates the order at the pay step — can reuse the exact same
+ * signing/broadcast/submit sequence.
+ */
+export async function escrowOrder(order: Order, onPhase?: (phase: ServiceCheckoutPhase) => void): Promise<Order> {
   onPhase?.('approving_token');
   const approveResult = await prepareApprove(order.id);
   if (!approveResult.success || !approveResult.data) {
@@ -118,4 +131,21 @@ export async function runServiceCheckout(
 
   onPhase?.('done');
   return submitResult.data || order;
+}
+
+/**
+ * Pay an approved booking request: the server creates the escrowed order, then
+ * the buyer funds it through the standard escrow flow.
+ */
+export async function payBookingRequestAndEscrow(
+  reqId: string,
+  onPhase?: (phase: ServiceCheckoutPhase) => void,
+): Promise<Order> {
+  const { payBookingRequest } = await import('./bookingRequestApi');
+  onPhase?.('creating_order');
+  const payResult = await payBookingRequest(reqId);
+  if (!payResult.success || !payResult.data?.orders?.length) {
+    throw new Error(payResult.message || 'Failed to start payment');
+  }
+  return escrowOrder(payResult.data.orders[0], onPhase);
 }

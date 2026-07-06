@@ -42,10 +42,18 @@ import {
   type BookingTier,
 } from '../../services/bookingFeeApi';
 import { encodeServiceNotes } from './serviceCart';
-import { getServiceProfile, type ServiceProfile } from '../../services/serviceListingApi';
+import {
+  getServiceProfile,
+  getBookingFormSchema,
+  type ServiceProfile,
+  type BookingField,
+  type BookingType,
+} from '../../services/serviceListingApi';
 import { runServiceCheckout } from '../../services/serviceCheckout';
+import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
+import BookingForm from './BookingForm';
 
 type FeeMode = 'standard' | 'booking';
 // The three marketplace service types drive which buyer flow the sheet shows.
@@ -85,6 +93,12 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const [mode, setMode] = useState<FeeMode>('standard');
   const [serviceType, setServiceType] = useState<ServiceType>('contact');
   const [profile, setProfile] = useState<ServiceProfile | null>(null);
+  // Auto-generated booking-form fields (unified booking engine). When non-empty
+  // the sheet renders a schema-driven BookingForm instead of the legacy flow.
+  const [customFields, setCustomFields] = useState<BookingField[]>([]);
+  // Booking workflow: 'instant' escrows immediately; others create a request the
+  // merchant must approve before the buyer pays (Phase 2).
+  const [bookingType, setBookingType] = useState<BookingType>('instant');
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   // Inline escrow checkout state for the order/booking/access-fee flows.
@@ -180,6 +194,12 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       const profRes = await getServiceProfile(serviceId);
       const prof = profRes.success && profRes.data ? profRes.data : null;
       setProfile(prof);
+
+      // Auto-generated booking-form schema. Fields present → schema-driven form;
+      // empty (or fetch failure) → the legacy per-serviceType flow below.
+      const schemaRes = await getBookingFormSchema(serviceId);
+      setCustomFields(schemaRes.success && schemaRes.data ? schemaRes.data.fields || [] : []);
+      setBookingType(schemaRes.success && schemaRes.data ? schemaRes.data.bookingType : 'instant');
 
       if (feeMode === 'booking' && catId) {
         const feeRes = await getCategoryBookingFees(catId);
@@ -299,6 +319,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     async (extra: {
       menuSelections?: { itemId: string; quantity: number }[];
       bookingSlot?: { slotStart: string; partySize: number };
+      answers?: Record<string, any>;
     }) => {
       setCheckingOut(true);
       try {
@@ -310,6 +331,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           buyerCountry,
           menuSelections: extra.menuSelections,
           bookingSlot: extra.bookingSlot,
+          answers: extra.answers,
         });
         toast.show('Order placed & funded via escrow', 'success');
         onClose();
@@ -322,6 +344,42 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [buyerCity, buyerState, buyerCountry, toast, onClose, router],
+  );
+
+  // BookingForm submit — instant bookings escrow immediately; request/approval
+  // (and quote) bookings create a request the merchant must approve first.
+  const handleBookingSubmit = useCallback(
+    async (answers: Record<string, any>) => {
+      if (bookingType === 'instant') {
+        await runInlineCheckout({ answers });
+        return;
+      }
+      setCheckingOut(true);
+      try {
+        const res = await createBookingRequest(productIdOf(), {
+          token: 'USDC',
+          buyerCity,
+          buyerState,
+          buyerCountry,
+          answers,
+        });
+        if (!res.success) {
+          toast.show(res.message || 'Failed to submit request', 'error');
+          return;
+        }
+        toast.show('Booking request sent — awaiting provider approval', 'success');
+        onClose();
+        // Simplified path (route groups are transparent). Cast: typed routes
+        // regenerate on the next `expo start` and don't yet include this screen.
+        router.push('/booking-requests' as any);
+      } catch (e: any) {
+        toast.show(e.message || 'Failed to submit request', 'error');
+      } finally {
+        setCheckingOut(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bookingType, buyerCity, buyerState, buyerCountry, toast, onClose, router, runInlineCheckout],
   );
 
   const handleMenuCheckout = (menuItems: { itemId: string; quantity: number }[]) =>
@@ -340,6 +398,10 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // Legacy fare-only booking: profile has no slot duration → skip the slot grid
   // and charge the booking fare directly.
   const isFareOnlyBooking = serviceType === 'booking' && (profile?.slotDurationMinutes ?? 0) === 0;
+
+  // A booking service with a configured FieldConfig renders the schema-driven
+  // BookingForm (which owns its own submit button) instead of the legacy flow.
+  const usesBookingForm = serviceType === 'booking' && customFields.length > 0;
 
   // Only offer the tiers the backend will actually honor for this buyer: the
   // detected coarse tier, plus a "residential" refinement when in the same city
@@ -377,6 +439,18 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
             </Text>
             <Button title="Retry" variant="secondary" onPress={load} />
           </View>
+        ) : usesBookingForm ? (
+          /* BOOKING (configurable form) — schema-driven fields; checks out with
+             the collected answers. Takes priority over the legacy slot/fare flow
+             when the merchant has configured a FieldConfig. Phase 1: these are
+             non-slotted bookings (free date/time fields, no capacity grid); the
+             backend only requires a slot when slotDurationMinutes > 0. */
+          <BookingForm
+            fields={customFields}
+            submitting={checkingOut}
+            submitLabel={bookingType === 'instant' ? 'Book & Pay' : 'Request booking'}
+            onSubmit={handleBookingSubmit}
+          />
         ) : serviceType === 'order' ? (
           /* ORDER — menu picker; checks out with menuSelections. */
           <MenuPicker
@@ -516,7 +590,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
 
         {/* Order / non-fare booking render their own Pay button inside the
             picker — only the contact + legacy-fare paths use the shared footer. */}
-        {!loading && !error && serviceType !== 'order' && !(serviceType === 'booking' && !isFareOnlyBooking) && (
+        {!loading && !error && !usesBookingForm && serviceType !== 'order' && !(serviceType === 'booking' && !isFareOnlyBooking) && (
           isFareOnlyBooking ? (
             <View style={{ gap: spacing.sm }}>
               <Button

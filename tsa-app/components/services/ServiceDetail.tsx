@@ -48,6 +48,14 @@ interface ServiceDetailCardProps {
    * behavior; 'order'/'booking' ungate the pricing flow (no contact fee needed).
    */
   serviceType?: 'contact' | 'order' | 'booking';
+  /**
+   * Whether `serviceType` has been resolved from the product yet. It starts
+   * unresolved (default 'contact'), so the contact-fee block is withheld until
+   * this is true — otherwise an order/booking listing flashes the fee block
+   * before its type is known. Defaults to true for callers that resolve
+   * synchronously.
+   */
+  serviceTypeResolved?: boolean;
 }
 
 const ServiceDetailCard = ({
@@ -63,11 +71,15 @@ const ServiceDetailCard = ({
   onCataloguePress,
   onPricingPress,
   serviceType = 'contact',
+  serviceTypeResolved = true,
 }: ServiceDetailCardProps) => {
   const { colors, spacing, radius } = useTheme();
   // Order/booking services are not contact-gated — their pricing/booking flow is
   // reachable without paying the $0.10 contact reveal. Only contact services gate.
   const pricingUnlocked = serviceType !== 'contact' || contactPaid;
+  // Only contact services have a pay-to-unlock contact fee. Withhold the block
+  // until the type is resolved so order/booking never flash the fee.
+  const showContactBlock = serviceTypeResolved && serviceType === 'contact';
 
   // A single tap-to-copy contact row. Keeps the exact onCopyPress(value)
   // contract — the parent owns clipboard + toast, so this row only forwards.
@@ -124,8 +136,9 @@ const ServiceDetailCard = ({
           {address}
         </Text>
 
-        {/* Contact Details Section */}
-        {contactPaid && contact ? (
+        {/* Contact Details Section — contact services only (pay-to-unlock). */}
+        {showContactBlock ? (
+          contactPaid && contact ? (
           <AccentCard padding="md" style={{ marginBottom: spacing.lg }}>
             <View
               style={{
@@ -175,7 +188,8 @@ const ServiceDetailCard = ({
               disabled={loading}
             />
           </AccentCard>
-        )}
+          )
+        ) : null}
 
         {/* Pricing services — View / PayNow. Pay the service price + call-out
             (or a booking fare) through escrow. Gated behind the contact fee:

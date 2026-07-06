@@ -36,6 +36,7 @@ import {
   Input,
   PickerSheet,
   PressableScale,
+  SegmentedControl,
   SelectRow,
   Spinner,
   Text,
@@ -50,9 +51,12 @@ import {
   getServiceAvailability,
   replaceServiceAvailability,
   AvailabilityWindow,
+  type BookingField,
+  type BookingType,
 } from "@/services/serviceListingApi";
 import MenuBuilder, { MenuDraft, emptyMenuDraft } from "./MenuBuilder";
 import AvailabilityEditor from "./AvailabilityEditor";
+import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
 type ServiceType = "contact" | "order" | "booking";
@@ -104,6 +108,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const [coverageArea, setCoverageArea] = useState("");
   const [operatingCompany, setOperatingCompany] = useState("");
   const [policies, setPolicies] = useState<PolicyValues>(emptyPolicyValues());
+  // Booking-form field config (unified booking engine) — the enabled customer
+  // form fields the marketplace auto-generates the booking form from.
+  const [bookingFields, setBookingFields] = useState<BookingField[]>([]);
+  // Booking workflow: instant (escrow immediately) vs request & approval (the
+  // merchant approves before the buyer pays). Phase 2.
+  const [bookingType, setBookingType] = useState<BookingType>("instant");
 
   // Menu (order) + availability (order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
@@ -208,6 +218,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
             refundPolicy: prof.refundPolicy ?? "",
             bookingRules: prof.bookingRules ?? "",
           });
+          if (prof.fieldConfig?.fields?.length) setBookingFields(prof.fieldConfig.fields);
+          if (prof.bookingType) setBookingType(prof.bookingType);
         }
 
         // Menu.
@@ -283,6 +295,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.refundPolicy = policies.refundPolicy;
       profile.bookingRules = policies.bookingRules;
       if (operatingCompany) profile.operatingCompany = operatingCompany;
+      // FieldConfig for the auto-generated customer booking form. Null clears it
+      // (→ legacy slot/fare flow); a non-empty set enables the schema-driven form.
+      profile.fieldConfig = bookingFields.length ? { fields: bookingFields } : null;
+      profile.bookingType = bookingType;
     }
     if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
@@ -834,6 +850,26 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                     value={policies}
                     onChange={(patch) => setPolicies((prev) => ({ ...prev, ...patch }))}
                   />
+
+                  {sectionTitle("Booking workflow")}
+                  <Card padding="lg" style={{ gap: spacing.sm }}>
+                    <SegmentedControl
+                      segments={[
+                        { key: "instant", label: "Instant" },
+                        { key: "request_approval", label: "Request & approve" },
+                      ]}
+                      value={bookingType === "instant" ? "instant" : "request_approval"}
+                      onChange={(k) => setBookingType(k as BookingType)}
+                    />
+                    <Text variant="caption" color="textSecondary">
+                      {bookingType === "instant"
+                        ? "Customers book and pay immediately."
+                        : "Customers request a booking; you approve before they pay."}
+                    </Text>
+                  </Card>
+
+                  {sectionTitle("Booking form")}
+                  <BookingConfigBuilder value={bookingFields} onChange={setBookingFields} />
 
                   {renderCoverage(true)}
 
