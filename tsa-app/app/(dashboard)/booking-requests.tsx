@@ -8,7 +8,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
+import { Badge, Button, Card, EmptyState, Input, Spinner, Text, useToast } from '@/components/ui';
 import {
   listBookingRequests,
   approveBookingRequest,
@@ -27,7 +27,6 @@ const STATUS_TONE: Record<BookingRequestStatus, { label: string; tone: ToneKey }
   requested: { label: 'Pending', tone: 'warning' },
   approved: { label: 'Approved', tone: 'success' },
   rejected: { label: 'Declined', tone: 'danger' },
-  quoted: { label: 'Quoted', tone: 'info' },
   expired: { label: 'Expired', tone: 'textMuted' },
   converted: { label: 'Paid', tone: 'success' },
   cancelled: { label: 'Cancelled', tone: 'textMuted' },
@@ -41,6 +40,7 @@ export default function BookingRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [priceDrafts, setPriceDrafts] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     const res = await listBookingRequests(tab);
@@ -70,7 +70,12 @@ export default function BookingRequestsScreen() {
 
   const handleApprove = (id: string) =>
     withBusy(id, async () => {
-      const res = await approveBookingRequest(id);
+      const raw = priceDrafts[id];
+      const amount = raw && raw.trim() !== '' ? Number(raw) : undefined;
+      if (amount != null && (isNaN(amount) || amount <= 0)) {
+        return toast.show('Enter a valid price', 'error');
+      }
+      const res = await approveBookingRequest(id, amount);
       if (!res.success) return toast.show(res.message || 'Failed to approve', 'error');
       toast.show('Request approved', 'success');
       load();
@@ -167,30 +172,46 @@ export default function BookingRequestsScreen() {
 
                   {/* Buyer: pay once approved. Seller: approve/decline while pending. */}
                   {tab === 'buyer' && request.status === 'approved' ? (
-                    <Button
-                      title="Pay & confirm"
-                      leftIcon="shield"
-                      onPress={() => handlePay(request.id)}
-                      loading={busyId === request.id}
-                      disabled={busyId === request.id}
-                    />
-                  ) : null}
-                  {tab === 'seller' && request.status === 'requested' ? (
-                    <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                    <>
+                      {request.quotedAmountUsd != null ? (
+                        <Text variant="bodyMed" weight="700">
+                          Quoted price: ${request.quotedAmountUsd.toFixed(2)}
+                        </Text>
+                      ) : null}
                       <Button
-                        title="Approve"
-                        onPress={() => handleApprove(request.id)}
+                        title="Pay & confirm"
+                        leftIcon="shield"
+                        onPress={() => handlePay(request.id)}
                         loading={busyId === request.id}
                         disabled={busyId === request.id}
-                        style={{ flex: 1 }}
                       />
-                      <Button
-                        title="Decline"
-                        variant="secondary"
-                        onPress={() => handleReject(request.id)}
-                        disabled={busyId === request.id}
-                        style={{ flex: 1 }}
+                    </>
+                  ) : null}
+                  {tab === 'seller' && request.status === 'requested' ? (
+                    <View style={{ gap: spacing.sm }}>
+                      <Input
+                        label="Price (USD) — leave blank for a fixed-price listing"
+                        keyboardType="decimal-pad"
+                        value={priceDrafts[request.id] ?? ''}
+                        onChangeText={(t) => setPriceDrafts((p) => ({ ...p, [request.id]: t }))}
+                        placeholder="e.g. 40.00"
                       />
+                      <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                        <Button
+                          title="Approve"
+                          onPress={() => handleApprove(request.id)}
+                          loading={busyId === request.id}
+                          disabled={busyId === request.id}
+                          style={{ flex: 1 }}
+                        />
+                        <Button
+                          title="Decline"
+                          variant="secondary"
+                          onPress={() => handleReject(request.id)}
+                          disabled={busyId === request.id}
+                          style={{ flex: 1 }}
+                        />
+                      </View>
                     </View>
                   ) : null}
                 </Card>
