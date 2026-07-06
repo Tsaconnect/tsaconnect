@@ -16,7 +16,7 @@ import (
 // Order created and escrowed, satisfying the on-chain productAmount>0 invariant.
 //
 // Lifecycle: requested → (approved | rejected) → [buyer pays] → converted.
-// A quote flow (Phase 3) adds QuotedAmountUSD/QuoteExpiresAt; not exercised yet.
+// An approval may carry a provider-named price in QuotedAmountUSD (price-on-request).
 type BookingRequest struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	ProductID uuid.UUID `gorm:"type:uuid;not null;index" json:"productId"`
