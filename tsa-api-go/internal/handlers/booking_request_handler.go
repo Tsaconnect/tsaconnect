@@ -345,7 +345,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, user, &seller, &product, serviceType, &profile,
 		r.Token, r.ServiceTier, r.BuyerCity, r.BuyerState, r.BuyerCountry,
-		nil, nil, r.GetAnswers(),
+		nil, nil, r.GetAnswers(), nil,
 	)
 	if errMsg != "" {
 		tx.Rollback()
