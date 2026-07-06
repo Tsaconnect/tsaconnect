@@ -1,0 +1,200 @@
+// app/(dashboard)/booking-requests.tsx
+//
+// Booking requests (unified booking engine, Phase 2). Two views via a segmented
+// control: "My requests" (buyer) shows the buyer's submitted requests + a
+// Pay button once approved; "Incoming" (seller) shows requests for the
+// merchant's services with Approve / Decline actions. Pay converts the request
+// into an escrowed order via the standard escrow flow.
+import React, { useCallback, useEffect, useState } from 'react';
+import { RefreshControl, ScrollView, View } from 'react-native';
+import { useTheme } from '@/theme';
+import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
+import {
+  listBookingRequests,
+  approveBookingRequest,
+  rejectBookingRequest,
+  type BookingRequestRow,
+  type BookingRequestStatus,
+} from '@/services/bookingRequestApi';
+import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
+
+type Tab = 'buyer' | 'seller';
+
+const STATUS_TONE: Record<BookingRequestStatus, { label: string; color: string }> = {
+  requested: { label: 'Pending', color: '#B7791F' },
+  approved: { label: 'Approved', color: '#2F855A' },
+  rejected: { label: 'Declined', color: '#C53030' },
+  quoted: { label: 'Quoted', color: '#2B6CB0' },
+  expired: { label: 'Expired', color: '#718096' },
+  converted: { label: 'Paid', color: '#2F855A' },
+  cancelled: { label: 'Cancelled', color: '#718096' },
+};
+
+export default function BookingRequestsScreen() {
+  const { colors, spacing } = useTheme();
+  const toast = useToast();
+  const [tab, setTab] = useState<Tab>('buyer');
+  const [rows, setRows] = useState<BookingRequestRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await listBookingRequests(tab);
+    setRows(res.success && res.data ? res.data.requests || [] : []);
+    setLoading(false);
+    setRefreshing(false);
+  }, [tab]);
+
+  useEffect(() => {
+    setLoading(true);
+    load();
+  }, [load]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    load();
+  };
+
+  const withBusy = async (id: string, fn: () => Promise<void>) => {
+    setBusyId(id);
+    try {
+      await fn();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleApprove = (id: string) =>
+    withBusy(id, async () => {
+      const res = await approveBookingRequest(id);
+      if (!res.success) return toast.show(res.message || 'Failed to approve', 'error');
+      toast.show('Request approved', 'success');
+      load();
+    });
+
+  const handleReject = (id: string) =>
+    withBusy(id, async () => {
+      const res = await rejectBookingRequest(id);
+      if (!res.success) return toast.show(res.message || 'Failed to decline', 'error');
+      toast.show('Request declined', 'success');
+      load();
+    });
+
+  const handlePay = (id: string) =>
+    withBusy(id, async () => {
+      try {
+        await payBookingRequestAndEscrow(id);
+        toast.show('Booking paid & funded via escrow', 'success');
+        load();
+      } catch (e: any) {
+        toast.show(e.message || 'Payment failed', 'error');
+      }
+    });
+
+  const Segment = ({ value, label }: { value: Tab; label: string }) => {
+    const active = tab === value;
+    return (
+      <Button
+        title={label}
+        variant={active ? 'primary' : 'secondary'}
+        size="sm"
+        onPress={() => setTab(value)}
+        style={{ flex: 1 }}
+      />
+    );
+  };
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={{ flexDirection: 'row', gap: spacing.sm, padding: spacing.lg }}>
+        <Segment value="buyer" label="My requests" />
+        <Segment value="seller" label="Incoming" />
+      </View>
+
+      {loading ? (
+        <View style={{ paddingVertical: spacing['2xl'], alignItems: 'center' }}>
+          <Spinner label="Loading requests…" />
+        </View>
+      ) : (
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingBottom: spacing['2xl'], gap: spacing.md }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        >
+          {rows.length === 0 ? (
+            <EmptyState
+              icon="list"
+              title="No booking requests"
+              subtitle={
+                tab === 'buyer'
+                  ? 'Requests you submit to providers will show here.'
+                  : 'Booking requests for your services will show here.'
+              }
+            />
+          ) : (
+            rows.map(({ request, serviceName }) => {
+              const tone = STATUS_TONE[request.status];
+              const answers = request.answers || {};
+              const answerKeys = Object.keys(answers);
+              return (
+                <Card key={request.id} padding="lg" style={{ gap: spacing.sm }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                    <Text variant="bodyMed" weight="700" style={{ flex: 1 }} numberOfLines={1}>
+                      {serviceName || 'Service'}
+                    </Text>
+                    <Badge label={tone.label} background={tone.color} color="#fff" size="sm" />
+                  </View>
+
+                  {answerKeys.length > 0 ? (
+                    <View style={{ gap: 2 }}>
+                      {answerKeys.slice(0, 4).map((k) => (
+                        <Text key={k} variant="caption" color="textSecondary">
+                          {k}: {String(answers[k])}
+                        </Text>
+                      ))}
+                    </View>
+                  ) : null}
+
+                  {request.status === 'rejected' && request.rejectReason ? (
+                    <Text variant="caption" color="danger">
+                      Reason: {request.rejectReason}
+                    </Text>
+                  ) : null}
+
+                  {/* Buyer: pay once approved. Seller: approve/decline while pending. */}
+                  {tab === 'buyer' && request.status === 'approved' ? (
+                    <Button
+                      title="Pay & confirm"
+                      leftIcon="shield"
+                      onPress={() => handlePay(request.id)}
+                      loading={busyId === request.id}
+                      disabled={busyId === request.id}
+                    />
+                  ) : null}
+                  {tab === 'seller' && request.status === 'requested' ? (
+                    <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                      <Button
+                        title="Approve"
+                        onPress={() => handleApprove(request.id)}
+                        loading={busyId === request.id}
+                        disabled={busyId === request.id}
+                        style={{ flex: 1 }}
+                      />
+                      <Button
+                        title="Decline"
+                        variant="secondary"
+                        onPress={() => handleReject(request.id)}
+                        disabled={busyId === request.id}
+                        style={{ flex: 1 }}
+                      />
+                    </View>
+                  ) : null}
+                </Card>
+              );
+            })
+          )}
+        </ScrollView>
+      )}
+    </View>
+  );
+}

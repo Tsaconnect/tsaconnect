@@ -431,6 +431,13 @@ const Layout = () => {
           }}
         />
         <Drawer.Screen
+          name="booking-requests"
+          options={{
+            title: "Booking Requests",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
           name="orderdetail"
           options={{
             title: "Order Detail",

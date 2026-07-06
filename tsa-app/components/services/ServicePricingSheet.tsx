@@ -47,8 +47,10 @@ import {
   getBookingFormSchema,
   type ServiceProfile,
   type BookingField,
+  type BookingType,
 } from '../../services/serviceListingApi';
 import { runServiceCheckout } from '../../services/serviceCheckout';
+import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
 import BookingForm from './BookingForm';
@@ -94,6 +96,9 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // Auto-generated booking-form fields (unified booking engine). When non-empty
   // the sheet renders a schema-driven BookingForm instead of the legacy flow.
   const [customFields, setCustomFields] = useState<BookingField[]>([]);
+  // Booking workflow: 'instant' escrows immediately; others create a request the
+  // merchant must approve before the buyer pays (Phase 2).
+  const [bookingType, setBookingType] = useState<BookingType>('instant');
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   // Inline escrow checkout state for the order/booking/access-fee flows.
@@ -194,6 +199,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       // empty (or fetch failure) → the legacy per-serviceType flow below.
       const schemaRes = await getBookingFormSchema(serviceId);
       setCustomFields(schemaRes.success && schemaRes.data ? schemaRes.data.fields || [] : []);
+      setBookingType(schemaRes.success && schemaRes.data ? schemaRes.data.bookingType : 'instant');
 
       if (feeMode === 'booking' && catId) {
         const feeRes = await getCategoryBookingFees(catId);
@@ -340,6 +346,42 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     [buyerCity, buyerState, buyerCountry, toast, onClose, router],
   );
 
+  // BookingForm submit — instant bookings escrow immediately; request/approval
+  // (and quote) bookings create a request the merchant must approve first.
+  const handleBookingSubmit = useCallback(
+    async (answers: Record<string, any>) => {
+      if (bookingType === 'instant') {
+        await runInlineCheckout({ answers });
+        return;
+      }
+      setCheckingOut(true);
+      try {
+        const res = await createBookingRequest(productIdOf(), {
+          token: 'USDC',
+          buyerCity,
+          buyerState,
+          buyerCountry,
+          answers,
+        });
+        if (!res.success) {
+          toast.show(res.message || 'Failed to submit request', 'error');
+          return;
+        }
+        toast.show('Booking request sent — awaiting provider approval', 'success');
+        onClose();
+        // Simplified path (route groups are transparent). Cast: typed routes
+        // regenerate on the next `expo start` and don't yet include this screen.
+        router.push('/booking-requests' as any);
+      } catch (e: any) {
+        toast.show(e.message || 'Failed to submit request', 'error');
+      } finally {
+        setCheckingOut(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bookingType, buyerCity, buyerState, buyerCountry, toast, onClose, router, runInlineCheckout],
+  );
+
   const handleMenuCheckout = (menuItems: { itemId: string; quantity: number }[]) =>
     runInlineCheckout({ menuSelections: menuItems });
 
@@ -406,7 +448,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           <BookingForm
             fields={customFields}
             submitting={checkingOut}
-            onSubmit={(answers) => runInlineCheckout({ answers })}
+            submitLabel={bookingType === 'instant' ? 'Book & Pay' : 'Request booking'}
+            onSubmit={handleBookingSubmit}
           />
         ) : serviceType === 'order' ? (
           /* ORDER — menu picker; checks out with menuSelections. */
