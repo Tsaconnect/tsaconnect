@@ -34,10 +34,9 @@ type BookingRequest struct {
 	// Answers is the submitted booking-form payload (keyed by FieldConfig keys).
 	Answers datatypes.JSON `gorm:"type:jsonb" json:"answers,omitempty"`
 
-	Status          string     `gorm:"not null;default:'requested';index" json:"status"`
-	RejectReason    string     `json:"rejectReason,omitempty"`
-	QuotedAmountUSD *float64   `json:"quotedAmountUsd,omitempty"` // Phase 3 (quote flow)
-	QuoteExpiresAt  *time.Time `json:"quoteExpiresAt,omitempty"`
+	Status          string   `gorm:"not null;default:'requested';index" json:"status"`
+	RejectReason    string   `json:"rejectReason,omitempty"`
+	QuotedAmountUSD *float64 `json:"quotedAmountUsd,omitempty"` // set by the provider when approving a price-on-request booking
 	// OrderID is set once the request is paid and converted to an escrowed order.
 	OrderID *uuid.UUID `gorm:"type:uuid" json:"orderId,omitempty"`
 
@@ -55,7 +54,6 @@ const (
 	BookingRequestRequested = "requested"
 	BookingRequestApproved  = "approved"
 	BookingRequestRejected  = "rejected"
-	BookingRequestQuoted    = "quoted" // Phase 3
 	BookingRequestExpired   = "expired"
 	BookingRequestConverted = "converted" // paid → order created
 	BookingRequestCancelled = "cancelled"
@@ -65,8 +63,8 @@ const (
 func ValidNextBookingRequestStatuses(current string) []string {
 	switch current {
 	case BookingRequestRequested:
-		return []string{BookingRequestApproved, BookingRequestRejected, BookingRequestQuoted, BookingRequestCancelled, BookingRequestExpired}
-	case BookingRequestApproved, BookingRequestQuoted:
+		return []string{BookingRequestApproved, BookingRequestRejected, BookingRequestCancelled, BookingRequestExpired}
+	case BookingRequestApproved:
 		return []string{BookingRequestConverted, BookingRequestCancelled, BookingRequestExpired}
 	default:
 		return nil

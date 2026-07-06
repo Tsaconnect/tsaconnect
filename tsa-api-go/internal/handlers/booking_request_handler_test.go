@@ -14,15 +14,13 @@ import (
 	"gorm.io/gorm"
 )
 
-func writeBookingProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType string) {
+func writeBookingProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType, pricingMethod string) {
 	t.Helper()
 	profile := models.ServiceProfile{
 		ID:            uuid.New(),
 		ProductID:     productID,
 		BookingType:   bookingType,
-		PricingMethod: models.PricingMethodFixed,
-		Workflow:      models.WorkflowManualAccept,
-		PaymentTiming: models.PaymentTimingBefore,
+		PricingMethod: pricingMethod,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
@@ -56,7 +54,7 @@ func TestBookingRequestLifecycle(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5) // same-city tier fee 5 → priceable
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequestApproval)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
 
 	idParams := gin.Params{{Key: "id", Value: svc.ID.String()}}
 
@@ -136,7 +134,7 @@ func TestUpsertServiceProfile_RejectsSlottedRequestMode(t *testing.T) {
 	c.Set("user", seller)
 	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
 	body, _ := json.Marshal(map[string]interface{}{
-		"bookingType":         models.BookingTypeRequestApproval,
+		"bookingType":         models.BookingTypeRequest,
 		"slotDurationMinutes": 60,
 	})
 	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
@@ -156,7 +154,7 @@ func TestBookingRequestReject(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequestApproval)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
 
 	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
 	if w.Code != http.StatusCreated {
@@ -184,10 +182,36 @@ func TestCreateBookingRequest_RejectsInstant(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant, models.PricingMethodFixed)
 
 	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for instant service, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// instant + on_request is an invalid combination (can't prepay an unnamed price).
+func TestUpsertServiceProfile_RejectsInstantOnRequest(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"bookingType":   models.BookingTypeInstant,
+		"pricingMethod": models.PricingMethodOnRequest,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for instant+on_request, got %d: %s", w.Code, w.Body.String())
 	}
 }

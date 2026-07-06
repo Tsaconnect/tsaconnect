@@ -20,8 +20,6 @@ func writeFieldConfig(t *testing.T, db *gorm.DB, productID uuid.UUID, cfg *model
 		ProductID:     productID,
 		BookingType:   models.BookingTypeInstant,
 		PricingMethod: models.PricingMethodFixed,
-		Workflow:      models.WorkflowAutoAccept,
-		PaymentTiming: models.PaymentTimingBefore,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
