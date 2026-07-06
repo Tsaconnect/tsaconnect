@@ -1072,7 +1072,7 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, user, &seller, &product, serviceType, &profile,
 		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
-		req.MenuSelections, req.BookingSlot, req.Answers,
+		req.MenuSelections, req.BookingSlot, req.Answers, nil,
 	)
 	if errMsg != "" {
 		tx.Rollback()
@@ -1111,6 +1111,7 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	serviceType string, profile *models.ServiceProfile,
 	token, serviceTier, buyerCity, buyerState, buyerCountry string,
 	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
+	priceOverrideUSD *float64,
 ) (*models.Order, string, int) {
 	// Validate the auto-generated booking-form answers against the merchant's
 	// field config (unified booking engine). No config → no validation (legacy).
@@ -1121,11 +1122,23 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	origin := resolveShippingOrigin(product, seller)
 	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)
 
-	priceUSD, calloutUSD, zone, menuSel, booking, perr := ch.resolveServicePricing(
-		tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
-	)
-	if perr != "" {
-		return nil, perr, http.StatusBadRequest
+	var priceUSD, calloutUSD float64
+	var zone string
+	var menuSel []models.OrderMenuSelection
+	var booking *models.ServiceBooking
+	if priceOverrideUSD != nil {
+		// Provider-quoted price (price-on-request): the quote is the all-in
+		// service price; no tier call-out is added and there's no slot to reserve.
+		priceUSD = *priceOverrideUSD
+		zone = detectedZone
+	} else {
+		var perr string
+		priceUSD, calloutUSD, zone, menuSel, booking, perr = ch.resolveServicePricing(
+			tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
+		)
+		if perr != "" {
+			return nil, perr, http.StatusBadRequest
+		}
 	}
 
 	decimals := tokenDecimals(token)
