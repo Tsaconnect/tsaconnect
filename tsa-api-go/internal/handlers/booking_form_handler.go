@@ -18,8 +18,6 @@ type bookingFormSchema struct {
 	ServiceType   string                `json:"serviceType"`
 	BookingType   string                `json:"bookingType"`
 	PricingMethod string                `json:"pricingMethod"`
-	Workflow      string                `json:"workflow"`
-	PaymentTiming string                `json:"paymentTiming"`
 	Fields        []models.BookingField `json:"fields"`
 	Policies      bookingPolicies       `json:"policies"`
 }
@@ -62,8 +60,6 @@ func (h *Handlers) GetBookingFormSchema(c *gin.Context) {
 		ServiceType:   serviceType,
 		BookingType:   orDefault(profile.BookingType, models.BookingTypeInstant),
 		PricingMethod: orDefault(profile.PricingMethod, models.PricingMethodFixed),
-		Workflow:      orDefault(profile.Workflow, models.WorkflowAutoAccept),
-		PaymentTiming: orDefault(profile.PaymentTiming, models.PaymentTimingBefore),
 		Fields:        []models.BookingField{},
 		Policies: bookingPolicies{
 			Cancellation: profile.CancellationPolicy,

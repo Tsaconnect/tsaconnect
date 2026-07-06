@@ -358,7 +358,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	// guards against two concurrent pay calls both creating an order (the order
 	// created above is rolled back if we lose the race).
 	claim := tx.Model(&models.BookingRequest{}).
-		Where("id = ? AND status IN ?", r.ID, []string{models.BookingRequestApproved, models.BookingRequestQuoted}).
+		Where("id = ? AND status = ?", r.ID, models.BookingRequestApproved).
 		Updates(map[string]interface{}{
 			"status":     models.BookingRequestConverted,
 			"order_id":   order.ID,
