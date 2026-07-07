@@ -19,9 +19,6 @@ import {
   isBiometricAvailable, isBiometricEnabled, setBiometricEnabled, getBiometricType,
   authenticateWithBiometric,
 } from "@/services/localAuth";
-import { useUserRole } from "@/hooks/useUserRole";
-
-const ADMIN_ROLES = new Set(["admin", "super_admin", "superadmin"]);
 
 interface SettingsItem {
   icon: string;
@@ -40,8 +37,6 @@ const SettingsScreen = () => {
   const { logOut, logOutFull } = useAuth();
   const { preference, setScheme } = useThemeControls();
   const { colors } = useTheme();
-  const { role } = useUserRole();
-  const isAdmin = !!role && ADMIN_ROLES.has(role.toLowerCase());
   const styles = makeStyles(colors);
   const [lockOn, setLockOn] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
@@ -179,21 +174,6 @@ const SettingsScreen = () => {
   };
 
   const sections: SettingsSection[] = [
-    ...(isAdmin
-      ? [
-          {
-            title: "Admin",
-            items: [
-              {
-                icon: "swap-horiz",
-                label: "Spot Listings",
-                description: "Manage the pairs shown on the Spot Trade tab",
-                onPress: () => router.push("/admin/spot-listings" as any),
-              },
-            ],
-          },
-        ]
-      : []),
     {
       title: "Currency",
       items: [],
