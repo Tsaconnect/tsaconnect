@@ -70,9 +70,8 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isMerchant, role, loading: roleLoading } = useUserRole();
+  const { isMerchant, loading: roleLoading } = useUserRole();
   const { isPm, loading: pmLoading } = useIsPaymentMerchant();
-  const isAdmin = !!role && ['admin', 'super_admin', 'superadmin'].includes(role);
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   // Minimum trade amount (fiat, in the selected currency). Shows ads whose
@@ -203,25 +202,6 @@ const P2PMarketScreen: React.FC = () => {
           />
         }
       >
-        {isAdmin && !roleLoading && (
-          <PressableScale onPress={() => router.push('/admin/p2p-disputes')} style={{ marginBottom: spacing.md }}>
-            <AccentCard padding="md" railColor={colors.warning}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="shield" size={20} color={colors.warning} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Dispute console
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Review and resolve escrow disputes.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={18} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-        )}
-
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View style={{ flex: 1 }}>
             <Text variant="title1" weight="700">
