@@ -47,6 +47,9 @@ function openTrade(listing: SpotListing, side: 'buy' | 'sell') {
 
 const SpotRow = ({ listing }: { listing: SpotListing }) => {
   const { colors, spacing, radius } = useTheme();
+  // Admin-entered logo URLs can be share-page links (ibb.co/…) or dead — fall
+  // back to the letter badge instead of rendering a blank circle.
+  const [logoFailed, setLogoFailed] = useState(false);
   const hasChange = listing.change24h != null;
   const isUp = (listing.change24h ?? 0) >= 0;
   const changeColor = isUp ? colors.success : colors.danger;
@@ -77,9 +80,10 @@ const SpotRow = ({ listing }: { listing: SpotListing }) => {
     <Card padding="md" style={{ marginBottom: spacing.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
         {/* Logo / letter badge */}
-        {listing.logoUrl ? (
+        {listing.logoUrl && !logoFailed ? (
           <Image
             source={{ uri: listing.logoUrl }}
+            onError={() => setLogoFailed(true)}
             style={{ width: 40, height: 40, borderRadius: radius.pill, backgroundColor: colors.surfaceAlt }}
           />
         ) : (
