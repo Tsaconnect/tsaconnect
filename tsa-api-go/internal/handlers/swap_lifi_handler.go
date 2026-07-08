@@ -148,7 +148,10 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := h.lifiGet(liFiHTTPClient, fmt.Sprintf("/tokens?chains=%s", chainId))
+	// Bulk client: a cold-cache per-chain list (Ethereum especially) is several
+	// MB and routinely overruns the 10s client, surfacing as "failed to reach
+	// LiFi" → the app's "Failed to fetch token list".
+	resp, err := h.lifiGet(liFiBulkHTTPClient, fmt.Sprintf("/tokens?chains=%s", chainId))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
