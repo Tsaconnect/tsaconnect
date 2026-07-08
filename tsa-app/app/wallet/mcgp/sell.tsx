@@ -1,7 +1,7 @@
 // app/wallet/mcgp/sell.tsx
 //
 // Sell spendable premium MCGP back for USDC at the premium sell price.
-// (Redeem-legacy and withdraw-to-wallet are not offered.)
+// (Withdraw-to-wallet is not offered.)
 import React, { useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

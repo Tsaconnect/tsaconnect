@@ -5,9 +5,8 @@
 // an unsigned tx the app signs + broadcasts; confirm endpoints verify the
 // on-chain event and write the audit ledger row.
 //
-// Two buckets:
-//   • PREMIUM — bought (buyPremium, paid in USDC), spendable (pay) + sellable.
-//   • LEGACY  — pre-launch snapshot entitlement, REDEEM-ONLY (sellLegacy).
+// PREMIUM MCGP only — bought (buyPremium, paid in USDC), spendable (pay) +
+// sellable.
 
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
@@ -25,8 +24,6 @@ export type McgpUnsignedTx = {
 export interface McgpBalance {
   walletAddress: string;
   premiumBalance: string; // MCGP base units (18dp)
-  legacyEntitlement: string;
-  legacyRemaining: string;
 }
 
 export interface McgpQuote {
@@ -58,10 +55,9 @@ export type ApiResult<T> = { success: boolean; data?: T; message?: string };
 export type SwapDirection =
   | 'buy_premium'
   | 'sell_premium'
-  | 'sell_legacy'
   | 'withdraw';
 
-export type QuoteKind = 'premiumBuy' | 'premiumSell' | 'legacySell';
+export type QuoteKind = 'premiumBuy' | 'premiumSell';
 
 async function safeJson(res: Response): Promise<any> {
   try {
@@ -134,7 +130,7 @@ export const getMcgpLedger = () =>
   getJson<{ entries: McgpLedgerEntry[] }>('/mcgp/ledger');
 
 // ────────────────────────────── prepares ──────────────────────────────────
-export const prepareMcgpApprove = (token: 'usdc' | 'mcgp', amount: string) =>
+export const prepareMcgpApprove = (token: 'usdc', amount: string) =>
   postJson<{ currentAllowance: string; tx: McgpUnsignedTx }>('/mcgp/approve/prepare', {
     token,
     amount,
@@ -145,9 +141,6 @@ export const prepareMcgpBuy = (mcgpAmount: string, maxUsdc: string) =>
 
 export const prepareMcgpSell = (mcgpAmount: string, minUsdc: string) =>
   postRawTx('/mcgp/sell/prepare', { mcgpAmount, minUsdc });
-
-export const prepareMcgpLegacySell = (mcgpAmount: string, minUsdc: string) =>
-  postRawTx('/mcgp/legacy/sell/prepare', { mcgpAmount, minUsdc });
 
 export const prepareMcgpWithdraw = (mcgpAmount: string) =>
   postRawTx('/mcgp/withdraw/prepare', { mcgpAmount });

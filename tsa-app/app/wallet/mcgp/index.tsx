@@ -8,7 +8,7 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
-import { AccentCard, Button, Card, Divider, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import { AccentCard, Button, Spinner, Text } from '@/components/ui';
 import { getMcgpBalance, type McgpBalance } from '@/services/mcgpSwapApi';
 
 const fmtMcgp = (base?: string) => {
@@ -76,15 +76,6 @@ export default function McgpHub() {
             <Button title="Sell" variant="secondary" onPress={() => router.push('/wallet/mcgp/sell')} />
           </View>
         </View>
-
-        <Card>
-          <SummaryCard>
-            <SummaryRow label="Premium (spendable)" value={`${fmtMcgp(bal?.premiumBalance)} MCGP`} />
-            <Divider spacing="xs" />
-            <SummaryRow label="Legacy redeemable" value={`${fmtMcgp(bal?.legacyRemaining)} MCGP`} />
-            <SummaryRow label="Legacy entitlement" value={`${fmtMcgp(bal?.legacyEntitlement)} MCGP`} />
-          </SummaryCard>
-        </Card>
 
         {loading ? <Spinner /> : null}
       </ScrollView>
