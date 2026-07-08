@@ -2,8 +2,8 @@
 //
 // The Spot Trade pane: renders the admin-curated list of pairs (services/spotApi)
 // with live price + 24h change, and Buy/Sell buttons that route to EXISTING flows
-// by `route` — MCGP → the Contract B USDC OTC desk, generic → All Swap (LiFi).
-// No new swap logic lives here.
+// by `route` — MCGP → the Contract B USDC OTC desk, generic → the Spot Trade
+// desk (app/wallet/spot-trade, LiFi under the hood). No new swap logic lives here.
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, ScrollView, RefreshControl, Image } from 'react-native';
 import { router } from 'expo-router';
@@ -30,10 +30,19 @@ function badgeColor(symbol: string, palette: string[]): string {
 function openTrade(listing: SpotListing, side: 'buy' | 'sell') {
   if (listing.route === 'mcgp') {
     router.push(side === 'buy' ? '/wallet/mcgp/buy' : '/wallet/mcgp/sell');
-  } else {
-    // Generic tokens trade via the existing All Swap (LiFi) pane.
-    router.push({ pathname: '/easyswap', params: { tab: 'allswap' } } as any);
+    return;
   }
+  // Generic tokens open the Spot Trade desk — MCGP-style form with both legs'
+  // balances, LiFi under the hood (see app/wallet/spot-trade).
+  router.push({
+    pathname: '/wallet/spot-trade',
+    params: {
+      side,
+      base: listing.baseSymbol,
+      quote: listing.quoteSymbol,
+      chain: listing.chain,
+    },
+  } as any);
 }
 
 const SpotRow = ({ listing }: { listing: SpotListing }) => {
