@@ -13,14 +13,15 @@
 // No recipient, amount, or submit logic was altered.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, ScrollView, KeyboardAvoidingView, Platform, FlatList,
+  View, ScrollView, KeyboardAvoidingView, Platform, FlatList, Linking,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
-import { signTransaction } from '../../services/wallet';
+import { signTransaction, getProvider } from '../../services/wallet';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -50,7 +51,7 @@ import {
 
 type BalanceEntry = WalletBalanceWithChain;
 
-type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
+type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'pending' | 'failure';
 
 // Round token-symbol badge. Color is sourced from the token registry's
 // iconColor (data-driven, like wallet/home & wallet/send) and falls back to a
@@ -105,6 +106,7 @@ const InstantPay = () => {
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const getSupportedChainsForToken = useCallback((symbol: string): ChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
@@ -231,17 +233,37 @@ const InstantPay = () => {
         nonce: r.data.nonce, chainId: r.data.chainId,
       });
       const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
-      if (res.success && res.data?.txHash) { setTxHash(res.data.txHash); setScreen('success'); }
-      else throw new Error(res.message || 'Failed');
+      if (!res.success || !res.data?.txHash) throw new Error(res.message || 'Failed');
+      setTxHash(res.data.txHash);
+
+      // "Sent" must mean MINED, not merely broadcast — an accepted tx can sit
+      // in the mempool forever (nonce queue, underpriced gas) and the recipient
+      // never receives it. Wait bounded; on timeout show the honest "pending"
+      // state instead of claiming success.
+      try {
+        const receipt = await getProvider(selectedChain).waitForTransaction(res.data.txHash, 1, 90_000);
+        if (receipt && receipt.status === 0) {
+          throw new Error('The transfer reverted on-chain. No funds were taken beyond gas.');
+        }
+        setScreen(receipt ? 'success' : 'pending');
+      } catch (waitErr: any) {
+        if (/reverted on-chain/.test(waitErr?.message || '')) throw waitErr;
+        // Timeout / RPC read failure — the tx may still confirm; don't call it failed.
+        setScreen('pending');
+      }
     } catch (e: any) { setError(e.message || 'Failed.'); setScreen('failure'); }
   };
 
   // ── Result ──
-  if (screen === 'success' || screen === 'failure') {
+  if (screen === 'success' || screen === 'pending' || screen === 'failure') {
     const ok = screen === 'success';
+    const pending = screen === 'pending';
+    const explorerUrl = txHash && activeChain?.explorerUrl ? `${activeChain.explorerUrl}/tx/${txHash}` : null;
+    const iconBg = ok ? colors.successBg : pending ? colors.accentMuted : colors.dangerBg;
     return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing['2xl'] }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'bottom']}>
+        {/* Outcome, centered; actions pinned to the bottom edge like the form's CTA. */}
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: spacing['2xl'] }}>
           <View
             style={{
               width: 80,
@@ -250,46 +272,86 @@ const InstantPay = () => {
               justifyContent: 'center',
               alignItems: 'center',
               marginBottom: spacing.lg,
-              backgroundColor: ok ? colors.successBg : colors.dangerBg,
+              backgroundColor: iconBg,
             }}
           >
-            <Icon name={ok ? 'checkCircle' : 'closeCircle'} size={48} color={ok ? colors.success : colors.danger} />
+            <Icon
+              name={ok ? 'checkCircle' : pending ? 'clock' : 'closeCircle'}
+              size={48}
+              color={ok ? colors.success : pending ? colors.accent : colors.danger}
+            />
           </View>
           <Text variant="title1" weight="700" align="center">
-            {ok ? 'Payment Sent!' : 'Payment Failed'}
+            {ok ? 'Payment sent' : pending ? 'Payment submitted' : 'Payment failed'}
           </Text>
-          <Text
-            variant="bodySm"
-            color="textSecondary"
-            align="center"
-            style={{ marginTop: spacing.xs, marginBottom: spacing.xl, paddingHorizontal: spacing['2xl'] }}
-          >
-            {ok ? `${amount} ${selectedToken} sent to @${resolvedUser?.username}` : error}
-          </Text>
+          {ok || pending ? (
+            <>
+              <Text variant="title3" weight="700" numeric align="center" style={{ marginTop: spacing.sm }}>
+                {amount} {selectedToken}
+              </Text>
+              <Text variant="bodySm" color="textSecondary" align="center" style={{ marginTop: spacing.xs }}>
+                to @{resolvedUser?.username} on {activeChain?.name || selectedChain}
+              </Text>
+              <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.sm }}>
+                {ok
+                  ? 'Confirmed on-chain. It may take a moment to show in their wallet.'
+                  : 'The network is taking longer than usual to confirm this transfer. Track it on the explorer — if it doesn’t confirm, contact support with the transaction hash below.'}
+              </Text>
+            </>
+          ) : (
+            <Card padding="md" style={{ marginTop: spacing.lg, alignSelf: 'stretch', backgroundColor: colors.dangerBg }}>
+              <Text variant="bodySm" color="danger" align="center">
+                {error || 'Something went wrong. Your funds have not moved.'}
+              </Text>
+            </Card>
+          )}
+
           {txHash ? (
-            <Text
-              variant="caption"
-              color="textMuted"
-              numeric
-              numberOfLines={1}
-              ellipsizeMode="middle"
-              style={{ maxWidth: '80%', marginBottom: spacing['2xl'] }}
+            <PressableScale
+              onPress={async () => {
+                await Clipboard.setStringAsync(txHash);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Copy transaction hash"
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                marginTop: spacing.xl,
+                paddingHorizontal: spacing.md,
+                paddingVertical: spacing.sm,
+                borderRadius: radius.pill,
+                backgroundColor: colors.surfaceAlt,
+                maxWidth: '100%',
+              }}
             >
-              Tx: {txHash}
-            </Text>
+              <Text variant="caption" color="textMuted" numeric numberOfLines={1} ellipsizeMode="middle" style={{ maxWidth: 200 }}>
+                {txHash}
+              </Text>
+              <Icon name={copied ? 'checkCircle' : 'copy'} size={14} color={copied ? colors.success : colors.textMuted} />
+            </PressableScale>
           ) : null}
-          <Button
-            title="Back to Wallet"
-            onPress={() => router.replace('/tokenization')}
-            fullWidth={false}
-          />
-          {ok && (
+          {explorerUrl ? (
+            <PressableScale onPress={() => Linking.openURL(explorerUrl)} style={{ marginTop: spacing.sm }} hitSlop={8}>
+              <Text variant="caption" weight="600" color="accent">
+                View on explorer
+              </Text>
+            </PressableScale>
+          ) : null}
+        </View>
+
+        <View style={{ padding: spacing.lg, gap: spacing.sm }}>
+          <Button title="Back to Wallet" size="lg" onPress={() => router.replace('/tokenization')} />
+          {ok ? (
             <Button
-              title="Send Again"
+              title="Send again"
               variant="ghost"
               onPress={() => { setScreen('form'); setAmount(''); setUsername(''); setResolvedUser(null); }}
-              style={{ marginTop: spacing.sm }}
             />
+          ) : (
+            <Button title="Try again" variant="ghost" onPress={() => setScreen('form')} />
           )}
         </View>
       </SafeAreaView>
@@ -314,10 +376,13 @@ const InstantPay = () => {
           <Spinner size="large" />
         </View>
         <Text variant="title1" weight="700" align="center">
-          Sending Payment
+          Sending payment
         </Text>
         <Text variant="bodySm" weight="600" color="accent" align="center" style={{ marginTop: spacing.xs }}>
-          Sending {amount} {selectedToken} to @{resolvedUser?.username}
+          {amount} {selectedToken} to @{resolvedUser?.username}
+        </Text>
+        <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.sm }}>
+          Waiting for the network to confirm — this can take up to a minute.
         </Text>
       </View>
     </SafeAreaView>
