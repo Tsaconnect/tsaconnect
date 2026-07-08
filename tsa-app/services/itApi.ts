@@ -16,7 +16,6 @@ export interface ITBalance {
   premiumBought: string; // MCGP wei (USDC-bought, self-exitable)
   premiumCredited: string; // MCGP wei (IT/NGN, spendable)
   pendingSettle: string; // MCGP wei (in-flight NGN sell)
-  legacyRemaining: string;
 }
 
 export interface ITIntent {
