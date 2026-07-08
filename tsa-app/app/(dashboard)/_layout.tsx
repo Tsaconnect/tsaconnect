@@ -1,20 +1,20 @@
 // app/(dashboard)/_layout.tsx
 //
 // Dashboard drawer/stack layout — user (and merchant-extended) navigation drawer
-// plus the (tabs) header chrome (notification bell + profile avatar). Migrated onto
-// the TSA Signature design system: legacy `COLORS` constants and the
-// react-native-elements Avatar are replaced by useTheme() tokens and @/components/ui
-// primitives (Text, Avatar, Divider), so the drawer + header chrome track light/dark
-// automatically.
+// plus the (tabs) header chrome (notification bell + profile avatar). Runs on the
+// TSA Signature design system (useTheme() tokens + @/components/ui primitives) so
+// the drawer + header chrome track light/dark automatically.
 //
-// LAYOUT INVARIANT: every Drawer.Screen registration, name, order, and option is
-// preserved verbatim; the merchant drawer section (its DrawerItems, labels, icons,
-// routes, and order) is preserved verbatim. The MaterialCommunityIcons glyphs are
-// kept for the drawer/section navigation icons (they are navigation chrome, not
-// @/components/ui content icons, and the Icon registry does not cover them). Only
-// theming/chrome was swapped onto tokens — auth check, profile fetch, the 5-minute
-// refresh interval, refreshProfile, handleAvatarPress, getUserInitials, the
-// unauthenticated guard, and the loading/auth render gate are all unchanged.
+// Drawer anatomy: identity header (avatar + name + email → profile) · auto items
+// from Drawer.Screen registrations · MERCHANT section (role-gated custom
+// DrawerItems). Both sections share ONE row treatment (drawerRowIcon /
+// drawerLabelStyle / zero item margin) — merchant items must pass an explicit
+// inactiveTintColor or their icons render near-invisible in dark mode.
+// MaterialCommunityIcons glyphs are navigation chrome, not @/components/ui
+// content icons (the Icon registry doesn't cover them); use the -outline
+// variants so the set reads as one family. Auth check, profile fetch, the
+// 5-minute refresh interval, handleAvatarPress, the unauthenticated guard,
+// and the loading/auth render gate are unchanged.
 import { Pressable, View } from "react-native";
 import React, { useEffect, useState } from "react";
 import { Drawer } from "expo-router/drawer";
@@ -86,25 +86,6 @@ const Layout = () => {
     return () => clearInterval(intervalId);
   }, []);
 
-  // Refresh profile function
-  const refreshProfile = async () => {
-    try {
-      if (isAuthenticated) {
-        const profileResponse = await api.getProfile();
-
-        if (profileResponse.success && profileResponse.data) {
-          setCurrentUser(profileResponse.data);
-          return { success: true, data: profileResponse.data };
-        } else {
-          return { success: false, message: profileResponse.message };
-        }
-      }
-    } catch (error) {
-      console.error('Error refreshing profile:', error);
-      return { success: false, message: 'Failed to refresh profile' };
-    }
-  };
-
   // Handle avatar press - navigate immediately, profile screen fetches its own data
   const handleAvatarPress = () => {
     if (!isAuthenticated) {
@@ -112,14 +93,6 @@ const Layout = () => {
       return;
     }
     router.push("/profile");
-  };
-
-  // Get user initials for avatar fallback
-  const getUserInitials = (name: string) => {
-    if (!name) return '?';
-    const names = name.split(' ');
-    if (names.length === 1) return name.charAt(0).toUpperCase();
-    return (names[0].charAt(0) + names[names.length - 1].charAt(0)).toUpperCase();
   };
 
   // Guard: redirect unauthenticated users to login
@@ -136,22 +109,69 @@ const Layout = () => {
 
   const isMerchant = userRole === "merchant";
 
-  const merchantIconStyle = {
+  // ONE row treatment for every drawer row — auto items (Drawer.Screen) and the
+  // merchant DrawerItems below both use these, so the two sections can't drift.
+  const drawerRowIconStyle = {
     marginVertical: -5,
     marginRight: spacing.lg,
     marginLeft: -spacing.md,
   } as const;
 
-  const merchantDrawerLabelStyle = {
+  const drawerLabelStyle = {
     marginHorizontal: -spacing.xl,
     fontSize: type.body.fontSize,
-    fontFamily: fontFamily['400'],
-    color: colors.textPrimary,
+    fontFamily: fontFamily['500'],
   } as const;
+
+  const merchantItems: { label: string; icon: string; route: string }[] = [
+    { label: "Merchant Dashboard", icon: "view-dashboard-outline", route: "/merchants/dashboard" },
+    { label: "Products & Services", icon: "shopping-outline", route: "/merchants/inventory" },
+    { label: "Add Product", icon: "plus-circle-outline", route: "/merchants/inventory/add" },
+    { label: "Sell USDT for Fiat", icon: "trending-up", route: "/merchants/sell-usdt" },
+    { label: "Buy Crypto with Cash", icon: "cash-multiple", route: "/merchants/buy-usdt" },
+    { label: "Digital Assets", icon: "wallet-outline", route: "/merchants/digital" },
+  ];
 
   const CustomDrawerContent = (props: any) => (
     <DrawerContentScrollView {...props}>
+      {/* Identity header — who's signed in, tap to manage the account. */}
+      <Pressable
+        onPress={() => {
+          props.navigation.closeDrawer();
+          router.push("/profile");
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Open profile"
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: spacing.md,
+          paddingHorizontal: spacing.xl,
+          paddingTop: spacing.sm,
+          paddingBottom: spacing.lg,
+        }}
+      >
+        {currentUser?.profilePicture ? (
+          <Avatar uri={currentUser.profilePicture} size={44} />
+        ) : (
+          <Avatar name={currentUser?.name || "?"} size={44} />
+        )}
+        <View style={{ flex: 1 }}>
+          <Text variant="bodyMed" weight="700" numberOfLines={1}>
+            {currentUser?.name || "Your account"}
+          </Text>
+          {currentUser?.email ? (
+            <Text variant="caption" color="textMuted" numberOfLines={1}>
+              {currentUser.email}
+            </Text>
+          ) : null}
+        </View>
+        <Icon name="chevron-right" size={20} color={colors.textMuted} />
+      </Pressable>
+      <Divider spacing="sm" inset={spacing.xl} />
+
       <DrawerItemList {...props} />
+
       {isMerchant && (
         <View style={{ marginTop: spacing.xs }}>
           <Divider spacing="sm" inset={spacing.xl} />
@@ -162,78 +182,26 @@ const Layout = () => {
           >
             MERCHANT
           </Text>
-          <DrawerItem
-            label="Merchant Dashboard"
-            icon={({ color }) => (
-              <Icon name="view-dashboard-outline" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/dashboard");
-            }}
-          />
-          <DrawerItem
-            label="Products & Services"
-            icon={({ color }) => (
-              <Icon name="shopping-outline" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/inventory");
-            }}
-          />
-          <DrawerItem
-            label="Add Product"
-            icon={({ color }) => (
-              <Icon name="plus-circle-outline" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/inventory/add");
-            }}
-          />
-          <DrawerItem
-            label="Sell USDT for Fiat"
-            icon={({ color }) => (
-              <Icon name="trending-up" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/sell-usdt");
-            }}
-          />
-          <DrawerItem
-            label="Buy Crypto with Cash"
-            icon={({ color }) => (
-              <Icon name="cash-multiple" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/buy-usdt");
-            }}
-          />
-          <DrawerItem
-            label="Digital Assets"
-            icon={({ color }) => (
-              <Icon name="wallet-outline" size={25} color={color} style={merchantIconStyle} />
-            )}
-            activeTintColor={colors.accent}
-            labelStyle={merchantDrawerLabelStyle}
-            onPress={() => {
-              props.navigation.closeDrawer();
-              router.push("/merchants/digital");
-            }}
-          />
+          {merchantItems.map((item) => (
+            <DrawerItem
+              key={item.route}
+              label={item.label}
+              icon={({ color }) => (
+                <Icon name={item.icon} size={25} color={color} style={drawerRowIconStyle} />
+              )}
+              activeTintColor={colors.accent}
+              // Custom DrawerItems don't inherit screenOptions — without this the
+              // icons fall back to react-navigation's dark default and vanish on
+              // the dark surface.
+              inactiveTintColor={colors.textPrimary}
+              labelStyle={drawerLabelStyle}
+              style={{ marginVertical: 0 }}
+              onPress={() => {
+                props.navigation.closeDrawer();
+                router.push(item.route as any);
+              }}
+            />
+          ))}
         </View>
       )}
     </DrawerContentScrollView>
@@ -248,39 +216,37 @@ const Layout = () => {
           ({ route, navigation }) => ({
             //@ts-ignore
             drawerIcon: ({ focused, color, size }) => {
+              // Outline variants, filled when focused — one visual family for
+              // the whole list. Every registered route MUST have a case here;
+              // a missing case renders an empty icon slot (misaligned label).
               let iconName;
               switch (route.name) {
-                case "categories":
-                  iconName = "clipboard-list";
-                  break;
-                case "profile":
-                  iconName = "account-cog";
-                  break;
-                case "myAdverts":
-                  iconName = "shopping";
-                  break;
-                case "Pending Reviews":
-                  iconName = "comment-processing";
+                case "(tabs)":
+                  iconName = focused ? "home" : "home-outline";
                   break;
                 case "orderlist":
-                  iconName = "ticket-percent";
+                  iconName = focused ? "ticket-percent" : "ticket-percent-outline";
+                  break;
+                case "myAdverts":
+                  iconName = focused ? "shopping" : "shopping-outline";
+                  break;
+                case "profile":
+                  iconName = focused ? "account-cog" : "account-cog-outline";
                   break;
                 case "settings":
-                  iconName = "cog";
+                  iconName = focused ? "cog" : "cog-outline";
                   break;
-                case "Saved Items":
-                  iconName = "heart";
+                case "categories":
+                  iconName = focused ? "clipboard-list" : "clipboard-list-outline";
                   break;
-                case "Followed Sellers":
-                  iconName = "account-heart";
+                case "booking-requests":
+                  iconName = "calendar-clock";
                   break;
-                case "Recently Viewed":
-                  iconName = "eye";
-                  break;
-                case "(tabs)":
-                  iconName = "home";
+                case "referrals":
+                  iconName = focused ? "account-multiple-plus" : "account-multiple-plus-outline";
                   break;
                 default:
+                  iconName = "circle-small"; // visible placeholder — add a case above
                   break;
               }
               return (
@@ -302,19 +268,12 @@ const Layout = () => {
             headerShadowVisible: false,
             sceneContainerStyle: { backgroundColor: colors.background },
             drawerActiveTintColor: colors.accent,
+            drawerActiveBackgroundColor: colors.accentMuted,
             drawerInactiveTintColor: colors.textPrimary,
             drawerStyle: { backgroundColor: colors.surface },
-            drawerLabelStyle: {
-              marginHorizontal: -spacing.xl,
-              fontSize: type.body.fontSize,
-              fontFamily: fontFamily['400'],
-              padding: -spacing.xl,
-            },
-            itemStyle: {
+            drawerLabelStyle,
+            drawerItemStyle: {
               marginVertical: 0,
-            },
-            drawerContentContainerStyle: {
-              justifyContent: "center",
             },
           })
         }
@@ -434,6 +393,13 @@ const Layout = () => {
           name="booking-requests"
           options={{
             title: "Booking Requests",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
+          name="referrals"
+          options={{
+            title: "Referrals",
             drawerActiveTintColor: colors.accent,
           }}
         />
