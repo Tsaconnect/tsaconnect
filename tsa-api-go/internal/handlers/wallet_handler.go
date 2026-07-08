@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -557,6 +558,30 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	signedTxBytes, err := hexutil.Decode(req.SignedTx)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction format")
+		return
+	}
+
+	// The chain credits a tx to whoever SIGNED it — not to the account the
+	// prepare endpoints computed the nonce for (user.WalletAddress). If the
+	// device wallet differs from the registered wallet, the nonce belongs to
+	// the wrong account and nodes accept the tx as a future-nonce orphan that
+	// queues in the mempool forever: the app reports "sent", nothing ever
+	// mines, and a retry rebuilds the byte-identical tx (2026-07-08 Instant
+	// Pay incident). Reject with an actionable message instead.
+	var parsedTx types.Transaction
+	if err := parsedTx.UnmarshalBinary(signedTxBytes); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
+		return
+	}
+	signerAddr, err := types.Sender(types.LatestSignerForChainID(parsedTx.ChainId()), &parsedTx)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify the transaction signature")
+		return
+	}
+	if !strings.EqualFold(signerAddr.Hex(), user.WalletAddress) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
+			"This transaction is signed by wallet %s, but your registered wallet is %s. The wallet on this device is not the one linked to your account — re-register your current wallet (or restore the registered one from its seed phrase) and try again.",
+			signerAddr.Hex(), user.WalletAddress))
 		return
 	}
 

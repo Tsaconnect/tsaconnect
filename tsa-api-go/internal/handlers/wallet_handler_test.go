@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -53,6 +58,13 @@ func setupTestDB(t *testing.T) *gorm.DB {
 			lock_until DATETIME,
 			wallet_address TEXT UNIQUE,
 			seed_phrase_backed_up INTEGER DEFAULT 0,
+			persona_inquiry_id TEXT,
+			mute_notifications INTEGER DEFAULT 0,
+			mute_email INTEGER DEFAULT 0,
+			tp_balance REAL DEFAULT 0,
+			cashback_balance REAL DEFAULT 0,
+			email_verified INTEGER DEFAULT 0,
+			last_settled_global_index REAL DEFAULT 0,
 			deleted_at DATETIME,
 			submitted_for_verification_at DATETIME,
 			created_at DATETIME,
@@ -569,5 +581,63 @@ func TestParseTokenAmount(t *testing.T) {
 				t.Errorf("parseTokenAmount(%q, %d) = %s, want %s", tt.amount, tt.decimals, result.String(), tt.wantStr)
 			}
 		})
+	}
+}
+
+// A tx signed by a wallet other than the user's registered one must be
+// rejected BEFORE broadcast. The chain credits the tx to the SIGNER, so the
+// prepared nonce (computed for the registered wallet) belongs to the wrong
+// account — the tx is accepted as a future-nonce orphan and queues in the
+// mempool forever: "Payment Sent" with no transfer ever landing. Regression
+// for the 2026-07-08 Instant Pay incident.
+func TestSubmitTx_SignerMismatchRejected(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	// Registered wallet ≠ the key that signs below.
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	// Sign a minimal legacy tx with a throwaway key (chainId 14601 = testnet
+	// sonic, resolvable via ClientForChainID without any network I/O).
+	key, _ := crypto.GenerateKey()
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    0,
+		To:       &common.Address{0x02},
+		Value:    big.NewInt(0),
+		Gas:      21000,
+		GasPrice: big.NewInt(1),
+	})
+	signed, err := types.SignTx(tx, types.LatestSignerForChainID(big.NewInt(14601)), key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	raw, err := signed.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    hexutil.Encode(raw),
+		"txType":      "send",
+		"tokenSymbol": "USDC",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "0.5",
+		"chainId":     14601,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("signed by wallet")) {
+		t.Errorf("expected signer-mismatch message, got: %s", w.Body.String())
 	}
 }
