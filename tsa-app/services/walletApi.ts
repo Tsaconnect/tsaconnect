@@ -2,7 +2,7 @@
 // API calls to the Go backend for wallet operations
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
-import { CHAINS, CHAIN_KEYS, type ChainKey } from '../constants/chains';
+import { CHAINS, CHAIN_KEYS, type ChainKey, type AnyChainKey } from '../constants/chains';
 import { getNetwork } from '../hooks/useNetwork';
 import { getActiveWallet } from './wallet';
 
@@ -17,7 +17,7 @@ export interface WalletBalance {
 }
 
 export interface WalletBalanceWithChain extends WalletBalance {
-  chainKey: ChainKey;
+  chainKey: AnyChainKey;
   chainName: string;
 }
 

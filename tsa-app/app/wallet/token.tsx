@@ -14,10 +14,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import { View, ScrollView, Dimensions, Image } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { CHAINS, type ChainKey, type ChainConfig } from '../../constants/chains';
+import { CHAINS, getChainDisplay, isNonEVMChain, type ChainKey, type AnyChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { getWalletBalances, normalizeWalletBalances, getTokenPriceHistory } from '../../services/walletApi';
+import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { useTheme } from '@/theme';
 import {
   AmountText,
@@ -179,9 +180,13 @@ const TokenDetailScreen: React.FC = () => {
 
   const { tokens: allTokens } = useTokens();
   const tokenConfig = allTokens[symbol];
-  const availableChains = tokenConfig?.chains ?? (chainKey ? [chainKey as ChainKey] : []);
-  const [activeChainKey, setActiveChainKey] = useState<ChainKey>((chainKey as ChainKey) || 'sonic');
-  const activeChainConfig = (CHAINS as Record<string, ChainConfig>)[activeChainKey];
+  // A token opened from a non-EVM chain (Tron) locks to that chain — its
+  // balance/send paths are family-specific and don't share the EVM chain switch.
+  const availableChains: AnyChainKey[] = isNonEVMChain(chainKey)
+    ? [chainKey]
+    : tokenConfig?.chains ?? (chainKey ? [chainKey as ChainKey] : []);
+  const [activeChainKey, setActiveChainKey] = useState<AnyChainKey>((chainKey as AnyChainKey) || 'sonic');
+  const activeChainConfig = getChainDisplay(activeChainKey);
 
   const [balance, setBalance] = useState(0);
   const [usdPrice, setUsdPrice] = useState(0);
@@ -207,22 +212,33 @@ const TokenDetailScreen: React.FC = () => {
       return;
     }
     try {
-      const result = await getWalletBalances(CHAINS[activeChainKey]?.chainId);
-      if (result.success && result.data) {
-        const found = normalizeWalletBalances(result.data, activeChainKey).find(
-          (entry) => entry.symbol === symbol && entry.chainKey === activeChainKey
-        );
-        if (found) {
-          const parsedBalance = parseFloat(found.balance || '0');
-          const parsedUsdValue = parseFloat(found.usdValue || '0');
-          setBalance(parsedBalance);
-          setUsdValue(parsedUsdValue);
-          setUsdPrice(found.usdPrice || (parsedBalance > 0 ? parsedUsdValue / parsedBalance : 0));
-        } else {
-          setBalance(0);
-          setUsdValue(0);
-          setUsdPrice(0);
-        }
+      // Non-EVM (Tron): derive the family address and read balances from the
+      // /wallet/nonevm/* path rather than the EVM chainId endpoint.
+      const found = isNonEVMChain(activeChainKey)
+        ? await (async () => {
+            const tronAddr = await getTronAddress();
+            if (!tronAddr) return undefined;
+            const rows = await getTronBalances(tronAddr);
+            return rows.find((entry) => entry.symbol === symbol);
+          })()
+        : await (async () => {
+            const result = await getWalletBalances(CHAINS[activeChainKey as ChainKey]?.chainId);
+            if (!result.success || !result.data) return undefined;
+            return normalizeWalletBalances(result.data, activeChainKey as ChainKey).find(
+              (entry) => entry.symbol === symbol && entry.chainKey === activeChainKey
+            );
+          })();
+
+      if (found) {
+        const parsedBalance = parseFloat(found.balance || '0');
+        const parsedUsdValue = parseFloat(found.usdValue || '0');
+        setBalance(parsedBalance);
+        setUsdValue(parsedUsdValue);
+        setUsdPrice(found.usdPrice || (parsedBalance > 0 ? parsedUsdValue / parsedBalance : 0));
+      } else {
+        setBalance(0);
+        setUsdValue(0);
+        setUsdPrice(0);
       }
     } catch (err) {
       console.error('Token detail fetch error:', err);

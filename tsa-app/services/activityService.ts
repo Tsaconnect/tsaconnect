@@ -15,7 +15,8 @@ export interface ActivityItem {
   status: string;
   timestamp: string;
   txHash?: string;
-  chainId?: number;
+  chainId?: number;         // EVM chains
+  chainKey?: string;        // non-EVM chains (e.g. 'tron') — no numeric chainId
   iconName: string;         // Ionicons name
   iconColor: string;
   iconBg: string;

@@ -12,14 +12,21 @@
 // submitTransaction confirm flow. No address or amount logic was altered.
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, ScrollView, KeyboardAvoidingView, Platform, FlatList,
+  View, ScrollView, KeyboardAvoidingView, Platform, FlatList, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
-import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
+import { parseUnits, formatUnits } from 'ethers';
+import {
+  CHAINS, CHAIN_KEYS, getChainDisplay, isNonEVMChain, txExplorerUrl,
+  type ChainKey, type AnyChainKey,
+} from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
-import { isValidAddress, signTransaction } from '../../services/wallet';
+import { isValidAddress, signTransaction, getActiveWallet } from '../../services/wallet';
+import { isValidTronAddress } from '../../services/chains/derivation';
+import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
+import { prepareTron, broadcastTron, type SendTronParams, type TronPrepared } from '../../services/chains/tronSend';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -107,8 +114,8 @@ const SendToken = () => {
   const discoveredDecimals = navParams.decimals ? parseInt(navParams.decimals, 10) : undefined;
 
   const [selectedToken, setSelectedToken] = useState(navParams.token || 'USDT');
-  const [selectedChain, setSelectedChain] = useState<ChainKey>(
-    (navParams.chainKey as ChainKey) || 'sonic',
+  const [selectedChain, setSelectedChain] = useState<AnyChainKey>(
+    (navParams.chainKey as AnyChainKey) || 'sonic',
   );
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
@@ -121,8 +128,13 @@ const SendToken = () => {
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  // Prepared Tron tx carried from review → send so we don't rebuild it (and
+  // re-run the gas preflight) a second time at broadcast.
+  const [tronTx, setTronTx] = useState<{ prepared: TronPrepared['prepared']; params: SendTronParams } | null>(null);
 
-  const getSupportedChainsForToken = useCallback((symbol: string): ChainKey[] => {
+  const isTron = isNonEVMChain(selectedChain);
+
+  const getSupportedChainsForToken = useCallback((symbol: string): AnyChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
     if (registryChains.length > 0) {
       return registryChains;
@@ -140,8 +152,10 @@ const SendToken = () => {
 
   useEffect(() => {
     // Discovered tokens come pre-pinned to a single chain via nav params;
-    // don't let the per-chain auto-correct overwrite that selection.
-    if (isDiscovered) return;
+    // don't let the per-chain auto-correct overwrite that selection. A non-EVM
+    // (Tron) selection is likewise explicit — the token registry only lists EVM
+    // chains, so auto-correct would wrongly bounce it back to an EVM chain.
+    if (isDiscovered || isNonEVMChain(selectedChain)) return;
     const chains = getSupportedChainsForToken(selectedToken);
     if (chains.length === 0) return;
     if (!chains.includes(selectedChain)) {
@@ -201,6 +215,13 @@ const SendToken = () => {
         }
       }
 
+      // Non-EVM (Tron): derive the address and append its balances so TRX/USDT
+      // appear in the token picker. Dormant-safe — yields nothing if unset.
+      try {
+        const tronAddr = await getTronAddress();
+        if (tronAddr) allBalances.push(...(await getTronBalances(tronAddr)));
+      } catch { /* chain unavailable — skip */ }
+
       setBalances(allBalances);
     } catch (err) {
       console.error('Send: load balances error:', err);
@@ -228,7 +249,11 @@ const SendToken = () => {
     amount && getUsdPrice() > 0 ? (parseFloat(amount) * getUsdPrice()).toFixed(2) : '0'
   );
 
-  const activeChain = CHAINS[selectedChain];
+  const activeChain = getChainDisplay(selectedChain);
+  const gasSymbol = activeChain?.nativeCurrency?.symbol || 'S';
+
+  const validAddress = (addr: string): boolean =>
+    isTron ? isValidTronAddress(addr) : isValidAddress(addr);
 
   const handlePaste = async () => {
     try {
@@ -239,11 +264,29 @@ const SendToken = () => {
 
   const validate = (): string | null => {
     if (!toAddress.trim()) return 'Enter a recipient address.';
-    if (!isValidAddress(toAddress.trim())) return 'Invalid wallet address.';
+    if (!validAddress(toAddress.trim())) return 'Invalid wallet address.';
     if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) return 'Enter a valid amount.';
     const sendAmount = parseFloat(tokenAmount);
     if (sendAmount > parseFloat(getBalance())) return 'Insufficient balance.';
     return null;
+  };
+
+  // Build the Tron send params for the selected token from the loaded balance
+  // row (decimals + TRC-20 contract). Null when we can't derive the address.
+  const buildTronParams = async (recipient: string): Promise<SendTronParams | null> => {
+    const walletId = await getActiveWallet();
+    const from = await getTronAddress(walletId || undefined);
+    if (!from || !walletId) return null;
+    const entry = balances.find((b) => b.symbol === selectedToken && b.chainKey === selectedChain);
+    const decimals = entry?.decimals ?? 6;
+    return {
+      from,
+      to: recipient,
+      amount: parseUnits(tokenAmount, decimals).toString(),
+      symbol: selectedToken,
+      tokenAddr: entry?.contractAddress || '',
+      walletAddress: walletId, // used to look up the mnemonic for Tron-key signing
+    };
   };
 
   const handleReview = async () => {
@@ -251,6 +294,18 @@ const SendToken = () => {
     setError('');
     try {
       setLoading(true);
+      if (isTron) {
+        // Tron: the prepare endpoint runs the mandatory gas preflight and
+        // returns the TRX fee. A 402 (no TRX for gas) throws with a friendly
+        // note we surface on the form instead of advancing to confirm.
+        const params = await buildTronParams(toAddress.trim());
+        if (!params) throw new Error('Could not derive your Tron wallet.');
+        const { prepared, fee } = await prepareTron(params);
+        setTronTx({ prepared, params });
+        setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 6));
+        setScreen('confirm');
+        return;
+      }
       const r = await prepareSendTransaction(
         selectedToken,
         toAddress.trim(),
@@ -285,6 +340,21 @@ const SendToken = () => {
     const chainId = activeChain?.chainId || CHAINS.sonic.chainId;
     const recipient = toAddress.trim();
     try {
+      // Tron: broadcast the tx already built (and gas-checked) at review. Signed
+      // locally with the Tron-path key inside broadcastTron. tronTx is set by
+      // handleReview; rebuild defensively if somehow missing.
+      if (isTron) {
+        let ctx = tronTx;
+        if (!ctx) {
+          const params = await buildTronParams(recipient);
+          if (!params) throw new Error('Could not derive your Tron wallet.');
+          ctx = { prepared: (await prepareTron(params)).prepared, params };
+        }
+        const { txHash: hash } = await broadcastTron(ctx.prepared, ctx.params);
+        setTxHash(hash);
+        setScreen('success');
+        return;
+      }
       // Nonce is computed server-side at prepare time and can go stale before
       // broadcast on Sonic's load-balanced RPC ("nonce too low"). The signed tx
       // can't be patched, so on a nonce error we re-prepare (fresh nonce),
@@ -360,11 +430,24 @@ const SendToken = () => {
               numeric
               numberOfLines={1}
               ellipsizeMode="middle"
-              style={{ maxWidth: '80%', marginBottom: spacing['2xl'] }}
+              style={{ maxWidth: '80%', marginBottom: spacing.md }}
             >
               Tx: {txHash}
             </Text>
           ) : null}
+          {ok && txHash ? (() => {
+            const url = txExplorerUrl(txHash, isTron ? { chainKey: selectedChain } : { chainId: activeChain?.chainId });
+            return url ? (
+              <Button
+                title="View on explorer"
+                variant="ghost"
+                leftIcon="nearMe"
+                onPress={() => Linking.openURL(url)}
+                fullWidth={false}
+                style={{ alignSelf: 'center', marginBottom: spacing.md }}
+              />
+            ) : null;
+          })() : null}
           <Button
             title="Back to Wallet"
             onPress={() => router.replace('/tokenization')}
@@ -448,7 +531,7 @@ const SendToken = () => {
               }
             />
             <SummaryRow label="Network" value={activeChain?.name || selectedChain} />
-            <SummaryRow label="Gas Fee" value={`${gasEstimate} ${activeChain?.nativeCurrency?.symbol || 'S'}`} />
+            <SummaryRow label="Gas Fee" value={`${gasEstimate} ${gasSymbol}`} />
           </SummaryCard>
         </Card>
 
@@ -584,7 +667,7 @@ const SendToken = () => {
               RECIPIENT
             </Text>
             <Input
-              placeholder="0x... wallet address"
+              placeholder={isTron ? 'T... wallet address' : '0x... wallet address'}
               value={toAddress}
               onChangeText={(t) => { setToAddress(t); setError(''); }}
               autoCapitalize="none"
@@ -597,7 +680,7 @@ const SendToken = () => {
                   onPress={handlePaste}
                 />
               }
-              error={toAddress && !isValidAddress(toAddress) ? 'Invalid address format' : undefined}
+              error={toAddress && !validAddress(toAddress) ? 'Invalid address format' : undefined}
             />
           </Card>
 

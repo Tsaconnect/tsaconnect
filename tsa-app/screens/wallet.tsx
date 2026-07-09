@@ -780,10 +780,13 @@ const WalletScreen: React.FC = () => {
           );
           if (isNative) continue;
 
+          // EVM-only legacy view: balances come from the EVM fan-out, so
+          // chainKey is always an EVM ChainKey here.
+          const evmChainKey = entry.chainKey as ChainKey;
           const tokenConfig = tokenList.find(
-            t => t.symbol === entry.symbol && t.chains.includes(entry.chainKey)
+            t => t.symbol === entry.symbol && t.chains.includes(evmChainKey)
           );
-          const chain = CHAINS[entry.chainKey];
+          const chain = CHAINS[evmChainKey];
           if (!chain) continue;
 
           updated.push({
@@ -800,7 +803,7 @@ const WalletScreen: React.FC = () => {
             details: {
               type: entry.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Token',
               chain: chain.name,
-              chainKey: entry.chainKey,
+              chainKey: evmChainKey,
             },
           });
         }

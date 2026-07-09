@@ -358,6 +358,64 @@ export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
   },
 };
 
+// Non-EVM chains live in their own key space (they have no numeric chainId and
+// use the /wallet/nonevm/* endpoints). `AnyChainKey` is the union used by any
+// UI surface that displays both families side by side (wallet home, receive,
+// send). Screens branch on `family` to pick the EVM vs non-EVM code path.
+export type NonEVMChainKey = keyof typeof NONEVM_CHAINS;
+export type AnyChainKey = ChainKey | NonEVMChainKey;
+
+export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron'];
+
+export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana';
+
+export function isNonEVMChain(key: string): key is NonEVMChainKey {
+  return (NONEVM_CHAIN_KEYS as string[]).includes(key);
+}
+
+// A family-agnostic view of a chain for display purposes. Resolves from either
+// the EVM `CHAINS` map or `NONEVM_CHAINS` so callers don't have to know which
+// space a key lives in. Returns undefined for unknown keys.
+export interface ChainDisplay {
+  key: AnyChainKey;
+  name: string;
+  shortName: string;
+  family: ChainFamily;
+  explorerUrl: string;
+  nativeCurrency: { symbol: string; decimals: number };
+  iconColor: string;
+  chainId?: number; // EVM only; undefined for non-EVM families
+}
+
+export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
+  if (isNonEVMChain(key)) {
+    const c = NONEVM_CHAINS[key];
+    return c && {
+      key, name: c.name, shortName: c.shortName, family: c.family,
+      explorerUrl: c.explorerUrl, nativeCurrency: c.nativeCurrency, iconColor: c.iconColor,
+    };
+  }
+  const c = CHAINS[key as ChainKey];
+  return c && {
+    key, name: c.name, shortName: c.shortName, family: c.family ?? 'evm',
+    explorerUrl: c.explorerUrl, nativeCurrency: c.nativeCurrency, iconColor: c.iconColor,
+    chainId: c.chainId,
+  };
+}
+
+// Explorer URL for a transaction on any family. EVM explorers use `/tx/{hash}`;
+// Tronscan uses `/#/transaction/{hash}`. Resolves the chain from a non-EVM key,
+// else an EVM chainId, else an EVM key. Returns undefined when unresolvable.
+export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
+  if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
+    return `${NONEVM_CHAINS[opts.chainKey].explorerUrl}/#/transaction/${txHash}`;
+  }
+  const explorer =
+    (typeof opts.chainId === 'number' ? getChainByChainId(opts.chainId)?.explorerUrl : undefined) ??
+    (opts.chainKey ? getChainDisplay(opts.chainKey)?.explorerUrl : undefined);
+  return explorer ? `${explorer}/tx/${txHash}` : undefined;
+}
+
 export const CHAIN_KEYS: ChainKey[] = [
   'sonic',
   'bsc',

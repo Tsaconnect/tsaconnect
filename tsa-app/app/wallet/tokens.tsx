@@ -129,8 +129,11 @@ export default function AllTokensScreen() {
         const bal = parseFloat(entry.balance);
         if (!bal || bal <= 0) continue;
         if (list.some((a) => a.symbol === entry.symbol && a.chainKey === entry.chainKey)) continue;
-        const tc = tokenList.find((t) => t.symbol === entry.symbol && t.chains.includes(entry.chainKey));
-        const chain = CHAINS[entry.chainKey];
+        // EVM-only view: balances come from the EVM fan-out, so chainKey is
+        // always an EVM ChainKey here.
+        const evmChainKey = entry.chainKey as ChainKey;
+        const tc = tokenList.find((t) => t.symbol === entry.symbol && t.chains.includes(evmChainKey));
+        const chain = CHAINS[evmChainKey];
         if (!chain) continue;
         list.push({
           id: String(id++),
@@ -140,7 +143,7 @@ export default function AllTokensScreen() {
           usdValue: parseFloat(entry.usdValue) || 0,
           iconColor: tc?.iconColor || '#888',
           iconUrl: tc?.iconUrl,
-          chainKey: entry.chainKey,
+          chainKey: evmChainKey,
           chainName: chain.name,
           isNative: false,
           contractAddress: entry.contractAddress || undefined,
