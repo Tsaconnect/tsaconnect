@@ -16,21 +16,27 @@ export async function sendTron(params: {
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: params.tokenAddr ?? '',
   };
-  const prep = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=tron`, {
+  const prepRes = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=tron`, {
     method: 'POST', headers, body: JSON.stringify(body),
-  }).then((r) => r.json());
+  });
+  if (!prepRes.ok) throw new Error(`prepare-tx failed (${prepRes.status})`);
+  const prep = await prepRes.json();
   if (!prep?.data?.prepared) throw new Error(prep?.message || 'prepare failed');
 
   const { prepared } = prep.data;
   const pk = await getPrivateKey(params.walletAddress);
   if (!pk) throw new Error('no key for wallet');
-  const sigs = prepared.payloads.map((p: { index: number; hashHex: string }) => ({
-    index: p.index, sigHex: signSecpDigest(p.hashHex, pk),
-  }));
+  const payloads: { index: number; hashHex: string }[] = prepared.payloads;
+  if (!Array.isArray(payloads) || payloads.length === 0) {
+    throw new Error('prepare-tx returned no payloads');
+  }
+  const sigs = payloads.map((p) => ({ index: p.index, sigHex: signSecpDigest(p.hashHex, pk) }));
 
-  const sub = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=tron`, {
+  const subRes = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=tron`, {
     method: 'POST', headers, body: JSON.stringify({ prepared, sigs }),
-  }).then((r) => r.json());
+  });
+  if (!subRes.ok) throw new Error(`submit-tx failed (${subRes.status})`);
+  const sub = await subRes.json();
   if (!sub?.data?.txHash) throw new Error(sub?.message || 'broadcast failed');
   return { txHash: sub.data.txHash };
 }
