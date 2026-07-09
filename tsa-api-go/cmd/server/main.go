@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/ojimcy/tsa-api-go/internal/chains"
+	"github.com/ojimcy/tsa-api-go/internal/chains/tron"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
@@ -33,6 +35,17 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
+
+	// Build the non-EVM chain registry. Each chain is registered only when its
+	// config is present (set via env); absent chains stay dormant (ForKey → false).
+	chainRegistry := chains.NewRegistry()
+	if tcfg, ok := cfg.NonEVMChains["tron"]; ok {
+		tg := tron.NewTronGrid(tcfg.RPCURL, tcfg.APIKey)
+		chainRegistry.Register("tron", tron.NewClient(tcfg, tg))
+		log.Printf("chains: tron registered (%s)", tcfg.RPCURL)
+	} else {
+		log.Printf("chains: tron dormant (TRON_RPC_URL unset)")
+	}
 
 	// Connect to PostgreSQL
 	_, err := config.ConnectDB(cfg)
@@ -230,6 +243,9 @@ func main() {
 	// Spot-listing reads price MCGP from Contract B's on-chain quote (nil-safe;
 	// falls back to the IT rate when the swap isn't configured).
 	h.MCGPSwap = mcgpSwapService
+	// Non-EVM chain registry (dormant-safe: handlers return 503 when ChainRegistry
+	// is nil or a given chain key is absent from the registry).
+	h.ChainRegistry = chainRegistry
 	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)

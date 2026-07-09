@@ -392,6 +392,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.GET("/transactions", h.GetTransactionHistory)
 		walletGroup.POST("/seed-phrase-backed-up", h.ConfirmSeedPhraseBackup)
 		walletGroup.GET("/resolve/:username", h.ResolveUsername)
+		// Non-EVM (family) wallet endpoints — dormant-safe: each handler returns
+		// 503 "chain unavailable" when ChainRegistry is nil or ForKey misses.
+		walletGroup.POST("/nonevm/register", h.RegisterNonEVMAddress)
+		walletGroup.GET("/nonevm/balances", h.GetNonEVMBalances)
+		walletGroup.POST("/nonevm/prepare-tx", h.PrepareNonEVMTx)
+		walletGroup.POST("/nonevm/submit-tx", h.SubmitNonEVMTx)
 	}
 
 	// Swap / OTC marketplace routes
