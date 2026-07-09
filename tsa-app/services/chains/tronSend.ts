@@ -33,7 +33,11 @@ export async function sendTron(params: {
   const sigs = payloads.map((p) => ({ index: p.index, sigHex: signSecpDigest(p.hashHex, pk) }));
 
   const subRes = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=tron`, {
-    method: 'POST', headers, body: JSON.stringify({ prepared, sigs }),
+    method: 'POST', headers,
+    body: JSON.stringify({
+      prepared, sigs,
+      from: params.from, amount: params.amount, symbol: params.symbol,
+    }),
   });
   if (!subRes.ok) throw new Error(`submit-tx failed (${subRes.status})`);
   const sub = await subRes.json();

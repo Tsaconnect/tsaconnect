@@ -8,10 +8,14 @@ import (
 )
 
 // WalletAddress is a public per-chain receive address for a given wallet.
-// Keyed on (WalletID, ChainKey) to respect the app's multi-wallet reality.
+// Keyed uniquely on (UserID, WalletID, ChainKey): scoping the unique index to
+// the owner respects the app's multi-wallet reality AND prevents a cross-user
+// lockout — since WalletID is a public EVM address, a two-column (WalletID,
+// ChainKey) unique index would let anyone pre-register a victim's address and
+// block the victim's own later registration.
 type WalletAddress struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	UserID    uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
+	UserID    uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_wallet_chain" json:"userId"`
 	WalletID  string    `gorm:"size:64;not null;uniqueIndex:idx_wallet_chain" json:"walletId"` // the EVM address that anchors the mnemonic
 	ChainKey  string    `gorm:"size:16;not null;uniqueIndex:idx_wallet_chain" json:"chainKey"`
 	Family    string    `gorm:"size:16;not null" json:"family"`

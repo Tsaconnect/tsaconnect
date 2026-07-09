@@ -97,15 +97,12 @@ func TestRegisterNonEVM_OwnershipScoping(t *testing.T) {
 
 	h.RegisterNonEVMAddress(c)
 
-	// The attempt must fail (unique index on wallet_id+chain_key rejects the
-	// insert that FirstOrCreate tries when the user_id-scoped WHERE finds nothing).
-	if w.Code == http.StatusOK {
-		t.Errorf("expected non-200, got %d — ownership scoping failed", w.Code)
-	}
-
-	// The original row for user B must be unchanged.
+	// The security invariant: whatever user A's call does, user B's own row is
+	// never mutated or hijacked. With the (user_id, wallet_id, chain_key) unique
+	// index, A's upsert is scoped to A's user_id, so it can only ever touch A's
+	// own row — B stays intact and B is not locked out.
 	var got models.WalletAddress
-	if err := db.Where("wallet_id = ? AND chain_key = ?", "0xB", "tron").First(&got).Error; err != nil {
+	if err := db.Where("wallet_id = ? AND chain_key = ? AND user_id = ?", "0xB", "tron", uuidB).First(&got).Error; err != nil {
 		t.Fatalf("reload B row: %v", err)
 	}
 	if got.Address != "ToldB" {
@@ -113,5 +110,25 @@ func TestRegisterNonEVM_OwnershipScoping(t *testing.T) {
 	}
 	if got.UserID != uuidB {
 		t.Errorf("user B's user_id was changed: got %v, want %v", got.UserID, uuidB)
+	}
+
+	// And user B can still register/update its OWN row without being blocked by
+	// A's activity (no cross-user lockout).
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Set("user", &models.User{ID: uuidB})
+	body2, _ := json.Marshal(map[string]string{"walletId": "0xB", "chainKey": "tron", "address": "TnewB"})
+	c2.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body2))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.RegisterNonEVMAddress(c2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("user B blocked from updating its own row: got %d", w2.Code)
+	}
+	var b2 models.WalletAddress
+	if err := db.Where("wallet_id = ? AND chain_key = ? AND user_id = ?", "0xB", "tron", uuidB).First(&b2).Error; err != nil {
+		t.Fatalf("reload B row after self-update: %v", err)
+	}
+	if b2.Address != "TnewB" {
+		t.Errorf("user B self-update did not apply: got %q, want %q", b2.Address, "TnewB")
 	}
 }

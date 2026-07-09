@@ -1036,6 +1036,9 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 type submitNonEVMRequest struct {
 	Prepared chains.PreparedTx  `json:"prepared" binding:"required"`
 	Sigs     []chains.Signature `json:"sigs" binding:"required"`
+	From     string             `json:"from"`
+	Amount   string             `json:"amount"`
+	Symbol   string             `json:"symbol"`
 }
 
 // SubmitNonEVMTx handles POST /api/wallet/nonevm/submit-tx.
@@ -1062,6 +1065,27 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
 		return
 	}
+
+	// Record the send as a pending activity row so the non-EVM reconciler can
+	// finalize it against on-chain truth (and it becomes an audit trail). The
+	// broadcast already succeeded, so a failed insert must not fail the request.
+	amount := req.Amount
+	if amount == "" {
+		amount = "0"
+	}
+	activity := models.WalletActivity{
+		ChainKey:  chainKey,
+		Address:   req.From,
+		Hash:      hash,
+		Direction: "out",
+		AmountRaw: amount,
+		Symbol:    req.Symbol,
+		Status:    "pending",
+	}
+	if err := config.DB.Create(&activity).Error; err != nil {
+		log.Printf("nonevm: failed to record activity for tx %s: %v", hash, err)
+	}
+
 	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})
 }
 
