@@ -114,11 +114,12 @@ const InstantPay = () => {
       return registryChains;
     }
 
+    // EVM-only flow: instant pay runs on EVM chains, so chainKey narrows safely.
     const inferredChains = Array.from(
       new Set(
         balances
           .filter((entry) => entry.symbol === symbol)
-          .map((entry) => entry.chainKey)
+          .map((entry) => entry.chainKey as ChainKey)
       )
     );
     return inferredChains;
@@ -649,7 +650,7 @@ const InstantPay = () => {
                 <PressableScale
                   onPress={() => {
                     setSelectedToken(item.symbol);
-                    setSelectedChain(item.chainKey);
+                    setSelectedChain(item.chainKey as ChainKey);
                     setShowTokenPicker(false);
                   }}
                   style={{

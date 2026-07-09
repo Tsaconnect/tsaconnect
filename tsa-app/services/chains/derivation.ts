@@ -8,6 +8,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { base58check, bech32, base58 } from '@scure/base';
 import { hmac } from '@noble/hashes/hmac';
 import { sha512 } from '@noble/hashes/sha512';
+import { bytesToHex } from '@noble/hashes/utils';
 
 export const DERIVATION_PATHS = {
   tron: "m/44'/195'/0'/0/0",
@@ -33,6 +34,27 @@ export function deriveTronAddress(mnemonic: string): string {
   body[0] = 0x41;
   body.set(hash.slice(12), 1);
   return b58check.encode(body);
+}
+
+// The Tron signing key — derived at the Tron path (m/44'/195'), NOT the EVM
+// path. Signing a Tron tx with the EVM key would produce a signature that
+// recovers to a different address than the registered owner_address, so Tron
+// rejects it (SIGERROR). Returns a 0x-less 32-byte hex private key.
+export function deriveTronPrivateKey(mnemonic: string): string {
+  const node = secpNode(mnemonic, DERIVATION_PATHS.tron);
+  return bytesToHex(node.privateKey!);
+}
+
+// Validate a Tron mainnet base58check address: 'T'-prefixed, 21-byte payload
+// with a 0x41 version byte and a valid double-sha256 checksum.
+export function isValidTronAddress(addr: string): boolean {
+  if (!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(addr)) return false;
+  try {
+    const decoded = b58check.decode(addr);
+    return decoded.length === 21 && decoded[0] === 0x41;
+  } catch {
+    return false;
+  }
 }
 
 // BTC native SegWit (BIP-84): bech32(hash160(compressed pubkey)).
