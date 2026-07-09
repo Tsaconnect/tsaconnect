@@ -76,6 +76,9 @@ describe('executeLiFiSwap — no approval needed', () => {
     expect(mockSignLiFiTransaction).toHaveBeenCalledTimes(1);
     expect(mockSignLiFiTransaction).toHaveBeenCalledWith(expect.objectContaining({ nonce: 7, to: '0xrouter' }));
     expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+    // Submit must declare the wallet the nonce was fetched for, so the BE's
+    // signer guard validates against it (not the registered wallet).
+    expect(mockSubmitTransaction.mock.calls[0][6]).toBe(WALLET);
     expect(mockWithRpcFallback).not.toHaveBeenCalled(); // no approve → no wait
   });
 });
@@ -98,6 +101,8 @@ describe('executeLiFiSwap — with approval', () => {
     // Approve carries the first nonce, swap the re-fetched one.
     expect(mockSignLiFiTransaction.mock.calls[0][0]).toMatchObject({ nonce: 7, to: '0xtoken' });
     expect(mockSignLiFiTransaction.mock.calls[1][0]).toMatchObject({ nonce: 8, to: '0xrouter' });
+    expect(mockSubmitTransaction.mock.calls[0][6]).toBe(WALLET); // approve declares the sender
+    expect(mockSubmitTransaction.mock.calls[1][6]).toBe(WALLET); // swap too
     expect(mockWithRpcFallback).toHaveBeenCalledTimes(1);
     expect(stages.some((s) => /approving/i.test(s))).toBe(true);
   });

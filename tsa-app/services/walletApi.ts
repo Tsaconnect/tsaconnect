@@ -409,13 +409,19 @@ export async function prepareSendTransaction(
   toAddress: string,
   amount: string,
   chainId: number,
-  options?: { tokenAddress?: string; decimals?: number }
+  options?: { tokenAddress?: string; decimals?: number; fromAddress?: string }
 ): Promise<ApiResponse<PreparedTransaction>> {
   try {
     const headers = await getAuthHeaders();
     const body: Record<string, unknown> = { tokenSymbol, toAddress, amount, chainId };
     if (options?.tokenAddress) body.tokenAddress = options.tokenAddress;
     if (typeof options?.decimals === 'number') body.decimals = options.decimals;
+    // Spend from the ACTIVE device wallet (same default as getWalletBalances
+    // and signTransaction); the registered wallet remains the RECEIVING
+    // identity. The BE computes the nonce for this address and its submit
+    // guard requires the signature to recover to it.
+    const fromAddress = options?.fromAddress || (await getActiveWallet());
+    if (fromAddress) body.fromAddress = fromAddress;
     const response = await fetch(`${API_BASE_URL}/wallet/prepare-tx`, {
       method: 'POST',
       headers,
@@ -434,7 +440,13 @@ export async function prepareSendTransaction(
 }
 
 /**
- * Submit a signed transaction to the backend for broadcast
+ * Submit a signed transaction to the backend for broadcast.
+ *
+ * `fromAddress` is REQUIRED and must be the wallet the tx was PREPARED for —
+ * the BE verifies the signature recovers to it. Callers must capture the
+ * active wallet ONCE per flow and thread the same address through prepare →
+ * sign → submit; re-resolving it at each step lets a mid-flow wallet switch
+ * pair another account's nonce with this signature (queued-forever tx).
  */
 export async function submitTransaction(
   signedTx: string,
@@ -442,14 +454,18 @@ export async function submitTransaction(
   tokenSymbol: string,
   toAddress: string,
   amount: string,
-  chainId: number
+  chainId: number,
+  fromAddress: string
 ): Promise<ApiResponse<{ txHash: string }>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/wallet/submit-tx`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ signedTx, txType, tokenSymbol, toAddress, amount, chainId }),
+      body: JSON.stringify({
+        signedTx, txType, tokenSymbol, toAddress, amount, chainId,
+        ...(fromAddress ? { fromAddress } : {}),
+      }),
     });
     const result = await safeJson<any>(response);
     const txHash = extractTransactionHash(result?.data);
@@ -675,7 +691,9 @@ export async function getSwapPrice(
  */
 export async function prepareSwap(
   direction: 'buy' | 'sell',
-  params: { mcgpAmount?: string; usdcAmount?: string; slippageBps?: number }
+  params: { mcgpAmount?: string; usdcAmount?: string; slippageBps?: number },
+  /** Wallet to swap from — capture once per flow and reuse for sign/submit. */
+  fromAddress?: string
 ): Promise<ApiResponse<PreparedSwap>> {
   try {
     const headers = await getAuthHeaders();
@@ -687,6 +705,7 @@ export async function prepareSwap(
         mcgpAmount: params.mcgpAmount,
         usdcAmount: params.usdcAmount,
         slippageBps: params.slippageBps || 50,
+        ...(fromAddress ? { fromAddress } : {}),
       }),
     });
     const result = await safeJson<PreparedSwap>(response);

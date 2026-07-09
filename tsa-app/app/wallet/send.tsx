@@ -19,7 +19,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
-import { isValidAddress, signTransaction } from '../../services/wallet';
+import { isValidAddress, signTransaction, getActiveWallet } from '../../services/wallet';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -251,6 +251,8 @@ const SendToken = () => {
     setError('');
     try {
       setLoading(true);
+      const from = await getActiveWallet();
+      if (!from) throw new Error('No wallet found. Set up your wallet first.');
       const r = await prepareSendTransaction(
         selectedToken,
         toAddress.trim(),
@@ -260,8 +262,9 @@ const SendToken = () => {
           ? {
               tokenAddress: navParams.contractAddress,
               decimals: discoveredDecimals,
+              fromAddress: from,
             }
-          : undefined,
+          : { fromAddress: from },
       );
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare transaction.');
       try {
@@ -285,6 +288,11 @@ const SendToken = () => {
     const chainId = activeChain?.chainId || CHAINS.sonic.chainId;
     const recipient = toAddress.trim();
     try {
+      // ONE captured address through prepare → sign → submit — a mid-flow
+      // wallet switch must fail the signature pin, not pair another account's
+      // nonce with this signature (queued-forever tx).
+      const from = await getActiveWallet();
+      if (!from) throw new Error('No wallet found. Set up your wallet first.');
       // Nonce is computed server-side at prepare time and can go stale before
       // broadcast on Sonic's load-balanced RPC ("nonce too low"). The signed tx
       // can't be patched, so on a nonce error we re-prepare (fresh nonce),
@@ -300,8 +308,9 @@ const SendToken = () => {
               ? {
                   tokenAddress: navParams.contractAddress,
                   decimals: discoveredDecimals,
+                  fromAddress: from,
                 }
-              : undefined,
+              : { fromAddress: from },
           ),
         sign: (tx) =>
           signTransaction({
@@ -309,9 +318,9 @@ const SendToken = () => {
             to: tx.to, data: tx.data, value: tx.value,
             gasLimit: tx.gasLimit, gasPrice: tx.gasPrice,
             nonce: tx.nonce, chainId: tx.chainId,
-          }),
+          }, from),
         submit: (signed) =>
-          submitTransaction(signed, 'send', selectedToken, recipient, tokenAmount, chainId),
+          submitTransaction(signed, 'send', selectedToken, recipient, tokenAmount, chainId, from),
       });
       if (res.success && res.data?.txHash) { setTxHash(res.data.txHash); setScreen('success'); }
       else throw new Error(res.message || 'Failed');
