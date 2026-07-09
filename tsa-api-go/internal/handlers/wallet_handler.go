@@ -963,9 +963,11 @@ func (h *Handlers) RegisterNonEVMAddress(c *gin.Context) {
 		UserID: user.ID, WalletID: req.WalletID, ChainKey: req.ChainKey,
 		Family: client.Family(), Address: req.Address,
 	}
-	// upsert on (wallet_id, chain_key)
-	if err := config.DB.Where("wallet_id = ? AND chain_key = ?", req.WalletID, req.ChainKey).
-		Assign(rec).FirstOrCreate(&rec).Error; err != nil {
+	// upsert on (wallet_id, chain_key, user_id) — scope to owner so a caller
+	// cannot overwrite another user's registered address by passing their walletId.
+	if err := config.DB.Where("wallet_id = ? AND chain_key = ? AND user_id = ?", req.WalletID, req.ChainKey, user.ID).
+		Assign(models.WalletAddress{Address: req.Address, Family: client.Family()}).
+		FirstOrCreate(&rec).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "failed to save address")
 		return
 	}
@@ -1061,4 +1063,27 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})
+}
+
+// GetNonEVMTxStatus handles GET /api/wallet/nonevm/tx-status.
+// Returns the status of a non-EVM transaction by hash.
+// Query params: ?chain=tron&hash=<txHash>
+func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
+	chainKey := c.Query("chain")
+	hash := c.Query("hash")
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	st, err := client.GetTxStatus(c.Request.Context(), hash)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "status lookup failed")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"status": st})
 }
