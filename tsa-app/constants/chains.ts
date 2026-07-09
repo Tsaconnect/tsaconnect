@@ -13,6 +13,7 @@ export interface ChainConfig {
   name: string;
   shortName: string;
   rpcUrl: string;
+  family?: 'evm' | 'tron' | 'btc' | 'solana';
   /**
    * Backup RPC endpoints, tried in order if the primary fails on broadcast.
    * Useful when a specific endpoint is unreachable from a user's carrier or
@@ -338,6 +339,24 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
 };
 
 // Helpers
+
+export interface NonEVMChainConfig {
+  chainKey: 'tron' | 'btc' | 'solana';
+  family: 'tron' | 'btc' | 'solana';
+  name: string;
+  shortName: string;
+  explorerUrl: string;
+  nativeCurrency: { symbol: string; decimals: number };
+  iconColor: string;
+}
+
+export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
+  tron: {
+    chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
+    explorerUrl: 'https://tronscan.org',
+    nativeCurrency: { symbol: 'TRX', decimals: 6 }, iconColor: '#EF0027',
+  },
+};
 
 export const CHAIN_KEYS: ChainKey[] = [
   'sonic',
