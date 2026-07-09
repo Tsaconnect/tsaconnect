@@ -145,6 +145,19 @@ type NetworkConfig struct {
 	TokenAddresses map[string]string // "chain:symbol" → contract address
 }
 
+// NonEVMChainConfig configures one non-EVM chain (Tron/BTC/Solana). Populated
+// only when its RPC/indexer env is present, so absent chains stay dormant.
+type NonEVMChainConfig struct {
+	ChainKey       string
+	Family         string
+	Network        string            // "mainnet" | "testnet"
+	RPCURL         string            // TronGrid base, mempool base, or Solana RPC
+	APIKey         string            // optional provider key
+	NativeSymbol   string
+	NativeDecimals int
+	Tokens         map[string]string // symbol → on-chain token contract/mint
+}
+
 type Config struct {
 	DatabaseURL         string
 	JWTSecret           string
@@ -346,6 +359,11 @@ type Config struct {
 
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
+
+	// NonEVMChains is the registry of non-EVM chain configs keyed by chain key
+	// (e.g. "tron"). A chain appears here ONLY when its RPC env is set —
+	// absent chains stay dormant (dormant-by-default pattern).
+	NonEVMChains map[string]NonEVMChainConfig
 
 	// Legacy flat fields — kept for backward compat, point to mainnet
 	Chains         map[string]ChainConfig
@@ -573,6 +591,8 @@ func Load() *Config {
 	// v2 fee/TP engine kill-switch — DEFAULT OFF until the documented cutover.
 	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
 
+	cfg.NonEVMChains = buildNonEVMChains()
+
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
 	// RPC URLs are used as defaults so the service boots without paid keys;
@@ -693,6 +713,29 @@ func Load() *Config {
 	cfg.TokenAddresses = mainnetTokens
 
 	return cfg
+}
+
+func buildNonEVMChains() map[string]NonEVMChainConfig {
+	out := map[string]NonEVMChainConfig{}
+
+	// Tron — dormant unless TRON_RPC_URL is set.
+	if rpc := os.Getenv("TRON_RPC_URL"); rpc != "" {
+		tokens := map[string]string{}
+		if a := os.Getenv("TRON_USDT_ADDRESS"); a != "" {
+			tokens["USDT"] = a
+		}
+		out["tron"] = NonEVMChainConfig{
+			ChainKey:       "tron",
+			Family:         "tron",
+			Network:        getEnv("TRON_NETWORK", "mainnet"),
+			RPCURL:         rpc,
+			APIKey:         os.Getenv("TRON_API_KEY"),
+			NativeSymbol:   "TRX",
+			NativeDecimals: 6,
+			Tokens:         tokens,
+		}
+	}
+	return out
 }
 
 func getEnvFloat64(key string, fallback float64) float64 {
