@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -922,4 +923,142 @@ func (h *Handlers) ResolveUsername(c *gin.Context) {
 		"walletAddress":      target.WalletAddress,
 		"verificationStatus": target.VerificationStatus,
 	})
+}
+
+// --- non-EVM (family) wallet endpoints ---
+
+type registerNonEVMRequest struct {
+	WalletID string `json:"walletId" binding:"required"`
+	ChainKey string `json:"chainKey" binding:"required"`
+	Address  string `json:"address" binding:"required"`
+}
+
+// RegisterNonEVMAddress handles POST /api/wallet/nonevm/register.
+// Associates a non-EVM chain address (e.g. Tron) with the authenticated user's wallet.
+func (h *Handlers) RegisterNonEVMAddress(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req registerNonEVMRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(req.ChainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	if err := client.ValidateAddress(req.Address); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	rec := models.WalletAddress{
+		UserID: user.ID, WalletID: req.WalletID, ChainKey: req.ChainKey,
+		Family: client.Family(), Address: req.Address,
+	}
+	// upsert on (wallet_id, chain_key)
+	if err := config.DB.Where("wallet_id = ? AND chain_key = ?", req.WalletID, req.ChainKey).
+		Assign(rec).FirstOrCreate(&rec).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "failed to save address")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "registered", gin.H{"address": rec.Address})
+}
+
+// GetNonEVMBalances handles GET /api/wallet/nonevm/balances.
+// Returns balances for a non-EVM address (e.g. Tron TRX + TRC-20s).
+// Query params: ?chain=tron&address=T...
+func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
+	chainKey := c.Query("chain")
+	addr := c.Query("address")
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	bals, err := client.GetBalances(c.Request.Context(), addr)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "balance read failed")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"balances": bals})
+}
+
+// PrepareNonEVMTx handles POST /api/wallet/nonevm/prepare-tx.
+// Estimates fee and builds an unsigned tx for a non-EVM send.
+// Query param: ?chain=tron
+func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
+	var req chains.TransferRequest
+	chainKey := c.Query("chain")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	fee, err := client.EstimateFee(c.Request.Context(), req)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "fee estimate failed")
+		return
+	}
+	if !fee.HasEnoughGas {
+		utils.ErrorResponse(c, http.StatusPaymentRequired, fee.Note)
+		return
+	}
+	prepared, err := client.PrepareTransfer(c.Request.Context(), req)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "prepared", gin.H{"prepared": prepared, "fee": fee})
+}
+
+type submitNonEVMRequest struct {
+	Prepared chains.PreparedTx  `json:"prepared" binding:"required"`
+	Sigs     []chains.Signature `json:"sigs" binding:"required"`
+}
+
+// SubmitNonEVMTx handles POST /api/wallet/nonevm/submit-tx.
+// Assembles a signed tx from payloads + signatures and broadcasts it.
+// Query param: ?chain=tron
+func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
+	chainKey := c.Query("chain")
+	var req submitNonEVMRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	hash, err := client.AssembleAndBroadcast(c.Request.Context(), req.Prepared, req.Sigs)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})
 }
