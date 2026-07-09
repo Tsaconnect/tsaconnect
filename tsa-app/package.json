@@ -17,7 +17,8 @@
   "jest": {
     "preset": "jest-expo",
     "transformIgnorePatterns": [
-      "node_modules/(?!(jest-)?react-native|@react-native|expo(nent)?|@expo(nent)?/.*|@scure|@noble|.*\\.mjs$)"
+      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|@scure|@noble))",
+      "/node_modules/react-native-reanimated/plugin/"
     ]
   },
   "dependencies": {
