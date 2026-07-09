@@ -643,6 +643,14 @@ func main() {
 		log.Printf("[fee-v2] reward processor registered (interval=1m)")
 	}
 
+	// Non-EVM confirm/reconcile worker: walks pending wallet_activity rows and
+	// finalizes them against on-chain truth. Guarded on the registry having at
+	// least one chain configured (e.g. Tron); dormant otherwise.
+	if len(chainRegistry.Keys()) > 0 {
+		scheduler.Register(jobs.NewNonEVMReconciler(config.DB, chainRegistry))
+		log.Printf("chains: non-EVM reconciler registered (%d chain(s))", len(chainRegistry.Keys()))
+	}
+
 	// Backfill any pending transactions that already have a txHash.
 	// These were submitted before the receipt-polling goroutine was added.
 	go handlers.BackfillPendingTransactions(blockchainService)
