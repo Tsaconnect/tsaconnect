@@ -15,17 +15,25 @@
     "update": "EXPO_TOKEN=4frfAtt1qmlHLYB2LcIACmmXsSSO0VYHFnllVbcr eas update"
   },
   "jest": {
-    "preset": "jest-expo"
+    "preset": "jest-expo",
+    "transformIgnorePatterns": [
+      "node_modules/(?!(jest-)?react-native|@react-native|expo(nent)?|@expo(nent)?/.*|@scure|@noble|.*\\.mjs$)"
+    ]
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
     "@expo/vector-icons": "^15.0.3",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-community/datetimepicker": "8.4.4",
     "@react-native-picker/picker": "2.11.1",
     "@react-navigation/drawer": "^7.0.0",
     "@react-navigation/material-top-tabs": "^7.4.10",
     "@react-navigation/native": "^7.0.0",
+    "@scure/base": "^1.2.6",
+    "@scure/bip32": "^1.7.0",
+    "@scure/bip39": "^1.6.0",
     "axios": "^1.7.7",
     "ethers": "^6.16.0",
     "expo": "~54.0.33",
