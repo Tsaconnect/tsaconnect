@@ -21,7 +21,8 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
-import { signTransaction, getProvider } from '../../services/wallet';
+import { signTransaction, getProvider, getActiveWallet } from '../../services/wallet';
+import api from '../../components/services/api';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -107,6 +108,21 @@ const InstantPay = () => {
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Sends leave the ACTIVE device wallet; @username payments arrive at the
+  // REGISTERED wallet. When they differ, say so instead of letting the user
+  // assume one wallet does both.
+  const [activeWallet, setActiveWallet] = useState('');
+  const [registeredWallet, setRegisteredWallet] = useState('');
+  useEffect(() => {
+    getActiveWallet().then((a) => setActiveWallet(a || ''));
+    api
+      .getProfile()
+      .then((r: any) => setRegisteredWallet(r?.data?.walletAddress || ''))
+      .catch(() => {});
+  }, []);
+  const walletMismatch =
+    !!activeWallet && !!registeredWallet && activeWallet.toLowerCase() !== registeredWallet.toLowerCase();
+  const shortAddr = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
   const getSupportedChainsForToken = useCallback((symbol: string): ChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
@@ -205,7 +221,9 @@ const InstantPay = () => {
     setError('');
     try {
       setLoading(true);
-      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
+      const from = await getActiveWallet();
+      if (!from) throw new Error('No wallet found. Set up your wallet first.');
+      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId, { fromAddress: from });
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare transaction.');
       const gp = BigInt(r.data.gasPrice || '0');
       const gl = BigInt(r.data.gasLimit || '21000');
@@ -224,15 +242,20 @@ const InstantPay = () => {
     setShowAuthModal(false);
     setScreen('sending'); setError('');
     try {
-      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
+      // ONE captured address through prepare → sign → submit: a mid-flow
+      // wallet switch must fail the signature pin, not pair another
+      // account's nonce with this signature (queued-forever tx).
+      const from = await getActiveWallet();
+      if (!from) throw new Error('No wallet found. Set up your wallet first.');
+      const r = await prepareSendTransaction(selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId, { fromAddress: from });
       if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare');
       const signed = await signTransaction({
         type: 0,
         to: r.data.to, data: r.data.data, value: r.data.value,
         gasLimit: r.data.gasLimit, gasPrice: r.data.gasPrice,
         nonce: r.data.nonce, chainId: r.data.chainId,
-      });
-      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId);
+      }, from);
+      const res = await submitTransaction(signed, 'send', selectedToken, resolvedUser!.walletAddress, amount, activeChain?.chainId || CHAINS.sonic.chainId, from);
       if (!res.success || !res.data?.txHash) throw new Error(res.message || 'Failed');
       setTxHash(res.data.txHash);
 
@@ -514,6 +537,21 @@ const InstantPay = () => {
               Send crypto to any TSA Connect user
             </Text>
           </View>
+
+          {/* Active ≠ registered wallet — sends still work (they leave the
+              device wallet); incoming @username payments go to the registered
+              wallet. Informational, never blocking. */}
+          {walletMismatch ? (
+            <AccentCard padding="md" style={{ marginBottom: spacing.md }}>
+              <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'flex-start' }}>
+                <Icon name="info" size={16} color={colors.accent} />
+                <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                  You&apos;re sending from this device&apos;s wallet ({shortAddr(activeWallet)}).
+                  Payments sent to your @username arrive at your registered wallet ({shortAddr(registeredWallet)}).
+                </Text>
+              </View>
+            </AccentCard>
+          ) : null}
 
           {/* Recipient */}
           <Card style={{ marginBottom: spacing.md }}>

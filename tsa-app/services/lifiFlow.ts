@@ -71,7 +71,9 @@ export async function executeLiFiSwap({
     // with a stale nonce.
     let approveRes;
     try {
-      approveRes = await submitTransaction(signedApprove, 'approve', fromSymbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId);
+      // walletAddress is the wallet the nonce was fetched for — declare it so
+      // the BE's signer guard validates against it (not the registered wallet).
+      approveRes = await submitTransaction(signedApprove, 'approve', fromSymbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId, walletAddress);
     } catch (e) {
       console.error('[swap] approve submitTransaction threw', { chainKey, e });
       throw new Error('Token approval failed. The network may be congested — try again.');
@@ -125,7 +127,7 @@ export async function executeLiFiSwap({
   const signedSwap = await signLiFiTransaction(swapTx);
   let res;
   try {
-    res = await submitTransaction(signedSwap, 'swap', fromSymbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId);
+    res = await submitTransaction(signedSwap, 'swap', fromSymbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId, walletAddress);
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });
     throw new Error('Swap broadcast failed. The network may be congested — try again.');

@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS } from '@/constants/chains';
-import { signTransaction, withRpcFallback } from '@/services/wallet';
+import { signTransaction, withRpcFallback, getActiveWallet } from '@/services/wallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
   type WalletBalance,
@@ -186,6 +186,8 @@ const SwapScreen = () => {
   const [pickerFor, setPickerFor] = useState<'from' | 'to' | null>(null);
   // Prepared swap (fetched on Review so the confirm screen can show real gas).
   const [prepared, setPrepared] = useState<Awaited<ReturnType<typeof prepareSwap>>['data'] | null>(null);
+  // Wallet the prepared txs' nonces belong to — sign/submit must reuse it.
+  const [preparedFor, setPreparedFor] = useState('');
   const [gasFee, setGasFee] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -249,7 +251,7 @@ const SwapScreen = () => {
 
   useEffect(() => {
     // Any input change invalidates a previously-prepared swap + its gas estimate.
-    setPrepared(null); setGasFee(null);
+    setPrepared(null); setPreparedFor(''); setGasFee(null);
     fetchPrice(direction, amount, fromToken.decimals);
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [amount, direction, fromToken.decimals, fetchPrice]);
@@ -302,9 +304,12 @@ const SwapScreen = () => {
       const params = direction === 'buy'
         ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
         : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
-      const prep = await prepareSwap(direction, { ...params, slippageBps: 50 });
+      const from = await getActiveWallet();
+      if (!from) throw new Error('No wallet found. Set up your wallet first.');
+      const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare swap');
       setPrepared(prep.data);
+      setPreparedFor(from);
       setGasFee(estimateGasFee(prep.data.approveTx, prep.data.swapTx));
       setScreen('confirm');
     } catch (err: any) {
@@ -320,11 +325,17 @@ const SwapScreen = () => {
         ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
         : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
 
-      // Reuse the txs prepared on the confirm step; only re-prepare if missing.
+      // Reuse the txs prepared on the confirm step; only re-prepare if
+      // missing. `from` MUST be the wallet the reused txs' nonces belong to —
+      // signing/submitting with a different (freshly-resolved) wallet would
+      // pair another account's nonce with this signature.
       let prepData = prepared;
-      if (!prepData) {
+      let from = preparedFor;
+      if (!prepData || !from) {
         setStatus('Preparing swap...');
-        const prep = await prepareSwap(direction, { ...params, slippageBps: 50 });
+        from = (await getActiveWallet()) || '';
+        if (!from) throw new Error('No wallet found. Set up your wallet first.');
+        const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
         if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare');
         prepData = prep.data;
       }
@@ -338,13 +349,13 @@ const SwapScreen = () => {
           to: approveTx.to, data: approveTx.data, value: approveTx.value,
           gasLimit: approveTx.gasLimit, gasPrice: approveTx.gasPrice,
           nonce: approveTx.nonce, chainId: approveTx.chainId,
-        });
+        }, from);
 
         // submitTransaction returns { success: false, message } on backend
         // errors — it never throws. Check explicitly so a failed approve
         // surfaces here instead of silently advancing into the swap step
         // with a stale nonce.
-        const approveRes = await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId);
+        const approveRes = await submitTransaction(signedA, 'approve', fromSymbol, approveTx.to, amount, approveTx.chainId, from);
         const approveHash = approveRes.success ? approveRes.data?.txHash : undefined;
         if (!approveHash) {
           console.error('[swap] approve rejected by backend', approveRes);
@@ -386,8 +397,8 @@ const SwapScreen = () => {
         to: swapTx.to, data: swapTx.data, value: swapTx.value,
         gasLimit: swapTx.gasLimit, gasPrice: swapTx.gasPrice,
         nonce: swapNonce, chainId: swapTx.chainId,
-      });
-      const res = await submitTransaction(signedS, 'swap', 'MCGP', swapTx.to, amount, swapTx.chainId);
+      }, from);
+      const res = await submitTransaction(signedS, 'swap', 'MCGP', swapTx.to, amount, swapTx.chainId, from);
 
       const swapHash = res.success ? res.data?.txHash : undefined;
       if (swapHash) {
