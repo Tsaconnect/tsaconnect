@@ -43,6 +43,10 @@ type prepareTxRequest struct {
 	ChainID      int64  `json:"chainId" binding:"required"`
 	TokenAddress string `json:"tokenAddress,omitempty"`
 	Decimals     *int   `json:"decimals,omitempty"`
+	// FromAddress lets the app spend from its ACTIVE device wallet (nonce/gas
+	// are computed for this address). Empty = the registered wallet.
+	// Receiving stays on the registered wallet (username resolution).
+	FromAddress string `json:"fromAddress,omitempty"`
 }
 
 // submitTxRequest is the request body for SubmitTransaction.
@@ -54,6 +58,9 @@ type submitTxRequest struct {
 	Amount      string  `json:"amount" binding:"required"`
 	ChainID     int64   `json:"chainId" binding:"required"`
 	FeeUSD      float64 `json:"feeUSD"` // optional: system fee in USD for TP distribution
+	// FromAddress is the wallet the tx was PREPARED for (the app's active
+	// wallet). The signature must recover to it. Empty = the registered wallet.
+	FromAddress string `json:"fromAddress,omitempty"`
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -445,6 +452,18 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 		return
 	}
 
+	// Sender: the app's active device wallet when declared, else the
+	// registered wallet. The nonce/gas below are computed for THIS address,
+	// so the submit guard later requires the signature to match it.
+	fromAddress := strings.TrimSpace(req.FromAddress)
+	if fromAddress != "" && !isValidEthAddress(fromAddress) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid fromAddress format")
+		return
+	}
+	if fromAddress == "" {
+		fromAddress = user.WalletAddress
+	}
+
 	client, chainName := h.BlockchainService.ClientForChainID(req.ChainID)
 	if client == nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported chain ID")
@@ -476,7 +495,7 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 	var err error
 
 	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
-		txBytes, err = client.PrepareNativeTransfer(user.WalletAddress, req.ToAddress, amountWei)
+		txBytes, err = client.PrepareNativeTransfer(fromAddress, req.ToAddress, amountWei)
 	} else {
 		// Resolve token contract: explicit override (discovered tokens)
 		// wins over the supported_tokens lookup.
@@ -493,7 +512,7 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 				return
 			}
 		}
-		txBytes, err = client.PrepareERC20Transfer(tokenAddr, user.WalletAddress, req.ToAddress, amountWei)
+		txBytes, err = client.PrepareERC20Transfer(tokenAddr, fromAddress, req.ToAddress, amountWei)
 	}
 
 	if err != nil {
@@ -562,12 +581,22 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	}
 
 	// The chain credits a tx to whoever SIGNED it — not to the account the
-	// prepare endpoints computed the nonce for (user.WalletAddress). If the
-	// device wallet differs from the registered wallet, the nonce belongs to
-	// the wrong account and nodes accept the tx as a future-nonce orphan that
-	// queues in the mempool forever: the app reports "sent", nothing ever
-	// mines, and a retry rebuilds the byte-identical tx (2026-07-08 Instant
-	// Pay incident). Reject with an actionable message instead.
+	// prepare endpoints computed the nonce for. If those differ, the nonce
+	// belongs to the wrong account and nodes accept the tx as a future-nonce
+	// orphan that queues in the mempool forever: the app reports "sent",
+	// nothing ever mines, and a retry rebuilds the byte-identical tx
+	// (2026-07-08 Instant Pay incident). The expected signer is the address
+	// the tx was prepared for: the declared active wallet (fromAddress) when
+	// present, else the registered wallet. Receiving stays on the registered
+	// wallet — this only governs who spends.
+	expectedSigner := strings.TrimSpace(req.FromAddress)
+	if expectedSigner != "" && !isValidEthAddress(expectedSigner) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid fromAddress format")
+		return
+	}
+	if expectedSigner == "" {
+		expectedSigner = user.WalletAddress
+	}
 	var parsedTx types.Transaction
 	if err := parsedTx.UnmarshalBinary(signedTxBytes); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
@@ -578,10 +607,10 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify the transaction signature")
 		return
 	}
-	if !strings.EqualFold(signerAddr.Hex(), user.WalletAddress) {
+	if !strings.EqualFold(signerAddr.Hex(), expectedSigner) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf(
-			"This transaction is signed by wallet %s, but your registered wallet is %s. The wallet on this device is not the one linked to your account — re-register your current wallet (or restore the registered one from its seed phrase) and try again.",
-			signerAddr.Hex(), user.WalletAddress))
+			"This transaction is signed by wallet %s, but it was prepared for wallet %s. Switch the app to that wallet (or re-register your current wallet) and try again.",
+			signerAddr.Hex(), expectedSigner))
 		return
 	}
 
@@ -602,7 +631,9 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		TxHash:      txHash,
 		TokenSymbol: tokenUpper,
 		TxType:      req.TxType,
-		FromAddress: user.WalletAddress,
+		// Record the true on-chain sender (may be the active device wallet,
+		// not the registered one).
+		FromAddress: signerAddr.Hex(),
 		ToAddress:   req.ToAddress,
 		Amount:      req.Amount,
 		Status:      models.TxStatusPending,

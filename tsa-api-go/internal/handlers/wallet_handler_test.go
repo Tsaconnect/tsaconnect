@@ -641,3 +641,121 @@ func TestSubmitTx_SignerMismatchRejected(t *testing.T) {
 		t.Errorf("expected signer-mismatch message, got: %s", w.Body.String())
 	}
 }
+
+// ---------- Active-wallet sends (fromAddress) ----------
+
+func TestPrepareTx_InvalidFromAddress(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "USDC",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "0.5",
+		"chainId":     14601,
+		"fromAddress": "not-an-address",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+// Spend-from-active-wallet: when the client declares the sender (fromAddress)
+// and the signature matches it, the signer guard must NOT reject — even though
+// the signer differs from the user's registered wallet. (Receive stays on the
+// registered wallet; sending follows the device's active wallet.)
+func TestSubmitTx_SignerMatchesFromAddress_PassesGuard(t *testing.T) {
+	// Point the testnet sonic client at an unreachable port so the broadcast
+	// fails fast and hermetically AFTER the guard.
+	t.Setenv("SONIC_TESTNET_RPC_URL", "http://127.0.0.1:1")
+
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	key, _ := crypto.GenerateKey()
+	signerAddr := crypto.PubkeyToAddress(key.PublicKey)
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce: 0, To: &common.Address{0x02}, Value: big.NewInt(0), Gas: 21000, GasPrice: big.NewInt(1),
+	})
+	signed, _ := types.SignTx(tx, types.LatestSignerForChainID(big.NewInt(14601)), key)
+	raw, _ := signed.MarshalBinary()
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    hexutil.Encode(raw),
+		"txType":      "send",
+		"tokenSymbol": "USDC",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "0.5",
+		"chainId":     14601,
+		"fromAddress": signerAddr.Hex(),
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if bytes.Contains(w.Body.Bytes(), []byte("signed by wallet")) {
+		t.Fatalf("guard rejected a signer that matches fromAddress: %s", w.Body.String())
+	}
+	// Broadcast against the dead RPC must fail — proves we got PAST the guard.
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 broadcast failure, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// fromAddress present but the signature belongs to someone else → still rejected.
+func TestSubmitTx_FromAddressSignerMismatch(t *testing.T) {
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	key, _ := crypto.GenerateKey()
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce: 0, To: &common.Address{0x02}, Value: big.NewInt(0), Gas: 21000, GasPrice: big.NewInt(1),
+	})
+	signed, _ := types.SignTx(tx, types.LatestSignerForChainID(big.NewInt(14601)), key)
+	raw, _ := signed.MarshalBinary()
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"signedTx":    hexutil.Encode(raw),
+		"txType":      "send",
+		"tokenSymbol": "USDC",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "0.5",
+		"chainId":     14601,
+		"fromAddress": "0x00000000000000000000000000000000000000AA",
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.SubmitTransaction(c)
+
+	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("signed by wallet")) {
+		t.Errorf("expected signer-mismatch 400, got %d: %s", w.Code, w.Body.String())
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -116,6 +117,10 @@ type prepareSwapRequest struct {
 	McgpAmount  string `json:"mcgpAmount"` // Required for sell; optional for buy
 	UsdcAmount  string `json:"usdcAmount"` // Optional for buy (alternative to mcgpAmount)
 	SlippageBps int    `json:"slippageBps"`
+	// FromAddress lets the app swap from its ACTIVE device wallet (nonce/gas
+	// computed for it; the submit guard requires the signature to match).
+	// Empty = the registered wallet.
+	FromAddress string `json:"fromAddress,omitempty"`
 }
 
 // PrepareSwap handles POST /api/swap/prepare (auth required).
@@ -126,15 +131,23 @@ func (h *SwapHandler) PrepareSwap(c *gin.Context) {
 		return
 	}
 
-	userWallet := user.WalletAddress
-	if userWallet == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "user wallet address not set")
-		return
-	}
-
 	var req prepareSwapRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	// Spend from the declared active device wallet; registered wallet otherwise.
+	userWallet := strings.TrimSpace(req.FromAddress)
+	if userWallet != "" && !isValidEthAddress(userWallet) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid fromAddress format")
+		return
+	}
+	if userWallet == "" {
+		userWallet = user.WalletAddress
+	}
+	if userWallet == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "user wallet address not set")
 		return
 	}
 
