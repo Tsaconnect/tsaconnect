@@ -19,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
 import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
 import { loadTronWallet } from '@/services/chains/tronWallet';
+import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
 import { useTokens } from '@/hooks/useTokens';
@@ -240,6 +241,33 @@ export default function AllTokensScreen() {
       }
     } catch { /* chain unavailable — skip Tron */ }
 
+    // Spendable premium MCGP (Contract B, not ERC-20) — overlay onto the MCGP
+    // row so it's reachable from "See all", not only the buy/sell screens.
+    try {
+      const { balance: premium, usdValue } = await getPremiumMcgpAsset();
+      if (premium > 0) {
+        const existing = list.find((a) => a.symbol === 'MCGP' && a.chainKey === 'sonic');
+        if (existing) {
+          existing.balance += premium;
+          existing.usdValue += usdValue;
+        } else {
+          const mcgpToken = tokenList.find((t) => t.symbol === 'MCGP');
+          list.push({
+            id: 'mcgp-premium',
+            symbol: 'MCGP',
+            name: mcgpToken?.name || 'MCG Protocol',
+            balance: premium,
+            usdValue,
+            iconColor: mcgpToken?.iconColor || '#FFD700',
+            iconUrl: mcgpToken?.iconUrl,
+            chainKey: 'sonic',
+            chainName: 'Sonic',
+            isNative: false,
+          });
+        }
+      }
+    } catch { /* MCGP swap unavailable — skip */ }
+
     // Visible = anything with balance, plus native zero rows, plus every
     // imported custom token (user explicitly added it).
     const withBalance = list
@@ -285,6 +313,12 @@ export default function AllTokensScreen() {
 
   const handlePress = useCallback(
     (asset: Asset) => {
+      // MCGP is a Contract-B entitlement, not a transferable ERC-20 — route to
+      // the MCGP hub instead of the generic token/send flow.
+      if (asset.symbol === 'MCGP') {
+        router.push('/wallet/mcgp' as any);
+        return;
+      }
       router.push({
         pathname: '/wallet/token',
         params: {
