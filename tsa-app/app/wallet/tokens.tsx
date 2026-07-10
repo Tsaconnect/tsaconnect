@@ -49,6 +49,8 @@ interface Asset {
   isNative: boolean;
   discovered?: boolean;
   imported?: boolean;
+  /** Short label chip (e.g. "Spendable" for premium MCGP). */
+  tag?: string;
   contractAddress?: string;
   decimals?: number;
 }
@@ -241,30 +243,26 @@ export default function AllTokensScreen() {
       }
     } catch { /* chain unavailable — skip Tron */ }
 
-    // Spendable premium MCGP (Contract B, not ERC-20) — overlay onto the MCGP
-    // row so it's reachable from "See all", not only the buy/sell screens.
+    // Spendable premium MCGP (Contract B, not ERC-20) — its own tagged row,
+    // distinct from any ordinary (withdrawn) ERC-20 MCGP, reachable from "See
+    // all", not only the buy/sell screens.
     try {
       const { balance: premium, usdValue } = await getPremiumMcgpAsset();
       if (premium > 0) {
-        const existing = list.find((a) => a.symbol === 'MCGP' && a.chainKey === 'sonic');
-        if (existing) {
-          existing.balance += premium;
-          existing.usdValue += usdValue;
-        } else {
-          const mcgpToken = tokenList.find((t) => t.symbol === 'MCGP');
-          list.push({
-            id: 'mcgp-premium',
-            symbol: 'MCGP',
-            name: mcgpToken?.name || 'MCG Protocol',
-            balance: premium,
-            usdValue,
-            iconColor: mcgpToken?.iconColor || '#FFD700',
-            iconUrl: mcgpToken?.iconUrl,
-            chainKey: 'sonic',
-            chainName: 'Sonic',
-            isNative: false,
-          });
-        }
+        const mcgpToken = tokenList.find((t) => t.symbol === 'MCGP');
+        list.push({
+          id: 'mcgp-premium',
+          symbol: 'MCGP',
+          name: mcgpToken?.name || 'MCG Protocol',
+          balance: premium,
+          usdValue,
+          iconColor: mcgpToken?.iconColor || '#FFD700',
+          iconUrl: mcgpToken?.iconUrl,
+          chainKey: 'sonic',
+          chainName: 'Sonic',
+          isNative: false,
+          tag: 'Spendable',
+        });
       }
     } catch { /* MCGP swap unavailable — skip */ }
 
@@ -313,9 +311,9 @@ export default function AllTokensScreen() {
 
   const handlePress = useCallback(
     (asset: Asset) => {
-      // MCGP is a Contract-B entitlement, not a transferable ERC-20 — route to
-      // the MCGP hub instead of the generic token/send flow.
-      if (asset.symbol === 'MCGP') {
+      // Spendable premium MCGP is a Contract-B entitlement, not a transferable
+      // ERC-20 — route to the MCGP hub. Ordinary MCGP falls through to detail.
+      if (asset.symbol === 'MCGP' && asset.tag) {
         router.push('/wallet/mcgp' as any);
         return;
       }
@@ -382,6 +380,9 @@ export default function AllTokensScreen() {
           )}
           {item.imported && (
             <Badge label="IMPORTED" size="sm" color={colors.info} background={colors.infoBg} />
+          )}
+          {item.tag && (
+            <Badge label={item.tag} size="sm" color={colors.warning} background={colors.warningBg} />
           )}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2, gap: spacing.xs }}>
