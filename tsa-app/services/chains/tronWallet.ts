@@ -35,21 +35,23 @@ export async function getTronAddress(walletAddress?: string): Promise<string | n
   return tronAddress;
 }
 
-// Stablecoins are pinned to $1; TRX has no price feed yet (deferred per spec),
-// so it shows a balance with no USD value rather than a wrong one.
-function usdPriceFor(symbol: string): number {
+// Fallback pricing when the backend didn't attach a price (e.g. pre-redeploy):
+// stablecoins pin to $1; everything else shows no USD rather than a wrong value.
+function fallbackUsdPrice(symbol: string): number {
   return symbol === 'USDT' || symbol === 'USDC' ? 1 : 0;
 }
 
 function toBalanceRow(b: NonEVMBalance): WalletBalanceWithChain {
   const human = formatUnits(b.raw || '0', b.decimals);
-  const usdPrice = usdPriceFor(b.symbol);
+  // Prefer the backend's CoinGecko price; fall back to the stablecoin pin.
+  const usdPrice = typeof b.usdPrice === 'number' ? b.usdPrice : fallbackUsdPrice(b.symbol);
+  const usdValue = typeof b.usdValue === 'number' ? b.usdValue : parseFloat(human) * usdPrice;
   return {
     symbol: b.symbol,
     name: b.symbol,
     balance: human,
     usdPrice,
-    usdValue: (parseFloat(human) * usdPrice).toFixed(2),
+    usdValue: usdValue.toFixed(2),
     contractAddress: b.tokenAddress || '',
     decimals: b.decimals,
     chainKey: TRON_KEY,

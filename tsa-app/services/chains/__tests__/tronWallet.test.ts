@@ -46,6 +46,16 @@ describe('getTronBalances', () => {
     expect(usdt.usdValue).toBe('2.50'); // pinned $1
     expect(usdt.contractAddress).toBe('TR7...');
   });
+
+  it('prefers backend-provided USD price/value over the fallback pin', async () => {
+    mockedApi.getNonEVMBalances.mockResolvedValue([
+      { symbol: 'TRX', raw: '2000000000', decimals: 6, isNative: true, usdPrice: 0.12, usdValue: 240 },
+    ]);
+
+    const [trx] = await getTronBalances('TXaddr');
+    expect(trx.usdPrice).toBe(0.12); // real CoinGecko price, not 0
+    expect(trx.usdValue).toBe('240.00');
+  });
 });
 
 describe('loadTronWallet', () => {

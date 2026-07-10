@@ -13,6 +13,8 @@ export interface NonEVMBalance {
   decimals: number;
   tokenAddress?: string;
   isNative: boolean;
+  usdPrice?: number; // attached by the backend price service
+  usdValue?: number;
 }
 
 export interface NonEVMTxStatus {

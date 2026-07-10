@@ -999,7 +999,52 @@ func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadGateway, "balance read failed")
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"balances": bals})
+	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"balances": enrichBalancesWithUSD(h.PriceService, bals)})
+}
+
+// enrichBalancesWithUSD attaches a per-token USD price + value to non-EVM
+// balances using the shared CoinGecko price service (same source as EVM). It's
+// best-effort: when the price service is unset or a symbol has no price, the
+// balance is returned with usdPrice/usdValue = 0 rather than failing the read.
+func enrichBalancesWithUSD(ps *services.PriceService, bals []chains.Balance) []balanceWithUSD {
+	prices := map[string]services.PriceData{}
+	if ps != nil && len(bals) > 0 {
+		symbols := make([]string, 0, len(bals))
+		for _, b := range bals {
+			symbols = append(symbols, b.Symbol)
+		}
+		if pd, err := ps.GetPrices(symbols); err == nil {
+			prices = pd
+		}
+	}
+	out := make([]balanceWithUSD, 0, len(bals))
+	for _, b := range bals {
+		price := prices[strings.ToUpper(b.Symbol)].USD
+		out = append(out, balanceWithUSD{
+			Balance:  b,
+			UsdPrice: price,
+			UsdValue: rawToFloat(b.Raw, b.Decimals) * price,
+		})
+	}
+	return out
+}
+
+type balanceWithUSD struct {
+	chains.Balance
+	UsdPrice float64 `json:"usdPrice"`
+	UsdValue float64 `json:"usdValue"`
+}
+
+// rawToFloat converts an integer base-unit string to a human float given the
+// token's decimals (e.g. "2000000000", 6 → 2000).
+func rawToFloat(raw string, decimals int) float64 {
+	bi, ok := new(big.Int).SetString(raw, 10)
+	if !ok {
+		return 0
+	}
+	div := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
+	f, _ := new(big.Float).Quo(new(big.Float).SetInt(bi), div).Float64()
+	return f
 }
 
 // PrepareNonEVMTx handles POST /api/wallet/nonevm/prepare-tx.

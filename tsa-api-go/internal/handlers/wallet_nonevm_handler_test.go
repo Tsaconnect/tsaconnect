@@ -13,9 +13,37 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestEnrichBalancesWithUSD(t *testing.T) {
+	ps := services.NewPriceService()
+	ps.SeedPriceForTest("TRX", services.PriceData{USD: 0.5})
+
+	out := enrichBalancesWithUSD(ps, []chains.Balance{
+		{Symbol: "TRX", Raw: "2000000000", Decimals: 6, IsNative: true}, // 2000 TRX
+	})
+	if len(out) != 1 {
+		t.Fatalf("want 1 balance, got %d", len(out))
+	}
+	if out[0].UsdPrice != 0.5 {
+		t.Fatalf("usdPrice: want 0.5, got %v", out[0].UsdPrice)
+	}
+	if out[0].UsdValue != 1000 { // 2000 * 0.5
+		t.Fatalf("usdValue: want 1000, got %v", out[0].UsdValue)
+	}
+}
+
+func TestEnrichBalancesBestEffortWhenNoPriceService(t *testing.T) {
+	out := enrichBalancesWithUSD(nil, []chains.Balance{
+		{Symbol: "TRX", Raw: "1000000", Decimals: 6, IsNative: true},
+	})
+	if out[0].UsdPrice != 0 || out[0].UsdValue != 0 {
+		t.Fatalf("nil price service must yield 0 USD, got %+v", out[0])
+	}
+}
 
 // stubTron is a hand fake of chains.ChainClient for handler wiring tests.
 type stubTron struct{ chains.ChainClient }
