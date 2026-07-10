@@ -715,24 +715,43 @@ func Load() *Config {
 	return cfg
 }
 
+// buildNonEVMChains configures non-EVM chains per network, keyed
+// "<network>:<chainKey>" (e.g. "mainnet:tron"), mirroring the EVM Networks map.
+// Each (network, chain) is dormant unless its RPC env is present.
 func buildNonEVMChains() map[string]NonEVMChainConfig {
 	out := map[string]NonEVMChainConfig{}
+	apiKey := os.Getenv("TRON_API_KEY") // one TronGrid key works across networks
 
-	// Tron — dormant unless TRON_RPC_URL is set.
-	if rpc := os.Getenv("TRON_RPC_URL"); rpc != "" {
-		tokens := map[string]string{}
-		if a := os.Getenv("TRON_USDT_ADDRESS"); a != "" {
-			tokens["USDT"] = a
+	addTron := func(network, rpc, usdt string) {
+		if rpc == "" {
+			return
 		}
-		out["tron"] = NonEVMChainConfig{
+		tokens := map[string]string{}
+		if usdt != "" {
+			tokens["USDT"] = usdt
+		}
+		out[network+":tron"] = NonEVMChainConfig{
 			ChainKey:       "tron",
 			Family:         "tron",
-			Network:        getEnv("TRON_NETWORK", "mainnet"),
+			Network:        network,
 			RPCURL:         rpc,
-			APIKey:         os.Getenv("TRON_API_KEY"),
+			APIKey:         apiKey,
 			NativeSymbol:   "TRX",
 			NativeDecimals: 6,
 			Tokens:         tokens,
+		}
+	}
+
+	// Preferred: explicit per-network config, so both can be live at once.
+	addTron("mainnet", os.Getenv("TRON_MAINNET_RPC_URL"), os.Getenv("TRON_MAINNET_USDT_ADDRESS"))
+	addTron("testnet", os.Getenv("TRON_TESTNET_RPC_URL"), os.Getenv("TRON_TESTNET_USDT_ADDRESS"))
+
+	// Backward-compat: a single TRON_RPC_URL maps to the network named by
+	// TRON_NETWORK (default mainnet), unless that network was already set above.
+	if rpc := os.Getenv("TRON_RPC_URL"); rpc != "" {
+		network := getEnv("TRON_NETWORK", "mainnet")
+		if _, exists := out[network+":tron"]; !exists {
+			addTron(network, rpc, os.Getenv("TRON_USDT_ADDRESS"))
 		}
 	}
 	return out

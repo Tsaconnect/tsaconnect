@@ -5,6 +5,7 @@
 // thrown error the caller can swallow so the chain simply doesn't appear.
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAuthHeaders } from '../walletApi';
+import { getNetwork } from '../../hooks/useNetwork';
 
 export interface NonEVMBalance {
   symbol: string;
@@ -49,7 +50,7 @@ export async function registerNonEVMAddress(
   address: string
 ): Promise<void> {
   const headers = await getAuthHeaders();
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/register`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/register?network=${getNetwork()}`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ walletId, chainKey, address }),
@@ -66,7 +67,7 @@ export async function getNonEVMBalances(
   address: string
 ): Promise<NonEVMBalance[]> {
   const headers = await getAuthHeaders();
-  const qp = new URLSearchParams({ chain: chainKey, address });
+  const qp = new URLSearchParams({ chain: chainKey, address, network: getNetwork() });
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/balances?${qp.toString()}`, { headers });
   const body = await readJson<{ balances?: NonEVMBalance[] }>(res);
   if (!res.ok || !body.data?.balances) {
@@ -92,7 +93,7 @@ export async function getNonEVMHistory(
   address: string
 ): Promise<NonEVMActivity[]> {
   const headers = await getAuthHeaders();
-  const qp = new URLSearchParams({ chain: chainKey, address });
+  const qp = new URLSearchParams({ chain: chainKey, address, network: getNetwork() });
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/history?${qp.toString()}`, { headers });
   const body = await readJson<{ items?: NonEVMActivity[] }>(res);
   if (!res.ok) {
@@ -107,7 +108,7 @@ export async function getNonEVMTxStatus(
   hash: string
 ): Promise<NonEVMTxStatus> {
   const headers = await getAuthHeaders();
-  const qp = new URLSearchParams({ chain: chainKey, hash });
+  const qp = new URLSearchParams({ chain: chainKey, hash, network: getNetwork() });
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/tx-status?${qp.toString()}`, { headers });
   const body = await readJson<{ status?: NonEVMTxStatus }>(res);
   if (!res.ok || !body.data?.status) {

@@ -24,17 +24,19 @@ func (s stubClient) History(context.Context, string, string) ([]Activity, string
 	return nil, "", nil
 }
 
-func TestRegistryLookupByKeyAndFamily(t *testing.T) {
+func TestRegistryLookupByNetworkAndKey(t *testing.T) {
 	r := NewRegistry()
-	r.Register("tron", stubClient{family: "tron"})
+	r.Register("mainnet", "tron", stubClient{family: "tron"})
+	r.Register("testnet", "tron", stubClient{family: "tron"})
 
-	if _, ok := r.ForKey("tron"); !ok {
-		t.Fatal("expected tron by key")
+	if _, ok := r.ForKey("mainnet", "tron"); !ok {
+		t.Fatal("expected mainnet tron")
 	}
-	if _, ok := r.ForFamily("tron"); !ok {
-		t.Fatal("expected tron by family")
+	if _, ok := r.ForKey("testnet", "tron"); !ok {
+		t.Fatal("expected testnet tron")
 	}
-	if _, ok := r.ForKey("solana"); ok {
+	// Same chainKey on an unconfigured network stays dormant.
+	if _, ok := r.ForKey("mainnet", "solana"); ok {
 		t.Fatal("solana must be dormant (unregistered)")
 	}
 }

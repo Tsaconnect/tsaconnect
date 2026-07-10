@@ -36,15 +36,20 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	// Build the non-EVM chain registry. Each chain is registered only when its
-	// config is present (set via env); absent chains stay dormant (ForKey → false).
+	// Build the non-EVM chain registry. Each (network, chain) is registered only
+	// when its config is present, so absent combos stay dormant (ForKey → false).
+	// mainnet + testnet can be live at once, mirroring the EVM Networks map.
 	chainRegistry := chains.NewRegistry()
-	if tcfg, ok := cfg.NonEVMChains["tron"]; ok {
-		tg := tron.NewTronGrid(tcfg.RPCURL, tcfg.APIKey)
-		chainRegistry.Register("tron", tron.NewClient(tcfg, tg))
-		log.Printf("chains: tron registered (%s)", tcfg.RPCURL)
-	} else {
-		log.Printf("chains: tron dormant (TRON_RPC_URL unset)")
+	for _, tcfg := range cfg.NonEVMChains {
+		switch tcfg.Family {
+		case "tron":
+			tg := tron.NewTronGrid(tcfg.RPCURL, tcfg.APIKey)
+			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, tron.NewClient(tcfg, tg))
+			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
+		}
+	}
+	if len(chainRegistry.Keys()) == 0 {
+		log.Printf("chains: no non-EVM chains configured (dormant)")
 	}
 
 	// Connect to PostgreSQL

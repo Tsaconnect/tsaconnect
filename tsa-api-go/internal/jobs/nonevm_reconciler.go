@@ -37,7 +37,11 @@ func (r *NonEVMReconciler) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		row := pending[i]
-		client, ok := r.reg.ForKey(row.ChainKey)
+		network := row.Network
+		if network == "" {
+			network = "mainnet" // rows written before the network column existed
+		}
+		client, ok := r.reg.ForKey(network, row.ChainKey)
 		if !ok {
 			continue
 		}

@@ -1,6 +1,7 @@
 import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
+import { getNetwork } from '../../hooks/useNetwork';
 import { deriveTronPrivateKey } from './derivation';
 import { signSecpDigest } from './sign';
 
@@ -53,7 +54,7 @@ export async function prepareTron(params: SendTronParams): Promise<TronPrepared>
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: params.tokenAddr ?? '',
   };
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=tron`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=tron&network=${getNetwork()}`, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
   const json = await readJson(res);
@@ -84,7 +85,7 @@ export async function broadcastTron(
   const sigs = payloads.map((p) => ({ index: p.index, sigHex: signSecpDigest(p.hashHex, tronKey) }));
 
   const headers = await authHeaders();
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=tron`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=tron&network=${getNetwork()}`, {
     method: 'POST', headers,
     body: JSON.stringify({
       prepared, sigs,

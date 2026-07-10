@@ -1,28 +1,28 @@
 package chains
 
+// Registry holds one ChainClient per (network, chainKey) pair, mirroring how the
+// EVM side keeps a full mainnet + testnet config side by side. A chain is only
+// registered when that network's config is present, so absent combinations stay
+// dormant (ForKey → false).
 type Registry struct {
-	byKey    map[string]ChainClient
-	byFamily map[string]ChainClient
+	byKey map[string]ChainClient // key = "<network>:<chainKey>"
 }
 
 func NewRegistry() *Registry {
-	return &Registry{byKey: map[string]ChainClient{}, byFamily: map[string]ChainClient{}}
+	return &Registry{byKey: map[string]ChainClient{}}
 }
 
-// Register wires a client for a chain key (e.g. "tron"). Only called when that
-// chain's config is present, so an absent chain stays dormant (ForKey → false).
-func (r *Registry) Register(chainKey string, c ChainClient) {
-	r.byKey[chainKey] = c
-	r.byFamily[c.Family()] = c
+func regKey(network, chainKey string) string { return network + ":" + chainKey }
+
+// Register wires a client for a (network, chainKey), e.g. ("mainnet", "tron").
+func (r *Registry) Register(network, chainKey string, c ChainClient) {
+	r.byKey[regKey(network, chainKey)] = c
 }
 
-func (r *Registry) ForKey(chainKey string) (ChainClient, bool) {
-	c, ok := r.byKey[chainKey]
-	return c, ok
-}
-
-func (r *Registry) ForFamily(family string) (ChainClient, bool) {
-	c, ok := r.byFamily[family]
+// ForKey looks up the client for a (network, chainKey); ok is false when that
+// combination isn't configured (dormant).
+func (r *Registry) ForKey(network, chainKey string) (ChainClient, bool) {
+	c, ok := r.byKey[regKey(network, chainKey)]
 	return c, ok
 }
 

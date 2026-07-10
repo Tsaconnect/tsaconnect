@@ -28,8 +28,8 @@ func (stubTron) GetBalances(context.Context, string) ([]chains.Balance, error) {
 
 func TestRegistryResolvesFamily(t *testing.T) {
 	r := chains.NewRegistry()
-	r.Register("tron", stubTron{})
-	c, ok := r.ForKey("tron")
+	r.Register("mainnet", "tron", stubTron{})
+	c, ok := r.ForKey("mainnet", "tron")
 	if !ok {
 		t.Fatal("tron not registered")
 	}
@@ -77,7 +77,7 @@ func TestRegisterNonEVM_OwnershipScoping(t *testing.T) {
 
 	// Wire a registry with a stub tron client.
 	reg := chains.NewRegistry()
-	reg.Register("tron", stubTron{})
+	reg.Register("mainnet", "tron", stubTron{})
 
 	h := &Handlers{ChainRegistry: reg}
 
