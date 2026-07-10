@@ -20,6 +20,7 @@ import {
   normalizeWalletBalances,
   type Transaction,
 } from '../services/walletApi';
+import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
 import { AssetList } from '@/components/dashboard/AssetList';
@@ -42,7 +43,7 @@ import {
 // The three transactable assets shown on the dashboard
 const DEFAULT_ASSETS: Asset[] = [
   {
-    _id: 'mcgp-001', id: 'mcgp-001', symbol: 'MCGP', name: 'Mason Capital Gold Point',
+    _id: 'mcgp-001', id: 'mcgp-001', symbol: 'MCGP', name: 'MCG Protocol',
     balance: 0, usdValue: 0, isSelected: false, isHidden: false,
     details: { type: 'Gold-Backed Token', chain: 'Sonic' }, currentPrice: 0, priceChange24h: 0,
   },
@@ -121,6 +122,21 @@ const Dashboard: React.FC = () => {
           return { ...a, balance: d.balance, usdValue: d.usdValue, currentPrice: d.usdPrice };
         });
       }
+
+      // MCGP in the wallet is the spendable premium entitlement (Contract B),
+      // not an ERC-20, so getWalletBalances reports 0. Overlay the premium
+      // balance so the dashboard shows what the user actually holds.
+      try {
+        const { balance: premium, usdValue } = await getPremiumMcgpAsset();
+        if (premium > 0) {
+          updatedAssets = updatedAssets.map(a =>
+            a.symbol === 'MCGP'
+              ? { ...a, balance: premium, usdValue, currentPrice: premium > 0 ? usdValue / premium : 0 }
+              : a,
+          );
+        }
+      } catch { /* MCGP swap unavailable — leave at 0 */ }
+
       // Select first asset with balance, or first
       const selected = updatedAssets.find(a => a.balance > 0) || updatedAssets[0];
       if (selected) selected.isSelected = true;

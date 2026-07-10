@@ -10,12 +10,12 @@ import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
 import { PressableScale, Text } from '@/components/ui';
-import { CHAINS, type ChainKey } from '../../constants/chains';
+import { getChainDisplay, type AnyChainKey } from '../../constants/chains';
 
 interface ChainSelectorProps {
-  availableChains: ChainKey[];
-  selectedChain: ChainKey;
-  onSelect: (chain: ChainKey) => void;
+  availableChains: AnyChainKey[];
+  selectedChain: AnyChainKey;
+  onSelect: (chain: AnyChainKey) => void;
   showAll?: boolean;
   onSelectAll?: () => void;
   allSelected?: boolean;
@@ -67,7 +67,7 @@ const ChainSelector = ({
         </PressableScale>
       )}
       {availableChains.map((chainKey) => {
-        const chain = CHAINS[chainKey];
+        const chain = getChainDisplay(chainKey);
         if (!chain) return null;
         const active = !allSelected && selectedChain === chainKey;
         return (

@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/ojimcy/tsa-api-go/internal/chains"
+	"github.com/ojimcy/tsa-api-go/internal/chains/tron"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
@@ -33,6 +35,22 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
+
+	// Build the non-EVM chain registry. Each (network, chain) is registered only
+	// when its config is present, so absent combos stay dormant (ForKey → false).
+	// mainnet + testnet can be live at once, mirroring the EVM Networks map.
+	chainRegistry := chains.NewRegistry()
+	for _, tcfg := range cfg.NonEVMChains {
+		switch tcfg.Family {
+		case "tron":
+			tg := tron.NewTronGrid(tcfg.RPCURL, tcfg.APIKey)
+			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, tron.NewClient(tcfg, tg))
+			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
+		}
+	}
+	if len(chainRegistry.Keys()) == 0 {
+		log.Printf("chains: no non-EVM chains configured (dormant)")
+	}
 
 	// Connect to PostgreSQL
 	_, err := config.ConnectDB(cfg)
@@ -230,6 +248,9 @@ func main() {
 	// Spot-listing reads price MCGP from Contract B's on-chain quote (nil-safe;
 	// falls back to the IT rate when the swap isn't configured).
 	h.MCGPSwap = mcgpSwapService
+	// Non-EVM chain registry (dormant-safe: handlers return 503 when ChainRegistry
+	// is nil or a given chain key is absent from the registry).
+	h.ChainRegistry = chainRegistry
 	eh := handlers.NewExchangeHandler(p2pService)
 	ch := handlers.NewCheckoutHandler(cfg, blockchainService, escrowService, eventBus, otcService)
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
@@ -625,6 +646,14 @@ func main() {
 		// and accumulates the per-user claimable-MCGP balance SP6 will publish.
 		scheduler.Register(jobs.NewRewardProcessorJob(rewardService, time.Minute, 500))
 		log.Printf("[fee-v2] reward processor registered (interval=1m)")
+	}
+
+	// Non-EVM confirm/reconcile worker: walks pending wallet_activity rows and
+	// finalizes them against on-chain truth. Guarded on the registry having at
+	// least one chain configured (e.g. Tron); dormant otherwise.
+	if len(chainRegistry.Keys()) > 0 {
+		scheduler.Register(jobs.NewNonEVMReconciler(config.DB, chainRegistry))
+		log.Printf("chains: non-EVM reconciler registered (%d chain(s))", len(chainRegistry.Keys()))
 	}
 
 	// Backfill any pending transactions that already have a txHash.

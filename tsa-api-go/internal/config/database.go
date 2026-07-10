@@ -121,6 +121,10 @@ func AutoMigrate() error {
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
 		&models.SpotListing{},
+		// Non-EVM chains — per-wallet derived addresses (keyed wallet_id+chain_key)
+		// and cached normalized tx history.
+		&models.WalletAddress{},
+		&models.WalletActivity{},
 	); err != nil {
 		return err
 	}

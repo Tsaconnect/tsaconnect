@@ -8,6 +8,7 @@
 // PREMIUM MCGP only — bought (buyPremium, paid in USDC), spendable (pay) +
 // sellable.
 
+import { ethers } from 'ethers';
 import { API_BASE_URL } from '@/constants/api/config';
 import { getAuthHeaders } from '@/services/walletApi';
 
@@ -125,6 +126,29 @@ export const getMcgpBalance = () => getJson<McgpBalance>('/mcgp/balance');
 
 export const getMcgpQuote = (kind: QuoteKind, amount: string) =>
   getJson<McgpQuote>(`/mcgp/quote?kind=${kind}&amount=${encodeURIComponent(amount)}`);
+
+/**
+ * The user's spendable premium MCGP as a wallet asset: human quantity plus a
+ * best-effort USD value from a premiumSell quote (what they'd receive in USDC).
+ * Premium MCGP is a Contract-B entitlement, not an ERC-20 in the wallet, so the
+ * standard balance read misses it — this is how the asset lists surface it.
+ * Returns a zero balance when unavailable so callers can simply skip it.
+ */
+export async function getPremiumMcgpAsset(): Promise<{ balance: number; usdValue: number }> {
+  const res = await getMcgpBalance();
+  if (!res.success || !res.data) return { balance: 0, usdValue: 0 };
+  const rawBase = res.data.premiumBalance || '0'; // 18dp base units
+  const balance = Number(ethers.formatUnits(rawBase, 18)) || 0;
+  if (balance <= 0) return { balance: 0, usdValue: 0 };
+  let usdValue = 0;
+  try {
+    const q = await getMcgpQuote('premiumSell', rawBase);
+    if (q.success && q.data) usdValue = Number(ethers.formatUnits(q.data.usdcAmount || '0', 6)) || 0;
+  } catch {
+    /* price unavailable — show the quantity with no USD rather than failing */
+  }
+  return { balance, usdValue };
+}
 
 export const getMcgpLedger = () =>
   getJson<{ entries: McgpLedgerEntry[] }>('/mcgp/ledger');

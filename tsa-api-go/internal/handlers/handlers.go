@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -29,6 +30,11 @@ type Handlers struct {
 	// MCGPSwap is the Contract B swap service (optional/nil-safe; wired from
 	// main.go). Spot-listing reads use its on-chain quote for MCGP's price.
 	MCGPSwap *services.MCGPSwapService
+
+	// ChainRegistry is the non-EVM chain registry (optional/nil-safe; wired from
+	// main.go after construction). Non-EVM wallet endpoints return 503 when
+	// their chain key is absent from the registry.
+	ChainRegistry *chains.Registry
 }
 
 // NewHandlers creates a new Handlers instance with the given services.

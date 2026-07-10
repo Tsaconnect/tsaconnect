@@ -7,8 +7,9 @@ import (
 	"gorm.io/datatypes"
 )
 
-// WalletAddress represents a blockchain address associated with the wallet.
-type WalletAddress struct {
+// WalletAddrEntry represents a blockchain address associated with the wallet
+// (value-type for JSON; used inside Wallet.Addresses jsonb). Not a GORM table.
+type WalletAddrEntry struct {
 	Blockchain string     `json:"blockchain,omitempty"`
 	Address    string     `json:"address,omitempty"`
 	IsActive   bool       `json:"isActive"`

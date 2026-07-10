@@ -145,6 +145,19 @@ type NetworkConfig struct {
 	TokenAddresses map[string]string // "chain:symbol" → contract address
 }
 
+// NonEVMChainConfig configures one non-EVM chain (Tron/BTC/Solana). Populated
+// only when its RPC/indexer env is present, so absent chains stay dormant.
+type NonEVMChainConfig struct {
+	ChainKey       string
+	Family         string
+	Network        string            // "mainnet" | "testnet"
+	RPCURL         string            // TronGrid base, mempool base, or Solana RPC
+	APIKey         string            // optional provider key
+	NativeSymbol   string
+	NativeDecimals int
+	Tokens         map[string]string // symbol → on-chain token contract/mint
+}
+
 type Config struct {
 	DatabaseURL         string
 	JWTSecret           string
@@ -346,6 +359,11 @@ type Config struct {
 
 	// Network configurations: "mainnet" and "testnet"
 	Networks map[string]NetworkConfig
+
+	// NonEVMChains is the registry of non-EVM chain configs keyed by chain key
+	// (e.g. "tron"). A chain appears here ONLY when its RPC env is set —
+	// absent chains stay dormant (dormant-by-default pattern).
+	NonEVMChains map[string]NonEVMChainConfig
 
 	// Legacy flat fields — kept for backward compat, point to mainnet
 	Chains         map[string]ChainConfig
@@ -573,6 +591,8 @@ func Load() *Config {
 	// v2 fee/TP engine kill-switch — DEFAULT OFF until the documented cutover.
 	cfg.FeeModelV2Enabled = getEnvBool("FEE_MODEL_V2_ENABLED", false)
 
+	cfg.NonEVMChains = buildNonEVMChains()
+
 	// ── Mainnet configuration ──
 	// Token addresses sourced from each chain's official documentation. Public
 	// RPC URLs are used as defaults so the service boots without paid keys;
@@ -693,6 +713,48 @@ func Load() *Config {
 	cfg.TokenAddresses = mainnetTokens
 
 	return cfg
+}
+
+// buildNonEVMChains configures non-EVM chains per network, keyed
+// "<network>:<chainKey>" (e.g. "mainnet:tron"), mirroring the EVM Networks map.
+// Each (network, chain) is dormant unless its RPC env is present.
+func buildNonEVMChains() map[string]NonEVMChainConfig {
+	out := map[string]NonEVMChainConfig{}
+	apiKey := os.Getenv("TRON_API_KEY") // one TronGrid key works across networks
+
+	addTron := func(network, rpc, usdt string) {
+		if rpc == "" {
+			return
+		}
+		tokens := map[string]string{}
+		if usdt != "" {
+			tokens["USDT"] = usdt
+		}
+		out[network+":tron"] = NonEVMChainConfig{
+			ChainKey:       "tron",
+			Family:         "tron",
+			Network:        network,
+			RPCURL:         rpc,
+			APIKey:         apiKey,
+			NativeSymbol:   "TRX",
+			NativeDecimals: 6,
+			Tokens:         tokens,
+		}
+	}
+
+	// Preferred: explicit per-network config, so both can be live at once.
+	addTron("mainnet", os.Getenv("TRON_MAINNET_RPC_URL"), os.Getenv("TRON_MAINNET_USDT_ADDRESS"))
+	addTron("testnet", os.Getenv("TRON_TESTNET_RPC_URL"), os.Getenv("TRON_TESTNET_USDT_ADDRESS"))
+
+	// Backward-compat: a single TRON_RPC_URL maps to the network named by
+	// TRON_NETWORK (default mainnet), unless that network was already set above.
+	if rpc := os.Getenv("TRON_RPC_URL"); rpc != "" {
+		network := getEnv("TRON_NETWORK", "mainnet")
+		if _, exists := out[network+":tron"]; !exists {
+			addTron(network, rpc, os.Getenv("TRON_USDT_ADDRESS"))
+		}
+	}
+	return out
 }
 
 func getEnvFloat64(key string, fallback float64) float64 {

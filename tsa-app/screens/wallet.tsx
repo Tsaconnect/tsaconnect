@@ -39,7 +39,12 @@ import {
   WalletMeta,
 } from '../services/wallet';
 import { useTokens, type CustomToken } from '../hooks/useTokens';
-import { CHAINS, type ChainKey } from '../constants/chains';
+import {
+  CHAINS, NONEVM_CHAIN_KEYS, getChainDisplay,
+  type ChainKey, type AnyChainKey,
+} from '../constants/chains';
+import { loadTronWallet } from '../services/chains/tronWallet';
+import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
@@ -71,6 +76,8 @@ interface WalletAsset {
   iconUrl?: string;
   /** Set on rows surfaced by the indexer instead of supported_tokens. */
   discovered?: boolean;
+  /** Short label chip (e.g. "Spendable" for premium MCGP). */
+  tag?: string;
   /** ERC-20 contract address; required for discovered rows so Send works. */
   contractAddress?: string;
   /** Token decimals; required for discovered rows so amount→wei conversion is correct. */
@@ -78,7 +85,7 @@ interface WalletAsset {
   details?: {
     type: string;
     chain: string;
-    chainKey: ChainKey;
+    chainKey: AnyChainKey;
   };
 }
 
@@ -346,6 +353,7 @@ const AssetRow: React.FC<{
             {asset.symbol}
           </Text>
           {asset.discovered && <Badge label="NEW" size="sm" color={colors.accent} background={colors.accentMuted} />}
+          {asset.tag && <Badge label={asset.tag} size="sm" color={colors.warning} background={colors.warningBg} />}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
           <Text variant="caption" color="textMuted">
@@ -360,7 +368,7 @@ const AssetRow: React.FC<{
                   borderRadius: 2.5,
                   marginLeft: spacing.xs,
                   marginRight: 3,
-                  backgroundColor: asset.details.chainKey ? CHAINS[asset.details.chainKey].iconColor : colors.textMuted,
+                  backgroundColor: getChainDisplay(asset.details.chainKey)?.iconColor || colors.textMuted,
                 }}
               />
               <Text variant="caption" color="textMuted">
@@ -698,7 +706,7 @@ const WalletScreen: React.FC = () => {
   const [showWalletSelector, setShowWalletSelector] = useState(false);
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
-  const [selectedChain, setSelectedChain] = useState<'all' | ChainKey>('all');
+  const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -780,10 +788,13 @@ const WalletScreen: React.FC = () => {
           );
           if (isNative) continue;
 
+          // EVM-only legacy view: balances come from the EVM fan-out, so
+          // chainKey is always an EVM ChainKey here.
+          const evmChainKey = entry.chainKey as ChainKey;
           const tokenConfig = tokenList.find(
-            t => t.symbol === entry.symbol && t.chains.includes(entry.chainKey)
+            t => t.symbol === entry.symbol && t.chains.includes(evmChainKey)
           );
-          const chain = CHAINS[entry.chainKey];
+          const chain = CHAINS[evmChainKey];
           if (!chain) continue;
 
           updated.push({
@@ -800,11 +811,65 @@ const WalletScreen: React.FC = () => {
             details: {
               type: entry.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Token',
               chain: chain.name,
-              chainKey: entry.chainKey,
+              chainKey: evmChainKey,
             },
           });
         }
       }
+      // Non-EVM (Tron): derive the address from the same seed, self-register,
+      // and append TRX + TRC-20 balances as assets. Dormant-safe — yields
+      // nothing when the backend chain is unconfigured. TRX shows as a native
+      // token (visible at 0 in the zero-balance section) so Tron always appears.
+      try {
+        const tron = await loadTronWallet(addr || undefined);
+        if (tron) {
+          const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+          let tId = updated.length + 1;
+          for (const row of tron.balances) {
+            const bal = parseFloat(row.balance) || 0;
+            updated.push({
+              id: `tron-${tId++}`,
+              symbol: row.symbol,
+              name: row.symbol === 'TRX' ? 'Tron' : row.name,
+              balance: bal,
+              usdValue: parseFloat(row.usdValue) || 0,
+              usdPrice: row.usdPrice || 0,
+              iconColor: tronColor,
+              contractAddress: row.contractAddress || undefined,
+              decimals: row.decimals,
+              details: {
+                type: row.symbol === 'TRX' ? 'Native Token' : 'Token',
+                chain: 'Tron',
+                chainKey: 'tron',
+              },
+            });
+          }
+        }
+      } catch { /* chain unavailable — skip Tron */ }
+
+      // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
+      // wallet), so the standard balance read misses it. Show it as its OWN
+      // tagged row — distinct from any ordinary (withdrawn) ERC-20 MCGP — so
+      // the user can tell spendable from transferable.
+      try {
+        const { balance: premium, usdValue } = await getPremiumMcgpAsset();
+        if (premium > 0) {
+          const mcgpToken = tokenList.find(t => t.symbol === 'MCGP');
+          updated.push({
+            id: 'mcgp-premium',
+            symbol: 'MCGP',
+            name: mcgpToken?.name || 'MCG Protocol',
+            balance: premium,
+            usdValue,
+            usdPrice: premium > 0 ? usdValue / premium : 0,
+            iconColor: mcgpToken?.iconColor || '#FFD700',
+            iconUrl: mcgpToken?.iconUrl,
+            tag: 'Spendable',
+            details: { type: 'Token', chain: 'Sonic', chainKey: 'sonic' },
+          });
+        }
+      } catch { /* MCGP swap unavailable — skip */ }
+
       // Inject user-imported custom tokens synchronously before discovery so
       // they appear in the first render of the asset list; discovery merges
       // on top and dedupes by chainKey+contract.
@@ -857,6 +922,13 @@ const WalletScreen: React.FC = () => {
   };
 
   const handleAssetPress = (asset: WalletAsset) => {
+    // Spendable premium MCGP is a Contract-B entitlement (buy/sell/pay), not a
+    // transferable ERC-20 — route it to the MCGP hub. Ordinary (withdrawn)
+    // MCGP falls through to the normal token/send flow.
+    if (asset.symbol === 'MCGP' && asset.tag) {
+      router.push('/wallet/mcgp' as any);
+      return;
+    }
     router.push({
       pathname: '/wallet/token',
       params: {
@@ -1000,6 +1072,25 @@ const WalletScreen: React.FC = () => {
                     active={isActive}
                     label={chain.shortName}
                     iconUrl={chain.iconUrl}
+                    iconColor={chain.iconColor}
+                    onPress={() => setSelectedChain(key)}
+                  />
+                  {hasBalance && !isActive && (
+                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                  )}
+                </View>
+              );
+            })}
+            {NONEVM_CHAIN_KEYS.map((key) => {
+              const chain = getChainDisplay(key);
+              if (!chain) return null;
+              const isActive = selectedChain === key;
+              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+              return (
+                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <ManageChip
+                    active={isActive}
+                    label={chain.shortName}
                     iconColor={chain.iconColor}
                     onPress={() => setSelectedChain(key)}
                   />
