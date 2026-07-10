@@ -17,7 +17,8 @@ import { View, FlatList, Image, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
-import { CHAINS, type ChainKey } from '@/constants/chains';
+import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
+import { loadTronWallet } from '@/services/chains/tronWallet';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
 import { useTokens } from '@/hooks/useTokens';
@@ -42,7 +43,7 @@ interface Asset {
   usdValue: number;
   iconColor: string;
   iconUrl?: string;
-  chainKey: ChainKey;
+  chainKey: AnyChainKey;
   chainName: string;
   isNative: boolean;
   discovered?: boolean;
@@ -214,6 +215,31 @@ export default function AllTokensScreen() {
       }
     }
 
+    // Non-EVM (Tron): append TRX + TRC-20 balances. Dormant-safe — yields
+    // nothing when the backend chain is unconfigured. TRX shows as a native
+    // token (visible even at 0) so Tron is always reachable from "See all".
+    try {
+      const tron = await loadTronWallet(addr || undefined);
+      if (tron) {
+        const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+        for (const row of tron.balances) {
+          list.push({
+            id: String(id++),
+            symbol: row.symbol,
+            name: row.symbol === 'TRX' ? 'Tron' : row.name,
+            balance: parseFloat(row.balance) || 0,
+            usdValue: parseFloat(row.usdValue) || 0,
+            iconColor: tronColor,
+            chainKey: 'tron',
+            chainName: 'Tron',
+            isNative: !row.contractAddress,
+            contractAddress: row.contractAddress || undefined,
+            decimals: row.decimals,
+          });
+        }
+      }
+    } catch { /* chain unavailable — skip Tron */ }
+
     // Visible = anything with balance, plus native zero rows, plus every
     // imported custom token (user explicitly added it).
     const withBalance = list
@@ -334,7 +360,7 @@ export default function AllTokensScreen() {
               height: 5,
               borderRadius: 2.5,
               // Per-chain brand dot color comes from chain config data.
-              backgroundColor: CHAINS[item.chainKey]?.iconColor || colors.textMuted,
+              backgroundColor: getChainDisplay(item.chainKey)?.iconColor || colors.textMuted,
             }}
           />
           <Text variant="caption" color="textMuted">
