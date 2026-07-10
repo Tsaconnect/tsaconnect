@@ -71,6 +71,7 @@ func NewPriceService() *PriceService {
 			"ETH":   "ethereum",
 			"BTC":   "bitcoin",
 			"SOL":   "solana",
+			"TRX":   "tron",
 			"MATIC": "matic-network",
 			"BNB":   "binancecoin",
 			"PAXG":  "pax-gold",

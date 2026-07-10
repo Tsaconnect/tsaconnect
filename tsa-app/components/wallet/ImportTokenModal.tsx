@@ -149,7 +149,7 @@ const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
         <ChainSelector
           availableChains={CHAIN_KEYS}
           selectedChain={selectedChain}
-          onSelect={(chain) => { setSelectedChain(chain); setError(''); }}
+          onSelect={(chain) => { setSelectedChain(chain as ChainKey); setError(''); }}
           size="normal"
         />
 

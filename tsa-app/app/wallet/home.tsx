@@ -34,7 +34,8 @@ import {
   WalletMeta,
 } from '../../services/wallet';
 import { useTokens } from '../../hooks/useTokens';
-import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
+import { CHAINS, CHAIN_KEYS, getChainDisplay, type ChainKey } from '../../constants/chains';
+import { loadTronWallet } from '../../services/chains/tronWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import ImportTokenModal from '../../components/wallet/ImportTokenModal';
 import { useNetwork } from '../../hooks/useNetwork';
@@ -96,8 +97,11 @@ const WalletHome = () => {
       const backedUp = list.find(w => w.address === address)?.backedUp;
       setSeedBackedUp(backedUp ?? false);
 
-      // Fetch balances from all chains in parallel, scoped to the active wallet
-      const [chainResults, txResult] = await Promise.all([
+      // Fetch balances from all chains in parallel, scoped to the active wallet.
+      // Tron (non-EVM) rides alongside the EVM fan-out; it derives its address
+      // from the same mnemonic, self-registers in the background, and stays
+      // dormant-safe (yields no rows when the backend chain is unconfigured).
+      const [chainResults, tronResult, txResult] = await Promise.all([
         Promise.all(
           CHAIN_KEYS.map(async (chainKey) => {
             const result = await getWalletBalances(
@@ -107,6 +111,7 @@ const WalletHome = () => {
             return { chainKey, result };
           })
         ),
+        address ? loadTronWallet(address).catch(() => null) : Promise.resolve(null),
         getTransactionHistory(1, 5),
       ]);
 
@@ -119,6 +124,11 @@ const WalletHome = () => {
           allBalances.push(entry);
           seenTokenChains.add(`${entry.symbol}-${entry.chainKey}`);
         }
+      }
+
+      for (const entry of tronResult?.balances ?? []) {
+        allBalances.push(entry);
+        seenTokenChains.add(`${entry.symbol}-${entry.chainKey}`);
       }
 
       // Merge with tokenList — add 0-balance entries for missing tokens
@@ -194,7 +204,7 @@ const WalletHome = () => {
   );
 
   const renderTokenCard = (token: WalletBalanceWithChain) => {
-    const chain = CHAINS[token.chainKey];
+    const chain = getChainDisplay(token.chainKey);
     return (
       <PressableScale
         key={`${token.symbol}-${token.chainKey}`}
@@ -213,7 +223,7 @@ const WalletHome = () => {
                 {
                   text: 'Remove',
                   style: 'destructive',
-                  onPress: async () => { await removeToken(token.symbol, token.chainKey); fetchData(); },
+                  onPress: async () => { await removeToken(token.symbol, token.chainKey as ChainKey); fetchData(); },
                 },
               ]
             );
@@ -535,7 +545,7 @@ const WalletHome = () => {
           <ChainSelector
             availableChains={CHAIN_KEYS}
             selectedChain={chainFilter === 'all' ? CHAIN_KEYS[0] : chainFilter}
-            onSelect={(chain) => setChainFilter(chain)}
+            onSelect={(chain) => setChainFilter(chain as ChainKey)}
             showAll
             onSelectAll={() => setChainFilter('all')}
             allSelected={chainFilter === 'all'}

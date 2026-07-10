@@ -17,7 +17,9 @@ import { View, FlatList, Image, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
-import { CHAINS, type ChainKey } from '@/constants/chains';
+import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
+import { loadTronWallet } from '@/services/chains/tronWallet';
+import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
 import { useTokens } from '@/hooks/useTokens';
@@ -42,11 +44,13 @@ interface Asset {
   usdValue: number;
   iconColor: string;
   iconUrl?: string;
-  chainKey: ChainKey;
+  chainKey: AnyChainKey;
   chainName: string;
   isNative: boolean;
   discovered?: boolean;
   imported?: boolean;
+  /** Short label chip (e.g. "Spendable" for premium MCGP). */
+  tag?: string;
   contractAddress?: string;
   decimals?: number;
 }
@@ -129,8 +133,11 @@ export default function AllTokensScreen() {
         const bal = parseFloat(entry.balance);
         if (!bal || bal <= 0) continue;
         if (list.some((a) => a.symbol === entry.symbol && a.chainKey === entry.chainKey)) continue;
-        const tc = tokenList.find((t) => t.symbol === entry.symbol && t.chains.includes(entry.chainKey));
-        const chain = CHAINS[entry.chainKey];
+        // EVM-only view: balances come from the EVM fan-out, so chainKey is
+        // always an EVM ChainKey here.
+        const evmChainKey = entry.chainKey as ChainKey;
+        const tc = tokenList.find((t) => t.symbol === entry.symbol && t.chains.includes(evmChainKey));
+        const chain = CHAINS[evmChainKey];
         if (!chain) continue;
         list.push({
           id: String(id++),
@@ -140,7 +147,7 @@ export default function AllTokensScreen() {
           usdValue: parseFloat(entry.usdValue) || 0,
           iconColor: tc?.iconColor || '#888',
           iconUrl: tc?.iconUrl,
-          chainKey: entry.chainKey,
+          chainKey: evmChainKey,
           chainName: chain.name,
           isNative: false,
           contractAddress: entry.contractAddress || undefined,
@@ -211,6 +218,54 @@ export default function AllTokensScreen() {
       }
     }
 
+    // Non-EVM (Tron): append TRX + TRC-20 balances. Dormant-safe — yields
+    // nothing when the backend chain is unconfigured. TRX shows as a native
+    // token (visible even at 0) so Tron is always reachable from "See all".
+    try {
+      const tron = await loadTronWallet(addr || undefined);
+      if (tron) {
+        const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+        for (const row of tron.balances) {
+          list.push({
+            id: String(id++),
+            symbol: row.symbol,
+            name: row.symbol === 'TRX' ? 'Tron' : row.name,
+            balance: parseFloat(row.balance) || 0,
+            usdValue: parseFloat(row.usdValue) || 0,
+            iconColor: tronColor,
+            chainKey: 'tron',
+            chainName: 'Tron',
+            isNative: !row.contractAddress,
+            contractAddress: row.contractAddress || undefined,
+            decimals: row.decimals,
+          });
+        }
+      }
+    } catch { /* chain unavailable — skip Tron */ }
+
+    // Spendable premium MCGP (Contract B, not ERC-20) — its own tagged row,
+    // distinct from any ordinary (withdrawn) ERC-20 MCGP, reachable from "See
+    // all", not only the buy/sell screens.
+    try {
+      const { balance: premium, usdValue } = await getPremiumMcgpAsset();
+      if (premium > 0) {
+        const mcgpToken = tokenList.find((t) => t.symbol === 'MCGP');
+        list.push({
+          id: 'mcgp-premium',
+          symbol: 'MCGP',
+          name: mcgpToken?.name || 'MCG Protocol',
+          balance: premium,
+          usdValue,
+          iconColor: mcgpToken?.iconColor || '#FFD700',
+          iconUrl: mcgpToken?.iconUrl,
+          chainKey: 'sonic',
+          chainName: 'Sonic',
+          isNative: false,
+          tag: 'Spendable',
+        });
+      }
+    } catch { /* MCGP swap unavailable — skip */ }
+
     // Visible = anything with balance, plus native zero rows, plus every
     // imported custom token (user explicitly added it).
     const withBalance = list
@@ -256,6 +311,12 @@ export default function AllTokensScreen() {
 
   const handlePress = useCallback(
     (asset: Asset) => {
+      // Spendable premium MCGP is a Contract-B entitlement, not a transferable
+      // ERC-20 — route to the MCGP hub. Ordinary MCGP falls through to detail.
+      if (asset.symbol === 'MCGP' && asset.tag) {
+        router.push('/wallet/mcgp' as any);
+        return;
+      }
       router.push({
         pathname: '/wallet/token',
         params: {
@@ -320,6 +381,9 @@ export default function AllTokensScreen() {
           {item.imported && (
             <Badge label="IMPORTED" size="sm" color={colors.info} background={colors.infoBg} />
           )}
+          {item.tag && (
+            <Badge label={item.tag} size="sm" color={colors.warning} background={colors.warningBg} />
+          )}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2, gap: spacing.xs }}>
           <Text variant="caption" color="textMuted">
@@ -331,7 +395,7 @@ export default function AllTokensScreen() {
               height: 5,
               borderRadius: 2.5,
               // Per-chain brand dot color comes from chain config data.
-              backgroundColor: CHAINS[item.chainKey]?.iconColor || colors.textMuted,
+              backgroundColor: getChainDisplay(item.chainKey)?.iconColor || colors.textMuted,
             }}
           />
           <Text variant="caption" color="textMuted">

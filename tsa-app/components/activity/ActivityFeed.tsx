@@ -18,7 +18,7 @@ import {
   fetchActivityItems, ALL_TYPES, TYPE_META,
   type ActivityItem, type ActivityType,
 } from '../../services/activityService';
-import { CHAINS } from '../../constants/chains';
+import { txExplorerUrl, isNonEVMChain, type AnyChainKey } from '../../constants/chains';
 import { useTheme } from '@/theme';
 import {
   Badge,
@@ -74,8 +74,11 @@ function formatDate(iso: string): string {
 
 function explorerUrl(item: ActivityItem): string | null {
   if (!item.txHash) return null;
-  const chain = Object.values(CHAINS).find(c => c.chainId === item.chainId);
-  return chain ? `${chain.explorerUrl}/tx/${item.txHash}` : null;
+  // Non-EVM (e.g. Tron) items carry a chainKey; EVM items carry a numeric
+  // chainId. txExplorerUrl resolves either to the right explorer + path.
+  const chainKey =
+    item.chainKey && isNonEVMChain(item.chainKey) ? (item.chainKey as AnyChainKey) : undefined;
+  return txExplorerUrl(item.txHash, { chainId: item.chainId, chainKey }) ?? null;
 }
 
 // Map an activity status to a theme tone (color + tinted background).

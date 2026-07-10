@@ -17,7 +17,15 @@ import { ScrollView } from 'react-native';
 import { getActiveWallet } from '@/services/wallet';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
-import { CHAINS, CHAIN_KEYS, type ChainKey, getSupportedNetworkNames } from '../../constants/chains';
+import {
+  CHAIN_KEYS,
+  NONEVM_CHAIN_KEYS,
+  getChainDisplay,
+  isNonEVMChain,
+  getSupportedNetworkNames,
+  type AnyChainKey,
+} from '../../constants/chains';
+import { getTronAddress } from '../../services/chains/tronWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { useTheme } from '@/theme';
 import {
@@ -34,19 +42,32 @@ import {
 const QR_FG = '#16201F';
 const QR_BG = '#FFFFFF';
 
+const RECEIVE_CHAINS: AnyChainKey[] = [...CHAIN_KEYS, ...NONEVM_CHAIN_KEYS];
+
 const ReceiveToken = () => {
   const { colors, spacing, radius } = useTheme();
-  const [walletAddress, setWalletAddress] = useState('');
+  const [evmAddress, setEvmAddress] = useState('');
+  const [tronAddress, setTronAddress] = useState('');
   const [copied, setCopied] = useState(false);
-  const [selectedChain, setSelectedChain] = useState<ChainKey>('sonic');
+  const [selectedChain, setSelectedChain] = useState<AnyChainKey>('sonic');
 
   useEffect(() => {
-    const loadAddress = async () => {
-      const address = await getActiveWallet();
-      if (address) setWalletAddress(address);
+    const loadAddresses = async () => {
+      const [evm, tron] = await Promise.all([
+        getActiveWallet(),
+        // Same mnemonic, standard Tron path — reproduces the TronLink address.
+        getTronAddress().catch(() => null),
+      ]);
+      if (evm) setEvmAddress(evm);
+      if (tron) setTronAddress(tron);
     };
-    loadAddress();
+    loadAddresses();
   }, []);
+
+  // The address to show/QR/copy depends on the selected chain's family: EVM
+  // chains share one 0x address; Tron has its own base58 T-address.
+  const walletAddress = isNonEVMChain(selectedChain) ? tronAddress : evmAddress;
+  const selectedChainName = getChainDisplay(selectedChain)?.name || 'Unknown';
 
   const handleCopy = async () => {
     if (!walletAddress) return;
@@ -77,7 +98,7 @@ const ReceiveToken = () => {
           NETWORK
         </Text>
         <ChainSelector
-          availableChains={CHAIN_KEYS}
+          availableChains={RECEIVE_CHAINS}
           selectedChain={selectedChain}
           onSelect={setSelectedChain}
         />
@@ -87,7 +108,7 @@ const ReceiveToken = () => {
           align="center"
           style={{ marginTop: spacing.md, marginBottom: spacing.sm }}
         >
-          Send tokens on {CHAINS[selectedChain]?.name || 'Unknown'} to this address
+          Send tokens on {selectedChainName} to this address
         </Text>
 
         <View style={{ alignItems: 'center', marginVertical: spacing['2xl'] }}>
@@ -141,8 +162,8 @@ const ReceiveToken = () => {
           <View style={{ flexDirection: 'row', gap: spacing.sm }}>
             <Icon name="warning" size={18} color={colors.warning} />
             <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-              Only send tokens on supported networks ({getSupportedNetworkNames()}) to this address.
-              Sending tokens on unsupported networks may result in permanent loss.
+              Only send tokens on the {selectedChainName} network to this address.
+              Sending from a different network may result in permanent loss.
             </Text>
           </View>
         </AccentCard>
