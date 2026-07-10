@@ -76,6 +76,8 @@ interface WalletAsset {
   iconUrl?: string;
   /** Set on rows surfaced by the indexer instead of supported_tokens. */
   discovered?: boolean;
+  /** Short label chip (e.g. "Spendable" for premium MCGP). */
+  tag?: string;
   /** ERC-20 contract address; required for discovered rows so Send works. */
   contractAddress?: string;
   /** Token decimals; required for discovered rows so amount→wei conversion is correct. */
@@ -351,6 +353,7 @@ const AssetRow: React.FC<{
             {asset.symbol}
           </Text>
           {asset.discovered && <Badge label="NEW" size="sm" color={colors.accent} background={colors.accentMuted} />}
+          {asset.tag && <Badge label={asset.tag} size="sm" color={colors.warning} background={colors.warningBg} />}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
           <Text variant="caption" color="textMuted">
@@ -845,30 +848,25 @@ const WalletScreen: React.FC = () => {
       } catch { /* chain unavailable — skip Tron */ }
 
       // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
-      // wallet), so the standard balance read misses it. Overlay it onto the
-      // MCGP row so it shows here, not just on the MCGP buy/sell screens.
+      // wallet), so the standard balance read misses it. Show it as its OWN
+      // tagged row — distinct from any ordinary (withdrawn) ERC-20 MCGP — so
+      // the user can tell spendable from transferable.
       try {
         const { balance: premium, usdValue } = await getPremiumMcgpAsset();
         if (premium > 0) {
-          const existing = updated.find(a => a.symbol === 'MCGP' && a.details?.chainKey === 'sonic');
-          if (existing) {
-            existing.balance += premium;
-            existing.usdValue += usdValue;
-            existing.usdPrice = existing.balance > 0 ? existing.usdValue / existing.balance : 0;
-          } else {
-            const mcgpToken = tokenList.find(t => t.symbol === 'MCGP');
-            updated.push({
-              id: 'mcgp-premium',
-              symbol: 'MCGP',
-              name: mcgpToken?.name || 'MCG Protocol',
-              balance: premium,
-              usdValue,
-              usdPrice: premium > 0 ? usdValue / premium : 0,
-              iconColor: mcgpToken?.iconColor || '#FFD700',
-              iconUrl: mcgpToken?.iconUrl,
-              details: { type: 'Token', chain: 'Sonic', chainKey: 'sonic' },
-            });
-          }
+          const mcgpToken = tokenList.find(t => t.symbol === 'MCGP');
+          updated.push({
+            id: 'mcgp-premium',
+            symbol: 'MCGP',
+            name: mcgpToken?.name || 'MCG Protocol',
+            balance: premium,
+            usdValue,
+            usdPrice: premium > 0 ? usdValue / premium : 0,
+            iconColor: mcgpToken?.iconColor || '#FFD700',
+            iconUrl: mcgpToken?.iconUrl,
+            tag: 'Spendable',
+            details: { type: 'Token', chain: 'Sonic', chainKey: 'sonic' },
+          });
         }
       } catch { /* MCGP swap unavailable — skip */ }
 
@@ -924,9 +922,10 @@ const WalletScreen: React.FC = () => {
   };
 
   const handleAssetPress = (asset: WalletAsset) => {
-    // MCGP is a Contract-B entitlement (buy/sell/pay), not a transferable
-    // ERC-20 — send it to the MCGP hub rather than the generic token/send flow.
-    if (asset.symbol === 'MCGP') {
+    // Spendable premium MCGP is a Contract-B entitlement (buy/sell/pay), not a
+    // transferable ERC-20 — route it to the MCGP hub. Ordinary (withdrawn)
+    // MCGP falls through to the normal token/send flow.
+    if (asset.symbol === 'MCGP' && asset.tag) {
       router.push('/wallet/mcgp' as any);
       return;
     }
