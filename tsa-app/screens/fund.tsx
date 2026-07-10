@@ -16,7 +16,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { getActiveWallet } from '@/services/wallet';
-import { type ChainKey } from '@/constants/chains';
+import { NONEVM_CHAINS, isNonEVMChain, type AnyChainKey } from '@/constants/chains';
+import { getTronAddress } from '@/services/chains/tronWallet';
 import { useTokens } from '@/hooks/useTokens';
 import { useTheme } from '@/theme';
 import {
@@ -37,12 +38,29 @@ interface ReceiveItem {
   name: string;
   iconColor: string;
   iconUrl?: string;
-  chainKey: ChainKey;
+  chainKey: AnyChainKey;
   chainName: string;
   chainShortName: string;
   chainIconColor: string;
   chainIconUrl?: string;
 }
+
+// Static Tron receive items — TRX (native) + USDT (TRC-20). Their deposit
+// address is the derived Tron address, not the EVM one.
+const TRON_RECEIVE_ITEMS: ReceiveItem[] = [
+  {
+    id: 'TRX-tron', symbol: 'TRX', name: 'Tron',
+    iconColor: NONEVM_CHAINS.tron.iconColor,
+    chainKey: 'tron', chainName: NONEVM_CHAINS.tron.name,
+    chainShortName: NONEVM_CHAINS.tron.shortName, chainIconColor: NONEVM_CHAINS.tron.iconColor,
+  },
+  {
+    id: 'USDT-tron', symbol: 'USDT', name: 'Tether USD',
+    iconColor: '#26A17B',
+    chainKey: 'tron', chainName: NONEVM_CHAINS.tron.name,
+    chainShortName: NONEVM_CHAINS.tron.shortName, chainIconColor: NONEVM_CHAINS.tron.iconColor,
+  },
+];
 
 interface QRTarget {
   item: ReceiveItem;
@@ -57,9 +75,9 @@ function truncateAddress(addr: string): string {
 function ChainFilterRow({
   chains, selected, onSelect,
 }: {
-  chains: { key: ChainKey; iconColor: string; iconUrl?: string; shortName: string }[];
-  selected: ChainKey | 'all';
-  onSelect: (k: ChainKey | 'all') => void;
+  chains: { key: AnyChainKey; iconColor: string; iconUrl?: string; shortName: string }[];
+  selected: AnyChainKey | 'all';
+  onSelect: (k: AnyChainKey | 'all') => void;
 }) {
   const { colors, spacing, radius } = useTheme();
   return (
@@ -296,16 +314,24 @@ export default function FundScreen() {
   const { colors, spacing, radius, type, fonts } = useTheme();
   const { tokenList, getChainsForToken } = useTokens();
   const [walletAddress, setWalletAddress] = useState('');
+  const [tronAddress, setTronAddress] = useState('');
   const [search, setSearch] = useState('');
-  const [chainFilter, setChainFilter] = useState<ChainKey | 'all'>('all');
+  const [chainFilter, setChainFilter] = useState<AnyChainKey | 'all'>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [qrTarget, setQrTarget] = useState<QRTarget | null>(null);
 
   useEffect(() => {
     getActiveWallet().then(addr => { if (addr) setWalletAddress(addr); });
+    // Same seed, standard Tron path — reproduces the TronLink address.
+    getTronAddress().then(addr => { if (addr) setTronAddress(addr); }).catch(() => {});
   }, []);
 
-  // Flatten tokens × chains into receive items
+  // The deposit address depends on the item's chain family: EVM chains share
+  // the one 0x address; Tron has its own base58 T-address.
+  const addressFor = (item: ReceiveItem): string =>
+    isNonEVMChain(item.chainKey) ? tronAddress : walletAddress;
+
+  // Flatten tokens × chains into receive items, then append the Tron items.
   const allItems = useMemo<ReceiveItem[]>(() => {
     const items: ReceiveItem[] = [];
     for (const token of tokenList) {
@@ -325,13 +351,14 @@ export default function FundScreen() {
         });
       }
     }
+    items.push(...TRON_RECEIVE_ITEMS);
     return items;
   }, [tokenList, getChainsForToken]);
 
   // Available chains for the filter
   const filterChains = useMemo(() => {
-    const seen = new Set<ChainKey>();
-    const result: { key: ChainKey; iconColor: string; iconUrl?: string; shortName: string }[] = [];
+    const seen = new Set<AnyChainKey>();
+    const result: { key: AnyChainKey; iconColor: string; iconUrl?: string; shortName: string }[] = [];
     for (const item of allItems) {
       if (!seen.has(item.chainKey)) {
         seen.add(item.chainKey);
@@ -354,22 +381,24 @@ export default function FundScreen() {
   const rest = filtered.filter(i => !POPULAR.includes(i.symbol));
 
   const handleCopy = async (item: ReceiveItem) => {
-    if (!walletAddress) return;
-    await Clipboard.setStringAsync(walletAddress);
+    const address = addressFor(item);
+    if (!address) return;
+    await Clipboard.setStringAsync(address);
     setCopiedId(item.id);
     setTimeout(() => setCopiedId(null), 2000);
   };
 
   const handleQR = (item: ReceiveItem) => {
-    if (!walletAddress) return;
-    setQrTarget({ item, address: walletAddress });
+    const address = addressFor(item);
+    if (!address) return;
+    setQrTarget({ item, address });
   };
 
   const renderItem = (item: ReceiveItem) => (
     <ReceiveRow
       key={item.id}
       item={item}
-      address={walletAddress}
+      address={addressFor(item)}
       copiedId={copiedId}
       onCopy={handleCopy}
       onQR={handleQR}
