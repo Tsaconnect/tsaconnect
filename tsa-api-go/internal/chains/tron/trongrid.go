@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -155,6 +156,98 @@ func (t *TronGrid) Broadcast(ctx context.Context, raw *RawTx, sigHex string) (st
 		return "", fmt.Errorf("broadcast rejected: %s", res.Message)
 	}
 	return raw.TxID, nil
+}
+
+// HistoryItem is one normalized transfer from the TronGrid history endpoints.
+// Native (TRX) rows carry hex 41-prefixed addresses; TRC-20 rows carry base58.
+type HistoryItem struct {
+	Hash      string
+	From      string
+	To        string
+	AmountRaw string
+	Symbol    string
+	Decimals  int
+	BlockTime int64 // ms since epoch
+	Success   bool
+	IsTRC20   bool
+}
+
+// GetTRXTransfers returns recent native-TRX transfers for an address.
+func (t *TronGrid) GetTRXTransfers(ctx context.Context, addr string, limit int) ([]HistoryItem, error) {
+	var env struct {
+		Data []struct {
+			TxID           string `json:"txID"`
+			BlockTimestamp int64  `json:"block_timestamp"`
+			Ret            []struct {
+				ContractRet string `json:"contractRet"`
+			} `json:"ret"`
+			RawData struct {
+				Contract []struct {
+					Type      string `json:"type"`
+					Parameter struct {
+						Value struct {
+							Amount       int64  `json:"amount"`
+							OwnerAddress string `json:"owner_address"`
+							ToAddress    string `json:"to_address"`
+						} `json:"value"`
+					} `json:"parameter"`
+				} `json:"contract"`
+			} `json:"raw_data"`
+		} `json:"data"`
+	}
+	path := fmt.Sprintf("/v1/accounts/%s/transactions?limit=%d&only_confirmed=true&order_by=block_timestamp,desc", addr, limit)
+	if err := t.do(ctx, http.MethodGet, path, nil, &env); err != nil {
+		return nil, err
+	}
+	out := make([]HistoryItem, 0, len(env.Data))
+	for _, tx := range env.Data {
+		if len(tx.RawData.Contract) == 0 || tx.RawData.Contract[0].Type != "TransferContract" {
+			continue // only plain TRX transfers (skip contract calls, freezes, etc.)
+		}
+		v := tx.RawData.Contract[0].Parameter.Value
+		success := len(tx.Ret) == 0 || tx.Ret[0].ContractRet == "" || tx.Ret[0].ContractRet == "SUCCESS"
+		out = append(out, HistoryItem{
+			Hash: tx.TxID, From: v.OwnerAddress, To: v.ToAddress,
+			AmountRaw: strconv.FormatInt(v.Amount, 10), Symbol: "TRX", Decimals: 6,
+			BlockTime: tx.BlockTimestamp, Success: success, IsTRC20: false,
+		})
+	}
+	return out, nil
+}
+
+// GetTRC20Transfers returns recent TRC-20 transfers for an address (base58
+// from/to, token symbol + decimals from token_info).
+func (t *TronGrid) GetTRC20Transfers(ctx context.Context, addr string, limit int) ([]HistoryItem, error) {
+	var env struct {
+		Data []struct {
+			TransactionID  string `json:"transaction_id"`
+			BlockTimestamp int64  `json:"block_timestamp"`
+			From           string `json:"from"`
+			To             string `json:"to"`
+			Value          string `json:"value"`
+			TokenInfo      struct {
+				Symbol   string `json:"symbol"`
+				Decimals int    `json:"decimals"`
+				Address  string `json:"address"`
+			} `json:"token_info"`
+		} `json:"data"`
+	}
+	path := fmt.Sprintf("/v1/accounts/%s/transactions/trc20?limit=%d&only_confirmed=true&order_by=block_timestamp,desc", addr, limit)
+	if err := t.do(ctx, http.MethodGet, path, nil, &env); err != nil {
+		return nil, err
+	}
+	out := make([]HistoryItem, 0, len(env.Data))
+	for _, tx := range env.Data {
+		if tx.Value == "" || tx.TokenInfo.Symbol == "" {
+			continue
+		}
+		out = append(out, HistoryItem{
+			Hash: tx.TransactionID, From: tx.From, To: tx.To,
+			AmountRaw: tx.Value, Symbol: tx.TokenInfo.Symbol, Decimals: tx.TokenInfo.Decimals,
+			BlockTime: tx.BlockTimestamp, Success: true, IsTRC20: true,
+		})
+	}
+	return out, nil
 }
 
 func (t *TronGrid) GetTxInfo(ctx context.Context, txID string) (*TxInfo, error) {

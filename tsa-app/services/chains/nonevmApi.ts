@@ -75,6 +75,32 @@ export async function getNonEVMBalances(
   return body.data.balances;
 }
 
+export interface NonEVMActivity {
+  hash: string;
+  direction: 'in' | 'out';
+  amountRaw: string;
+  decimals: number;
+  symbol: string;
+  counterparty: string;
+  status: string;
+  blockTime: number; // seconds since epoch
+}
+
+/** Fetch recent on-chain transfer history (sends + receives) for an address. */
+export async function getNonEVMHistory(
+  chainKey: string,
+  address: string
+): Promise<NonEVMActivity[]> {
+  const headers = await getAuthHeaders();
+  const qp = new URLSearchParams({ chain: chainKey, address });
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/history?${qp.toString()}`, { headers });
+  const body = await readJson<{ items?: NonEVMActivity[] }>(res);
+  if (!res.ok) {
+    throw new Error(body.message || `history failed (${res.status})`);
+  }
+  return body.data?.items ?? [];
+}
+
 /** Poll the confirmation status of a broadcast non-EVM transaction. */
 export async function getNonEVMTxStatus(
   chainKey: string,

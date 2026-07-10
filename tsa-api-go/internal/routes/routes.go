@@ -399,6 +399,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.POST("/nonevm/prepare-tx", h.PrepareNonEVMTx)
 		walletGroup.POST("/nonevm/submit-tx", h.SubmitNonEVMTx)
 		walletGroup.GET("/nonevm/tx-status", h.GetNonEVMTxStatus)
+		walletGroup.GET("/nonevm/history", h.GetNonEVMHistory)
 	}
 
 	// Swap / OTC marketplace routes

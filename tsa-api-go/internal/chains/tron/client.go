@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -136,9 +138,44 @@ func (c *Client) GetTxStatus(ctx context.Context, txHash string) (chains.TxStatu
 }
 
 func (c *Client) History(ctx context.Context, addr string, cursor string) ([]chains.Activity, string, error) {
-	// Minimal first pass: return empty history; hydrated by the reconciler/webhookless
-	// polling in a later task. Kept non-nil to satisfy the interface contract.
-	return []chains.Activity{}, "", nil
+	const perKind = 30
+	trx, err := c.tg.GetTRXTransfers(ctx, addr, perKind)
+	if err != nil {
+		return nil, "", err
+	}
+	trc, err := c.tg.GetTRC20Transfers(ctx, addr, perKind)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// TRX rows carry hex (41..) addresses; TRC-20 rows carry base58. Compare
+	// each row's sender against the owner in its own encoding to set direction.
+	addrHex, _ := Base58ToHex(addr)
+
+	items := make([]chains.Activity, 0, len(trx)+len(trc))
+	for _, it := range append(trx, trc...) {
+		fromIsMe := (it.IsTRC20 && strings.EqualFold(it.From, addr)) ||
+			(!it.IsTRC20 && strings.EqualFold(it.From, addrHex))
+		direction, counter := "in", it.From
+		if fromIsMe {
+			direction, counter = "out", it.To
+		}
+		if !it.IsTRC20 {
+			counter = HexToBase58(counter) // pretty base58 for display
+		}
+		status := "confirmed"
+		if !it.Success {
+			status = "failed"
+		}
+		items = append(items, chains.Activity{
+			Hash: it.Hash, Direction: direction, AmountRaw: it.AmountRaw, Decimals: it.Decimals,
+			Symbol: it.Symbol, Counter: counter, Status: status,
+			BlockTime: it.BlockTime / 1000, // ms → s
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool { return items[i].BlockTime > items[j].BlockTime })
+	return items, "", nil
 }
 
 func firstNonEmpty(a, b string) string {
