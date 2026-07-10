@@ -63,7 +63,7 @@ func TestNonEVMReconcilerConfirmsPending(t *testing.T) {
 	}
 
 	reg := chains.NewRegistry()
-	reg.Register("tron", stubStatusClient{confirmed: true, success: true})
+	reg.Register("mainnet", "tron", stubStatusClient{confirmed: true, success: true})
 
 	if err := NewNonEVMReconciler(db, reg).Run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -90,7 +90,7 @@ func TestNonEVMReconcilerMarksFailed(t *testing.T) {
 	}
 
 	reg := chains.NewRegistry()
-	reg.Register("tron", stubStatusClient{confirmed: true, success: false})
+	reg.Register("mainnet", "tron", stubStatusClient{confirmed: true, success: false})
 
 	if err := NewNonEVMReconciler(db, reg).Run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

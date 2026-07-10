@@ -11,6 +11,7 @@ import (
 type WalletActivity struct {
 	ID            uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	ChainKey      string    `gorm:"size:16;not null;uniqueIndex:idx_chain_hash_dir" json:"chainKey"`
+	Network       string    `gorm:"size:16;not null;default:'mainnet'" json:"network"` // which chain network the tx is on
 	Address       string    `gorm:"size:128;not null;index" json:"address"`
 	Hash          string    `gorm:"size:128;not null;uniqueIndex:idx_chain_hash_dir" json:"hash"`
 	Direction     string    `gorm:"size:4;not null;uniqueIndex:idx_chain_hash_dir" json:"direction"` // "in" | "out"

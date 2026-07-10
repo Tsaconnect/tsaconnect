@@ -950,7 +950,7 @@ func (h *Handlers) RegisterNonEVMAddress(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(req.ChainKey)
+	client, ok := h.ChainRegistry.ForKey(resolveNetwork(c), req.ChainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -979,12 +979,13 @@ func (h *Handlers) RegisterNonEVMAddress(c *gin.Context) {
 // Query params: ?chain=tron&address=T...
 func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
 	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
 	addr := c.Query("address")
 	if h.ChainRegistry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(chainKey)
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -1003,6 +1004,7 @@ func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
 func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 	var req chains.TransferRequest
 	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
@@ -1011,7 +1013,7 @@ func (h *Handlers) PrepareNonEVMTx(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(chainKey)
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -1046,6 +1048,7 @@ type submitNonEVMRequest struct {
 // Query param: ?chain=tron
 func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
 	var req submitNonEVMRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
@@ -1055,7 +1058,7 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(chainKey)
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -1075,6 +1078,7 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	}
 	activity := models.WalletActivity{
 		ChainKey:  chainKey,
+		Network:   network,
 		Address:   req.From,
 		Hash:      hash,
 		Direction: "out",
@@ -1094,12 +1098,13 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 // Query params: ?chain=tron&hash=<txHash>
 func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
 	hash := c.Query("hash")
 	if h.ChainRegistry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(chainKey)
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -1117,13 +1122,14 @@ func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 // covering both sends and receives. Query params: ?chain=tron&address=...&cursor=
 func (h *Handlers) GetNonEVMHistory(c *gin.Context) {
 	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
 	addr := c.Query("address")
 	cursor := c.Query("cursor")
 	if h.ChainRegistry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
-	client, ok := h.ChainRegistry.ForKey(chainKey)
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
