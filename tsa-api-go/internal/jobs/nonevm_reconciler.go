@@ -28,8 +28,10 @@ func (r *NonEVMReconciler) Run(ctx context.Context) error {
 	if r.db == nil || r.reg == nil {
 		return nil // dormant
 	}
+	// Oldest-first so a backlog above the cap drains from the front instead of
+	// starving the earliest-pending rows.
 	var pending []models.WalletActivity
-	if err := r.db.Where("status = ?", "pending").Limit(100).Find(&pending).Error; err != nil {
+	if err := r.db.Where("status = ?", "pending").Order("created_at asc").Limit(100).Find(&pending).Error; err != nil {
 		return err
 	}
 	for i := range pending {

@@ -284,7 +284,9 @@ export async function fetchActivityItems(
 
   if (active.includes('wallet')) {
     fetchers.push(fetchWalletItems(page, perSource, 'send,receive,approve,escrow'));
-    fetchers.push(fetchTronItems());
+    // Tron history is a bounded recent window (no cursor pagination), so fetch
+    // it only on the first page — re-fetching per page would append duplicates.
+    if (page === 1) fetchers.push(fetchTronItems());
   }
   if (active.includes('swap'))   fetchers.push(fetchWalletItems(page, perSource, 'swap'));
   if (active.includes('tp'))     fetchers.push(fetchTPItems(page, perSource));

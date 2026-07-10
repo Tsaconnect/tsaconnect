@@ -20,7 +20,7 @@ import (
 // stubTron is a hand fake of chains.ChainClient for handler wiring tests.
 type stubTron struct{ chains.ChainClient }
 
-func (stubTron) Family() string                { return "tron" }
+func (stubTron) Family() string                 { return "tron" }
 func (stubTron) ValidateAddress(a string) error { return nil }
 func (stubTron) GetBalances(context.Context, string) ([]chains.Balance, error) {
 	return []chains.Balance{{Symbol: "TRX", Raw: "5", Decimals: 6, IsNative: true}}, nil
@@ -36,6 +36,50 @@ func TestRegistryResolvesFamily(t *testing.T) {
 	bals, _ := c.GetBalances(context.Background(), "TXYZ")
 	if len(bals) != 1 || bals[0].Symbol != "TRX" {
 		t.Fatalf("unexpected balances: %+v", bals)
+	}
+}
+
+// stubBalances returns a network-distinguishable symbol so a test can prove
+// which client the handler routed to.
+type stubBalances struct {
+	chains.ChainClient
+	sym string
+}
+
+func (stubBalances) Family() string               { return "tron" }
+func (stubBalances) ValidateAddress(string) error { return nil }
+func (s stubBalances) GetBalances(context.Context, string) ([]chains.Balance, error) {
+	return []chains.Balance{{Symbol: s.sym, Raw: "1", Decimals: 6, IsNative: true}}, nil
+}
+
+// TestGetNonEVMBalances_RoutesByNetwork proves ?network= selects the matching
+// per-network client (the dual-network wiring), not just the default mainnet.
+func TestGetNonEVMBalances_RoutesByNetwork(t *testing.T) {
+	reg := chains.NewRegistry()
+	reg.Register("mainnet", "tron", stubBalances{sym: "MAINNET"})
+	reg.Register("testnet", "tron", stubBalances{sym: "TESTNET"})
+	h := &Handlers{ChainRegistry: reg}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("GET", "/?chain=tron&address=TXYZ&network=testnet", nil)
+
+	h.GetNonEVMBalances(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Balances []chains.Balance `json:"balances"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data.Balances) != 1 || resp.Data.Balances[0].Symbol != "TESTNET" {
+		t.Fatalf("expected the testnet client to serve, got %+v", resp.Data.Balances)
 	}
 }
 
