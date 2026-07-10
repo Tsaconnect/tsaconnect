@@ -1111,3 +1111,27 @@ func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 	}
 	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"status": st})
 }
+
+// GetNonEVMHistory handles GET /api/wallet/nonevm/history.
+// Returns recent on-chain transfers (native + tokens) for a non-EVM address,
+// covering both sends and receives. Query params: ?chain=tron&address=...&cursor=
+func (h *Handlers) GetNonEVMHistory(c *gin.Context) {
+	chainKey := c.Query("chain")
+	addr := c.Query("address")
+	cursor := c.Query("cursor")
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	items, next, err := client.History(c.Request.Context(), addr, cursor)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadGateway, "history lookup failed")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"items": items, "next": next})
+}

@@ -69,10 +69,11 @@ type Activity struct {
 	Hash      string `json:"hash"`
 	Direction string `json:"direction"` // "in" | "out"
 	AmountRaw string `json:"amountRaw"`
+	Decimals  int    `json:"decimals"`
 	Symbol    string `json:"symbol"`
 	Counter   string `json:"counterparty"`
 	Status    string `json:"status"`
-	BlockTime int64  `json:"blockTime"`
+	BlockTime int64  `json:"blockTime"` // seconds since epoch
 }
 
 // ChainClient is implemented once per non-EVM family.
