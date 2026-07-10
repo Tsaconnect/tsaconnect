@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -138,22 +139,37 @@ func (c *Client) GetTxStatus(ctx context.Context, txHash string) (chains.TxStatu
 }
 
 func (c *Client) History(ctx context.Context, addr string, cursor string) ([]chains.Activity, string, error) {
+	// cursor is reserved: this returns a bounded window of the most recent
+	// transfers (perKind native + perKind token). Fingerprint-based pagination
+	// is deferred; the app fetches this once, on the first activity page. The
+	// returned "next" is therefore always empty.
 	const perKind = 30
-	trx, err := c.tg.GetTRXTransfers(ctx, addr, perKind)
-	if err != nil {
-		return nil, "", err
+
+	// TRX and TRC-20 live on separate TronGrid endpoints — fetch concurrently.
+	var trx, trc []HistoryItem
+	var trxErr, trcErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); trx, trxErr = c.tg.GetTRXTransfers(ctx, addr, perKind) }()
+	go func() { defer wg.Done(); trc, trcErr = c.tg.GetTRC20Transfers(ctx, addr, perKind) }()
+	wg.Wait()
+	if trxErr != nil {
+		return nil, "", trxErr
 	}
-	trc, err := c.tg.GetTRC20Transfers(ctx, addr, perKind)
-	if err != nil {
-		return nil, "", err
+	if trcErr != nil {
+		return nil, "", trcErr
 	}
 
 	// TRX rows carry hex (41..) addresses; TRC-20 rows carry base58. Compare
 	// each row's sender against the owner in its own encoding to set direction.
 	addrHex, _ := Base58ToHex(addr)
 
-	items := make([]chains.Activity, 0, len(trx)+len(trc))
-	for _, it := range append(trx, trc...) {
+	merged := make([]HistoryItem, 0, len(trx)+len(trc))
+	merged = append(merged, trx...)
+	merged = append(merged, trc...)
+
+	items := make([]chains.Activity, 0, len(merged))
+	for _, it := range merged {
 		fromIsMe := (it.IsTRC20 && strings.EqualFold(it.From, addr)) ||
 			(!it.IsTRC20 && strings.EqualFold(it.From, addrHex))
 		direction, counter := "in", it.From

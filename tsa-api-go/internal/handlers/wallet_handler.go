@@ -990,6 +990,10 @@ func (h *Handlers) GetNonEVMBalances(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
+	if err := client.ValidateAddress(addr); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid address")
+		return
+	}
 	bals, err := client.GetBalances(c.Request.Context(), addr)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "balance read failed")
@@ -1132,6 +1136,10 @@ func (h *Handlers) GetNonEVMHistory(c *gin.Context) {
 	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	if err := client.ValidateAddress(addr); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid address")
 		return
 	}
 	items, next, err := client.History(c.Request.Context(), addr, cursor)
