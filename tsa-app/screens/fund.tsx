@@ -9,7 +9,7 @@
 // unchanged — this is a visual/structural restyle only.
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  View, TextInput, FlatList,
+  View, TextInput, FlatList, ScrollView,
   Modal, Share, Image, Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +18,7 @@ import QRCode from 'react-native-qrcode-svg';
 import { getActiveWallet } from '@/services/wallet';
 import { NONEVM_CHAINS, isNonEVMChain, type AnyChainKey } from '@/constants/chains';
 import { getTronAddress } from '@/services/chains/tronWallet';
+import { getBtcAddress } from '@/services/chains/btcWallet';
 import { useTokens } from '@/hooks/useTokens';
 import { useTheme } from '@/theme';
 import {
@@ -30,7 +31,16 @@ import {
   PressableScale,
 } from '@/components/ui';
 
-const POPULAR = ['USDT', 'USDC', 'BNB', 'ETH', 'MCGP'];
+const POPULAR = ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX'];
+
+// Display ranking within each section — MCGP always first, then majors by
+// market prominence; anything unranked sorts after, alphabetically.
+const TOKEN_RANK: Record<string, number> = Object.fromEntries(
+  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'POL', 'AVAX'].map((s, i) => [s, i]),
+);
+const rankOf = (symbol: string): number => TOKEN_RANK[symbol] ?? Number.MAX_SAFE_INTEGER;
+const byRank = (a: ReceiveItem, b: ReceiveItem): number =>
+  rankOf(a.symbol) - rankOf(b.symbol) || a.symbol.localeCompare(b.symbol);
 
 interface ReceiveItem {
   id: string;
@@ -45,20 +55,30 @@ interface ReceiveItem {
   chainIconUrl?: string;
 }
 
-// Static Tron receive items — TRX (native) + USDT (TRC-20). Their deposit
-// address is the derived Tron address, not the EVM one.
-const TRON_RECEIVE_ITEMS: ReceiveItem[] = [
+// Static non-EVM receive items — TRX (native) + USDT (TRC-20) + BTC. Their
+// deposit addresses are the per-family derived addresses, not the EVM one.
+const NONEVM_RECEIVE_ITEMS: ReceiveItem[] = [
   {
     id: 'TRX-tron', symbol: 'TRX', name: 'Tron',
-    iconColor: NONEVM_CHAINS.tron.iconColor,
+    iconColor: NONEVM_CHAINS.tron.iconColor, iconUrl: NONEVM_CHAINS.tron.iconUrl,
     chainKey: 'tron', chainName: NONEVM_CHAINS.tron.name,
     chainShortName: NONEVM_CHAINS.tron.shortName, chainIconColor: NONEVM_CHAINS.tron.iconColor,
+    chainIconUrl: NONEVM_CHAINS.tron.iconUrl,
   },
   {
     id: 'USDT-tron', symbol: 'USDT', name: 'Tether USD',
     iconColor: '#26A17B',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/325/small/Tether.png',
     chainKey: 'tron', chainName: NONEVM_CHAINS.tron.name,
     chainShortName: NONEVM_CHAINS.tron.shortName, chainIconColor: NONEVM_CHAINS.tron.iconColor,
+    chainIconUrl: NONEVM_CHAINS.tron.iconUrl,
+  },
+  {
+    id: 'BTC-btc', symbol: 'BTC', name: 'Bitcoin',
+    iconColor: NONEVM_CHAINS.btc.iconColor, iconUrl: NONEVM_CHAINS.btc.iconUrl,
+    chainKey: 'btc', chainName: NONEVM_CHAINS.btc.name,
+    chainShortName: NONEVM_CHAINS.btc.shortName, chainIconColor: NONEVM_CHAINS.btc.iconColor,
+    chainIconUrl: NONEVM_CHAINS.btc.iconUrl,
   },
 ];
 
@@ -81,7 +101,11 @@ function ChainFilterRow({
 }) {
   const { colors, spacing, radius } = useTheme();
   return (
-    <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={{ flexDirection: 'row', gap: spacing.sm, paddingRight: spacing.lg }}
+    >
       <PressableScale
         onPress={() => onSelect('all')}
         style={{
@@ -120,7 +144,7 @@ function ChainFilterRow({
           }
         </PressableScale>
       ))}
-    </View>
+    </ScrollView>
   );
 }
 
@@ -315,6 +339,7 @@ export default function FundScreen() {
   const { tokenList, getChainsForToken } = useTokens();
   const [walletAddress, setWalletAddress] = useState('');
   const [tronAddress, setTronAddress] = useState('');
+  const [btcAddress, setBtcAddress] = useState('');
   const [search, setSearch] = useState('');
   const [chainFilter, setChainFilter] = useState<AnyChainKey | 'all'>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -322,14 +347,19 @@ export default function FundScreen() {
 
   useEffect(() => {
     getActiveWallet().then(addr => { if (addr) setWalletAddress(addr); });
-    // Same seed, standard Tron path — reproduces the TronLink address.
+    // Same seed, standard derivation paths — reproduce the TronLink address
+    // and the Sparrow/Electrum BIP-84 address respectively.
     getTronAddress().then(addr => { if (addr) setTronAddress(addr); }).catch(() => {});
+    getBtcAddress().then(addr => { if (addr) setBtcAddress(addr); }).catch(() => {});
   }, []);
 
   // The deposit address depends on the item's chain family: EVM chains share
-  // the one 0x address; Tron has its own base58 T-address.
-  const addressFor = (item: ReceiveItem): string =>
-    isNonEVMChain(item.chainKey) ? tronAddress : walletAddress;
+  // the one 0x address; Tron and BTC each derive their own.
+  const addressFor = (item: ReceiveItem): string => {
+    if (item.chainKey === 'tron') return tronAddress;
+    if (item.chainKey === 'btc') return btcAddress;
+    return isNonEVMChain(item.chainKey) ? '' : walletAddress;
+  };
 
   // Flatten tokens × chains into receive items, then append the Tron items.
   const allItems = useMemo<ReceiveItem[]>(() => {
@@ -351,7 +381,7 @@ export default function FundScreen() {
         });
       }
     }
-    items.push(...TRON_RECEIVE_ITEMS);
+    items.push(...NONEVM_RECEIVE_ITEMS);
     return items;
   }, [tokenList, getChainsForToken]);
 
@@ -371,14 +401,18 @@ export default function FundScreen() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     return allItems.filter(item => {
+      // Hide rows whose deposit address isn't available (e.g. a non-EVM
+      // address that can't be derived for a key-only wallet).
+      if (!addressFor(item)) return false;
       if (chainFilter !== 'all' && item.chainKey !== chainFilter) return false;
       if (q && !item.symbol.toLowerCase().includes(q) && !item.name.toLowerCase().includes(q) && !item.chainName.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [allItems, search, chainFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allItems, search, chainFilter, walletAddress, tronAddress, btcAddress]);
 
-  const popular = filtered.filter(i => POPULAR.includes(i.symbol));
-  const rest = filtered.filter(i => !POPULAR.includes(i.symbol));
+  const popular = filtered.filter(i => POPULAR.includes(i.symbol)).sort(byRank);
+  const rest = filtered.filter(i => !POPULAR.includes(i.symbol)).sort(byRank);
 
   const handleCopy = async (item: ReceiveItem) => {
     const address = addressFor(item);
