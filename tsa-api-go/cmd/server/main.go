@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/ojimcy/tsa-api-go/internal/chains"
+	"github.com/ojimcy/tsa-api-go/internal/chains/btc"
 	"github.com/ojimcy/tsa-api-go/internal/chains/tron"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
@@ -45,6 +46,10 @@ func main() {
 		case "tron":
 			tg := tron.NewTronGrid(tcfg.RPCURL, tcfg.APIKey)
 			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, tron.NewClient(tcfg, tg))
+			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
+		case "btc":
+			esp := btc.NewEsplora(tcfg.RPCURL)
+			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, btc.NewClient(tcfg, esp))
 			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
 		}
 	}

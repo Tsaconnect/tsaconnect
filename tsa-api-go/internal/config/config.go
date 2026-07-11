@@ -762,6 +762,24 @@ func buildNonEVMChains() map[string]NonEVMChainConfig {
 			addTron(network, rpc, os.Getenv("TRON_USDT_ADDRESS"))
 		}
 	}
+
+	// BTC: RPCURL is an Esplora-compatible REST base (blockstream.info or
+	// mempool.space). Same dormancy rule — unset env means the chain is off.
+	addBTC := func(network, esploraBase string) {
+		if esploraBase == "" {
+			return
+		}
+		out[network+":btc"] = NonEVMChainConfig{
+			ChainKey:       "btc",
+			Family:         "btc",
+			Network:        network,
+			RPCURL:         esploraBase,
+			NativeSymbol:   "BTC",
+			NativeDecimals: 8,
+		}
+	}
+	addBTC("mainnet", os.Getenv("BTC_MAINNET_ESPLORA_URL"))
+	addBTC("testnet", os.Getenv("BTC_TESTNET_ESPLORA_URL"))
 	return out
 }
 
