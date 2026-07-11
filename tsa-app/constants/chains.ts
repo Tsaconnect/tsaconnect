@@ -350,11 +350,16 @@ export interface NonEVMChainConfig {
   iconColor: string;
 }
 
-export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
+export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
   tron: {
     chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
     explorerUrl: 'https://tronscan.org',
     nativeCurrency: { symbol: 'TRX', decimals: 6 }, iconColor: '#EF0027',
+  },
+  btc: {
+    chainKey: 'btc', family: 'btc', name: 'Bitcoin', shortName: 'BTC',
+    explorerUrl: 'https://mempool.space',
+    nativeCurrency: { symbol: 'BTC', decimals: 8 }, iconColor: '#F7931A',
   },
 };
 
@@ -365,7 +370,7 @@ export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
 export type NonEVMChainKey = keyof typeof NONEVM_CHAINS;
 export type AnyChainKey = ChainKey | NonEVMChainKey;
 
-export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron'];
+export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc'];
 
 export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana';
 
@@ -403,12 +408,15 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
   };
 }
 
-// Explorer URL for a transaction on any family. EVM explorers use `/tx/{hash}`;
-// Tronscan uses `/#/transaction/{hash}`. Resolves the chain from a non-EVM key,
-// else an EVM chainId, else an EVM key. Returns undefined when unresolvable.
+// Explorer URL for a transaction on any family. EVM explorers and
+// mempool.space use `/tx/{hash}`; Tronscan uses `/#/transaction/{hash}`.
+// Resolves the chain from a non-EVM key, else an EVM chainId, else an EVM
+// key. Returns undefined when unresolvable.
 export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
   if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
-    return `${NONEVM_CHAINS[opts.chainKey].explorerUrl}/#/transaction/${txHash}`;
+    const chain = NONEVM_CHAINS[opts.chainKey];
+    const path = chain.family === 'tron' ? `/#/transaction/${txHash}` : `/tx/${txHash}`;
+    return `${chain.explorerUrl}${path}`;
   }
   const explorer =
     (typeof opts.chainId === 'number' ? getChainByChainId(opts.chainId)?.explorerUrl : undefined) ??
