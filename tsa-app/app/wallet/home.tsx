@@ -15,6 +15,7 @@ import {
   ScrollView,
   RefreshControl,
   Alert,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -65,6 +66,16 @@ const WalletHome = () => {
   const TOKEN_ICONS: Record<string, string> = Object.fromEntries(
     tokenList.map(t => [t.symbol, t.symbol[0]])
   );
+  // Registry tokens carry their own logo; native coins (BTC, TRX, ETH, S, …)
+  // fall back to their chain's logo. Anything else keeps the letter circle.
+  const TOKEN_URLS: Record<string, string | undefined> = Object.fromEntries(
+    tokenList.map(t => [t.symbol, t.iconUrl])
+  );
+  const tokenLogoUrl = (token: WalletBalanceWithChain): string | undefined => {
+    const chain = getChainDisplay(token.chainKey);
+    if (TOKEN_URLS[token.symbol]) return TOKEN_URLS[token.symbol];
+    return chain?.nativeCurrency?.symbol === token.symbol ? chain?.iconUrl : undefined;
+  };
 
   const [balances, setBalances] = useState<WalletBalanceWithChain[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -207,6 +218,7 @@ const WalletHome = () => {
 
   const renderTokenCard = (token: WalletBalanceWithChain) => {
     const chain = getChainDisplay(token.chainKey);
+    const logoUrl = tokenLogoUrl(token);
     return (
       <PressableScale
         key={`${token.symbol}-${token.chainKey}`}
@@ -234,21 +246,33 @@ const WalletHome = () => {
       >
         <Card padding="md" style={{ marginBottom: spacing.sm }}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <View
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: radius.pill,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginRight: spacing.md,
-                backgroundColor: TOKEN_COLORS[token.symbol] || colors.accent,
-              }}
-            >
-              <Text variant="bodyMed" weight="700" style={{ color: colors.onAccent }}>
-                {TOKEN_ICONS[token.symbol] || token.symbol[0]}
-              </Text>
-            </View>
+            {logoUrl ? (
+              <Image
+                source={{ uri: logoUrl }}
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: radius.pill,
+                  marginRight: spacing.md,
+                }}
+              />
+            ) : (
+              <View
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: radius.pill,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginRight: spacing.md,
+                  backgroundColor: TOKEN_COLORS[token.symbol] || colors.accent,
+                }}
+              >
+                <Text variant="bodyMed" weight="700" style={{ color: colors.onAccent }}>
+                  {TOKEN_ICONS[token.symbol] || token.symbol[0]}
+                </Text>
+              </View>
+            )}
             <View style={{ flex: 1 }}>
               <Text variant="bodyMed" weight="600">
                 {token.symbol}
