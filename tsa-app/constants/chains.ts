@@ -256,7 +256,12 @@ export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
 // Active chain config — defaults to mainnet, updated by useNetwork hook
 export let CHAINS: Record<ChainKey, ChainConfig> = { ...MAINNET_CHAINS };
 
+// Tracked here as well so non-EVM helpers (which have no per-network map)
+// can pick network-specific values like the BTC testnet explorer.
+let activeNetwork: NetworkType = 'mainnet';
+
 export function setActiveNetwork(network: NetworkType) {
+  activeNetwork = network;
   if (network === 'testnet') {
     Object.assign(CHAINS, TESTNET_CHAINS);
   } else {
@@ -346,6 +351,9 @@ export interface NonEVMChainConfig {
   name: string;
   shortName: string;
   explorerUrl: string;
+  // Used when the app is on the testnet toggle AND the chain's addresses are
+  // network-specific (BTC). Chains with one address space (Tron) omit it.
+  explorerUrlTestnet?: string;
   nativeCurrency: { symbol: string; decimals: number };
   iconColor: string;
 }
@@ -359,6 +367,7 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
   btc: {
     chainKey: 'btc', family: 'btc', name: 'Bitcoin', shortName: 'BTC',
     explorerUrl: 'https://mempool.space',
+    explorerUrlTestnet: 'https://mempool.space/testnet',
     nativeCurrency: { symbol: 'BTC', decimals: 8 }, iconColor: '#F7931A',
   },
 };
@@ -415,8 +424,10 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
 export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
   if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
     const chain = NONEVM_CHAINS[opts.chainKey];
+    const base =
+      activeNetwork === 'testnet' && chain.explorerUrlTestnet ? chain.explorerUrlTestnet : chain.explorerUrl;
     const path = chain.family === 'tron' ? `/#/transaction/${txHash}` : `/tx/${txHash}`;
-    return `${chain.explorerUrl}${path}`;
+    return `${base}${path}`;
   }
   const explorer =
     (typeof opts.chainId === 'number' ? getChainByChainId(opts.chainId)?.explorerUrl : undefined) ??

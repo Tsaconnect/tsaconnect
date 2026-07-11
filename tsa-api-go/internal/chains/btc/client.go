@@ -34,6 +34,18 @@ const (
 	inputVB    = 68
 	changeVB   = 31
 	overheadVB = 11
+
+	// Bounds on client-supplied prepared txs at submit time. Digest computation
+	// and script-engine verification run per input BEFORE signatures are
+	// checked, so an unbounded Raw would let one request burn CPU/memory at
+	// will. 500 P2WPKH inputs (~34k vB) is far above any tx we prepare.
+	maxTxInputs  = 500
+	maxTxOutputs = 100
+
+	// maxFeeSat rejects a broadcast whose implied fee (inputs - outputs)
+	// exceeds 0.01 BTC. The user signs their own tx so only their funds are at
+	// stake, but a buggy client must not hand the balance to miners.
+	maxFeeSat = 1_000_000
 )
 
 type Client struct {
@@ -174,6 +186,11 @@ func (c *Client) AssembleAndBroadcast(ctx context.Context, prepared chains.Prepa
 	if err := json.Unmarshal([]byte(prepared.Raw), &raw); err != nil {
 		return "", fmt.Errorf("bad prepared tx: %v", err)
 	}
+	// Raw is client-supplied: bound it before any per-input work (digests +
+	// script-engine runs) so one request can't burn arbitrary CPU/memory.
+	if len(raw.Inputs) > maxTxInputs || len(raw.Outputs) > maxTxOutputs {
+		return "", fmt.Errorf("prepared tx too large (%d inputs / %d outputs)", len(raw.Inputs), len(raw.Outputs))
+	}
 	if len(sigs) != len(raw.Inputs) {
 		return "", fmt.Errorf("btc expects %d signatures (one per input), got %d", len(raw.Inputs), len(sigs))
 	}
@@ -206,6 +223,19 @@ func (c *Client) AssembleAndBroadcast(ctx context.Context, prepared chains.Prepa
 
 	if err := verifyTx(tx, raw, senderScript); err != nil {
 		return "", fmt.Errorf("signature verification failed: %v", err)
+	}
+
+	// Fee sanity: the network only enforces outputs <= inputs, not an upper
+	// bound. Catch a corrupted Raw before it donates the balance to miners.
+	var inSum, outSum int64
+	for _, in := range raw.Inputs {
+		inSum += in.ValueSat
+	}
+	for _, out := range raw.Outputs {
+		outSum += out.ValueSat
+	}
+	if fee := inSum - outSum; fee < 0 || fee > maxFeeSat {
+		return "", fmt.Errorf("implied fee %d sats is outside the sane range [0, %d]", fee, maxFeeSat)
 	}
 
 	var buf bytes.Buffer
@@ -244,6 +274,7 @@ func (c *Client) History(ctx context.Context, addr string, cursor string) ([]cha
 	for _, tx := range txs {
 		var inSum, outSum, toOthers int64
 		counterIn, counterOut := "", ""
+		recipients := 0
 		for _, vin := range tx.Vin {
 			if vin.Prevout.Address == addr {
 				inSum += vin.Prevout.Value
@@ -256,8 +287,11 @@ func (c *Client) History(ctx context.Context, addr string, cursor string) ([]cha
 				outSum += vout.Value
 			} else {
 				toOthers += vout.Value
-				if counterOut == "" && vout.Address != "" {
-					counterOut = vout.Address
+				if vout.Address != "" {
+					recipients++
+					if counterOut == "" {
+						counterOut = vout.Address
+					}
 				}
 			}
 		}
@@ -268,6 +302,12 @@ func (c *Client) History(ctx context.Context, addr string, cursor string) ([]cha
 			amount = toOthers
 			if amount == 0 { // self-transfer / consolidation: show the fee spent
 				amount = -net
+			}
+			// A batch send (e.g. from another BIP-84 wallet on the same seed)
+			// pays several recipients in one tx; the amount above is the total,
+			// so say so rather than misattributing it all to the first address.
+			if recipients > 1 {
+				counter = fmt.Sprintf("%s (+%d more)", counterOut, recipients-1)
 			}
 		}
 		status := "pending"

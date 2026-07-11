@@ -327,6 +327,101 @@ func TestHistoryMapsDirectionsAndAmounts(t *testing.T) {
 	}
 }
 
+func TestHistoryBatchSendAndConsolidation(t *testing.T) {
+	me := "bc1qme000000000000000000000000000000000000"
+	alice := "bc1qalice000000000000000000000000000000000"
+	bob := "bc1qbob00000000000000000000000000000000000"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/address/"+me+"/txs", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `[
+		 {"txid":"batch","status":{"confirmed":true,"block_time":1700000300},
+		  "vin":[{"prevout":{"scriptpubkey_address":"%[1]s","value":100000}}],
+		  "vout":[{"scriptpubkey_address":"%[2]s","value":50000},
+		          {"scriptpubkey_address":"%[3]s","value":30000},
+		          {"scriptpubkey_address":"%[1]s","value":19000}]},
+		 {"txid":"consolidate","status":{"confirmed":true,"block_time":1700000200},
+		  "vin":[{"prevout":{"scriptpubkey_address":"%[1]s","value":40000}},
+		         {"prevout":{"scriptpubkey_address":"%[1]s","value":20000}}],
+		  "vout":[{"scriptpubkey_address":"%[1]s","value":59000}]}
+		]`, me, alice, bob)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "mainnet")
+	items, _, err := c.History(context.Background(), me, "")
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want 2 items got %d", len(items))
+	}
+	// Batch send to two recipients: total external amount, counterparty says so.
+	batch := items[0]
+	if batch.Hash != "batch" || batch.Direction != "out" || batch.AmountRaw != "80000" {
+		t.Fatalf("bad batch item: %+v", batch)
+	}
+	if batch.Counter != alice+" (+1 more)" {
+		t.Fatalf("batch counterparty want %q got %q", alice+" (+1 more)", batch.Counter)
+	}
+	// Self-consolidation: no external recipients; amount is the fee spent.
+	cons := items[1]
+	if cons.Hash != "consolidate" || cons.Direction != "out" || cons.AmountRaw != "1000" || cons.Counter != "" {
+		t.Fatalf("bad consolidation item: %+v", cons)
+	}
+}
+
+func TestAssembleRejectsOversizedAndFeeInsaneRaw(t *testing.T) {
+	priv, sender := testKey(t)
+	srv := mockEsplora(t, sender, []UTXO{{Txid: utxoTxid, Vout: 0, Value: 100_000}}, nil)
+	defer srv.Close()
+	c := newTestClient(srv.URL, "mainnet")
+
+	prepared, err := c.PrepareTransfer(context.Background(),
+		transferReq(sender, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "80000"))
+	if err != nil {
+		t.Fatalf("PrepareTransfer: %v", err)
+	}
+
+	// Oversized: inflate the input list beyond maxTxInputs. Digest computation
+	// must bail before doing per-input work or signature checks.
+	var raw rawTx
+	json.Unmarshal([]byte(prepared.Raw), &raw)
+	for len(raw.Inputs) <= maxTxInputs {
+		raw.Inputs = append(raw.Inputs, raw.Inputs[0])
+	}
+	bigJSON, _ := json.Marshal(raw)
+	big := prepared
+	big.Raw = string(bigJSON)
+	if _, err := c.AssembleAndBroadcast(context.Background(), big, nil); err == nil ||
+		!strings.Contains(err.Error(), "too large") {
+		t.Fatalf("want too-large rejection, got %v", err)
+	}
+
+	// Fee-insane: shrink the recipient output so inputs-outputs > maxFeeSat…
+	// impossible with a 100k UTXO, so instead drop the change output and lower
+	// the recipient to 1 sat over a large input: use outputs summing to 1000
+	// against the 100k input → fee 99k < 1 BTC cap, fine. So assert the
+	// negative-fee guard instead: inflate outputs beyond inputs.
+	json.Unmarshal([]byte(prepared.Raw), &raw)
+	raw.Outputs[0].ValueSat = 200_000 // exceeds the 100k input
+	negJSON, _ := json.Marshal(raw)
+	neg := prepared
+	neg.Raw = string(negJSON)
+	digests, _, err := computeDigests(raw)
+	if err != nil {
+		t.Fatalf("computeDigests: %v", err)
+	}
+	sigs := make([]chains.Signature, len(digests))
+	for i, d := range digests {
+		sigs[i] = chains.Signature{Index: i, SigHex: signAppStyle(t, priv, hex.EncodeToString(d))}
+	}
+	if _, err := c.AssembleAndBroadcast(context.Background(), neg, sigs); err == nil ||
+		!strings.Contains(err.Error(), "outside the sane range") {
+		t.Fatalf("want fee-sanity rejection, got %v", err)
+	}
+}
+
 func TestGetTxStatusConfirmations(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tx/deadbeef", func(w http.ResponseWriter, r *http.Request) {

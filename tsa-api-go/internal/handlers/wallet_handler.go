@@ -1173,6 +1173,10 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "broadcast", gin.H{"txHash": hash})
 }
 
+// nonEVMTxHashRe matches Tron and BTC txids (32-byte hex). Validated before
+// the hash is interpolated into an upstream provider URL path.
+var nonEVMTxHashRe = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
 // GetNonEVMTxStatus handles GET /api/wallet/nonevm/tx-status.
 // Returns the status of a non-EVM transaction by hash.
 // Query params: ?chain=tron&hash=<txHash>
@@ -1180,6 +1184,10 @@ func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 	chainKey := c.Query("chain")
 	network := resolveNetwork(c)
 	hash := c.Query("hash")
+	if !nonEVMTxHashRe.MatchString(hash) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid tx hash")
+		return
+	}
 	if h.ChainRegistry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
