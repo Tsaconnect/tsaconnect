@@ -142,18 +142,24 @@ active receive addresses and corrects DB drift against chain truth (reconcile-on
 - **Address validation** (base58 → 32 bytes) before any prepare, to avoid wasted broadcasts.
 - **Manual import of a bad mint:** `getAccountInfo` returns non-mint / missing → reject with a message.
 
-## 7. Library decision (architectural call)
+## 7. Library decision (architectural call — decided during execution)
 
-The parent spec named `gagliardetto/solana-go` for Go tx construction. **Decision for this cut: build
-the message serializer by hand in `message.go` against the documented System / SPL-Token /
-Associated-Token instruction layouts, without adding `solana-go`.** Rationale: we only need three
-fixed instruction shapes (SOL transfer, SPL transfer, ATA create), the wire format is stable and
-simple, and avoiding the dependency keeps the module lean and the supply-chain surface minimal —
-consistent with how BTC uses focused `btcsuite` primitives rather than a monolithic SDK, and how Tron
-uses raw TronGrid HTTP. If message construction proves fiddlier than expected during execution
-(e.g. token-2022, versioned txs), we revisit and pull in `solana-go` behind the same `ChainClient`
-interface — the boundary makes that swap local. This trade-off is logged here so the reviewer can
-challenge it.
+**Decision: use `github.com/gagliardetto/solana-go` server-side for tx construction, RPC, and message
+serialization** (the parent spec's named choice), behind the `ChainClient` interface.
+
+I initially considered hand-rolling the serializer to avoid the dependency, but building an SPL send
+correctly requires deriving the recipient's **Associated Token Account** — a program-derived address
+that needs ed25519 on-curve checking (`findProgramAddress`) plus exact byte layouts for the System /
+SPL-Token / Associated-Token instructions and Solana's shortvec message encoding. Hand-rolling all of
+that for **money movement** is unjustified risk when a battle-tested library exists.
+
+The parent spec's supply-chain caution was about `@solana/web3.js` — the *JavaScript, on-device*
+library (Dec-2024 key-exfil incident). That concern does not transfer here: `solana-go` runs
+**server-side only**, and the server never holds a seed or signs — the app still signs on-device with
+`@noble` ed25519. So the heavy SDK stays off the user's device exactly as the spec's "heavy chain SDKs
+live server-side" principle intends. The cost is server-side transitive dependencies (acceptable in a
+Go API that already depends on go-ethereum, GORM, etc.); the `ChainClient` boundary keeps the choice
+local and swappable.
 
 ## 8. Testing
 
