@@ -225,18 +225,21 @@ export default function AllTokensScreen() {
     try {
       const tron = await loadTronWallet(addr || undefined);
       if (tron) {
-        const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+        const tronChain = getChainDisplay('tron');
         for (const row of tron.balances) {
+          const isNative = !row.contractAddress;
           list.push({
             id: String(id++),
             symbol: row.symbol,
             name: row.symbol === 'TRX' ? 'Tron' : row.name,
             balance: parseFloat(row.balance) || 0,
             usdValue: parseFloat(row.usdValue) || 0,
-            iconColor: tronColor,
+            iconColor: tronChain?.iconColor || '#EF0027',
+            // TRX gets the chain logo; TRC-20s (USDT) reuse the registry logo.
+            iconUrl: isNative ? tronChain?.iconUrl : tokenList.find((t) => t.symbol === row.symbol)?.iconUrl,
             chainKey: 'tron',
             chainName: 'Tron',
-            isNative: !row.contractAddress,
+            isNative,
             contractAddress: row.contractAddress || undefined,
             decimals: row.decimals,
           });
@@ -249,7 +252,7 @@ export default function AllTokensScreen() {
     try {
       const btc = await loadBtcWallet(addr || undefined);
       if (btc) {
-        const btcColor = getChainDisplay('btc')?.iconColor || '#F7931A';
+        const btcChain = getChainDisplay('btc');
         for (const row of btc.balances) {
           list.push({
             id: String(id++),
@@ -257,7 +260,8 @@ export default function AllTokensScreen() {
             name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
             balance: parseFloat(row.balance) || 0,
             usdValue: parseFloat(row.usdValue) || 0,
-            iconColor: btcColor,
+            iconColor: btcChain?.iconColor || '#F7931A',
+            iconUrl: btcChain?.iconUrl,
             chainKey: 'btc',
             chainName: 'Bitcoin',
             isNative: true,
