@@ -35,7 +35,7 @@ import {
   WalletMeta,
 } from '../../services/wallet';
 import { useTokens } from '../../hooks/useTokens';
-import { CHAINS, CHAIN_KEYS, getChainDisplay, type ChainKey } from '../../constants/chains';
+import { CHAINS, CHAIN_KEYS, getChainDisplay, tokenRankOf, type ChainKey } from '../../constants/chains';
 import { loadTronWallet } from '../../services/chains/tronWallet';
 import { loadBtcWallet } from '../../services/chains/btcWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
@@ -580,6 +580,16 @@ const WalletHome = () => {
           <View style={{ marginTop: spacing.md }}>
             {(balances as WalletBalanceWithChain[])
               .filter((b) => chainFilter === 'all' || b.chainKey === chainFilter)
+              // Non-zero holdings first (by USD value, then raw balance for
+              // tokens without a price feed); zero rows by the shared ranking
+              // so MCGP leads and majors follow.
+              .sort(
+                (a, b) =>
+                  parseFloat(b.usdValue || '0') - parseFloat(a.usdValue || '0') ||
+                  parseFloat(b.balance || '0') - parseFloat(a.balance || '0') ||
+                  tokenRankOf(a.symbol) - tokenRankOf(b.symbol) ||
+                  a.symbol.localeCompare(b.symbol)
+              )
               .map(renderTokenCard)}
           </View>
           <PressableScale
