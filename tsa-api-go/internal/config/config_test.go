@@ -123,3 +123,40 @@ func TestLoad_LegacyScalarsMirrorSonic(t *testing.T) {
 		t.Errorf("legacy version %q != sonic entry %q", cfg.P2PEscrowEIP712Version, sonic.EIP712Version)
 	}
 }
+
+// Robinhood Chain is a wallet-only chain (native ETH + canonical USDG stablecoin)
+// present on both networks. It must NOT appear in the P2P registry — no escrow is
+// deployed there. USDG has a mainnet address by default; testnet stays env-gated.
+func TestLoad_RobinhoodWalletChain(t *testing.T) {
+	const usdgMainnet = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+
+	cfg := Load()
+
+	main, ok := cfg.Networks["mainnet"].Chains["robinhood"]
+	if !ok {
+		t.Fatalf("expected robinhood in mainnet chains")
+	}
+	if main.ChainID != 4663 || main.NativeCurrency != "ETH" {
+		t.Errorf("robinhood mainnet = %+v, want chainID=4663 native=ETH", main)
+	}
+	if got := cfg.Networks["mainnet"].TokenAddresses["robinhood:USDG"]; got != usdgMainnet {
+		t.Errorf("robinhood:USDG mainnet = %q, want %q", got, usdgMainnet)
+	}
+
+	test, ok := cfg.Networks["testnet"].Chains["robinhood"]
+	if !ok {
+		t.Fatalf("expected robinhood in testnet chains")
+	}
+	if test.ChainID != 46630 || test.NativeCurrency != "ETH" {
+		t.Errorf("robinhood testnet = %+v, want chainID=46630 native=ETH", test)
+	}
+	// No verified testnet USDG address ships by default (env-gated).
+	if got, present := cfg.Networks["testnet"].TokenAddresses["robinhood:USDG"]; present {
+		t.Errorf("robinhood:USDG testnet should be unset by default, got %q", got)
+	}
+
+	// Wallet-only: must never be registered as a P2P chain.
+	if _, isP2P := cfg.P2PChains[4663]; isP2P {
+		t.Errorf("robinhood (4663) must not be in P2PChains")
+	}
+}

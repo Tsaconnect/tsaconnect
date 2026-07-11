@@ -68,6 +68,7 @@ func NewPriceService() *PriceService {
 			"MCGP":  "maticgold-pro",
 			"USDT":  "tether",
 			"USDC":  "usd-coin",
+			"USDG":  "global-dollar",
 			"ETH":   "ethereum",
 			"BTC":   "bitcoin",
 			"SOL":   "solana",
