@@ -102,6 +102,22 @@ symbol=USDG, name="Global Dollar", decimals=6, chains=["robinhood"], is_active=t
 
 Native ETH needs no DB row — it surfaces automatically.
 
+## Launch checklist (before enabling in prod)
+
+These two are **ops steps, not code** — the code defaults are deliberately safe
+without them, but USDG stays dormant and the RPC stays rate-limited until done:
+
+- [ ] **Add the USDG `supported_tokens` row** on the live DB
+      (`symbol=USDG, name="Global Dollar", decimals=6, chains=["robinhood"],
+      is_active=true`). `seedDefaultTokens()` only runs on an empty table, so the
+      already-seeded prod DB won't surface USDG without this. Native ETH needs
+      no row.
+- [ ] **Override `ROBINHOOD_MAINNET_RPC_URL`** with a keyed provider
+      (Alchemy/QuickNode). The public endpoint is rate-limited, and
+      `GetWalletBalances` adds sequential per-chain RPC round-trips (native
+      balance + on-chain `decimals()` + token balance) on every request — a
+      throttled public RPC would dominate the endpoint's tail latency.
+
 ## Verification
 
 - `go build ./...` in `tsa-api-go` (compiles with the new config/handler).
