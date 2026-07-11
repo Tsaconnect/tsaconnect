@@ -17,7 +17,7 @@ import { View, FlatList, Image, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
-import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
+import { CHAINS, getChainDisplay, tokenRankOf, type ChainKey, type AnyChainKey } from '@/constants/chains';
 import { loadTronWallet } from '@/services/chains/tronWallet';
 import { loadBtcWallet } from '@/services/chains/btcWallet';
 import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
@@ -225,18 +225,21 @@ export default function AllTokensScreen() {
     try {
       const tron = await loadTronWallet(addr || undefined);
       if (tron) {
-        const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+        const tronChain = getChainDisplay('tron');
         for (const row of tron.balances) {
+          const isNative = !row.contractAddress;
           list.push({
             id: String(id++),
             symbol: row.symbol,
             name: row.symbol === 'TRX' ? 'Tron' : row.name,
             balance: parseFloat(row.balance) || 0,
             usdValue: parseFloat(row.usdValue) || 0,
-            iconColor: tronColor,
+            iconColor: tronChain?.iconColor || '#EF0027',
+            // TRX gets the chain logo; TRC-20s (USDT) reuse the registry logo.
+            iconUrl: isNative ? tronChain?.iconUrl : tokenList.find((t) => t.symbol === row.symbol)?.iconUrl,
             chainKey: 'tron',
             chainName: 'Tron',
-            isNative: !row.contractAddress,
+            isNative,
             contractAddress: row.contractAddress || undefined,
             decimals: row.decimals,
           });
@@ -249,7 +252,7 @@ export default function AllTokensScreen() {
     try {
       const btc = await loadBtcWallet(addr || undefined);
       if (btc) {
-        const btcColor = getChainDisplay('btc')?.iconColor || '#F7931A';
+        const btcChain = getChainDisplay('btc');
         for (const row of btc.balances) {
           list.push({
             id: String(id++),
@@ -257,7 +260,8 @@ export default function AllTokensScreen() {
             name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
             balance: parseFloat(row.balance) || 0,
             usdValue: parseFloat(row.usdValue) || 0,
-            iconColor: btcColor,
+            iconColor: btcChain?.iconColor || '#F7931A',
+            iconUrl: btcChain?.iconUrl,
             chainKey: 'btc',
             chainName: 'Bitcoin',
             isNative: true,
@@ -291,11 +295,19 @@ export default function AllTokensScreen() {
     } catch { /* MCGP swap unavailable — skip */ }
 
     // Visible = anything with balance, plus native zero rows, plus every
-    // imported custom token (user explicitly added it).
+    // imported custom token (user explicitly added it). MCGP always leads
+    // when held; zero rows follow the shared ranking.
     const withBalance = list
       .filter((a) => a.balance > 0 || a.imported)
-      .sort((a, b) => b.usdValue - a.usdValue);
-    const nativeZero = list.filter((a) => a.balance === 0 && a.isNative);
+      .sort(
+        (a, b) =>
+          (a.symbol === 'MCGP' ? 0 : 1) - (b.symbol === 'MCGP' ? 0 : 1) ||
+          b.usdValue - a.usdValue ||
+          tokenRankOf(a.symbol) - tokenRankOf(b.symbol),
+      );
+    const nativeZero = list
+      .filter((a) => a.balance === 0 && a.isNative)
+      .sort((a, b) => tokenRankOf(a.symbol) - tokenRankOf(b.symbol) || a.symbol.localeCompare(b.symbol));
     const final = [...withBalance, ...nativeZero];
 
     setAssets(final);

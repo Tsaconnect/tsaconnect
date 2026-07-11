@@ -384,6 +384,7 @@ export interface NonEVMChainConfig {
   explorerUrlTestnet?: string;
   nativeCurrency: { symbol: string; decimals: number };
   iconColor: string;
+  iconUrl?: string; // native-coin logo, same CDN as the EVM chain entries
 }
 
 export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
@@ -391,12 +392,14 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
     chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
     explorerUrl: 'https://tronscan.org',
     nativeCurrency: { symbol: 'TRX', decimals: 6 }, iconColor: '#EF0027',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/1094/small/tron-logo.png',
   },
   btc: {
     chainKey: 'btc', family: 'btc', name: 'Bitcoin', shortName: 'BTC',
     explorerUrl: 'https://mempool.space',
     explorerUrlTestnet: 'https://mempool.space/testnet',
     nativeCurrency: { symbol: 'BTC', decimals: 8 }, iconColor: '#F7931A',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/1/small/bitcoin.png',
   },
 };
 
@@ -415,6 +418,17 @@ export function isNonEVMChain(key: string): key is NonEVMChainKey {
   return (NONEVM_CHAIN_KEYS as string[]).includes(key);
 }
 
+// Display ranking for asset lists — MCGP always first, then majors by market
+// prominence. Anything unranked sorts after, alphabetically via tokenRankOf
+// callers. Shared by wallet home and the receive screen so the order matches.
+const TOKEN_RANK: Record<string, number> = Object.fromEntries(
+  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'POL', 'AVAX'].map((s, i) => [s, i]),
+);
+
+export function tokenRankOf(symbol: string): number {
+  return TOKEN_RANK[symbol] ?? Number.MAX_SAFE_INTEGER;
+}
+
 // A family-agnostic view of a chain for display purposes. Resolves from either
 // the EVM `CHAINS` map or `NONEVM_CHAINS` so callers don't have to know which
 // space a key lives in. Returns undefined for unknown keys.
@@ -426,6 +440,7 @@ export interface ChainDisplay {
   explorerUrl: string;
   nativeCurrency: { symbol: string; decimals: number };
   iconColor: string;
+  iconUrl?: string; // native-coin logo
   chainId?: number; // EVM only; undefined for non-EVM families
 }
 
@@ -435,12 +450,14 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
     return c && {
       key, name: c.name, shortName: c.shortName, family: c.family,
       explorerUrl: c.explorerUrl, nativeCurrency: c.nativeCurrency, iconColor: c.iconColor,
+      iconUrl: c.iconUrl,
     };
   }
   const c = CHAINS[key as ChainKey];
   return c && {
     key, name: c.name, shortName: c.shortName, family: c.family ?? 'evm',
     explorerUrl: c.explorerUrl, nativeCurrency: c.nativeCurrency, iconColor: c.iconColor,
+    iconUrl: c.iconUrl,
     chainId: c.chainId,
   };
 }

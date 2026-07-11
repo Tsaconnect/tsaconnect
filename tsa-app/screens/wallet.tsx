@@ -40,10 +40,11 @@ import {
 } from '../services/wallet';
 import { useTokens, type CustomToken } from '../hooks/useTokens';
 import {
-  CHAINS, NONEVM_CHAIN_KEYS, getChainDisplay,
+  CHAINS, NONEVM_CHAIN_KEYS, getChainDisplay, tokenRankOf,
   type ChainKey, type AnyChainKey,
 } from '../constants/chains';
 import { loadTronWallet } from '../services/chains/tronWallet';
+import { loadBtcWallet } from '../services/chains/btcWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
@@ -823,22 +824,25 @@ const WalletScreen: React.FC = () => {
       try {
         const tron = await loadTronWallet(addr || undefined);
         if (tron) {
-          const tronColor = getChainDisplay('tron')?.iconColor || '#EF0027';
+          const tronChain = getChainDisplay('tron');
           let tId = updated.length + 1;
           for (const row of tron.balances) {
             const bal = parseFloat(row.balance) || 0;
+            const isNative = row.symbol === 'TRX';
             updated.push({
               id: `tron-${tId++}`,
               symbol: row.symbol,
-              name: row.symbol === 'TRX' ? 'Tron' : row.name,
+              name: isNative ? 'Tron' : row.name,
               balance: bal,
               usdValue: parseFloat(row.usdValue) || 0,
               usdPrice: row.usdPrice || 0,
-              iconColor: tronColor,
+              iconColor: tronChain?.iconColor || '#EF0027',
+              // TRX gets the chain logo; TRC-20s (USDT) reuse the registry logo.
+              iconUrl: isNative ? tronChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
               contractAddress: row.contractAddress || undefined,
               decimals: row.decimals,
               details: {
-                type: row.symbol === 'TRX' ? 'Native Token' : 'Token',
+                type: isNative ? 'Native Token' : 'Token',
                 chain: 'Tron',
                 chainKey: 'tron',
               },
@@ -846,6 +850,31 @@ const WalletScreen: React.FC = () => {
           }
         }
       } catch { /* chain unavailable — skip Tron */ }
+
+      // Non-EVM (BTC): same pattern — the BIP-84 address derives from the same
+      // seed, self-registers, and BTC shows as a native token (visible at 0 in
+      // the zero-balance section) so Bitcoin always appears.
+      try {
+        const btc = await loadBtcWallet(addr || undefined);
+        if (btc) {
+          const btcChain = getChainDisplay('btc');
+          let bId = updated.length + 1;
+          for (const row of btc.balances) {
+            updated.push({
+              id: `btc-${bId++}`,
+              symbol: row.symbol,
+              name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
+              balance: parseFloat(row.balance) || 0,
+              usdValue: parseFloat(row.usdValue) || 0,
+              usdPrice: row.usdPrice || 0,
+              iconColor: btcChain?.iconColor || '#F7931A',
+              iconUrl: btcChain?.iconUrl,
+              decimals: row.decimals,
+              details: { type: 'Native Token', chain: 'Bitcoin', chainKey: 'btc' },
+            });
+          }
+        }
+      } catch { /* chain unavailable — skip BTC */ }
 
       // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
       // wallet), so the standard balance read misses it. Show it as its OWN
@@ -959,10 +988,19 @@ const WalletScreen: React.FC = () => {
     [visibleAssets, selectedChain],
   );
 
+  // MCGP always leads when held; other holdings by USD value; zero-balance
+  // natives by the shared ranking (BTC, ETH, … — see tokenRankOf).
   const assetsWithBalance = chainFilteredAssets
     .filter(a => a.balance > 0 || a.details?.type === 'Imported')
-    .sort((a, b) => b.usdValue - a.usdValue);
-  const nativeZeroBalance = chainFilteredAssets.filter(a => a.balance === 0 && a.details?.type === 'Native Token');
+    .sort(
+      (a, b) =>
+        (a.symbol === 'MCGP' ? 0 : 1) - (b.symbol === 'MCGP' ? 0 : 1) ||
+        b.usdValue - a.usdValue ||
+        tokenRankOf(a.symbol) - tokenRankOf(b.symbol),
+    );
+  const nativeZeroBalance = chainFilteredAssets
+    .filter(a => a.balance === 0 && a.details?.type === 'Native Token')
+    .sort((a, b) => tokenRankOf(a.symbol) - tokenRankOf(b.symbol) || a.symbol.localeCompare(b.symbol));
 
   const ASSET_PREVIEW = 5;
   const previewAssets = assetsWithBalance.slice(0, ASSET_PREVIEW);
