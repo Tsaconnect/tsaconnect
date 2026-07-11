@@ -585,6 +585,7 @@ const WalletHome = () => {
               // so MCGP leads and majors follow.
               .sort(
                 (a, b) =>
+                  (a.symbol === 'MCGP' ? 0 : 1) - (b.symbol === 'MCGP' ? 0 : 1) ||
                   parseFloat(b.usdValue || '0') - parseFloat(a.usdValue || '0') ||
                   parseFloat(b.balance || '0') - parseFloat(a.balance || '0') ||
                   tokenRankOf(a.symbol) - tokenRankOf(b.symbol) ||
