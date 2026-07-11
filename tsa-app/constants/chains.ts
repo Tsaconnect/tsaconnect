@@ -418,6 +418,17 @@ export function isNonEVMChain(key: string): key is NonEVMChainKey {
   return (NONEVM_CHAIN_KEYS as string[]).includes(key);
 }
 
+// Display ranking for asset lists — MCGP always first, then majors by market
+// prominence. Anything unranked sorts after, alphabetically via tokenRankOf
+// callers. Shared by wallet home and the receive screen so the order matches.
+const TOKEN_RANK: Record<string, number> = Object.fromEntries(
+  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'POL', 'AVAX'].map((s, i) => [s, i]),
+);
+
+export function tokenRankOf(symbol: string): number {
+  return TOKEN_RANK[symbol] ?? Number.MAX_SAFE_INTEGER;
+}
+
 // A family-agnostic view of a chain for display purposes. Resolves from either
 // the EVM `CHAINS` map or `NONEVM_CHAINS` so callers don't have to know which
 // space a key lives in. Returns undefined for unknown keys.

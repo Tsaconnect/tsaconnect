@@ -16,7 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { getActiveWallet } from '@/services/wallet';
-import { NONEVM_CHAINS, isNonEVMChain, type AnyChainKey } from '@/constants/chains';
+import { NONEVM_CHAINS, isNonEVMChain, tokenRankOf, type AnyChainKey } from '@/constants/chains';
 import { getTronAddress } from '@/services/chains/tronWallet';
 import { getBtcAddress } from '@/services/chains/btcWallet';
 import { useTokens } from '@/hooks/useTokens';
@@ -33,14 +33,10 @@ import {
 
 const POPULAR = ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX'];
 
-// Display ranking within each section — MCGP always first, then majors by
-// market prominence; anything unranked sorts after, alphabetically.
-const TOKEN_RANK: Record<string, number> = Object.fromEntries(
-  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'POL', 'AVAX'].map((s, i) => [s, i]),
-);
-const rankOf = (symbol: string): number => TOKEN_RANK[symbol] ?? Number.MAX_SAFE_INTEGER;
+// Section order: shared ranking (MCGP first, then majors), unranked
+// alphabetically after.
 const byRank = (a: ReceiveItem, b: ReceiveItem): number =>
-  rankOf(a.symbol) - rankOf(b.symbol) || a.symbol.localeCompare(b.symbol);
+  tokenRankOf(a.symbol) - tokenRankOf(b.symbol) || a.symbol.localeCompare(b.symbol);
 
 interface ReceiveItem {
   id: string;
