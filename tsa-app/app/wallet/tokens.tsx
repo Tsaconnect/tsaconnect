@@ -17,7 +17,7 @@ import { View, FlatList, Image, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
-import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
+import { CHAINS, getChainDisplay, tokenRankOf, type ChainKey, type AnyChainKey } from '@/constants/chains';
 import { loadTronWallet } from '@/services/chains/tronWallet';
 import { loadBtcWallet } from '@/services/chains/btcWallet';
 import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
@@ -295,11 +295,19 @@ export default function AllTokensScreen() {
     } catch { /* MCGP swap unavailable — skip */ }
 
     // Visible = anything with balance, plus native zero rows, plus every
-    // imported custom token (user explicitly added it).
+    // imported custom token (user explicitly added it). MCGP always leads
+    // when held; zero rows follow the shared ranking.
     const withBalance = list
       .filter((a) => a.balance > 0 || a.imported)
-      .sort((a, b) => b.usdValue - a.usdValue);
-    const nativeZero = list.filter((a) => a.balance === 0 && a.isNative);
+      .sort(
+        (a, b) =>
+          (a.symbol === 'MCGP' ? 0 : 1) - (b.symbol === 'MCGP' ? 0 : 1) ||
+          b.usdValue - a.usdValue ||
+          tokenRankOf(a.symbol) - tokenRankOf(b.symbol),
+      );
+    const nativeZero = list
+      .filter((a) => a.balance === 0 && a.isNative)
+      .sort((a, b) => tokenRankOf(a.symbol) - tokenRankOf(b.symbol) || a.symbol.localeCompare(b.symbol));
     const final = [...withBalance, ...nativeZero];
 
     setAssets(final);
