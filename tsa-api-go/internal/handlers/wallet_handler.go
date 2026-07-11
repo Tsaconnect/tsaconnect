@@ -1236,3 +1236,46 @@ func (h *Handlers) GetNonEVMHistory(c *gin.Context) {
 	}
 	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{"items": items, "next": next})
 }
+
+// mintResolver is the optional capability a ChainClient exposes to resolve a
+// token contract/mint into its on-chain metadata (currently Solana). Chains
+// without it (Tron, BTC) simply don't implement it and the route 400s.
+type mintResolver interface {
+	ResolveMint(ctx context.Context, mint string) (decimals uint8, ok bool, err error)
+}
+
+// GetNonEVMTokenInfo handles GET /api/wallet/nonevm/token-info.
+// Resolves a user-supplied token mint/contract into its decimals so the app can
+// import an arbitrary token (e.g. any SPL token on Solana).
+// Query params: ?chain=solana&mint=<mint address>
+func (h *Handlers) GetNonEVMTokenInfo(c *gin.Context) {
+	chainKey := c.Query("chain")
+	network := resolveNetwork(c)
+	mint := c.Query("mint")
+	if h.ChainRegistry == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	client, ok := h.ChainRegistry.ForKey(network, chainKey)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	resolver, ok := client.(mintResolver)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusBadRequest, "token import not supported on this chain")
+		return
+	}
+	decimals, found, err := resolver.ResolveMint(c.Request.Context(), mint)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !found {
+		utils.ErrorResponse(c, http.StatusNotFound, "no token found at that address")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "ok", gin.H{
+		"chain": chainKey, "mint": mint, "decimals": decimals, "tokenAddress": mint,
+	})
+}
