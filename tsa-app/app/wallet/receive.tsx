@@ -27,6 +27,7 @@ import {
 } from '../../constants/chains';
 import { getTronAddress } from '../../services/chains/tronWallet';
 import { getBtcAddress } from '../../services/chains/btcWallet';
+import { getSolanaAddress } from '../../services/chains/solanaWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { useTheme } from '@/theme';
 import {
@@ -50,28 +51,33 @@ const ReceiveToken = () => {
   const [evmAddress, setEvmAddress] = useState('');
   const [tronAddress, setTronAddress] = useState('');
   const [btcAddress, setBtcAddress] = useState('');
+  const [solanaAddress, setSolanaAddress] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<AnyChainKey>('sonic');
 
   useEffect(() => {
     const loadAddresses = async () => {
-      const [evm, tron, btc] = await Promise.all([
+      const [evm, tron, btc, sol] = await Promise.all([
         getActiveWallet(),
         // Same mnemonic, standard Tron path — reproduces the TronLink address.
         getTronAddress().catch(() => null),
         // Same mnemonic, BIP-84 path — reproduces the Sparrow/Electrum address.
         getBtcAddress().catch(() => null),
+        // Same mnemonic, Phantom path — reproduces the Phantom address.
+        getSolanaAddress().catch(() => null),
       ]);
       if (evm) setEvmAddress(evm);
       if (tron) setTronAddress(tron);
       if (btc) setBtcAddress(btc);
+      if (sol) setSolanaAddress(sol);
     };
     loadAddresses();
   }, []);
 
   // The address to show/QR/copy depends on the selected chain's family: EVM
-  // chains share one 0x address; Tron and BTC each derive their own.
-  const nonEvmAddress = selectedChain === 'btc' ? btcAddress : tronAddress;
+  // chains share one 0x address; Tron, BTC, and Solana each derive their own.
+  const nonEvmAddress =
+    selectedChain === 'btc' ? btcAddress : selectedChain === 'solana' ? solanaAddress : tronAddress;
   const walletAddress = isNonEVMChain(selectedChain) ? nonEvmAddress : evmAddress;
   const selectedChainName = getChainDisplay(selectedChain)?.name || 'Unknown';
 

@@ -24,9 +24,22 @@ import { router, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 
-import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
+import {
+  CHAINS,
+  CHAIN_KEYS,
+  getChainDisplay,
+  isNonEVMChain,
+  type ChainKey,
+  type AnyChainKey,
+} from '../../constants/chains';
 import { readTokenContract, isValidAddress } from '../../services/wallet';
+import { isValidSolanaAddress } from '../../services/chains/derivation';
+import { getNonEVMTokenInfo } from '../../services/chains/nonevmApi';
 import { useTokens, type CustomToken } from '../../hooks/useTokens';
+
+// Chains the import screen supports: all EVM chains plus Solana (SPL mints).
+// Other non-EVM chains (Tron TRC-20, BTC) aren't user-importable yet.
+const IMPORT_CHAIN_KEYS: AnyChainKey[] = [...CHAIN_KEYS, 'solana'];
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -56,8 +69,8 @@ function hashColor(str: string): string {
 
 const ChainPickerSheet: React.FC<{
   visible: boolean;
-  selected: ChainKey;
-  onSelect: (key: ChainKey) => void;
+  selected: AnyChainKey;
+  onSelect: (key: AnyChainKey) => void;
   onClose: () => void;
 }> = ({ visible, selected, onSelect, onClose }) => {
   const { colors, spacing, radius } = useTheme();
@@ -68,8 +81,9 @@ const ChainPickerSheet: React.FC<{
         contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }}
         keyboardShouldPersistTaps="handled"
       >
-        {CHAIN_KEYS.map((key) => {
-          const chain = CHAINS[key];
+        {IMPORT_CHAIN_KEYS.map((key) => {
+          const chain = getChainDisplay(key);
+          if (!chain) return null;
           const active = selected === key;
           return (
             <PressableScale
@@ -119,7 +133,7 @@ const ImportTokenScreen: React.FC = () => {
   const { importToken } = useTokens();
 
   const [tab, setTab] = useState<TabKey>('token');
-  const [chainKey, setChainKey] = useState<ChainKey>('ethereum');
+  const [chainKey, setChainKey] = useState<AnyChainKey>('ethereum');
   const [address, setAddress] = useState('');
   const [name, setName] = useState('');
   const [symbol, setSymbol] = useState('');
@@ -129,15 +143,30 @@ const ImportTokenScreen: React.FC = () => {
   const [showChainPicker, setShowChainPicker] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const selectedChain = CHAINS[chainKey];
+  const selectedChain = getChainDisplay(chainKey);
+  const selectedChainName = selectedChain?.name ?? 'Unknown';
+  const isSolanaImport = chainKey === 'solana';
 
-  const isAddressValid = useMemo(() => isValidAddress(address.trim()), [address]);
+  // Family-aware address validation: EVM 0x address vs Solana base58 mint.
+  const validAddress = useCallback(
+    (addr: string) => (isSolanaImport ? isValidSolanaAddress(addr) : isValidAddress(addr)),
+    [isSolanaImport],
+  );
 
-  const lookup = useCallback(async (addr: string, chain: ChainKey) => {
+  const isAddressValid = useMemo(() => validAddress(address.trim()), [address, validAddress]);
+
+  const lookup = useCallback(async (addr: string, chain: AnyChainKey) => {
     setFetching(true);
     setError('');
     try {
-      const result = await readTokenContract(addr, chain);
+      if (isNonEVMChain(chain)) {
+        // Solana: the base SPL mint account carries decimals but no name/symbol,
+        // so we auto-fill decimals and let the user name the token themselves.
+        const info = await getNonEVMTokenInfo(chain, addr);
+        setDecimals(String(info.decimals));
+        return;
+      }
+      const result = await readTokenContract(addr, chain as ChainKey);
       if (!result) {
         setError('Could not read this contract. Make sure it is a valid ERC-20 on the selected network.');
         return;
@@ -145,8 +174,8 @@ const ImportTokenScreen: React.FC = () => {
       setName(result.name);
       setSymbol(result.symbol);
       setDecimals(String(result.decimals));
-    } catch {
-      setError('Failed to fetch token data.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to fetch token data.');
     } finally {
       setFetching(false);
     }
@@ -156,7 +185,7 @@ const ImportTokenScreen: React.FC = () => {
     const trimmed = text.trim();
     setAddress(trimmed);
     setError('');
-    if (isValidAddress(trimmed)) {
+    if (validAddress(trimmed)) {
       void lookup(trimmed, chainKey);
     } else {
       setName('');
@@ -165,10 +194,13 @@ const ImportTokenScreen: React.FC = () => {
     }
   };
 
-  const handleChainChange = (next: ChainKey) => {
+  const handleChainChange = (next: AnyChainKey) => {
     setChainKey(next);
-    if (isValidAddress(address.trim())) {
-      void lookup(address.trim(), next);
+    // Re-validate the current address under the new chain's family before lookup.
+    const addr = address.trim();
+    const valid = next === 'solana' ? isValidSolanaAddress(addr) : isValidAddress(addr);
+    if (valid) {
+      void lookup(addr, next);
     }
   };
 
@@ -180,8 +212,8 @@ const ImportTokenScreen: React.FC = () => {
   const handleSave = async () => {
     setError('');
     const addr = address.trim();
-    if (!isValidAddress(addr)) {
-      setError('Enter a valid contract address.');
+    if (!validAddress(addr)) {
+      setError(isSolanaImport ? 'Enter a valid SPL mint address.' : 'Enter a valid contract address.');
       return;
     }
     if (!name.trim() || !symbol.trim() || !decimals.trim()) {
@@ -200,14 +232,16 @@ const ImportTokenScreen: React.FC = () => {
         name: name.trim(),
         decimals: dec,
         iconColor: hashColor(symbol.trim()),
-        chains: [chainKey],
+        // EVM tokens carry their chain in `chains`; non-EVM tokens are keyed
+        // solely by chainKey (their `chains` list stays empty).
+        chains: isNonEVMChain(chainKey) ? [] : [chainKey as ChainKey],
         contractAddress: addr,
         chainKey,
         custom: true,
         importedAt: new Date().toISOString(),
       };
       await importToken(token);
-      Alert.alert('Token imported', `${token.symbol} on ${selectedChain.name} has been added.`);
+      Alert.alert('Token imported', `${token.symbol} on ${selectedChainName} has been added.`);
       router.back();
     } catch (err: any) {
       setError(err?.message || 'Failed to import token.');
@@ -279,10 +313,10 @@ const ImportTokenScreen: React.FC = () => {
 
               <SelectRow
                 label="Network"
-                value={selectedChain.name}
+                value={selectedChainName}
                 onPress={() => setShowChainPicker(true)}
                 leftElement={
-                  selectedChain.iconUrl ? (
+                  selectedChain?.iconUrl ? (
                     <Image
                       source={{ uri: selectedChain.iconUrl }}
                       style={{ width: 22, height: 22, borderRadius: 11 }}
@@ -294,8 +328,8 @@ const ImportTokenScreen: React.FC = () => {
               />
 
               <Input
-                label="Address"
-                placeholder="0x..."
+                label={isSolanaImport ? 'Mint address' : 'Address'}
+                placeholder={isSolanaImport ? 'SPL mint address' : '0x...'}
                 value={address}
                 onChangeText={handleAddressChange}
                 autoCapitalize="none"
@@ -312,7 +346,7 @@ const ImportTokenScreen: React.FC = () => {
               />
 
               {fetching && (
-                <Spinner inline label={`Reading contract on ${selectedChain.name}…`} />
+                <Spinner inline label={`Reading ${isSolanaImport ? 'mint' : 'contract'} on ${selectedChainName}…`} />
               )}
 
               <Input

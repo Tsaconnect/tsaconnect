@@ -387,7 +387,7 @@ export interface NonEVMChainConfig {
   iconUrl?: string; // native-coin logo, same CDN as the EVM chain entries
 }
 
-export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
+export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana', NonEVMChainConfig> = {
   tron: {
     chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
     explorerUrl: 'https://tronscan.org',
@@ -401,6 +401,14 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
     nativeCurrency: { symbol: 'BTC', decimals: 8 }, iconColor: '#F7931A',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/1/small/bitcoin.png',
   },
+  solana: {
+    chainKey: 'solana', family: 'solana', name: 'Solana', shortName: 'SOL',
+    explorerUrl: 'https://solscan.io',
+    // Solana explorers take an explicit ?cluster=devnet for the testnet toggle.
+    explorerUrlTestnet: 'https://solscan.io/?cluster=devnet',
+    nativeCurrency: { symbol: 'SOL', decimals: 9 }, iconColor: '#14F195',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/4128/small/solana.png',
+  },
 };
 
 // Non-EVM chains live in their own key space (they have no numeric chainId and
@@ -410,7 +418,7 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
 export type NonEVMChainKey = keyof typeof NONEVM_CHAINS;
 export type AnyChainKey = ChainKey | NonEVMChainKey;
 
-export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc'];
+export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc', 'solana'];
 
 export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana';
 

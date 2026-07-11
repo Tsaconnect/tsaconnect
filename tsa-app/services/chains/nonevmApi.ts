@@ -104,6 +104,30 @@ export async function getNonEVMHistory(
   return body.data?.items ?? [];
 }
 
+export interface NonEVMTokenInfo {
+  chain: string;
+  mint: string;
+  decimals: number;
+  tokenAddress: string;
+}
+
+/**
+ * Resolve a user-supplied token mint/contract into its on-chain metadata
+ * (decimals), so the app can import an arbitrary token (e.g. any SPL token on
+ * Solana). Throws with the backend's message when the address isn't a valid
+ * token on that chain.
+ */
+export async function getNonEVMTokenInfo(chainKey: string, mint: string): Promise<NonEVMTokenInfo> {
+  const headers = await getAuthHeaders();
+  const qp = new URLSearchParams({ chain: chainKey, mint, network: getNetwork() });
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/token-info?${qp.toString()}`, { headers });
+  const body = await readJson<NonEVMTokenInfo>(res);
+  if (!res.ok || !body.data) {
+    throw new Error(body.message || `token lookup failed (${res.status})`);
+  }
+  return body.data;
+}
+
 /** Poll the confirmation status of a broadcast non-EVM transaction. */
 export async function getNonEVMTxStatus(
   chainKey: string,

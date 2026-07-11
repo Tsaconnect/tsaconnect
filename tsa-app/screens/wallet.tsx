@@ -40,11 +40,12 @@ import {
 } from '../services/wallet';
 import { useTokens, type CustomToken } from '../hooks/useTokens';
 import {
-  CHAINS, NONEVM_CHAIN_KEYS, getChainDisplay, tokenRankOf,
+  CHAINS, NONEVM_CHAIN_KEYS, getChainDisplay, isNonEVMChain, tokenRankOf,
   type ChainKey, type AnyChainKey,
 } from '../constants/chains';
 import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
+import { loadSolanaWallet } from '../services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
@@ -194,6 +195,10 @@ async function mergeCustomTokens(
     const balances = address
       ? await Promise.all(
           customTokens.map(async (t) => {
+            // Non-EVM custom tokens (e.g. imported SPL mints) have no ERC-20
+            // balanceOf; their balance is already reflected by the nonevm
+            // loaders' auto-discovery and dedups against `existing` below.
+            if (isNonEVMChain(t.chainKey)) return null;
             try {
               const raw = await readErc20BalanceOf(t.contractAddress, address, t.chainKey);
               return Number(ethers.formatUnits(raw, t.decimals));
@@ -214,7 +219,8 @@ async function mergeCustomTokens(
     customTokens.forEach((token, i) => {
       const contractKey = `${token.chainKey}::${token.contractAddress.toLowerCase()}`;
       if (seenContract.has(contractKey)) return;
-      const chain = CHAINS[token.chainKey];
+      // getChainDisplay resolves both EVM and non-EVM chains (CHAINS is EVM-only).
+      const chain = getChainDisplay(token.chainKey);
       if (!chain) return;
 
       const balance = balances[i] ?? 0;
@@ -875,6 +881,38 @@ const WalletScreen: React.FC = () => {
           }
         }
       } catch { /* chain unavailable — skip BTC */ }
+
+      // Non-EVM (Solana): the Phantom-path address derives from the same seed,
+      // self-registers, and SOL shows as a native token (visible at 0 in the
+      // zero-balance section) so Solana always appears; held SPL tokens (auto-
+      // discovered) ride alongside.
+      try {
+        const sol = await loadSolanaWallet(addr || undefined);
+        if (sol) {
+          const solChain = getChainDisplay('solana');
+          let sId = updated.length + 1;
+          for (const row of sol.balances) {
+            const isNative = row.symbol === 'SOL';
+            updated.push({
+              id: `solana-${sId++}`,
+              symbol: row.symbol,
+              name: isNative ? 'Solana' : row.name,
+              balance: parseFloat(row.balance) || 0,
+              usdValue: parseFloat(row.usdValue) || 0,
+              usdPrice: row.usdPrice || 0,
+              iconColor: solChain?.iconColor || '#14F195',
+              iconUrl: isNative ? solChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
+              contractAddress: row.contractAddress || undefined,
+              decimals: row.decimals,
+              details: {
+                type: isNative ? 'Native Token' : 'Token',
+                chain: 'Solana',
+                chainKey: 'solana',
+              },
+            });
+          }
+        }
+      } catch { /* chain unavailable — skip Solana */ }
 
       // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
       // wallet), so the standard balance read misses it. Show it as its OWN
