@@ -143,6 +143,30 @@ export function deriveSolanaAddress(mnemonic: string): string {
   return b58EncodeNoCheck(pub);
 }
 
+// The Solana signing key — the 32-byte ed25519 seed at the Phantom path
+// (m/44'/501'), NOT the EVM/Tron key. Unlike secp256k1 chains the "private
+// key" here is the SLIP-0010 seed; @noble derives the public key + signs from
+// it. The backend recovers no key from the signature — it verifies the 64-byte
+// ed25519 signature against the fee-payer pubkey it embedded in the message, so
+// signing with any other seed fails verification before broadcast. Returns a
+// 0x-less 32-byte hex key.
+export function deriveSolanaPrivateKey(mnemonic: string): string {
+  const seed = mnemonicToSeedSync(mnemonic.trim());
+  return bytesToHex(ed25519Slip10(seed, DERIVATION_PATHS.solana));
+}
+
+// Validate a Solana address: base58 that decodes to exactly 32 bytes. Solana
+// accepts off-curve system addresses (e.g. PDAs), so curve membership is not
+// checked — matching what the backend validator allows.
+export function isValidSolanaAddress(addr: string): boolean {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) return false;
+  try {
+    return base58.decode(addr).length === 32;
+  } catch {
+    return false;
+  }
+}
+
 // --- SLIP-0010 ed25519 (all-hardened) ---
 function ed25519Slip10(seed: Uint8Array, path: string): Uint8Array {
   let I = hmac(sha512, new TextEncoder().encode('ed25519 seed'), seed);
