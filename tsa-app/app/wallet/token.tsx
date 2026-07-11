@@ -19,6 +19,8 @@ import { useTokens } from '../../hooks/useTokens';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { getWalletBalances, normalizeWalletBalances, getTokenPriceHistory } from '../../services/walletApi';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
+import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
+import { getSolanaAddress, getSolanaBalances } from '../../services/chains/solanaWallet';
 import { useTheme } from '@/theme';
 import {
   AmountText,
@@ -212,13 +214,20 @@ const TokenDetailScreen: React.FC = () => {
       return;
     }
     try {
-      // Non-EVM (Tron): derive the family address and read balances from the
+      // Non-EVM: derive the family-specific address and read balances from the
       // /wallet/nonevm/* path rather than the EVM chainId endpoint.
       const found = isNonEVMChain(activeChainKey)
         ? await (async () => {
-            const tronAddr = await getTronAddress();
-            if (!tronAddr) return undefined;
-            const rows = await getTronBalances(tronAddr);
+            const fam = getChainDisplay(activeChainKey)?.family;
+            const addr =
+              fam === 'btc' ? await getBtcAddress()
+              : fam === 'solana' ? await getSolanaAddress()
+              : await getTronAddress();
+            if (!addr) return undefined;
+            const rows =
+              fam === 'btc' ? await getBtcBalances(addr)
+              : fam === 'solana' ? await getSolanaBalances(addr)
+              : await getTronBalances(addr);
             return rows.find((entry) => entry.symbol === symbol);
           })()
         : await (async () => {

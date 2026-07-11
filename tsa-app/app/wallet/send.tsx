@@ -24,11 +24,13 @@ import {
 } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { isValidAddress, signTransaction, getActiveWallet } from '../../services/wallet';
-import { isValidTronAddress, isValidBtcAddress } from '../../services/chains/derivation';
+import { isValidTronAddress, isValidBtcAddress, isValidSolanaAddress } from '../../services/chains/derivation';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { prepareTron, broadcastTron, type SendTronParams, type TronPrepared } from '../../services/chains/tronSend';
 import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
 import { prepareBtc, broadcastBtc, type SendBtcParams, type BtcPrepared } from '../../services/chains/btcSend';
+import { getSolanaAddress, getSolanaBalances } from '../../services/chains/solanaWallet';
+import { prepareSolana, broadcastSolana, type SendSolanaParams, type SolanaPrepared } from '../../services/chains/solanaSend';
 import { getNetwork } from '../../hooks/useNetwork';
 import {
   getWalletBalances,
@@ -136,12 +138,14 @@ const SendToken = () => {
   const [nonEvmTx, setNonEvmTx] = useState<
     | { family: 'tron'; prepared: TronPrepared['prepared']; params: SendTronParams }
     | { family: 'btc'; prepared: BtcPrepared['prepared']; params: SendBtcParams }
+    | { family: 'solana'; prepared: SolanaPrepared['prepared']; params: SendSolanaParams }
     | null
   >(null);
 
   const nonEvmFamily = isNonEVMChain(selectedChain) ? NONEVM_CHAINS[selectedChain].family : null;
   const isTron = nonEvmFamily === 'tron';
   const isBtc = nonEvmFamily === 'btc';
+  const isSolana = nonEvmFamily === 'solana';
 
   const getSupportedChainsForToken = useCallback((symbol: string): AnyChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
@@ -224,9 +228,9 @@ const SendToken = () => {
         }
       }
 
-      // Non-EVM (Tron/BTC): derive each address and append its balances so
-      // TRX/USDT/BTC appear in the token picker. Dormant-safe — each chain
-      // yields nothing if unset.
+      // Non-EVM (Tron/BTC/Solana): derive each address and append its balances so
+      // TRX/USDT/BTC/SOL + SPL tokens appear in the token picker. Dormant-safe —
+      // each chain yields nothing if unset.
       try {
         const tronAddr = await getTronAddress();
         if (tronAddr) allBalances.push(...(await getTronBalances(tronAddr)));
@@ -234,6 +238,10 @@ const SendToken = () => {
       try {
         const btcAddr = await getBtcAddress();
         if (btcAddr) allBalances.push(...(await getBtcBalances(btcAddr)));
+      } catch { /* chain unavailable — skip */ }
+      try {
+        const solAddr = await getSolanaAddress();
+        if (solAddr) allBalances.push(...(await getSolanaBalances(solAddr)));
       } catch { /* chain unavailable — skip */ }
 
       setBalances(allBalances);
@@ -269,6 +277,7 @@ const SendToken = () => {
   const validAddress = (addr: string): boolean => {
     if (isTron) return isValidTronAddress(addr);
     if (isBtc) return isValidBtcAddress(addr, getNetwork());
+    if (isSolana) return isValidSolanaAddress(addr);
     return isValidAddress(addr);
   };
 
@@ -321,6 +330,25 @@ const SendToken = () => {
     };
   };
 
+  // Build the Solana send params for the selected token from the loaded balance
+  // row (SOL = 9 decimals; SPL uses the mint's decimals + mint address). Null
+  // when we can't derive the address.
+  const buildSolanaParams = async (recipient: string): Promise<SendSolanaParams | null> => {
+    const walletId = await getActiveWallet();
+    const from = await getSolanaAddress(walletId || undefined);
+    if (!from || !walletId) return null;
+    const entry = balances.find((b) => b.symbol === selectedToken && b.chainKey === selectedChain);
+    const decimals = entry?.decimals ?? 9;
+    return {
+      from,
+      to: recipient,
+      amount: parseUnits(tokenAmount, decimals).toString(),
+      symbol: selectedToken,
+      tokenAddr: entry?.contractAddress || '', // SPL mint; empty for native SOL
+      walletAddress: walletId, // used to look up the mnemonic for ed25519 signing
+    };
+  };
+
   const handleReview = async () => {
     const e = validate(); if (e) { setError(e); return; }
     setError('');
@@ -346,6 +374,18 @@ const SendToken = () => {
         const { prepared, fee } = await prepareBtc(params);
         setNonEvmTx({ family: 'btc', prepared, params });
         setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 8));
+        setScreen('confirm');
+        return;
+      }
+      if (isSolana) {
+        // Solana: prepare runs the SOL fee preflight (base fee + ATA rent when
+        // the recipient has no token account). A 402 (no SOL for gas) throws
+        // with a friendly note we surface on the form.
+        const params = await buildSolanaParams(toAddress.trim());
+        if (!params) throw new Error('Could not derive your Solana wallet.');
+        const { prepared, fee } = await prepareSolana(params);
+        setNonEvmTx({ family: 'solana', prepared, params });
+        setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 9));
         setScreen('confirm');
         return;
       }
@@ -411,6 +451,18 @@ const SendToken = () => {
           ctx = { family: 'btc', prepared: (await prepareBtc(params)).prepared, params };
         }
         const { txHash: hash } = await broadcastBtc(ctx.prepared, ctx.params);
+        setTxHash(hash);
+        setScreen('success');
+        return;
+      }
+      if (isSolana) {
+        let ctx = nonEvmTx?.family === 'solana' ? nonEvmTx : null;
+        if (!ctx) {
+          const params = await buildSolanaParams(recipient);
+          if (!params) throw new Error('Could not derive your Solana wallet.');
+          ctx = { family: 'solana', prepared: (await prepareSolana(params)).prepared, params };
+        }
+        const { txHash: hash } = await broadcastSolana(ctx.prepared, ctx.params);
         setTxHash(hash);
         setScreen('success');
         return;
@@ -733,7 +785,7 @@ const SendToken = () => {
               RECIPIENT
             </Text>
             <Input
-              placeholder={isTron ? 'T... wallet address' : isBtc ? 'bc1... wallet address' : '0x... wallet address'}
+              placeholder={isTron ? 'T... wallet address' : isBtc ? 'bc1... wallet address' : isSolana ? 'Solana wallet address' : '0x... wallet address'}
               value={toAddress}
               onChangeText={(t) => { setToAddress(t); setError(''); }}
               autoCapitalize="none"
