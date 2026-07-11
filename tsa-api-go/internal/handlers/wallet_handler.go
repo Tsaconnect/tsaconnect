@@ -874,6 +874,9 @@ func seedDefaultTokens() []models.SupportedToken {
 		{"USDT", "Tether", 6, "#26A17B", []string{"sonic", "bsc"}},
 		{"USDC", "USD Coin", 6, "#2775CA", []string{"sonic", "bsc"}},
 		{"MCGP", "MCG Protocol", 18, "#FFD700", []string{"sonic"}},
+		// Robinhood Chain's canonical stablecoin (Paxos Global Dollar). Decimals
+		// are read on-chain at balance time; 6 here is the fallback.
+		{"USDG", "Global Dollar", 6, "#00C805", []string{"robinhood"}},
 	}
 
 	var created []models.SupportedToken

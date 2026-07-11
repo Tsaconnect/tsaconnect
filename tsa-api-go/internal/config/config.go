@@ -608,6 +608,7 @@ func Load() *Config {
 		"optimism":  {Name: "Optimism", RPCURL: getEnv("OPTIMISM_MAINNET_RPC_URL", "https://mainnet.optimism.io"), ChainID: getEnvInt64("OPTIMISM_MAINNET_CHAIN_ID", 10), NativeCurrency: "ETH"},
 		"avalanche": {Name: "Avalanche C-Chain", RPCURL: getEnv("AVALANCHE_MAINNET_RPC_URL", "https://api.avax.network/ext/bc/C/rpc"), ChainID: getEnvInt64("AVALANCHE_MAINNET_CHAIN_ID", 43114), NativeCurrency: "AVAX"},
 		"linea":     {Name: "Linea", RPCURL: getEnv("LINEA_MAINNET_RPC_URL", "https://rpc.linea.build"), ChainID: getEnvInt64("LINEA_MAINNET_CHAIN_ID", 59144), NativeCurrency: "ETH"},
+		"robinhood": {Name: "Robinhood Chain", RPCURL: getEnv("ROBINHOOD_MAINNET_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"), ChainID: getEnvInt64("ROBINHOOD_MAINNET_CHAIN_ID", 4663), NativeCurrency: "ETH"},
 	}
 	mainnetTokens := map[string]string{}
 	if cfg.MCGPTokenAddress != "" {
@@ -635,6 +636,9 @@ func Load() *Config {
 		"avalanche:USDC": getEnv("AVALANCHE_MAINNET_USDC_ADDRESS", "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"),
 		"linea:USDT":     getEnv("LINEA_MAINNET_USDT_ADDRESS", "0xA219439258ca9da29E9Cc4cE5596924745e12B93"),
 		"linea:USDC":     getEnv("LINEA_MAINNET_USDC_ADDRESS", "0x176211869cA2b568f2A7D4EE941E073a821EE1ff"),
+		// Robinhood Chain's canonical stablecoin is USDG (Paxos Global Dollar);
+		// bridged USDC/USDT arrive as USDG, so USDG is the one to wire here.
+		"robinhood:USDG": getEnv("ROBINHOOD_MAINNET_USDG_ADDRESS", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
 	} {
 		if def != "" {
 			mainnetTokens[tokenKey] = def
@@ -656,6 +660,7 @@ func Load() *Config {
 		"optimism":  {Name: "OP Sepolia", RPCURL: getEnv("OPTIMISM_TESTNET_RPC_URL", "https://sepolia.optimism.io"), ChainID: getEnvInt64("OPTIMISM_TESTNET_CHAIN_ID", 11155420), NativeCurrency: "ETH"},
 		"avalanche": {Name: "Avalanche Fuji", RPCURL: getEnv("AVALANCHE_TESTNET_RPC_URL", "https://api.avax-test.network/ext/bc/C/rpc"), ChainID: getEnvInt64("AVALANCHE_TESTNET_CHAIN_ID", 43113), NativeCurrency: "AVAX"},
 		"linea":     {Name: "Linea Sepolia", RPCURL: getEnv("LINEA_TESTNET_RPC_URL", "https://rpc.sepolia.linea.build"), ChainID: getEnvInt64("LINEA_TESTNET_CHAIN_ID", 59141), NativeCurrency: "ETH"},
+		"robinhood": {Name: "Robinhood Testnet", RPCURL: getEnv("ROBINHOOD_TESTNET_RPC_URL", "https://rpc.testnet.chain.robinhood.com"), ChainID: getEnvInt64("ROBINHOOD_TESTNET_CHAIN_ID", 46630), NativeCurrency: "ETH"},
 	}
 	testnetTokens := map[string]string{}
 	// Sonic testnet token defaults come from the testnet preset (the same
@@ -697,6 +702,9 @@ func Load() *Config {
 		"avalanche:USDC": "AVALANCHE_TESTNET_USDC_ADDRESS",
 		"linea:USDT":     "LINEA_TESTNET_USDT_ADDRESS",
 		"linea:USDC":     "LINEA_TESTNET_USDC_ADDRESS",
+		// No verified Robinhood testnet USDG deployment is published; env-gated
+		// so it can be promoted once a faucet/bridge address is known.
+		"robinhood:USDG": "ROBINHOOD_TESTNET_USDG_ADDRESS",
 	} {
 		if addr := os.Getenv(env); addr != "" {
 			testnetTokens[tokenKey] = addr
