@@ -25,7 +25,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 
 import {
-  CHAINS,
   CHAIN_KEYS,
   getChainDisplay,
   isNonEVMChain,
@@ -36,10 +35,6 @@ import { readTokenContract, isValidAddress } from '../../services/wallet';
 import { isValidSolanaAddress } from '../../services/chains/derivation';
 import { getNonEVMTokenInfo } from '../../services/chains/nonevmApi';
 import { useTokens, type CustomToken } from '../../hooks/useTokens';
-
-// Chains the import screen supports: all EVM chains plus Solana (SPL mints).
-// Other non-EVM chains (Tron TRC-20, BTC) aren't user-importable yet.
-const IMPORT_CHAIN_KEYS: AnyChainKey[] = [...CHAIN_KEYS, 'solana'];
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -58,6 +53,10 @@ import {
 } from '@/components/ui';
 
 type TabKey = 'token' | 'network';
+
+// Chains the import screen supports: all EVM chains plus Solana (SPL mints).
+// Other non-EVM chains (Tron TRC-20, BTC) aren't user-importable yet.
+const IMPORT_CHAIN_KEYS: AnyChainKey[] = [...CHAIN_KEYS, 'solana'];
 
 function hashColor(str: string): string {
   let hash = 0;
