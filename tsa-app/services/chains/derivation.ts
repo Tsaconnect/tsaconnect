@@ -5,7 +5,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { ed25519 } from '@noble/curves/ed25519';
-import { base58check, bech32, base58 } from '@scure/base';
+import { base58check, bech32, bech32m, base58 } from '@scure/base';
 import { hmac } from '@noble/hashes/hmac';
 import { sha512 } from '@noble/hashes/sha512';
 import { bytesToHex } from '@noble/hashes/utils';
@@ -13,8 +13,11 @@ import { bytesToHex } from '@noble/hashes/utils';
 export const DERIVATION_PATHS = {
   tron: "m/44'/195'/0'/0/0",
   btc: "m/84'/0'/0'/0/0",
+  btcTestnet: "m/84'/1'/0'/0/0", // BIP-84 testnet coin type
   solana: "m/44'/501'/0'/0'",
 } as const;
+
+export type BtcNetwork = 'mainnet' | 'testnet';
 
 const b58check = base58check(sha256);
 
@@ -57,12 +60,79 @@ export function isValidTronAddress(addr: string): boolean {
   }
 }
 
-// BTC native SegWit (BIP-84): bech32(hash160(compressed pubkey)).
-export function deriveBtcAddress(mnemonic: string): string {
-  const node = secpNode(mnemonic, DERIVATION_PATHS.btc);
+// BTC native SegWit (BIP-84): bech32(hash160(compressed pubkey)). Unlike
+// Tron, the address is network-specific — testnet uses coin type 1' and the
+// 'tb' prefix, so the same seed yields different mainnet/testnet addresses
+// (matching Sparrow/Electrum behavior).
+function btcNode(mnemonic: string, network: BtcNetwork): HDKey {
+  const path = network === 'testnet' ? DERIVATION_PATHS.btcTestnet : DERIVATION_PATHS.btc;
+  return secpNode(mnemonic, path);
+}
+
+export function deriveBtcAddress(mnemonic: string, network: BtcNetwork = 'mainnet'): string {
+  const node = btcNode(mnemonic, network);
   const h160 = ripemd160(sha256(node.publicKey!)); // publicKey is compressed (33 bytes)
   const words = bech32.toWords(h160);
-  return bech32.encode('bc', [0x00, ...words]);
+  return bech32.encode(network === 'testnet' ? 'tb' : 'bc', [0x00, ...words]);
+}
+
+// The BTC signing key — derived at the BIP-84 path, NOT the EVM path. The
+// backend recovers the pubkey from each input signature and requires it to
+// hash to the sender address's witness program, so signing with any other
+// key is rejected before broadcast. Returns a 0x-less 32-byte hex key.
+export function deriveBtcPrivateKey(mnemonic: string, network: BtcNetwork = 'mainnet'): string {
+  return bytesToHex(btcNode(mnemonic, network).privateKey!);
+}
+
+// Validate a BTC address for the given network. Accepts native SegWit v0
+// (bech32: P2WPKH/P2WSH), taproot v1 (bech32m), and legacy base58check
+// (P2PKH/P2SH) — everything the backend can build an output script for.
+export function isValidBtcAddress(addr: string, network: BtcNetwork = 'mainnet'): boolean {
+  if (!addr) return false;
+  const hrp = network === 'testnet' ? 'tb' : 'bc';
+  const lower = addr.toLowerCase();
+  if (lower.startsWith(`${hrp}1`)) {
+    // Mixed-case bech32 is invalid per BIP-173.
+    if (addr !== lower && addr !== addr.toUpperCase()) return false;
+    return decodeSegwit(lower, hrp) !== null;
+  }
+  // Legacy base58check: 1 version byte + 20-byte hash.
+  try {
+    const decoded = b58check.decode(addr);
+    if (decoded.length !== 21) return false;
+    const version = decoded[0];
+    return network === 'testnet' ? version === 0x6f || version === 0xc4 : version === 0x00 || version === 0x05;
+  } catch {
+    return false;
+  }
+}
+
+// BIP-173/350: witness v0 must checksum as bech32, v1+ as bech32m.
+function decodeSegwit(addr: string, hrp: string): { version: number; program: Uint8Array } | null {
+  for (const codec of [bech32, bech32m] as const) {
+    let decoded;
+    try {
+      decoded = codec.decode(addr as `${string}1${string}`, 90);
+    } catch {
+      continue;
+    }
+    if (decoded.prefix !== hrp || decoded.words.length === 0) return null;
+    const [version, ...rest] = decoded.words;
+    let program: Uint8Array;
+    try {
+      program = bech32.fromWords(rest);
+    } catch {
+      return null;
+    }
+    // Only witness v0 (P2WPKH/P2WSH) and v1 (taproot) — the versions the
+    // backend can build output scripts for. Future versions are rejected.
+    const ok =
+      version === 0
+        ? codec === bech32 && (program.length === 20 || program.length === 32)
+        : codec === bech32m && version === 1 && program.length === 32;
+    return ok ? { version, program } : null;
+  }
+  return null;
 }
 
 // Solana: ed25519 via SLIP-0010 hardened path → base58 of the 32-byte pubkey.

@@ -275,7 +275,12 @@ export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
 // Active chain config — defaults to mainnet, updated by useNetwork hook
 export let CHAINS: Record<ChainKey, ChainConfig> = { ...MAINNET_CHAINS };
 
+// Tracked here as well so non-EVM helpers (which have no per-network map)
+// can pick network-specific values like the BTC testnet explorer.
+let activeNetwork: NetworkType = 'mainnet';
+
 export function setActiveNetwork(network: NetworkType) {
+  activeNetwork = network;
   if (network === 'testnet') {
     Object.assign(CHAINS, TESTNET_CHAINS);
   } else {
@@ -374,15 +379,24 @@ export interface NonEVMChainConfig {
   name: string;
   shortName: string;
   explorerUrl: string;
+  // Used when the app is on the testnet toggle AND the chain's addresses are
+  // network-specific (BTC). Chains with one address space (Tron) omit it.
+  explorerUrlTestnet?: string;
   nativeCurrency: { symbol: string; decimals: number };
   iconColor: string;
 }
 
-export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
+export const NONEVM_CHAINS: Record<'tron' | 'btc', NonEVMChainConfig> = {
   tron: {
     chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
     explorerUrl: 'https://tronscan.org',
     nativeCurrency: { symbol: 'TRX', decimals: 6 }, iconColor: '#EF0027',
+  },
+  btc: {
+    chainKey: 'btc', family: 'btc', name: 'Bitcoin', shortName: 'BTC',
+    explorerUrl: 'https://mempool.space',
+    explorerUrlTestnet: 'https://mempool.space/testnet',
+    nativeCurrency: { symbol: 'BTC', decimals: 8 }, iconColor: '#F7931A',
   },
 };
 
@@ -393,7 +407,7 @@ export const NONEVM_CHAINS: Record<'tron', NonEVMChainConfig> = {
 export type NonEVMChainKey = keyof typeof NONEVM_CHAINS;
 export type AnyChainKey = ChainKey | NonEVMChainKey;
 
-export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron'];
+export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc'];
 
 export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana';
 
@@ -431,12 +445,17 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
   };
 }
 
-// Explorer URL for a transaction on any family. EVM explorers use `/tx/{hash}`;
-// Tronscan uses `/#/transaction/{hash}`. Resolves the chain from a non-EVM key,
-// else an EVM chainId, else an EVM key. Returns undefined when unresolvable.
+// Explorer URL for a transaction on any family. EVM explorers and
+// mempool.space use `/tx/{hash}`; Tronscan uses `/#/transaction/{hash}`.
+// Resolves the chain from a non-EVM key, else an EVM chainId, else an EVM
+// key. Returns undefined when unresolvable.
 export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
   if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
-    return `${NONEVM_CHAINS[opts.chainKey].explorerUrl}/#/transaction/${txHash}`;
+    const chain = NONEVM_CHAINS[opts.chainKey];
+    const base =
+      activeNetwork === 'testnet' && chain.explorerUrlTestnet ? chain.explorerUrlTestnet : chain.explorerUrl;
+    const path = chain.family === 'tron' ? `/#/transaction/${txHash}` : `/tx/${txHash}`;
+    return `${base}${path}`;
   }
   const explorer =
     (typeof opts.chainId === 'number' ? getChainByChainId(opts.chainId)?.explorerUrl : undefined) ??

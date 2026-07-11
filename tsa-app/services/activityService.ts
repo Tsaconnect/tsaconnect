@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatUnits } from 'ethers';
 import { API_BASE_URL } from '../constants/api/config';
 import { getTronAddress } from './chains/tronWallet';
+import { getBtcAddress } from './chains/btcWallet';
 import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
 
 export type ActivityType = 'wallet' | 'swap' | 'tp' | 'cashback' | 'order' | 'service';
@@ -207,37 +208,53 @@ async function fetchWalletItems(page: number, limit: number, txType?: string): P
   return (data?.data?.transactions ?? []).map(fromWalletTx);
 }
 
-function fromTronActivity(a: NonEVMActivity): ActivityItem {
-  const isIn = a.direction === 'in';
-  const human = Number(formatUnits(a.amountRaw || '0', a.decimals || 6));
-  const icon = isIn
-    ? { name: 'arrow-down', color: '#22C55E', bg: '#F0FDF4' }
-    : { name: 'arrow-up', color: '#EF4444', bg: '#FEF2F2' };
-  return {
-    id: `tron-${a.hash}-${a.direction}`,
-    type: 'wallet',
-    subtype: isIn ? 'receive' : 'send',
-    title: `${isIn ? 'Received' : 'Sent'} ${a.symbol}`,
-    subtitle: `${isIn ? 'From' : 'To'}: ${truncate(a.counterparty)} · Tron`,
-    amount: `${human.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${a.symbol}`,
-    positive: isIn,
-    status: a.status || 'confirmed',
-    timestamp: new Date(a.blockTime * 1000).toISOString(),
-    txHash: a.hash,
-    chainKey: 'tron',
-    iconName: icon.name,
-    iconColor: icon.color,
-    iconBg: icon.bg,
+function fromNonEVMActivity(chainKey: 'tron' | 'btc', chainLabel: string) {
+  return (a: NonEVMActivity): ActivityItem => {
+    const isIn = a.direction === 'in';
+    const human = Number(formatUnits(a.amountRaw || '0', a.decimals || 6));
+    const icon = isIn
+      ? { name: 'arrow-down', color: '#22C55E', bg: '#F0FDF4' }
+      : { name: 'arrow-up', color: '#EF4444', bg: '#FEF2F2' };
+    // Pending BTC txs carry no block time yet — treat them as "just now" so
+    // they sort to the top instead of 1970.
+    const ts = a.blockTime > 0 ? a.blockTime * 1000 : Date.now();
+    return {
+      id: `${chainKey}-${a.hash}-${a.direction}`,
+      type: 'wallet',
+      subtype: isIn ? 'receive' : 'send',
+      title: `${isIn ? 'Received' : 'Sent'} ${a.symbol}`,
+      subtitle: `${isIn ? 'From' : 'To'}: ${truncate(a.counterparty)} · ${chainLabel}`,
+      amount: `${human.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${a.symbol}`,
+      positive: isIn,
+      status: a.status || 'confirmed',
+      timestamp: new Date(ts).toISOString(),
+      txHash: a.hash,
+      chainKey,
+      iconName: icon.name,
+      iconColor: icon.color,
+      iconBg: icon.bg,
+    };
   };
 }
 
-// Tron history is derived + fetched client-side (its address isn't the EVM one).
-// Dormant-safe: yields nothing when the chain is unconfigured or no wallet.
+// Tron/BTC history is derived + fetched client-side (their addresses aren't
+// the EVM one). Dormant-safe: yields nothing when the chain is unconfigured
+// or there's no wallet.
 async function fetchTronItems(): Promise<ActivityItem[]> {
   try {
     const addr = await getTronAddress();
     if (!addr) return [];
-    return (await getNonEVMHistory('tron', addr)).map(fromTronActivity);
+    return (await getNonEVMHistory('tron', addr)).map(fromNonEVMActivity('tron', 'Tron'));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchBtcItems(): Promise<ActivityItem[]> {
+  try {
+    const addr = await getBtcAddress();
+    if (!addr) return [];
+    return (await getNonEVMHistory('btc', addr)).map(fromNonEVMActivity('btc', 'Bitcoin'));
   } catch {
     return [];
   }
@@ -284,9 +301,12 @@ export async function fetchActivityItems(
 
   if (active.includes('wallet')) {
     fetchers.push(fetchWalletItems(page, perSource, 'send,receive,approve,escrow'));
-    // Tron history is a bounded recent window (no cursor pagination), so fetch
-    // it only on the first page — re-fetching per page would append duplicates.
-    if (page === 1) fetchers.push(fetchTronItems());
+    // Tron/BTC history is a bounded recent window (no cursor pagination), so
+    // fetch it only on the first page — re-fetching per page would duplicate.
+    if (page === 1) {
+      fetchers.push(fetchTronItems());
+      fetchers.push(fetchBtcItems());
+    }
   }
   if (active.includes('swap'))   fetchers.push(fetchWalletItems(page, perSource, 'swap'));
   if (active.includes('tp'))     fetchers.push(fetchTPItems(page, perSource));

@@ -19,14 +19,17 @@ import { router, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
 import { parseUnits, formatUnits } from 'ethers';
 import {
-  CHAINS, CHAIN_KEYS, getChainDisplay, isNonEVMChain, txExplorerUrl,
+  CHAINS, CHAIN_KEYS, NONEVM_CHAINS, getChainDisplay, isNonEVMChain, txExplorerUrl,
   type ChainKey, type AnyChainKey,
 } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { isValidAddress, signTransaction, getActiveWallet } from '../../services/wallet';
-import { isValidTronAddress } from '../../services/chains/derivation';
+import { isValidTronAddress, isValidBtcAddress } from '../../services/chains/derivation';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { prepareTron, broadcastTron, type SendTronParams, type TronPrepared } from '../../services/chains/tronSend';
+import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
+import { prepareBtc, broadcastBtc, type SendBtcParams, type BtcPrepared } from '../../services/chains/btcSend';
+import { getNetwork } from '../../hooks/useNetwork';
 import {
   getWalletBalances,
   normalizeWalletBalances,
@@ -128,11 +131,17 @@ const SendToken = () => {
   const [txHash, setTxHash] = useState('');
   const [showTokenPicker, setShowTokenPicker] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  // Prepared Tron tx carried from review → send so we don't rebuild it (and
-  // re-run the gas preflight) a second time at broadcast.
-  const [tronTx, setTronTx] = useState<{ prepared: TronPrepared['prepared']; params: SendTronParams } | null>(null);
+  // Prepared non-EVM tx carried from review → send so we don't rebuild it
+  // (and re-run the fee preflight) a second time at broadcast.
+  const [nonEvmTx, setNonEvmTx] = useState<
+    | { family: 'tron'; prepared: TronPrepared['prepared']; params: SendTronParams }
+    | { family: 'btc'; prepared: BtcPrepared['prepared']; params: SendBtcParams }
+    | null
+  >(null);
 
-  const isTron = isNonEVMChain(selectedChain);
+  const nonEvmFamily = isNonEVMChain(selectedChain) ? NONEVM_CHAINS[selectedChain].family : null;
+  const isTron = nonEvmFamily === 'tron';
+  const isBtc = nonEvmFamily === 'btc';
 
   const getSupportedChainsForToken = useCallback((symbol: string): AnyChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
@@ -215,11 +224,16 @@ const SendToken = () => {
         }
       }
 
-      // Non-EVM (Tron): derive the address and append its balances so TRX/USDT
-      // appear in the token picker. Dormant-safe — yields nothing if unset.
+      // Non-EVM (Tron/BTC): derive each address and append its balances so
+      // TRX/USDT/BTC appear in the token picker. Dormant-safe — each chain
+      // yields nothing if unset.
       try {
         const tronAddr = await getTronAddress();
         if (tronAddr) allBalances.push(...(await getTronBalances(tronAddr)));
+      } catch { /* chain unavailable — skip */ }
+      try {
+        const btcAddr = await getBtcAddress();
+        if (btcAddr) allBalances.push(...(await getBtcBalances(btcAddr)));
       } catch { /* chain unavailable — skip */ }
 
       setBalances(allBalances);
@@ -252,8 +266,11 @@ const SendToken = () => {
   const activeChain = getChainDisplay(selectedChain);
   const gasSymbol = activeChain?.nativeCurrency?.symbol || 'S';
 
-  const validAddress = (addr: string): boolean =>
-    isTron ? isValidTronAddress(addr) : isValidAddress(addr);
+  const validAddress = (addr: string): boolean => {
+    if (isTron) return isValidTronAddress(addr);
+    if (isBtc) return isValidBtcAddress(addr, getNetwork());
+    return isValidAddress(addr);
+  };
 
   const handlePaste = async () => {
     try {
@@ -289,6 +306,21 @@ const SendToken = () => {
     };
   };
 
+  // Build the BTC send params (native only — no tokens on Bitcoin). Amount is
+  // sats (8 decimals). Null when we can't derive the address.
+  const buildBtcParams = async (recipient: string): Promise<SendBtcParams | null> => {
+    const walletId = await getActiveWallet();
+    const from = await getBtcAddress(walletId || undefined);
+    if (!from || !walletId) return null;
+    return {
+      from,
+      to: recipient,
+      amount: parseUnits(tokenAmount, 8).toString(),
+      symbol: 'BTC',
+      walletAddress: walletId, // used to look up the mnemonic for BIP-84 signing
+    };
+  };
+
   const handleReview = async () => {
     const e = validate(); if (e) { setError(e); return; }
     setError('');
@@ -301,8 +333,19 @@ const SendToken = () => {
         const params = await buildTronParams(toAddress.trim());
         if (!params) throw new Error('Could not derive your Tron wallet.');
         const { prepared, fee } = await prepareTron(params);
-        setTronTx({ prepared, params });
+        setNonEvmTx({ family: 'tron', prepared, params });
         setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 6));
+        setScreen('confirm');
+        return;
+      }
+      if (isBtc) {
+        // BTC: prepare selects UTXOs server-side and returns the network fee.
+        // A 402 (balance can't cover amount + fee) throws with a friendly note.
+        const params = await buildBtcParams(toAddress.trim());
+        if (!params) throw new Error('Could not derive your Bitcoin wallet.');
+        const { prepared, fee } = await prepareBtc(params);
+        setNonEvmTx({ family: 'btc', prepared, params });
+        setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 8));
         setScreen('confirm');
         return;
       }
@@ -345,17 +388,29 @@ const SendToken = () => {
     const chainId = activeChain?.chainId || CHAINS.sonic.chainId;
     const recipient = toAddress.trim();
     try {
-      // Tron: broadcast the tx already built (and gas-checked) at review. Signed
-      // locally with the Tron-path key inside broadcastTron. tronTx is set by
-      // handleReview; rebuild defensively if somehow missing.
+      // Non-EVM: broadcast the tx already built (and fee-checked) at review.
+      // Signed locally with the chain-path key inside broadcastTron/Btc.
+      // nonEvmTx is set by handleReview; rebuild defensively if missing.
       if (isTron) {
-        let ctx = tronTx;
+        let ctx = nonEvmTx?.family === 'tron' ? nonEvmTx : null;
         if (!ctx) {
           const params = await buildTronParams(recipient);
           if (!params) throw new Error('Could not derive your Tron wallet.');
-          ctx = { prepared: (await prepareTron(params)).prepared, params };
+          ctx = { family: 'tron', prepared: (await prepareTron(params)).prepared, params };
         }
         const { txHash: hash } = await broadcastTron(ctx.prepared, ctx.params);
+        setTxHash(hash);
+        setScreen('success');
+        return;
+      }
+      if (isBtc) {
+        let ctx = nonEvmTx?.family === 'btc' ? nonEvmTx : null;
+        if (!ctx) {
+          const params = await buildBtcParams(recipient);
+          if (!params) throw new Error('Could not derive your Bitcoin wallet.');
+          ctx = { family: 'btc', prepared: (await prepareBtc(params)).prepared, params };
+        }
+        const { txHash: hash } = await broadcastBtc(ctx.prepared, ctx.params);
         setTxHash(hash);
         setScreen('success');
         return;
@@ -447,7 +502,7 @@ const SendToken = () => {
             </Text>
           ) : null}
           {ok && txHash ? (() => {
-            const url = txExplorerUrl(txHash, isTron ? { chainKey: selectedChain } : { chainId: activeChain?.chainId });
+            const url = txExplorerUrl(txHash, nonEvmFamily ? { chainKey: selectedChain } : { chainId: activeChain?.chainId });
             return url ? (
               <Button
                 title="View on explorer"
@@ -678,7 +733,7 @@ const SendToken = () => {
               RECIPIENT
             </Text>
             <Input
-              placeholder={isTron ? 'T... wallet address' : '0x... wallet address'}
+              placeholder={isTron ? 'T... wallet address' : isBtc ? 'bc1... wallet address' : '0x... wallet address'}
               value={toAddress}
               onChangeText={(t) => { setToAddress(t); setError(''); }}
               autoCapitalize="none"
