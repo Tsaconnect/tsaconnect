@@ -19,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
 import { CHAINS, getChainDisplay, type ChainKey, type AnyChainKey } from '@/constants/chains';
 import { loadTronWallet } from '@/services/chains/tronWallet';
+import { loadBtcWallet } from '@/services/chains/btcWallet';
 import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
@@ -242,6 +243,29 @@ export default function AllTokensScreen() {
         }
       }
     } catch { /* chain unavailable — skip Tron */ }
+
+    // Non-EVM (BTC): same pattern — BTC shows as a native token (visible even
+    // at 0) so Bitcoin is always reachable from "See all".
+    try {
+      const btc = await loadBtcWallet(addr || undefined);
+      if (btc) {
+        const btcColor = getChainDisplay('btc')?.iconColor || '#F7931A';
+        for (const row of btc.balances) {
+          list.push({
+            id: String(id++),
+            symbol: row.symbol,
+            name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
+            balance: parseFloat(row.balance) || 0,
+            usdValue: parseFloat(row.usdValue) || 0,
+            iconColor: btcColor,
+            chainKey: 'btc',
+            chainName: 'Bitcoin',
+            isNative: true,
+            decimals: row.decimals,
+          });
+        }
+      }
+    } catch { /* chain unavailable — skip BTC */ }
 
     // Spendable premium MCGP (Contract B, not ERC-20) — its own tagged row,
     // distinct from any ordinary (withdrawn) ERC-20 MCGP, reachable from "See

@@ -26,6 +26,7 @@ import {
   type AnyChainKey,
 } from '../../constants/chains';
 import { getTronAddress } from '../../services/chains/tronWallet';
+import { getBtcAddress } from '../../services/chains/btcWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { useTheme } from '@/theme';
 import {
@@ -48,25 +49,30 @@ const ReceiveToken = () => {
   const { colors, spacing, radius } = useTheme();
   const [evmAddress, setEvmAddress] = useState('');
   const [tronAddress, setTronAddress] = useState('');
+  const [btcAddress, setBtcAddress] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<AnyChainKey>('sonic');
 
   useEffect(() => {
     const loadAddresses = async () => {
-      const [evm, tron] = await Promise.all([
+      const [evm, tron, btc] = await Promise.all([
         getActiveWallet(),
         // Same mnemonic, standard Tron path — reproduces the TronLink address.
         getTronAddress().catch(() => null),
+        // Same mnemonic, BIP-84 path — reproduces the Sparrow/Electrum address.
+        getBtcAddress().catch(() => null),
       ]);
       if (evm) setEvmAddress(evm);
       if (tron) setTronAddress(tron);
+      if (btc) setBtcAddress(btc);
     };
     loadAddresses();
   }, []);
 
   // The address to show/QR/copy depends on the selected chain's family: EVM
-  // chains share one 0x address; Tron has its own base58 T-address.
-  const walletAddress = isNonEVMChain(selectedChain) ? tronAddress : evmAddress;
+  // chains share one 0x address; Tron and BTC each derive their own.
+  const nonEvmAddress = selectedChain === 'btc' ? btcAddress : tronAddress;
+  const walletAddress = isNonEVMChain(selectedChain) ? nonEvmAddress : evmAddress;
   const selectedChainName = getChainDisplay(selectedChain)?.name || 'Unknown';
 
   const handleCopy = async () => {
