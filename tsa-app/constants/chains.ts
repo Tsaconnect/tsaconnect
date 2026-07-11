@@ -49,7 +49,8 @@ export type ChainKey =
   | 'base'
   | 'optimism'
   | 'avalanche'
-  | 'linea';
+  | 'linea'
+  | 'robinhood';
 
 export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
   sonic: {
@@ -151,6 +152,15 @@ export const MAINNET_CHAINS: Record<ChainKey, ChainConfig> = {
     iconColor: '#121212',
     iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/135/small/linea.jpeg',
   },
+  robinhood: {
+    chainId: 4663,
+    name: 'Robinhood Chain',
+    shortName: 'HOOD',
+    rpcUrl: 'https://rpc.mainnet.chain.robinhood.com',
+    explorerUrl: 'https://robinhoodchain.blockscout.com',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#00C805',
+  },
 };
 
 export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
@@ -251,6 +261,15 @@ export const TESTNET_CHAINS: Record<ChainKey, ChainConfig> = {
     iconColor: '#121212',
     iconUrl: 'https://coin-images.coingecko.com/asset_platforms/images/135/small/linea.jpeg',
   },
+  robinhood: {
+    chainId: 46630,
+    name: 'Robinhood Testnet',
+    shortName: 'HOOD',
+    rpcUrl: 'https://rpc.testnet.chain.robinhood.com',
+    explorerUrl: 'https://explorer.testnet.chain.robinhood.com',
+    nativeCurrency: { symbol: 'ETH', decimals: 18 },
+    iconColor: '#00C805',
+  },
 };
 
 // Active chain config — defaults to mainnet, updated by useNetwork hook
@@ -294,7 +313,7 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     iconColor: '#627EEA',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png',
     // ETH is the native gas token on Ethereum L1 and on most major L2s.
-    chains: ['ethereum', 'arbitrum', 'base', 'optimism', 'linea'],
+    chains: ['ethereum', 'arbitrum', 'base', 'optimism', 'linea', 'robinhood'],
   },
   BNB: {
     symbol: 'BNB',
@@ -335,6 +354,15 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
     iconColor: '#2775CA',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/usdc.png',
     chains: ['sonic', 'bsc', 'ethereum', 'polygon', 'arbitrum', 'base', 'optimism', 'avalanche', 'linea'],
+  },
+  // USDG (Paxos Global Dollar) is Robinhood Chain's canonical stablecoin —
+  // bridged USDC/USDT land there as USDG, so it's listed only on robinhood.
+  USDG: {
+    symbol: 'USDG',
+    name: 'Global Dollar',
+    decimals: 6,
+    iconColor: '#00C805',
+    chains: ['robinhood'],
   },
 };
 
@@ -426,6 +454,7 @@ export const CHAIN_KEYS: ChainKey[] = [
   'optimism',
   'avalanche',
   'linea',
+  'robinhood',
 ];
 
 export function getChain(key: ChainKey): ChainConfig {
@@ -462,6 +491,7 @@ const NETWORK_DISPLAY_NAMES: Record<ChainKey, string> = {
   optimism: 'Optimism',
   avalanche: 'Avalanche',
   linea: 'Linea',
+  robinhood: 'Robinhood',
 };
 
 /** Clean, user-facing network name for a chainId (e.g. 14601 → "Sonic", 97 →
