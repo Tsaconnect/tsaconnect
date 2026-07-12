@@ -85,8 +85,13 @@ export async function broadcastSolana(
   const mnemonic = await getMnemonic(params.walletAddress);
   if (!mnemonic) throw new Error('no key for wallet');
   const solKey = deriveSolanaPrivateKey(mnemonic);
-  // ed25519 signs the whole serialized message carried in hashHex.
-  const sigs = payloads.map((p) => ({ index: p.index, sigHex: signEd25519Message(p.hashHex, solKey) }));
+  // ed25519 signs the whole serialized message carried in hashHex. Guard the
+  // declared curve so a mismatched backend payload fails loudly, not silently
+  // with a wrong-scheme signature.
+  const sigs = payloads.map((p) => {
+    if (p.curve !== 'ed25519') throw new Error(`unexpected signing curve: ${p.curve}`);
+    return { index: p.index, sigHex: signEd25519Message(p.hashHex, solKey) };
+  });
 
   const headers = await authHeaders();
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=solana&network=${getNetwork()}`, {

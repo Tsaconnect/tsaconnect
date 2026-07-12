@@ -62,24 +62,26 @@ func TestSymbolFor(t *testing.T) {
 
 func TestBuildFeeQuote(t *testing.T) {
 	tests := []struct {
-		name        string
-		bal         uint64
-		isToken     bool
-		needsATA    bool
-		wantEnough  bool
-		wantFee     string
-		wantNoteSub string // substring the note must contain ("" = no note)
+		name         string
+		bal          uint64
+		isToken      bool
+		needsATA     bool
+		nativeAmount uint64
+		wantEnough   bool
+		wantFee      string
+		wantNoteSub  string // substring the note must contain ("" = no note)
 	}{
-		{"native, enough", 1_000_000, false, false, true, "5000", ""},
-		{"native, short", 4000, false, false, false, "5000", "Not enough SOL"},
-		{"token, ata exists, enough", 1_000_000, true, false, true, "5000", ""},
-		{"token, needs ata, enough", 3_000_000, true, true, true, "2044280", ""},
-		{"token, needs ata, short", 1000, true, true, false, "2044280", "account rent"},
-		{"token, no ata, short", 1000, true, false, false, "5000", "network fee)."},
+		{"native, covers amount+fee", 1_000_000, false, false, 500_000, true, "5000", ""},
+		{"native, covers fee but not amount+fee", 6000, false, false, 5000, false, "5000", "amount plus the network fee"},
+		{"native, short even for fee", 4000, false, false, 0, false, "5000", "amount plus the network fee"},
+		{"token, ata exists, enough", 1_000_000, true, false, 0, true, "5000", ""},
+		{"token, needs ata, enough", 3_000_000, true, true, 0, true, "2044280", ""},
+		{"token, needs ata, short", 1000, true, true, 0, false, "2044280", "account rent"},
+		{"token, no ata, short", 1000, true, false, 0, false, "5000", "network fee)."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			q := buildFeeQuote(tt.bal, tt.isToken, tt.needsATA, "USDC", "SOL")
+			q := buildFeeQuote(tt.bal, tt.isToken, tt.needsATA, tt.nativeAmount, "USDC", "SOL")
 			if q.HasEnoughGas != tt.wantEnough {
 				t.Errorf("HasEnoughGas = %v, want %v", q.HasEnoughGas, tt.wantEnough)
 			}

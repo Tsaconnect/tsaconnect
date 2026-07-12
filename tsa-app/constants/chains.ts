@@ -403,9 +403,9 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana', NonEVMChainConfig>
   },
   solana: {
     chainKey: 'solana', family: 'solana', name: 'Solana', shortName: 'SOL',
+    // Solana explorers use ?cluster=devnet (a query param) for testnet rather
+    // than a distinct host; txExplorerUrl appends it AFTER the /tx/<hash> path.
     explorerUrl: 'https://solscan.io',
-    // Solana explorers take an explicit ?cluster=devnet for the testnet toggle.
-    explorerUrlTestnet: 'https://solscan.io/?cluster=devnet',
     nativeCurrency: { symbol: 'SOL', decimals: 9 }, iconColor: '#14F195',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/4128/small/solana.png',
   },
@@ -477,6 +477,13 @@ export function getChainDisplay(key: AnyChainKey): ChainDisplay | undefined {
 export function txExplorerUrl(txHash: string, opts: { chainId?: number; chainKey?: AnyChainKey }): string | undefined {
   if (opts.chainKey && isNonEVMChain(opts.chainKey)) {
     const chain = NONEVM_CHAINS[opts.chainKey];
+    // Solana selects the cluster with a ?cluster=devnet query param appended
+    // AFTER the path, not a separate host — so build it explicitly to avoid a
+    // "host/?cluster=devnet/tx/hash" URL where the path lands after the query.
+    if (chain.family === 'solana') {
+      const suffix = activeNetwork === 'testnet' ? '?cluster=devnet' : '';
+      return `${chain.explorerUrl}/tx/${txHash}${suffix}`;
+    }
     const base =
       activeNetwork === 'testnet' && chain.explorerUrlTestnet ? chain.explorerUrlTestnet : chain.explorerUrl;
     const path = chain.family === 'tron' ? `/#/transaction/${txHash}` : `/tx/${txHash}`;
