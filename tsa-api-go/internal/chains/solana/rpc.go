@@ -58,27 +58,40 @@ func (r *RPC) HeldTokens(ctx context.Context, owner solanago.PublicKey) ([]heldT
 	return out, nil
 }
 
-// MintDecimals batch-reads the decimals for a set of mints in a single
-// getMultipleAccounts call, borsh-decoding each mint account. Missing/invalid
-// mints are simply absent from the returned map.
+// maxAccountsPerCall is the getMultipleAccounts limit — Solana caps a single
+// request at 100 pubkeys. Wallets flooded with spam-airdrop SPL accounts can
+// easily exceed this, so MintDecimals chunks to stay under it (otherwise the
+// whole balance read would error and hide even the native SOL balance).
+const maxAccountsPerCall = 100
+
+// MintDecimals batch-reads the decimals for a set of mints via getMultipleAccounts
+// (chunked to 100/call), borsh-decoding each mint account. Missing/invalid mints
+// are simply absent from the returned map.
 func (r *RPC) MintDecimals(ctx context.Context, mints []solanago.PublicKey) (map[string]uint8, error) {
 	out := map[string]uint8{}
-	if len(mints) == 0 {
-		return out, nil
-	}
-	res, err := r.cl.GetMultipleAccounts(ctx, mints...)
-	if err != nil {
-		return nil, err
-	}
-	for i, acc := range res.Value {
-		if acc == nil {
-			continue
+	for start := 0; start < len(mints); start += maxAccountsPerCall {
+		end := start + maxAccountsPerCall
+		if end > len(mints) {
+			end = len(mints)
 		}
-		var m token.Mint
-		if err := bin.NewBorshDecoder(acc.Data.GetBinary()).Decode(&m); err != nil {
-			continue
+		batch := mints[start:end]
+		res, err := r.cl.GetMultipleAccounts(ctx, batch...)
+		if err != nil {
+			return nil, err
 		}
-		out[mints[i].String()] = m.Decimals
+		// getMultipleAccounts returns one slot per input in order (null for
+		// missing); index defensively in case a provider returns a short array.
+		for i := 0; i < len(res.Value) && i < len(batch); i++ {
+			acc := res.Value[i]
+			if acc == nil {
+				continue
+			}
+			var m token.Mint
+			if err := bin.NewBorshDecoder(acc.Data.GetBinary()).Decode(&m); err != nil {
+				continue
+			}
+			out[batch[i].String()] = m.Decimals
+		}
 	}
 	return out, nil
 }

@@ -338,7 +338,11 @@ const SendToken = () => {
     const from = await getSolanaAddress(walletId || undefined);
     if (!from || !walletId) return null;
     const entry = balances.find((b) => b.symbol === selectedToken && b.chainKey === selectedChain);
-    const decimals = entry?.decimals ?? 9;
+    // Native SOL is a safe 9-decimals default; an SPL send needs the mint's real
+    // decimals from its balance row — guessing would mis-scale the amount by
+    // orders of magnitude, so bail rather than default.
+    const decimals = entry?.decimals ?? (selectedToken === 'SOL' ? 9 : undefined);
+    if (decimals === undefined) return null;
     return {
       from,
       to: recipient,

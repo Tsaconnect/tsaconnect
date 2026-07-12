@@ -77,6 +77,13 @@ const NONEVM_RECEIVE_ITEMS: ReceiveItem[] = [
     chainShortName: NONEVM_CHAINS.btc.shortName, chainIconColor: NONEVM_CHAINS.btc.iconColor,
     chainIconUrl: NONEVM_CHAINS.btc.iconUrl,
   },
+  {
+    id: 'SOL-solana', symbol: 'SOL', name: 'Solana',
+    iconColor: NONEVM_CHAINS.solana.iconColor, iconUrl: NONEVM_CHAINS.solana.iconUrl,
+    chainKey: 'solana', chainName: NONEVM_CHAINS.solana.name,
+    chainShortName: NONEVM_CHAINS.solana.shortName, chainIconColor: NONEVM_CHAINS.solana.iconColor,
+    chainIconUrl: NONEVM_CHAINS.solana.iconUrl,
+  },
 ];
 
 interface QRTarget {
@@ -409,7 +416,7 @@ export default function FundScreen() {
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allItems, search, chainFilter, walletAddress, tronAddress, btcAddress]);
+  }, [allItems, search, chainFilter, walletAddress, tronAddress, btcAddress, solanaAddress]);
 
   const popular = filtered.filter(i => POPULAR.includes(i.symbol)).sort(byRank);
   const rest = filtered.filter(i => !POPULAR.includes(i.symbol)).sort(byRank);

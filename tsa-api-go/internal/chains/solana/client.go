@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	bin "github.com/gagliardetto/binary"
 	solanago "github.com/gagliardetto/solana-go"
@@ -36,6 +37,19 @@ const (
 	// small on the shared free-tier gateway. Cursor pagination is deferred
 	// (mirrors the Tron history impl).
 	historyWindow = 12
+
+	// historyConcurrency caps how many getTransaction calls run at once so a
+	// single history view can't burst the shared free-tier RPC's qps budget.
+	historyConcurrency = 4
+
+	// historyTimeout bounds total wall-clock for enriching a history page.
+	historyTimeout = 10 * time.Second
+
+	// maxPreparedRawHex bounds the client-supplied prepared message we hex+borsh
+	// decode at submit — a legitimate Solana message is well under this. The
+	// signature is verified on-chain, not here, so an oversized blob would only
+	// waste server CPU/memory.
+	maxPreparedRawHex = 8192
 )
 
 // Client is the Solana ChainClient. Tx construction, RPC, and message
@@ -93,14 +107,17 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 		amountByMint[h.Mint.String()] += h.Amount
 	}
 
-	// Fetch decimals for every distinct mint we care about (configured + held) in
-	// one getMultipleAccounts call.
+	// Fetch decimals only for the mints we'll display: configured tokens plus
+	// held tokens with a non-zero balance. Skipping zero-balance spam accounts
+	// keeps the getMultipleAccounts batch small on spam-flooded wallets.
 	mintSet := map[string]struct{}{}
 	for _, mint := range c.cfg.Tokens {
 		mintSet[mint] = struct{}{}
 	}
-	for mint := range amountByMint {
-		mintSet[mint] = struct{}{}
+	for mint, amt := range amountByMint {
+		if amt > 0 {
+			mintSet[mint] = struct{}{}
+		}
 	}
 	mints := make([]solanago.PublicKey, 0, len(mintSet))
 	for m := range mintSet {
@@ -113,32 +130,38 @@ func (c *Client) GetBalances(ctx context.Context, addr string) ([]chains.Balance
 		return nil, err
 	}
 
+	// emit appends a token row, but drops a HELD token whose decimals we couldn't
+	// resolve — emitting Decimals:0 for real holdings renders a ~10^n-inflated
+	// balance/USD on a financial screen. A zero-balance token with unknown
+	// decimals is harmless (0 scales to 0), so configured tokens still show at 0.
+	emit := func(mint string) {
+		dec, ok := decs[mint]
+		if !ok && amountByMint[mint] > 0 {
+			return
+		}
+		out = append(out, chains.Balance{
+			Symbol: c.symbolFor(mint), Raw: strconv.FormatUint(amountByMint[mint], 10),
+			Decimals: int(dec), TokenAddress: mint,
+		})
+	}
+
 	// Configured tokens are always shown (even at zero), like Tron's TRC-20s.
 	emitted := map[string]struct{}{}
 	for _, mint := range c.cfg.Tokens {
-		out = append(out, chains.Balance{
-			Symbol: c.symbolFor(mint), Raw: strconv.FormatUint(amountByMint[mint], 10),
-			Decimals: int(decs[mint]), TokenAddress: mint,
-		})
+		emit(mint)
 		emitted[mint] = struct{}{}
 	}
 	// Auto-discovered tokens (not in the registry) are shown only when held.
 	discovered := make([]string, 0)
-	for mint := range amountByMint {
-		if _, done := emitted[mint]; done {
-			continue
-		}
-		if amountByMint[mint] == 0 {
+	for mint, amt := range amountByMint {
+		if _, done := emitted[mint]; done || amt == 0 {
 			continue
 		}
 		discovered = append(discovered, mint)
 	}
 	sort.Strings(discovered) // stable ordering across refreshes
 	for _, mint := range discovered {
-		out = append(out, chains.Balance{
-			Symbol: c.symbolFor(mint), Raw: strconv.FormatUint(amountByMint[mint], 10),
-			Decimals: int(decs[mint]), TokenAddress: mint,
-		})
+		emit(mint)
 	}
 	return out, nil
 }
@@ -176,20 +199,33 @@ func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (c
 		}
 		needsATA = !exists
 	}
-	return buildFeeQuote(sol, req.TokenAddr != "", needsATA, req.Symbol, c.cfg.NativeSymbol), nil
+	// For a native SOL send the balance must also cover the amount itself, not
+	// just the fee — otherwise "send max" passes preflight then fails at broadcast.
+	var nativeAmount uint64
+	if req.TokenAddr == "" {
+		if amt, ok := new(big.Int).SetString(req.Amount, 10); ok && amt.IsUint64() {
+			nativeAmount = amt.Uint64()
+		}
+	}
+	return buildFeeQuote(sol, req.TokenAddr != "", needsATA, nativeAmount, req.Symbol, c.cfg.NativeSymbol), nil
 }
 
 // buildFeeQuote assembles the fee quote from the pre-fetched SOL balance and the
-// two facts that drive cost: whether this is a token send and whether the
-// recipient's ATA must be created. Pure so the preflight logic is unit-tested
-// without a live RPC.
-func buildFeeQuote(solBalance uint64, isToken, needsATA bool, symbol, native string) chains.FeeQuote {
+// facts that drive cost: whether this is a token send, whether the recipient's
+// ATA must be created, and (for native sends) the amount that must sit alongside
+// the fee. Pure so the preflight logic is unit-tested without a live RPC.
+func buildFeeQuote(solBalance uint64, isToken, needsATA bool, nativeAmount uint64, symbol, native string) chains.FeeQuote {
 	est := uint64(lamportsPerSig)
 	if needsATA {
 		est += ataRentLamports
 	}
+	// A token send only needs the SOL fee; a native send needs amount + fee.
+	required := est
+	if !isToken {
+		required += nativeAmount
+	}
 	note := ""
-	if solBalance < est {
+	if solBalance < required {
 		if isToken {
 			rent := ""
 			if needsATA {
@@ -197,12 +233,12 @@ func buildFeeQuote(solBalance uint64, isToken, needsATA bool, symbol, native str
 			}
 			note = "You need " + native + " in this wallet to send " + symbol + " (network fee" + rent + ")."
 		} else {
-			note = "Not enough " + native + " to cover the network fee."
+			note = "Not enough " + native + " to cover the amount plus the network fee."
 		}
 	}
 	return chains.FeeQuote{
 		GasSymbol: native, EstFeeRaw: strconv.FormatUint(est, 10), GasDecimals: solDecimals,
-		NeedsActivation: needsATA, HasEnoughGas: solBalance >= est, Note: note,
+		NeedsActivation: needsATA, HasEnoughGas: solBalance >= required, Note: note,
 	}
 }
 
@@ -283,6 +319,9 @@ func (c *Client) AssembleAndBroadcast(ctx context.Context, prepared chains.Prepa
 	if len(sigs) != 1 {
 		return "", fmt.Errorf("solana expects exactly one signature, got %d", len(sigs))
 	}
+	if len(prepared.Raw) > maxPreparedRawHex {
+		return "", fmt.Errorf("prepared message too large")
+	}
 	msgBytes, err := hex.DecodeString(prepared.Raw)
 	if err != nil {
 		return "", fmt.Errorf("bad prepared message: %w", err)
@@ -343,24 +382,28 @@ func (c *Client) History(ctx context.Context, addr string, cursor string) ([]cha
 		return nil, "", err
 	}
 
-	// Enrich each signature into activity concurrently (bounded by historyWindow).
-	type slot struct {
-		items []chains.Activity
-	}
-	results := make([]slot, len(sigs))
+	// Each signature costs one getTransaction. Bound both the concurrency (so a
+	// single history view can't burst the shared free-tier RPC — see the spec's
+	// gateway budget) and the total wall-clock with a deadline.
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	results := make([][]chains.Activity, len(sigs))
+	sem := make(chan struct{}, historyConcurrency)
 	var wg sync.WaitGroup
 	for i := range sigs {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
-			results[i].items = c.activityFor(ctx, owner, sigs[i])
+			defer func() { <-sem }()
+			results[i] = c.activityFor(ctx, owner, sigs[i])
 		}(i)
 	}
 	wg.Wait()
 
 	items := make([]chains.Activity, 0, len(sigs))
 	for _, r := range results {
-		items = append(items, r.items...)
+		items = append(items, r...)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].BlockTime > items[j].BlockTime })
 	return items, "", nil // cursor pagination deferred (matches Tron)
