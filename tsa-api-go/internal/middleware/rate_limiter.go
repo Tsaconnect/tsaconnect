@@ -48,16 +48,28 @@ func (s *rateLimiterStore) cleanup() {
 // It allows up to maxRequests requests per the specified window duration.
 // Default recommendation: 100 requests per 15 minutes.
 func RateLimiter(maxRequests int, window time.Duration) gin.HandlerFunc {
+	return RateLimiterBy(maxRequests, window, func(c *gin.Context) string { return c.ClientIP() })
+}
+
+// RateLimiterBy is RateLimiter with a caller-supplied bucket key. Use it to
+// throttle per authenticated user (e.g. to protect a shared upstream quota that
+// a single account could exhaust from one IP) rather than per IP. keyFn should
+// return a stable, non-empty key; an empty key falls back to the client IP so a
+// missing key never disables the limit.
+func RateLimiterBy(maxRequests int, window time.Duration, keyFn func(*gin.Context) string) gin.HandlerFunc {
 	store := newRateLimiterStore()
 
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
+		key := keyFn(c)
+		if key == "" {
+			key = c.ClientIP()
+		}
 		now := time.Now()
 
-		val, loaded := store.entries.Load(ip)
+		val, loaded := store.entries.Load(key)
 		if !loaded {
-			// First request from this IP
-			store.entries.Store(ip, &rateLimitEntry{
+			// First request for this key
+			store.entries.Store(key, &rateLimitEntry{
 				count:     1,
 				expiresAt: now.Add(window),
 			})
@@ -69,7 +81,7 @@ func RateLimiter(maxRequests int, window time.Duration) gin.HandlerFunc {
 
 		// If the window has expired, reset the counter
 		if now.After(entry.expiresAt) {
-			store.entries.Store(ip, &rateLimitEntry{
+			store.entries.Store(key, &rateLimitEntry{
 				count:     1,
 				expiresAt: now.Add(window),
 			})

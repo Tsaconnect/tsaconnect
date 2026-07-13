@@ -17,9 +17,10 @@ import { View, FlatList, Image, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
-import { CHAINS, getChainDisplay, tokenRankOf, type ChainKey, type AnyChainKey } from '@/constants/chains';
+import { CHAINS, getChainDisplay, isNonEVMChain, tokenRankOf, type ChainKey, type AnyChainKey } from '@/constants/chains';
 import { loadTronWallet } from '@/services/chains/tronWallet';
 import { loadBtcWallet } from '@/services/chains/btcWallet';
+import { loadSolanaWallet } from '@/services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '@/services/mcgpSwapApi';
 import { getWalletBalances, normalizeWalletBalances, getDiscoveredTokens } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, formatTokenBalance } from '@/services/wallet';
@@ -85,6 +86,10 @@ export default function AllTokensScreen() {
       addr && customTokens.length > 0
         ? Promise.all(
             customTokens.map(async (t) => {
+              // Non-EVM custom tokens (e.g. imported SPL mints) have no ERC-20
+              // balanceOf; their balance rides in via the nonevm loaders'
+              // auto-discovery and dedups against the custom row below.
+              if (isNonEVMChain(t.chainKey)) return null;
               try {
                 const raw = await readErc20BalanceOf(t.contractAddress, addr, t.chainKey);
                 return Number(ethers.formatUnits(raw, t.decimals));
@@ -160,7 +165,8 @@ export default function AllTokensScreen() {
     // User-imported custom tokens — always surface them, with on-chain balance
     // attached when we can read it; 0 otherwise so the row never disappears.
     customTokens.forEach((t, i) => {
-      const chain = CHAINS[t.chainKey];
+      // getChainDisplay resolves both EVM and non-EVM chains (CHAINS is EVM-only).
+      const chain = getChainDisplay(t.chainKey);
       if (!chain) return;
       if (
         list.some(
@@ -270,6 +276,49 @@ export default function AllTokensScreen() {
         }
       }
     } catch { /* chain unavailable — skip BTC */ }
+
+    // Non-EVM (Solana): SOL shows as a native token (visible even at 0) so
+    // Solana is always reachable from "See all"; held SPL tokens (auto-
+    // discovered by the backend) appear alongside it.
+    try {
+      const sol = await loadSolanaWallet(addr || undefined);
+      if (sol) {
+        const solChain = getChainDisplay('solana');
+        for (const row of sol.balances) {
+          const isNative = !row.contractAddress;
+          // An SPL token the user already imported was added above (at 0) by the
+          // custom-token loop; hydrate that row's real balance instead of adding
+          // a duplicate.
+          const existing = row.contractAddress
+            ? list.find(
+                (a) =>
+                  a.chainKey === 'solana' &&
+                  a.contractAddress?.toLowerCase() === row.contractAddress?.toLowerCase(),
+              )
+            : undefined;
+          if (existing) {
+            existing.balance = parseFloat(row.balance) || 0;
+            existing.usdValue = parseFloat(row.usdValue) || 0;
+            continue;
+          }
+          list.push({
+            id: String(id++),
+            symbol: row.symbol,
+            name: row.symbol === 'SOL' ? 'Solana' : row.name,
+            balance: parseFloat(row.balance) || 0,
+            usdValue: parseFloat(row.usdValue) || 0,
+            iconColor: solChain?.iconColor || '#14F195',
+            // SOL gets the chain logo; SPL tokens reuse the registry logo when known.
+            iconUrl: isNative ? solChain?.iconUrl : tokenList.find((t) => t.symbol === row.symbol)?.iconUrl,
+            chainKey: 'solana',
+            chainName: 'Solana',
+            isNative,
+            contractAddress: row.contractAddress || undefined,
+            decimals: row.decimals,
+          });
+        }
+      }
+    } catch { /* chain unavailable — skip Solana */ }
 
     // Spendable premium MCGP (Contract B, not ERC-20) — its own tagged row,
     // distinct from any ordinary (withdrawn) ERC-20 MCGP, reachable from "See

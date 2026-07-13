@@ -3,12 +3,16 @@ import {
   deriveBtcAddress,
   deriveBtcPrivateKey,
   deriveSolanaAddress,
+  deriveSolanaPrivateKey,
   isValidBtcAddress,
+  isValidSolanaAddress,
 } from '../derivation';
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
-import { bech32 } from '@scure/base';
+import { bech32, base58 } from '@scure/base';
+import { bytesToHex } from '@noble/hashes/utils';
 
 // Canonical BIP-39 test mnemonic.
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -41,14 +45,44 @@ describe('non-EVM derivation (one seed, standard paths)', () => {
     expect(a).toMatch(/^T[1-9A-HJ-NP-Za-km-z]{33}$/);
   });
 
-  it('Solana produces a base58 ed25519 pubkey (m/44h/501h/0h/0h)', () => {
-    const a = deriveSolanaAddress(M);
-    expect(a).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}$/);
+  it('Solana matches the Phantom vector (m/44h/501h/0h/0h)', () => {
+    // Phantom derives this address from the canonical mnemonic at the standard
+    // Solana path — guards the "one seed, reproducible in Phantom" promise.
+    expect(deriveSolanaAddress(M)).toBe('HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk');
+  });
+
+  it('Solana private key pairs with the derived address', () => {
+    const priv = deriveSolanaPrivateKey(M);
+    expect(priv).toBe('37df573b3ac4ad5b522e064e25b63ea16bcbe79d449e81a0268d1047948bb445');
+    // ed25519 pubkey from the seed key, base58-encoded, equals the address.
+    const pub = ed25519.getPublicKey(priv);
+    expect(base58.encode(pub)).toBe(deriveSolanaAddress(M));
   });
 
   it('is deterministic', () => {
     expect(deriveTronAddress(M)).toBe(deriveTronAddress(M));
     expect(deriveSolanaAddress(M)).toBe(deriveSolanaAddress(M));
+  });
+});
+
+describe('isValidSolanaAddress', () => {
+  it('accepts a base58 32-byte address', () => {
+    expect(isValidSolanaAddress('HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk')).toBe(true);
+    expect(isValidSolanaAddress(deriveSolanaAddress(M))).toBe(true);
+    // The USDC mint is a valid 32-byte account address.
+    expect(isValidSolanaAddress('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')).toBe(true);
+  });
+
+  it('rejects malformed / wrong-length / non-base58 addresses', () => {
+    const bad = [
+      '',
+      '0x14dC79964da2C08b23698B3D3cc7Ca32193d9955', // EVM (0/O/I/l not in base58)
+      'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', // Tron (34 chars but not 32 bytes)
+      'abc', // too short
+      base58.encode(new Uint8Array(31)), // 31 bytes
+      base58.encode(new Uint8Array(33)), // 33 bytes
+    ];
+    for (const a of bad) expect(isValidSolanaAddress(a)).toBe(false);
   });
 });
 
