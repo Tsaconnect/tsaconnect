@@ -1130,6 +1130,11 @@ type submitNonEVMRequest struct {
 // Assembles a signed tx from payloads + signatures and broadcasts it.
 // Query param: ?chain=tron
 func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	chainKey := c.Query("chain")
 	network := resolveNetwork(c)
 	var req submitNonEVMRequest
@@ -1146,6 +1151,24 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
 	}
+	// The audit row's Address comes from the client, so verify req.From is an
+	// address THIS user registered for this chain before we broadcast + record.
+	// Without this a caller could broadcast their own tx while logging another
+	// user's address, poisoning the activity/audit trail (Tampering/Repudiation).
+	// Registration is idempotent and runs on every wallet load, so a legitimate
+	// sender is always registered by the time they send.
+	var owned int64
+	if err := config.DB.Model(&models.WalletAddress{}).
+		Where("user_id = ? AND chain_key = ? AND address = ?", user.ID, chainKey, req.From).
+		Count(&owned).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "failed to verify sender")
+		return
+	}
+	if owned == 0 {
+		utils.ErrorResponse(c, http.StatusForbidden, "sender address is not registered to this account")
+		return
+	}
+
 	hash, err := client.AssembleAndBroadcast(c.Request.Context(), req.Prepared, req.Sigs)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, err.Error())
@@ -1162,7 +1185,7 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 	activity := models.WalletActivity{
 		ChainKey:  chainKey,
 		Network:   network,
-		Address:   req.From,
+		Address:   req.From, // verified above to be a user-registered address
 		Hash:      hash,
 		Direction: "out",
 		AmountRaw: amount,
@@ -1180,6 +1203,20 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 // the hash is interpolated into an upstream provider URL path.
 var nonEVMTxHashRe = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
+// solanaSigRe matches a base58-encoded 64-byte Solana signature (~87–88 chars).
+// Solana txids are base58, not hex, so they need their own gate.
+var solanaSigRe = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{80,90}$`)
+
+// validNonEVMTxHash validates a tx hash per family before it is used in a status
+// lookup. Tron/BTC interpolate the hash into an upstream provider URL path (hex
+// only); Solana passes a base58 signature to solana-go.
+func validNonEVMTxHash(family, hash string) bool {
+	if family == "solana" {
+		return solanaSigRe.MatchString(hash)
+	}
+	return nonEVMTxHashRe.MatchString(hash)
+}
+
 // GetNonEVMTxStatus handles GET /api/wallet/nonevm/tx-status.
 // Returns the status of a non-EVM transaction by hash.
 // Query params: ?chain=tron&hash=<txHash>
@@ -1187,10 +1224,6 @@ func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 	chainKey := c.Query("chain")
 	network := resolveNetwork(c)
 	hash := c.Query("hash")
-	if !nonEVMTxHashRe.MatchString(hash) {
-		utils.ErrorResponse(c, http.StatusBadRequest, "invalid tx hash")
-		return
-	}
 	if h.ChainRegistry == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
 		return
@@ -1198,6 +1231,11 @@ func (h *Handlers) GetNonEVMTxStatus(c *gin.Context) {
 	client, ok := h.ChainRegistry.ForKey(network, chainKey)
 	if !ok {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "chain unavailable")
+		return
+	}
+	// Validate per family AFTER resolving the client (hex for Tron/BTC, base58 for Solana).
+	if !validNonEVMTxHash(client.Family(), hash) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid tx hash")
 		return
 	}
 	st, err := client.GetTxStatus(c.Request.Context(), hash)
