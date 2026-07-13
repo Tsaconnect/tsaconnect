@@ -19,6 +19,7 @@ import { getActiveWallet } from '@/services/wallet';
 import { NONEVM_CHAINS, isNonEVMChain, tokenRankOf, type AnyChainKey } from '@/constants/chains';
 import { getTronAddress } from '@/services/chains/tronWallet';
 import { getBtcAddress } from '@/services/chains/btcWallet';
+import { getSolanaAddress } from '@/services/chains/solanaWallet';
 import { useTokens } from '@/hooks/useTokens';
 import { useTheme } from '@/theme';
 import {
@@ -75,6 +76,13 @@ const NONEVM_RECEIVE_ITEMS: ReceiveItem[] = [
     chainKey: 'btc', chainName: NONEVM_CHAINS.btc.name,
     chainShortName: NONEVM_CHAINS.btc.shortName, chainIconColor: NONEVM_CHAINS.btc.iconColor,
     chainIconUrl: NONEVM_CHAINS.btc.iconUrl,
+  },
+  {
+    id: 'SOL-solana', symbol: 'SOL', name: 'Solana',
+    iconColor: NONEVM_CHAINS.solana.iconColor, iconUrl: NONEVM_CHAINS.solana.iconUrl,
+    chainKey: 'solana', chainName: NONEVM_CHAINS.solana.name,
+    chainShortName: NONEVM_CHAINS.solana.shortName, chainIconColor: NONEVM_CHAINS.solana.iconColor,
+    chainIconUrl: NONEVM_CHAINS.solana.iconUrl,
   },
 ];
 
@@ -336,6 +344,7 @@ export default function FundScreen() {
   const [walletAddress, setWalletAddress] = useState('');
   const [tronAddress, setTronAddress] = useState('');
   const [btcAddress, setBtcAddress] = useState('');
+  const [solanaAddress, setSolanaAddress] = useState('');
   const [search, setSearch] = useState('');
   const [chainFilter, setChainFilter] = useState<AnyChainKey | 'all'>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -343,17 +352,19 @@ export default function FundScreen() {
 
   useEffect(() => {
     getActiveWallet().then(addr => { if (addr) setWalletAddress(addr); });
-    // Same seed, standard derivation paths — reproduce the TronLink address
-    // and the Sparrow/Electrum BIP-84 address respectively.
+    // Same seed, standard derivation paths — reproduce the TronLink, the
+    // Sparrow/Electrum BIP-84, and the Phantom addresses respectively.
     getTronAddress().then(addr => { if (addr) setTronAddress(addr); }).catch(() => {});
     getBtcAddress().then(addr => { if (addr) setBtcAddress(addr); }).catch(() => {});
+    getSolanaAddress().then(addr => { if (addr) setSolanaAddress(addr); }).catch(() => {});
   }, []);
 
   // The deposit address depends on the item's chain family: EVM chains share
-  // the one 0x address; Tron and BTC each derive their own.
+  // the one 0x address; Tron, BTC, and Solana each derive their own.
   const addressFor = (item: ReceiveItem): string => {
     if (item.chainKey === 'tron') return tronAddress;
     if (item.chainKey === 'btc') return btcAddress;
+    if (item.chainKey === 'solana') return solanaAddress;
     return isNonEVMChain(item.chainKey) ? '' : walletAddress;
   };
 
@@ -405,7 +416,7 @@ export default function FundScreen() {
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allItems, search, chainFilter, walletAddress, tronAddress, btcAddress]);
+  }, [allItems, search, chainFilter, walletAddress, tronAddress, btcAddress, solanaAddress]);
 
   const popular = filtered.filter(i => POPULAR.includes(i.symbol)).sort(byRank);
   const rest = filtered.filter(i => !POPULAR.includes(i.symbol)).sort(byRank);

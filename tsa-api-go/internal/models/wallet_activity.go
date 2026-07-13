@@ -9,20 +9,26 @@ import (
 
 // WalletActivity is a cached, normalized non-EVM transaction history row.
 type WalletActivity struct {
-	ID            uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	ChainKey      string    `gorm:"size:16;not null;uniqueIndex:idx_chain_hash_dir" json:"chainKey"`
-	Network       string    `gorm:"size:16;not null;default:'mainnet'" json:"network"` // which chain network the tx is on
-	Address       string    `gorm:"size:128;not null;index" json:"address"`
-	Hash          string    `gorm:"size:128;not null;uniqueIndex:idx_chain_hash_dir" json:"hash"`
-	Direction     string    `gorm:"size:4;not null;uniqueIndex:idx_chain_hash_dir" json:"direction"` // "in" | "out"
-	AmountRaw     string    `gorm:"type:numeric(78,0);not null" json:"amountRaw"`
-	Symbol        string    `gorm:"size:16;not null" json:"symbol"`
-	Counterparty  string    `gorm:"size:128" json:"counterparty"`
-	Status        string    `gorm:"size:16;not null;default:'pending'" json:"status"`
-	Confirmations int64     `gorm:"not null;default:0" json:"confirmations"`
-	BlockTime     int64     `gorm:"index" json:"blockTime"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	// UserID scopes the row to the account that submitted the send. Nullable: it
+	// is set for outgoing sends recorded at submit time (verified against the
+	// user's registered address), but rows created before this column existed —
+	// and any future indexer-hydrated receive rows not tied to a submit — leave
+	// it NULL. Indexed for per-user audit queries.
+	UserID        *uuid.UUID `gorm:"type:uuid;index" json:"userId,omitempty"`
+	ChainKey      string     `gorm:"size:16;not null;uniqueIndex:idx_chain_hash_dir" json:"chainKey"`
+	Network       string     `gorm:"size:16;not null;default:'mainnet'" json:"network"` // which chain network the tx is on
+	Address       string     `gorm:"size:128;not null;index" json:"address"`
+	Hash          string     `gorm:"size:128;not null;uniqueIndex:idx_chain_hash_dir" json:"hash"`
+	Direction     string     `gorm:"size:4;not null;uniqueIndex:idx_chain_hash_dir" json:"direction"` // "in" | "out"
+	AmountRaw     string     `gorm:"type:numeric(78,0);not null" json:"amountRaw"`
+	Symbol        string     `gorm:"size:16;not null" json:"symbol"`
+	Counterparty  string     `gorm:"size:128" json:"counterparty"`
+	Status        string     `gorm:"size:16;not null;default:'pending'" json:"status"`
+	Confirmations int64      `gorm:"not null;default:0" json:"confirmations"`
+	BlockTime     int64      `gorm:"index" json:"blockTime"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 func (WalletActivity) TableName() string { return "wallet_activity" }

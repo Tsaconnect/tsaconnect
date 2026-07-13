@@ -6,6 +6,7 @@ import {
   getTokensForChain,
   type TokenConfig,
   type ChainKey,
+  type AnyChainKey,
   type ChainConfig,
 } from '../constants/chains';
 import { fetchSupportedTokens } from '../services/walletApi';
@@ -15,7 +16,10 @@ const CUSTOM_TOKENS_KEY_PREFIX = 'tsa-custom-tokens-';
 
 export interface CustomToken extends TokenConfig {
   contractAddress: string;
-  chainKey: ChainKey;
+  // AnyChainKey so non-EVM tokens (e.g. an imported SPL mint on Solana) can be
+  // persisted alongside EVM ERC-20s. Consumers that do EVM-only work (on-chain
+  // balanceOf, CHAINS lookup) must guard with isNonEVMChain before narrowing.
+  chainKey: AnyChainKey;
   custom: true;
   importedAt: string;
 }

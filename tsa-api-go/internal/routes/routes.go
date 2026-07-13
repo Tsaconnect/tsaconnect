@@ -394,12 +394,30 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		walletGroup.GET("/resolve/:username", h.ResolveUsername)
 		// Non-EVM (family) wallet endpoints — dormant-safe: each handler returns
 		// 503 "chain unavailable" when ChainRegistry is nil or ForKey misses.
+		//
+		// The read routes each hit a shared upstream RPC/indexer whose free-tier
+		// quota one account could exhaust from a single IP, so throttle them
+		// per authenticated user (not just per IP). 60/min is generous for the
+		// app's usage (a wallet load fires a handful) but caps abuse well under
+		// the gateway budget. Registration/prepare/submit are naturally bounded
+		// by user action and keep the global IP limiter only.
+		nonEVMReadLimit := middleware.RateLimiterBy(60, time.Minute, func(c *gin.Context) string {
+			v, _ := c.Get("user")
+			switch u := v.(type) {
+			case models.User:
+				return "nonevm:" + u.ID.String()
+			case *models.User:
+				return "nonevm:" + u.ID.String()
+			}
+			return "" // falls back to client IP inside RateLimiterBy
+		})
 		walletGroup.POST("/nonevm/register", h.RegisterNonEVMAddress)
-		walletGroup.GET("/nonevm/balances", h.GetNonEVMBalances)
+		walletGroup.GET("/nonevm/balances", nonEVMReadLimit, h.GetNonEVMBalances)
 		walletGroup.POST("/nonevm/prepare-tx", h.PrepareNonEVMTx)
 		walletGroup.POST("/nonevm/submit-tx", h.SubmitNonEVMTx)
-		walletGroup.GET("/nonevm/tx-status", h.GetNonEVMTxStatus)
-		walletGroup.GET("/nonevm/history", h.GetNonEVMHistory)
+		walletGroup.GET("/nonevm/tx-status", nonEVMReadLimit, h.GetNonEVMTxStatus)
+		walletGroup.GET("/nonevm/history", nonEVMReadLimit, h.GetNonEVMHistory)
+		walletGroup.GET("/nonevm/token-info", nonEVMReadLimit, h.GetNonEVMTokenInfo)
 	}
 
 	// Swap / OTC marketplace routes

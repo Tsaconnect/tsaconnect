@@ -780,6 +780,50 @@ func buildNonEVMChains() map[string]NonEVMChainConfig {
 	}
 	addBTC("mainnet", os.Getenv("BTC_MAINNET_ESPLORA_URL"))
 	addBTC("testnet", os.Getenv("BTC_TESTNET_ESPLORA_URL"))
+
+	// Solana: RPCURL is a JSON-RPC endpoint (public mainnet-beta/devnet, or a
+	// keyed provider like Helius). Same dormancy rule — unset env = chain off.
+	// Tokens map symbol → SPL mint; USDC/USDT are seeded when their mint env is
+	// present, and users can still import any other mint at runtime.
+	addSolana := func(network, rpc, usdcMint, usdtMint string) {
+		if rpc == "" {
+			return
+		}
+		tokens := map[string]string{}
+		if usdcMint != "" {
+			tokens["USDC"] = usdcMint
+		}
+		if usdtMint != "" {
+			tokens["USDT"] = usdtMint
+		}
+		out[network+":solana"] = NonEVMChainConfig{
+			ChainKey:       "solana",
+			Family:         "solana",
+			Network:        network,
+			RPCURL:         rpc,
+			NativeSymbol:   "SOL",
+			NativeDecimals: 9,
+			Tokens:         tokens,
+		}
+	}
+	addSolana("mainnet",
+		os.Getenv("SOLANA_MAINNET_RPC_URL"),
+		os.Getenv("SOLANA_MAINNET_USDC_MINT"),
+		os.Getenv("SOLANA_MAINNET_USDT_MINT"),
+	)
+	addSolana("testnet", // "testnet" binds to Solana devnet for the app's network toggle
+		os.Getenv("SOLANA_DEVNET_RPC_URL"),
+		os.Getenv("SOLANA_DEVNET_USDC_MINT"),
+		os.Getenv("SOLANA_DEVNET_USDT_MINT"),
+	)
+	// Back-compat: a single SOLANA_RPC_URL maps to SOLANA_NETWORK (default
+	// mainnet) unless that network was already configured above.
+	if rpc := os.Getenv("SOLANA_RPC_URL"); rpc != "" {
+		network := getEnv("SOLANA_NETWORK", "mainnet")
+		if _, exists := out[network+":solana"]; !exists {
+			addSolana(network, rpc, os.Getenv("SOLANA_USDC_MINT"), os.Getenv("SOLANA_USDT_MINT"))
+		}
+	}
 	return out
 }
 
