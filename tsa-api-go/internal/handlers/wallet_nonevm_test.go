@@ -79,7 +79,7 @@ func nonEVMTables(t *testing.T, db *gorm.DB) {
 			chain_key TEXT NOT NULL, family TEXT NOT NULL, address TEXT NOT NULL,
 			created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS wallet_activity (
-			id TEXT PRIMARY KEY, chain_key TEXT NOT NULL, network TEXT NOT NULL DEFAULT 'mainnet',
+			id TEXT PRIMARY KEY, user_id TEXT, chain_key TEXT NOT NULL, network TEXT NOT NULL DEFAULT 'mainnet',
 			address TEXT NOT NULL, hash TEXT NOT NULL, direction TEXT NOT NULL,
 			amount_raw TEXT NOT NULL, symbol TEXT NOT NULL, counterparty TEXT,
 			status TEXT NOT NULL DEFAULT 'pending', confirmations INTEGER NOT NULL DEFAULT 0,
@@ -166,10 +166,12 @@ func TestSubmitNonEVMTx_AllowsRegisteredSender(t *testing.T) {
 	if !fake.broadcasted {
 		t.Errorf("expected broadcast for a registered sender")
 	}
-	// The audit row is recorded with the verified address.
+	// The audit row is recorded with the verified address AND scoped to the user.
 	var count int64
-	db.Model(&models.WalletActivity{}).Where("hash = ? AND address = ?", "txhash123", from).Count(&count)
+	db.Model(&models.WalletActivity{}).
+		Where("hash = ? AND address = ? AND user_id = ?", "txhash123", from, user.ID.String()).
+		Count(&count)
 	if count != 1 {
-		t.Errorf("expected 1 activity row for the verified sender, got %d", count)
+		t.Errorf("expected 1 activity row scoped to the verified sender+user, got %d", count)
 	}
 }

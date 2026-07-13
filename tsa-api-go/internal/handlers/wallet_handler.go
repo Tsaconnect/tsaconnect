@@ -1183,6 +1183,7 @@ func (h *Handlers) SubmitNonEVMTx(c *gin.Context) {
 		amount = "0"
 	}
 	activity := models.WalletActivity{
+		UserID:    &user.ID, // scope the audit row to the verified submitter
 		ChainKey:  chainKey,
 		Network:   network,
 		Address:   req.From, // verified above to be a user-registered address
