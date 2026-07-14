@@ -22,6 +22,12 @@ jest.mock('../walletApi', () => ({
 
 jest.mock('../lifi', () => ({
   buildERC20ApproveCalldata: () => '0xapprovecalldata',
+  isSolanaLiFiChain: (id: number) => id === 1151111081099710,
+}));
+
+const mockExecuteLiFiSolanaSwap = jest.fn();
+jest.mock('../chains/solanaLifi', () => ({
+  executeLiFiSolanaSwap: (...a: any[]) => mockExecuteLiFiSolanaSwap(...a),
 }));
 
 jest.mock('../swapErrors', () => ({
@@ -129,6 +135,37 @@ describe('executeLiFiSwap — with approval', () => {
     await expect(executeLiFiSwap(params({ quote: approvalQuote() }))).rejects.toThrow(/insufficient funds/i);
     expect(mockWithRpcFallback).not.toHaveBeenCalled();
     expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('executeLiFiSwap — Solana source routes', () => {
+  const SOLANA_CHAIN_ID = 1151111081099710;
+
+  it('delegates to the Solana executor with raw amount + tx data, skipping the EVM path', async () => {
+    mockExecuteLiFiSolanaSwap.mockResolvedValue('5solhash');
+    const q = quote({ transactionRequest: { data: 'c29sYW5hdHg=' } }); // no EVM fields at all
+
+    const hash = await executeLiFiSwap(params({
+      quote: q, fromSymbol: 'SOL', fromDecimals: 9, fromAmount: '1.5', fromChainId: SOLANA_CHAIN_ID,
+    }));
+
+    expect(hash).toBe('5solhash');
+    expect(mockExecuteLiFiSolanaSwap).toHaveBeenCalledWith(expect.objectContaining({
+      txDataB64: 'c29sYW5hdHg=',
+      fromAmountRaw: '1500000000', // 1.5 SOL in lamports
+      fromSymbol: 'SOL',
+      walletAddress: WALLET,
+    }));
+    // The EVM machinery must never run for a Solana source.
+    expect(mockFetchPendingNonce).not.toHaveBeenCalled();
+    expect(mockSignLiFiTransaction).not.toHaveBeenCalled();
+    expect(mockSubmitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('still runs the EVM path when fromChainId is an EVM chain (EVM→SOL direction)', async () => {
+    const hash = await executeLiFiSwap(params({ fromChainId: 56 }));
+    expect(hash).toBe('0xswaphash');
+    expect(mockExecuteLiFiSolanaSwap).not.toHaveBeenCalled();
   });
 });
 

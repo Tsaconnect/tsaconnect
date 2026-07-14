@@ -176,7 +176,7 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 }
 
 // GetChains handles GET /api/swap/lifi/chains
-// Proxies LiFi EVM chain list with a 24-hour in-memory cache.
+// Proxies the LiFi chain list (EVM + Solana) with a 24-hour in-memory cache.
 func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	h.mu.Lock()
 	if h.chainsCache != nil && time.Since(h.chainsCache.fetchedAt) < 24*time.Hour {
@@ -187,7 +187,7 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes=EVM")
+	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes=EVM,SVM")
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return

@@ -1,17 +1,19 @@
 // services/lifiFlow.ts
 //
-// Execute a quoted LiFi swap: (optional) approve → wait mined → swap, with
-// pending-nonce management and RPC fallback. Extracted VERBATIM from
-// screens/all-swap.tsx handleSwap so the All Swap screen and the Spot Trade
-// desk share one implementation — the screens keep only their own state
-// wiring. Throws Error with a user-facing message on any failure; resolves
-// with the swap tx hash on success.
+// Execute a quoted LiFi swap. EVM source: (optional) approve → wait mined →
+// swap, with pending-nonce management and RPC fallback (extracted VERBATIM
+// from screens/all-swap.tsx handleSwap so the All Swap screen and the Spot
+// Trade desk share one implementation). Solana source: ed25519-sign LiFi's
+// pre-built tx and broadcast via the nonevm path — no approve, no nonce
+// (services/chains/solanaLifi.ts). Throws Error with a user-facing message on
+// any failure; resolves with the swap tx hash on success.
 
 import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
 import { submitTransaction } from '@/services/walletApi';
-import { buildERC20ApproveCalldata, type LiFiQuote } from '@/services/lifi';
+import { buildERC20ApproveCalldata, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
+import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { mapSubmitError } from '@/services/swapErrors';
 
 export interface ExecuteLiFiSwapParams {
@@ -22,6 +24,11 @@ export interface ExecuteLiFiSwapParams {
   /** Human-units amount the user entered (what the quote was fetched for). */
   fromAmount: string;
   walletAddress: string;
+  /**
+   * LiFi chain id the from-token lives on. Required to route Solana-source
+   * swaps — a Solana quote's transactionRequest has no chainId to branch on.
+   */
+  fromChainId?: number;
   /** Progress labels ("Step 1 of 2: Approving token…", …). */
   onStage?: (label: string) => void;
 }
@@ -32,9 +39,26 @@ export async function executeLiFiSwap({
   fromDecimals,
   fromAmount,
   walletAddress,
+  fromChainId,
   onStage,
 }: ExecuteLiFiSwapParams): Promise<string> {
-  const chainKeyResult = getChainByChainId(quote.transactionRequest.chainId);
+  if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
+    return executeLiFiSolanaSwap({
+      txDataB64: quote.transactionRequest.data,
+      fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      fromSymbol,
+      walletAddress,
+      onStage,
+    });
+  }
+
+  // EVM path: the quote must carry a full EVM transactionRequest. The fields
+  // are optional on the type only because Solana routes omit them.
+  const { chainId: evmChainId, to: evmTo, value: evmValue, gasLimit: evmGasLimit } = quote.transactionRequest;
+  if (evmChainId === undefined || !evmTo || evmValue === undefined || !evmGasLimit) {
+    throw new Error('Unsupported chain in route');
+  }
+  const chainKeyResult = getChainByChainId(evmChainId);
   if (!chainKeyResult) throw new Error('Unsupported chain in route');
   const chainKey = chainKeyResult.key;
 
@@ -56,7 +80,7 @@ export async function executeLiFiSwap({
       to: quote.approvalToken,
       data: calldata,
       value: '0x0',
-      chainId: quote.transactionRequest.chainId,
+      chainId: evmChainId,
       nonce,
       gasLimit: '65000',
       ...(quote.transactionRequest.maxFeePerGas
@@ -73,7 +97,7 @@ export async function executeLiFiSwap({
     try {
       // walletAddress is the wallet the nonce was fetched for — declare it so
       // the BE's signer guard validates against it (not the registered wallet).
-      approveRes = await submitTransaction(signedApprove, 'approve', fromSymbol, quote.approvalToken, humanAmount, quote.transactionRequest.chainId, walletAddress);
+      approveRes = await submitTransaction(signedApprove, 'approve', fromSymbol, quote.approvalToken, humanAmount, evmChainId, walletAddress);
     } catch (e) {
       console.error('[swap] approve submitTransaction threw', { chainKey, e });
       throw new Error('Token approval failed. The network may be congested — try again.');
@@ -123,11 +147,11 @@ export async function executeLiFiSwap({
   }
 
   onStage?.(quote.approvalAddress ? 'Step 2 of 2: Executing swap…' : 'Executing swap…');
-  const swapTx = { ...quote.transactionRequest, nonce };
+  const swapTx = { ...quote.transactionRequest, to: evmTo, value: evmValue, chainId: evmChainId, gasLimit: evmGasLimit, nonce };
   const signedSwap = await signLiFiTransaction(swapTx);
   let res;
   try {
-    res = await submitTransaction(signedSwap, 'swap', fromSymbol, quote.transactionRequest.to, humanAmount, quote.transactionRequest.chainId, walletAddress);
+    res = await submitTransaction(signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress);
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });
     throw new Error('Swap broadcast failed. The network may be congested — try again.');

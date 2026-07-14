@@ -1,7 +1,12 @@
-import { getLiFiTokens, getLiFiQuote, buildERC20ApproveCalldata } from './lifi';
+import { getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, SOLANA_LIFI_CHAIN_ID } from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue('Bearer test-token'),
+}));
+
+const mockGetNetwork = jest.fn(() => 'mainnet');
+jest.mock('../hooks/useNetwork', () => ({
+  getNetwork: () => mockGetNetwork(),
 }));
 
 const mockFetch = jest.fn();
@@ -23,6 +28,30 @@ const MOCK_QUOTE = {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockGetNetwork.mockReturnValue('mainnet');
+});
+
+describe('getLiFiChains', () => {
+  const CHAINS_BODY = {
+    chains: [
+      { id: 56, name: 'BSC', key: 'bsc', coin: 'BNB', chainType: 'EVM' },
+      { id: SOLANA_LIFI_CHAIN_ID, name: 'Solana', key: 'sol', coin: 'SOL', chainType: 'SVM' },
+    ],
+  };
+
+  it('fetches through the backend proxy and includes Solana on mainnet', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
+    const chains = await getLiFiChains();
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/swap/lifi/chains'), expect.any(Object));
+    expect(chains.map(c => c.id)).toEqual([56, SOLANA_LIFI_CHAIN_ID]);
+  });
+
+  it('hides Solana in testnet mode (swaps are mainnet-only)', async () => {
+    mockGetNetwork.mockReturnValue('testnet');
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
+    const chains = await getLiFiChains();
+    expect(chains.map(c => c.id)).toEqual([56]);
+  });
 });
 
 describe('getLiFiTokens', () => {
@@ -70,6 +99,19 @@ describe('getLiFiQuote', () => {
   it('throws on non-ok response', async () => {
     mockFetch.mockResolvedValueOnce({ ok: false, json: async () => ({ message: 'No route found' }) });
     await expect(getLiFiQuote({ fromChain: 56, toChain: 1, fromToken: '0xabc', toToken: '0xdef', fromAmount: '1000000', fromAddress: '0x123' })).rejects.toThrow('No route found');
+  });
+
+  it('forwards toAddress for cross-VM routes and omits it otherwise', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => MOCK_QUOTE });
+    await getLiFiQuote({
+      fromChain: SOLANA_LIFI_CHAIN_ID, toChain: 42161, fromToken: 'SOL', toToken: '0xdef',
+      fromAmount: '1000000000', fromAddress: 'So1anaAddr', toAddress: '0xEvmRecipient',
+    });
+    expect(mockFetch.mock.calls[0][0]).toContain('toAddress=0xEvmRecipient');
+
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => MOCK_QUOTE });
+    await getLiFiQuote({ fromChain: 56, toChain: 1, fromToken: '0xabc', toToken: '0xdef', fromAmount: '1', fromAddress: '0x123' });
+    expect(mockFetch.mock.calls[1][0]).not.toContain('toAddress');
   });
 });
 
