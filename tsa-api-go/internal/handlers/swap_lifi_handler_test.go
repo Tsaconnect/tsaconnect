@@ -42,8 +42,8 @@ func TestGetChains_ReturnsLiFiResponse(t *testing.T) {
 		if r.URL.Path != "/chains" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("chainTypes") != "EVM" {
-			t.Errorf("expected chainTypes=EVM, got %s", r.URL.Query().Get("chainTypes"))
+		if r.URL.Query().Get("chainTypes") != "EVM,SVM" {
+			t.Errorf("expected chainTypes=EVM,SVM, got %s", r.URL.Query().Get("chainTypes"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -269,6 +269,37 @@ func TestGetQuote_ForwardsParamsToLiFi(t *testing.T) {
 	r := setupTestRouter(h)
 
 	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain=56&toChain=1&fromToken=0xabc&toToken=0xdef&fromAmount=1000000&fromAddress=0x123", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Cross-VM routes (Solana↔EVM) carry the destination-chain address in
+// toAddress and use LiFi's non-numeric SVM chain id — both must pass through
+// the proxy untouched.
+func TestGetQuote_ForwardsSolanaChainAndToAddress(t *testing.T) {
+	const svmChainID = "1151111081099710"
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("fromChain") != svmChainID {
+			t.Errorf("expected fromChain=%s, got %s", svmChainID, q.Get("fromChain"))
+		}
+		if q.Get("toAddress") != "0x123" {
+			t.Errorf("expected toAddress=0x123, got %s", q.Get("toAddress"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"toAmount":"1000","transactionRequest":{"data":"AQAA"}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/quote?fromChain="+svmChainID+"&toChain=42161&fromToken=SOL&toToken=0xdef&fromAmount=1000000000&fromAddress=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&toAddress=0x123", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
