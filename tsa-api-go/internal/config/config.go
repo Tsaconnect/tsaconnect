@@ -824,6 +824,39 @@ func buildNonEVMChains() map[string]NonEVMChainConfig {
 			addSolana(network, rpc, os.Getenv("SOLANA_USDC_MINT"), os.Getenv("SOLANA_USDT_MINT"))
 		}
 	}
+
+	// Sui: RPCURL is a JSON-RPC fullnode endpoint (public mainnet/testnet or a
+	// keyed provider). Same dormancy rule — unset env = chain off. Tokens map
+	// symbol → coin type (e.g. "0x…::usdc::USDC"); USDC is seeded when its type
+	// env is present, and users can import any other coin type at runtime.
+	addSui := func(network, rpc, usdcType string) {
+		if rpc == "" {
+			return
+		}
+		tokens := map[string]string{}
+		if usdcType != "" {
+			tokens["USDC"] = usdcType
+		}
+		out[network+":sui"] = NonEVMChainConfig{
+			ChainKey:       "sui",
+			Family:         "sui",
+			Network:        network,
+			RPCURL:         rpc,
+			NativeSymbol:   "SUI",
+			NativeDecimals: 9,
+			Tokens:         tokens,
+		}
+	}
+	addSui("mainnet", os.Getenv("SUI_MAINNET_RPC_URL"), os.Getenv("SUI_MAINNET_USDC_TYPE"))
+	addSui("testnet", os.Getenv("SUI_TESTNET_RPC_URL"), os.Getenv("SUI_TESTNET_USDC_TYPE"))
+	// Back-compat: a single SUI_RPC_URL maps to SUI_NETWORK (default mainnet)
+	// unless that network was already configured above.
+	if rpc := os.Getenv("SUI_RPC_URL"); rpc != "" {
+		network := getEnv("SUI_NETWORK", "mainnet")
+		if _, exists := out[network+":sui"]; !exists {
+			addSui(network, rpc, os.Getenv("SUI_USDC_TYPE"))
+		}
+	}
 	return out
 }
 
