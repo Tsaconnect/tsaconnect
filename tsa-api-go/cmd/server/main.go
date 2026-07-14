@@ -17,6 +17,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/chains/btc"
 	"github.com/ojimcy/tsa-api-go/internal/chains/solana"
+	"github.com/ojimcy/tsa-api-go/internal/chains/sui"
 	"github.com/ojimcy/tsa-api-go/internal/chains/tron"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
@@ -55,6 +56,10 @@ func main() {
 		case "solana":
 			srpc := solana.NewRPC(tcfg.RPCURL)
 			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, solana.NewClient(tcfg, srpc))
+			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
+		case "sui":
+			srpc := sui.NewRPC(tcfg.RPCURL)
+			chainRegistry.Register(tcfg.Network, tcfg.ChainKey, sui.NewClient(tcfg, srpc))
 			log.Printf("chains: %s/%s registered (%s)", tcfg.Network, tcfg.ChainKey, tcfg.RPCURL)
 		}
 	}
