@@ -10,9 +10,10 @@
 // message-agnostic and handles both legacy and v0 versioned messages).
 import { base58, base64 } from '@scure/base';
 import { bytesToHex } from '@noble/hashes/utils';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../../constants/api/config';
+import { getAuthHeaders } from '../walletApi';
 import { getMnemonic } from '../wallet';
+import { getNetwork } from '../../hooks/useNetwork';
 import { deriveSolanaPrivateKey } from './derivation';
 import { signEd25519Message } from './sign';
 import { getSolanaAddress } from './solanaWallet';
@@ -30,13 +31,18 @@ export interface ParsedLiFiSolanaTx {
 }
 
 // Solana's compact-u16: 1-3 bytes, 7 value bits per byte, high bit = continue.
+// Rejects non-canonical encodings (a continuation followed by a zero byte) so
+// this parser can never read a value differently than the runtime would.
 function readCompactU16(bytes: Uint8Array, offset: number): { value: number; size: number } {
   let value = 0;
   for (let i = 0; i < 3; i++) {
     const b = bytes[offset + i];
     if (b === undefined) throw new Error('truncated compact-u16');
     value |= (b & 0x7f) << (7 * i);
-    if ((b & 0x80) === 0) return { value, size: i + 1 };
+    if ((b & 0x80) === 0) {
+      if (i > 0 && b === 0) throw new Error('non-canonical compact-u16');
+      return { value, size: i + 1 };
+    }
   }
   throw new Error('compact-u16 too long');
 }
@@ -55,13 +61,22 @@ export function parseLiFiSolanaTx(dataB64: string): ParsedLiFiSolanaTx {
   const msg = raw.slice(msgStart);
 
   // Versioned messages prefix the header with a version byte (0x80 | version).
+  // Only v0 exists today — refuse unknown versions rather than guess their
+  // layout (a legacy header byte can never be ≥ 0x80: that would mean 128+
+  // signatures, which cannot fit Solana's 1232-byte packet).
   let o = 0;
-  if ((msg[0] & 0x80) !== 0) o = 1;
+  if ((msg[0] & 0x80) !== 0) {
+    if (msg[0] !== 0x80) throw new Error('unsupported Solana transaction version');
+    o = 1;
+  }
   const numRequiredSignatures = msg[o];
   const keysCount = readCompactU16(msg, o + 3);
   let keyOffset = o + 3 + keysCount.size;
   if (numRequiredSignatures === 0 || numRequiredSignatures > keysCount.value) {
     throw new Error('malformed Solana transaction: bad signer count');
+  }
+  if (sigCount.value !== numRequiredSignatures) {
+    throw new Error('malformed Solana transaction: signature slot count mismatch');
   }
   if (msg.length < keyOffset + keysCount.value * 32) {
     throw new Error('malformed Solana transaction: truncated account keys');
@@ -72,11 +87,6 @@ export function parseLiFiSolanaTx(dataB64: string): ParsedLiFiSolanaTx {
     keyOffset += 32;
   }
   return { messageHex: bytesToHex(msg), requiredSigners };
-}
-
-async function authHeaders() {
-  const token = await AsyncStorage.getItem('authToken');
-  return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
 export interface ExecuteLiFiSolanaSwapParams {
@@ -101,6 +111,13 @@ export async function executeLiFiSolanaSwap({
   walletAddress,
   onStage,
 }: ExecuteLiFiSolanaSwapParams): Promise<string> {
+  // The broadcast is pinned to mainnet, so refuse to execute while the app is
+  // in testnet mode — the screen would be showing devnet balances against a
+  // real mainnet fund movement (Solana is hidden from swap pickers on testnet,
+  // but a selection made on mainnet survives the toggle).
+  if (getNetwork() === 'testnet') {
+    throw new Error('Swaps are mainnet-only. Switch the app back to mainnet to swap.');
+  }
   const solAddress = await getSolanaAddress(walletAddress);
   if (!solAddress) throw new Error('No Solana key for this wallet.');
 
@@ -126,7 +143,7 @@ export async function executeLiFiSolanaSwap({
   const sigHex = signEd25519Message(parsed.messageHex, deriveSolanaPrivateKey(mnemonic));
 
   onStage?.('Broadcasting swap…');
-  const headers = await authHeaders();
+  const headers = await getAuthHeaders();
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=solana&network=${SWAP_NETWORK}`, {
     method: 'POST',
     headers,
