@@ -1,12 +1,27 @@
 import { ethers } from 'ethers';
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
+import { getNetwork } from '../hooks/useNetwork';
+
+// LiFi's non-numeric chain id for Solana (SVM family). Safe as a JS number
+// (~2^50 < 2^53) but has no entry in the EVM CHAINS map — branch on it before
+// any getChainByChainId lookup.
+export const SOLANA_LIFI_CHAIN_ID = 1151111081099710;
+
+// LiFi's address for native SOL (the system program id), the SVM analogue of
+// 0xeeee…/0x0000… native markers on EVM chains.
+export const SOLANA_NATIVE_ADDRESS = '11111111111111111111111111111111';
+
+export function isSolanaLiFiChain(chainId: number): boolean {
+  return chainId === SOLANA_LIFI_CHAIN_ID;
+}
 
 export interface LiFiChain {
   id: number;
   name: string;
   key: string;
   coin: string;
+  chainType?: string; // 'EVM' | 'SVM'
   nativeToken?: { logoURI?: string };
 }
 
@@ -27,15 +42,24 @@ export interface LiFiQuoteParams {
   toToken: string;
   fromAmount: string;
   fromAddress: string;
+  /**
+   * Destination-chain recipient. REQUIRED on cross-VM routes (Solana↔EVM),
+   * where the sending address can't receive on the destination chain.
+   */
+  toAddress?: string;
   slippage?: string;
 }
 
 export interface LiFiTransactionRequest {
-  to: string;
+  /**
+   * EVM: 0x calldata. Solana: the base64-serialized transaction built by LiFi
+   * (and the ONLY field present — no to/value/gas on SVM routes).
+   */
   data: string;
-  value: string;
-  chainId: number;
-  gasLimit: string;
+  to?: string;
+  value?: string;
+  chainId?: number;
+  gasLimit?: string;
   gasPrice?: string;
   maxFeePerGas?: string;
   maxPriorityFeePerGas?: string;
@@ -55,10 +79,15 @@ export interface LiFiQuote {
 }
 
 export async function getLiFiChains(): Promise<LiFiChain[]> {
-  const res = await fetch('https://li.quest/v1/chains?chainTypes=EVM');
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/chains`, { headers });
   if (!res.ok) throw new Error('Failed to fetch LiFi chains');
   const data = await res.json();
-  return Array.isArray(data?.chains) ? data.chains : [];
+  const chains: LiFiChain[] = Array.isArray(data?.chains) ? data.chains : [];
+  // Swaps are mainnet-only (LiFi has no testnets). In testnet mode the wallet's
+  // Solana side points at devnet, so hide Solana from the swap surface rather
+  // than let a mainnet swap draw on a devnet-displayed balance.
+  return getNetwork() === 'testnet' ? chains.filter(c => !isSolanaLiFiChain(c.id)) : chains;
 }
 
 export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
@@ -143,6 +172,7 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     toToken: params.toToken,
     fromAmount: params.fromAmount,
     fromAddress: params.fromAddress,
+    ...(params.toAddress ? { toAddress: params.toAddress } : {}),
     ...(params.slippage ? { slippage: params.slippage } : {}),
   });
 
