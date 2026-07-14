@@ -8,6 +8,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { base58check, bech32, bech32m, base58 } from '@scure/base';
 import { hmac } from '@noble/hashes/hmac';
 import { sha512 } from '@noble/hashes/sha512';
+import { blake2b } from '@noble/hashes/blake2b';
 import { bytesToHex } from '@noble/hashes/utils';
 
 export const DERIVATION_PATHS = {
@@ -15,6 +16,7 @@ export const DERIVATION_PATHS = {
   btc: "m/84'/0'/0'/0/0",
   btcTestnet: "m/84'/1'/0'/0/0", // BIP-84 testnet coin type
   solana: "m/44'/501'/0'/0'",
+  sui: "m/44'/784'/0'/0'/0'", // SLIP-0044 coin type 784, all-hardened (matches @mysten/sui)
 } as const;
 
 export type BtcNetwork = 'mainnet' | 'testnet';
@@ -165,6 +167,41 @@ export function isValidSolanaAddress(addr: string): boolean {
   } catch {
     return false;
   }
+}
+
+// --- Sui (ed25519, same SLIP-0010 scheme as Solana; different path + address) ---
+
+// Sui derives the 32-byte ed25519 seed at m/44'/784'/0'/0'/0' (all hardened),
+// exactly like Solana but for coin type 784. The public/private key handling is
+// identical to Solana (@noble treats the 32-byte seed as the ed25519 key).
+export function deriveSuiPrivateKey(mnemonic: string): string {
+  const seed = mnemonicToSeedSync(mnemonic.trim());
+  return bytesToHex(ed25519Slip10(seed, DERIVATION_PATHS.sui));
+}
+
+// The 32-byte ed25519 public key hex. Sui gives no key recovery from a
+// signature (unlike secp256k1), so the app hands this to the backend alongside
+// the signature; the backend assembles the on-chain signature
+// base64(flag=0x00 || sig64 || pubkey32) and verifies it hashes to the sender.
+export function deriveSuiPublicKey(mnemonic: string): string {
+  return bytesToHex(ed25519.getPublicKey(deriveSuiPrivateKey(mnemonic)));
+}
+
+// A Sui address is 0x || hex(blake2b256(0x00 || pubkey)) — the 0x00 is the
+// ed25519 signature-scheme flag. 32-byte digest → 66-char address. Verified
+// against @mysten/sui.
+export function deriveSuiAddress(mnemonic: string): string {
+  const pub = ed25519.getPublicKey(deriveSuiPrivateKey(mnemonic));
+  const flagged = new Uint8Array(1 + pub.length); // flag 0x00 already set
+  flagged.set(pub, 1);
+  return '0x' + bytesToHex(blake2b(flagged, { dkLen: 32 }));
+}
+
+// Validate a Sui address: 0x + exactly 64 lowercase hex chars (32 bytes). Sui
+// accepts short forms in some tooling, but our derived/receive addresses are
+// always the full 32-byte form, and the backend validator requires the same.
+export function isValidSuiAddress(addr: string): boolean {
+  return /^0x[0-9a-fA-F]{64}$/.test(addr);
 }
 
 // --- SLIP-0010 ed25519 (all-hardened) ---

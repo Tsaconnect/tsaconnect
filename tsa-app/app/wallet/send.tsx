@@ -24,13 +24,15 @@ import {
 } from '../../constants/chains';
 import { useTokens } from '../../hooks/useTokens';
 import { isValidAddress, signTransaction, getActiveWallet } from '../../services/wallet';
-import { isValidTronAddress, isValidBtcAddress, isValidSolanaAddress } from '../../services/chains/derivation';
+import { isValidTronAddress, isValidBtcAddress, isValidSolanaAddress, isValidSuiAddress } from '../../services/chains/derivation';
 import { getTronAddress, getTronBalances } from '../../services/chains/tronWallet';
 import { prepareTron, broadcastTron, type SendTronParams, type TronPrepared } from '../../services/chains/tronSend';
 import { getBtcAddress, getBtcBalances } from '../../services/chains/btcWallet';
 import { prepareBtc, broadcastBtc, type SendBtcParams, type BtcPrepared } from '../../services/chains/btcSend';
 import { getSolanaAddress, getSolanaBalances } from '../../services/chains/solanaWallet';
 import { prepareSolana, broadcastSolana, type SendSolanaParams, type SolanaPrepared } from '../../services/chains/solanaSend';
+import { getSuiAddress, getSuiBalances } from '../../services/chains/suiWallet';
+import { prepareSui, broadcastSui, type SendSuiParams, type SuiPrepared } from '../../services/chains/suiSend';
 import { getNetwork } from '../../hooks/useNetwork';
 import {
   getWalletBalances,
@@ -139,6 +141,7 @@ const SendToken = () => {
     | { family: 'tron'; prepared: TronPrepared['prepared']; params: SendTronParams }
     | { family: 'btc'; prepared: BtcPrepared['prepared']; params: SendBtcParams }
     | { family: 'solana'; prepared: SolanaPrepared['prepared']; params: SendSolanaParams }
+    | { family: 'sui'; prepared: SuiPrepared['prepared']; params: SendSuiParams }
     | null
   >(null);
 
@@ -146,6 +149,7 @@ const SendToken = () => {
   const isTron = nonEvmFamily === 'tron';
   const isBtc = nonEvmFamily === 'btc';
   const isSolana = nonEvmFamily === 'solana';
+  const isSui = nonEvmFamily === 'sui';
 
   const getSupportedChainsForToken = useCallback((symbol: string): AnyChainKey[] => {
     const registryChains = tokens[symbol]?.chains ?? [];
@@ -228,8 +232,8 @@ const SendToken = () => {
         }
       }
 
-      // Non-EVM (Tron/BTC/Solana): derive each address and append its balances so
-      // TRX/USDT/BTC/SOL + SPL tokens appear in the token picker. Dormant-safe —
+      // Non-EVM (Tron/BTC/Solana/Sui): derive each address and append its balances
+      // so TRX/USDT/BTC/SOL/SUI + tokens appear in the token picker. Dormant-safe —
       // each chain yields nothing if unset.
       try {
         const tronAddr = await getTronAddress();
@@ -242,6 +246,10 @@ const SendToken = () => {
       try {
         const solAddr = await getSolanaAddress();
         if (solAddr) allBalances.push(...(await getSolanaBalances(solAddr)));
+      } catch { /* chain unavailable — skip */ }
+      try {
+        const suiAddr = await getSuiAddress();
+        if (suiAddr) allBalances.push(...(await getSuiBalances(suiAddr)));
       } catch { /* chain unavailable — skip */ }
 
       setBalances(allBalances);
@@ -278,6 +286,7 @@ const SendToken = () => {
     if (isTron) return isValidTronAddress(addr);
     if (isBtc) return isValidBtcAddress(addr, getNetwork());
     if (isSolana) return isValidSolanaAddress(addr);
+    if (isSui) return isValidSuiAddress(addr);
     return isValidAddress(addr);
   };
 
@@ -353,6 +362,29 @@ const SendToken = () => {
     };
   };
 
+  // Build the Sui send params for the selected token from the loaded balance row
+  // (SUI = 9 decimals; a coin uses its own decimals + coin type). Null when we
+  // can't derive the address.
+  const buildSuiParams = async (recipient: string): Promise<SendSuiParams | null> => {
+    const walletId = await getActiveWallet();
+    const from = await getSuiAddress(walletId || undefined);
+    if (!from || !walletId) return null;
+    const entry = balances.find((b) => b.symbol === selectedToken && b.chainKey === selectedChain);
+    // Native SUI is a safe 9-decimals default; a coin send needs the coin type's
+    // real decimals from its balance row — guessing would mis-scale the amount,
+    // so bail rather than default.
+    const decimals = entry?.decimals ?? (selectedToken === 'SUI' ? 9 : undefined);
+    if (decimals === undefined) return null;
+    return {
+      from,
+      to: recipient,
+      amount: parseUnits(tokenAmount, decimals).toString(),
+      symbol: selectedToken,
+      tokenAddr: entry?.contractAddress || '', // coin type; empty for native SUI
+      walletAddress: walletId, // used to look up the mnemonic for ed25519 signing
+    };
+  };
+
   const handleReview = async () => {
     const e = validate(); if (e) { setError(e); return; }
     setError('');
@@ -389,6 +421,18 @@ const SendToken = () => {
         if (!params) throw new Error('Could not derive your Solana wallet.');
         const { prepared, fee } = await prepareSolana(params);
         setNonEvmTx({ family: 'solana', prepared, params });
+        setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 9));
+        setScreen('confirm');
+        return;
+      }
+      if (isSui) {
+        // Sui: prepare builds the tx server-side and runs the SUI fee preflight
+        // (gas is always paid in SUI). A 402 (no SUI for gas) throws with a
+        // friendly note we surface on the form.
+        const params = await buildSuiParams(toAddress.trim());
+        if (!params) throw new Error('Could not derive your Sui wallet.');
+        const { prepared, fee } = await prepareSui(params);
+        setNonEvmTx({ family: 'sui', prepared, params });
         setGasEstimate(formatUnits(fee.estFeeRaw || '0', fee.gasDecimals || 9));
         setScreen('confirm');
         return;
@@ -467,6 +511,18 @@ const SendToken = () => {
           ctx = { family: 'solana', prepared: (await prepareSolana(params)).prepared, params };
         }
         const { txHash: hash } = await broadcastSolana(ctx.prepared, ctx.params);
+        setTxHash(hash);
+        setScreen('success');
+        return;
+      }
+      if (isSui) {
+        let ctx = nonEvmTx?.family === 'sui' ? nonEvmTx : null;
+        if (!ctx) {
+          const params = await buildSuiParams(recipient);
+          if (!params) throw new Error('Could not derive your Sui wallet.');
+          ctx = { family: 'sui', prepared: (await prepareSui(params)).prepared, params };
+        }
+        const { txHash: hash } = await broadcastSui(ctx.prepared, ctx.params);
         setTxHash(hash);
         setScreen('success');
         return;
@@ -789,7 +845,7 @@ const SendToken = () => {
               RECIPIENT
             </Text>
             <Input
-              placeholder={isTron ? 'T... wallet address' : isBtc ? 'bc1... wallet address' : isSolana ? 'Solana wallet address' : '0x... wallet address'}
+              placeholder={isTron ? 'T... wallet address' : isBtc ? 'bc1... wallet address' : isSolana ? 'Solana wallet address' : isSui ? '0x... Sui address' : '0x... wallet address'}
               value={toAddress}
               onChangeText={(t) => { setToAddress(t); setError(''); }}
               autoCapitalize="none"

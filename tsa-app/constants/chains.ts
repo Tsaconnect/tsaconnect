@@ -374,8 +374,8 @@ export const DEFAULT_TOKENS: Record<string, TokenConfig> = {
 // Helpers
 
 export interface NonEVMChainConfig {
-  chainKey: 'tron' | 'btc' | 'solana';
-  family: 'tron' | 'btc' | 'solana';
+  chainKey: 'tron' | 'btc' | 'solana' | 'sui';
+  family: 'tron' | 'btc' | 'solana' | 'sui';
   name: string;
   shortName: string;
   explorerUrl: string;
@@ -387,7 +387,7 @@ export interface NonEVMChainConfig {
   iconUrl?: string; // native-coin logo, same CDN as the EVM chain entries
 }
 
-export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana', NonEVMChainConfig> = {
+export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana' | 'sui', NonEVMChainConfig> = {
   tron: {
     chainKey: 'tron', family: 'tron', name: 'Tron', shortName: 'TRON',
     explorerUrl: 'https://tronscan.org',
@@ -409,6 +409,15 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana', NonEVMChainConfig>
     nativeCurrency: { symbol: 'SOL', decimals: 9 }, iconColor: '#14F195',
     iconUrl: 'https://coin-images.coingecko.com/coins/images/4128/small/solana.png',
   },
+  sui: {
+    chainKey: 'sui', family: 'sui', name: 'Sui', shortName: 'SUI',
+    // Suiscan is network-scoped by path (/mainnet, /testnet), like BTC's
+    // distinct testnet host — txExplorerUrl uses base + /tx/<digest>.
+    explorerUrl: 'https://suiscan.xyz/mainnet',
+    explorerUrlTestnet: 'https://suiscan.xyz/testnet',
+    nativeCurrency: { symbol: 'SUI', decimals: 9 }, iconColor: '#4DA2FF',
+    iconUrl: 'https://coin-images.coingecko.com/coins/images/26375/small/sui-ocean-square.png',
+  },
 };
 
 // Non-EVM chains live in their own key space (they have no numeric chainId and
@@ -418,9 +427,9 @@ export const NONEVM_CHAINS: Record<'tron' | 'btc' | 'solana', NonEVMChainConfig>
 export type NonEVMChainKey = keyof typeof NONEVM_CHAINS;
 export type AnyChainKey = ChainKey | NonEVMChainKey;
 
-export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc', 'solana'];
+export const NONEVM_CHAIN_KEYS: NonEVMChainKey[] = ['tron', 'btc', 'solana', 'sui'];
 
-export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana';
+export type ChainFamily = 'evm' | 'tron' | 'btc' | 'solana' | 'sui';
 
 export function isNonEVMChain(key: string): key is NonEVMChainKey {
   return (NONEVM_CHAIN_KEYS as string[]).includes(key);
@@ -430,7 +439,7 @@ export function isNonEVMChain(key: string): key is NonEVMChainKey {
 // prominence. Anything unranked sorts after, alphabetically via tokenRankOf
 // callers. Shared by wallet home and the receive screen so the order matches.
 const TOKEN_RANK: Record<string, number> = Object.fromEntries(
-  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'POL', 'AVAX'].map((s, i) => [s, i]),
+  ['MCGP', 'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'TRX', 'S', 'SOL', 'SUI', 'POL', 'AVAX'].map((s, i) => [s, i]),
 );
 
 export function tokenRankOf(symbol: string): number {
