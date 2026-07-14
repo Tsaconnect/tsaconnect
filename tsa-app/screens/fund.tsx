@@ -20,6 +20,7 @@ import { NONEVM_CHAINS, isNonEVMChain, tokenRankOf, type AnyChainKey } from '@/c
 import { getTronAddress } from '@/services/chains/tronWallet';
 import { getBtcAddress } from '@/services/chains/btcWallet';
 import { getSolanaAddress } from '@/services/chains/solanaWallet';
+import { getSuiAddress } from '@/services/chains/suiWallet';
 import { useTokens } from '@/hooks/useTokens';
 import { useTheme } from '@/theme';
 import {
@@ -83,6 +84,13 @@ const NONEVM_RECEIVE_ITEMS: ReceiveItem[] = [
     chainKey: 'solana', chainName: NONEVM_CHAINS.solana.name,
     chainShortName: NONEVM_CHAINS.solana.shortName, chainIconColor: NONEVM_CHAINS.solana.iconColor,
     chainIconUrl: NONEVM_CHAINS.solana.iconUrl,
+  },
+  {
+    id: 'SUI-sui', symbol: 'SUI', name: 'Sui',
+    iconColor: NONEVM_CHAINS.sui.iconColor, iconUrl: NONEVM_CHAINS.sui.iconUrl,
+    chainKey: 'sui', chainName: NONEVM_CHAINS.sui.name,
+    chainShortName: NONEVM_CHAINS.sui.shortName, chainIconColor: NONEVM_CHAINS.sui.iconColor,
+    chainIconUrl: NONEVM_CHAINS.sui.iconUrl,
   },
 ];
 
@@ -345,6 +353,7 @@ export default function FundScreen() {
   const [tronAddress, setTronAddress] = useState('');
   const [btcAddress, setBtcAddress] = useState('');
   const [solanaAddress, setSolanaAddress] = useState('');
+  const [suiAddress, setSuiAddress] = useState('');
   const [search, setSearch] = useState('');
   const [chainFilter, setChainFilter] = useState<AnyChainKey | 'all'>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -357,14 +366,16 @@ export default function FundScreen() {
     getTronAddress().then(addr => { if (addr) setTronAddress(addr); }).catch(() => {});
     getBtcAddress().then(addr => { if (addr) setBtcAddress(addr); }).catch(() => {});
     getSolanaAddress().then(addr => { if (addr) setSolanaAddress(addr); }).catch(() => {});
+    getSuiAddress().then(addr => { if (addr) setSuiAddress(addr); }).catch(() => {});
   }, []);
 
   // The deposit address depends on the item's chain family: EVM chains share
-  // the one 0x address; Tron, BTC, and Solana each derive their own.
+  // the one 0x address; Tron, BTC, Solana, and Sui each derive their own.
   const addressFor = (item: ReceiveItem): string => {
     if (item.chainKey === 'tron') return tronAddress;
     if (item.chainKey === 'btc') return btcAddress;
     if (item.chainKey === 'solana') return solanaAddress;
+    if (item.chainKey === 'sui') return suiAddress;
     return isNonEVMChain(item.chainKey) ? '' : walletAddress;
   };
 
