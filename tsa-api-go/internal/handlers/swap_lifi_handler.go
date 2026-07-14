@@ -387,7 +387,10 @@ func (h *SwapLiFiHandler) getOrFetchAllTokens() ([]tokenWithChain, error) {
 // Sort by symbol then chainId so paginated results are deterministic across
 // requests.
 func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
-	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens")
+	// LiFi's /tokens defaults to chainTypes=EVM — Solana's SPL tokens only
+	// arrive when SVM is requested explicitly, so the all-chains search can
+	// surface them.
+	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes=EVM,SVM")
 	if err != nil {
 		return nil, fmt.Errorf("failed to reach LiFi")
 	}
