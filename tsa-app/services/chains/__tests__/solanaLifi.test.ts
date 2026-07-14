@@ -12,6 +12,15 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue('test-token'),
 }));
 
+jest.mock('../../walletApi', () => ({
+  getAuthHeaders: jest.fn().mockResolvedValue({ 'Content-Type': 'application/json', Authorization: 'Bearer test-token' }),
+}));
+
+const mockGetNetwork = jest.fn(() => 'mainnet');
+jest.mock('../../../hooks/useNetwork', () => ({
+  getNetwork: () => mockGetNetwork(),
+}));
+
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 jest.mock('../../wallet', () => ({
   getMnemonic: jest.fn().mockResolvedValue(M),
@@ -32,27 +41,30 @@ const FIXTURE_SIGNER = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const FIXTURE_B64 =
   'AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQAGC8b6evO+2606PWXzaqvJdDGxu+TC0vbg5HymAgNFL11hR9h+xts5WL3LfUErJnMDEDv5zl5VjLZc76BV/YP5Cc4exKx5dRVemt3hGVsILbAqLacDjoyJLepcGh8OZdmtUKkFkxS28bUd96QnLGuIP+SKR9nUPjx5KAmyEIH7KRpgX7MO9JIaGP6Q2ez2elLYn//71B04FimG9SDqdvAt5WoDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAACg9DdKCNU/vCuOw4ifTfNicomb7F93498t8zvvk69xVOvOBlLeNNUrvx+mtjU8M/6bMkkfa3lc/YUBpqqTCXooAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALQj5Z1paZLqq3kUJ1PAm9bYE1qpQE9jUkcSHEnSn0OVBHnVW/IxwG7udMVuzmgVB/2xst6j9I5RArHNola8E4/thJYi2wlAhp64UPJmmQu0Mh/91M4v0dxfQcuL0j/QaAoFAAUCwFwVAAUACQPA7QAAAAAAAAYCFAcJAJOr0slAxDIACAIACwwCAAAAoCUmAAAAAAAJBxUAAQIACBYACQMIAAMMAgAAAGCkdDsAAAAACQIWAwERChoAAwQXABYWARgKGgAXAAwNDg8QERITAwQWFiy7ZPrMMcSvFGCkdDsAAAAA7VuZBAAAAABkAAAAAAABAAAAoQEAAAAAECcAAQkEFgMAAAEJCQgZAAIAARkACHynZoBqeXa6TAAAAAAAAAAAAAAAABERERERERERERERERERERERERERmqGTBAAAAAAAAAAAAAAAAMKvAAAAAAAAAAAAAAAAAAADAAAAAAAAAAAAAAAAAAAApapuIXG0FuHSfsU8qME9s/kaic0AK44pIQAAAAAAAAEAAAABAtnDDfuWEY2uAzWl9dW04R5sD/Lws3UWLUj16RRlk9irAUQGKAYFMDRcCsQUbNWfqUeIq0fK5IgZkPBmSi4Je8s76zDsOHbou3kInZeem5afSZoBnA==';
 
-// Minimal LEGACY (unversioned) tx: 1 empty sig slot + message with header
-// [1,0,1], 2 account keys, a blockhash, and zero instructions.
-function legacyFixture(signerKey: Uint8Array): string {
-  const msg = new Uint8Array(3 + 1 + 64 + 32 + 1);
+// Minimal LEGACY (unversioned) tx: `numSigners` empty sig slots + message with
+// header [numSigners, 0, 1], numSigners+1 account keys, a blockhash, and zero
+// instructions. Signature-slot count always matches the header, as on-chain.
+function legacyFixture(signerKeys: Uint8Array[]): string {
+  const n = signerKeys.length;
+  const msg = new Uint8Array(3 + 1 + (n + 1) * 32 + 32 + 1);
   let o = 0;
-  msg[o++] = 1; // numRequiredSignatures
+  msg[o++] = n; // numRequiredSignatures
   msg[o++] = 0; // numReadonlySigned
   msg[o++] = 1; // numReadonlyUnsigned
-  msg[o++] = 2; // compact-u16 account count
-  msg.set(signerKey, o); o += 32;
-  msg.set(new Uint8Array(32).fill(7), o); o += 32; // second (program) key
+  msg[o++] = n + 1; // compact-u16 account count
+  for (const k of signerKeys) { msg.set(k, o); o += 32; }
+  msg.set(new Uint8Array(32).fill(7), o); o += 32; // trailing (program) key
   msg.set(new Uint8Array(32).fill(9), o); o += 32; // recent blockhash
   msg[o++] = 0; // zero instructions
-  const tx = new Uint8Array(1 + 64 + msg.length);
-  tx[0] = 1; // one signature slot
-  tx.set(msg, 1 + 64);
+  const tx = new Uint8Array(1 + n * 64 + msg.length);
+  tx[0] = n; // signature slots
+  tx.set(msg, 1 + n * 64);
   return base64.encode(tx);
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockGetNetwork.mockReturnValue('mainnet');
   mockGetSolanaAddress.mockResolvedValue(FIXTURE_SIGNER);
   mockRegister.mockResolvedValue(undefined);
 });
@@ -69,16 +81,15 @@ describe('parseLiFiSolanaTx', () => {
 
   it('parses a legacy (unversioned) message too', () => {
     const key = new Uint8Array(32).fill(3);
-    const parsed = parseLiFiSolanaTx(legacyFixture(key));
+    const parsed = parseLiFiSolanaTx(legacyFixture([key]));
     expect(parsed.requiredSigners).toEqual([base58.encode(key)]);
     expect(parsed.messageHex.startsWith('80')).toBe(false);
   });
 
   it('reports every required signer when a route needs more than one', () => {
-    const raw = base64.decode(legacyFixture(new Uint8Array(32).fill(3)));
-    raw[65] = 2; // numRequiredSignatures → 2 (both existing keys become signers)
-    const parsed = parseLiFiSolanaTx(base64.encode(raw));
-    expect(parsed.requiredSigners).toHaveLength(2);
+    const keys = [new Uint8Array(32).fill(3), new Uint8Array(32).fill(4)];
+    const parsed = parseLiFiSolanaTx(legacyFixture(keys));
+    expect(parsed.requiredSigners).toEqual(keys.map(k => base58.encode(k)));
   });
 
   it('throws on malformed input rather than mis-parsing', () => {
@@ -88,6 +99,30 @@ describe('parseLiFiSolanaTx', () => {
     const sigOnly = new Uint8Array(65);
     sigOnly[0] = 1;
     expect(() => parseLiFiSolanaTx(base64.encode(sigOnly))).toThrow(/no message/);
+  });
+
+  it('rejects a signature-slot count that disagrees with the message header', () => {
+    const raw = base64.decode(legacyFixture([new Uint8Array(32).fill(3)]));
+    raw[65] = 2; // header claims 2 required signers, but only 1 sig slot exists
+    expect(() => parseLiFiSolanaTx(base64.encode(raw))).toThrow(/slot count mismatch/);
+  });
+
+  it('rejects unknown transaction versions instead of guessing their layout', () => {
+    const raw = base64.decode(FIXTURE_B64);
+    raw[65] = 0x81; // v1 — does not exist yet
+    expect(() => parseLiFiSolanaTx(base64.encode(raw))).toThrow(/unsupported/i);
+  });
+
+  it('rejects non-canonical compact-u16 encodings', () => {
+    const raw = base64.decode(legacyFixture([new Uint8Array(32).fill(3)]));
+    // Rewrite the account-count byte (2) as the 2-byte non-canonical 0x82 0x00.
+    const msgStart = 65;
+    const patched = new Uint8Array(raw.length + 1);
+    patched.set(raw.slice(0, msgStart + 3), 0);
+    patched[msgStart + 3] = 0x82; // 2 with continuation bit
+    patched[msgStart + 4] = 0x00; // zero continuation byte — non-canonical
+    patched.set(raw.slice(msgStart + 4), msgStart + 5);
+    expect(() => parseLiFiSolanaTx(base64.encode(patched))).toThrow(/non-canonical/);
   });
 });
 
@@ -155,6 +190,13 @@ describe('executeLiFiSolanaSwap', () => {
       base58.decode(derived),
     );
     expect(ok).toBe(true);
+  });
+
+  it('refuses to execute in testnet mode (broadcast is pinned to mainnet)', async () => {
+    mockGetNetwork.mockReturnValue('testnet');
+    const fetchFn = mockFetch({ data: { txHash: 'x' } });
+    await expect(executeLiFiSolanaSwap(params())).rejects.toThrow(/mainnet-only/);
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it('refuses to sign when the wallet is not the required signer', async () => {
