@@ -164,7 +164,8 @@ export default function AllSwapScreen() {
 
   useFocusEffect(useCallback(() => {
     loadBalances();
-  }, [fromChainId]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromChainId, solanaAddress]));
 
   useEffect(() => {
     let active = true;
@@ -188,6 +189,15 @@ export default function AllSwapScreen() {
 
   const loadBalances = async () => {
     try {
+      // /wallet/balances is EVM-only — it 400s on the Solana pseudo chain-id
+      // and would leave the previous EVM chain's rows in place, which the
+      // picker's "your tokens" section then matches BY SYMBOL against SPL
+      // tokens. Read the SPL rows instead (or clear while the address derives).
+      if (isSolanaLiFiChain(fromChainId)) {
+        if (!solanaAddress) { setBalances([]); return; }
+        setBalances(await getSolanaBalances(solanaAddress));
+        return;
+      }
       const res = await getWalletBalances(fromChainId);
       if (res.success && res.data) {
         setBalances(normalizeWalletBalances(res.data, 'bsc'));
