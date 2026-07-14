@@ -28,6 +28,7 @@ import {
 import { getTronAddress } from '../../services/chains/tronWallet';
 import { getBtcAddress } from '../../services/chains/btcWallet';
 import { getSolanaAddress } from '../../services/chains/solanaWallet';
+import { getSuiAddress } from '../../services/chains/suiWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import { useTheme } from '@/theme';
 import {
@@ -52,12 +53,13 @@ const ReceiveToken = () => {
   const [tronAddress, setTronAddress] = useState('');
   const [btcAddress, setBtcAddress] = useState('');
   const [solanaAddress, setSolanaAddress] = useState('');
+  const [suiAddress, setSuiAddress] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedChain, setSelectedChain] = useState<AnyChainKey>('sonic');
 
   useEffect(() => {
     const loadAddresses = async () => {
-      const [evm, tron, btc, sol] = await Promise.all([
+      const [evm, tron, btc, sol, sui] = await Promise.all([
         getActiveWallet(),
         // Same mnemonic, standard Tron path — reproduces the TronLink address.
         getTronAddress().catch(() => null),
@@ -65,19 +67,28 @@ const ReceiveToken = () => {
         getBtcAddress().catch(() => null),
         // Same mnemonic, Phantom path — reproduces the Phantom address.
         getSolanaAddress().catch(() => null),
+        // Same mnemonic, Sui path (m/44'/784') — reproduces the Sui wallet address.
+        getSuiAddress().catch(() => null),
       ]);
       if (evm) setEvmAddress(evm);
       if (tron) setTronAddress(tron);
       if (btc) setBtcAddress(btc);
       if (sol) setSolanaAddress(sol);
+      if (sui) setSuiAddress(sui);
     };
     loadAddresses();
   }, []);
 
   // The address to show/QR/copy depends on the selected chain's family: EVM
-  // chains share one 0x address; Tron, BTC, and Solana each derive their own.
+  // chains share one 0x address; Tron, BTC, Solana, and Sui each derive their own.
   const nonEvmAddress =
-    selectedChain === 'btc' ? btcAddress : selectedChain === 'solana' ? solanaAddress : tronAddress;
+    selectedChain === 'btc'
+      ? btcAddress
+      : selectedChain === 'solana'
+        ? solanaAddress
+        : selectedChain === 'sui'
+          ? suiAddress
+          : tronAddress;
   const walletAddress = isNonEVMChain(selectedChain) ? nonEvmAddress : evmAddress;
   const selectedChainName = getChainDisplay(selectedChain)?.name || 'Unknown';
 

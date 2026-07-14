@@ -39,6 +39,7 @@ import { CHAINS, CHAIN_KEYS, getChainDisplay, tokenRankOf, type ChainKey } from 
 import { loadTronWallet } from '../../services/chains/tronWallet';
 import { loadBtcWallet } from '../../services/chains/btcWallet';
 import { loadSolanaWallet } from '../../services/chains/solanaWallet';
+import { loadSuiWallet } from '../../services/chains/suiWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import ImportTokenModal from '../../components/wallet/ImportTokenModal';
 import { useNetwork } from '../../hooks/useNetwork';
@@ -114,7 +115,7 @@ const WalletHome = () => {
       // Tron and BTC (non-EVM) ride alongside the EVM fan-out; each derives its
       // address from the same mnemonic, self-registers in the background, and
       // stays dormant-safe (yields no rows when the backend chain is unconfigured).
-      const [chainResults, tronResult, btcResult, solResult, txResult] = await Promise.all([
+      const [chainResults, tronResult, btcResult, solResult, suiResult, txResult] = await Promise.all([
         Promise.all(
           CHAIN_KEYS.map(async (chainKey) => {
             const result = await getWalletBalances(
@@ -127,6 +128,7 @@ const WalletHome = () => {
         address ? loadTronWallet(address).catch(() => null) : Promise.resolve(null),
         address ? loadBtcWallet(address).catch(() => null) : Promise.resolve(null),
         address ? loadSolanaWallet(address).catch(() => null) : Promise.resolve(null),
+        address ? loadSuiWallet(address).catch(() => null) : Promise.resolve(null),
         getTransactionHistory(1, 5),
       ]);
 
@@ -145,6 +147,7 @@ const WalletHome = () => {
         ...(tronResult?.balances ?? []),
         ...(btcResult?.balances ?? []),
         ...(solResult?.balances ?? []),
+        ...(suiResult?.balances ?? []),
       ]) {
         allBalances.push(entry);
         seenTokenChains.add(`${entry.symbol}-${entry.chainKey}`);
