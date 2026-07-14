@@ -144,6 +144,38 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	}
 }
 
+// (d) Solana routes settle with LiFi's oversized SVM chain id (1151111081099710
+// ≈ 2^50) — it must survive the int64 JSON field and reach the re-query as the
+// exact decimal string, and the verified fee must accrue like any EVM route.
+func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupWithdrawalTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "assol", nil)
+
+	const svmChainID int64 = 1151111081099710
+	var gotFromChain, gotToChain string
+	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+		gotFromChain, gotToChain = p.FromChain, p.ToChain
+		return 1000.0, true
+	}
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "sol-1", "fromToken": "SOL", "toToken": "USDC",
+		"fromAmount": "1000000000", "chainId": svmChainID, "toChainId": 42161,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("settle status=%d body=%s", w.Code, w.Body.String())
+	}
+	if gotFromChain != "1151111081099710" || gotToChain != "42161" {
+		t.Errorf("re-query chain ids: from=%q to=%q", gotFromChain, gotToChain)
+	}
+	sourceID := deterministicUUID("allswap:sol-1")
+	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
+		t.Fatalf("want 1 allswap guard row, got %d", got)
+	}
+}
+
 // waitForGuardHandler polls for the async EnqueueFeeSettled goroutine to land a
 // guard row (releasing the single SQLite connection between polls).
 func waitForGuardHandler(t *testing.T, db *gorm.DB, sourceType string, sourceID uuid.UUID, want int64) int64 {
