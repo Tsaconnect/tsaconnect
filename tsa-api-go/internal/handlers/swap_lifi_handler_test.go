@@ -308,6 +308,57 @@ func TestGetQuote_ForwardsSolanaChainAndToAddress(t *testing.T) {
 	}
 }
 
+// The all-chains search blob must request SVM explicitly — LiFi's /tokens
+// defaults to EVM only, which silently drops every SPL token from search.
+func TestGetAllChainTokens_RequestsSVMAndFlattensSolana(t *testing.T) {
+	const svmChainID = "1151111081099710"
+	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tokens" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("chainTypes") != "EVM,SVM" {
+			t.Errorf("expected chainTypes=EVM,SVM, got %s", r.URL.Query().Get("chainTypes"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"tokens":{
+			"56":[{"address":"0xabc","symbol":"USDT","decimals":18,"name":"Tether","chainId":56}],
+			"` + svmChainID + `":[{"address":"So11111111111111111111111111111111111111112","symbol":"SOL","decimals":9,"name":"Solana"}]
+		}}`))
+	}))
+	defer mockLiFi.Close()
+
+	h := newTestLiFiHandler(mockLiFi.URL)
+	r := setupTestRouter(h)
+	r.GET("/swap/lifi/tokens/all", h.GetAllChainTokens)
+
+	req := httptest.NewRequest("GET", "/swap/lifi/tokens/all?q=sol", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Tokens []struct {
+			Symbol  string `json:"symbol"`
+			ChainID int64  `json:"chainId"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	found := false
+	for _, tok := range body.Tokens {
+		if tok.Symbol == "SOL" && tok.ChainID == 1151111081099710 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SOL on the SVM chain id missing from flattened tokens: %s", w.Body.String())
+	}
+}
+
 func TestGetQuote_PreservesCallerSlippage(t *testing.T) {
 	mockLiFi := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("slippage") != "0.01" {
