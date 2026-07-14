@@ -4,9 +4,14 @@ import {
   deriveBtcPrivateKey,
   deriveSolanaAddress,
   deriveSolanaPrivateKey,
+  deriveSuiAddress,
+  deriveSuiPrivateKey,
+  deriveSuiPublicKey,
   isValidBtcAddress,
   isValidSolanaAddress,
+  isValidSuiAddress,
 } from '../derivation';
+import { blake2b } from '@noble/hashes/blake2b';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
@@ -59,9 +64,47 @@ describe('non-EVM derivation (one seed, standard paths)', () => {
     expect(base58.encode(pub)).toBe(deriveSolanaAddress(M));
   });
 
+  it('Sui matches the @mysten/sui vector (m/44h/784h/0h/0h/0h)', () => {
+    // Cross-checked against @mysten/sui v1.45.2 Ed25519Keypair.deriveKeypair
+    // for the canonical mnemonic — guards the "one seed, reproducible in a Sui
+    // wallet" promise and the blake2b256(0x00||pubkey) address scheme.
+    expect(deriveSuiAddress(M)).toBe('0x5e93a736d04fbb25737aa40bee40171ef79f65fae833749e3c089fe7cc2161f1');
+  });
+
+  it('Sui private + public key pair with the derived address', () => {
+    expect(deriveSuiPrivateKey(M)).toBe('8869cb07178bf67e08d7c4abdf45487dbf379c9a452fcec2836854bf4a3d29b0');
+    expect(deriveSuiPublicKey(M)).toBe('900b4d81eecea3df2f74b14200c4f4cf3f49afaca7a634ffd2cf6ff82bdaecf2');
+    // address == 0x || hex(blake2b256(0x00 || pubkey)).
+    const pub = Uint8Array.from(Buffer.from(deriveSuiPublicKey(M), 'hex'));
+    const flagged = new Uint8Array(1 + pub.length);
+    flagged.set(pub, 1);
+    expect('0x' + Buffer.from(blake2b(flagged, { dkLen: 32 })).toString('hex')).toBe(deriveSuiAddress(M));
+  });
+
   it('is deterministic', () => {
     expect(deriveTronAddress(M)).toBe(deriveTronAddress(M));
     expect(deriveSolanaAddress(M)).toBe(deriveSolanaAddress(M));
+    expect(deriveSuiAddress(M)).toBe(deriveSuiAddress(M));
+  });
+});
+
+describe('isValidSuiAddress', () => {
+  it('accepts a 0x + 64-hex address', () => {
+    expect(isValidSuiAddress(deriveSuiAddress(M))).toBe(true);
+    expect(isValidSuiAddress('0x5e93a736d04fbb25737aa40bee40171ef79f65fae833749e3c089fe7cc2161f1')).toBe(true);
+  });
+
+  it('rejects malformed / wrong-length / non-hex addresses', () => {
+    const bad = [
+      '',
+      '5e93a736d04fbb25737aa40bee40171ef79f65fae833749e3c089fe7cc2161f1', // missing 0x
+      '0x5e93a736', // too short
+      '0x' + 'f'.repeat(63), // 63 hex
+      '0x' + 'f'.repeat(65), // 65 hex
+      '0xg' + 'f'.repeat(63), // non-hex
+      'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk', // Solana base58
+    ];
+    for (const a of bad) expect(isValidSuiAddress(a)).toBe(false);
   });
 });
 
