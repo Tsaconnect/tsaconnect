@@ -64,6 +64,22 @@ describe('non-EVM derivation (one seed, standard paths)', () => {
     expect(base58.encode(pub)).toBe(deriveSolanaAddress(M));
   });
 
+  it('Solana Trust Wallet path matches the wallet-core vector (m/44h/501h/0h)', () => {
+    // Trust Wallet derives one hop shorter than Phantom (wallet-core
+    // registry.json default). Cross-checked against ed25519-hd-key v1.3.0 —
+    // guards the import fallback for seeds coming from Trust Wallet.
+    expect(deriveSolanaAddress(M, 'trustwallet')).toBe('GjJyeC1r2RgkuoCWMyPYkCWSGSGLcz266EaAkLA27AhL');
+    // Explicit 'phantom' and the default are the same path.
+    expect(deriveSolanaAddress(M, 'phantom')).toBe(deriveSolanaAddress(M));
+  });
+
+  it('Solana Trust Wallet private key pairs with its derived address', () => {
+    const priv = deriveSolanaPrivateKey(M, 'trustwallet');
+    expect(priv).not.toBe(deriveSolanaPrivateKey(M));
+    const pub = ed25519.getPublicKey(priv);
+    expect(base58.encode(pub)).toBe(deriveSolanaAddress(M, 'trustwallet'));
+  });
+
   it('Sui matches the @mysten/sui vector (m/44h/784h/0h/0h/0h)', () => {
     // Cross-checked against @mysten/sui v1.45.2 Ed25519Keypair.deriveKeypair
     // for the canonical mnemonic — guards the "one seed, reproducible in a Sui
