@@ -242,6 +242,12 @@ const Layout = () => {
                 case "booking-requests":
                   iconName = "calendar-clock";
                   break;
+                case "ordering-requests":
+                  iconName = focused ? "cart" : "cart-outline";
+                  break;
+                case "contact-requests":
+                  iconName = focused ? "card-account-phone" : "card-account-phone-outline";
+                  break;
                 case "referrals":
                   iconName = focused ? "account-multiple-plus" : "account-multiple-plus-outline";
                   break;
@@ -393,6 +399,20 @@ const Layout = () => {
           name="booking-requests"
           options={{
             title: "Booking Requests",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
+          name="ordering-requests"
+          options={{
+            title: "Ordering Requests",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
+          name="contact-requests"
+          options={{
+            title: "Contact Requests",
             drawerActiveTintColor: colors.accent,
           }}
         />
