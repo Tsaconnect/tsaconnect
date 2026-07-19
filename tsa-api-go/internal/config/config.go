@@ -158,6 +158,38 @@ type NonEVMChainConfig struct {
 	Tokens         map[string]string // symbol → on-chain token contract/mint
 }
 
+// FeeQuoteConfig tunes the deposit/withdrawal fee-quote engine (PM fee spec,
+// batch 11). All rates are basis points (1% = 100 bps); integer math only —
+// the calculator never touches float64 for money.
+type FeeQuoteConfig struct {
+	// PlatformStableUSD is the flat platform fee on stablecoin (USDC/USDT)
+	// flows, in whole USD. MCGP flows always carry a $0 platform fee.
+	// PM-UNRESOLVED: the spec gives both $1 and $2 — default $2 until the PM
+	// settles it (FEE_PLATFORM_STABLE_USD).
+	PlatformStableUSD int64
+	// ProviderFallbackBps prices the provider (Flutterwave) fee when a live
+	// GetFees quote is unavailable (client dormant or the call fails).
+	ProviderFallbackBps int64
+	// TaxBasis selects what the VAT + platform-tax percentages apply to:
+	// "fee" — the provider fee (matches the PM's receipt: ₦0.75 VAT on a ₦10
+	// provider fee for a ₦500 deposit), or "amount" — the gross amount
+	// (matches the PM's prose).
+	// PM-UNRESOLVED: default "fee", per the receipt evidence (FEE_TAX_BASIS).
+	TaxBasis string
+	// VATBps + PlatformTaxBps make up the "tax" line: 7.5% VAT + 0.5% platform.
+	VATBps         int64
+	PlatformTaxBps int64
+	// McgpSwapBps is the MCGP→stable swap leg on MCGP withdrawals
+	// (admin-adjustable); LifiRouteBps is the LiFi routing leg. An MCGP
+	// withdrawal pays both (default 2% + 3% = 5%). A stablecoin withdrawal
+	// pays only the LiFi leg when the funds are already on Polygon, both
+	// otherwise.
+	McgpSwapBps  int64
+	LifiRouteBps int64
+	// StableDepositConvBps is the conversion fee on stablecoin deposits.
+	StableDepositConvBps int64
+}
+
 type Config struct {
 	DatabaseURL         string
 	JWTSecret           string
@@ -341,6 +373,12 @@ type Config struct {
 	// FiatProviderOverride pins the payout gateway: "flutterwave" | "nomba".
 	// Empty ⇒ auto: Flutterwave when its creds are present, else Nomba.
 	FiatProviderOverride string
+
+	// FeeQuote — deposit/withdrawal fee-quote engine (PM fee spec, batch 11).
+	// Quote-only: powers GET /api/it/quote so the app can show the itemized
+	// fee breakdown before confirm. NOT wired into money movement yet (that
+	// lands after PM sign-off on the two UNRESOLVED values below).
+	FeeQuote FeeQuoteConfig
 
 	// Fee/TP overhaul (SP3) tunables.
 	//
@@ -602,6 +640,24 @@ func Load() *Config {
 	cfg.FlutterwaveMerchantID = strings.TrimSpace(getEnv("FLUTTERWAVE_MERCHANT_ID", ""))
 	cfg.FlutterwaveCustomerID = strings.TrimSpace(getEnv("FLUTTERWAVE_CUSTOMER_ID", ""))
 	cfg.FiatProviderOverride = strings.ToLower(strings.TrimSpace(getEnv("FIAT_PROVIDER", "")))
+
+	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values
+	// are PM-UNRESOLVED and intentionally config-first so flipping them is an
+	// env change, not a deploy:
+	//   FEE_PLATFORM_STABLE_USD — PM gave both $1 and $2; default 2.
+	//   FEE_TAX_BASIS           — "fee" matches the PM's receipt (VAT charged
+	//                             on the provider fee); "amount" matches their
+	//                             prose. Default "fee" (receipt evidence).
+	cfg.FeeQuote = FeeQuoteConfig{
+		PlatformStableUSD:    getEnvInt64("FEE_PLATFORM_STABLE_USD", 2),
+		ProviderFallbackBps:  getEnvInt64("FEE_PROVIDER_FALLBACK_BPS", 200),
+		TaxBasis:             strings.ToLower(strings.TrimSpace(getEnv("FEE_TAX_BASIS", "fee"))),
+		VATBps:               getEnvInt64("FEE_VAT_BPS", 750),
+		PlatformTaxBps:       getEnvInt64("FEE_PLATFORM_TAX_BPS", 50),
+		McgpSwapBps:          getEnvInt64("FEE_MCGP_SWAP_BPS", 200),
+		LifiRouteBps:         getEnvInt64("FEE_LIFI_ROUTE_BPS", 300),
+		StableDepositConvBps: getEnvInt64("FEE_STABLE_DEPOSIT_CONV_BPS", 200),
+	}
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
 	// value; tunable without code change.
