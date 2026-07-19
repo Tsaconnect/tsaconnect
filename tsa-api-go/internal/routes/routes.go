@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, fwh *handlers.FlutterwaveWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -195,6 +195,17 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			return
 		}
 		nwh.Handle(c)
+	})
+
+	// Flutterwave webhook — same contract as the Nomba route: signature-verified
+	// (no auth middleware), path always present so the dashboard-configured URL
+	// never 404s; a clear 503 when the FW stack is dormant.
+	api.POST("/webhooks/flutterwave", func(c *gin.Context) {
+		if fwh == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Flutterwave webhook not configured"})
+			return
+		}
+		fwh.Handle(c)
 	})
 
 	// Admin PM operator routes (manual-release queue + release/decline/payout).

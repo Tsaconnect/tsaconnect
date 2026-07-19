@@ -438,6 +438,28 @@ func main() {
 		log.Printf("Nomba dormant: NOMBA_CLIENT_ID / NOMBA_CLIENT_SECRET / NOMBA_ACCOUNT_ID not set — bank list and account verification disabled")
 	}
 
+	// Flutterwave v4 — the preferred fiat gateway (Nomba declined production
+	// API access, 2026-07). Dormant-by-default: nil without creds.
+	fwClient := services.NewFlutterwaveClient(cfg.FlutterwaveBaseURL, cfg.FlutterwaveIdpURL, cfg.FlutterwaveClientID, cfg.FlutterwaveClientSecret)
+	if fwClient == nil {
+		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
+	}
+
+	// Bank directory + name enquiry follow the resolved fiat provider so the
+	// app's bank dropdown and the payout gateway can never disagree on codes.
+	var bankDirectory services.BankDirectory
+	if cfg.ResolveFiatProvider() == "flutterwave" {
+		bankDirectory = services.NewFlutterwaveBankDirectory(fwClient, "NG")
+	}
+	if bankDirectory == nil {
+		bankDirectory = services.NewNombaBankDirectory(nombaClient)
+	}
+	if bankDirectory == nil {
+		log.Printf("Bank directory dormant: no fiat provider credentials — bank list + account resolve endpoints will 503")
+	} else {
+		log.Printf("Bank directory active (provider=%s)", cfg.ResolveFiatProvider())
+	}
+
 	// Corporate PM onboarding — resume-able Nomba sub-account provisioning.
 	// DORMANT-BY-DEFAULT: built only when Nomba creds are present (nombaClient != nil).
 	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
@@ -507,7 +529,7 @@ func main() {
 	} else {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
-	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient, merchantStats)
+	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
@@ -578,6 +600,7 @@ func main() {
 		pmAuto *services.PMAutomationService
 		pmh    *handlers.PMHandler
 		nwh    *handlers.NombaWebhookHandler
+		fwh    *handlers.FlutterwaveWebhookHandler
 	)
 	if releaseSigner != nil && p2pTradeSvc != nil {
 		// Gateway selection: live Nomba transfer gateway when client credentials
@@ -599,7 +622,20 @@ func main() {
 		} else {
 			log.Printf("[pm] Nomba gateway disabled (need NOMBA_CLIENT_ID + NOMBA_CLIENT_SECRET + NOMBA_ACCOUNT_ID) — sell payouts will error until configured")
 		}
-		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
+		// Flutterwave v4 gateway — preferred when configured (Nomba declined prod
+		// API access); Nomba stays as explicit fallback via FIAT_PROVIDER=nomba.
+		// Provider resolution is centralized in cfg.ResolveFiatProvider so the
+		// payout gateway and webhook wiring can never disagree.
+		gateway := nombaGateway
+		if cfg.ResolveFiatProvider() == "flutterwave" {
+			if fwClient != nil {
+				gateway = services.NewFlutterwaveGateway(fwClient, cfg.NombaSenderName)
+				log.Printf("[pm] live Flutterwave gateway enabled (base=%s)", cfg.FlutterwaveBaseURL)
+			} else {
+				log.Printf("[pm] FIAT_PROVIDER=flutterwave but FLUTTERWAVE_CLIENT_ID/SECRET missing — payouts stay on the Nomba/disabled gateway")
+			}
+		}
+		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, gateway, cfg.NombaSenderName)
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
 		// Wire admin PM approval (provision + activate). Needs a Nomba client to
 		// create the virtual account; pmNombaClient is nil when creds are absent,
@@ -619,6 +655,16 @@ func main() {
 			log.Printf("[pm] Nomba webhook handler ready")
 		} else {
 			log.Printf("[pm] Nomba webhook dormant: NOMBA_WEBHOOK_SECRET not set")
+		}
+		if cfg.FlutterwaveWebhookSecret != "" {
+			fwh = handlers.NewFlutterwaveWebhookHandler(
+				services.NewFlutterwaveWebhookVerifier(cfg.FlutterwaveWebhookSecret),
+				services.NewWebhookStoreForProvider(config.DB, services.ProviderFlutterwave),
+				pmAuto,
+			)
+			log.Printf("[pm] Flutterwave webhook handler ready")
+		} else {
+			log.Printf("[pm] Flutterwave webhook dormant: FLUTTERWAVE_WEBHOOK_SECRET not set")
 		}
 		// M2 liveness: periodically recover PM trades wedged at `paid` with no
 		// release (auto-release failed after markPaid, broadcast never landed) and
@@ -703,7 +749,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, fwh, mcgpSwapHandler, itHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

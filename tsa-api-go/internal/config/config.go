@@ -320,6 +320,24 @@ type Config struct {
 	// webhooks. UNSET ⇒ webhook route dormant.
 	NombaWebhookSecret string
 
+	// Flutterwave — v4 fiat gateway replacing Nomba (Nomba declined production
+	// API access, 2026-07). Dormant-by-default: missing creds ⇒ nil client,
+	// routes surface "not configured". The production base URL is mid-migration
+	// on Flutterwave's side, so it is ALWAYS config-driven.
+	FlutterwaveBaseURL       string
+	FlutterwaveIdpURL        string
+	FlutterwaveClientID      string
+	FlutterwaveClientSecret  string
+	// FlutterwaveWebhookSecret verifies the flutterwave-signature header
+	// (Base64 HMAC-SHA256 of the raw body). UNSET ⇒ FW webhook route dormant.
+	FlutterwaveWebhookSecret string
+	// FlutterwaveMerchantID is OUR merchant id — the wallet identifier used as
+	// the recipient of balance-to-balance currency conversions.
+	FlutterwaveMerchantID string
+	// FiatProviderOverride pins the payout gateway: "flutterwave" | "nomba".
+	// Empty ⇒ auto: Flutterwave when its creds are present, else Nomba.
+	FiatProviderOverride string
+
 	// Fee/TP overhaul (SP3) tunables.
 	//
 	// TPPerUSD is the TP minting rate: how many TP one USD of TP-pool value
@@ -569,6 +587,16 @@ func Load() *Config {
 	cfg.PMReleaseSigner = strings.ToLower(strings.TrimSpace(getEnv("PM_RELEASE_SIGNER", "local")))
 	cfg.PMReleasePrivateKey = strings.TrimSpace(getEnv("PM_RELEASE_PRIVATE_KEY", ""))
 	cfg.NombaWebhookSecret = strings.TrimSpace(getEnv("NOMBA_WEBHOOK_SECRET", ""))
+
+	// Flutterwave — sandbox by default; production must set FLUTTERWAVE_BASE_URL
+	// (the prod base is mid-migration on Flutterwave's side — verify at go-live).
+	cfg.FlutterwaveBaseURL = getEnv("FLUTTERWAVE_BASE_URL", "https://developersandbox-api.flutterwave.com")
+	cfg.FlutterwaveIdpURL = getEnv("FLUTTERWAVE_IDP_URL", "https://idp.flutterwave.com")
+	cfg.FlutterwaveClientID = strings.TrimSpace(os.Getenv("FLUTTERWAVE_CLIENT_ID"))
+	cfg.FlutterwaveClientSecret = strings.TrimSpace(os.Getenv("FLUTTERWAVE_CLIENT_SECRET"))
+	cfg.FlutterwaveWebhookSecret = strings.TrimSpace(getEnv("FLUTTERWAVE_WEBHOOK_SECRET", ""))
+	cfg.FlutterwaveMerchantID = strings.TrimSpace(getEnv("FLUTTERWAVE_MERCHANT_ID", ""))
+	cfg.FiatProviderOverride = strings.ToLower(strings.TrimSpace(getEnv("FIAT_PROVIDER", "")))
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
 	// value; tunable without code change.
@@ -953,6 +981,24 @@ func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 		return 24 * time.Hour
 	}
 	return c.GlobalPoolSettleInterval
+}
+
+// ResolveFiatProvider returns the effective payout/collections gateway:
+// FIAT_PROVIDER when explicitly set, otherwise Flutterwave when its creds are
+// present, otherwise Nomba. Central so the payout gateway, webhook wiring,
+// and bank-directory selection can never disagree.
+func (c *Config) ResolveFiatProvider() string {
+	if c == nil {
+		return "nomba"
+	}
+	switch c.FiatProviderOverride {
+	case "flutterwave", "nomba":
+		return c.FiatProviderOverride
+	}
+	if c.FlutterwaveClientID != "" && c.FlutterwaveClientSecret != "" {
+		return "flutterwave"
+	}
+	return "nomba"
 }
 
 // parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries
