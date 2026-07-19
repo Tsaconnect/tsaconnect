@@ -6,6 +6,11 @@
 // unchanged — this is a visual/structural restyle only. Per-token brand colors
 // (USDC blue, USDT green, MCGP gold) come from the TOKENS data config, not ad-hoc
 // styling, so they're preserved as token identity.
+//
+// OTC listing controls (admin-set, /api/otc/settings, fail OPEN): Direct |
+// Presale sub-tabs (Presale is a coming-soon placeholder), per-direction
+// buy/sell pause (Review button dimmed + press blocked with a toast), and an
+// asset-class chip next to the pair title when set.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, TextInput, ScrollView, KeyboardAvoidingView, Platform, FlatList,
@@ -17,11 +22,12 @@ import { CHAINS } from '@/constants/chains';
 import { signTransaction, withRpcFallback, getActiveWallet } from '@/services/wallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
-  type WalletBalance,
+  getOtcSettings, type OtcSettings, type WalletBalance,
 } from '@/services/walletApi';
 import { useTheme } from '@/theme';
 import {
-  Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
+  Text, Badge, Button, Card, EmptyState, Icon, PressableScale, SegmentedControl, Sheet, Spinner,
+  useToast,
 } from '@/components/ui';
 import { mapSubmitError } from '@/services/swapErrors';
 
@@ -49,6 +55,15 @@ const SWAP_PAIRS: Array<{ from: string; to: string; label: string }> = [
 ];
 
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
+
+// OTC sub-tabs. Direct hosts the live MCGP/USDC desk; Presale is a
+// coming-soon placeholder until presale listings exist.
+type OtcTab = 'direct' | 'presale';
+
+const OTC_TABS: { key: OtcTab; label: string }[] = [
+  { key: 'direct', label: 'Direct' },
+  { key: 'presale', label: 'Presale' },
+];
 
 function toWei(amount: string, d: number): bigint {
   try {
@@ -170,7 +185,11 @@ const TokenPicker = ({
 // ── Main Screen ──
 const SwapScreen = () => {
   const { colors, spacing, radius, fonts } = useTheme();
+  const toast = useToast();
 
+  const [otcTab, setOtcTab] = useState<OtcTab>('direct');
+  // null until loaded — treated as everything-enabled (fail OPEN).
+  const [otcSettings, setOtcSettings] = useState<OtcSettings | null>(null);
   const [fromSymbol, setFromSymbol] = useState('USDC');
   const [toSymbol, setToSymbol] = useState('MCGP');
   const [amount, setAmount] = useState('');
@@ -224,6 +243,14 @@ const SwapScreen = () => {
 
   // Refresh balances every time the screen gains focus
   useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
+
+  // Refresh the admin OTC controls on focus (getOtcSettings caches briefly and
+  // fails OPEN, so a backend hiccup never locks the desk).
+  useFocusEffect(useCallback(() => {
+    let live = true;
+    getOtcSettings().then(s => { if (live) setOtcSettings(s); });
+    return () => { live = false; };
+  }, []));
 
   const bal = (sym: string) => balances.find(b => b.symbol === sym)?.balance || '0';
 
@@ -315,6 +342,22 @@ const SwapScreen = () => {
     } catch (err: any) {
       setError(err.message || 'Failed to prepare swap.');
     } finally { setPreparing(false); }
+  };
+
+  // Admin pause for the active direction — explicit false only, so unloaded /
+  // failed settings leave the desk open (fail OPEN).
+  const directionPaused = direction === 'buy'
+    ? otcSettings?.buyEnabled === false
+    : otcSettings?.sellEnabled === false;
+
+  // Review press while paused: no navigation, just a toast. The button stays
+  // pressable (dimmed via style) so the tap can explain itself.
+  const onReviewPress = () => {
+    if (directionPaused) {
+      toast.info(direction === 'buy' ? 'Buying is temporarily paused' : 'Selling is temporarily paused');
+      return;
+    }
+    goToConfirm();
   };
 
   const handleSwap = async () => {
@@ -557,6 +600,26 @@ const SwapScreen = () => {
     </SafeAreaView>
   );
 
+  // ── Presale sub-tab: coming-soon placeholder (no listings yet) ──
+  if (otcTab === 'presale') return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <View style={{ paddingHorizontal: spacing.xl, paddingTop: spacing.xl }}>
+        <SegmentedControl
+          segments={OTC_TABS}
+          value={otcTab}
+          onChange={(k) => setOtcTab(k as OtcTab)}
+        />
+      </View>
+      <View style={{ flex: 1, justifyContent: 'center' }}>
+        <EmptyState
+          icon="clock"
+          title="Presale coming soon"
+          subtitle="Presale listings will appear here once they go live."
+        />
+      </View>
+    </SafeAreaView>
+  );
+
   // ── Form ──
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -566,10 +629,29 @@ const SwapScreen = () => {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
+          {/* Direct | Presale sub-tabs */}
+          <View style={{ marginBottom: spacing.lg }}>
+            <SegmentedControl
+              segments={OTC_TABS}
+              value={otcTab}
+              onChange={(k) => setOtcTab(k as OtcTab)}
+            />
+          </View>
+
           {/* Header */}
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
             <View>
-              <Text variant="title1" weight="700">Swap</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                <Text variant="title1" weight="700">Swap</Text>
+                {otcSettings?.assetClass ? (
+                  <Badge
+                    label={otcSettings.assetClass}
+                    size="sm"
+                    color={colors.accent}
+                    background={colors.accentMuted}
+                  />
+                ) : null}
+              </View>
               <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>OTC Marketplace</Text>
             </View>
             {rateDisplay ? (
@@ -727,13 +809,14 @@ const SwapScreen = () => {
             </View>
           ) : null}
 
-          {/* Action */}
+          {/* Action — while the active direction is admin-paused the button is
+              dimmed but stays pressable so the tap can toast the reason. */}
           <Button
             title={preparing ? 'Calculating fees…' : 'Review Swap'}
-            onPress={goToConfirm}
+            onPress={onReviewPress}
             loading={preparing}
-            disabled={!amount || priceLoading || preparing || !!priceErr}
-            style={{ marginTop: spacing.xl }}
+            disabled={!directionPaused && (!amount || priceLoading || preparing || !!priceErr)}
+            style={{ marginTop: spacing.xl, ...(directionPaused ? { opacity: 0.4 } : null) }}
           />
         </ScrollView>
 
