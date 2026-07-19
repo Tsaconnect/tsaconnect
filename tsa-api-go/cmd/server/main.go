@@ -164,6 +164,7 @@ func main() {
 	// nil in that case so its /api/mcgp routes are not registered.
 	var mcgpSwapHandler *handlers.MCGPSwapHandler
 	var itHandler *handlers.ITHandler
+	var itService *services.ITService // hoisted: the PM block wires automation onto it
 	mcgpSwapService := services.NewMCGPSwapService(sonicClient, cfg)
 	if mcgpSwapService.IsConfigured() {
 		mcgpSwapHandler = handlers.NewMCGPSwapHandler(config.DB, mcgpSwapService)
@@ -181,7 +182,7 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
-				itService := services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
+				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
@@ -636,6 +637,25 @@ func main() {
 			}
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, gateway, cfg.NombaSenderName)
+		// IT automation — webhook routing always (references arrive regardless),
+		// payout gateway only when a LIVE gateway exists (the disabled gateway
+		// would flip HasAutoPayout and force bank capture with no way to pay).
+		if itService != nil {
+			pmAuto.SetITHooks(itService)
+			_, fwLive := gateway.(*services.FlutterwaveGateway)
+			if fwLive || pmNombaClient != nil {
+				itService.SetPayoutGateway(gateway)
+				log.Printf("[it] sell auto-payout ACTIVE (gateway live)")
+			} else {
+				log.Printf("[it] sell auto-payout dormant: no live payout gateway")
+			}
+			if vaProv := services.NewFlutterwaveVAProvisioner(fwClient, cfg.FlutterwaveCustomerID); vaProv != nil {
+				itService.SetVAProvisioner(vaProv)
+				log.Printf("[it] buy dynamic-VA provisioning ACTIVE")
+			} else {
+				log.Printf("[it] buy dynamic VAs dormant: FW client or FLUTTERWAVE_CUSTOMER_ID missing — company static VA fallback")
+			}
+		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
 		// Wire admin PM approval (provision + activate). Needs a Nomba client to
 		// create the virtual account; pmNombaClient is nil when creds are absent,

@@ -119,6 +119,9 @@ type PMAutomationService struct {
 	name       PMNameLookup
 	gateway    NombaGateway
 	senderName string
+	// itHooks routes IT-prefixed Flutterwave webhook references to the IT
+	// service (see flutterwave_dispatch.go); nil when IT is dormant.
+	itHooks ITWebhookHooks
 }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway

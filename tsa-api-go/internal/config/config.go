@@ -334,6 +334,10 @@ type Config struct {
 	// FlutterwaveMerchantID is OUR merchant id — the wallet identifier used as
 	// the recipient of balance-to-balance currency conversions.
 	FlutterwaveMerchantID string
+	// FlutterwaveCustomerID is the company customer that IT dynamic virtual
+	// accounts hang off (per-payer customers with BVN/NIN are a follow-up).
+	// UNSET ⇒ IT buys fall back to the company PM's static VA.
+	FlutterwaveCustomerID string
 	// FiatProviderOverride pins the payout gateway: "flutterwave" | "nomba".
 	// Empty ⇒ auto: Flutterwave when its creds are present, else Nomba.
 	FiatProviderOverride string
@@ -596,6 +600,7 @@ func Load() *Config {
 	cfg.FlutterwaveClientSecret = strings.TrimSpace(os.Getenv("FLUTTERWAVE_CLIENT_SECRET"))
 	cfg.FlutterwaveWebhookSecret = strings.TrimSpace(getEnv("FLUTTERWAVE_WEBHOOK_SECRET", ""))
 	cfg.FlutterwaveMerchantID = strings.TrimSpace(getEnv("FLUTTERWAVE_MERCHANT_ID", ""))
+	cfg.FlutterwaveCustomerID = strings.TrimSpace(getEnv("FLUTTERWAVE_CUSTOMER_ID", ""))
 	cfg.FiatProviderOverride = strings.ToLower(strings.TrimSpace(getEnv("FIAT_PROVIDER", "")))
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool
