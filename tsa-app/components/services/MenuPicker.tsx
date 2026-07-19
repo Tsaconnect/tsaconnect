@@ -11,6 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Image, ScrollView } from 'react-native';
 import { useTheme } from '@/theme';
+import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import {
   AmountText,
   Button,
@@ -36,7 +37,7 @@ interface MenuPickerProps {
   submitting?: boolean;
 }
 
-const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+const fmtUsd = (n: number) => (isMicroPrice(n) ? `$${formatMicroPrice(n)}` : `$${n.toFixed(2)}`);
 
 export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, submitting }) => {
   const { colors, spacing, radius } = useTheme();

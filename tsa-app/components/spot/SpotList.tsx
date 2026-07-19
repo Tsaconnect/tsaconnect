@@ -10,6 +10,7 @@ import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import { Card, EmptyState, Icon, PressableScale, Spinner, Text } from '@/components/ui';
 import { getSpotListings, type SpotListing } from '@/services/spotApi';
+import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 
 // USD formatter that stays readable across BTC-scale and sub-cent prices.
 function formatUsd(v?: number | null): string {
@@ -17,6 +18,9 @@ function formatUsd(v?: number | null): string {
   if (v >= 1) {
     return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
+  // Sub-cent (micro-cap) prices delegate to the shared leading-zero
+  // compression: $0.0000012 → "$0.0₅12".
+  if (isMicroPrice(v)) return `$${formatMicroPrice(v)}`;
   return `$${v.toPrecision(3).replace(/\.?0+$/, '')}`;
 }
 

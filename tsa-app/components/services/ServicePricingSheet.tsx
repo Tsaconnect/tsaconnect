@@ -20,6 +20,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTheme } from '@/theme';
+import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import {
   Button,
   Divider,
@@ -73,7 +74,7 @@ interface ServicePricingSheetProps {
   buyerCountry?: string;
 }
 
-const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+const fmtUsd = (n: number) => (isMicroPrice(n) ? `$${formatMicroPrice(n)}` : `$${n.toFixed(2)}`);
 
 export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   visible,
