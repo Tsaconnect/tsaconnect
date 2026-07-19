@@ -15,6 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Image } from 'react-native';
 import { useTheme } from '@/theme';
+import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import {
   AmountText,
   Button,
@@ -46,7 +47,7 @@ interface MenuPickerProps {
   onSelectionChange?: (items: { itemId: string; quantity: number }[]) => void;
 }
 
-const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+const fmtUsd = (n: number) => (isMicroPrice(n) ? `$${formatMicroPrice(n)}` : `$${n.toFixed(2)}`);
 
 export const MenuPicker: React.FC<MenuPickerProps> = ({
   productId,
