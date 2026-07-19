@@ -371,20 +371,24 @@ func (c *FlutterwaveClient) ResolveAccount(ctx context.Context, currency, bankCo
 
 // ─── Customers + virtual accounts (collections) ────────────────────────────
 
-// FWCustomerRequest creates the customer a virtual account hangs off.
-// Flutterwave requires BVN or NIN for NGN virtual accounts.
-//
-// TODO(sandbox): field names below follow the v4 docs' resource conventions
-// but the exact identification shape must be confirmed against the sandbox
-// before production (tracked in the FW E2E gate list).
+// FWCustomerRequest creates the customer a virtual account hangs off. Name is
+// nested {first,last} (sandbox-verified 2026-07-19). The sandbox did NOT
+// enforce BVN/NIN at customer creation; production NGN VAs may still require
+// it — the identification shape stays best-effort until a live-mode check.
 type FWCustomerRequest struct {
-	Email          string `json:"email"`
-	FirstName      string `json:"first_name,omitempty"`
-	LastName       string `json:"last_name,omitempty"`
-	Phone          string `json:"phone,omitempty"`
-	IDType         string `json:"id_type,omitempty"`   // "BVN" | "NIN"
-	IDNumber       string `json:"id_number,omitempty"` // the BVN/NIN digits
-	MetaReference  string `json:"meta_reference,omitempty"`
+	Email         string  `json:"email"`
+	Name          *FWName `json:"name,omitempty"`
+	Phone         string  `json:"phone,omitempty"`
+	IDType        string  `json:"id_type,omitempty"`   // "BVN" | "NIN" (live-mode TBC)
+	IDNumber      string  `json:"id_number,omitempty"` // the BVN/NIN digits
+	MetaReference string  `json:"-"`
+}
+
+// FWName is the nested name object used by customers (and transfer
+// recipients accept the same shape).
+type FWName struct {
+	First string `json:"first,omitempty"`
+	Last  string `json:"last,omitempty"`
 }
 
 type fwCustomerResp struct {
@@ -441,14 +445,17 @@ type FWVirtualAccountRequest struct {
 	Narration   string  `json:"narration,omitempty"`
 }
 
-// FWVirtualAccount is the provisioned pay-into account.
+// FWVirtualAccount is the provisioned pay-into account (field names
+// sandbox-verified: the bank is account_bank_name, expiry is
+// account_expiration_datetime).
 type FWVirtualAccount struct {
 	ID            string `json:"id"`
 	AccountNumber string `json:"account_number"`
 	AccountName   string `json:"account_name"`
-	BankName      string `json:"bank_name"`
+	BankName      string `json:"account_bank_name"`
 	Reference     string `json:"reference"`
 	Status        string `json:"status"`
+	ExpiresAt     string `json:"account_expiration_datetime"`
 }
 
 // CreateVirtualAccount provisions a virtual account for fiat collections.
@@ -727,21 +734,20 @@ func (c *FlutterwaveClient) QuoteRate(ctx context.Context, sourceCurrency, destC
 
 // ─── Balances ──────────────────────────────────────────────────────────────
 
-// FWBalance is one currency balance on the merchant wallet.
+// FWBalance is one currency balance on the merchant wallet
+// (sandbox-verified shape: {currency, available_balance}).
 type FWBalance struct {
-	Currency        string  `json:"currency"`
-	AvailableAmount float64 `json:"available_amount"`
-	LedgerAmount    float64 `json:"ledger_amount"`
+	Currency         string  `json:"currency"`
+	AvailableBalance float64 `json:"available_balance"`
 }
 
-// FetchBalances reads the merchant's wallet balances (all currencies).
-// TODO(sandbox): confirm the exact path — the v4 reference lists
-// fetch_wallet_balances; adjust if the sandbox 404s.
+// FetchBalances reads the merchant's wallet balances (all currencies) via
+// GET /wallets/balances (path sandbox-verified 2026-07-19).
 func (c *FlutterwaveClient) FetchBalances(ctx context.Context) ([]FWBalance, error) {
 	if !c.IsEnabled() {
 		return nil, ErrFlutterwaveDisabled
 	}
-	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/balances", nil, "")
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/wallets/balances", nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("flutterwave balances: %w", err)
 	}
