@@ -15,8 +15,13 @@
 // "Add to cart" stashes the resolved tier + quoted price/fee in the shared
 // cart item's notes (see serviceCart.ts) so checkout can build the serviceTiers
 // map and label the line "Call-out fee". "Pay now" adds then routes to checkout.
+//
+// Screen-fit layout: ALL content (slot/menu pickers, party size, policies,
+// summaries) lives in the Sheet's scrollable body; the flow's primary CTA is
+// pinned in the Sheet footer so it stays visible on short screens. The pickers
+// run in hideSubmit mode and mirror their selection up for the footer CTA.
 // Built entirely on the TSA Signature primitives (@/theme + @/components/ui).
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -53,7 +58,7 @@ import { runServiceCheckout } from '../../services/serviceCheckout';
 import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
-import BookingForm from './BookingForm';
+import BookingForm, { type BookingFormHandle } from './BookingForm';
 
 type FeeMode = 'standard' | 'booking';
 // The three marketplace service types drive which buyer flow the sheet shows.
@@ -104,6 +109,12 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // Inline escrow checkout state for the order/booking/access-fee flows.
   const [checkingOut, setCheckingOut] = useState(false);
 
+  // Selections mirrored up from the hideSubmit pickers so the pinned footer
+  // CTA can enable/disable and check out.
+  const [menuSelections, setMenuSelections] = useState<{ itemId: string; quantity: number }[]>([]);
+  const [slotSelection, setSlotSelection] = useState<{ slotStart: string; partySize: number } | null>(null);
+  const bookingFormRef = useRef<BookingFormHandle>(null);
+
   // STANDARD state
   const [residential, setResidential] = useState(false);
   const [detectedZone, setDetectedZone] = useState<string>('same_country');
@@ -140,6 +151,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setMenuSelections([]);
+    setSlotSelection(null);
     try {
       const res = await api.getProductById(serviceId);
       if (!res.success || !res.data) {
@@ -425,8 +438,73 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     [allowedBookingTiers, bookingFees],
   );
 
+  // Pinned footer CTA per flow — always visible below the scrollable body.
+  // Null while loading/errored (the Retry button lives in the body). The
+  // branch order mirrors the body's flow branches below.
+  const footer: React.ReactNode =
+    loading || error ? null : usesBookingForm ? (
+      <Button
+        title={bookingType === 'instant' ? 'Book & Pay' : 'Request booking'}
+        size="lg"
+        leftIcon="shield"
+        onPress={() => bookingFormRef.current?.submit()}
+        loading={checkingOut}
+        disabled={checkingOut}
+      />
+    ) : serviceType === 'order' ? (
+      <Button
+        title="Pay now"
+        size="lg"
+        leftIcon="shield"
+        onPress={() => handleMenuCheckout(menuSelections)}
+        loading={checkingOut}
+        disabled={checkingOut || menuSelections.length === 0}
+      />
+    ) : serviceType === 'booking' && !isFareOnlyBooking ? (
+      <Button
+        title="Pay now"
+        size="lg"
+        leftIcon="shield"
+        onPress={() => slotSelection && handleSlotCheckout(slotSelection)}
+        loading={checkingOut}
+        disabled={checkingOut || !slotSelection}
+      />
+    ) : isFareOnlyBooking ? (
+      <Button
+        title="Pay now"
+        size="lg"
+        leftIcon="shield"
+        onPress={handleAccessFeeCheckout}
+        loading={checkingOut}
+        disabled={checkingOut}
+      />
+    ) : (
+      <>
+        {!canPay && (
+          <Text variant="caption" color="textMuted" align="center">
+            No charge for this selection — nothing to pay.
+          </Text>
+        )}
+        <Button
+          title="Pay now"
+          size="lg"
+          leftIcon="shield"
+          onPress={handlePayNow}
+          loading={adding}
+          disabled={adding || !canPay}
+        />
+        <Button
+          title="Add to cart"
+          variant="secondary"
+          onPress={handleAddToCart}
+          loading={adding}
+          disabled={adding || !canPay}
+        />
+      </>
+    );
+
   return (
-    <Sheet visible={visible} onClose={onClose} title="Service Pricing">
+    <Sheet visible={visible} onClose={onClose} title="Service Pricing" scrollable footer={footer}>
       <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.md, gap: spacing.lg }}>
         {loading ? (
           <View style={{ paddingVertical: spacing['2xl'], alignItems: 'center' }}>
@@ -446,25 +524,26 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
              non-slotted bookings (free date/time fields, no capacity grid); the
              backend only requires a slot when slotDurationMinutes > 0. */
           <BookingForm
+            ref={bookingFormRef}
             fields={customFields}
-            submitting={checkingOut}
-            submitLabel={bookingType === 'instant' ? 'Book & Pay' : 'Request booking'}
+            hideSubmit
             onSubmit={handleBookingSubmit}
           />
         ) : serviceType === 'order' ? (
-          /* ORDER — menu picker; checks out with menuSelections. */
+          /* ORDER — menu picker; the pinned footer checks out menuSelections. */
           <MenuPicker
             productId={productIdOf()}
-            onCheckout={handleMenuCheckout}
-            submitting={checkingOut}
+            hideSubmit
+            onSelectionChange={setMenuSelections}
           />
         ) : serviceType === 'booking' && !isFareOnlyBooking ? (
-          /* BOOKING — slot picker + policies; checks out with bookingSlots. */
+          /* BOOKING — slot picker + policies; the pinned footer checks out the
+             mirrored slotSelection. */
           <>
             <SlotPicker
               productId={productIdOf()}
-              onCheckout={handleSlotCheckout}
-              submitting={checkingOut}
+              hideSubmit
+              onSelectionChange={setSlotSelection}
             />
             {(profile?.cancellationPolicy ||
               profile?.reschedulePolicy ||
@@ -586,46 +665,6 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               <SummaryRow label="Total" value={fmtUsd(total)} total valueColor="accent" />
             </SummaryCard>
           </>
-        )}
-
-        {/* Order / non-fare booking render their own Pay button inside the
-            picker — only the contact + legacy-fare paths use the shared footer. */}
-        {!loading && !error && !usesBookingForm && serviceType !== 'order' && !(serviceType === 'booking' && !isFareOnlyBooking) && (
-          isFareOnlyBooking ? (
-            <View style={{ gap: spacing.sm }}>
-              <Button
-                title="Pay now"
-                size="lg"
-                leftIcon="shield"
-                onPress={handleAccessFeeCheckout}
-                loading={checkingOut}
-                disabled={checkingOut}
-              />
-            </View>
-          ) : (
-            <View style={{ gap: spacing.sm }}>
-              {!canPay && (
-                <Text variant="caption" color="textMuted" align="center">
-                  No charge for this selection — nothing to pay.
-                </Text>
-              )}
-              <Button
-                title="Pay now"
-                size="lg"
-                leftIcon="shield"
-                onPress={handlePayNow}
-                loading={adding}
-                disabled={adding || !canPay}
-              />
-              <Button
-                title="Add to cart"
-                variant="secondary"
-                onPress={handleAddToCart}
-                loading={adding}
-                disabled={adding || !canPay}
-              />
-            </View>
-          )
         )}
       </View>
     </Sheet>

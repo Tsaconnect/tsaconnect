@@ -6,7 +6,10 @@
 // by field key, validates required fields, and hands the answers to the caller
 // for the inline escrow checkout. No per-service-type branching: the form is
 // generated entirely from `fields`.
-import React, { useMemo, useState } from 'react';
+//
+// With `hideSubmit` the parent owns the CTA (pinned sheet footer) and triggers
+// validation + submit through the BookingFormHandle ref instead.
+import React, { forwardRef, useImperativeHandle, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import { Button, IconButton, Input, RadioGroup, Text } from '@/components/ui';
@@ -17,6 +20,14 @@ interface BookingFormProps {
   submitting?: boolean;
   submitLabel?: string;
   onSubmit: (answers: Record<string, any>) => void;
+  /** Hide the internal submit button — the parent renders the CTA in a pinned
+   *  sheet footer and submits via the BookingFormHandle ref. */
+  hideSubmit?: boolean;
+}
+
+export interface BookingFormHandle {
+  /** Validate and submit — same path as the internal button. */
+  submit: () => void;
 }
 
 // Field types that store a numeric answer.
@@ -37,12 +48,10 @@ const placeholderFor = (type: BookingField['type']): string | undefined => {
   }
 };
 
-const BookingForm: React.FC<BookingFormProps> = ({
-  fields,
-  submitting,
-  submitLabel = 'Book & Pay',
-  onSubmit,
-}) => {
+const BookingForm = forwardRef<BookingFormHandle, BookingFormProps>(function BookingForm(
+  { fields, submitting, submitLabel = 'Book & Pay', onSubmit, hideSubmit },
+  ref,
+) {
   const { spacing } = useTheme();
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -82,6 +91,8 @@ const BookingForm: React.FC<BookingFormProps> = ({
     }
     onSubmit(cleaned);
   };
+
+  useImperativeHandle(ref, () => ({ submit: handleSubmit }));
 
   const renderField = (f: BookingField) => {
     const label = f.required ? `${f.label} *` : f.label;
@@ -179,16 +190,18 @@ const BookingForm: React.FC<BookingFormProps> = ({
           {items.map(renderField)}
         </View>
       ))}
-      <Button
-        title={submitLabel}
-        size="lg"
-        leftIcon="shield"
-        onPress={handleSubmit}
-        loading={submitting}
-        disabled={submitting}
-      />
+      {!hideSubmit && (
+        <Button
+          title={submitLabel}
+          size="lg"
+          leftIcon="shield"
+          onPress={handleSubmit}
+          loading={submitting}
+          disabled={submitting}
+        />
+      )}
     </View>
   );
-};
+});
 
 export default BookingForm;
