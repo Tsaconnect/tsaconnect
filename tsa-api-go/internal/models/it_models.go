@@ -52,6 +52,20 @@ type ITIntent struct {
 	TxHash        string `gorm:"size:66" json:"txHash,omitempty"`
 	FailureReason string `gorm:"size:256" json:"failureReason,omitempty"`
 
+	// Sell payout destination (captured at sell creation for auto-payout; empty
+	// on legacy manual-payout intents).
+	BankCode      string `gorm:"size:16" json:"bankCode,omitempty"`
+	AccountNumber string `gorm:"size:20" json:"accountNumber,omitempty"`
+	AccountName   string `gorm:"size:128" json:"accountName,omitempty"`
+	// PayoutID is the fiat provider's transfer id for the sell payout leg; the
+	// transfer.disburse webhook closes the intent against it.
+	PayoutID string `gorm:"size:64;index" json:"payoutId,omitempty"`
+
+	// Dynamic virtual-account details issued for this buy intent (Flutterwave
+	// collections); shown to the buyer as the pay-into account.
+	VAAccountNumber string `gorm:"size:20" json:"vaAccountNumber,omitempty"`
+	VABankName      string `gorm:"size:64" json:"vaBankName,omitempty"`
+
 	// PMID is the company MCGP Payment Merchant this intent settles against.
 	PMID *uuid.UUID `gorm:"type:uuid;index" json:"pmId,omitempty"`
 
