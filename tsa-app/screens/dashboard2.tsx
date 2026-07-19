@@ -1,11 +1,11 @@
 // screens/dashboard2.tsx
 //
-// Home dashboard — total portfolio balance, quick actions, asset list, recent
-// activity, and trade shortcuts. Migrated onto the TSA Signature design system
-// (@/theme tokens + @/components/ui primitives). Behavior is unchanged: all
-// balance reads, the portfolio/transaction/TP/cashback fetches, the auth-token
-// bootstrap, the value-hide toggle, navigation routes, and money formatting are
-// preserved verbatim — this was a visual/structural restyle only.
+// Home dashboard — total portfolio balance, quick actions, asset list, the
+// Real World Marketplace (RWM) widget, and trade shortcuts. Built on the TSA
+// Signature design system (@/theme tokens + @/components/ui primitives). The
+// RWM widget replaced the Recent Activity transactions card; balance reads,
+// the portfolio/TP/cashback fetches, the auth-token bootstrap, the value-hide
+// toggle, navigation routes, and money formatting are preserved verbatim.
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -16,15 +16,13 @@ import CartIconBadge from '@/components/common/CartIconBadge';
 import CurrencySelector from '@/components/currency/CurrencySelector';
 import {
   getWalletBalances,
-  getTransactionHistory,
   normalizeWalletBalances,
-  type Transaction,
 } from '../services/walletApi';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
 import { AssetList } from '@/components/dashboard/AssetList';
-import { RecentActivity } from '@/components/dashboard/RecentActivity';
+import { RWMWidget } from '@/components/dashboard/RWMWidget';
 import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
 import { useNetwork } from '../hooks/useNetwork';
@@ -66,8 +64,9 @@ const Dashboard: React.FC = () => {
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
+  // Bumped on pull-to-refresh so the RWM widget re-fetches its tabs too.
+  const [rwmRefresh, setRwmRefresh] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,14 +150,6 @@ const Dashboard: React.FC = () => {
         }
       } catch {}
 
-      // Fetch transactions
-      try {
-        const txRes = await getTransactionHistory(1, 5);
-        if (txRes.success && txRes.data?.transactions) {
-          setTransactions(txRes.data.transactions);
-        }
-      } catch {}
-
       // Fetch TP and cashback balances
       try {
         const tpRes = await api.getTPBalance();
@@ -184,7 +175,10 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => { if (authToken) fetchData(); }, [authToken, fetchData]);
 
-  const onRefresh = useCallback(() => fetchData(true), [fetchData]);
+  const onRefresh = useCallback(() => {
+    setRwmRefresh((n) => n + 1);
+    return fetchData(true);
+  }, [fetchData]);
 
   // ── Skeleton loading ──
   if (isLoading && !isRefreshing) {
@@ -290,7 +284,7 @@ const Dashboard: React.FC = () => {
 
         <AssetList assets={assets} isValuesHidden={isValuesHidden} />
 
-        <RecentActivity transactions={transactions} isValuesHidden={isValuesHidden} />
+        <RWMWidget isValuesHidden={isValuesHidden} refreshSignal={rwmRefresh} />
 
         <TradeActions />
       </ScrollView>
