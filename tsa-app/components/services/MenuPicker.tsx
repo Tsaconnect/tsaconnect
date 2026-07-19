@@ -7,9 +7,13 @@
 // createOrders(). The server recomputes the authoritative charge from the DB —
 // the subtotal here is a preview only.
 //
+// The list renders flat (no internal ScrollView) — the hosting sheet/screen
+// provides the single scroll container. With `hideSubmit` + `onSelectionChange`
+// the parent owns the CTA instead (pinned sheet footer).
+//
 // Built entirely on the TSA Signature primitives (@/theme + @/components/ui).
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Image, ScrollView } from 'react-native';
+import { View, Image } from 'react-native';
 import { useTheme } from '@/theme';
 import {
   AmountText,
@@ -31,14 +35,26 @@ interface MenuPickerProps {
   productId: string;
   /** Called with the picked items when the buyer checks out. Empty selection is
    *  blocked by the disabled Pay button, so this always carries ≥1 item. */
-  onCheckout: (items: { itemId: string; quantity: number }[]) => void;
+  onCheckout?: (items: { itemId: string; quantity: number }[]) => void;
   /** Drives the Pay button's loading spinner while the parent runs escrow. */
   submitting?: boolean;
+  /** Hide the internal Pay button — the parent renders the CTA in a pinned
+   *  sheet footer and drives checkout from `onSelectionChange`. */
+  hideSubmit?: boolean;
+  /** Reports the current selection (empty until an item is added) so an
+   *  external CTA can enable/disable and check out. */
+  onSelectionChange?: (items: { itemId: string; quantity: number }[]) => void;
 }
 
 const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
 
-export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, submitting }) => {
+export const MenuPicker: React.FC<MenuPickerProps> = ({
+  productId,
+  onCheckout,
+  submitting,
+  hideSubmit,
+  onSelectionChange,
+}) => {
   const { colors, spacing, radius } = useTheme();
 
   const [loading, setLoading] = useState(true);
@@ -96,6 +112,11 @@ export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, s
     [items, qty],
   );
 
+  // Mirror the selection up so an external (pinned-footer) CTA can react.
+  useEffect(() => {
+    onSelectionChange?.(selections);
+  }, [selections, onSelectionChange]);
+
   const canPay = selections.length > 0;
 
   if (loading) {
@@ -134,7 +155,7 @@ export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, s
         checkout.
       </Text>
 
-      <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator={false}>
+      <View>
         {items.map((it, i) => {
           const count = qty[it.id] || 0;
           return (
@@ -199,7 +220,7 @@ export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, s
             </View>
           );
         })}
-      </ScrollView>
+      </View>
 
       <SummaryCard dividerBeforeLast>
         <SummaryRow
@@ -219,14 +240,16 @@ export const MenuPicker: React.FC<MenuPickerProps> = ({ productId, onCheckout, s
         </Text>
       )}
 
-      <Button
-        title="Pay now"
-        size="lg"
-        leftIcon="shield"
-        onPress={() => onCheckout(selections)}
-        loading={submitting}
-        disabled={submitting || !canPay}
-      />
+      {!hideSubmit && (
+        <Button
+          title="Pay now"
+          size="lg"
+          leftIcon="shield"
+          onPress={() => onCheckout?.(selections)}
+          loading={submitting}
+          disabled={submitting || !canPay}
+        />
+      )}
     </View>
   );
 };
