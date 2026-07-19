@@ -446,6 +446,22 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11) — quote-only,
+	// always registered. Provider fees pass through live Flutterwave GetFees
+	// when the client is up, else the config fallback percentage; the P2P FX
+	// feed converts the flat USD platform fee for NGN quotes. Nothing here
+	// moves money — deduction wiring lands after PM sign-off.
+	feeQuoteQuoter := services.NewFlutterwaveFeeQuoter(fwClient)
+	if feeQuoteQuoter == nil {
+		log.Printf("[fee-quote] provider fees on config fallback (%d bps): Flutterwave dormant", cfg.FeeQuote.ProviderFallbackBps)
+	} else {
+		log.Printf("[fee-quote] provider fees live via Flutterwave GetFees")
+	}
+	feeQuoteHandler := handlers.NewFeeQuoteHandler(
+		services.NewFeeQuoteService(cfg.FeeQuote, feeQuoteQuoter),
+		services.NewP2PFxProvider(p2pService),
+	)
+
 	// Bank directory + name enquiry follow the resolved fiat provider so the
 	// app's bank dropdown and the payout gateway can never disagree on codes.
 	var bankDirectory services.BankDirectory
@@ -769,7 +785,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, fwh, mcgpSwapHandler, itHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, fwh, mcgpSwapHandler, itHandler, feeQuoteHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

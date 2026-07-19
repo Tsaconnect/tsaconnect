@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, fwh *handlers.FlutterwaveWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, fwh *handlers.FlutterwaveWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, fqh *handlers.FeeQuoteHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -786,5 +786,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
+	}
+
+	// Deposit/withdrawal fee quotes — ALWAYS registered, independent of the IT
+	// gate above (the calculator has a config fallback for every external
+	// dependency, so dormant Flutterwave/IT must not hide the fee preview).
+	if fqh != nil {
+		quote := api.Group("/it")
+		quote.Use(auth)
+		quote.GET("/quote", fqh.GetQuote)
 	}
 }
