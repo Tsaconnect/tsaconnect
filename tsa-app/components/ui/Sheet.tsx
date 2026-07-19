@@ -1,7 +1,13 @@
 // Bottom sheet on RN Modal + reanimated slide/fade (no gesture-handler root needed).
 // Dismiss via scrim tap or the close button. Animates in AND out (mounted-state).
+//
+// Screen-fit layout (opt-in): pass `scrollable` to wrap children in a vertical
+// ScrollView that shrinks inside the panel's max height, and/or `footer` to pin
+// CTAs below the body (rendered via BottomActionBar, outside any scrolling, with
+// the safe-area bottom inset) so the primary action can never be pushed
+// off-screen on short devices. Children-only usage renders exactly as before.
 import React, { useEffect, useState } from 'react';
-import { Modal, Pressable, View } from 'react-native';
+import { Modal, Pressable, ScrollView, View } from 'react-native';
 import Animated, {
   runOnJS,
   useAnimatedStyle,
@@ -13,6 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import { Text } from './Text';
 import { IconButton } from './IconButton';
+import { BottomActionBar } from './BottomActionBar';
 
 export interface SheetProps {
   visible: boolean;
@@ -21,9 +28,24 @@ export interface SheetProps {
   children: React.ReactNode;
   /** Cap panel height as a fraction of the screen (default 0.85). */
   maxHeightRatio?: number;
+  /** Wrap children in a vertical ScrollView so long content scrolls inside the
+   *  panel instead of overflowing it (pair with `footer` for a screen-fit sheet).
+   *  Leave off when the children manage their own scrolling (e.g. a FlatList). */
+  scrollable?: boolean;
+  /** Pinned CTA slot rendered below the body, outside any scrolling — always
+   *  visible. Owns the safe-area bottom inset when present. */
+  footer?: React.ReactNode;
 }
 
-export const Sheet: React.FC<SheetProps> = ({ visible, onClose, title, children, maxHeightRatio = 0.85 }) => {
+export const Sheet: React.FC<SheetProps> = ({
+  visible,
+  onClose,
+  title,
+  children,
+  maxHeightRatio = 0.85,
+  scrollable = false,
+  footer,
+}) => {
   const { colors, radius, spacing, motion } = useTheme();
   const insets = useSafeAreaInsets();
   const reduced = useReducedMotion();
@@ -67,7 +89,8 @@ export const Sheet: React.FC<SheetProps> = ({ visible, onClose, title, children,
               backgroundColor: colors.surface,
               borderTopLeftRadius: radius.xl,
               borderTopRightRadius: radius.xl,
-              paddingBottom: insets.bottom + spacing.md,
+              // With a pinned footer the BottomActionBar owns the bottom inset.
+              paddingBottom: footer ? 0 : insets.bottom + spacing.md,
             },
             panelStyle,
           ]}
@@ -93,7 +116,16 @@ export const Sheet: React.FC<SheetProps> = ({ visible, onClose, title, children,
             )}
             <IconButton icon="close" accessibilityLabel="Close" onPress={onClose} size={20} />
           </View>
-          {children}
+          {scrollable ? (
+            // flexShrink lets the body give way to the header/footer inside the
+            // maxHeight cap, becoming scrollable instead of overflowing.
+            <ScrollView style={{ flexShrink: 1 }} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+              {children}
+            </ScrollView>
+          ) : (
+            children
+          )}
+          {footer ? <BottomActionBar>{footer}</BottomActionBar> : null}
         </Animated.View>
       </View>
     </Modal>
