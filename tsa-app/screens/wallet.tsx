@@ -718,6 +718,7 @@ const WalletScreen: React.FC = () => {
   const [showManageModal, setShowManageModal] = useState(false);
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
   const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
+  const [showFilterSheet, setShowFilterSheet] = useState(false);
   // SYMBOL → taxonomy category from the spot listings (empty map → everything
   // counts as "spot", so the filter degrades gracefully offline).
   const [categoryMap, setCategoryMap] = useState<Map<string, SpotCategory>>(new Map());
@@ -1036,6 +1037,19 @@ const WalletScreen: React.FC = () => {
     } as any);
   };
 
+  const filtersActive = selectedChain !== 'all' || selectedCategory !== 'all';
+
+  // Pill label, e.g. "All assets" / "SONIC · tStocks".
+  const filterSummary = useMemo(() => {
+    const chainLabel = selectedChain === 'all' ? null : getChainDisplay(selectedChain)?.shortName ?? selectedChain;
+    const categoryLabel =
+      selectedCategory === 'all'
+        ? null
+        : WALLET_CATEGORY_FILTERS.find(f => f.key === selectedCategory)?.label ?? selectedCategory;
+    const parts = [chainLabel, categoryLabel].filter(Boolean);
+    return parts.length ? parts.join(' · ') : 'All assets';
+  }, [selectedChain, selectedCategory]);
+
   const chainFilteredAssets = useMemo(
     () => visibleAssets.filter(a => {
       if (selectedChain !== 'all' && a.details?.chainKey !== selectedChain) return false;
@@ -1193,69 +1207,36 @@ const WalletScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Chain filter */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={{ marginBottom: spacing.sm, marginHorizontal: -spacing.xs }}
-            contentContainerStyle={{ paddingHorizontal: spacing.xs, gap: spacing.xs }}
+          {/* Chain + category filters live in one sheet — two stacked chip rows
+              ate the vertical space above the asset list. */}
+          <PressableScale
+            onPress={() => setShowFilterSheet(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Filter assets. Current filter: ${filterSummary}`}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: spacing.xs,
+              alignSelf: 'flex-start',
+              paddingVertical: spacing.xs,
+              paddingHorizontal: spacing.md,
+              marginBottom: spacing.sm,
+              borderRadius: radius.pill,
+              borderWidth: 1,
+              borderColor: filtersActive ? colors.accent : colors.border,
+              backgroundColor: filtersActive ? colors.accentMuted : colors.surface,
+            }}
           >
-            <ManageChip active={selectedChain === 'all'} label="All" onPress={() => setSelectedChain('all')} />
-            {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
-              const isActive = selectedChain === key;
-              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
-              return (
-                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <ManageChip
-                    active={isActive}
-                    label={chain.shortName}
-                    iconUrl={chain.iconUrl}
-                    iconColor={chain.iconColor}
-                    onPress={() => setSelectedChain(key)}
-                  />
-                  {hasBalance && !isActive && (
-                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
-                  )}
-                </View>
-              );
-            })}
-            {NONEVM_CHAIN_KEYS.map((key) => {
-              const chain = getChainDisplay(key);
-              if (!chain) return null;
-              const isActive = selectedChain === key;
-              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
-              return (
-                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <ManageChip
-                    active={isActive}
-                    label={chain.shortName}
-                    iconColor={chain.iconColor}
-                    onPress={() => setSelectedChain(key)}
-                  />
-                  {hasBalance && !isActive && (
-                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
-                  )}
-                </View>
-              );
-            })}
-          </ScrollView>
-
-          {/* Asset-category filter (taxonomy from spot listings) */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={{ marginBottom: spacing.sm, marginHorizontal: -spacing.xs }}
-            contentContainerStyle={{ paddingHorizontal: spacing.xs, gap: spacing.xs }}
-          >
-            {WALLET_CATEGORY_FILTERS.map((f) => (
-              <ManageChip
-                key={f.key}
-                active={selectedCategory === f.key}
-                label={f.label}
-                onPress={() => setSelectedCategory(f.key)}
-              />
-            ))}
-          </ScrollView>
+            <Icon name="filter" size={14} color={filtersActive ? colors.accent : colors.textSecondary} />
+            <Text
+              variant="bodySm"
+              weight={filtersActive ? '600' : '400'}
+              style={{ color: filtersActive ? colors.accent : colors.textSecondary }}
+            >
+              {filterSummary}
+            </Text>
+            <Icon name="chevronDown" size={14} color={filtersActive ? colors.accent : colors.textMuted} />
+          </PressableScale>
 
           {previewAssets.map(asset => (
             <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
@@ -1364,6 +1345,91 @@ const WalletScreen: React.FC = () => {
                 Manage Wallets
               </Text>
             </PressableScale>
+          </View>
+        </Sheet>
+
+        <Sheet
+          visible={showFilterSheet}
+          onClose={() => setShowFilterSheet(false)}
+          title="Filter assets"
+          scrollable
+        >
+          <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, gap: spacing.lg }}>
+            <View>
+              <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                CHAIN
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                <ManageChip active={selectedChain === 'all'} label="All" onPress={() => setSelectedChain('all')} />
+                {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
+                  const isActive = selectedChain === key;
+                  const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+                  return (
+                    <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <ManageChip
+                        active={isActive}
+                        label={chain.shortName}
+                        iconUrl={chain.iconUrl}
+                        iconColor={chain.iconColor}
+                        onPress={() => setSelectedChain(key)}
+                      />
+                      {hasBalance && !isActive && (
+                        <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                      )}
+                    </View>
+                  );
+                })}
+                {NONEVM_CHAIN_KEYS.map((key) => {
+                  const chain = getChainDisplay(key);
+                  if (!chain) return null;
+                  const isActive = selectedChain === key;
+                  const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+                  return (
+                    <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <ManageChip
+                        active={isActive}
+                        label={chain.shortName}
+                        iconColor={chain.iconColor}
+                        onPress={() => setSelectedChain(key)}
+                      />
+                      {hasBalance && !isActive && (
+                        <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View>
+              <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                CATEGORY
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                {WALLET_CATEGORY_FILTERS.map((f) => (
+                  <ManageChip
+                    key={f.key}
+                    active={selectedCategory === f.key}
+                    label={f.label}
+                    onPress={() => setSelectedCategory(f.key)}
+                  />
+                ))}
+              </View>
+            </View>
+
+            {filtersActive && (
+              <PressableScale
+                onPress={() => {
+                  setSelectedChain('all');
+                  setSelectedCategory('all');
+                }}
+                style={{ alignItems: 'center', paddingVertical: spacing.sm }}
+              >
+                <Text variant="bodyMed" weight="600" color="accent">
+                  Clear filters
+                </Text>
+              </PressableScale>
+            )}
           </View>
         </Sheet>
       </ScrollView>
