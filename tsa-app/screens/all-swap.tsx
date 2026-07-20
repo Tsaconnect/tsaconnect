@@ -550,7 +550,7 @@ export default function AllSwapScreen() {
         <Button
           title="Go to Wallet"
           leftIcon="wallet"
-          onPress={() => router.push('/wallet')}
+          onPress={() => router.push('/tokenization')}
           fullWidth={false}
           size="lg"
           style={{ marginTop: spacing['3xl'], paddingHorizontal: spacing['3xl'] }}

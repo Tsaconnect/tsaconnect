@@ -57,6 +57,7 @@ import {
   AmountText,
   Avatar,
   Badge,
+  Button,
   Divider,
   EmptyState,
   Icon,
@@ -1072,6 +1073,49 @@ const WalletScreen: React.FC = () => {
           <Skeleton height={180} radius="lg" />
           <Skeleton height={300} radius="lg" style={{ marginTop: spacing.lg }} />
         </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // No wallet yet — the setup entry point ("Set Up Wallet" prompts from
+  // checkout and the dashboard backup banner land here). Without this the
+  // screen would render an empty balance sheet with no way to create one.
+  if (!activeAddress) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: spacing['3xl'] }}>
+          <View
+            style={{
+              width: 88,
+              height: 88,
+              borderRadius: radius.pill,
+              backgroundColor: colors.accentMuted,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: spacing.xl,
+            }}
+          >
+            <Icon name="wallet" size={48} color={colors.accent} />
+          </View>
+          <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
+            Set Up Your Wallet
+          </Text>
+          <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing['2xl'] }}>
+            A wallet is needed to make purchases, receive cashback, and manage your funds securely.
+          </Text>
+          <Button
+            title="Create New Wallet"
+            leftIcon="plus"
+            onPress={() => router.push('/wallet/seedphrase')}
+            style={{ marginBottom: spacing.md }}
+          />
+          <Button
+            title="Import Existing Wallet"
+            variant="secondary"
+            leftIcon="upload"
+            onPress={() => router.push('/wallet/seedphrase')}
+          />
+        </View>
       </SafeAreaView>
     );
   }
