@@ -598,7 +598,12 @@ export async function getTokenPriceHistory(
       `${API_BASE_URL}/market/history/${symbol}?days=${days}`,
       { method: 'GET', headers }
     );
-    return await response.json();
+    const json = await response.json();
+    // The endpoint wraps the series: data = { symbol, days, interval, history }.
+    // Unwrap to the bare point array this function's signature promises, while
+    // still accepting a plain array in case the shape is ever flattened.
+    const points = Array.isArray(json?.data) ? json.data : json?.data?.history;
+    return { ...json, data: Array.isArray(points) ? points : [] };
   } catch (error: any) {
     console.error('Get token price history error:', error);
     return { success: false, message: error.message || 'Failed to fetch price history' };

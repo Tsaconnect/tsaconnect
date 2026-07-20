@@ -47,6 +47,8 @@ import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
 import { loadSolanaWallet } from '../services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
+import { getSpotListings, type SpotCategory } from '../services/spotApi';
+import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
@@ -714,6 +716,20 @@ const WalletScreen: React.FC = () => {
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
+  const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
+  // SYMBOL → taxonomy category from the spot listings (empty map → everything
+  // counts as "spot", so the filter degrades gracefully offline).
+  const [categoryMap, setCategoryMap] = useState<Map<string, SpotCategory>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    getSpotListings().then((r) => {
+      if (!cancelled && r.success && r.data) setCategoryMap(categoryBySymbol(r.data.listings ?? []));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -1020,10 +1036,12 @@ const WalletScreen: React.FC = () => {
   };
 
   const chainFilteredAssets = useMemo(
-    () => selectedChain === 'all'
-      ? visibleAssets
-      : visibleAssets.filter(a => a.details?.chainKey === selectedChain),
-    [visibleAssets, selectedChain],
+    () => visibleAssets.filter(a => {
+      if (selectedChain !== 'all' && a.details?.chainKey !== selectedChain) return false;
+      if (selectedCategory !== 'all' && assetCategoryOf(a.symbol, categoryMap) !== selectedCategory) return false;
+      return true;
+    }),
+    [visibleAssets, selectedChain, selectedCategory, categoryMap],
   );
 
   // MCGP always leads when held; other holdings by USD value; zero-balance
@@ -1176,6 +1194,23 @@ const WalletScreen: React.FC = () => {
                 </View>
               );
             })}
+          </ScrollView>
+
+          {/* Asset-category filter (taxonomy from spot listings) */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={{ marginBottom: spacing.sm, marginHorizontal: -spacing.xs }}
+            contentContainerStyle={{ paddingHorizontal: spacing.xs, gap: spacing.xs }}
+          >
+            {WALLET_CATEGORY_FILTERS.map((f) => (
+              <ManageChip
+                key={f.key}
+                active={selectedCategory === f.key}
+                label={f.label}
+                onPress={() => setSelectedCategory(f.key)}
+              />
+            ))}
           </ScrollView>
 
           {previewAssets.map(asset => (
