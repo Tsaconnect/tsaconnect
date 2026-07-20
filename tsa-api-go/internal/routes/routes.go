@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -546,6 +546,27 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
 			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// Reward programme (PM signup/onboarding enrolment forms). Distinct from
+	// the TP-ladder /rewards endpoints above — see models/reward_claim.go.
+	if rch != nil {
+		rewardClaims := api.Group("/reward-claims")
+		rewardClaims.Use(auth)
+		{
+			rewardClaims.POST("", rch.SubmitRewardClaim)
+			rewardClaims.GET("/me", rch.GetMyRewardClaims)
+		}
+
+		adminRewardClaims := api.Group("/admin/reward-claims")
+		adminRewardClaims.Use(adminAuth)
+		{
+			adminRewardClaims.GET("", rch.ListRewardClaimsAdmin)
+			adminRewardClaims.GET("/downlines", rch.GetDownlinesAdmin)
+			// Approval is funds-adjacent (it authorises a payout), so it takes
+			// the stricter gate on top of adminAuth.
+			adminRewardClaims.PATCH("/:id", middleware.RequireP2PAdmin(), rch.UpdateRewardClaimStatus)
 		}
 	}
 

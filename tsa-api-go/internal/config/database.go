@@ -75,6 +75,7 @@ func AutoMigrate() error {
 		&models.EmailVerification{},
 		&models.PasswordReset{},
 		&models.PrivateSaleSubmission{},
+		&models.RewardClaim{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},
 		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.
