@@ -251,6 +251,9 @@ const Layout = () => {
                 case "referrals":
                   iconName = focused ? "account-multiple-plus" : "account-multiple-plus-outline";
                   break;
+                case "reward":
+                  iconName = focused ? "gift" : "gift-outline";
+                  break;
                 default:
                   iconName = "circle-small"; // visible placeholder — add a case above
                   break;
@@ -420,6 +423,13 @@ const Layout = () => {
           name="referrals"
           options={{
             title: "Referrals",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
+          name="reward"
+          options={{
+            title: "Reward",
             drawerActiveTintColor: colors.accent,
           }}
         />
