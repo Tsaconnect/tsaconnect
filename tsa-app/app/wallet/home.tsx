@@ -42,6 +42,8 @@ import { loadSolanaWallet } from '../../services/chains/solanaWallet';
 import { loadSuiWallet } from '../../services/chains/suiWallet';
 import ChainSelector from '../../components/wallet/ChainSelector';
 import ImportTokenModal from '../../components/wallet/ImportTokenModal';
+import { getSpotListings, type SpotCategory } from '../../services/spotApi';
+import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../../utils/spotTabs';
 import { useNetwork } from '../../hooks/useNetwork';
 import { useTheme } from '@/theme';
 import {
@@ -50,6 +52,7 @@ import {
   Avatar,
   Button,
   Card,
+  Chip,
   EmptyState,
   Icon,
   PressableScale,
@@ -90,7 +93,21 @@ const WalletHome = () => {
   const [activeLabel, setActiveLabel] = useState('');
   const [selectorVisible, setSelectorVisible] = useState(false);
   const [chainFilter, setChainFilter] = useState<ChainKey | 'all'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<SpotCategory | 'all'>('all');
+  // SYMBOL → taxonomy category from the spot listings (empty map → everything
+  // counts as "spot", so the filter degrades gracefully offline).
+  const [categoryMap, setCategoryMap] = useState<Map<string, SpotCategory>>(new Map());
   const [importModalVisible, setImportModalVisible] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSpotListings().then((r) => {
+      if (!cancelled && r.success && r.data) setCategoryMap(categoryBySymbol(r.data.listings ?? []));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const { network } = useNetwork();
 
   const fetchData = useCallback(async () => {
@@ -586,9 +603,27 @@ const WalletHome = () => {
             allSelected={chainFilter === 'all'}
             size="compact"
           />
+          {/* Second filter dimension: asset category (taxonomy from spot listings) */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: spacing.xs, marginTop: spacing.sm }}
+          >
+            {WALLET_CATEGORY_FILTERS.map((f) => (
+              <Chip
+                key={f.key}
+                label={f.label}
+                selected={categoryFilter === f.key}
+                onPress={() => setCategoryFilter(f.key)}
+              />
+            ))}
+          </ScrollView>
           <View style={{ marginTop: spacing.md }}>
             {(balances as WalletBalanceWithChain[])
               .filter((b) => chainFilter === 'all' || b.chainKey === chainFilter)
+              .filter(
+                (b) => categoryFilter === 'all' || assetCategoryOf(b.symbol, categoryMap) === categoryFilter
+              )
               // Non-zero holdings first (by USD value, then raw balance for
               // tokens without a price feed); zero rows by the shared ranking
               // so MCGP leads and majors follow.

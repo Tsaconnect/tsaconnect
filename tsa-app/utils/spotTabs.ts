@@ -5,7 +5,7 @@
 // computed here from the server-enriched fields. The server list is already
 // ranked (pins → volume group → mcap), so filters preserve incoming order
 // unless the tab itself defines a sort (Hot/New/Gainers/Losers).
-import type { SpotListing } from '@/services/spotApi';
+import type { SpotCategory, SpotListing } from '@/services/spotApi';
 
 export type SpotTabKey =
   | 'all'
@@ -31,6 +31,35 @@ export const SPOT_TABS: { key: SpotTabKey; label: string }[] = [
   { key: 'gainers', label: 'Gainers' },
   { key: 'losers', label: 'Losers' },
 ];
+
+// Wallet asset-category filter row (second dimension next to the chain chips).
+// RWA is an OTC-side class, not a wallet filter — rwa-categorized symbols only
+// appear under All here.
+export const WALLET_CATEGORY_FILTERS: { key: 'all' | SpotCategory; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'spot', label: 'Spot' },
+  { key: 'alpha', label: 'Alpha' },
+  { key: 'tstocks', label: 'tStocks' },
+  { key: 'tokenized', label: 'Tokenized' },
+  { key: 'tradefi', label: 'Tradefi' },
+];
+
+// Builds the SYMBOL → category map from the spot listings (the single source of
+// asset taxonomy). First listing per base symbol wins (server order is ranked).
+export function categoryBySymbol(listings: SpotListing[]): Map<string, SpotCategory> {
+  const map = new Map<string, SpotCategory>();
+  for (const l of listings) {
+    const sym = l.baseSymbol.toUpperCase();
+    if (!map.has(sym) && l.category) map.set(sym, l.category);
+  }
+  return map;
+}
+
+// Category for a wallet asset. Symbols with no spot listing count as plain
+// "spot" assets so they never vanish from every tab.
+export function assetCategoryOf(symbol: string, map: Map<string, SpotCategory>): SpotCategory {
+  return map.get(symbol.toUpperCase()) ?? 'spot';
+}
 
 export const HOT_COUNT = 10;
 export const NEW_WINDOW_DAYS = 14;

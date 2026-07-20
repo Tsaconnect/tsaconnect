@@ -1,5 +1,12 @@
 import type { SpotListing } from '@/services/spotApi';
-import { filterListingsByTab, HOT_COUNT, SPOT_TABS } from '../spotTabs';
+import {
+  assetCategoryOf,
+  categoryBySymbol,
+  filterListingsByTab,
+  HOT_COUNT,
+  SPOT_TABS,
+  WALLET_CATEGORY_FILTERS,
+} from '../spotTabs';
 
 const NOW = Date.parse('2026-07-20T12:00:00Z');
 const daysAgo = (d: number) => new Date(NOW - d * 24 * 60 * 60 * 1000).toISOString();
@@ -94,6 +101,27 @@ describe('filterListingsByTab', () => {
     ];
     expect(symbols(filterListingsByTab(rows, 'gainers', new Set(), NOW))).toEqual(['UP8', 'UP2']);
     expect(symbols(filterListingsByTab(rows, 'losers', new Set(), NOW))).toEqual(['DOWN9', 'DOWN1']);
+  });
+
+  it('wallet categories: symbol map from listings, unlisted symbols default to spot', () => {
+    const rows = [
+      listing({ baseSymbol: 'AAPL', category: 'tstocks' }),
+      listing({ baseSymbol: 'aapl', category: 'alpha' }), // dup symbol — first (ranked) wins
+      listing({ baseSymbol: 'BOND', category: 'tradefi' }),
+    ];
+    const map = categoryBySymbol(rows);
+    expect(assetCategoryOf('aapl', map)).toBe('tstocks');
+    expect(assetCategoryOf('BOND', map)).toBe('tradefi');
+    expect(assetCategoryOf('MCGP', map)).toBe('spot');
+    expect(WALLET_CATEGORY_FILTERS[0]).toEqual({ key: 'all', label: 'All' });
+    expect(WALLET_CATEGORY_FILTERS.map((f) => f.label)).toEqual([
+      'All',
+      'Spot',
+      'Alpha',
+      'tStocks',
+      'Tokenized',
+      'Tradefi',
+    ]);
   });
 
   it('tab registry: All first, labels match the PM spec', () => {
