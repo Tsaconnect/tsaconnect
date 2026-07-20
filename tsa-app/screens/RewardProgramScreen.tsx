@@ -236,6 +236,7 @@ const RewardProgramScreen = () => {
             {linkRow('TradePoints & rewards', 'Your level, claimable rewards and TP history', '/rewards')}
             {linkRow('Cashback', 'What you earned back on transactions', '/cashback')}
             {linkRow('Referrals', 'Who you onboarded and TP earned from them', '/referrals')}
+            {linkRow('Leaderboard', 'Top TradePoint earners and your rank', '/reward-program/leaderboard')}
           </Card>
         </ScrollView>
       )}
