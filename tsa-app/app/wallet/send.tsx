@@ -66,7 +66,7 @@ type BalanceEntry = WalletBalanceWithChain;
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
 // Round token-symbol badge. Color is sourced from the token registry's
-// iconColor (data-driven, like wallet/home) and falls back to a neutral token.
+// iconColor (data-driven, like screens/wallet) and falls back to a neutral token.
 const TokenBadge = ({
   symbol,
   size = 36,
@@ -96,7 +96,7 @@ const SendToken = () => {
   const { colors, spacing, radius } = useTheme();
   const { tokens, tokenList } = useTokens();
 
-  // Token-color map derived from the registry (matches wallet/home), so badge
+  // Token-color map derived from the registry (matches screens/wallet), so badge
   // colors stay data-driven instead of hardcoded hex.
   const tokenColorFor = useCallback(
     (symbol: string): string => tokens[symbol]?.iconColor || colors.textMuted,
