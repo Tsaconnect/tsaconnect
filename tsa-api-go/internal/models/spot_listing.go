@@ -24,6 +24,29 @@ func ValidSpotRoute(r string) bool {
 	}
 }
 
+// Spot listing taxonomy categories (admin-assigned, per PM asset-classification
+// spec). Computed tabs (Hot/New/Gainers/Losers/Favorites) are derived client-side
+// and are NOT categories. "spot" is the default bucket.
+const (
+	SpotCategorySpot      = "spot"
+	SpotCategoryAlpha     = "alpha"
+	SpotCategoryTStocks   = "tstocks"
+	SpotCategoryTokenized = "tokenized" // Tokenized market
+	SpotCategoryTradefi   = "tradefi"
+	SpotCategoryRWA       = "rwa"
+)
+
+// ValidSpotCategory reports whether cat is a recognised taxonomy category.
+func ValidSpotCategory(cat string) bool {
+	switch cat {
+	case SpotCategorySpot, SpotCategoryAlpha, SpotCategoryTStocks,
+		SpotCategoryTokenized, SpotCategoryTradefi, SpotCategoryRWA:
+		return true
+	default:
+		return false
+	}
+}
+
 // SpotChains is the set of chain keys a listing may reference. Mirrors the
 // NetworkConfig.Chains / SupportedToken chain-key space and the admin UI picker.
 var SpotChains = map[string]bool{
@@ -54,6 +77,12 @@ type SpotListing struct {
 	// silently persist as enabled. Handlers set Enabled explicitly instead.
 	Enabled      bool `gorm:"not null" json:"enabled"`
 	DisplayOrder int  `gorm:"column:display_order" json:"displayOrder"`
+	// Category is the admin-assigned taxonomy bucket (ValidSpotCategory).
+	// Handlers default it to "spot" explicitly, mirroring the Enabled note above.
+	Category string `gorm:"default:'spot'" json:"category"`
+	// PinnedPosition is a 1-based admin override in the ranked public list
+	// (nil = unpinned; ranking then applies default pins / dynamic order).
+	PinnedPosition *int      `gorm:"column:pinned_position" json:"pinnedPosition"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
