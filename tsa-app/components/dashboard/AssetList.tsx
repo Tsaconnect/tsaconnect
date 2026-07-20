@@ -33,17 +33,15 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden, on
 
       {assets.map((asset, index) => {
         const isLast = index === assets.length - 1;
-        const RowContainer: React.ElementType = onAssetPress ? PressableScale : View;
         return (
           <View key={asset._id || asset.id || asset.symbol}>
-            <RowContainer
-              {...(onAssetPress
-                ? {
-                    onPress: () => onAssetPress(asset.symbol),
-                    accessibilityRole: 'button' as const,
-                    accessibilityLabel: `View ${asset.symbol} pairs and chains`,
-                  }
-                : {})}
+            {/* PressableScale with no onPress is inert, so one component
+                handles both cases — no ElementType indirection, and props stay
+                type-checked. */}
+            <PressableScale
+              onPress={onAssetPress ? () => onAssetPress(asset.symbol) : undefined}
+              accessibilityRole={onAssetPress ? 'button' : undefined}
+              accessibilityLabel={onAssetPress ? `View ${asset.symbol} pairs and chains` : undefined}
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
@@ -69,7 +67,7 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden, on
                   {isValuesHidden ? '••••' : formatPrice(asset.usdValue)}
                 </Text>
               </View>
-            </RowContainer>
+            </PressableScale>
             {!isLast && <Divider inset={spacing.lg} />}
           </View>
         );

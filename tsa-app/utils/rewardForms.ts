@@ -18,9 +18,10 @@ export type PhoneNetwork = (typeof PHONE_NETWORKS)[number];
 
 export const MIN_ONBOARDING_USERNAMES = 10;
 
+// name/username are NOT here: the server derives identity from the auth token
+// (accepting them let a user file under someone else's username). The screens
+// display them read-only from AuthContext.
 export interface SignupFormFields {
-  name: string;
-  username: string;
   phoneNumber: string;
   phoneNetwork: string;
   inviterUsername: string;
@@ -28,8 +29,6 @@ export interface SignupFormFields {
 }
 
 export interface OnboardingFormFields {
-  name: string;
-  username: string;
   payoutMethod: string;
   payoutDetails: string;
   invitedUsernames: string;
@@ -39,16 +38,19 @@ export type FormErrors = Record<string, string>;
 
 /** Counts non-blank entries, so trailing separators don't inflate the total. */
 export function countUsernames(raw: string): number {
-  return raw
-    .split(/[\s,\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean).length;
+  // Split on commas/newlines ONLY — not spaces, so "John Doe" is one entry —
+  // and count distinct lowercased names. Mirrors splitUsernames in the Go
+  // handler; both must agree or the client and server disagree on the minimum.
+  const seen = new Set<string>();
+  for (const part of raw.split(/[,\n\r]+/)) {
+    const name = part.trim().toLowerCase();
+    if (name) seen.add(name);
+  }
+  return seen.size;
 }
 
 export function validateSignupForm(f: SignupFormFields): FormErrors {
   const errors: FormErrors = {};
-  if (!f.name.trim()) errors.name = 'Enter your name';
-  if (!f.username.trim()) errors.username = 'Enter your username';
   // Nigerian mobile numbers are 11 digits local (0803…) or 13 with the country
   // code. Accept either and let the payout rail normalise.
   const digits = f.phoneNumber.replace(/\D/g, '');
@@ -59,15 +61,17 @@ export function validateSignupForm(f: SignupFormFields): FormErrors {
   return errors;
 }
 
-export function validateOnboardingForm(f: OnboardingFormFields): FormErrors {
+export function validateOnboardingForm(
+  f: OnboardingFormFields,
+  minUsernames: number = MIN_ONBOARDING_USERNAMES,
+): FormErrors {
   const errors: FormErrors = {};
-  if (!f.name.trim()) errors.name = 'Enter your name';
-  if (!f.username.trim()) errors.username = 'Enter your username';
   if (!f.payoutMethod.trim()) errors.payoutMethod = 'Select how you want to be paid';
   if (!f.payoutDetails.trim()) errors.payoutDetails = 'Enter your account details';
+  // Distinct, case-insensitive — matches the server, where repeats don't count.
   const n = countUsernames(f.invitedUsernames);
-  if (n < MIN_ONBOARDING_USERNAMES) {
-    errors.invitedUsernames = `List at least ${MIN_ONBOARDING_USERNAMES} usernames (you have ${n})`;
+  if (n < minUsernames) {
+    errors.invitedUsernames = `List at least ${minUsernames} different usernames (you have ${n})`;
   }
   return errors;
 }

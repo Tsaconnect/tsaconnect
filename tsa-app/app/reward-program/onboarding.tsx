@@ -8,8 +8,9 @@ import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform, Alert } fr
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
+import { useAuth } from '@/AuthContext/AuthContext';
 import { Button, Input, ScreenHeader, SelectRow, Sheet, Text } from '@/components/ui';
-import { submitRewardClaim } from '@/services/rewardProgramApi';
+import { getMyRewardClaims, submitRewardClaim } from '@/services/rewardProgramApi';
 import {
   countUsernames,
   MIN_ONBOARDING_USERNAMES,
@@ -25,8 +26,10 @@ const PAYOUT_METHODS: { key: string; label: string }[] = [
 
 const OnboardingRewardForm = () => {
   const { colors, spacing } = useTheme();
-  const [name, setName] = useState('');
-  const [username, setUsername] = useState('');
+  const { currentUser } = useAuth();
+  // The threshold is the SERVER's — a hardcoded client copy would silently
+  // disagree with the hub (which already reads requiredReferrals) if it changed.
+  const [minUsernames, setMinUsernames] = useState(MIN_ONBOARDING_USERNAMES);
   const [payoutMethod, setPayoutMethod] = useState('');
   const [payoutDetails, setPayoutDetails] = useState('');
   const [invitedUsernames, setInvitedUsernames] = useState('');
@@ -36,19 +39,29 @@ const OnboardingRewardForm = () => {
   const [submitting, setSubmitting] = useState(false);
   const [methodOpen, setMethodOpen] = useState(false);
 
-  const usernameRef = useRef<TextInput>(null);
   const detailsRef = useRef<TextInput>(null);
 
-  const fields = { name, username, payoutMethod, payoutDetails, invitedUsernames };
+  const fields = { payoutMethod, payoutDetails, invitedUsernames };
   const listed = countUsernames(invitedUsernames);
 
   useEffect(() => {
-    if (validated) setErrors(validateOnboardingForm(fields));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [validated, name, username, payoutMethod, payoutDetails, invitedUsernames]);
+    let cancelled = false;
+    getMyRewardClaims().then((r) => {
+      const required = r.data?.onboarding?.eligibility?.requiredReferrals;
+      if (!cancelled && typeof required === 'number' && required > 0) setMinUsernames(required);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!validated) return;
+    setErrors(
+      validateOnboardingForm({ payoutMethod, payoutDetails, invitedUsernames }, minUsernames),
+    );
+  }, [validated, payoutMethod, payoutDetails, invitedUsernames, minUsernames]);
 
   const handleSubmit = async () => {
-    const found = validateOnboardingForm(fields);
+    const found = validateOnboardingForm(fields, minUsernames);
     setErrors(found);
     setValidated(true);
     if (Object.keys(found).length > 0) return;
@@ -56,8 +69,6 @@ const OnboardingRewardForm = () => {
     setSubmitting(true);
     const r = await submitRewardClaim({
       kind: 'onboarding',
-      name: name.trim(),
-      username: username.trim(),
       payoutMethod,
       payoutDetails: payoutDetails.trim(),
       invitedUsernames: invitedUsernames.trim(),
@@ -65,11 +76,8 @@ const OnboardingRewardForm = () => {
     setSubmitting(false);
 
     if (r.success) {
-      Alert.alert(
-        'Submitted',
-        'Your onboarding reward form has been received. We’ll review it and be in touch.',
-        [{ text: 'Done', onPress: () => router.back() }],
-      );
+      router.back();
+      Alert.alert('Submitted', 'Your onboarding reward form has been received. We’ll review it and be in touch.');
       return;
     }
     Alert.alert('Could not submit', r.message || 'Please try again.');
@@ -79,7 +87,7 @@ const OnboardingRewardForm = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Onboarding form" fallbackRoute="/reward" />
+      <ScreenHeader title="Onboarding form" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
@@ -92,23 +100,12 @@ const OnboardingRewardForm = () => {
             A one-time cash reward for bringing people onto TSA Connect.
           </Text>
 
+          <Input label="Name" value={currentUser?.name ?? ''} editable={false} helper="From your account" />
           <Input
-            label="Name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Your full name"
-            error={errors.name}
-            returnKeyType="next"
-            onSubmitEditing={() => usernameRef.current?.focus()}
-          />
-          <Input
-            ref={usernameRef}
             label="Username"
-            value={username}
-            onChangeText={setUsername}
-            placeholder="Your TSA Connect username"
-            autoCapitalize="none"
-            error={errors.username}
+            value={currentUser?.username ?? ''}
+            editable={false}
+            helper="From your account"
           />
           <SelectRow
             label="Payout method"
@@ -132,7 +129,7 @@ const OnboardingRewardForm = () => {
             placeholder="Separate usernames with commas"
             autoCapitalize="none"
             multiline
-            helper={`${listed} of ${MIN_ONBOARDING_USERNAMES} listed`}
+            helper={`${listed} of ${minUsernames} listed`}
             error={errors.invitedUsernames}
           />
 
@@ -144,7 +141,7 @@ const OnboardingRewardForm = () => {
             style={{ marginTop: spacing.lg }}
           />
           <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.md }}>
-            Ensure you onboard a minimum of {MIN_ONBOARDING_USERNAMES} users and also make a
+            Ensure you onboard a minimum of {minUsernames} users and also make a
             transaction to be eligible.
           </Text>
         </ScrollView>

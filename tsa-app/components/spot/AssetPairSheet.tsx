@@ -20,6 +20,10 @@ export interface AssetPairSheetProps {
   symbol: string;
   /** Listings for that symbol, already filtered (see listingsForSymbol). */
   listings: SpotListing[];
+  /** Set when the listings fetch failed, so an outage isn't reported as
+   *  "this asset has no pairs" — a network error is not a product fact. */
+  error?: string;
+  onRetry?: () => void;
 }
 
 export const AssetPairSheet: React.FC<AssetPairSheetProps> = ({
@@ -27,6 +31,8 @@ export const AssetPairSheet: React.FC<AssetPairSheetProps> = ({
   onClose,
   symbol,
   listings,
+  error,
+  onRetry,
 }) => {
   const { colors, spacing, radius } = useTheme();
 
@@ -58,7 +64,22 @@ export const AssetPairSheet: React.FC<AssetPairSheetProps> = ({
   return (
     <Sheet visible={visible} onClose={onClose} title={`Trade ${symbol}`} scrollable>
       <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg }}>
-        {listings.length === 0 ? (
+        {error ? (
+          <View style={{ gap: spacing.md }}>
+            <EmptyState
+              icon="closeCircle"
+              title="Couldn’t load trading pairs"
+              subtitle={error}
+            />
+            {!!onRetry && (
+              <PressableScale onPress={onRetry} style={{ alignItems: 'center', paddingVertical: spacing.sm }}>
+                <Text variant="bodyMed" weight="600" color="accent">
+                  Try again
+                </Text>
+              </PressableScale>
+            )}
+          </View>
+        ) : listings.length === 0 ? (
           <EmptyState
             icon="clock"
             title="Not listed for trading yet"

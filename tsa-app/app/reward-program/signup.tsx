@@ -7,6 +7,7 @@ import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform, Alert } fr
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
+import { useAuth } from '@/AuthContext/AuthContext';
 import { Button, Input, ScreenHeader, SelectRow, Sheet, Text } from '@/components/ui';
 import { submitRewardClaim } from '@/services/rewardProgramApi';
 import { PHONE_NETWORKS, validateSignupForm, type FormErrors } from '@/utils/rewardForms';
@@ -20,8 +21,9 @@ const NETWORK_LABEL: Record<string, string> = {
 
 const SignupRewardForm = () => {
   const { colors, spacing } = useTheme();
-  const [name, setName] = useState('');
-  const [username, setUsername] = useState('');
+  // Identity is shown for confirmation but never submitted — the server takes
+  // it from the auth token.
+  const { currentUser } = useAuth();
   const [phoneNumber, setPhoneNumber] = useState('');
   const [phoneNetwork, setPhoneNetwork] = useState('');
   const [inviterUsername, setInviterUsername] = useState('');
@@ -32,18 +34,19 @@ const SignupRewardForm = () => {
   const [submitting, setSubmitting] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
 
-  const usernameRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
-  const inviterRef = useRef<TextInput>(null);
   const socialRef = useRef<TextInput>(null);
 
-  const fields = { name, username, phoneNumber, phoneNetwork, inviterUsername, socialLinks };
+  const fields = { phoneNumber, phoneNetwork, inviterUsername, socialLinks };
 
   // Errors appear only after the first submit attempt, then track live.
+  // Fields are rebuilt inside the effect so every input is a real dependency —
+  // no eslint-disable, so adding a rule for socials/inviter can't silently stop
+  // live validation for it.
   useEffect(() => {
-    if (validated) setErrors(validateSignupForm(fields));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [validated, name, username, phoneNumber, phoneNetwork]);
+    if (!validated) return;
+    setErrors(validateSignupForm({ phoneNumber, phoneNetwork, inviterUsername, socialLinks }));
+  }, [validated, phoneNumber, phoneNetwork, inviterUsername, socialLinks]);
 
   const handleSubmit = async () => {
     const found = validateSignupForm(fields);
@@ -54,8 +57,6 @@ const SignupRewardForm = () => {
     setSubmitting(true);
     const r = await submitRewardClaim({
       kind: 'signup',
-      name: name.trim(),
-      username: username.trim(),
       phoneNumber: phoneNumber.trim(),
       phoneNetwork,
       inviterUsername: inviterUsername.trim(),
@@ -64,11 +65,11 @@ const SignupRewardForm = () => {
     setSubmitting(false);
 
     if (r.success) {
-      Alert.alert(
-        'Submitted',
-        'Your signup reward form has been received. We’ll review it and be in touch.',
-        [{ text: 'Done', onPress: () => router.back() }],
-      );
+      // Navigate first: on Android the alert is dismissible with the hardware
+      // back button, which would skip an onPress-only navigation and leave the
+      // user on a filled form that submits again.
+      router.back();
+      Alert.alert('Submitted', 'Your signup reward form has been received. We’ll review it and be in touch.');
       return;
     }
     Alert.alert('Could not submit', r.message || 'Please try again.');
@@ -76,7 +77,7 @@ const SignupRewardForm = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Signup form" fallbackRoute="/reward" />
+      <ScreenHeader title="Signup form" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}
@@ -91,23 +92,15 @@ const SignupRewardForm = () => {
 
           <Input
             label="Name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Your full name"
-            error={errors.name}
-            returnKeyType="next"
-            onSubmitEditing={() => usernameRef.current?.focus()}
+            value={currentUser?.name ?? ''}
+            editable={false}
+            helper="From your account"
           />
           <Input
-            ref={usernameRef}
             label="Username"
-            value={username}
-            onChangeText={setUsername}
-            placeholder="Your TSA Connect username"
-            autoCapitalize="none"
-            error={errors.username}
-            returnKeyType="next"
-            onSubmitEditing={() => phoneRef.current?.focus()}
+            value={currentUser?.username ?? ''}
+            editable={false}
+            helper="From your account"
           />
           <Input
             ref={phoneRef}
@@ -127,7 +120,6 @@ const SignupRewardForm = () => {
             error={errors.phoneNetwork}
           />
           <Input
-            ref={inviterRef}
             label="Inviter's username (optional)"
             value={inviterUsername}
             onChangeText={setInviterUsername}

@@ -7,7 +7,7 @@
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
@@ -47,8 +47,9 @@ import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
 import { loadSolanaWallet } from '../services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
-import { getSpotListings, type SpotCategory } from '../services/spotApi';
+import { type SpotCategory } from '../services/spotApi';
 import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
+import { useSpotListings } from '../hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
@@ -719,19 +720,15 @@ const WalletScreen: React.FC = () => {
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
   const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
   const [showFilterSheet, setShowFilterSheet] = useState(false);
-  // SYMBOL → taxonomy category from the spot listings (empty map → everything
-  // counts as "spot", so the filter degrades gracefully offline).
-  const [categoryMap, setCategoryMap] = useState<Map<string, SpotCategory>>(new Map());
-
-  useEffect(() => {
-    let cancelled = false;
-    getSpotListings().then((r) => {
-      if (!cancelled && r.success && r.data) setCategoryMap(categoryBySymbol(r.data.listings ?? []));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // SYMBOL → taxonomy category, from the shared listings cache. When the fetch
+  // fails the map is empty and every asset falls back to "spot", which would
+  // silently produce wrong CATEGORY results — so the sheet surfaces the error
+  // rather than pretending the filter works.
+  const { listings: spotListings, error: listingsError } = useSpotListings();
+  const categoryMap = useMemo<Map<string, SpotCategory>>(
+    () => categoryBySymbol(spotListings),
+    [spotListings],
+  );
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -783,6 +780,11 @@ const WalletScreen: React.FC = () => {
       setActiveAddress(addr);
       const meta = list.find(w => w.address === addr);
       setActiveLabel(meta?.label || 'Wallet');
+    } else {
+      // Must reset: without this, deleting the last wallet leaves a stale
+      // address and the no-wallet onboarding branch becomes unreachable.
+      setActiveAddress('');
+      setActiveLabel('Wallet');
     }
 
     const nativeAssets = buildNativeAssets();
@@ -974,7 +976,13 @@ const WalletScreen: React.FC = () => {
     }
   }, [buildNativeAssets, tokenList, customTokens, network]);
 
-  useEffect(() => { fetchBalances(); }, [fetchBalances]);
+  // Focus-driven, not mount-only. This screen is a TAB: creating a wallet ends
+  // with router.replace('/tokenization'), which targets this already-mounted
+  // screen, so it never remounts. With a plain mount effect activeAddress stays
+  // '' and the user is bounced back to "Set Up Your Wallet" holding the wallet
+  // they just made. (The old app/wallet/home.tsx got away with a mount effect
+  // because it was a STACK route that the replace unmounted.)
+  useFocusEffect(useCallback(() => { fetchBalances(); }, [fetchBalances]));
 
   const onRefresh = useCallback(() => fetchBalances(true), [fetchBalances]);
 
@@ -1405,6 +1413,11 @@ const WalletScreen: React.FC = () => {
               <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
                 CATEGORY
               </Text>
+              {!!listingsError && (
+                <Text variant="caption" color="danger" style={{ marginBottom: spacing.sm }}>
+                  Couldn’t load asset categories, so this filter may be incomplete.
+                </Text>
+              )}
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
                 {WALLET_CATEGORY_FILTERS.map((f) => (
                   <ManageChip

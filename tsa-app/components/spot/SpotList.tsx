@@ -8,7 +8,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl, Image } from 'react-native';
 import { useTheme } from '@/theme';
 import { Card, Chip, EmptyState, Icon, PressableScale, Spinner, Text } from '@/components/ui';
-import { getSpotListings, type SpotListing } from '@/services/spotApi';
+import { type SpotListing } from '@/services/spotApi';
+import { useSpotListings } from '@/hooks/useSpotListings';
 import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import { filterListingsByTab, SPOT_TABS, type SpotTabKey } from '@/utils/spotTabs';
 import { listingsForSymbol } from '@/utils/spotPairs';
@@ -193,10 +194,9 @@ const TAB_EMPTY: Partial<Record<SpotTabKey, { title: string; subtitle: string }>
 
 const SpotList = () => {
   const { colors, spacing } = useTheme();
-  const [listings, setListings] = useState<SpotListing[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Shared cache — the wallet filter and homepage picker read the same dataset.
+  const { listings, loading, error, reload } = useSpotListings();
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
   const [tab, setTab] = useState<SpotTabKey>('all');
   const [pickerSymbol, setPickerSymbol] = useState<string | null>(null);
   const { favoriteIds, toggleFavorite } = useSpotFavorites();
@@ -214,20 +214,10 @@ const SpotList = () => {
   );
 
   const load = useCallback(async () => {
-    const r = await getSpotListings();
-    if (r.success && r.data) {
-      setListings(r.data.listings ?? []);
-      setError('');
-    } else {
-      setError(r.message || 'Could not load spot pairs');
-    }
-    setLoading(false);
+    await reload();
     setRefreshing(false);
-  }, []);
+  }, [reload]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
 
   if (loading) {
     return (
@@ -317,6 +307,8 @@ const SpotList = () => {
         onClose={() => setPickerSymbol(null)}
         symbol={pickerSymbol ?? ''}
         listings={pickerListings}
+        error={error ?? undefined}
+        onRetry={reload}
       />
     </View>
   );
