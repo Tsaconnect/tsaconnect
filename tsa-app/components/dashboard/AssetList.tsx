@@ -9,14 +9,16 @@ import { View } from 'react-native';
 import { Asset } from '@/components/services/api';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
-import { Avatar, Divider, Surface, Text } from '@/components/ui';
+import { Avatar, Divider, PressableScale, Surface, Text } from '@/components/ui';
 
 interface AssetListProps {
   assets: Asset[];
   isValuesHidden: boolean;
+  /** Tapping a row opens the pair/chain picker. Rows stay inert when omitted. */
+  onAssetPress?: (symbol: string) => void;
 }
 
-export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) => {
+export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden, onAssetPress }) => {
   const { formatPrice } = useCurrency();
   const { spacing } = useTheme();
 
@@ -31,9 +33,17 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) 
 
       {assets.map((asset, index) => {
         const isLast = index === assets.length - 1;
+        const RowContainer: React.ElementType = onAssetPress ? PressableScale : View;
         return (
           <View key={asset._id || asset.id || asset.symbol}>
-            <View
+            <RowContainer
+              {...(onAssetPress
+                ? {
+                    onPress: () => onAssetPress(asset.symbol),
+                    accessibilityRole: 'button' as const,
+                    accessibilityLabel: `View ${asset.symbol} pairs and chains`,
+                  }
+                : {})}
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
@@ -59,7 +69,7 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) 
                   {isValuesHidden ? '••••' : formatPrice(asset.usdValue)}
                 </Text>
               </View>
-            </View>
+            </RowContainer>
             {!isLast && <Divider inset={spacing.lg} />}
           </View>
         );
