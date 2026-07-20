@@ -8,8 +8,6 @@ import {
 } from '../rewardForms';
 
 const signup = (over: Partial<SignupFormFields> = {}): SignupFormFields => ({
-  name: 'Ada',
-  username: 'ada',
   phoneNumber: '08030000000',
   phoneNetwork: 'mtn',
   inviterUsername: '',
@@ -20,8 +18,6 @@ const signup = (over: Partial<SignupFormFields> = {}): SignupFormFields => ({
 const tenNames = Array.from({ length: 10 }, (_, i) => `user${i}`).join(',');
 
 const onboarding = (over: Partial<OnboardingFormFields> = {}): OnboardingFormFields => ({
-  name: 'Ada',
-  username: 'ada',
   payoutMethod: 'bank',
   payoutDetails: '0123456789 GTB',
   invitedUsernames: tenNames,
@@ -33,9 +29,13 @@ describe('countUsernames', () => {
     expect(countUsernames('a,b,c')).toBe(3);
     expect(countUsernames('a, b, c,')).toBe(3); // trailing comma
     expect(countUsernames('a\nb\nc')).toBe(3);
-    expect(countUsernames('  a   b  ')).toBe(2);
     expect(countUsernames('')).toBe(0);
     expect(countUsernames(',,,')).toBe(0);
+    // Spaces are NOT separators — "John Doe" is one name, not two. This
+    // matches splitUsernames in the Go handler; the two previously disagreed.
+    expect(countUsernames('  a   b  ')).toBe(1);
+    // Distinct, case-insensitively.
+    expect(countUsernames('a,A,a')).toBe(1);
   });
 });
 
@@ -44,11 +44,9 @@ describe('validateSignupForm', () => {
     expect(validateSignupForm(signup())).toEqual({});
   });
 
-  it('requires name, username, phone and network', () => {
-    const errors = validateSignupForm(
-      signup({ name: ' ', username: '', phoneNumber: '', phoneNetwork: '' }),
-    );
-    expect(Object.keys(errors).sort()).toEqual(['name', 'phoneNetwork', 'phoneNumber', 'username']);
+  it('requires phone and network (identity comes from the account)', () => {
+    const errors = validateSignupForm(signup({ phoneNumber: '', phoneNetwork: '' }));
+    expect(Object.keys(errors).sort()).toEqual(['phoneNetwork', 'phoneNumber']);
   });
 
   it('rejects an unsupported network', () => {
@@ -70,6 +68,21 @@ describe('validateSignupForm', () => {
 describe('validateOnboardingForm', () => {
   it('accepts a complete form with the minimum usernames', () => {
     expect(validateOnboardingForm(onboarding())).toEqual({});
+  });
+
+  it('counts distinct usernames only — repeats must not satisfy the minimum', () => {
+    const repeated = Array.from({ length: 12 }, () => 'sameguy').join(',');
+    expect(validateOnboardingForm(onboarding({ invitedUsernames: repeated })).invitedUsernames)
+      .toContain('you have 1');
+    // A name with a space is ONE entry, matching the Go handler.
+    expect(countUsernames('John Doe,Jane Roe')).toBe(2);
+  });
+
+  it('honours a server-supplied minimum over the client default', () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => `u${i}`).join(',');
+    expect(validateOnboardingForm(onboarding({ invitedUsernames: twelve }), 15).invitedUsernames)
+      .toContain('15');
+    expect(validateOnboardingForm(onboarding({ invitedUsernames: twelve }), 5)).toEqual({});
   });
 
   it('requires payout method and details', () => {

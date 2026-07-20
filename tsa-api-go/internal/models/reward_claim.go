@@ -75,10 +75,10 @@ type RewardClaim struct {
 	Username string `gorm:"not null;index" json:"username"`
 
 	// Signup form
-	PhoneNumber      string `json:"phoneNumber,omitempty"`
-	PhoneNetwork     string `json:"phoneNetwork,omitempty"`
-	InviterUsername  string `json:"inviterUsername,omitempty"`
-	SocialLinks      string `json:"socialLinks,omitempty"`
+	PhoneNumber     string `json:"phoneNumber,omitempty"`
+	PhoneNetwork    string `json:"phoneNetwork,omitempty"`
+	InviterUsername string `json:"inviterUsername,omitempty"`
+	SocialLinks     string `json:"socialLinks,omitempty"`
 
 	// Onboarding form. PayoutDetails is free text (bank account or mobile-money
 	// handle); InvitedUsernames is a comma-separated list captured at submit
@@ -88,8 +88,8 @@ type RewardClaim struct {
 	InvitedUsernames string `json:"invitedUsernames,omitempty"`
 
 	// Set when an admin approves/rejects.
-	ReviewedBy   *uuid.UUID `gorm:"type:uuid" json:"reviewedBy,omitempty"`
-	ReviewNotes  string     `json:"reviewNotes,omitempty"`
+	ReviewedBy  *uuid.UUID `gorm:"type:uuid" json:"reviewedBy,omitempty"`
+	ReviewNotes string     `json:"reviewNotes,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

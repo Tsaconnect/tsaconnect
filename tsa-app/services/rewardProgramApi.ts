@@ -49,10 +49,9 @@ export interface RewardFormState {
 
 export type MyRewardClaims = Record<RewardClaimKind, RewardFormState>;
 
+// No name/username: the server derives identity from the auth token.
 export interface SubmitRewardClaimInput {
   kind: RewardClaimKind;
-  name: string;
-  username: string;
   // signup
   phoneNumber?: string;
   phoneNetwork?: string;

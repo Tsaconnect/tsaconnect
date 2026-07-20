@@ -9,7 +9,7 @@
 import React, { useCallback, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, type Href } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   Badge,
@@ -137,8 +137,11 @@ const RewardProgramScreen = () => {
             )}
             <Button
               title="Fill form"
-              onPress={() => router.push(route as never)}
-              disabled={!elig?.eligible}
+              onPress={() => router.push(route as Href)}
+              // Fail OPEN when eligibility is unknown (load failed): the server
+              // re-checks on submit, so a network blip shouldn't permanently
+              // disable the form with no way to retry.
+              disabled={elig ? !elig.eligible : false}
             />
             <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm }}>
               {footnote}
@@ -151,7 +154,7 @@ const RewardProgramScreen = () => {
 
   const linkRow = (label: string, sublabel: string, route: string) => (
     <PressableScale
-      onPress={() => router.push(route as never)}
+      onPress={() => router.push(route as Href)}
       style={{
         flexDirection: 'row',
         alignItems: 'center',
@@ -193,9 +196,16 @@ const RewardProgramScreen = () => {
           }
         >
           {!!error && (
-            <Text variant="bodySm" color="danger" style={{ marginBottom: spacing.md }}>
-              {error}
-            </Text>
+            <Card padding="md" style={{ marginBottom: spacing.md }}>
+              <Text variant="bodySm" color="danger" style={{ marginBottom: spacing.xs }}>
+                {error}
+              </Text>
+              <PressableScale onPress={load} style={{ paddingVertical: spacing.xs }}>
+                <Text variant="bodySm" weight="600" color="accent">
+                  Tap to retry
+                </Text>
+              </PressableScale>
+            </Card>
           )}
 
           {formCard(

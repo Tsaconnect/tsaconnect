@@ -12,7 +12,7 @@
 // no-op and traps the user.
 import React from 'react';
 import { View, ViewStyle } from 'react-native';
-import { router } from 'expo-router';
+import { router, type Href } from 'expo-router';
 import { useTheme } from '@/theme';
 import { IconButton } from './IconButton';
 import { Text } from './Text';
@@ -23,8 +23,10 @@ export interface ScreenHeaderProps {
   align?: 'center' | 'left';
   /** Overrides the default router.back() — use for intra-screen step-back. */
   onBack?: () => void;
-  /** Where to go when there is nothing to pop back to. */
-  fallbackRoute?: string;
+  /** Where to go when there is nothing to pop back to. Typed so a bad route
+   *  literal is a compile error — this is exactly where /reward vs /rewards
+   *  would otherwise slip through. */
+  fallbackRoute?: Href;
   /** Trailing slot (actions). Reserves the spacer when centred. */
   right?: React.ReactNode;
   showBack?: boolean;
@@ -47,7 +49,7 @@ export const ScreenHeader: React.FC<ScreenHeaderProps> = ({
   const handleBack = () => {
     if (onBack) return onBack();
     if (router.canGoBack()) router.back();
-    else router.replace(fallbackRoute as never);
+    else router.replace(fallbackRoute);
   };
 
   return (
