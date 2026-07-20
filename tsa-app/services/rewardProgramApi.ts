@@ -91,3 +91,25 @@ export const getMyRewardClaims = () => req<MyRewardClaims>('GET', '/reward-claim
 
 export const submitRewardClaim = (input: SubmitRewardClaimInput) =>
   req<RewardClaim>('POST', '/reward-claims', input);
+
+// TP leaderboard — ranks users by their maintained tp_balance.
+export interface LeaderboardEntry {
+  rank: number;
+  userId: string;
+  username: string;
+  name: string;
+  tpBalance: number;
+  level: number;
+  isMe: boolean;
+}
+
+export interface LeaderboardMe {
+  rank: number;
+  userId: string;
+  username: string;
+  tpBalance: number;
+  level: number;
+}
+
+export const getTPLeaderboard = (limit = 50) =>
+  req<{ entries: LeaderboardEntry[]; me: LeaderboardMe }>('GET', `/tp/leaderboard?limit=${limit}`);

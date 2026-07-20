@@ -7,6 +7,7 @@ const RewardProgramLayout = () => (
   <Stack screenOptions={{ headerShown: false }}>
     <Stack.Screen name="signup" />
     <Stack.Screen name="onboarding" />
+    <Stack.Screen name="leaderboard" />
   </Stack>
 );
 
