@@ -9,6 +9,10 @@ import { getAuthHeaders } from '@/services/walletApi';
 
 export type SpotRoute = 'mcgp' | 'lifi';
 
+// Admin-assigned taxonomy bucket. Computed tabs (Hot/New/Gainers/Losers/
+// Favorites) are derived client-side — see utils/spotTabs.
+export type SpotCategory = 'spot' | 'alpha' | 'tstocks' | 'tokenized' | 'tradefi' | 'rwa';
+
 export interface SpotListing {
   id: string;
   baseSymbol: string;
@@ -18,10 +22,16 @@ export interface SpotListing {
   logoUrl?: string;
   enabled: boolean;
   displayOrder: number;
+  category: SpotCategory;
+  pinnedPosition?: number | null;
+  createdAt?: string;
   // Enriched on the public read only (null when no price is available; absent on
-  // the admin list).
+  // the admin list). The public list arrives pre-ranked by the server (pins →
+  // volume group → mcap) — render in order, don't re-sort.
   price?: number | null;
   change24h?: number | null;
+  marketCap?: number | null;
+  volume24h?: number | null;
 }
 
 export type ApiResult<T> = { success: boolean; data?: T; message?: string };

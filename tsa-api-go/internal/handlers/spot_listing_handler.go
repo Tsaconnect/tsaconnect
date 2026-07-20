@@ -26,6 +26,8 @@ type spotListingResponse struct {
 	models.SpotListing
 	Price     *float64 `json:"price"`
 	Change24h *float64 `json:"change24h"`
+	MarketCap *float64 `json:"marketCap"`
+	Volume24h *float64 `json:"volume24h"`
 }
 
 // spotListingInput is the admin create/update body. Pointer fields make partial
@@ -38,6 +40,9 @@ type spotListingInput struct {
 	LogoURL      string `json:"logoUrl"`
 	Enabled      *bool  `json:"enabled"`
 	DisplayOrder *int   `json:"displayOrder"`
+	Category     string `json:"category"`
+	// PinnedPosition <= 0 clears the pin (stored as NULL).
+	PinnedPosition *int `json:"pinnedPosition"`
 }
 
 // oneMCGP is 1 MCGP in base units (18 decimals).
@@ -104,6 +109,14 @@ func (h *Handlers) enrichSpotListings(rows []models.SpotListing) []spotListingRe
 			price, change := pd.USD, pd.USD24hChange
 			resp.Price = &price
 			resp.Change24h = &change
+			if pd.USDMarketCap > 0 {
+				mcap := pd.USDMarketCap
+				resp.MarketCap = &mcap
+			}
+			if pd.USD24hVol > 0 {
+				vol := pd.USD24hVol
+				resp.Volume24h = &vol
+			}
 		}
 		out = append(out, resp)
 	}
@@ -134,7 +147,7 @@ func (h *Handlers) GetSpotListings(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load spot listings")
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Spot listings", gin.H{"listings": h.enrichSpotListings(rows)})
+	utils.SuccessResponse(c, http.StatusOK, "Spot listings", gin.H{"listings": rankSpotListings(h.enrichSpotListings(rows))})
 }
 
 // ListSpotListingsAdmin — GET /api/admin/spot-listings. All rows incl. disabled.
@@ -175,6 +188,14 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 	if !models.ValidSpotRoute(route) {
 		route = models.SpotRouteLiFi
 	}
+	category := strings.ToLower(strings.TrimSpace(in.Category))
+	if category == "" {
+		category = models.SpotCategorySpot
+	}
+	if !models.ValidSpotCategory(category) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category")
+		return
+	}
 	listing := models.SpotListing{
 		BaseSymbol:  base,
 		QuoteSymbol: quote,
@@ -182,12 +203,16 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 		Route:       route,
 		LogoURL:     strings.TrimSpace(in.LogoURL),
 		Enabled:     true,
+		Category:    category,
 	}
 	if in.Enabled != nil {
 		listing.Enabled = *in.Enabled
 	}
 	if in.DisplayOrder != nil {
 		listing.DisplayOrder = *in.DisplayOrder
+	}
+	if in.PinnedPosition != nil && *in.PinnedPosition > 0 {
+		listing.PinnedPosition = in.PinnedPosition
 	}
 	if err := config.DB.Create(&listing).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Failed to create listing (pair may already exist)")
@@ -245,6 +270,20 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 	}
 	if in.DisplayOrder != nil {
 		updates["display_order"] = *in.DisplayOrder
+	}
+	if s := strings.ToLower(strings.TrimSpace(in.Category)); s != "" {
+		if !models.ValidSpotCategory(s) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category")
+			return
+		}
+		updates["category"] = s
+	}
+	if in.PinnedPosition != nil {
+		if *in.PinnedPosition > 0 {
+			updates["pinned_position"] = *in.PinnedPosition
+		} else {
+			updates["pinned_position"] = nil // <= 0 clears the pin
+		}
 	}
 	if len(updates) > 0 {
 		if err := config.DB.Model(&listing).Updates(updates).Error; err != nil {

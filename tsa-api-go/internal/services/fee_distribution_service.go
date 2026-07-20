@@ -33,8 +33,10 @@ import (
 // 100% system with NO TP and NO recipients. A zero share credits nothing.
 //
 // The TP pool is split across gen0 (the transacting user) and gen1..gen10
-// uplines using the EXISTING models.GenerationPercentages ladder (gen0 35.4%
-// … gen10 0.4%). A
+// uplines using the models.GenerationPercentages ladder, which is EQUAL shares:
+// eleven participants at 1/11 each (boot-asserted to sum to 1.0). This comment
+// previously described a decaying 35.4%…0.4% ladder — that has not matched the
+// code since the ladder was flattened. A
 // generation with NO live ancestor (chain shorter than 10, or
 // an inactive/suspended/deleted ancestor) routes its share to the GLOBAL POOL
 // and the climb CONTINUES (route-and-continue — the key behavior change from
@@ -49,6 +51,11 @@ import (
 type FeeDistributionService struct {
 	db    *gorm.DB
 	graph *ReferralGraphService
+
+	// splitConfigs, when set, supplies admin-edited per-feature splits that
+	// override the compiled-in featureSplits table. nil = defaults only, which
+	// is what every existing test and any un-wired call path gets.
+	splitConfigs *FeeSplitConfigService
 
 	// tpPerUSD is the minting-rate constant captured at construction. Default
 	// 1.0 (1 TP = $1 of pool value); tunable via config so level pacing can be
@@ -93,6 +100,14 @@ func NewFeeDistributionService(db *gorm.DB, graph *ReferralGraphService, tpPerUS
 		tpPerUSD:  tpPerUSD,
 		settleSem: make(chan struct{}, feeSettleMaxConcurrency),
 	}
+}
+
+// WithSplitConfigs attaches the admin-override source. Optional by design:
+// leaving it unset keeps the compiled-in featureSplits behaviour, which is what
+// existing tests exercise.
+func (s *FeeDistributionService) WithSplitConfigs(cfg *FeeSplitConfigService) *FeeDistributionService {
+	s.splitConfigs = cfg
+	return s
 }
 
 // TPPerUSD exposes the minting rate in effect (for tests / diagnostics).
@@ -207,6 +222,19 @@ func splitFor(feature string) FeeShares {
 	return featureSplits[defaultSplitFeature]
 }
 
+// splitForFeature resolves the split the engine should APPLY: an admin override
+// when one is configured and valid, otherwise the compiled-in default. Kept as a
+// method (splitFor stays a pure package function) so existing tests and any
+// call path without a configured service keep the hardcoded behaviour.
+func (s *FeeDistributionService) splitForFeature(feature string) FeeShares {
+	if s.splitConfigs != nil {
+		if fs, ok := s.splitConfigs.Overrides()[feature]; ok {
+			return fs
+		}
+	}
+	return splitFor(feature)
+}
+
 // FeeEvent is the input to the engine: one settled platform fee. Stage 2 (the
 // hook-up across checkout / service / swap / withdrawal / P2P release) builds
 // these and calls OnFeeSettled.
@@ -253,7 +281,11 @@ func (sp FeeSplit) Total() float64 {
 // using the COMPLETE per-feature split table (splitFor). An unknown feature
 // falls back to the product_merchant split (and logs).
 func ComputeSplit(feature string, feeUSD float64) FeeSplit {
-	fs := splitFor(feature)
+	return computeSplitWith(splitFor(feature), feeUSD)
+}
+
+// computeSplitWith is the shared carve, given an already-resolved share table.
+func computeSplitWith(fs FeeShares, feeUSD float64) FeeSplit {
 	return FeeSplit{
 		SystemUSD:           feeUSD * fs.System,
 		BuyerCashbackUSD:    feeUSD * fs.Buyer,
@@ -406,7 +438,10 @@ func (s *FeeDistributionService) MarkRecipientsDirty(ctx context.Context, recipi
 // (sentinel) when the guard already exists so the wrapper can treat it as an
 // idempotent no-op.
 func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, byGen map[int]Ancestor, recipients map[uuid.UUID]struct{}) error {
-	split := ComputeSplit(ev.Feature, ev.FeeUSD)
+	// Resolve through the admin overrides (falls back to the compiled-in table
+	// when none is configured or the row is invalid), so a rate change takes
+	// effect without a deploy.
+	split := computeSplitWith(s.splitForFeature(ev.Feature), ev.FeeUSD)
 
 	// (1) Idempotency guard. ON CONFLICT DO NOTHING then check RowsAffected
 	// so a duplicate is a clean no-op on both PostgreSQL and SQLite.

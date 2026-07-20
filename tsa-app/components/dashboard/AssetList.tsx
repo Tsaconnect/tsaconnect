@@ -9,14 +9,16 @@ import { View } from 'react-native';
 import { Asset } from '@/components/services/api';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
-import { Avatar, Divider, Surface, Text } from '@/components/ui';
+import { Avatar, Divider, PressableScale, Surface, Text } from '@/components/ui';
 
 interface AssetListProps {
   assets: Asset[];
   isValuesHidden: boolean;
+  /** Tapping a row opens the pair/chain picker. Rows stay inert when omitted. */
+  onAssetPress?: (symbol: string) => void;
 }
 
-export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) => {
+export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden, onAssetPress }) => {
   const { formatPrice } = useCurrency();
   const { spacing } = useTheme();
 
@@ -33,7 +35,13 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) 
         const isLast = index === assets.length - 1;
         return (
           <View key={asset._id || asset.id || asset.symbol}>
-            <View
+            {/* PressableScale with no onPress is inert, so one component
+                handles both cases — no ElementType indirection, and props stay
+                type-checked. */}
+            <PressableScale
+              onPress={onAssetPress ? () => onAssetPress(asset.symbol) : undefined}
+              accessibilityRole={onAssetPress ? 'button' : undefined}
+              accessibilityLabel={onAssetPress ? `View ${asset.symbol} pairs and chains` : undefined}
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
@@ -59,7 +67,7 @@ export const AssetList: React.FC<AssetListProps> = ({ assets, isValuesHidden }) 
                   {isValuesHidden ? '••••' : formatPrice(asset.usdValue)}
                 </Text>
               </View>
-            </View>
+            </PressableScale>
             {!isLast && <Divider inset={spacing.lg} />}
           </View>
         );
