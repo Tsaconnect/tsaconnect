@@ -4,12 +4,18 @@
 // with live price + 24h change, and Buy/Sell buttons that route to EXISTING flows
 // by `route` — MCGP → the Contract B USDC OTC desk, generic → the Spot Trade
 // desk (app/wallet/spot-trade, LiFi under the hood). No new swap logic lives here.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl, Image } from 'react-native';
-import { router } from 'expo-router';
 import { useTheme } from '@/theme';
-import { Card, EmptyState, Icon, PressableScale, Spinner, Text } from '@/components/ui';
-import { getSpotListings, type SpotListing } from '@/services/spotApi';
+import { Card, Chip, EmptyState, Icon, PressableScale, Spinner, Text } from '@/components/ui';
+import { type SpotListing } from '@/services/spotApi';
+import { useSpotListings } from '@/hooks/useSpotListings';
+import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
+import { filterListingsByTab, SPOT_TABS, type SpotTabKey } from '@/utils/spotTabs';
+import { listingsForSymbol } from '@/utils/spotPairs';
+import { openSpotTrade } from '@/services/spotTrade';
+import { useSpotFavorites } from '@/hooks/useSpotFavorites';
+import AssetPairSheet from '@/components/spot/AssetPairSheet';
 
 // USD formatter that stays readable across BTC-scale and sub-cent prices.
 function formatUsd(v?: number | null): string {
@@ -17,6 +23,9 @@ function formatUsd(v?: number | null): string {
   if (v >= 1) {
     return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
+  // Sub-cent (micro-cap) prices delegate to the shared leading-zero
+  // compression: $0.0000012 → "$0.0₅12".
+  if (isMicroPrice(v)) return `$${formatMicroPrice(v)}`;
   return `$${v.toPrecision(3).replace(/\.?0+$/, '')}`;
 }
 
@@ -27,25 +36,17 @@ function badgeColor(symbol: string, palette: string[]): string {
   return palette[hash % palette.length];
 }
 
-function openTrade(listing: SpotListing, side: 'buy' | 'sell') {
-  if (listing.route === 'mcgp') {
-    router.push(side === 'buy' ? '/wallet/mcgp/buy' : '/wallet/mcgp/sell');
-    return;
-  }
-  // Generic tokens open the Spot Trade desk — MCGP-style form with both legs'
-  // balances, LiFi under the hood (see app/wallet/spot-trade).
-  router.push({
-    pathname: '/wallet/spot-trade',
-    params: {
-      side,
-      base: listing.baseSymbol,
-      quote: listing.quoteSymbol,
-      chain: listing.chain,
-    },
-  } as any);
-}
-
-const SpotRow = ({ listing }: { listing: SpotListing }) => {
+const SpotRow = ({
+  listing,
+  isFavorite,
+  onToggleFavorite,
+  onPress,
+}: {
+  listing: SpotListing;
+  isFavorite: boolean;
+  onToggleFavorite: () => void;
+  onPress: () => void;
+}) => {
   const { colors, spacing, radius } = useTheme();
   // Admin-entered logo URLs can be share-page links (ibb.co/…) or dead — fall
   // back to the letter badge instead of rendering a blank circle.
@@ -58,7 +59,7 @@ const SpotRow = ({ listing }: { listing: SpotListing }) => {
 
   const tradeBtn = (side: 'buy' | 'sell') => (
     <PressableScale
-      onPress={() => openTrade(listing, side)}
+      onPress={() => openSpotTrade(listing, side)}
       accessibilityRole="button"
       accessibilityLabel={`${side} ${listing.baseSymbol}`}
       style={{
@@ -79,6 +80,14 @@ const SpotRow = ({ listing }: { listing: SpotListing }) => {
   return (
     <Card padding="md" style={{ marginBottom: spacing.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+        {/* Tapping the asset itself opens the pair/chain picker; Buy/Sell and
+            the favourite toggle stay direct actions. */}
+        <PressableScale
+          onPress={onPress}
+          accessibilityRole="button"
+          accessibilityLabel={`View ${listing.baseSymbol} pairs and chains`}
+          style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.md }}
+        >
         {/* Logo / letter badge */}
         {listing.logoUrl && !logoFailed ? (
           <Image
@@ -147,6 +156,23 @@ const SpotRow = ({ listing }: { listing: SpotListing }) => {
             )}
           </View>
         </View>
+        </PressableScale>
+
+        {/* Favorite toggle */}
+        <PressableScale
+          onPress={onToggleFavorite}
+          accessibilityRole="button"
+          accessibilityLabel={isFavorite ? `Remove ${listing.baseSymbol} from favorites` : `Add ${listing.baseSymbol} to favorites`}
+          accessibilityState={{ selected: isFavorite }}
+          hitSlop={8}
+          style={{ padding: spacing.xs }}
+        >
+          <Icon
+            name={isFavorite ? 'heart' : 'heartOutline'}
+            size={20}
+            color={isFavorite ? colors.danger : colors.textMuted}
+          />
+        </PressableScale>
 
         {/* Buy / Sell */}
         <View style={{ gap: spacing.xs }}>
@@ -158,28 +184,40 @@ const SpotRow = ({ listing }: { listing: SpotListing }) => {
   );
 };
 
+// Per-tab empty-state copy so a filtered-empty tab doesn't read like an outage.
+const TAB_EMPTY: Partial<Record<SpotTabKey, { title: string; subtitle: string }>> = {
+  favorites: { title: 'No favorites yet', subtitle: 'Tap the heart on any pair to pin it here.' },
+  new: { title: 'No new listings', subtitle: 'Pairs added in the last two weeks show up here.' },
+  gainers: { title: 'No gainers right now', subtitle: 'Pairs trading up over 24h show up here.' },
+  losers: { title: 'No losers right now', subtitle: 'Pairs trading down over 24h show up here.' },
+};
+
 const SpotList = () => {
   const { colors, spacing } = useTheme();
-  const [listings, setListings] = useState<SpotListing[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Shared cache — the wallet filter and homepage picker read the same dataset.
+  const { listings, loading, error, reload } = useSpotListings();
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
+  const [tab, setTab] = useState<SpotTabKey>('all');
+  const [pickerSymbol, setPickerSymbol] = useState<string | null>(null);
+  const { favoriteIds, toggleFavorite } = useSpotFavorites();
+
+  // Venues for the tapped asset — every pair/chain it's listed on, not just
+  // the row that was tapped.
+  const pickerListings = useMemo(
+    () => (pickerSymbol ? listingsForSymbol(listings, pickerSymbol) : []),
+    [listings, pickerSymbol],
+  );
+
+  const visible = useMemo(
+    () => filterListingsByTab(listings, tab, favoriteIds),
+    [listings, tab, favoriteIds],
+  );
 
   const load = useCallback(async () => {
-    const r = await getSpotListings();
-    if (r.success && r.data) {
-      setListings(r.data.listings ?? []);
-      setError('');
-    } else {
-      setError(r.message || 'Could not load spot pairs');
-    }
-    setLoading(false);
+    await reload();
     setRefreshing(false);
-  }, []);
+  }, [reload]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
 
   if (loading) {
     return (
@@ -205,24 +243,74 @@ const SpotList = () => {
     );
   }
 
+  const emptyTab = TAB_EMPTY[tab] ?? {
+    title: 'Nothing in this tab yet',
+    subtitle: 'Pairs assigned to this category will show up here.',
+  };
+
   return (
-    <ScrollView
-      contentContainerStyle={{ padding: spacing.lg }}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={() => {
-            setRefreshing(true);
-            load();
-          }}
-          tintColor={colors.accent}
-        />
-      }
-    >
-      {listings.map((l) => (
-        <SpotRow key={l.id} listing={l} />
-      ))}
-    </ScrollView>
+    <View style={{ flex: 1 }}>
+      {/* Category tabs (taxonomy + computed) */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{
+          gap: spacing.xs,
+          paddingHorizontal: spacing.lg,
+          paddingTop: spacing.md,
+          paddingBottom: spacing.xs,
+        }}
+      >
+        {SPOT_TABS.map((t) => (
+          <Chip
+            key={t.key}
+            label={t.label}
+            leftIcon={t.key === 'favorites' ? 'heart' : t.key === 'hot' ? 'trendingUp' : undefined}
+            selected={tab === t.key}
+            onPress={() => setTab(t.key)}
+          />
+        ))}
+      </ScrollView>
+
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, flexGrow: 1 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              load();
+            }}
+            tintColor={colors.accent}
+          />
+        }
+      >
+        {visible.length === 0 ? (
+          <View style={{ flex: 1, justifyContent: 'center' }}>
+            <EmptyState icon="clock" title={emptyTab.title} subtitle={emptyTab.subtitle} />
+          </View>
+        ) : (
+          visible.map((l) => (
+            <SpotRow
+              key={l.id}
+              listing={l}
+              isFavorite={favoriteIds.has(l.id)}
+              onToggleFavorite={() => toggleFavorite(l.id)}
+              onPress={() => setPickerSymbol(l.baseSymbol)}
+            />
+          ))
+        )}
+      </ScrollView>
+
+      <AssetPairSheet
+        visible={pickerSymbol != null}
+        onClose={() => setPickerSymbol(null)}
+        symbol={pickerSymbol ?? ''}
+        listings={pickerListings}
+        error={error ?? undefined}
+        onRetry={reload}
+      />
+    </View>
   );
 };
 

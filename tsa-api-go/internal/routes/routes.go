@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -429,6 +429,21 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
+	// OTC listing controls — PM kill-switches per direction + listing metadata
+	// for the app's Easyswap "OTC" tab. The app read is auth'd and fails OPEN
+	// client-side if unreachable; the write pauses/unpauses a trading side, so
+	// it is restricted to true admin roles (RequireP2PAdmin) on top of
+	// AdminAuth, same boundary as /admin/fees.
+	if osh != nil {
+		api.GET("/otc/settings", auth, osh.GetOTCSettings)
+
+		adminOTC := api.Group("/admin/otc")
+		adminOTC.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminOTC.PUT("/settings", osh.UpdateOTCSettings)
+		}
+	}
+
 	if slh != nil {
 		lifiGroup := api.Group("/swap/lifi")
 		lifiGroup.Use(auth)
@@ -531,6 +546,50 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
 			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// System Fees & TradePoints: admin split config + distribution tracker,
+	// plus the user-facing leaderboard. Read-only over what the fee engine
+	// already writes, except the split PUT which retunes future distributions.
+	if tph != nil {
+		tpUser := api.Group("/tp")
+		tpUser.Use(auth)
+		{
+			tpUser.GET("/leaderboard", tph.GetTPLeaderboard)
+		}
+
+		adminTP := api.Group("/admin/tp")
+		adminTP.Use(adminAuth)
+		{
+			adminTP.GET("/splits", tph.ListFeeSplits)
+			// Changing a split changes how every future fee is carved, so it
+			// takes the stricter gate on top of adminAuth.
+			adminTP.PUT("/splits/:feature", middleware.RequireP2PAdmin(), tph.UpsertFeeSplit)
+			adminTP.GET("/distributions", tph.ListFeeDistributions)
+			adminTP.GET("/distributions/:sourceType/:sourceId", tph.GetFeeDistributionDetail)
+			adminTP.GET("/global-pool", tph.GetGlobalPool)
+		}
+	}
+
+	// Reward programme (PM signup/onboarding enrolment forms). Distinct from
+	// the TP-ladder /rewards endpoints above — see models/reward_claim.go.
+	if rch != nil {
+		rewardClaims := api.Group("/reward-claims")
+		rewardClaims.Use(auth)
+		{
+			rewardClaims.POST("", rch.SubmitRewardClaim)
+			rewardClaims.GET("/me", rch.GetMyRewardClaims)
+		}
+
+		adminRewardClaims := api.Group("/admin/reward-claims")
+		adminRewardClaims.Use(adminAuth)
+		{
+			adminRewardClaims.GET("", rch.ListRewardClaimsAdmin)
+			adminRewardClaims.GET("/downlines", rch.GetDownlinesAdmin)
+			// Approval is funds-adjacent (it authorises a payout), so it takes
+			// the stricter gate on top of adminAuth.
+			adminRewardClaims.PATCH("/:id", middleware.RequireP2PAdmin(), rch.UpdateRewardClaimStatus)
 		}
 	}
 

@@ -75,6 +75,8 @@ func AutoMigrate() error {
 		&models.EmailVerification{},
 		&models.PasswordReset{},
 		&models.PrivateSaleSubmission{},
+		&models.RewardClaim{},
+		&models.FeeSplitConfig{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},
 		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.
@@ -121,6 +123,9 @@ func AutoMigrate() error {
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
 		&models.SpotListing{},
+		// OTC listing controls — singleton row of per-direction kill-switches
+		// (buy/sell) + listing metadata for the app's Easyswap "OTC" tab.
+		&models.OTCSettings{},
 		// Non-EVM chains — per-wallet derived addresses (keyed wallet_id+chain_key)
 		// and cached normalized tx history.
 		&models.WalletAddress{},
@@ -128,6 +133,11 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+
+	// TP leaderboard ranks by users.tp_balance; without this index it's a full
+	// scan once the table grows. Partial: only rows the leaderboard can return.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_users_tp_balance
+		ON users (tp_balance DESC) WHERE deleted_at IS NULL`)
 
 	// P2P trade integrity constraints — buyer cannot equal seller. AutoMigrate
 	// doesn't emit CHECK constraints, so this is added explicitly. IF NOT

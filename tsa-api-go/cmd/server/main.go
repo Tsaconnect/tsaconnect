@@ -289,6 +289,18 @@ func main() {
 	// PMOnboarding is wired below after nombaClient is initialised; pass nil for now.
 	mrh := handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, nil)
 	swh := handlers.NewSwapHandler(cfg, otcService, blockchainService)
+	// OTC listing controls — PM buy/sell kill-switches + listing metadata for
+	// the app's Easyswap "OTC" tab (DB-only; no on-chain interaction).
+	osh := handlers.NewOTCSettingsHandler(config.DB)
+	// Reward programme enrolment forms — reuses the existing eligibility and
+	// referral-graph services rather than restating their rules.
+	rewardClaimService := services.NewRewardClaimService(config.DB, rewardEligibilityService, referralGraphService)
+	rch := handlers.NewRewardClaimHandler(config.DB, rewardClaimService, referralGraphService)
+	// Admin-editable per-feature fee splits — the engine consults these before
+	// falling back to its compiled-in table.
+	feeSplitConfigService := services.NewFeeSplitConfigService(config.DB)
+	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
+	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
@@ -703,7 +715,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph)
 
 	// Configure HTTP server
 	port := cfg.Port
