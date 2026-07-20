@@ -6,12 +6,12 @@
 // visual/structural restyle onto the TSA Signature design system (theme tokens +
 // @/components/ui primitives) only.
 import React, { useState, useRef } from 'react';
-import { View, TextInput, Pressable, Alert } from 'react-native';
+import { View, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { setPin as savePin, setBiometricEnabled, isBiometricAvailable, getBiometricType } from '@/services/localAuth';
 import { useTheme } from '@/theme';
-import { Text, Button, Icon, PressableScale } from '@/components/ui';
+import { Text, Button, Icon, PressableScale, ScreenHeader } from '@/components/ui';
 
 type Step = 'create' | 'confirm' | 'biometric' | 'done';
 
@@ -124,20 +124,8 @@ const PinSetupScreen = () => {
   if (step === 'biometric') {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <ScreenHeader />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.lg }}>
-          <Pressable
-            onPress={() => router.back()}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              alignSelf: 'flex-start',
-              gap: spacing.xs,
-              marginBottom: spacing['2xl'],
-            }}
-          >
-            <Icon name="chevronLeft" size={22} color={colors.accent} />
-          </Pressable>
-
           {iconCircle('shield', colors.accent, colors.accentMuted)}
           <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
             Enable Biometric?
@@ -162,39 +150,31 @@ const PinSetupScreen = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.lg }}>
-        <Pressable
-          onPress={() => {
-            if (isConfirm) {
-              setStep('create');
-              setPin('');
-              setConfirmPin('');
-            } else if (router.canGoBack()) router.back();
-          }}
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            alignSelf: 'flex-start',
-            gap: spacing.xs,
-            marginBottom: spacing['2xl'],
-          }}
-        >
-          <Icon name="chevronLeft" size={22} color={colors.accent} />
-          <Text variant="bodyMed" weight="600" color="accent">
-            {isConfirm ? 'Re-enter' : 'Back'}
-          </Text>
-        </Pressable>
-
+      <ScreenHeader
+        onBack={
+          isConfirm
+            ? () => {
+                setStep('create');
+                setPin('');
+                setConfirmPin('');
+              }
+            : undefined
+        }
+      />
+      {/* Top-anchored, not centred: the hidden autofocus input below raises the
+          number pad, and Android runs softwareKeyboardLayoutMode "pan"
+          (app.json), so centred content sits behind the keypad. */}
+      <View style={{ flex: 1, alignItems: 'center', paddingHorizontal: spacing.lg, paddingTop: spacing.xl }}>
         {iconCircle('lock', colors.accent, colors.accentMuted)}
         <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
           {isConfirm ? 'Confirm PIN' : 'Create PIN'}
         </Text>
-        <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing['3xl'] }}>
+        <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing['2xl'] }}>
           {isConfirm ? 'Re-enter your 4-digit PIN' : 'Choose a 4-digit PIN to secure your app'}
         </Text>
 
         {/* PIN dots */}
-        <View style={{ flexDirection: 'row', gap: spacing.xl, marginBottom: spacing['3xl'] }}>
+        <View style={{ flexDirection: 'row', gap: spacing.xl, marginBottom: spacing.xl }}>
           {[0, 1, 2, 3].map((i) => {
             const filled = currentPin.length > i;
             return (

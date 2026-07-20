@@ -48,6 +48,7 @@ import {
   SummaryCard,
   SummaryRow,
   Text,
+  ScreenHeader,
 } from '@/components/ui';
 
 type BalanceEntry = WalletBalanceWithChain;
@@ -416,15 +417,10 @@ const InstantPay = () => {
   if (screen === 'confirm') return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
-        <PressableScale
-          onPress={() => setScreen('form')}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.lg }}
-        >
-          <Icon name="chevronLeft" size={22} color={colors.accent} />
-          <Text variant="bodyMed" weight="600" color="accent">
-            Back
-          </Text>
-        </PressableScale>
+        <ScreenHeader
+          onBack={() => setScreen('form')}
+          style={{ paddingHorizontal: 0, marginBottom: spacing.lg }}
+        />
         <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>
           Confirm Payment
         </Text>
