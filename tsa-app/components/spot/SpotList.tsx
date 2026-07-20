@@ -6,13 +6,15 @@
 // desk (app/wallet/spot-trade, LiFi under the hood). No new swap logic lives here.
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl, Image } from 'react-native';
-import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import { Card, Chip, EmptyState, Icon, PressableScale, Spinner, Text } from '@/components/ui';
 import { getSpotListings, type SpotListing } from '@/services/spotApi';
 import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import { filterListingsByTab, SPOT_TABS, type SpotTabKey } from '@/utils/spotTabs';
+import { listingsForSymbol } from '@/utils/spotPairs';
+import { openSpotTrade } from '@/services/spotTrade';
 import { useSpotFavorites } from '@/hooks/useSpotFavorites';
+import AssetPairSheet from '@/components/spot/AssetPairSheet';
 
 // USD formatter that stays readable across BTC-scale and sub-cent prices.
 function formatUsd(v?: number | null): string {
@@ -33,32 +35,16 @@ function badgeColor(symbol: string, palette: string[]): string {
   return palette[hash % palette.length];
 }
 
-function openTrade(listing: SpotListing, side: 'buy' | 'sell') {
-  if (listing.route === 'mcgp') {
-    router.push(side === 'buy' ? '/wallet/mcgp/buy' : '/wallet/mcgp/sell');
-    return;
-  }
-  // Generic tokens open the Spot Trade desk — MCGP-style form with both legs'
-  // balances, LiFi under the hood (see app/wallet/spot-trade).
-  router.push({
-    pathname: '/wallet/spot-trade',
-    params: {
-      side,
-      base: listing.baseSymbol,
-      quote: listing.quoteSymbol,
-      chain: listing.chain,
-    },
-  } as any);
-}
-
 const SpotRow = ({
   listing,
   isFavorite,
   onToggleFavorite,
+  onPress,
 }: {
   listing: SpotListing;
   isFavorite: boolean;
   onToggleFavorite: () => void;
+  onPress: () => void;
 }) => {
   const { colors, spacing, radius } = useTheme();
   // Admin-entered logo URLs can be share-page links (ibb.co/…) or dead — fall
@@ -72,7 +58,7 @@ const SpotRow = ({
 
   const tradeBtn = (side: 'buy' | 'sell') => (
     <PressableScale
-      onPress={() => openTrade(listing, side)}
+      onPress={() => openSpotTrade(listing, side)}
       accessibilityRole="button"
       accessibilityLabel={`${side} ${listing.baseSymbol}`}
       style={{
@@ -93,6 +79,14 @@ const SpotRow = ({
   return (
     <Card padding="md" style={{ marginBottom: spacing.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+        {/* Tapping the asset itself opens the pair/chain picker; Buy/Sell and
+            the favourite toggle stay direct actions. */}
+        <PressableScale
+          onPress={onPress}
+          accessibilityRole="button"
+          accessibilityLabel={`View ${listing.baseSymbol} pairs and chains`}
+          style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.md }}
+        >
         {/* Logo / letter badge */}
         {listing.logoUrl && !logoFailed ? (
           <Image
@@ -161,6 +155,7 @@ const SpotRow = ({
             )}
           </View>
         </View>
+        </PressableScale>
 
         {/* Favorite toggle */}
         <PressableScale
@@ -203,7 +198,15 @@ const SpotList = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<SpotTabKey>('all');
+  const [pickerSymbol, setPickerSymbol] = useState<string | null>(null);
   const { favoriteIds, toggleFavorite } = useSpotFavorites();
+
+  // Venues for the tapped asset — every pair/chain it's listed on, not just
+  // the row that was tapped.
+  const pickerListings = useMemo(
+    () => (pickerSymbol ? listingsForSymbol(listings, pickerSymbol) : []),
+    [listings, pickerSymbol],
+  );
 
   const visible = useMemo(
     () => filterListingsByTab(listings, tab, favoriteIds),
@@ -303,10 +306,18 @@ const SpotList = () => {
               listing={l}
               isFavorite={favoriteIds.has(l.id)}
               onToggleFavorite={() => toggleFavorite(l.id)}
+              onPress={() => setPickerSymbol(l.baseSymbol)}
             />
           ))
         )}
       </ScrollView>
+
+      <AssetPairSheet
+        visible={pickerSymbol != null}
+        onClose={() => setPickerSymbol(null)}
+        symbol={pickerSymbol ?? ''}
+        listings={pickerListings}
+      />
     </View>
   );
 };

@@ -25,6 +25,9 @@ import { AssetList } from '@/components/dashboard/AssetList';
 import { RWMWidget } from '@/components/dashboard/RWMWidget';
 import { TradeActions } from '@/components/dashboard/TradeActions';
 import { BackupBanner } from '@/components/dashboard/BackupBanner';
+import AssetPairSheet from '@/components/spot/AssetPairSheet';
+import { getSpotListings, type SpotListing } from '@/services/spotApi';
+import { listingsForSymbol } from '@/utils/spotPairs';
 import { useNetwork } from '../hooks/useNetwork';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
@@ -62,6 +65,9 @@ const Dashboard: React.FC = () => {
   const { network } = useNetwork();
   const { formatDualPrice } = useCurrency();
   const [assets, setAssets] = useState<Asset[]>(DEFAULT_ASSETS);
+  // Spot listings back the pair/chain picker opened by tapping an asset.
+  const [spotListings, setSpotListings] = useState<SpotListing[]>([]);
+  const [pickerSymbol, setPickerSymbol] = useState<string | null>(null);
   const [totalUsdValue, setTotalUsdValue] = useState(0);
   const [dailyChange, setDailyChange] = useState(0);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
@@ -175,6 +181,17 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => { if (authToken) fetchData(); }, [authToken, fetchData]);
 
+  // Listings are auth-gated, so wait for the token. Failure is silent: the
+  // picker then shows its "not listed for trading yet" state.
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    getSpotListings().then((r) => {
+      if (!cancelled && r.success && r.data) setSpotListings(r.data.listings ?? []);
+    });
+    return () => { cancelled = true; };
+  }, [authToken]);
+
   const onRefresh = useCallback(() => {
     setRwmRefresh((n) => n + 1);
     return fetchData(true);
@@ -282,11 +299,22 @@ const Dashboard: React.FC = () => {
           </PressableScale>
         )}
 
-        <AssetList assets={assets} isValuesHidden={isValuesHidden} />
+        <AssetList
+          assets={assets}
+          isValuesHidden={isValuesHidden}
+          onAssetPress={(symbol) => setPickerSymbol(symbol)}
+        />
 
         <RWMWidget isValuesHidden={isValuesHidden} refreshSignal={rwmRefresh} />
 
         <TradeActions />
+
+        <AssetPairSheet
+          visible={pickerSymbol != null}
+          onClose={() => setPickerSymbol(null)}
+          symbol={pickerSymbol ?? ''}
+          listings={pickerSymbol ? listingsForSymbol(spotListings, pickerSymbol) : []}
+        />
       </ScrollView>
     </SafeAreaView>
   );
