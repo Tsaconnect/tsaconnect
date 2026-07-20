@@ -14,6 +14,7 @@ type PriceData struct {
 	USD            float64 `json:"usd"`
 	USD24hChange   float64 `json:"usd_24h_change"`
 	USDMarketCap   float64 `json:"usd_market_cap"`
+	USD24hVol      float64 `json:"usd_24h_vol"`
 	LastUpdatedAt  int64   `json:"last_updated_at"`
 }
 
@@ -120,7 +121,7 @@ func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error
 	}
 
 	url := fmt.Sprintf(
-		"https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_last_updated_at=true",
+		"https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true&include_last_updated_at=true",
 		strings.Join(ids, ","),
 	)
 
@@ -152,6 +153,9 @@ func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error
 			}
 			if v, ok := data["usd_market_cap"].(float64); ok {
 				pd.USDMarketCap = v
+			}
+			if v, ok := data["usd_24h_vol"].(float64); ok {
+				pd.USD24hVol = v
 			}
 			if v, ok := data["last_updated_at"].(float64); ok {
 				pd.LastUpdatedAt = int64(v)

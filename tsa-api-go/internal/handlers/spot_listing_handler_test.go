@@ -34,6 +34,8 @@ func setupSpotTestDB(t *testing.T) {
 			logo_url TEXT,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			display_order INTEGER,
+			category TEXT DEFAULT 'spot',
+			pinned_position INTEGER,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
@@ -140,6 +142,123 @@ func TestCreateSpotListing_DuplicatePair(t *testing.T) {
 	h.CreateSpotListing(c2)
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate create status = %d, want 400", w2.Code)
+	}
+}
+
+func TestCreateSpotListing_CategoryAndPin(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"AAPL","quoteSymbol":"USDC","chain":"base","category":"tstocks","pinnedPosition":4}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row)
+	if row.Category != "tstocks" {
+		t.Fatalf("category = %q, want tstocks", row.Category)
+	}
+	if row.PinnedPosition == nil || *row.PinnedPosition != 4 {
+		t.Fatalf("pinnedPosition = %v, want 4", row.PinnedPosition)
+	}
+}
+
+func TestCreateSpotListing_DefaultCategorySpot(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"MCGP","quoteSymbol":"USDC","chain":"sonic"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row)
+	if row.Category != models.SpotCategorySpot {
+		t.Fatalf("category = %q, want spot (default)", row.Category)
+	}
+	if row.PinnedPosition != nil {
+		t.Fatalf("pinnedPosition should default nil; got %v", *row.PinnedPosition)
+	}
+}
+
+func TestCreateSpotListing_InvalidCategory(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	c, w := spotCtx(t, http.MethodPost, `{"baseSymbol":"MCGP","quoteSymbol":"USDC","chain":"sonic","category":"memes"}`, adminUser())
+	h.CreateSpotListing(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid category", w.Code)
+	}
+}
+
+func TestUpdateSpotListing_SetAndClearPin(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	p := 5
+	listing := models.SpotListing{BaseSymbol: "ADA", QuoteSymbol: "USDC", Chain: "bsc", Enabled: true, Category: "spot", PinnedPosition: &p}
+	config.DB.Create(&listing)
+
+	// Change category + move the pin.
+	c1, w1 := spotCtx(t, http.MethodPut, `{"category":"alpha","pinnedPosition":2}`, adminUser())
+	c1.Params = gin.Params{{Key: "id", Value: listing.ID.String()}}
+	h.UpdateSpotListing(c1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("update status = %d; body=%s", w1.Code, w1.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row, "id = ?", listing.ID)
+	if row.Category != "alpha" || row.PinnedPosition == nil || *row.PinnedPosition != 2 {
+		t.Fatalf("after update: category=%q pin=%v, want alpha/2", row.Category, row.PinnedPosition)
+	}
+
+	// pinnedPosition <= 0 clears the pin.
+	c2, w2 := spotCtx(t, http.MethodPut, `{"pinnedPosition":0}`, adminUser())
+	c2.Params = gin.Params{{Key: "id", Value: listing.ID.String()}}
+	h.UpdateSpotListing(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("clear status = %d; body=%s", w2.Code, w2.Body.String())
+	}
+	config.DB.First(&row, "id = ?", listing.ID)
+	if row.PinnedPosition != nil {
+		t.Fatalf("pin should be cleared; got %v", *row.PinnedPosition)
+	}
+}
+
+func TestGetSpotListings_RankedDefaultPinsWithoutPrices(t *testing.T) {
+	setupSpotTestDB(t)
+	// Deliberately adversarial display_order: ETH before BTC before MCGP.
+	config.DB.Create(&models.SpotListing{BaseSymbol: "ETH", QuoteSymbol: "USDC", Chain: "ethereum", Enabled: true, DisplayOrder: 1, Category: "spot"})
+	config.DB.Create(&models.SpotListing{BaseSymbol: "BTC", QuoteSymbol: "USDT", Chain: "bsc", Enabled: true, DisplayOrder: 2, Category: "spot"})
+	config.DB.Create(&models.SpotListing{BaseSymbol: "MCGP", QuoteSymbol: "USDC", Chain: "sonic", Route: "mcgp", Enabled: true, DisplayOrder: 3, Category: "spot"})
+
+	h := newSpotHandlers() // nil PriceService — pins must still order MCGP/BTC/ETH
+	c, w := spotCtx(t, http.MethodGet, ``, adminUser())
+	h.GetSpotListings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Listings []struct {
+				BaseSymbol string `json:"baseSymbol"`
+				Category   string `json:"category"`
+			} `json:"listings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []string{"MCGP", "BTC", "ETH"}
+	if len(resp.Data.Listings) != 3 {
+		t.Fatalf("listings = %d, want 3", len(resp.Data.Listings))
+	}
+	for i, sym := range want {
+		if resp.Data.Listings[i].BaseSymbol != sym {
+			t.Fatalf("position %d = %s, want %s", i+1, resp.Data.Listings[i].BaseSymbol, sym)
+		}
+	}
+	if resp.Data.Listings[0].Category != "spot" {
+		t.Fatalf("category should serialize; got %q", resp.Data.Listings[0].Category)
 	}
 }
 
