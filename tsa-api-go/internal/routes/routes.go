@@ -27,7 +27,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 // SetupRoutes registers all route groups and endpoints on the router.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -546,6 +546,29 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminPrivateSale.GET("/submissions", psh.ListPrivateSaleSubmissions)
 			adminPrivateSale.PATCH("/submissions/:id/status", psh.UpdatePrivateSaleStatus)
+		}
+	}
+
+	// System Fees & TradePoints: admin split config + distribution tracker,
+	// plus the user-facing leaderboard. Read-only over what the fee engine
+	// already writes, except the split PUT which retunes future distributions.
+	if tph != nil {
+		tpUser := api.Group("/tp")
+		tpUser.Use(auth)
+		{
+			tpUser.GET("/leaderboard", tph.GetTPLeaderboard)
+		}
+
+		adminTP := api.Group("/admin/tp")
+		adminTP.Use(adminAuth)
+		{
+			adminTP.GET("/splits", tph.ListFeeSplits)
+			// Changing a split changes how every future fee is carved, so it
+			// takes the stricter gate on top of adminAuth.
+			adminTP.PUT("/splits/:feature", middleware.RequireP2PAdmin(), tph.UpsertFeeSplit)
+			adminTP.GET("/distributions", tph.ListFeeDistributions)
+			adminTP.GET("/distributions/:sourceType/:sourceId", tph.GetFeeDistributionDetail)
+			adminTP.GET("/global-pool", tph.GetGlobalPool)
 		}
 	}
 
