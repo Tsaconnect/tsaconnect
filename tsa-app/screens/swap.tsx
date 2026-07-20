@@ -28,6 +28,7 @@ import { useTheme } from '@/theme';
 import {
   Text, Badge, Button, Card, EmptyState, Icon, PressableScale, SegmentedControl, Sheet, Spinner,
   useToast,
+  ScreenHeader,
 } from '@/components/ui';
 import { mapSubmitError } from '@/services/swapErrors';
 
@@ -538,13 +539,10 @@ const SwapScreen = () => {
   if (screen === 'confirm') return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, paddingBottom: spacing['4xl'] }}>
-        <PressableScale
-          onPress={() => setScreen('form')}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.lg }}
-        >
-          <Icon name="chevronLeft" size={22} color={colors.accent} />
-          <Text variant="bodyMed" weight="600" color="accent">Back</Text>
-        </PressableScale>
+        <ScreenHeader
+          onBack={() => setScreen('form')}
+          style={{ paddingHorizontal: 0, marginBottom: spacing.lg }}
+        />
         <Text variant="title1" weight="700" style={{ marginBottom: spacing.xl }}>Confirm Swap</Text>
 
         <Card padding="lg">
