@@ -250,11 +250,16 @@ const SpotList = () => {
 
   return (
     <View style={{ flex: 1 }}>
-      {/* Category tabs (taxonomy + computed) */}
+      {/* Category tabs (taxonomy + computed). flexGrow:0 keeps the row hugging
+          its content height — without it the horizontal ScrollView fills the
+          column and the chips stretch to giant lozenges. alignItems:center pins
+          each chip to its natural height regardless. */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
+        style={{ flexGrow: 0, flexShrink: 0 }}
         contentContainerStyle={{
+          alignItems: 'center',
           gap: spacing.xs,
           paddingHorizontal: spacing.lg,
           paddingTop: spacing.md,
