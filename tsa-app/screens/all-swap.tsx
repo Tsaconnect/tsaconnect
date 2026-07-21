@@ -39,6 +39,7 @@ import {
   PressableScale,
   Text,
   Toggle,
+  ScreenHeader,
 } from '@/components/ui';
 
 const FEE_PCT = 3;
@@ -450,13 +451,10 @@ export default function AllSwapScreen() {
   if (screen === 'confirm') return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, paddingBottom: spacing['4xl'] }}>
-        <PressableScale
-          onPress={() => setScreen('form')}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 2, marginBottom: spacing.lg }}
-        >
-          <Icon name="chevronLeft" size={20} color={colors.accent} />
-          <Text variant="bodySm" weight="600" color="accent">Back</Text>
-        </PressableScale>
+        <ScreenHeader
+          onBack={() => setScreen('form')}
+          style={{ paddingHorizontal: 0, marginBottom: spacing.lg }}
+        />
         <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>Confirm Swap</Text>
 
         {/* From → To summary */}
@@ -550,7 +548,7 @@ export default function AllSwapScreen() {
         <Button
           title="Go to Wallet"
           leftIcon="wallet"
-          onPress={() => router.push('/wallet')}
+          onPress={() => router.push('/tokenization')}
           fullWidth={false}
           size="lg"
           style={{ marginTop: spacing['3xl'], paddingHorizontal: spacing['3xl'] }}

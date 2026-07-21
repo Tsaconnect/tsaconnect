@@ -598,7 +598,12 @@ export async function getTokenPriceHistory(
       `${API_BASE_URL}/market/history/${symbol}?days=${days}`,
       { method: 'GET', headers }
     );
-    return await response.json();
+    const json = await response.json();
+    // The endpoint wraps the series: data = { symbol, days, interval, history }.
+    // Unwrap to the bare point array this function's signature promises, while
+    // still accepting a plain array in case the shape is ever flattened.
+    const points = Array.isArray(json?.data) ? json.data : json?.data?.history;
+    return { ...json, data: Array.isArray(points) ? points : [] };
   } catch (error: any) {
     console.error('Get token price history error:', error);
     return { success: false, message: error.message || 'Failed to fetch price history' };
@@ -717,4 +722,57 @@ export async function prepareSwap(
   } catch (error: any) {
     return { success: false, message: error.message || 'Failed to prepare swap' };
   }
+}
+
+// ── OTC listing controls (admin-set) ──
+// Per-direction kill-switches + listing metadata for the OTC tab.
+export interface OtcSettings {
+  buyEnabled: boolean;
+  sellEnabled: boolean;
+  logoUrl: string;
+  assetClass: string;
+  category: 'direct' | 'presale' | string;
+}
+
+// Fail-OPEN defaults: if the settings can't be fetched, nothing is paused.
+const OTC_SETTINGS_OPEN: OtcSettings = {
+  buyEnabled: true,
+  sellEnabled: true,
+  logoUrl: '',
+  assetClass: '',
+  category: 'direct',
+};
+
+const OTC_SETTINGS_TTL_MS = 60_000;
+let otcSettingsCache: { data: OtcSettings; at: number } | null = null;
+
+/**
+ * Get the OTC listing controls (buy/sell pause + metadata). Cached in memory
+ * briefly so re-focusing the tab doesn't refetch; any failure returns the
+ * fail-open defaults (everything enabled) and is NOT cached, so a healthy
+ * fetch can recover on the next call.
+ */
+export async function getOtcSettings(): Promise<OtcSettings> {
+  if (otcSettingsCache && Date.now() - otcSettingsCache.at < OTC_SETTINGS_TTL_MS) {
+    return otcSettingsCache.data;
+  }
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/otc/settings`, { method: 'GET', headers });
+    const r = await safeJson<Partial<OtcSettings>>(response);
+    if (r.success && r.data) {
+      const settings: OtcSettings = {
+        buyEnabled: r.data.buyEnabled !== false,
+        sellEnabled: r.data.sellEnabled !== false,
+        logoUrl: r.data.logoUrl || '',
+        assetClass: r.data.assetClass || '',
+        category: r.data.category || 'direct',
+      };
+      otcSettingsCache = { data: settings, at: Date.now() };
+      return settings;
+    }
+  } catch {
+    // fall through to fail-open defaults
+  }
+  return OTC_SETTINGS_OPEN;
 }

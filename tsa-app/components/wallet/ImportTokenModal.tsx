@@ -10,8 +10,11 @@
 // guard, and the importToken persistence call are all preserved verbatim — this
 // is a visual/structural restyle only. The hashColor() helper is registry-style
 // data (the custom token's icon color), not chrome, so it is kept unchanged.
+//
+// Screen-fit layout: content scrolls in the Sheet body; the step's primary
+// CTA (Look Up / Import / Back) is pinned in the Sheet footer.
 import React, { useState } from 'react';
-import { View, ScrollView, Alert } from 'react-native';
+import { View, Alert } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { CHAINS, CHAIN_KEYS, type ChainKey } from '../../constants/chains';
 import { readTokenContract } from '../../services/wallet';
@@ -136,13 +139,20 @@ const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
     </AccentCard>
   ) : null;
 
+  // Pinned footer CTA per step (loading has none).
+  const footer =
+    step === 'input' ? (
+      <Button title="Look Up Token" onPress={handleLookup} disabled={!contractAddress.trim()} />
+    ) : step === 'confirm' && tokenData ? (
+      <>
+        <Button title={`Import ${tokenData.symbol}`} onPress={handleImport} />
+        <Button title="Back" variant="ghost" onPress={() => setStep('input')} />
+      </>
+    ) : null;
+
   return (
-    <Sheet visible={visible} onClose={handleClose} title="Import Token">
-      <ScrollView
-        contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.md }}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
+    <Sheet visible={visible} onClose={handleClose} title="Import Token" scrollable footer={footer}>
+      <View style={{ padding: spacing.lg, paddingTop: spacing.md }}>
         <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
           NETWORK
         </Text>
@@ -177,13 +187,6 @@ const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
             />
 
             {errorBanner}
-
-            <Button
-              title="Look Up Token"
-              onPress={handleLookup}
-              disabled={!contractAddress.trim()}
-              style={{ marginTop: spacing.xl }}
-            />
           </>
         )}
 
@@ -261,21 +264,9 @@ const ImportTokenModal = ({ visible, onClose }: ImportTokenModalProps) => {
             </View>
 
             {errorBanner}
-
-            <Button
-              title={`Import ${tokenData.symbol}`}
-              onPress={handleImport}
-              style={{ marginTop: spacing.xl }}
-            />
-            <Button
-              title="Back"
-              variant="ghost"
-              onPress={() => setStep('input')}
-              style={{ marginTop: spacing.sm }}
-            />
           </>
         )}
-      </ScrollView>
+      </View>
     </Sheet>
   );
 };

@@ -99,7 +99,13 @@ const LockScreen = () => {
       <View
         style={{
           flex: 1,
-          justifyContent: 'center',
+          // The number pad is raised by the hidden autofocus input below, and
+          // Android runs softwareKeyboardLayoutMode "pan" (app.json) so the
+          // window is panned rather than resized — centred content ends up
+          // behind the keypad. Anchor to the top while the PIN pad is up; the
+          // biometric prompt has no keyboard, so it stays centred.
+          justifyContent: showPinInput ? 'flex-start' : 'center',
+          paddingTop: showPinInput ? spacing['4xl'] : 0,
           alignItems: 'center',
           paddingHorizontal: spacing['3xl'],
         }}

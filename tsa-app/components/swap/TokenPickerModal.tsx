@@ -12,7 +12,7 @@ import {
   StyleSheet, Pressable, SectionList, FlatList, Image,
   ActivityIndicator, Platform, ScrollView,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { LiFiToken, LiFiChain } from '../../services/lifi';
 import { getLiFiChains, getLiFiToken } from '../../services/lifi';
 import type { WalletBalanceWithChain } from '../../services/walletApi';
@@ -359,6 +359,7 @@ export default function TokenPickerModal({
 }: Props) {
   const theme = useTheme();
   const { colors, spacing, radius } = theme;
+  const insets = useSafeAreaInsets();
   const [search, setSearch] = useState('');
   const [chains, setChains] = useState<LiFiChain[]>([]);
   const [chainsLoading, setChainsLoading] = useState(true);
@@ -554,6 +555,8 @@ export default function TokenPickerModal({
               borderTopLeftRadius: radius.xl,
               borderTopRightRadius: radius.xl,
               padding: spacing.xl,
+              // Keep the last rows above the Android nav bar / iOS home indicator.
+              paddingBottom: Math.max(insets.bottom, spacing.xl),
               maxHeight: '82%',
             }}
             onPress={() => {}}
@@ -753,6 +756,9 @@ export default function TokenPickerModal({
             ) : (
               <SectionList
                 sections={sections}
+                // Shrink inside the maxHeight panel so the list scrolls instead
+                // of overflowing off-screen on short devices.
+                style={{ flexShrink: 1 }}
                 keyExtractor={(item, index) => `${item.address}-${item.chainId ?? 0}-${index}`}
                 renderSectionHeader={({ section }) => (
                   <View

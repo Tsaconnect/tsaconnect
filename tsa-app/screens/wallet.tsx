@@ -7,7 +7,7 @@
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
@@ -47,6 +47,9 @@ import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
 import { loadSolanaWallet } from '../services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
+import { type SpotCategory } from '../services/spotApi';
+import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
+import { useSpotListings } from '../hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
@@ -55,6 +58,7 @@ import {
   AmountText,
   Avatar,
   Badge,
+  Button,
   Divider,
   EmptyState,
   Icon,
@@ -714,6 +718,17 @@ const WalletScreen: React.FC = () => {
   const [hiddenTokens, setHiddenTokens] = useState<Set<string>>(new Set());
   const [showManageModal, setShowManageModal] = useState(false);
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
+  const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
+  const [showFilterSheet, setShowFilterSheet] = useState(false);
+  // SYMBOL → taxonomy category, from the shared listings cache. When the fetch
+  // fails the map is empty and every asset falls back to "spot", which would
+  // silently produce wrong CATEGORY results — so the sheet surfaces the error
+  // rather than pretending the filter works.
+  const { listings: spotListings, error: listingsError } = useSpotListings();
+  const categoryMap = useMemo<Map<string, SpotCategory>>(
+    () => categoryBySymbol(spotListings),
+    [spotListings],
+  );
 
   useEffect(() => {
     AsyncStorage.getItem('wallet_hidden_tokens').then(v => {
@@ -765,6 +780,11 @@ const WalletScreen: React.FC = () => {
       setActiveAddress(addr);
       const meta = list.find(w => w.address === addr);
       setActiveLabel(meta?.label || 'Wallet');
+    } else {
+      // Must reset: without this, deleting the last wallet leaves a stale
+      // address and the no-wallet onboarding branch becomes unreachable.
+      setActiveAddress('');
+      setActiveLabel('Wallet');
     }
 
     const nativeAssets = buildNativeAssets();
@@ -956,7 +976,13 @@ const WalletScreen: React.FC = () => {
     }
   }, [buildNativeAssets, tokenList, customTokens, network]);
 
-  useEffect(() => { fetchBalances(); }, [fetchBalances]);
+  // Focus-driven, not mount-only. This screen is a TAB: creating a wallet ends
+  // with router.replace('/tokenization'), which targets this already-mounted
+  // screen, so it never remounts. With a plain mount effect activeAddress stays
+  // '' and the user is bounced back to "Set Up Your Wallet" holding the wallet
+  // they just made. (The old app/wallet/home.tsx got away with a mount effect
+  // because it was a STACK route that the replace unmounted.)
+  useFocusEffect(useCallback(() => { fetchBalances(); }, [fetchBalances]));
 
   const onRefresh = useCallback(() => fetchBalances(true), [fetchBalances]);
 
@@ -1019,11 +1045,26 @@ const WalletScreen: React.FC = () => {
     } as any);
   };
 
+  const filtersActive = selectedChain !== 'all' || selectedCategory !== 'all';
+
+  // Pill label, e.g. "All assets" / "SONIC · tStocks".
+  const filterSummary = useMemo(() => {
+    const chainLabel = selectedChain === 'all' ? null : getChainDisplay(selectedChain)?.shortName ?? selectedChain;
+    const categoryLabel =
+      selectedCategory === 'all'
+        ? null
+        : WALLET_CATEGORY_FILTERS.find(f => f.key === selectedCategory)?.label ?? selectedCategory;
+    const parts = [chainLabel, categoryLabel].filter(Boolean);
+    return parts.length ? parts.join(' · ') : 'All assets';
+  }, [selectedChain, selectedCategory]);
+
   const chainFilteredAssets = useMemo(
-    () => selectedChain === 'all'
-      ? visibleAssets
-      : visibleAssets.filter(a => a.details?.chainKey === selectedChain),
-    [visibleAssets, selectedChain],
+    () => visibleAssets.filter(a => {
+      if (selectedChain !== 'all' && a.details?.chainKey !== selectedChain) return false;
+      if (selectedCategory !== 'all' && assetCategoryOf(a.symbol, categoryMap) !== selectedCategory) return false;
+      return true;
+    }),
+    [visibleAssets, selectedChain, selectedCategory, categoryMap],
   );
 
   // MCGP always leads when held; other holdings by USD value; zero-balance
@@ -1054,6 +1095,49 @@ const WalletScreen: React.FC = () => {
           <Skeleton height={180} radius="lg" />
           <Skeleton height={300} radius="lg" style={{ marginTop: spacing.lg }} />
         </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  // No wallet yet — the setup entry point ("Set Up Wallet" prompts from
+  // checkout and the dashboard backup banner land here). Without this the
+  // screen would render an empty balance sheet with no way to create one.
+  if (!activeAddress) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: spacing['3xl'] }}>
+          <View
+            style={{
+              width: 88,
+              height: 88,
+              borderRadius: radius.pill,
+              backgroundColor: colors.accentMuted,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: spacing.xl,
+            }}
+          >
+            <Icon name="wallet" size={48} color={colors.accent} />
+          </View>
+          <Text variant="title2" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
+            Set Up Your Wallet
+          </Text>
+          <Text variant="bodySm" color="textSecondary" align="center" style={{ marginBottom: spacing['2xl'] }}>
+            A wallet is needed to make purchases, receive cashback, and manage your funds securely.
+          </Text>
+          <Button
+            title="Create New Wallet"
+            leftIcon="plus"
+            onPress={() => router.push('/wallet/seedphrase')}
+            style={{ marginBottom: spacing.md }}
+          />
+          <Button
+            title="Import Existing Wallet"
+            variant="secondary"
+            leftIcon="upload"
+            onPress={() => router.push('/wallet/seedphrase')}
+          />
+        </View>
       </SafeAreaView>
     );
   }
@@ -1131,52 +1215,36 @@ const WalletScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* Chain filter */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={{ marginBottom: spacing.sm, marginHorizontal: -spacing.xs }}
-            contentContainerStyle={{ paddingHorizontal: spacing.xs, gap: spacing.xs }}
+          {/* Chain + category filters live in one sheet — two stacked chip rows
+              ate the vertical space above the asset list. */}
+          <PressableScale
+            onPress={() => setShowFilterSheet(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Filter assets. Current filter: ${filterSummary}`}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: spacing.xs,
+              alignSelf: 'flex-start',
+              paddingVertical: spacing.xs,
+              paddingHorizontal: spacing.md,
+              marginBottom: spacing.sm,
+              borderRadius: radius.pill,
+              borderWidth: 1,
+              borderColor: filtersActive ? colors.accent : colors.border,
+              backgroundColor: filtersActive ? colors.accentMuted : colors.surface,
+            }}
           >
-            <ManageChip active={selectedChain === 'all'} label="All" onPress={() => setSelectedChain('all')} />
-            {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
-              const isActive = selectedChain === key;
-              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
-              return (
-                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <ManageChip
-                    active={isActive}
-                    label={chain.shortName}
-                    iconUrl={chain.iconUrl}
-                    iconColor={chain.iconColor}
-                    onPress={() => setSelectedChain(key)}
-                  />
-                  {hasBalance && !isActive && (
-                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
-                  )}
-                </View>
-              );
-            })}
-            {NONEVM_CHAIN_KEYS.map((key) => {
-              const chain = getChainDisplay(key);
-              if (!chain) return null;
-              const isActive = selectedChain === key;
-              const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
-              return (
-                <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <ManageChip
-                    active={isActive}
-                    label={chain.shortName}
-                    iconColor={chain.iconColor}
-                    onPress={() => setSelectedChain(key)}
-                  />
-                  {hasBalance && !isActive && (
-                    <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
-                  )}
-                </View>
-              );
-            })}
-          </ScrollView>
+            <Icon name="filter" size={14} color={filtersActive ? colors.accent : colors.textSecondary} />
+            <Text
+              variant="bodySm"
+              weight={filtersActive ? '600' : '400'}
+              style={{ color: filtersActive ? colors.accent : colors.textSecondary }}
+            >
+              {filterSummary}
+            </Text>
+            <Icon name="chevronDown" size={14} color={filtersActive ? colors.accent : colors.textMuted} />
+          </PressableScale>
 
           {previewAssets.map(asset => (
             <AssetRow key={asset.id} asset={asset} isValuesHidden={isValuesHidden} onPress={() => handleAssetPress(asset)} />
@@ -1285,6 +1353,96 @@ const WalletScreen: React.FC = () => {
                 Manage Wallets
               </Text>
             </PressableScale>
+          </View>
+        </Sheet>
+
+        <Sheet
+          visible={showFilterSheet}
+          onClose={() => setShowFilterSheet(false)}
+          title="Filter assets"
+          scrollable
+        >
+          <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, gap: spacing.lg }}>
+            <View>
+              <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                CHAIN
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                <ManageChip active={selectedChain === 'all'} label="All" onPress={() => setSelectedChain('all')} />
+                {(Object.entries(CHAINS) as [ChainKey, (typeof CHAINS)[ChainKey]][]).map(([key, chain]) => {
+                  const isActive = selectedChain === key;
+                  const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+                  return (
+                    <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <ManageChip
+                        active={isActive}
+                        label={chain.shortName}
+                        iconUrl={chain.iconUrl}
+                        iconColor={chain.iconColor}
+                        onPress={() => setSelectedChain(key)}
+                      />
+                      {hasBalance && !isActive && (
+                        <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                      )}
+                    </View>
+                  );
+                })}
+                {NONEVM_CHAIN_KEYS.map((key) => {
+                  const chain = getChainDisplay(key);
+                  if (!chain) return null;
+                  const isActive = selectedChain === key;
+                  const hasBalance = visibleAssets.some(a => a.details?.chainKey === key && a.balance > 0);
+                  return (
+                    <View key={key} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <ManageChip
+                        active={isActive}
+                        label={chain.shortName}
+                        iconColor={chain.iconColor}
+                        onPress={() => setSelectedChain(key)}
+                      />
+                      {hasBalance && !isActive && (
+                        <View style={{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.success, marginLeft: 2 }} />
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View>
+              <Text variant="overline" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                CATEGORY
+              </Text>
+              {!!listingsError && (
+                <Text variant="caption" color="danger" style={{ marginBottom: spacing.sm }}>
+                  Couldn’t load asset categories, so this filter may be incomplete.
+                </Text>
+              )}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                {WALLET_CATEGORY_FILTERS.map((f) => (
+                  <ManageChip
+                    key={f.key}
+                    active={selectedCategory === f.key}
+                    label={f.label}
+                    onPress={() => setSelectedCategory(f.key)}
+                  />
+                ))}
+              </View>
+            </View>
+
+            {filtersActive && (
+              <PressableScale
+                onPress={() => {
+                  setSelectedChain('all');
+                  setSelectedCategory('all');
+                }}
+                style={{ alignItems: 'center', paddingVertical: spacing.sm }}
+              >
+                <Text variant="bodyMed" weight="600" color="accent">
+                  Clear filters
+                </Text>
+              </PressableScale>
+            )}
           </View>
         </Sheet>
       </ScrollView>

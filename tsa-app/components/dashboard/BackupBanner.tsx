@@ -60,7 +60,7 @@ export const BackupBanner: React.FC = () => {
   // No wallet banner
   if (bannerType === 'no_wallet') {
     return (
-      <PressableScale onPress={() => router.push('/wallet/home')} style={{ marginBottom: spacing.md }}>
+      <PressableScale onPress={() => router.push('/tokenization')} style={{ marginBottom: spacing.md }}>
         <AccentCard padding="md" railColor={colors.info}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
             <Icon name="wallet" size={20} color={colors.info} />

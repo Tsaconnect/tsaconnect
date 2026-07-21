@@ -5,6 +5,8 @@
 // an open time slot (slots with remaining == 0 are disabled), choose a party
 // size, and hands the reservation back to the parent as
 // { slotStart, partySize } → bookingSlots[productId] for createOrders().
+// With `hideSubmit` + `onSelectionChange` the parent owns the CTA instead
+// (pinned sheet footer) and this renders only the selection UI.
 //
 // A legacy fare-only booking (slotDurationMinutes == 0) has no slot grid — the
 // parent handles that case and never renders this component. The server
@@ -34,9 +36,15 @@ import {
 interface SlotPickerProps {
   productId: string;
   /** Called with the chosen slot when the buyer checks out. */
-  onCheckout: (slot: { slotStart: string; partySize: number }) => void;
+  onCheckout?: (slot: { slotStart: string; partySize: number }) => void;
   /** Drives the Pay button's loading spinner while the parent runs escrow. */
   submitting?: boolean;
+  /** Hide the internal Pay button — the parent renders the CTA in a pinned
+   *  sheet footer and drives checkout from `onSelectionChange`. */
+  hideSubmit?: boolean;
+  /** Reports the current selection (null until a time is picked) so an
+   *  external CTA can enable/disable and check out. */
+  onSelectionChange?: (slot: { slotStart: string; partySize: number } | null) => void;
 }
 
 const DAYS_AHEAD = 14;
@@ -51,7 +59,13 @@ const dayKeyOf = (iso: string) => ymd(new Date(iso));
 const timeLabel = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-export const SlotPicker: React.FC<SlotPickerProps> = ({ productId, onCheckout, submitting }) => {
+export const SlotPicker: React.FC<SlotPickerProps> = ({
+  productId,
+  onCheckout,
+  submitting,
+  hideSubmit,
+  onSelectionChange,
+}) => {
   const { colors, spacing, radius } = useTheme();
 
   const [loading, setLoading] = useState(true);
@@ -120,6 +134,11 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({ productId, onCheckout, s
   useEffect(() => {
     setPartySize((p) => Math.min(Math.max(1, p), partyCap));
   }, [partyCap]);
+
+  // Mirror the selection up so an external (pinned-footer) CTA can react.
+  useEffect(() => {
+    onSelectionChange?.(selectedStart ? { slotStart: selectedStart, partySize } : null);
+  }, [selectedStart, partySize, onSelectionChange]);
 
   const dayHeading = (key: string) => {
     const d = new Date(`${key}T00:00:00`);
@@ -287,14 +306,16 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({ productId, onCheckout, s
         </View>
       )}
 
-      <Button
-        title="Pay now"
-        size="lg"
-        leftIcon="shield"
-        onPress={() => selectedStart && onCheckout({ slotStart: selectedStart, partySize })}
-        loading={submitting}
-        disabled={submitting || !canPay}
-      />
+      {!hideSubmit && (
+        <Button
+          title="Pay now"
+          size="lg"
+          leftIcon="shield"
+          onPress={() => selectedStart && onCheckout?.({ slotStart: selectedStart, partySize })}
+          loading={submitting}
+          disabled={submitting || !canPay}
+        />
+      )}
     </View>
   );
 };

@@ -59,6 +59,7 @@ import {
   SummaryCard,
   SummaryRow,
   Text,
+  ScreenHeader,
 } from '@/components/ui';
 
 type BalanceEntry = WalletBalanceWithChain;
@@ -66,7 +67,7 @@ type BalanceEntry = WalletBalanceWithChain;
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
 // Round token-symbol badge. Color is sourced from the token registry's
-// iconColor (data-driven, like wallet/home) and falls back to a neutral token.
+// iconColor (data-driven, like screens/wallet) and falls back to a neutral token.
 const TokenBadge = ({
   symbol,
   size = 36,
@@ -96,7 +97,7 @@ const SendToken = () => {
   const { colors, spacing, radius } = useTheme();
   const { tokens, tokenList } = useTokens();
 
-  // Token-color map derived from the registry (matches wallet/home), so badge
+  // Token-color map derived from the registry (matches screens/wallet), so badge
   // colors stay data-driven instead of hardcoded hex.
   const tokenColorFor = useCallback(
     (symbol: string): string => tokens[symbol]?.iconColor || colors.textMuted,
@@ -668,15 +669,10 @@ const SendToken = () => {
   if (screen === 'confirm') return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}>
-        <PressableScale
-          onPress={() => setScreen('form')}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.lg }}
-        >
-          <Icon name="chevronLeft" size={22} color={colors.accent} />
-          <Text variant="bodyMed" weight="600" color="accent">
-            Back
-          </Text>
-        </PressableScale>
+        <ScreenHeader
+          onBack={() => setScreen('form')}
+          style={{ paddingHorizontal: 0, marginBottom: spacing.lg }}
+        />
         <Text variant="title1" weight="700" style={{ marginBottom: spacing.lg }}>
           Confirm Send
         </Text>

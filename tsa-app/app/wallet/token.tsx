@@ -260,9 +260,8 @@ const TokenDetailScreen: React.FC = () => {
     setLoadingChart(true);
     try {
       const result = await getTokenPriceHistory(symbol, days);
-      if (result.success && result.data) {
-        const points = result.data as any[];
-        const prices = points.map((p: any) => p.price);
+      if (result.success && Array.isArray(result.data) && result.data.length > 0) {
+        const prices = result.data.map((p: any) => p.price);
         setPriceHistory(prices);
         // Calculate price change %
         if (prices.length >= 2) {
@@ -478,7 +477,9 @@ const TokenDetailScreen: React.FC = () => {
           <InfoRow label="Type" value={type || 'Token'} />
           <InfoRow label="Network" value={activeChainConfig?.name || activeChainKey} />
           <InfoRow label="Symbol" value={symbol} />
-          {isNative && <InfoRow label="Decimals" value="18" />}
+          {isNative && activeChainConfig?.nativeCurrency && (
+            <InfoRow label="Decimals" value={String(activeChainConfig.nativeCurrency.decimals)} />
+          )}
           {activeChainConfig?.explorerUrl && (
             <InfoRow label="Explorer" value={activeChainConfig.shortName || activeChainConfig.name} last />
           )}
