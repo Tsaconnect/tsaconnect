@@ -19,6 +19,7 @@ import {
 import { useRouter } from 'expo-router';
 import PhoneInput from 'react-native-international-phone-number';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { Button, Icon, Input, Text } from '@/components/ui';
 import { useAuth } from '../../AuthContext/AuthContext';
 import * as ImagePicker from 'expo-image-picker';
@@ -42,6 +43,7 @@ const EditProfileScreen = ({ user }) => {
   const { token, setCurrentUser } = useAuth();
   const router = useRouter();
   const { colors, spacing, radius, fonts, type } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const defaultCca2 = COUNTRY_TO_CCA2[user.country] || 'NG';
 
   const [name, setName] = useState(user.name || '');
@@ -150,7 +152,7 @@ const EditProfileScreen = ({ user }) => {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={{ flex: 1, backgroundColor: colors.background }}
     >
-      <ScrollView contentContainerStyle={{ padding: spacing.xl, paddingBottom: spacing['4xl'] }}>
+      <ScrollView contentContainerStyle={{ padding: spacing.xl, paddingBottom: spacing['4xl'] + kbHeight }}>
         {/* Avatar Section */}
         <View style={{ alignItems: 'center', marginBottom: spacing['2xl'] }}>
           <TouchableOpacity

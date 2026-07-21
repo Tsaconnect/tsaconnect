@@ -60,6 +60,7 @@ import {
   signTransaction,
 } from '../../services/wallet';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   AccentCard,
   AmountInput,
@@ -83,6 +84,7 @@ const SONIC_CHAIN_IDS = [146, 14601];
 
 const P2PPoolScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const [token, setToken] = useState<Token>('USDT');
   const [amountInput, setAmountInput] = useState('');
   const [available, setAvailable] = useState<string>('0');
@@ -372,7 +374,7 @@ const P2PPoolScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="title1" weight="700">

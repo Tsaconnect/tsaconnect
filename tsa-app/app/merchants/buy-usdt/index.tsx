@@ -12,6 +12,7 @@ import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
     AmountInput,
     Button,
@@ -24,6 +25,7 @@ import {
 
 const BuyUSDTScreen = () => {
     const { colors, spacing } = useTheme();
+    const kbHeight = useKeyboardHeight();
     const [amount, setAmount] = useState('');
     const [exchangeRate, setExchangeRate] = useState('1.01');
 
@@ -41,7 +43,7 @@ const BuyUSDTScreen = () => {
                 style={{ flex: 1 }}
             >
                 <ScrollView
-                    contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+                    contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
                     keyboardShouldPersistTaps="handled"
                 >
                     <View style={{ marginBottom: spacing['2xl'] }}>

@@ -37,6 +37,7 @@ import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getNetworkDisplayName } from '../../constants/chains';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   AccentCard,
   AmountInput,
@@ -79,6 +80,7 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 
 const CreateBuyAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const { isMerchant, loading: roleLoading } = useUserRole();
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
@@ -278,7 +280,7 @@ const CreateBuyAdScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="title1" weight="700">

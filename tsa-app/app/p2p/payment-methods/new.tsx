@@ -28,6 +28,7 @@ import {
 import { useP2pCurrency } from '../../../hooks/useP2pCurrency';
 import CurrencySelector from '../../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   AccentCard,
   Button,
@@ -59,6 +60,7 @@ function providerTypeLabel(type: PaymentProvider['type']): string {
 
 const NewPaymentMethodScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
+  const kbHeight = useKeyboardHeight();
 
   // Currency for THIS method is a local form field. Seed it from the P2P
   // market currency (do NOT mutate the hook's setCurrency here). The first
@@ -220,7 +222,7 @@ const NewPaymentMethodScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="title1" weight="700">

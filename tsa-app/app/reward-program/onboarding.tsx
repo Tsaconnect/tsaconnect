@@ -8,6 +8,7 @@ import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform, Alert } fr
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { Button, Input, ScreenHeader, SelectRow, Sheet, Text } from '@/components/ui';
 import { getMyRewardClaims, submitRewardClaim } from '@/services/rewardProgramApi';
@@ -26,6 +27,7 @@ const PAYOUT_METHODS: { key: string; label: string }[] = [
 
 const OnboardingRewardForm = () => {
   const { colors, spacing } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const { currentUser } = useAuth();
   // The threshold is the SERVER's — a hardcoded client copy would silently
   // disagree with the hub (which already reads requiredReferrals) if it changed.
@@ -93,7 +95,7 @@ const OnboardingRewardForm = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
