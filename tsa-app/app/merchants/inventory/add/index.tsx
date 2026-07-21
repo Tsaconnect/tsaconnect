@@ -27,6 +27,7 @@ import api from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
 import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   Avatar,
   Button,
@@ -56,6 +57,7 @@ const CategoryAvatar = ({ category }: { category: any }) => {
 
 const AddProduct = () => {
   const { colors, spacing, radius } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const toast = useToast();
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
@@ -322,7 +324,7 @@ const AddProduct = () => {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >

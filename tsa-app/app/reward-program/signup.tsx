@@ -7,6 +7,7 @@ import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform, Alert } fr
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { Button, Input, ScreenHeader, SelectRow, Sheet, Text } from '@/components/ui';
 import { submitRewardClaim } from '@/services/rewardProgramApi';
@@ -21,6 +22,7 @@ const NETWORK_LABEL: Record<string, string> = {
 
 const SignupRewardForm = () => {
   const { colors, spacing } = useTheme();
+  const kbHeight = useKeyboardHeight();
   // Identity is shown for confirmation but never submitted — the server takes
   // it from the auth token.
   const { currentUser } = useAuth();
@@ -83,7 +85,7 @@ const SignupRewardForm = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>

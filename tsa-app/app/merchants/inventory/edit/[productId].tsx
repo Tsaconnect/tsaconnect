@@ -36,6 +36,7 @@ import api, { Product } from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
 import { calculateZoneRates, PACKAGE_SIZE_PRESETS } from '@/constants/shipping';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   AccentCard,
   Avatar,
@@ -53,6 +54,7 @@ import {
 
 const EditProduct = () => {
   const { colors, spacing, radius } = useTheme();
+  const kbHeight = useKeyboardHeight();
   const { productId, productData: productDataParam } = useLocalSearchParams<{
     productId: string;
     productData?: string;
@@ -456,7 +458,7 @@ const EditProduct = () => {
         <ScrollView
           ref={scrollRef}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           {/* Basic Information */}

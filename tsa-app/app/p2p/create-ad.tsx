@@ -48,6 +48,7 @@ import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
 import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   AccentCard,
   AmountInput,
@@ -101,6 +102,7 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 
 const CreateAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
+  const kbHeight = useKeyboardHeight();
 
   // Currency for THIS ad is a local form field. We seed it from the P2P market
   // currency (do not mutate the hook's setCurrency here), then resolve the full
@@ -761,7 +763,7 @@ const CreateAdScreen: React.FC = () => {
         style={{ flex: 1 }}
       >
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
           <Text variant="title1" weight="700">
