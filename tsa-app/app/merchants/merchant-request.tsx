@@ -24,6 +24,7 @@ import {
   TextInputProps,
   ScrollView,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
@@ -36,6 +37,7 @@ import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngB
 import { getMyPmStatus } from '../../services/p2p';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import LocationPicker from '@/components/common/LocationPicker';
 import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 
@@ -243,9 +245,6 @@ export default function MerchantRequestScreen() {
   const businessNameRef = useRef<TextInput>(null);
   const descriptionRef = useRef<TextInput>(null);
   const addressRef = useRef<TextInput>(null);
-  const cityRef = useRef<TextInput>(null);
-  const stateRef = useRef<TextInput>(null);
-  const countryRef = useRef<TextInput>(null);
   const phoneRef = useRef<TextInput>(null);
   const regNumberRef = useRef<TextInput>(null);
   const makerWalletRef = useRef<TextInput>(null);
@@ -589,39 +588,26 @@ export default function MerchantRequestScreen() {
             value={address}
             onChangeText={setAddress}
             placeholder="Street address"
-            returnKeyType="next"
-            onSubmitEditing={() => cityRef.current?.focus()}
+            returnKeyType="done"
+            onSubmitEditing={() => Keyboard.dismiss()}
           />
 
-          <Field
-            ref={cityRef}
-            label="City *"
-            value={city}
-            onChangeText={setCity}
-            placeholder="City"
-            returnKeyType="next"
-            onSubmitEditing={() => stateRef.current?.focus()}
-          />
-
-          <Field
-            ref={stateRef}
-            label="State *"
-            value={state}
-            onChangeText={setState}
-            placeholder="State"
-            returnKeyType="next"
-            onSubmitEditing={() => countryRef.current?.focus()}
-          />
-
-          <Field
-            ref={countryRef}
-            label="Country *"
-            value={country}
-            onChangeText={setCountry}
-            placeholder="Country"
-            returnKeyType="next"
-            onSubmitEditing={() => phoneRef.current?.focus()}
-          />
+          {/* Country → State → City via the shared cascading picker (same one
+              used in signup / profile / delivery), replacing free-text fields. */}
+          <View style={{ marginBottom: spacing.md }}>
+            <LocationPicker
+              value={{ country, state, city }}
+              onChange={(loc) => {
+                setCountry(loc.country);
+                setState(loc.state);
+                setCity(loc.city);
+              }}
+              fields={['country', 'state', 'city']}
+              required={['country', 'state', 'city']}
+              labels={{ country: 'Country *', state: 'State *', city: 'City *' }}
+              showLabels
+            />
+          </View>
 
           <Field
             ref={phoneRef}
