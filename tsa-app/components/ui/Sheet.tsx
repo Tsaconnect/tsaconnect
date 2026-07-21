@@ -17,6 +17,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { Text } from './Text';
 import { IconButton } from './IconButton';
 import { BottomActionBar } from './BottomActionBar';
@@ -49,6 +50,11 @@ export const Sheet: React.FC<SheetProps> = ({
   const { colors, radius, spacing, motion } = useTheme();
   const insets = useSafeAreaInsets();
   const reduced = useReducedMotion();
+  // Lift the panel above the keyboard. The Modal is bottom-anchored and RN
+  // doesn't resize a Modal window for the keypad, so a sheet with a search input
+  // (bank/provider/token pickers) would otherwise have its list buried under the
+  // keyboard.
+  const kbHeight = useKeyboardHeight();
   const [mounted, setMounted] = useState(visible);
   const progress = useSharedValue(0);
 
@@ -91,6 +97,8 @@ export const Sheet: React.FC<SheetProps> = ({
               borderTopRightRadius: radius.xl,
               // With a pinned footer the BottomActionBar owns the bottom inset.
               paddingBottom: footer ? 0 : insets.bottom + spacing.md,
+              // Sit above the keyboard when one is open (0 otherwise = no change).
+              marginBottom: kbHeight,
             },
             panelStyle,
           ]}
