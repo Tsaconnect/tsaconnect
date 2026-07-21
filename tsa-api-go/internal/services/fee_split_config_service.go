@@ -124,12 +124,23 @@ func (s *FeeSplitConfigService) Upsert(cfg models.FeeSplitConfig) (models.FeeSpl
 			return models.FeeSplitConfig{}, err
 		}
 	case err == gorm.ErrRecordNotFound:
-		// Select("*"): the model's `default:true` tag makes GORM omit a false
-		// Active on insert and fall back to the DB default (true), so creating an
-		// inactive override would silently persist as active. Force every column.
-		if err := s.db.Select("*").Create(&cfg).Error; err != nil {
+		// Capture the intended Active BEFORE Create: on an INSERT of a
+		// zero-value bool with a `default:true` tag, GORM both omits it from the
+		// INSERT *and* rewrites the struct's field to the default — so after
+		// Create, cfg.Active reads true even when the caller asked for false.
+		wantActive := cfg.Active
+		if err := s.db.Create(&cfg).Error; err != nil {
 			return models.FeeSplitConfig{}, err
 		}
+		// The row now holds the default (true). A column-named Update always
+		// writes the value, even false — force the intended one.
+		if !wantActive {
+			if err := s.db.Model(&models.FeeSplitConfig{}).Where("id = ?", cfg.ID).
+				Update("active", false).Error; err != nil {
+				return models.FeeSplitConfig{}, err
+			}
+		}
+		cfg.Active = wantActive
 		existing = cfg
 	default:
 		return models.FeeSplitConfig{}, err
