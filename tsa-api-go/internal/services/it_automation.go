@@ -239,6 +239,31 @@ func (p *FlutterwaveVAProvisioner) CreateDynamicVA(ctx context.Context, referenc
 	})
 }
 
+// CreateVirtualAccount issues a STATIC (permanent, amount-0) NGN virtual account
+// for a corporate Payment Merchant, returning the account number. accountRef is
+// the PM's deterministic "pm-<userID>" reference — the SAME attribution key the
+// charge.completed webhook carries back, so the existing provider-agnostic
+// inbound matcher (resolveInboundPM → WHERE nomba_account_ref = ?) keys on it
+// with no change.
+//
+// This signature satisfies services.NombaProvisioner, so *FlutterwaveVAProvisioner
+// is a drop-in for the Nomba client in PMOnboardingService — the whole point of
+// moving PM onboarding off Nomba.
+func (p *FlutterwaveVAProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (string, error) {
+	va, err := p.client.CreateVirtualAccount(ctx, FWVirtualAccountRequest{
+		CustomerID:  p.customerID,
+		Reference:   accountRef,
+		Currency:    "NGN",
+		Amount:      0,
+		AccountType: "static",
+		Narration:   accountName,
+	})
+	if err != nil {
+		return "", err
+	}
+	return va.AccountNumber, nil
+}
+
 // ─── Kobo/naira helpers (big.Int — no float drift on money) ────────────────
 
 // nairaToKobo converts a decimal naira string ("500", "500.5", "500.00") to

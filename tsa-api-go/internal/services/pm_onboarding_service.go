@@ -12,9 +12,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// ErrPMProvisioningUnavailable is returned when the provisioner is nil
-// (Nomba credentials not configured at startup).
-var ErrPMProvisioningUnavailable = errors.New("PM provisioning unavailable: Nomba not configured")
+// ErrPMProvisioningUnavailable is returned when the provisioner is nil (no fiat
+// provider — Flutterwave or Nomba — configured at startup).
+var ErrPMProvisioningUnavailable = errors.New("PM provisioning unavailable: no fiat provider configured")
 
 // NombaProvisioner is the minimal interface PMOnboardingService needs so tests
 // can inject a fake without depending on *NombaClient directly. Under the

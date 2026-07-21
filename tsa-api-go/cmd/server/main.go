@@ -30,6 +30,26 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/ws"
 )
 
+// pmProvisioner picks the fiat provisioner for corporate PM virtual accounts,
+// honoring cfg.ResolveFiatProvider (same resolver as payouts / webhooks / bank
+// directory, so they can never disagree): Flutterwave static company VAs when
+// FW is selected AND configured, otherwise the Nomba client. Returns a nil
+// interface (not a typed-nil) when the chosen provider isn't configured, so
+// PMOnboardingService's `provisioner == nil` guard still 503s ApprovePM.
+func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, nombaClient *services.NombaClient) services.NombaProvisioner {
+	if cfg.ResolveFiatProvider() == "flutterwave" {
+		if p := services.NewFlutterwaveVAProvisioner(fwClient, cfg.FlutterwaveCustomerID); p != nil {
+			return p
+		}
+		// FW selected but client or FLUTTERWAVE_CUSTOMER_ID missing — fall back
+		// to Nomba if it happens to be configured, else nil (dormant).
+	}
+	if nombaClient != nil {
+		return nombaClient
+	}
+	return nil
+}
+
 func main() {
 	// Load .env file (ignore error if file doesn't exist)
 	if err := godotenv.Load(); err != nil {
@@ -489,14 +509,15 @@ func main() {
 		log.Printf("Bank directory active (provider=%s)", cfg.ResolveFiatProvider())
 	}
 
-	// Corporate PM onboarding — resume-able Nomba sub-account provisioning.
-	// DORMANT-BY-DEFAULT: built only when Nomba creds are present (nombaClient != nil).
+	// Corporate PM onboarding — resume-able VA provisioning via the resolved
+	// fiat provider (Flutterwave static VAs when selected, else Nomba).
+	// DORMANT-BY-DEFAULT: built only when the chosen provider is configured.
 	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
-	if nombaClient != nil {
-		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, nombaClient))
-		log.Printf("[pm] onboarding service ready (resume-able Nomba provisioning)")
+	if prov := pmProvisioner(cfg, fwClient, nombaClient); prov != nil {
+		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, prov))
+		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
 	} else {
-		log.Printf("[pm] onboarding service dormant: Nomba creds absent — corporate PM approval disabled")
+		log.Printf("[pm] onboarding service dormant: no fiat provider configured — corporate PM approval disabled")
 	}
 
 	// P2P trade service — wired only when the contract address is set.
@@ -685,14 +706,15 @@ func main() {
 			}
 		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
-		// Wire admin PM approval (provision + activate). Needs a Nomba client to
-		// create the virtual account; pmNombaClient is nil when creds are absent,
-		// in which case ApprovePM 503s while reject/pause/resume still work.
-		if pmNombaClient != nil {
-			pmh.SetApprover(services.NewPMOnboardingService(config.DB, pmNombaClient))
-			log.Printf("[pm] admin PM approval ready (provision + activate)")
+		// Wire admin PM approval (provision + activate) via the resolved fiat
+		// provider — Flutterwave static VAs when selected, else Nomba. When
+		// neither is configured the approver is nil and ApprovePM 503s while
+		// reject/pause/resume still work.
+		if prov := pmProvisioner(cfg, fwClient, pmNombaClient); prov != nil {
+			pmh.SetApprover(services.NewPMOnboardingService(config.DB, prov))
+			log.Printf("[pm] admin PM approval ready (provider=%s)", cfg.ResolveFiatProvider())
 		} else {
-			log.Printf("[pm] admin PM approval dormant: Nomba client absent — approve will 503 (reject/pause/resume still available)")
+			log.Printf("[pm] admin PM approval dormant: no fiat provider configured — approve will 503 (reject/pause/resume still available)")
 		}
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
