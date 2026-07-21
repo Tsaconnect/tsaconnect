@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -363,8 +364,17 @@ func (c *FlutterwaveClient) ResolveAccount(ctx context.Context, currency, bankCo
 	if env.failed() || parsed.AccountName == "" {
 		return "", ErrFWAccountNotFound
 	}
+	now := time.Now()
 	c.lookupMu.Lock()
-	c.lookups[key] = fwLookupEntry{at: time.Now(), name: parsed.AccountName}
+	// Sweep expired entries before inserting so the cache stays bounded to the
+	// distinct accounts resolved within one TTL window — entries are otherwise
+	// only TTL-ignored on read, never evicted, which leaks for the process life.
+	for k, e := range c.lookups {
+		if now.Sub(e.at) >= fwLookupTTL {
+			delete(c.lookups, k)
+		}
+	}
+	c.lookups[key] = fwLookupEntry{at: now, name: parsed.AccountName}
 	c.lookupMu.Unlock()
 	return parsed.AccountName, nil
 }
@@ -658,7 +668,9 @@ func (c *FlutterwaveClient) GetFees(ctx context.Context, amount float64, currenc
 		return nil, ErrFlutterwaveDisabled
 	}
 	q := url.Values{}
-	q.Set("amount", fmt.Sprintf("%g", amount))
+	// Plain decimal, never scientific notation: %g renders ≥₦1,000,000 as
+	// "1e+06", which the fee endpoint would mis-parse or reject.
+	q.Set("amount", strconv.FormatFloat(amount, 'f', -1, 64))
 	q.Set("currency", strings.ToUpper(currency))
 	if paymentMethod != "" {
 		q.Set("payment_method", paymentMethod)
