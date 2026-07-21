@@ -36,9 +36,9 @@ import (
 // FW is selected AND configured, otherwise the Nomba client. Returns a nil
 // interface (not a typed-nil) when the chosen provider isn't configured, so
 // PMOnboardingService's `provisioner == nil` guard still 503s ApprovePM.
-func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, nombaClient *services.NombaClient) services.NombaProvisioner {
+func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwCustomerID string, nombaClient *services.NombaClient) services.NombaProvisioner {
 	if cfg.ResolveFiatProvider() == "flutterwave" {
-		if p := services.NewFlutterwaveVAProvisioner(fwClient, cfg.FlutterwaveCustomerID); p != nil {
+		if p := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); p != nil {
 			return p
 		}
 		// FW selected but client or FLUTTERWAVE_CUSTOMER_ID missing — fall back
@@ -478,6 +478,24 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// Resolve the company customer that parents all FW virtual accounts. Uses
+	// FLUTTERWAVE_CUSTOMER_ID when set, else mints one lazily and persists it
+	// (per environment) so operators needn't find it in the dashboard.
+	fwCustomerID, fwCustErr := services.ResolveFlutterwaveCompanyCustomer(
+		context.Background(), config.DB, fwClient, cfg.FlutterwaveBaseURL, cfg.FlutterwaveCustomerID,
+		services.CompanyCustomerParams{
+			Name:  cfg.FlutterwaveCompanyName,
+			Email: cfg.FlutterwaveCompanyEmail,
+			Phone: cfg.FlutterwaveCompanyPhone,
+		},
+	)
+	if fwCustErr != nil {
+		log.Printf("[fw] company customer unresolved — VA provisioning stays dormant: %v", fwCustErr)
+		fwCustomerID = ""
+	} else if fwCustomerID != "" {
+		log.Printf("[fw] company customer resolved (VA parent)")
+	}
+
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11) — quote-only,
 	// always registered. Provider fees pass through live Flutterwave GetFees
 	// when the client is up, else the config fallback percentage; the P2P FX
@@ -513,7 +531,7 @@ func main() {
 	// fiat provider (Flutterwave static VAs when selected, else Nomba).
 	// DORMANT-BY-DEFAULT: built only when the chosen provider is configured.
 	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
-	if prov := pmProvisioner(cfg, fwClient, nombaClient); prov != nil {
+	if prov := pmProvisioner(cfg, fwClient, fwCustomerID, nombaClient); prov != nil {
 		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, prov))
 		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
 	} else {
@@ -698,7 +716,7 @@ func main() {
 			} else {
 				log.Printf("[it] sell auto-payout dormant: no live payout gateway")
 			}
-			if vaProv := services.NewFlutterwaveVAProvisioner(fwClient, cfg.FlutterwaveCustomerID); vaProv != nil {
+			if vaProv := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); vaProv != nil {
 				itService.SetVAProvisioner(vaProv)
 				log.Printf("[it] buy dynamic-VA provisioning ACTIVE")
 			} else {
@@ -710,7 +728,7 @@ func main() {
 		// provider — Flutterwave static VAs when selected, else Nomba. When
 		// neither is configured the approver is nil and ApprovePM 503s while
 		// reject/pause/resume still work.
-		if prov := pmProvisioner(cfg, fwClient, pmNombaClient); prov != nil {
+		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
 			pmh.SetApprover(services.NewPMOnboardingService(config.DB, prov))
 			log.Printf("[pm] admin PM approval ready (provider=%s)", cfg.ResolveFiatProvider())
 		} else {

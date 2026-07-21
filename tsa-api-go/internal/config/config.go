@@ -370,6 +370,11 @@ type Config struct {
 	// accounts hang off (per-payer customers with BVN/NIN are a follow-up).
 	// UNSET ⇒ IT buys fall back to the company PM's static VA.
 	FlutterwaveCustomerID string
+	// Company customer registered lazily when FlutterwaveCustomerID is unset —
+	// the parent for all virtual accounts. Overridable; sane defaults.
+	FlutterwaveCompanyName  string
+	FlutterwaveCompanyEmail string
+	FlutterwaveCompanyPhone string
 	// FiatProviderOverride pins the payout gateway: "flutterwave" | "nomba".
 	// Empty ⇒ auto: Flutterwave when its creds are present, else Nomba.
 	FiatProviderOverride string
@@ -639,6 +644,9 @@ func Load() *Config {
 	cfg.FlutterwaveWebhookSecret = strings.TrimSpace(getEnv("FLUTTERWAVE_WEBHOOK_SECRET", ""))
 	cfg.FlutterwaveMerchantID = strings.TrimSpace(getEnv("FLUTTERWAVE_MERCHANT_ID", ""))
 	cfg.FlutterwaveCustomerID = strings.TrimSpace(getEnv("FLUTTERWAVE_CUSTOMER_ID", ""))
+	cfg.FlutterwaveCompanyName = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_NAME", "TSA Connect"))
+	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
+	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
 	cfg.FiatProviderOverride = strings.ToLower(strings.TrimSpace(getEnv("FIAT_PROVIDER", "")))
 
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values
