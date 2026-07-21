@@ -204,7 +204,7 @@ const CheckoutScreen = () => {
       Alert.alert(
         'Wallet Required',
         'Please set up your wallet first.',
-        [{ text: 'Set Up Wallet', onPress: () => router.push('/wallet/home') }],
+        [{ text: 'Set Up Wallet', onPress: () => router.push('/tokenization') }],
       );
       return;
     }
@@ -547,7 +547,7 @@ const CheckoutScreen = () => {
       'You need a wallet to complete your purchase. Set up your wallet to continue.',
       [
         { text: 'Cancel', style: 'cancel', onPress: () => router.back() },
-        { text: 'Set Up Wallet', onPress: () => router.push('/wallet/home') },
+        { text: 'Set Up Wallet', onPress: () => router.push('/tokenization') },
       ],
     );
     // Reset so the alert doesn't re-trigger

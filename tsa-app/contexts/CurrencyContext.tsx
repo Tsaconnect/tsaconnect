@@ -15,6 +15,7 @@ import React, {
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CurrencyConfig, DEFAULT_CURRENCY } from "../constants/currencies";
+import { formatMicroPrice, isMicroPrice } from "../utils/formatPrice";
 import { exchangeRateService, P2PRate } from "../services/exchangeRateApi";
 import { useAuth } from "../AuthContext/AuthContext";
 
@@ -278,8 +279,10 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
 
   const formatPriceFn = useCallback(
     (usdAmount: number): string => {
-      // Plain USD path — no rate needed.
+      // Plain USD path — no rate needed. Sub-cent (micro-cap) prices use
+      // leading-zero compression ("$0.0₅12") instead of rounding to "$0.00".
       if (currency.code === "USD") {
+        if (isMicroPrice(usdAmount)) return `$${formatMicroPrice(usdAmount)}`;
         return `$${usdAmount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -290,6 +293,7 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
       // the USD value rather than silently quoting in local currency at 1:1.
       // Caller should also be checking isSelectedRateStale to disable trades.
       if (rate === null) {
+        if (isMicroPrice(usdAmount)) return `$${formatMicroPrice(usdAmount)}`;
         return `$${usdAmount.toLocaleString("en-US", {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
@@ -297,6 +301,13 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
       }
 
       const localAmount = usdAmount * rate;
+
+      // Micro-cap prices can be sub-cent in local currency too. Prefix the
+      // symbol manually — same rationale as the Intl catch-fallback below.
+      if (isMicroPrice(localAmount)) {
+        const sym = currency.symbol || currency.code;
+        return `${sym}${formatMicroPrice(localAmount)}`;
+      }
 
       let formatted: string;
       try {
@@ -327,10 +338,12 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
   // Helper used by formatDualPrice for the USD primary line. Always renders
   // the value with the `$` symbol regardless of the user's selected currency.
   const formatUSD = (usdAmount: number) =>
-    `$${usdAmount.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+    isMicroPrice(usdAmount)
+      ? `$${formatMicroPrice(usdAmount)}`
+      : `$${usdAmount.toLocaleString("en-US", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
 
   const formatDualPriceFn = useCallback(
     (usdAmount: number): { primary: string; secondary: string } => {
@@ -340,10 +353,14 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
       // secondary line with the ISO code so the two lines stay visually
       // distinct: "$20.00" / "USD 20.00".
       if (currency.code === "USD" || rate === null) {
-        const secondary = `USD ${usdAmount.toLocaleString("en-US", {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`;
+        const secondary = `USD ${
+          isMicroPrice(usdAmount)
+            ? formatMicroPrice(usdAmount)
+            : usdAmount.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })
+        }`;
         return { primary, secondary };
       }
 

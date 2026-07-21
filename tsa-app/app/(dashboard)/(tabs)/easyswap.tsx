@@ -1,6 +1,6 @@
 // app/(dashboard)/(tabs)/easyswap.tsx
 //
-// Easyswap — token swap entry. Hosts three sub-views (Swap / Spot Trade / All
+// Easyswap — token swap entry. Hosts three sub-views (OTC / Spot Trade / All
 // Swap) behind a tab selector. Restyled onto the TSA Signature design system
 // (theme tokens + @/components/ui primitives): the legacy numbered-pill tab bar
 // is now a SegmentedControl and the "Coming Soon" placeholder is rebuilt on
@@ -18,8 +18,9 @@ import { SegmentedControl } from '@/components/ui';
 
 type Tab = 'swap' | 'spot' | 'allswap';
 
+// Key stays 'swap' (deep links use ?tab=swap); only the label is "OTC".
 const TABS: { key: Tab; label: string }[] = [
-  { key: 'swap', label: 'Swap' },
+  { key: 'swap', label: 'OTC' },
   { key: 'spot', label: 'Spot Trade' },
   { key: 'allswap', label: 'All Swap' },
 ];
