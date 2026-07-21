@@ -38,11 +38,16 @@ import (
 // PMOnboardingService's `provisioner == nil` guard still 503s ApprovePM.
 func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwCustomerID string, nombaClient *services.NombaClient) services.NombaProvisioner {
 	if cfg.ResolveFiatProvider() == "flutterwave" {
+		// FW selected → FW or nothing. Never silently fall back to Nomba (which
+		// we're migrating off, and whose sandbox caps VAs at 2 per holder): a
+		// missing FW company-customer id must surface as a dormant provisioner
+		// so ApprovePM 503s with a clear error, rather than routing a live PM to
+		// the wrong provider and failing deep in Nomba's create-VA call.
+		// Guard the typed-nil so the interface is a true nil (not a typed-nil).
 		if p := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); p != nil {
 			return p
 		}
-		// FW selected but client or FLUTTERWAVE_CUSTOMER_ID missing — fall back
-		// to Nomba if it happens to be configured, else nil (dormant).
+		return nil
 	}
 	if nombaClient != nil {
 		return nombaClient
