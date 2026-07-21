@@ -28,18 +28,19 @@ type P2PHandler struct {
 	db       *gorm.DB
 	trade    *services.P2PTradeService
 	messages *services.P2PMessageService
-	// nomba is optional — when nil, bank-list and account-resolve endpoints
+	// banks is optional — when nil, bank-list and account-resolve endpoints
 	// return a 503-ish "feature unavailable" response. The trade routes
-	// themselves don't depend on it.
-	nomba *services.NombaClient
+	// themselves don't depend on it. Backed by whichever fiat provider is
+	// active (Flutterwave since 2026-07; Nomba as fallback).
+	banks services.BankDirectory
 	stats *services.MerchantStatsService
 }
 
 // NewP2PHandler constructs a P2PHandler. Pass nil for `trade` to disable the
 // P2P routes — handlers will return a configuration-error response so the
 // frontend can show "feature unavailable" cleanly instead of a 500.
-func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService, nomba *services.NombaClient, stats *services.MerchantStatsService) *P2PHandler {
-	return &P2PHandler{db: db, trade: trade, messages: messages, nomba: nomba, stats: stats}
+func NewP2PHandler(db *gorm.DB, trade *services.P2PTradeService, messages *services.P2PMessageService, banks services.BankDirectory, stats *services.MerchantStatsService) *P2PHandler {
+	return &P2PHandler{db: db, trade: trade, messages: messages, banks: banks, stats: stats}
 }
 
 // IsConfigured reports whether the handler has its trade service wired up.
@@ -50,9 +51,10 @@ func (h *P2PHandler) IsConfigured() bool {
 
 // HasNomba reports whether the bank directory / account-resolve endpoints
 // can serve requests. Used by routes.go to skip registering them when
-// credentials are absent.
+// credentials are absent. (Name is historical — the directory is provider-
+// agnostic; kept to avoid churning call sites.)
 func (h *P2PHandler) HasNomba() bool {
-	return h != nil && h.nomba.IsEnabled()
+	return h != nil && h.banks != nil
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -305,7 +307,7 @@ func (h *P2PHandler) ListNigerianBanks(c *gin.Context) {
 		})
 		return
 	}
-	banks, err := h.nomba.ListBanks(c.Request.Context())
+	banks, err := h.banks.ListBanks(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
 		return
@@ -336,7 +338,7 @@ func (h *P2PHandler) ResolveAccountName(c *gin.Context) {
 		})
 		return
 	}
-	result, err := h.nomba.Lookup(c.Request.Context(), bankCode, accountNumber)
+	result, err := h.banks.Resolve(c.Request.Context(), bankCode, accountNumber)
 	if err != nil {
 		if errors.Is(err, services.ErrNombaAccountNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
