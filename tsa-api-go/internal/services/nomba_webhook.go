@@ -149,16 +149,29 @@ func (v *NombaWebhookVerifier) Verify(body []byte, signatureB64, timestamp strin
 // NombaWebhookStore — ledger writer with (provider, event_id) dedup
 // ---------------------------------------------------------------------------
 
-// NombaWebhookStore persists incoming Nomba webhook events to webhook_events
-// and deduplicates on the (provider, event_id) unique index.
+// NombaWebhookStore persists incoming provider webhook events to
+// webhook_events and deduplicates on the (provider, event_id) unique index.
+// Despite the historical name it is provider-parameterized — the Flutterwave
+// handler uses the same store with ProviderFlutterwave.
 type NombaWebhookStore struct {
-	db *gorm.DB
+	db       *gorm.DB
+	provider string
 }
 
-// NewNombaWebhookStore constructs a store backed by the given GORM DB.
+// NewNombaWebhookStore constructs a store backed by the given GORM DB,
+// recording events under the Nomba provider key.
 func NewNombaWebhookStore(db *gorm.DB) *NombaWebhookStore {
-	return &NombaWebhookStore{db: db}
+	return &NombaWebhookStore{db: db, provider: ProviderNomba}
 }
+
+// NewWebhookStoreForProvider constructs a store recording events under an
+// arbitrary provider key (e.g. ProviderFlutterwave).
+func NewWebhookStoreForProvider(db *gorm.DB, provider string) *NombaWebhookStore {
+	return &NombaWebhookStore{db: db, provider: provider}
+}
+
+// Provider returns the provider key this store records under.
+func (s *NombaWebhookStore) Provider() string { return s.provider }
 
 // DB returns the underlying GORM handle so callers (the webhook handler) can
 // update an event row's status/error/processed_at after dispatch. Exposed
@@ -178,7 +191,7 @@ func (s *NombaWebhookStore) DB() *gorm.DB { return s.db }
 func (s *NombaWebhookStore) Record(ctx context.Context, eventID string, body []byte, signature string) (*models.WebhookEvent, bool, error) {
 	ev := &models.WebhookEvent{
 		ID:         uuid.New(),
-		Provider:   ProviderNomba,
+		Provider:   s.provider,
 		EventID:    eventID,
 		Payload:    datatypes.JSON(body),
 		Signature:  signature,
@@ -201,7 +214,7 @@ func (s *NombaWebhookStore) Record(ctx context.Context, eventID string, body []b
 		// Duplicate — re-fetch the canonical existing record.
 		var existing models.WebhookEvent
 		if err := s.db.WithContext(ctx).
-			Where("provider = ? AND event_id = ?", ProviderNomba, eventID).
+			Where("provider = ? AND event_id = ?", s.provider, eventID).
 			First(&existing).Error; err != nil {
 			return nil, true, fmt.Errorf("webhook re-fetch existing: %w", err)
 		}

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -108,16 +109,33 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Surface the real pay-into account (the company PM's Nomba VA), not a
-	// hardcoded note. payTo is null when no PM is configured so the app can show
-	// a clear "payments unavailable" state instead of a fake account.
+	// Surface the real pay-into account. Preferred: a per-intent dynamic
+	// Flutterwave VA (amount-locked, reference = PaymentRef → webhook
+	// auto-credit). Fallback: the company PM's static VA (operator-matched).
+	// payTo is null when neither exists so the app can show a clear
+	// "payments unavailable" state instead of a fake account.
 	var payTo interface{}
-	if pm, _ := h.it.CompanyPM(c.Request.Context()); pm != nil {
-		payTo = gin.H{
-			"accountNumber": pm.InboundAccountNumber,
-			"bank":          pm.InboundBank,
-			"accountName":   pm.Name,
-			"reference":     intent.PaymentRef,
+	if h.it.HasVAProvisioning() {
+		if err := h.it.ProvisionBuyVA(c.Request.Context(), intent); err != nil {
+			log.Printf("[it] dynamic VA for intent %s failed (falling back to company VA): %v", intent.ID, err)
+		} else {
+			payTo = gin.H{
+				"accountNumber": intent.VAAccountNumber,
+				"bank":          intent.VABankName,
+				"accountName":   "TSA Connect",
+				"reference":     intent.PaymentRef,
+				"expiresInSec":  3600,
+			}
+		}
+	}
+	if payTo == nil {
+		if pm, _ := h.it.CompanyPM(c.Request.Context()); pm != nil {
+			payTo = gin.H{
+				"accountNumber": pm.InboundAccountNumber,
+				"bank":          pm.InboundBank,
+				"accountName":   pm.Name,
+				"reference":     intent.PaymentRef,
+			}
 		}
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Buy intent created", gin.H{
@@ -129,6 +147,11 @@ func (h *ITHandler) Buy(c *gin.Context) {
 
 type itSellReq struct {
 	McgpAmount string `json:"mcgpAmount"`
+	// Payout destination — required when auto-payout is active so the fiat
+	// leg can fire without an operator; optional on the legacy manual flow.
+	BankCode      string `json:"bankCode"`
+	AccountNumber string `json:"accountNumber"`
+	AccountName   string `json:"accountName"`
 }
 
 // POST /api/it/sell — debit credited premium (on-chain) and open the NGN payout.
@@ -147,7 +170,20 @@ func (h *ITHandler) Sell(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount)
+	// When auto-payout is wired, the destination is mandatory — a sell with no
+	// bank would silently fall back to the manual queue the PM wants retired.
+	var bank *services.ITSellBank
+	if req.BankCode != "" || req.AccountNumber != "" {
+		if req.BankCode == "" || len(req.AccountNumber) != 10 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "bankCode and a 10-digit accountNumber are required")
+			return
+		}
+		bank = &services.ITSellBank{Code: req.BankCode, Number: req.AccountNumber, Name: req.AccountName}
+	} else if h.it.HasAutoPayout() {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Select a payout bank account")
+		return
+	}
+	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return

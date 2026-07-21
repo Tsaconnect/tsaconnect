@@ -38,7 +38,11 @@ type InboundPayment struct {
 	SenderAccountName   string
 	SenderAccountNumber string
 	AmountNGN           string
-	Status              string // "settled" | "pending" | ...
+	// Currency of the credited amount. Empty means NGN (the Nomba parser
+	// predates multi-currency and leaves it unset); the Flutterwave parser
+	// always sets it so consumers can reject non-NGN credits they can't price.
+	Currency string
+	Status   string // "settled" | "pending" | ...
 }
 
 // PayoutStatus is a normalized payout-result webhook (sell flow).

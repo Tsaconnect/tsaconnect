@@ -119,6 +119,9 @@ type PMAutomationService struct {
 	name       PMNameLookup
 	gateway    NombaGateway
 	senderName string
+	// itHooks routes IT-prefixed Flutterwave webhook references to the IT
+	// service (see flutterwave_dispatch.go); nil when IT is dormant.
+	itHooks ITWebhookHooks
 }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
@@ -432,17 +435,24 @@ func (s *PMAutomationService) RecoverStuckTrades(ctx context.Context, olderThan 
 
 // retryWebhookRow is the lightweight projection scanned for RetryFailedWebhooks.
 type retryWebhookRow struct {
-	ID      uuid.UUID
-	EventID string
-	Payload []byte
+	ID       uuid.UUID
+	EventID  string
+	Provider string
+	Payload  []byte
 }
 
-// RetryFailedWebhooks re-dispatches Nomba webhook events that the live handler
+// RetryFailedWebhooks re-dispatches fiat webhook events that the live handler
 // could not settle: rows left `failed` (a dispatch error), or `pending` rows
 // orphaned by a crash mid-dispatch (received_at older than staleAfter). For each
-// it re-runs Dispatch; success (or a recognized non-settling event) flips the row
-// to `processed`. A still-failing dispatch is left untouched to be retried on the
-// next tick. Returns the count moved to `processed`.
+// it re-runs the provider-appropriate dispatcher (Nomba or Flutterwave); success
+// (or a recognized non-settling event) flips the row to `processed`. A
+// still-failing dispatch is left untouched to be retried on the next tick.
+// Returns the count moved to `processed`.
+//
+// Both providers are covered: FW is the primary gateway, so a transiently-failed
+// FW charge/transfer must be re-driven here — the FW handler's own dedup returns
+// "already processed" on redelivery regardless of status, so this job is the only
+// path that heals a failed FW event.
 //
 // This recovers transient-failure inbound/payout dispatches whose trade is still
 // actionable. A paid-orphan is NOT recovered here (its trade is past
@@ -452,8 +462,8 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 	var rows []retryWebhookRow
 	if err := s.db.WithContext(ctx).
 		Table("webhook_events").
-		Select("id, event_id, payload").
-		Where("provider = ?", ProviderNomba).
+		Select("id, event_id, provider, payload").
+		Where("provider IN ?", []string{ProviderNomba, ProviderFlutterwave}).
 		Where("status = ? OR (status = ? AND received_at < ?)", "failed", "pending", cutoff).
 		Order("received_at ASC").
 		Limit(100).
@@ -463,7 +473,13 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 
 	retried := 0
 	for _, r := range rows {
-		err := s.Dispatch(ctx, r.Payload)
+		var err error
+		switch r.Provider {
+		case ProviderFlutterwave:
+			err = s.DispatchFlutterwave(ctx, r.Payload)
+		default:
+			err = s.Dispatch(ctx, r.Payload)
+		}
 		if err != nil && !errors.Is(err, ErrNonSettlingEvent) {
 			// Still failing — leave it for the next tick.
 			log.Printf("[pm recovery] re-dispatch webhook event=%s still failing: %v", r.EventID, err)

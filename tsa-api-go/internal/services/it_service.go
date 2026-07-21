@@ -58,6 +58,12 @@ type ITService struct {
 	swap        *MCGPSwapService
 	fx          FxProvider // NGN/USD source for USD→Naira conversion
 	companyPMID string     // PaymentMerchant UUID for the IT pay-into account (optional)
+
+	// Automation seams (all optional — absent keeps the legacy operator-manual
+	// flow): payout fires sell payouts through the fiat gateway; va provisions
+	// per-intent dynamic virtual accounts for buys. See it_automation.go.
+	payout NombaGateway
+	va     ITVAProvisioner
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
@@ -298,7 +304,7 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 // CreateSellIntent debits the user's credited premium into pendingSettle
 // (on-chain, operator-signed) and records the intent as `debited` — the NGN
 // payout + settle/reverse follow. Quotes NGN at the locked sell rate.
-func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, walletAddr, mcgpWei string) (*models.ITIntent, error) {
+func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, walletAddr, mcgpWei string, bank *ITSellBank) (*models.ITIntent, error) {
 	if !s.IsConfigured() {
 		return nil, ErrITNotConfigured
 	}
@@ -347,6 +353,11 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		NgnKobo:       ngn.String(),
 		RateKobo:      sellRate.String(),
 	}
+	if bank != nil {
+		intent.BankCode = strings.TrimSpace(bank.Code)
+		intent.AccountNumber = strings.TrimSpace(bank.Number)
+		intent.AccountName = strings.TrimSpace(bank.Name)
+	}
 	debitRef := itRef("IT:debit:", intent.ID)
 	intent.DebitRef = common.BytesToHash(debitRef[:]).Hex()
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
@@ -364,6 +375,16 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	}
 	intent.TxHash = txHash
 	_ = s.setStatus(ctx, intent, models.ITStatusDebited, "")
+
+	// Auto-payout: fire the fiat leg immediately when the gateway is wired and
+	// the intent carries a destination. A payout error is NOT a sell failure —
+	// the debit stands and the operator settles manually (legacy path); the
+	// error is recorded on the intent for visibility.
+	if s.payout != nil && intent.BankCode != "" && intent.AccountNumber != "" {
+		if err := s.AutoPayout(ctx, intent); err != nil {
+			log.Printf("[it] auto-payout intent=%s failed (operator fallback): %v", intent.ID, err)
+		}
+	}
 	return intent, nil
 }
 

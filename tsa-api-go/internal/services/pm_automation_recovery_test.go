@@ -189,6 +189,79 @@ func TestRetryFailedWebhooks(t *testing.T) {
 	}
 }
 
+// TestRetryFailedWebhooks_Flutterwave guards the recovery job against a
+// provider-scoping regression: FW is the primary gateway, so a failed FW event
+// must be selected and re-driven via DispatchFlutterwave. The job previously
+// hardcoded provider=nomba and would leave FW money permanently stuck.
+func TestRetryFailedWebhooks_Flutterwave(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createWebhookEventsTable(t, db)
+	svc, esc, _ := newService(t, db)
+
+	pm := seedActivePM(t, db, "1234567890", 0)
+	// FW attributes inbound credits by the VA accountRef (nomba_account_ref
+	// column) via GetByAccountRef, not walletId — set a deterministic ref and
+	// key the charge.completed payload on it.
+	accountRef := "pm-" + pm.UserID.String()
+	if err := db.Model(&models.PaymentMerchant{}).Where("id = ?", pm.ID).
+		Update("nomba_account_ref", accountRef).Error; err != nil {
+		t.Fatalf("set account ref: %v", err)
+	}
+	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
+	buyerID := uuid.New()
+	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
+	setReleasedEvent(esc, trade)
+
+	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
+		buyerID: "JOHN DOE",
+	}))
+
+	// A `failed` Flutterwave charge.completed whose reference matches the PM's VA
+	// and whose amount/sender match the pending trade → re-dispatch settles it.
+	body := []byte(`{
+		"webhook_id": "fw-retry-1",
+		"type": "charge.completed",
+		"data": {
+			"reference": "` + accountRef + `",
+			"status": "succeeded",
+			"amount": 1500,
+			"currency": "NGN",
+			"customer": {"name": "JOHN DOE"}
+		}
+	}`)
+	failedRow := &models.WebhookEvent{
+		ID: uuid.New(), Provider: ProviderFlutterwave, EventID: "fw-retry-1",
+		Payload: body, Signature: "sig", Status: "failed",
+		ReceivedAt: time.Now().Add(-10 * time.Minute),
+	}
+	if err := db.Create(failedRow).Error; err != nil {
+		t.Fatalf("seed failed FW webhook: %v", err)
+	}
+
+	got, err := auto.RetryFailedWebhooks(context.Background(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("RetryFailedWebhooks: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("retried = %d, want 1 (the FW event re-driven)", got)
+	}
+	if len(signer.calls) != 1 {
+		t.Errorf("signer called %d times, want 1 (the matched trade released)", len(signer.calls))
+	}
+
+	var failedP models.WebhookEvent
+	db.First(&failedP, "id = ?", failedRow.ID)
+	if failedP.Status != "processed" {
+		t.Errorf("failed FW row status = %q, want processed", failedP.Status)
+	}
+	var tradeP models.P2PTrade
+	db.First(&tradeP, "id = ?", trade.ID)
+	if tradeP.Status != models.P2PTradeStatusReleased {
+		t.Errorf("trade status = %q, want released", tradeP.Status)
+	}
+}
+
 func TestDispatch_RoutesInboundAndPayout(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)

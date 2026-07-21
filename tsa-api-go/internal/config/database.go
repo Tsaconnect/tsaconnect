@@ -77,6 +77,7 @@ func AutoMigrate() error {
 		&models.PrivateSaleSubmission{},
 		&models.RewardClaim{},
 		&models.FeeSplitConfig{},
+		&models.FlutterwaveCustomer{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},
 		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.

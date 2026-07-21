@@ -30,6 +30,31 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/ws"
 )
 
+// pmProvisioner picks the fiat provisioner for corporate PM virtual accounts,
+// honoring cfg.ResolveFiatProvider (same resolver as payouts / webhooks / bank
+// directory, so they can never disagree): Flutterwave static company VAs when
+// FW is selected AND configured, otherwise the Nomba client. Returns a nil
+// interface (not a typed-nil) when the chosen provider isn't configured, so
+// PMOnboardingService's `provisioner == nil` guard still 503s ApprovePM.
+func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwCustomerID string, nombaClient *services.NombaClient) services.NombaProvisioner {
+	if cfg.ResolveFiatProvider() == "flutterwave" {
+		// FW selected → FW or nothing. Never silently fall back to Nomba (which
+		// we're migrating off, and whose sandbox caps VAs at 2 per holder): a
+		// missing FW company-customer id must surface as a dormant provisioner
+		// so ApprovePM 503s with a clear error, rather than routing a live PM to
+		// the wrong provider and failing deep in Nomba's create-VA call.
+		// Guard the typed-nil so the interface is a true nil (not a typed-nil).
+		if p := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); p != nil {
+			return p
+		}
+		return nil
+	}
+	if nombaClient != nil {
+		return nombaClient
+	}
+	return nil
+}
+
 func main() {
 	// Load .env file (ignore error if file doesn't exist)
 	if err := godotenv.Load(); err != nil {
@@ -164,6 +189,7 @@ func main() {
 	// nil in that case so its /api/mcgp routes are not registered.
 	var mcgpSwapHandler *handlers.MCGPSwapHandler
 	var itHandler *handlers.ITHandler
+	var itService *services.ITService // hoisted: the PM block wires automation onto it
 	mcgpSwapService := services.NewMCGPSwapService(sonicClient, cfg)
 	if mcgpSwapService.IsConfigured() {
 		mcgpSwapHandler = handlers.NewMCGPSwapHandler(config.DB, mcgpSwapService)
@@ -181,7 +207,7 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
-				itService := services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
+				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
@@ -450,14 +476,71 @@ func main() {
 		log.Printf("Nomba dormant: NOMBA_CLIENT_ID / NOMBA_CLIENT_SECRET / NOMBA_ACCOUNT_ID not set — bank list and account verification disabled")
 	}
 
-	// Corporate PM onboarding — resume-able Nomba sub-account provisioning.
-	// DORMANT-BY-DEFAULT: built only when Nomba creds are present (nombaClient != nil).
-	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
-	if nombaClient != nil {
-		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, nombaClient))
-		log.Printf("[pm] onboarding service ready (resume-able Nomba provisioning)")
+	// Flutterwave v4 — the preferred fiat gateway (Nomba declined production
+	// API access, 2026-07). Dormant-by-default: nil without creds.
+	fwClient := services.NewFlutterwaveClient(cfg.FlutterwaveBaseURL, cfg.FlutterwaveIdpURL, cfg.FlutterwaveClientID, cfg.FlutterwaveClientSecret)
+	if fwClient == nil {
+		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
+	}
+
+	// Resolve the company customer that parents all FW virtual accounts. Uses
+	// FLUTTERWAVE_CUSTOMER_ID when set, else mints one lazily and persists it
+	// (per environment) so operators needn't find it in the dashboard.
+	fwCustomerID, fwCustErr := services.ResolveFlutterwaveCompanyCustomer(
+		context.Background(), config.DB, fwClient, cfg.FlutterwaveBaseURL, cfg.FlutterwaveCustomerID,
+		services.CompanyCustomerParams{
+			Name:  cfg.FlutterwaveCompanyName,
+			Email: cfg.FlutterwaveCompanyEmail,
+			Phone: cfg.FlutterwaveCompanyPhone,
+		},
+	)
+	if fwCustErr != nil {
+		log.Printf("[fw] company customer unresolved — VA provisioning stays dormant: %v", fwCustErr)
+		fwCustomerID = ""
+	} else if fwCustomerID != "" {
+		log.Printf("[fw] company customer resolved (VA parent)")
+	}
+
+	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11) — quote-only,
+	// always registered. Provider fees pass through live Flutterwave GetFees
+	// when the client is up, else the config fallback percentage; the P2P FX
+	// feed converts the flat USD platform fee for NGN quotes. Nothing here
+	// moves money — deduction wiring lands after PM sign-off.
+	feeQuoteQuoter := services.NewFlutterwaveFeeQuoter(fwClient)
+	if feeQuoteQuoter == nil {
+		log.Printf("[fee-quote] provider fees on config fallback (%d bps): Flutterwave dormant", cfg.FeeQuote.ProviderFallbackBps)
 	} else {
-		log.Printf("[pm] onboarding service dormant: Nomba creds absent — corporate PM approval disabled")
+		log.Printf("[fee-quote] provider fees live via Flutterwave GetFees")
+	}
+	feeQuoteHandler := handlers.NewFeeQuoteHandler(
+		services.NewFeeQuoteService(cfg.FeeQuote, feeQuoteQuoter),
+		services.NewP2PFxProvider(p2pService),
+	)
+
+	// Bank directory + name enquiry follow the resolved fiat provider so the
+	// app's bank dropdown and the payout gateway can never disagree on codes.
+	var bankDirectory services.BankDirectory
+	if cfg.ResolveFiatProvider() == "flutterwave" {
+		bankDirectory = services.NewFlutterwaveBankDirectory(fwClient, "NG")
+	}
+	if bankDirectory == nil {
+		bankDirectory = services.NewNombaBankDirectory(nombaClient)
+	}
+	if bankDirectory == nil {
+		log.Printf("Bank directory dormant: no fiat provider credentials — bank list + account resolve endpoints will 503")
+	} else {
+		log.Printf("Bank directory active (provider=%s)", cfg.ResolveFiatProvider())
+	}
+
+	// Corporate PM onboarding — resume-able VA provisioning via the resolved
+	// fiat provider (Flutterwave static VAs when selected, else Nomba).
+	// DORMANT-BY-DEFAULT: built only when the chosen provider is configured.
+	// When nil, ApproveMerchantRequest on a p2p_merchant request returns a clear 503.
+	if prov := pmProvisioner(cfg, fwClient, fwCustomerID, nombaClient); prov != nil {
+		mrh = handlers.NewMerchantRequestHandlerWithPM(config.DB, eventBus, services.NewPMOnboardingService(config.DB, prov))
+		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
+	} else {
+		log.Printf("[pm] onboarding service dormant: no fiat provider configured — corporate PM approval disabled")
 	}
 
 	// P2P trade service — wired only when the contract address is set.
@@ -519,7 +602,7 @@ func main() {
 	} else {
 		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
 	}
-	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, nombaClient, merchantStats)
+	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
 
 	// ── PM automation (Nomba-backed buy/sell auto-settle) ────────────────────
 	// DORMANT-BY-DEFAULT, gated bottom-up:
@@ -590,6 +673,7 @@ func main() {
 		pmAuto *services.PMAutomationService
 		pmh    *handlers.PMHandler
 		nwh    *handlers.NombaWebhookHandler
+		fwh    *handlers.FlutterwaveWebhookHandler
 	)
 	if releaseSigner != nil && p2pTradeSvc != nil {
 		// Gateway selection: live Nomba transfer gateway when client credentials
@@ -611,16 +695,49 @@ func main() {
 		} else {
 			log.Printf("[pm] Nomba gateway disabled (need NOMBA_CLIENT_ID + NOMBA_CLIENT_SECRET + NOMBA_ACCOUNT_ID) — sell payouts will error until configured")
 		}
-		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, nombaGateway, cfg.NombaSenderName)
+		// Flutterwave v4 gateway — preferred when configured (Nomba declined prod
+		// API access); Nomba stays as explicit fallback via FIAT_PROVIDER=nomba.
+		// Provider resolution is centralized in cfg.ResolveFiatProvider so the
+		// payout gateway and webhook wiring can never disagree.
+		gateway := nombaGateway
+		if cfg.ResolveFiatProvider() == "flutterwave" {
+			if fwClient != nil {
+				gateway = services.NewFlutterwaveGateway(fwClient, cfg.NombaSenderName)
+				log.Printf("[pm] live Flutterwave gateway enabled (base=%s)", cfg.FlutterwaveBaseURL)
+			} else {
+				log.Printf("[pm] FIAT_PROVIDER=flutterwave but FLUTTERWAVE_CLIENT_ID/SECRET missing — payouts stay on the Nomba/disabled gateway")
+			}
+		}
+		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, gateway, cfg.NombaSenderName)
+		// IT automation — webhook routing always (references arrive regardless),
+		// payout gateway only when a LIVE gateway exists (the disabled gateway
+		// would flip HasAutoPayout and force bank capture with no way to pay).
+		if itService != nil {
+			pmAuto.SetITHooks(itService)
+			_, fwLive := gateway.(*services.FlutterwaveGateway)
+			if fwLive || pmNombaClient != nil {
+				itService.SetPayoutGateway(gateway)
+				log.Printf("[it] sell auto-payout ACTIVE (gateway live)")
+			} else {
+				log.Printf("[it] sell auto-payout dormant: no live payout gateway")
+			}
+			if vaProv := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); vaProv != nil {
+				itService.SetVAProvisioner(vaProv)
+				log.Printf("[it] buy dynamic-VA provisioning ACTIVE")
+			} else {
+				log.Printf("[it] buy dynamic VAs dormant: FW client or FLUTTERWAVE_CUSTOMER_ID missing — company static VA fallback")
+			}
+		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
-		// Wire admin PM approval (provision + activate). Needs a Nomba client to
-		// create the virtual account; pmNombaClient is nil when creds are absent,
-		// in which case ApprovePM 503s while reject/pause/resume still work.
-		if pmNombaClient != nil {
-			pmh.SetApprover(services.NewPMOnboardingService(config.DB, pmNombaClient))
-			log.Printf("[pm] admin PM approval ready (provision + activate)")
+		// Wire admin PM approval (provision + activate) via the resolved fiat
+		// provider — Flutterwave static VAs when selected, else Nomba. When
+		// neither is configured the approver is nil and ApprovePM 503s while
+		// reject/pause/resume still work.
+		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
+			pmh.SetApprover(services.NewPMOnboardingService(config.DB, prov))
+			log.Printf("[pm] admin PM approval ready (provider=%s)", cfg.ResolveFiatProvider())
 		} else {
-			log.Printf("[pm] admin PM approval dormant: Nomba client absent — approve will 503 (reject/pause/resume still available)")
+			log.Printf("[pm] admin PM approval dormant: no fiat provider configured — approve will 503 (reject/pause/resume still available)")
 		}
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(
@@ -631,6 +748,16 @@ func main() {
 			log.Printf("[pm] Nomba webhook handler ready")
 		} else {
 			log.Printf("[pm] Nomba webhook dormant: NOMBA_WEBHOOK_SECRET not set")
+		}
+		if cfg.FlutterwaveWebhookSecret != "" {
+			fwh = handlers.NewFlutterwaveWebhookHandler(
+				services.NewFlutterwaveWebhookVerifier(cfg.FlutterwaveWebhookSecret),
+				services.NewWebhookStoreForProvider(config.DB, services.ProviderFlutterwave),
+				pmAuto,
+			)
+			log.Printf("[pm] Flutterwave webhook handler ready")
+		} else {
+			log.Printf("[pm] Flutterwave webhook dormant: FLUTTERWAVE_WEBHOOK_SECRET not set")
 		}
 		// M2 liveness: periodically recover PM trades wedged at `paid` with no
 		// release (auto-release failed after markPaid, broadcast never landed) and
@@ -715,7 +842,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
