@@ -35,6 +35,7 @@ import { getMyMerchantRequest, submitMerchantRequest } from '../../components/se
 import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngBanks';
 import { getMyPmStatus } from '../../services/p2p';
 import { useTheme } from '@/theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 
@@ -197,6 +198,9 @@ export function resolveMerchantGate(args: {
 export default function MerchantRequestScreen() {
   const { colors, spacing } = useTheme();
   const { currentUser } = useAuth();
+  // Pad the scroll body by the keyboard height so fields below the focused one
+  // can scroll clear of the keypad (Android runs pan mode — see the hook).
+  const kbHeight = useKeyboardHeight();
   const { type } = useLocalSearchParams<{ type?: string }>();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -522,7 +526,7 @@ export default function MerchantRequestScreen() {
         <ScrollView
           ref={scrollRef}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
         >
           <Text variant="title1" weight="700">
             Become a Merchant
