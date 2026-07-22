@@ -32,10 +32,12 @@ import (
 
 // pmProvisioner picks the fiat provisioner for corporate PM virtual accounts,
 // honoring cfg.ResolveFiatProvider (same resolver as payouts / webhooks / bank
-// directory, so they can never disagree): Flutterwave static company VAs when
-// FW is selected AND configured, otherwise the Nomba client. Returns a nil
-// interface (not a typed-nil) when the chosen provider isn't configured, so
-// PMOnboardingService's `provisioner == nil` guard still 503s ApprovePM.
+// directory, so they can never disagree). ResolveFiatProvider now always returns
+// "flutterwave" (Nomba is retired), so this yields the Flutterwave static-VA
+// provisioner when FW is configured, else a nil interface (not a typed-nil) that
+// makes PMOnboardingService's `provisioner == nil` guard 503 ApprovePM. The
+// trailing Nomba branch is kept as the dormant seam for a future provider and is
+// currently unreachable.
 func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwCustomerID string, nombaClient *services.NombaClient) services.NombaProvisioner {
 	if cfg.ResolveFiatProvider() == "flutterwave" {
 		// FW selected → FW or nothing. Never silently fall back to Nomba (which
@@ -695,18 +697,18 @@ func main() {
 		} else {
 			log.Printf("[pm] Nomba gateway disabled (need NOMBA_CLIENT_ID + NOMBA_CLIENT_SECRET + NOMBA_ACCOUNT_ID) — sell payouts will error until configured")
 		}
-		// Flutterwave v4 gateway — preferred when configured (Nomba declined prod
-		// API access); Nomba stays as explicit fallback via FIAT_PROVIDER=nomba.
-		// Provider resolution is centralized in cfg.ResolveFiatProvider so the
-		// payout gateway and webhook wiring can never disagree.
+		// Flutterwave is the sole payout gateway (ResolveFiatProvider always
+		// returns "flutterwave" now that Nomba is retired). When FW creds are
+		// present it goes live; otherwise the payout gateway falls back to the
+		// nombaGateway sentinel — which is the disabled no-op unless someone
+		// deliberately sets NOMBA_* creds (a retired path removed with the Nomba
+		// implementation). In prod FW creds are always set, so this is FW.
 		gateway := nombaGateway
-		if cfg.ResolveFiatProvider() == "flutterwave" {
-			if fwClient != nil {
-				gateway = services.NewFlutterwaveGateway(fwClient, cfg.NombaSenderName)
-				log.Printf("[pm] live Flutterwave gateway enabled (base=%s)", cfg.FlutterwaveBaseURL)
-			} else {
-				log.Printf("[pm] FIAT_PROVIDER=flutterwave but FLUTTERWAVE_CLIENT_ID/SECRET missing — payouts stay on the Nomba/disabled gateway")
-			}
+		if fwClient != nil {
+			gateway = services.NewFlutterwaveGateway(fwClient, cfg.NombaSenderName)
+			log.Printf("[pm] live Flutterwave gateway enabled (base=%s)", cfg.FlutterwaveBaseURL)
+		} else {
+			log.Printf("[pm] Flutterwave gateway dormant: FLUTTERWAVE_CLIENT_ID/SECRET missing — sell payouts error until configured")
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, gateway, cfg.NombaSenderName)
 		// IT automation — webhook routing always (references arrive regardless),
@@ -729,10 +731,10 @@ func main() {
 			}
 		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
-		// Wire admin PM approval (provision + activate) via the resolved fiat
-		// provider — Flutterwave static VAs when selected, else Nomba. When
-		// neither is configured the approver is nil and ApprovePM 503s while
-		// reject/pause/resume still work.
+		// Wire admin PM approval (provision + activate) via Flutterwave static
+		// VAs (the sole provider). When FW isn't configured the approver is nil
+		// and ApprovePM 503s while reject/pause/resume still work — it never
+		// routes provisioning to Nomba.
 		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
 			pmh.SetApprover(services.NewPMOnboardingService(config.DB, prov))
 			log.Printf("[pm] admin PM approval ready (provider=%s)", cfg.ResolveFiatProvider())
