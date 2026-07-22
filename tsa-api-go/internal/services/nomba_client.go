@@ -397,7 +397,11 @@ type virtualAccountResp struct {
 // deterministic, unique reference the inbound webhook uses to attribute paid-in
 // funds back to this PM. Returns the VA's pay-into bank account number
 // (data.bankAccountNumber). There is NO walletId in the VA response.
-func (c *NombaClient) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (bankAccountNumber string, err error) {
+//
+// idType/idNumber (the account holder's BVN/NIN) are accepted to satisfy the
+// shared NombaProvisioner interface; the Nomba path is dormant and does not
+// forward them today.
+func (c *NombaClient) CreateVirtualAccount(ctx context.Context, accountRef, accountName, idType, idNumber string) (bankAccountNumber string, err error) {
 	if !c.IsEnabled() {
 		return "", ErrNombaDisabled
 	}

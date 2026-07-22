@@ -99,6 +99,25 @@ func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*m
 	return &pm, nil
 }
 
+// GetByUserID looks up the most recent PaymentMerchant for a user regardless of
+// status (pending/approved/active/paused/rejected). Used by the status read so
+// the app can distinguish "approved, needs activation" from "active".
+// Returns ErrPMNotFound when the user has no PM row.
+func (s *PMService) GetByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
+	var pm models.PaymentMerchant
+	err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		First(&pm).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPMNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
 // GetByID looks up a PM by its primary key UUID.
 // Returns ErrPMNotFound when no row matches.
 func (s *PMService) GetByID(ctx context.Context, id uuid.UUID) (*models.PaymentMerchant, error) {

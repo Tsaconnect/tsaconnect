@@ -621,6 +621,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			}
 			pmh.GetMyPMStatus(c)
 		})
+		// Merchant self-activation: supply BVN/NIN to mint the NGN virtual account
+		// and go live. Dormant path returns 503 so the app shows a clear message.
+		p2pUserGroup.POST("/pm/activate", func(c *gin.Context) {
+			if pmh == nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "PM activation not configured"})
+				return
+			}
+			pmh.ActivatePM(c)
+		})
 	}
 
 	// Nomba-backed Nigerian bank directory + name enquiry. Registered as

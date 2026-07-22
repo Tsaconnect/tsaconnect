@@ -731,15 +731,18 @@ func main() {
 			}
 		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)
-		// Wire admin PM approval (provision + activate) via Flutterwave static
-		// VAs (the sole provider). When FW isn't configured the approver is nil
-		// and ApprovePM 503s while reject/pause/resume still work — it never
-		// routes provisioning to Nomba.
+		// Wire admin PM approval (pending → approved) and merchant self-activation
+		// (approved → active, mints the Flutterwave static VA from the merchant's
+		// own BVN/NIN). Both use the same onboarding service; when FW isn't
+		// configured the provisioner is nil and approve/activate 503 while
+		// reject/pause/resume still work — it never routes provisioning to Nomba.
 		if prov := pmProvisioner(cfg, fwClient, fwCustomerID, pmNombaClient); prov != nil {
-			pmh.SetApprover(services.NewPMOnboardingService(config.DB, prov))
-			log.Printf("[pm] admin PM approval ready (provider=%s)", cfg.ResolveFiatProvider())
+			pmOnboarding := services.NewPMOnboardingService(config.DB, prov)
+			pmh.SetApprover(pmOnboarding)
+			pmh.SetActivator(pmOnboarding)
+			log.Printf("[pm] admin PM approval + merchant activation ready (provider=%s)", cfg.ResolveFiatProvider())
 		} else {
-			log.Printf("[pm] admin PM approval dormant: no fiat provider configured — approve will 503 (reject/pause/resume still available)")
+			log.Printf("[pm] admin PM approval/activation dormant: no fiat provider configured — approve/activate will 503 (reject/pause/resume still available)")
 		}
 		if cfg.NombaWebhookSecret != "" {
 			nwh = handlers.NewNombaWebhookHandler(

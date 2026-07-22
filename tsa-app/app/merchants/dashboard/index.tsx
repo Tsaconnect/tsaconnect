@@ -42,7 +42,7 @@ export default function MerchantDashboard() {
   const [items, setItems] = useState<Product[]>([]);
   const [merchantName, setMerchantName] = useState('Merchant');
   const { formatPrice } = useCurrency();
-  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
+  const { isPm, status: pmStatus, loading: pmLoading, reload: reloadPmStatus } = useIsPaymentMerchant();
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -73,7 +73,10 @@ export default function MerchantDashboard() {
   useFocusEffect(
     useCallback(() => {
       loadDashboard();
-    }, [loadDashboard])
+      // Refresh PM status on focus so the CTA reflects a just-completed
+      // activation (returning from the activate-pm screen) without a remount.
+      reloadPmStatus();
+    }, [loadDashboard, reloadPmStatus])
   );
 
   const onRefresh = () => {
@@ -198,10 +201,36 @@ export default function MerchantDashboard() {
             </View>
           </AccentCard>
 
-          {/* PM upgrade CTA — visible only to merchants who are not yet an
-              active Payment Merchant. Absent while status is loading or once
-              the user is already a PM. Routes to the locked PM form. */}
-          {!pmLoading && !isPm && (
+          {/* PM activation CTA — the application was approved but the merchant
+              still has to verify identity (BVN/NIN) to mint their NGN account
+              and go live. Takes priority over the upgrade CTA. */}
+          {!pmLoading && !isPm && pmStatus === 'approved' && (
+            <PressableScale
+              onPress={() => router.push('/merchants/activate-pm' as any)}
+              style={{ marginBottom: spacing.lg }}
+            >
+              <AccentCard padding="md" railColor={colors.success}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="shield" size={24} color={colors.success} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      Activate your Payment Merchant
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      Approved! Verify your BVN/NIN to go live.
+                    </Text>
+                  </View>
+                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                </View>
+              </AccentCard>
+            </PressableScale>
+          )}
+
+          {/* PM upgrade CTA — visible only to merchants with no existing PM
+              (or a rejected one). Hidden for active (isPm), approved-awaiting-
+              activation, and paused PMs — they're already merchants. Absent
+              while status is loading. Routes to the locked PM form. */}
+          {!pmLoading && !isPm && pmStatus !== 'approved' && pmStatus !== 'paused' && (
             <PressableScale
               onPress={() => router.push('/merchants/merchant-request?type=p2p_merchant' as any)}
               style={{ marginBottom: spacing.lg }}

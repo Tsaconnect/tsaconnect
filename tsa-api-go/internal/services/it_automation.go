@@ -246,18 +246,30 @@ func (p *FlutterwaveVAProvisioner) CreateDynamicVA(ctx context.Context, referenc
 // inbound matcher (resolveInboundPM → WHERE nomba_account_ref = ?) keys on it
 // with no change.
 //
+// idType ("BVN"|"NIN") + idNumber are the account holder's identity, REQUIRED by
+// Flutterwave live mode for NGN static accounts. They are supplied by the merchant
+// at activation time, forwarded to Flutterwave here, and never stored — do not
+// log idNumber.
+//
 // This signature satisfies services.NombaProvisioner, so *FlutterwaveVAProvisioner
 // is a drop-in for the Nomba client in PMOnboardingService — the whole point of
 // moving PM onboarding off Nomba.
-func (p *FlutterwaveVAProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (string, error) {
-	va, err := p.client.CreateVirtualAccount(ctx, FWVirtualAccountRequest{
+func (p *FlutterwaveVAProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName, idType, idNumber string) (string, error) {
+	req := FWVirtualAccountRequest{
 		CustomerID:  p.customerID,
 		Reference:   accountRef,
 		Currency:    "NGN",
 		Amount:      0,
 		AccountType: "static",
 		Narration:   accountName,
-	})
+	}
+	switch strings.ToUpper(strings.TrimSpace(idType)) {
+	case "NIN":
+		req.NIN = strings.TrimSpace(idNumber)
+	default: // "BVN" (default) — the historical identity type for NGN VAs
+		req.BVN = strings.TrimSpace(idNumber)
+	}
+	va, err := p.client.CreateVirtualAccount(ctx, req)
 	if err != nil {
 		return "", err
 	}

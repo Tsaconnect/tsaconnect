@@ -39,12 +39,21 @@ func TestFlutterwavePMProvisioner_CreatesStaticVA(t *testing.T) {
 		t.Fatal("provisioner nil despite client + customer id")
 	}
 
-	acctNo, err := prov.CreateVirtualAccount(context.Background(), "pm-abc-123", "Acme Corp")
+	acctNo, err := prov.CreateVirtualAccount(context.Background(), "pm-abc-123", "Acme Corp", "BVN", "12345678901")
 	if err != nil {
 		t.Fatalf("CreateVirtualAccount: %v", err)
 	}
 	if acctNo != "9988776655" {
 		t.Fatalf("account number = %q, want 9988776655", acctNo)
+	}
+
+	// Live mode requires the account holder's BVN/NIN on NGN static accounts —
+	// the provisioner must forward it (and never a stored value).
+	if gotBody["bvn"] != "12345678901" {
+		t.Fatalf("bvn = %v, want 12345678901 (forwarded holder identity)", gotBody["bvn"])
+	}
+	if _, hasNIN := gotBody["nin"]; hasNIN {
+		t.Fatalf("nin should be omitted when idType is BVN, got %v", gotBody["nin"])
 	}
 
 	// The crux: a PM VA must be STATIC (permanent, amount 0) and carry the PM's

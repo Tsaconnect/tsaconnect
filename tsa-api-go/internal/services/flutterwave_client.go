@@ -453,6 +453,13 @@ type FWVirtualAccountRequest struct {
 	AccountType string  `json:"account_type"`
 	Expiry      int     `json:"expiry,omitempty"`
 	Narration   string  `json:"narration,omitempty"`
+
+	// BVN/NIN identify the account holder. Flutterwave live mode REQUIRES one or
+	// the other for NGN static accounts (sandbox does not). These carry personal
+	// identity data: they transit in-memory to Flutterwave only and are NEVER
+	// persisted or logged — do not add this struct to any log line.
+	BVN string `json:"bvn,omitempty"`
+	NIN string `json:"nin,omitempty"`
 }
 
 // FWVirtualAccount is the provisioned pay-into account (field names

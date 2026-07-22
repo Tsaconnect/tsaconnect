@@ -158,7 +158,7 @@ type approveCall struct {
 	adminID uuid.UUID
 }
 
-func (f *fakePMApprover) ProvisionAndActivatePM(_ context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
+func (f *fakePMApprover) ApprovePM(_ context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
 	f.calls = append(f.calls, approveCall{pmID: pmID, adminID: adminID})
 	return f.pm, f.err
 }
@@ -682,7 +682,7 @@ type fakePMStatusGetter struct {
 	err error
 }
 
-func (f *fakePMStatusGetter) GetActiveByUserID(_ context.Context, _ uuid.UUID) (*models.PaymentMerchant, error) {
+func (f *fakePMStatusGetter) GetByUserID(_ context.Context, _ uuid.UUID) (*models.PaymentMerchant, error) {
 	return f.pm, f.err
 }
 
@@ -744,6 +744,40 @@ func TestGetMyPMStatus_ActivePM(t *testing.T) {
 	}
 	if data["status"] != "active" {
 		t.Errorf("status = %v, want active", data["status"])
+	}
+}
+
+// TestGetMyPMStatus_ApprovedPM: an approved-but-not-activated PM returns
+// {isPm:false, status:"approved"} so the app can prompt for KYC activation.
+func TestGetMyPMStatus_ApprovedPM(t *testing.T) {
+	user := testRegularUser()
+	approvedPM := &models.PaymentMerchant{
+		ID:     uuid.New(),
+		UserID: user.ID,
+		Status: models.PaymentMerchantStatusApproved,
+	}
+	fake := &fakePMStatusGetter{pm: approvedPM, err: nil}
+	h := &PMHandler{auto: &fakePMAutomation{}, pm: nil}
+	h.pmStatus = fake
+
+	router := buildPMStatusRouter(h, user)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	data := resp["data"].(map[string]interface{})
+	if data["isPm"] != false {
+		t.Errorf("isPm = %v, want false (approved is not yet live)", data["isPm"])
+	}
+	if data["status"] != "approved" {
+		t.Errorf("status = %v, want approved", data["status"])
 	}
 }
 
@@ -944,8 +978,8 @@ func TestPMHandler_ApprovePM_Success(t *testing.T) {
 	approver := &fakePMApprover{pm: &models.PaymentMerchant{
 		ID:                 pmID,
 		Name:               "Acme Corp",
-		Status:             models.PaymentMerchantStatusActive,
-		ProvisioningStatus: models.PMProvisioningActive,
+		Status:             models.PaymentMerchantStatusApproved,
+		ProvisioningStatus: models.PMProvisioningPending,
 		NombaCredsRef:      "secret-ref",
 		ReviewedAt:         &now,
 	}}
@@ -967,8 +1001,8 @@ func TestPMHandler_ApprovePM_Success(t *testing.T) {
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	data, _ := resp["data"].(map[string]interface{})
-	if data["status"] != models.PaymentMerchantStatusActive {
-		t.Errorf("status = %v, want active", data["status"])
+	if data["status"] != models.PaymentMerchantStatusApproved {
+		t.Errorf("status = %v, want approved", data["status"])
 	}
 	if _, leaked := data["nombaCredsRef"]; leaked {
 		t.Errorf("nombaCredsRef leaked in approve response")
@@ -1079,6 +1113,130 @@ func TestPMHandler_RejectPM_InvalidTransition(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ─── Merchant self-activation: ActivatePM ─────────────────────────────────────
+
+// fakePMActivator records the KYC args it receives so tests can assert the id
+// number is forwarded (and, at the handler layer, that validation gates bad input
+// before it ever reaches the activator).
+type fakePMActivator struct {
+	out          *models.PaymentMerchant
+	err          error
+	calls        int
+	lastIDType   string
+	lastIDNumber string
+}
+
+func (f *fakePMActivator) ActivateWithKYC(_ context.Context, _, _ uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error) {
+	f.calls++
+	f.lastIDType = idType
+	f.lastIDNumber = idNumber
+	return f.out, f.err
+}
+
+// buildActivateRouter wires POST /p2p/pm/activate with the given user in context.
+func buildActivateRouter(h *PMHandler, user *models.User) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	if user != nil {
+		r.Use(func(c *gin.Context) { c.Set("user", user); c.Next() })
+	}
+	r.POST("/p2p/pm/activate", h.ActivatePM)
+	return r
+}
+
+func activatePost(router *gin.Engine, body string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/p2p/pm/activate", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestPMHandler_ActivatePM_Success(t *testing.T) {
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+	activated := &models.PaymentMerchant{ID: approved.ID, UserID: user.ID, Status: models.PaymentMerchantStatusActive}
+
+	act := &fakePMActivator{out: activated}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: approved}
+	h.SetActivator(act)
+
+	w := activatePost(buildActivateRouter(h, user), `{"idType":"BVN","idNumber":"22233344455"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if act.calls != 1 || act.lastIDType != "BVN" || act.lastIDNumber != "22233344455" {
+		t.Fatalf("activator got calls=%d id=(%q,%q), want 1 (BVN,22233344455)", act.calls, act.lastIDType, act.lastIDNumber)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if data, _ := resp["data"].(map[string]interface{}); data["status"] != models.PaymentMerchantStatusActive {
+		t.Errorf("status = %v, want active", resp["data"])
+	}
+}
+
+func TestPMHandler_ActivatePM_ValidatesInputBeforeActivator(t *testing.T) {
+	user := testRegularUser()
+	act := &fakePMActivator{out: &models.PaymentMerchant{}}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}}
+	h.SetActivator(act)
+	router := buildActivateRouter(h, user)
+
+	for _, body := range []string{
+		`{"idType":"BVN","idNumber":"1234567890"}`,   // 10 digits
+		`{"idType":"BVN","idNumber":"223334445556"}`, // 12 digits
+		`{"idType":"BVN","idNumber":"2223334445a"}`,  // non-numeric
+		`{"idType":"PASSPORT","idNumber":"22233344455"}`, // bad idType
+		`{"idType":"","idNumber":"22233344455"}`,         // missing idType
+		`{"idNumber":"22233344455"}`,                     // missing idType key
+	} {
+		w := activatePost(router, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %q: expected 400, got %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+	// Bad input must never reach the activator (no wasted provider round-trip).
+	if act.calls != 0 {
+		t.Errorf("activator called %d times on invalid input, want 0", act.calls)
+	}
+}
+
+func TestPMHandler_ActivatePM_NoPMIs404(t *testing.T) {
+	user := testRegularUser()
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{err: services.ErrPMNotFound}
+	h.SetActivator(&fakePMActivator{out: &models.PaymentMerchant{}})
+
+	w := activatePost(buildActivateRouter(h, user), `{"idType":"NIN","idNumber":"22233344455"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPMHandler_ActivatePM_DormantIs503(t *testing.T) {
+	user := testRegularUser()
+	h := &PMHandler{auto: &fakePMAutomation{}} // no activator, no pmStatus
+	w := activatePost(buildActivateRouter(h, user), `{"idType":"BVN","idNumber":"22233344455"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPMHandler_ActivatePM_WrongStatusIs409(t *testing.T) {
+	user := testRegularUser()
+	approved := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Status: models.PaymentMerchantStatusApproved}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: approved}
+	h.SetActivator(&fakePMActivator{err: services.ErrInvalidPMTransition})
+
+	w := activatePost(buildActivateRouter(h, user), `{"idType":"BVN","idNumber":"22233344455"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}

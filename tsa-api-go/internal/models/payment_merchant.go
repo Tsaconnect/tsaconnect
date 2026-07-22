@@ -10,6 +10,7 @@ import (
 // Payment-merchant status values.
 const (
 	PaymentMerchantStatusPending  = "pending"  // awaiting admin approval/provisioning
+	PaymentMerchantStatusApproved = "approved" // admin-approved; awaiting merchant KYC to activate (no VA yet)
 	PaymentMerchantStatusActive   = "active"   // live: automation runs
 	PaymentMerchantStatusPaused   = "paused"   // kill switch: no new trades, in-flight drain
 	PaymentMerchantStatusRejected = "rejected" // declined at onboarding; never activated

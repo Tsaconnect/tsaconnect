@@ -103,30 +103,34 @@ func fakeMerchantRequest(userID uuid.UUID) *models.MerchantRequest {
 
 type fakeNombaProvisioner struct {
 	// Controls VA-create behaviour.
-	createVirtualAccountFn func(ctx context.Context, accountRef, accountName string) (string, error)
+	createVirtualAccountFn func(ctx context.Context, accountRef, accountName, idType, idNumber string) (string, error)
 
-	// Records so tests can assert idempotency + the accountRef passed.
+	// Records so tests can assert idempotency + the args passed.
 	createVirtualAccountCalls int
 	lastAccountRef            string
 	lastAccountName           string
+	lastIDType                string
+	lastIDNumber              string
 }
 
-func (f *fakeNombaProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (string, error) {
+func (f *fakeNombaProvisioner) CreateVirtualAccount(ctx context.Context, accountRef, accountName, idType, idNumber string) (string, error) {
 	f.createVirtualAccountCalls++
 	f.lastAccountRef = accountRef
 	f.lastAccountName = accountName
+	f.lastIDType = idType
+	f.lastIDNumber = idNumber
 	if f.createVirtualAccountFn != nil {
-		return f.createVirtualAccountFn(ctx, accountRef, accountName)
+		return f.createVirtualAccountFn(ctx, accountRef, accountName, idType, idNumber)
 	}
 	return "0012345678", nil
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-// TestProvisionAndActivate_HappyPath verifies the full VA-only success path:
-// row ends active, VA number + accountRef stored, CreateVirtualAccount called
-// exactly once with the deterministic accountRef and business name.
-func TestProvisionAndActivate_HappyPath(t *testing.T) {
+// TestApproveFromRequest_HappyPath verifies approval copies settlement/caps and
+// lands the PM in 'approved' WITHOUT creating a virtual account — VA creation is
+// deferred to merchant KYC activation.
+func TestApproveFromRequest_HappyPath(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 	fake := &fakeNombaProvisioner{}
 	svc := NewPMOnboardingService(db, fake)
@@ -134,180 +138,208 @@ func TestProvisionAndActivate_HappyPath(t *testing.T) {
 	userID := uuid.New()
 	req := fakeMerchantRequest(userID)
 
-	pm, err := svc.ProvisionAndActivate(context.Background(), req)
+	pm, err := svc.ApproveFromRequest(context.Background(), req)
 	if err != nil {
-		t.Fatalf("ProvisionAndActivate error: %v", err)
+		t.Fatalf("ApproveFromRequest error: %v", err)
 	}
 
-	// Row should be active.
-	if pm.Status != models.PaymentMerchantStatusActive {
-		t.Errorf("status = %q, want %q", pm.Status, models.PaymentMerchantStatusActive)
+	// Row should be approved, not active — and NO VA yet.
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		t.Errorf("status = %q, want %q", pm.Status, models.PaymentMerchantStatusApproved)
 	}
-	if pm.ProvisioningStatus != models.PMProvisioningActive {
-		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
+	if pm.NombaAccountRef != "" {
+		t.Errorf("NombaAccountRef = %q, want empty (VA deferred to activation)", pm.NombaAccountRef)
 	}
-
-	// VA fields stored: accountRef is the match key, inbound is the VA number.
-	if pm.NombaAccountRef != pmAccountRef(userID) {
-		t.Errorf("NombaAccountRef = %q, want %q", pm.NombaAccountRef, pmAccountRef(userID))
+	if pm.InboundAccountNumber != "" {
+		t.Errorf("InboundAccountNumber = %q, want empty (VA deferred)", pm.InboundAccountNumber)
 	}
-	if pm.InboundAccountNumber == "" {
-		t.Error("InboundAccountNumber (VA number) is empty")
-	}
-	// Sub-account id must NOT be set under the VA-only model.
-	if pm.NombaSubAccountID != "" {
-		t.Errorf("NombaSubAccountID = %q, want empty (VA-only model never sets it)", pm.NombaSubAccountID)
+	if fake.createVirtualAccountCalls != 0 {
+		t.Errorf("CreateVirtualAccount called %d times, want 0 (approval never provisions)", fake.createVirtualAccountCalls)
 	}
 
-	// Settlement bank copied from request.
+	// Settlement bank / wallet / caps copied from request.
 	if pm.SettlementBankCode != req.SettlementBankCode {
 		t.Errorf("SettlementBankCode = %q, want %q", pm.SettlementBankCode, req.SettlementBankCode)
 	}
-	if pm.SettlementAccountNumber != req.SettlementAccountNumber {
-		t.Errorf("SettlementAccountNumber = %q, want %q", pm.SettlementAccountNumber, req.SettlementAccountNumber)
-	}
-
-	// Operator wallet copied.
 	if pm.OperatorWalletAddress != req.MakerWalletAddress {
 		t.Errorf("OperatorWalletAddress = %q, want %q", pm.OperatorWalletAddress, req.MakerWalletAddress)
 	}
-
-	// Caps copied.
 	if pm.PerTradeCapUSD != req.RequestedPerTradeCapUSD {
 		t.Errorf("PerTradeCapUSD = %v, want %v", pm.PerTradeCapUSD, req.RequestedPerTradeCapUSD)
 	}
-	if pm.DailyCapUSD != req.RequestedDailyCapUSD {
-		t.Errorf("DailyCapUSD = %v, want %v", pm.DailyCapUSD, req.RequestedDailyCapUSD)
-	}
-
-	// UserID set from request.
 	if pm.UserID != userID {
 		t.Errorf("UserID = %v, want %v", pm.UserID, userID)
 	}
+}
 
-	// CreateVirtualAccount called exactly once with the deterministic accountRef
-	// and the business name.
-	if fake.createVirtualAccountCalls != 1 {
-		t.Errorf("CreateVirtualAccount called %d times, want 1", fake.createVirtualAccountCalls)
-	}
-	if fake.lastAccountRef != pmAccountRef(userID) {
-		t.Errorf("CreateVirtualAccount accountRef = %q, want %q", fake.lastAccountRef, pmAccountRef(userID))
-	}
-	if fake.lastAccountName != req.BusinessName {
-		t.Errorf("CreateVirtualAccount accountName = %q, want %q", fake.lastAccountName, req.BusinessName)
-	}
+// TestApproveFromRequest_NilProvisionerOK verifies approval does NOT require a
+// fiat provider — it is a pure state transition; only activation needs one.
+func TestApproveFromRequest_NilProvisionerOK(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, nil)
 
-	// Exactly one row in DB.
-	var count int64
-	if err := db.Model(&models.PaymentMerchant{}).Count(&count).Error; err != nil {
-		t.Fatalf("count: %v", err)
+	req := fakeMerchantRequest(uuid.New())
+	pm, err := svc.ApproveFromRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ApproveFromRequest with nil provisioner should succeed: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 payment_merchants row, got %d", count)
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		t.Errorf("status = %q, want approved", pm.Status)
 	}
 }
 
-// TestProvisionAndActivate_Resume verifies the idempotency / resume logic:
-// first attempt fails at CreateVirtualAccount → row pending, no accountRef.
-// Second attempt creates the VA → active. The VA create runs only on the second
-// attempt (no double-create) because the first never persisted an accountRef.
-func TestProvisionAndActivate_Resume(t *testing.T) {
+// approvedPM sets up an approved PM (via ApproveFromRequest) ready for activation.
+func approvedPM(t *testing.T, svc *PMOnboardingService, userID uuid.UUID) *models.PaymentMerchant {
+	t.Helper()
+	pm, err := svc.ApproveFromRequest(context.Background(), fakeMerchantRequest(userID))
+	if err != nil {
+		t.Fatalf("approvedPM setup: %v", err)
+	}
+	return pm
+}
+
+// TestActivateWithKYC_HappyPath verifies the merchant-triggered activation:
+// approved → active, VA created once with the forwarded BVN, and the id number
+// is NOT persisted anywhere on the row.
+func TestActivateWithKYC_HappyPath(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	fake := &fakeNombaProvisioner{}
+	svc := NewPMOnboardingService(db, fake)
+
+	userID := uuid.New()
+	pm := approvedPM(t, svc, userID)
+
+	const bvn = "22233344455"
+	out, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "BVN", bvn)
+	if err != nil {
+		t.Fatalf("ActivateWithKYC error: %v", err)
+	}
+
+	if out.Status != models.PaymentMerchantStatusActive {
+		t.Errorf("status = %q, want active", out.Status)
+	}
+	if out.ProvisioningStatus != models.PMProvisioningActive {
+		t.Errorf("provisioning_status = %q, want active", out.ProvisioningStatus)
+	}
+	if out.NombaAccountRef != pmAccountRef(userID) {
+		t.Errorf("NombaAccountRef = %q, want %q", out.NombaAccountRef, pmAccountRef(userID))
+	}
+	if out.InboundAccountNumber == "" {
+		t.Error("InboundAccountNumber (VA number) is empty")
+	}
+
+	// VA created exactly once, with the BVN forwarded to the provider.
+	if fake.createVirtualAccountCalls != 1 {
+		t.Errorf("CreateVirtualAccount called %d times, want 1", fake.createVirtualAccountCalls)
+	}
+	if fake.lastIDType != "BVN" || fake.lastIDNumber != bvn {
+		t.Errorf("forwarded id = (%q,%q), want (BVN,%q)", fake.lastIDType, fake.lastIDNumber, bvn)
+	}
+
+	// CRITICAL: the id number must never be persisted on the PM row.
+	var raw models.PaymentMerchant
+	if err := db.First(&raw, "id = ?", pm.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	for field, val := range map[string]string{
+		"InboundAccountNumber": raw.InboundAccountNumber,
+		"NombaAccountRef":      raw.NombaAccountRef,
+		"Name":                 raw.Name,
+		"ReviewNote":           raw.ReviewNote,
+	} {
+		if val == bvn {
+			t.Errorf("BVN leaked into persisted field %s", field)
+		}
+	}
+}
+
+// TestActivateWithKYC_Resume verifies the resume/idempotency logic: a first
+// activation that fails at the VA call persists nothing, and a retry creates the
+// VA exactly once; a third call skips re-creation.
+func TestActivateWithKYC_Resume(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 
-	vaErrOnFirst := true
+	failFirst := true
 	vaErr := errors.New("va network timeout")
-
 	fake := &fakeNombaProvisioner{
-		createVirtualAccountFn: func(ctx context.Context, accountRef, accountName string) (string, error) {
-			if vaErrOnFirst {
-				vaErrOnFirst = false
+		createVirtualAccountFn: func(ctx context.Context, accountRef, accountName, idType, idNumber string) (string, error) {
+			if failFirst {
+				failFirst = false
 				return "", vaErr
 			}
 			return "0098765432", nil
 		},
 	}
 	svc := NewPMOnboardingService(db, fake)
-
 	userID := uuid.New()
-	req := fakeMerchantRequest(userID)
+	pm := approvedPM(t, svc, userID)
 
-	// Attempt 1 — VA creation fails (before any number returned → nothing persisted).
-	_, err := svc.ProvisionAndActivate(context.Background(), req)
-	if err == nil {
-		t.Fatal("attempt 1: expected error, got nil")
+	// Attempt 1 — VA fails, nothing persisted, still approved.
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "BVN", "22233344455"); !errors.Is(err, vaErr) {
+		t.Fatalf("attempt 1: want vaErr, got %v", err)
 	}
-	if !errors.Is(err, vaErr) {
-		t.Fatalf("attempt 1: expected vaErr, got %v", err)
-	}
-
-	// After attempt 1: row exists, not active, no accountRef (VA create failed).
-	var pm models.PaymentMerchant
-	if err := db.First(&pm, "user_id = ?", userID).Error; err != nil {
-		t.Fatalf("load pm after attempt 1: %v", err)
-	}
-	if pm.Status == models.PaymentMerchantStatusActive {
-		t.Error("after attempt 1: status should not be active")
-	}
-	if pm.NombaAccountRef != "" {
-		t.Error("after attempt 1: NombaAccountRef should be empty (VA create failed)")
-	}
-	if fake.createVirtualAccountCalls != 1 {
-		t.Errorf("after attempt 1: CreateVirtualAccount called %d times, want 1", fake.createVirtualAccountCalls)
+	var after1 models.PaymentMerchant
+	db.First(&after1, "id = ?", pm.ID)
+	if after1.Status == models.PaymentMerchantStatusActive || after1.NombaAccountRef != "" {
+		t.Errorf("attempt 1 must not activate or store a ref: status=%q ref=%q", after1.Status, after1.NombaAccountRef)
 	}
 
-	// Attempt 2 — same request; VA now succeeds.
-	pm2, err := svc.ProvisionAndActivate(context.Background(), req)
-	if err != nil {
-		t.Fatalf("attempt 2: unexpected error: %v", err)
+	// Attempt 2 — succeeds.
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "BVN", "22233344455"); err != nil {
+		t.Fatalf("attempt 2: %v", err)
 	}
-	if pm2.Status != models.PaymentMerchantStatusActive {
-		t.Errorf("attempt 2: status = %q, want %q", pm2.Status, models.PaymentMerchantStatusActive)
-	}
-	if pm2.NombaAccountRef != pmAccountRef(userID) {
-		t.Errorf("attempt 2: NombaAccountRef = %q, want %q", pm2.NombaAccountRef, pmAccountRef(userID))
-	}
-	if pm2.InboundAccountNumber == "" {
-		t.Error("attempt 2: InboundAccountNumber is empty")
-	}
-	// VA create ran exactly twice total (once-failed, once-succeeded). The third
-	// time below must NOT re-create.
-	if fake.createVirtualAccountCalls != 2 {
-		t.Errorf("attempt 2: CreateVirtualAccount called %d times total, want 2", fake.createVirtualAccountCalls)
-	}
-
-	// Attempt 3 — already provisioned: must NOT re-create the VA (resume skips it).
-	pm3, err := svc.ProvisionAndActivate(context.Background(), req)
-	if err != nil {
-		t.Fatalf("attempt 3: unexpected error: %v", err)
-	}
-	if pm3.NombaAccountRef != pm2.NombaAccountRef {
-		t.Errorf("attempt 3: NombaAccountRef changed: got %q, want %q", pm3.NombaAccountRef, pm2.NombaAccountRef)
+	// Attempt 3 — already active: idempotent, no re-create.
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "BVN", "22233344455"); err != nil {
+		t.Fatalf("attempt 3: %v", err)
 	}
 	if fake.createVirtualAccountCalls != 2 {
-		t.Errorf("attempt 3: CreateVirtualAccount called %d times total, want still 2 (resume skips re-create)", fake.createVirtualAccountCalls)
-	}
-
-	// Exactly one row in DB.
-	var count int64
-	if err := db.Model(&models.PaymentMerchant{}).Count(&count).Error; err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 payment_merchants row, got %d", count)
+		t.Errorf("CreateVirtualAccount called %d times total, want 2 (fail, succeed, then skip)", fake.createVirtualAccountCalls)
 	}
 }
 
-// TestProvisionAndActivate_NilProvisioner verifies that when PMOnboardingService
-// is constructed with a nil provisioner, ProvisionAndActivate returns a clear error.
-func TestProvisionAndActivate_NilProvisioner(t *testing.T) {
+// TestActivateWithKYC_OwnershipMismatch verifies a user cannot activate another
+// user's PM — it returns ErrPMNotFound (no existence leak) and creates no VA.
+func TestActivateWithKYC_OwnershipMismatch(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	fake := &fakeNombaProvisioner{}
+	svc := NewPMOnboardingService(db, fake)
+
+	owner := uuid.New()
+	pm := approvedPM(t, svc, owner)
+
+	_, err := svc.ActivateWithKYC(context.Background(), pm.ID, uuid.New(), "BVN", "22233344455")
+	if !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("want ErrPMNotFound for foreign user, got %v", err)
+	}
+	if fake.createVirtualAccountCalls != 0 {
+		t.Errorf("CreateVirtualAccount called %d times, want 0", fake.createVirtualAccountCalls)
+	}
+}
+
+// TestActivateWithKYC_WrongStatus verifies activation is rejected on a still-pending
+// PM (not yet admin-approved).
+func TestActivateWithKYC_WrongStatus(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, &fakeNombaProvisioner{})
+
+	userID := uuid.New()
+	pm := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "Acme", Status: models.PaymentMerchantStatusPending}
+	if err := db.Create(pm).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := svc.ActivateWithKYC(context.Background(), pm.ID, userID, "BVN", "22233344455"); !errors.Is(err, ErrInvalidPMTransition) {
+		t.Fatalf("want ErrInvalidPMTransition for pending PM, got %v", err)
+	}
+}
+
+// TestActivateWithKYC_NilProvisioner verifies activation surfaces a clear error
+// when no fiat provider is configured.
+func TestActivateWithKYC_NilProvisioner(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 	svc := NewPMOnboardingService(db, nil)
 
-	userID := uuid.New()
-	req := fakeMerchantRequest(userID)
-
-	_, err := svc.ProvisionAndActivate(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error for nil provisioner, got nil")
+	_, err := svc.ActivateWithKYC(context.Background(), uuid.New(), uuid.New(), "BVN", "22233344455")
+	if !errors.Is(err, ErrPMProvisioningUnavailable) {
+		t.Fatalf("want ErrPMProvisioningUnavailable, got %v", err)
 	}
 }
