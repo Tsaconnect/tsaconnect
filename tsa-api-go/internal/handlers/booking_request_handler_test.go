@@ -14,15 +14,13 @@ import (
 	"gorm.io/gorm"
 )
 
-func writeBookingProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType string) {
+func writeBookingProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType, pricingMethod string) {
 	t.Helper()
 	profile := models.ServiceProfile{
 		ID:            uuid.New(),
 		ProductID:     productID,
 		BookingType:   bookingType,
-		PricingMethod: models.PricingMethodFixed,
-		Workflow:      models.WorkflowManualAccept,
-		PaymentTiming: models.PaymentTimingBefore,
+		PricingMethod: pricingMethod,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
@@ -56,7 +54,7 @@ func TestBookingRequestLifecycle(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5) // same-city tier fee 5 → priceable
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequestApproval)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
 
 	idParams := gin.Params{{Key: "id", Value: svc.ID.String()}}
 
@@ -136,7 +134,7 @@ func TestUpsertServiceProfile_RejectsSlottedRequestMode(t *testing.T) {
 	c.Set("user", seller)
 	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
 	body, _ := json.Marshal(map[string]interface{}{
-		"bookingType":         models.BookingTypeRequestApproval,
+		"bookingType":         models.BookingTypeRequest,
 		"slotDurationMinutes": 60,
 	})
 	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
@@ -156,7 +154,7 @@ func TestBookingRequestReject(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequestApproval)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
 
 	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
 	if w.Code != http.StatusCreated {
@@ -184,10 +182,178 @@ func TestCreateBookingRequest_RejectsInstant(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := serviceCategory(t, db, models.ServiceTypeBooking)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
-	writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeInstant, models.PricingMethodFixed)
 
 	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for instant service, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// instant + on_request is an invalid combination (can't prepay an unnamed price).
+func TestUpsertServiceProfile_RejectsInstantOnRequest(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"bookingType":   models.BookingTypeInstant,
+		"pricingMethod": models.PricingMethodOnRequest,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for instant+on_request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// instant + on_request must also be rejected when it only arises after
+// merging a partial update onto an existing profile (preserve-existing
+// semantics on BookingType/PricingMethod means a body carrying only
+// bookingType can silently combine with a stored on_request pricing method).
+func TestUpsertServiceProfile_RejectsInstantOnRequest_PartialUpdate(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodOnRequest)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"bookingType": models.BookingTypeInstant,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for partial update merging into instant+on_request, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// A partial update that adds a slot duration to an existing request-mode listing
+// must be rejected on the merged values — a request booking can't reserve a slot,
+// so persisting request+slot would strand the buyer at the (slot-less) pay step.
+func TestUpsertServiceProfile_RejectsRequestPlusSlot_PartialUpdate(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", seller)
+	c.Params = gin.Params{{Key: "id", Value: svc.ID.String()}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"slotDurationMinutes": 60,
+	})
+	c.Request, _ = http.NewRequest("PUT", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpsertServiceProfile(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for partial update merging into request+slot, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// A price-on-request booking: approval must carry a price, which becomes the
+// escrowed amount the buyer pays.
+// TestCreateServiceOrder_RejectsRequestBooking guards the money-path bypass:
+// a request-type booking must go through CreateBookingRequest → approval before
+// payment, so the instant single-service checkout must refuse it. Otherwise a
+// buyer escrows the base fare and skips approval (and, for on_request, skips the
+// provider naming the price).
+func TestCreateServiceOrder_RejectsRequestBooking(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+
+	// A request + fixed booking listing → instant buy must be rejected.
+	reqSvc := createTestService(t, db, seller.ID, &cat.ID, 5, 0)
+	writeBookingProfile(t, db, reqSvc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
+	if w := postJSON(t, buyer, nil, map[string]interface{}{
+		"token": "USDC", "productId": reqSvc.ID.String(),
+	}, ch.CreateServiceOrder); w.Code != http.StatusBadRequest {
+		t.Fatalf("instant buy of request booking: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// A plain instant booking (with a payable access fee) still buys directly —
+	// the guard must not block the legitimate instant path.
+	instSvc := createTestService(t, db, seller.ID, &cat.ID, 5, 0)
+	if err := db.Create(&models.ServiceProfile{
+		ID: uuid.New(), ProductID: instSvc.ID,
+		BookingType: models.BookingTypeInstant, PricingMethod: models.PricingMethodFixed,
+		AccessFeeUSD: 5, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("create instant profile: %v", err)
+	}
+	if w := postJSON(t, buyer, nil, map[string]interface{}{
+		"token": "USDC", "productId": instSvc.ID.String(),
+	}, ch.CreateServiceOrder); w.Code != http.StatusCreated {
+		t.Fatalf("instant buy of instant booking: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBookingRequestOnRequestQuote(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 0)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodOnRequest)
+
+	w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var reqRow models.BookingRequest
+	db.Where("buyer_id = ?", buyer.ID).First(&reqRow)
+	reqParams := gin.Params{{Key: "reqId", Value: reqRow.ID.String()}}
+
+	// Approve without a price → 400.
+	if w := postJSON(t, seller, reqParams, nil, ch.ApproveBookingRequest); w.Code != http.StatusBadRequest {
+		t.Fatalf("approve without price: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Approve with a price → 200, stored.
+	if w := postJSON(t, seller, reqParams, map[string]interface{}{"amountUsd": 42.0}, ch.ApproveBookingRequest); w.Code != http.StatusOK {
+		t.Fatalf("approve with price: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	db.First(&reqRow, "id = ?", reqRow.ID)
+	if reqRow.QuotedAmountUSD == nil || *reqRow.QuotedAmountUSD != 42.0 {
+		t.Fatalf("expected quoted 42, got %v", reqRow.QuotedAmountUSD)
+	}
+
+	// Pay → order escrows the quoted price (42 USDC → 42000000 in 6 decimals).
+	w = postJSON(t, buyer, reqParams, nil, ch.PayBookingRequest)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("pay: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var order models.Order
+	db.Where("buyer_id = ?", buyer.ID).First(&order)
+	if order.ProductAmount != "42000000" {
+		t.Errorf("expected productAmount 42000000, got %s", order.ProductAmount)
 	}
 }

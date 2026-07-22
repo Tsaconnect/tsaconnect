@@ -404,6 +404,16 @@ func resolveServiceTypeAndProfile(tx *gorm.DB, product *models.Product) (string,
 	return serviceType, profile
 }
 
+// rejectsInstantBuy reports whether a listing must NOT be bought directly on the
+// instant-checkout paths: a request-type booking requires a booking request the
+// provider approves (and, for on_request, prices) before payment. Without this,
+// a buyer could escrow the base fare and skip approval — and, for on_request,
+// skip the provider naming the price. The approval→pay path (PayBookingRequest)
+// does not call this, so it can still complete a request booking.
+func rejectsInstantBuy(serviceType string, profile *models.ServiceProfile) bool {
+	return serviceType == models.ServiceTypeBooking && profile.BookingType == models.BookingTypeRequest
+}
+
 // serviceContactGatePaid reports whether the buyer has paid the one-time
 // contact-reveal fee for a contact-type service (the checkout gate).
 func serviceContactGatePaid(tx *gorm.DB, buyerID, productID uuid.UUID) bool {
@@ -743,6 +753,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 					utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
 					return
 				}
+				if rejectsInstantBuy(serviceType, &serviceProfile) {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s requires a booking request — submit a request and wait for the provider to approve before paying.", product.Name))
+					return
+				}
 			} else {
 				// Stock validation + decrement (products only).
 				if product.Stock < item.Quantity {
@@ -1068,11 +1083,16 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
 		return
 	}
+	if rejectsInstantBuy(serviceType, &profile) {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s requires a booking request — submit a request and wait for the provider to approve before paying.", product.Name))
+		return
+	}
 
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, user, &seller, &product, serviceType, &profile,
 		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
-		req.MenuSelections, req.BookingSlot, req.Answers,
+		req.MenuSelections, req.BookingSlot, req.Answers, nil,
 	)
 	if errMsg != "" {
 		tx.Rollback()
@@ -1111,6 +1131,7 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	serviceType string, profile *models.ServiceProfile,
 	token, serviceTier, buyerCity, buyerState, buyerCountry string,
 	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
+	priceOverrideUSD *float64,
 ) (*models.Order, string, int) {
 	// Validate the auto-generated booking-form answers against the merchant's
 	// field config (unified booking engine). No config → no validation (legacy).
@@ -1121,11 +1142,23 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	origin := resolveShippingOrigin(product, seller)
 	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)
 
-	priceUSD, calloutUSD, zone, menuSel, booking, perr := ch.resolveServicePricing(
-		tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
-	)
-	if perr != "" {
-		return nil, perr, http.StatusBadRequest
+	var priceUSD, calloutUSD float64
+	var zone string
+	var menuSel []models.OrderMenuSelection
+	var booking *models.ServiceBooking
+	if priceOverrideUSD != nil {
+		// Provider-quoted price (price-on-request): the quote is the all-in
+		// service price; no tier call-out is added and there's no slot to reserve.
+		priceUSD = *priceOverrideUSD
+		zone = detectedZone
+	} else {
+		var perr string
+		priceUSD, calloutUSD, zone, menuSel, booking, perr = ch.resolveServicePricing(
+			tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
+		)
+		if perr != "" {
+			return nil, perr, http.StatusBadRequest
+		}
 	}
 
 	decimals := tokenDecimals(token)

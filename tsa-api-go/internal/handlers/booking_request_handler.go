@@ -249,6 +249,29 @@ func (ch *CheckoutHandler) ApproveBookingRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusConflict, fmt.Sprintf("Cannot approve a %s request", r.Status))
 		return
 	}
+
+	var body struct {
+		AmountUSD *float64 `json:"amountUsd"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	// Price-on-request listings require the provider to name a price at approval.
+	// Fail closed if the profile can't be loaded: silently proceeding would
+	// leave PricingMethod == "" and approve an on_request booking with no price,
+	// so the buyer would later escrow the base fare instead of the named price.
+	var profile models.ServiceProfile
+	if err := config.DB.Where("product_id = ?", r.ProductID).First(&profile).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load service listing")
+		return
+	}
+	if profile.PricingMethod == models.PricingMethodOnRequest {
+		if body.AmountUSD == nil || *body.AmountUSD <= 0 {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Set a price to approve this request")
+			return
+		}
+		r.QuotedAmountUSD = body.AmountUSD
+	}
+
 	r.Status = models.BookingRequestApproved
 	r.UpdatedAt = time.Now()
 	if err := config.DB.Save(r).Error; err != nil {
@@ -345,7 +368,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, user, &seller, &product, serviceType, &profile,
 		r.Token, r.ServiceTier, r.BuyerCity, r.BuyerState, r.BuyerCountry,
-		nil, nil, r.GetAnswers(),
+		nil, nil, r.GetAnswers(), r.QuotedAmountUSD,
 	)
 	if errMsg != "" {
 		tx.Rollback()
@@ -358,7 +381,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	// guards against two concurrent pay calls both creating an order (the order
 	// created above is rolled back if we lose the race).
 	claim := tx.Model(&models.BookingRequest{}).
-		Where("id = ? AND status IN ?", r.ID, []string{models.BookingRequestApproved, models.BookingRequestQuoted}).
+		Where("id = ? AND status = ?", r.ID, models.BookingRequestApproved).
 		Updates(map[string]interface{}{
 			"status":     models.BookingRequestConverted,
 			"order_id":   order.ID,

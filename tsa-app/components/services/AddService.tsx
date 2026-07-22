@@ -53,6 +53,7 @@ import {
   AvailabilityWindow,
   type BookingField,
   type BookingType,
+  type PricingMethod,
 } from "@/services/serviceListingApi";
 import MenuBuilder, { MenuDraft, emptyMenuDraft } from "./MenuBuilder";
 import AvailabilityEditor from "./AvailabilityEditor";
@@ -114,6 +115,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // Booking workflow: instant (escrow immediately) vs request & approval (the
   // merchant approves before the buyer pays). Phase 2.
   const [bookingType, setBookingType] = useState<BookingType>("instant");
+  // Pricing: fixed (set up front) vs on_request (merchant names the price when
+  // approving each request). on_request implies bookingType "request".
+  const [pricingMethod, setPricingMethod] = useState<PricingMethod>("fixed");
 
   // Menu (order) + availability (order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
@@ -147,6 +151,14 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     setCalloutSameCountry(rates.sameCountry.toFixed(2));
     setCalloutInternational(rates.international.toFixed(2));
   };
+
+  // Price-on-request listings can't be bought instantly — the merchant must
+  // name a price first, so force the engagement to "request" in that case.
+  useEffect(() => {
+    if (pricingMethod === "on_request" && bookingType === "instant") {
+      setBookingType("request");
+    }
+  }, [pricingMethod, bookingType]);
 
   useEffect(() => {
     const fetchCategories = async () => {
@@ -220,6 +232,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           });
           if (prof.fieldConfig?.fields?.length) setBookingFields(prof.fieldConfig.fields);
           if (prof.bookingType) setBookingType(prof.bookingType);
+          if (prof.pricingMethod) setPricingMethod(prof.pricingMethod);
         }
 
         // Menu.
@@ -299,6 +312,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       // (→ legacy slot/fare flow); a non-empty set enables the schema-driven form.
       profile.fieldConfig = bookingFields.length ? { fields: bookingFields } : null;
       profile.bookingType = bookingType;
+      profile.pricingMethod = pricingMethod;
     }
     if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
@@ -851,14 +865,35 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                     onChange={(patch) => setPolicies((prev) => ({ ...prev, ...patch }))}
                   />
 
-                  {sectionTitle("Booking workflow")}
+                  {sectionTitle("Pricing")}
                   <Card padding="lg" style={{ gap: spacing.sm }}>
                     <SegmentedControl
                       segments={[
-                        { key: "instant", label: "Instant" },
-                        { key: "request_approval", label: "Request & approve" },
+                        { key: "fixed", label: "Fixed price" },
+                        { key: "on_request", label: "Price on request" },
                       ]}
-                      value={bookingType === "instant" ? "instant" : "request_approval"}
+                      value={pricingMethod}
+                      onChange={(k) => setPricingMethod(k as PricingMethod)}
+                    />
+                    <Text variant="caption" color="textSecondary">
+                      {pricingMethod === "fixed"
+                        ? "You set the price up front."
+                        : "You name the price when you approve each request."}
+                    </Text>
+                  </Card>
+
+                  {sectionTitle("Booking workflow")}
+                  <Card padding="lg" style={{ gap: spacing.sm }}>
+                    <SegmentedControl
+                      segments={
+                        pricingMethod === "on_request"
+                          ? [{ key: "request", label: "Request first" }]
+                          : [
+                              { key: "instant", label: "Buy now" },
+                              { key: "request", label: "Request first" },
+                            ]
+                      }
+                      value={bookingType}
                       onChange={(k) => setBookingType(k as BookingType)}
                     />
                     <Text variant="caption" color="textSecondary">
