@@ -109,6 +109,13 @@ export default function MerchantLayout() {
                     title: 'Merchant Application',
                 }}
             />
+            <Stack.Screen
+                name="activate-pm"
+                options={{
+                    title: 'Activate Payment Merchant',
+                    headerShown: true,
+                }}
+            />
         </Stack>
     );
 }

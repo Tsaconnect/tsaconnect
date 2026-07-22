@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -663,29 +662,24 @@ func TestListMerchantRequests_WithStatusFilter(t *testing.T) {
 
 // ── C1: provisioning retry re-entry test ─────────────────────────────────────
 
-// handlerFakeProvisioner is a test double that satisfies services.NombaProvisioner
-// under the VA-only model. CreateVirtualAccount fails on the first call and
-// succeeds on subsequent calls, so attempt-1 approval returns 5xx and leaves the
-// request re-approvable.
+// handlerFakeProvisioner is a test double satisfying services.NombaProvisioner.
+// Under the split onboarding model, merchant approval NEVER calls this — VA
+// creation is deferred to merchant KYC activation — so vaCallCount must stay 0
+// across every approval test.
 type handlerFakeProvisioner struct {
 	vaCallCount int
 }
 
-func (f *handlerFakeProvisioner) CreateVirtualAccount(_ context.Context, _, _ string) (string, error) {
+func (f *handlerFakeProvisioner) CreateVirtualAccount(_ context.Context, _, _, _, _ string) (string, error) {
 	f.vaCallCount++
-	if f.vaCallCount == 1 {
-		return "", errors.New("VA create network error (attempt 1)")
-	}
 	return "0011223344", nil
 }
 
-// TestApproveMerchantRequest_PMProvisioningRetry exercises C1:
-//   - The admin approves a p2p_merchant request.
-//   - Attempt 1: VA-create fails → handler returns 5xx; request left in `approved`
-//     state with a non-active payment_merchants row → re-approvable.
-//   - Attempt 2: VA-create succeeds → 200; PM row is now active; sub-account was
-//     created exactly once across both attempts.
-func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
+// TestApproveMerchantRequest_PMApprovedNoVA verifies the split onboarding model:
+// admin approval flips the request to approved and creates the payment_merchants
+// row in the 'approved' state WITHOUT creating a virtual account (that is deferred
+// to merchant KYC activation). The corporate fields captured at submit persist.
+func TestApproveMerchantRequest_PMApprovedNoVA(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	fake := &handlerFakeProvisioner{}
 	svc := services.NewPMOnboardingService(db, fake)
@@ -707,75 +701,48 @@ func TestApproveMerchantRequest_PMProvisioningRetry(t *testing.T) {
 	json.Unmarshal(w1.Body.Bytes(), &submitResp)
 	reqID := submitResp["data"].(map[string]interface{})["id"].(string)
 
-	// ── Attempt 1: VA fails → 5xx ─────────────────────────────────────────────
+	// Approve → 200.
 	w2, c2 := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
 		map[string]interface{}{"note": "Approved"}, admin)
 	c2.Params = gin.Params{{Key: "id", Value: reqID}}
 	h.ApproveMerchantRequest(c2)
-
-	if w2.Code != http.StatusInternalServerError {
-		t.Errorf("attempt 1: expected 500, got %d: %s", w2.Code, w2.Body.String())
+	if w2.Code != http.StatusOK {
+		t.Fatalf("approve: expected 200, got %d: %s", w2.Code, w2.Body.String())
 	}
 
-	// The merchant_request should now be approved (status flip already committed).
+	// Request is approved.
 	var mr models.MerchantRequest
 	if err := db.First(&mr, "id = ?", reqID).Error; err != nil {
-		t.Fatalf("reload merchant request after attempt 1: %v", err)
+		t.Fatalf("reload merchant request: %v", err)
 	}
 	if mr.Status != models.MerchantRequestStatusApproved {
-		t.Errorf("after attempt 1: request status = %q, want %q", mr.Status, models.MerchantRequestStatusApproved)
+		t.Errorf("request status = %q, want %q", mr.Status, models.MerchantRequestStatusApproved)
 	}
 
-	// The payment_merchants row should exist but NOT be active.
+	// PM row exists in 'approved' with NO virtual account yet.
 	var pm models.PaymentMerchant
 	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
-		t.Fatalf("load PM row after attempt 1: %v", err)
+		t.Fatalf("load PM row: %v", err)
 	}
-	if pm.ProvisioningStatus == models.PMProvisioningActive {
-		t.Error("attempt 1: PM row should NOT be active yet")
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		t.Errorf("PM status = %q, want approved", pm.Status)
 	}
-
-	// VA-create attempted once so far (it failed).
-	if fake.vaCallCount != 1 {
-		t.Errorf("attempt 1: CreateVirtualAccount called %d times, want 1", fake.vaCallCount)
+	if pm.NombaAccountRef != "" || pm.InboundAccountNumber != "" {
+		t.Errorf("VA created during approval: ref=%q inbound=%q (should defer to activation)", pm.NombaAccountRef, pm.InboundAccountNumber)
 	}
-
-	// ── Attempt 2: VA succeeds → 200 ─────────────────────────────────────────
-	w3, c3 := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve",
-		map[string]interface{}{"note": "Approved retry"}, admin)
-	c3.Params = gin.Params{{Key: "id", Value: reqID}}
-	h.ApproveMerchantRequest(c3)
-
-	if w3.Code != http.StatusOK {
-		t.Errorf("attempt 2: expected 200, got %d: %s", w3.Code, w3.Body.String())
+	if fake.vaCallCount != 0 {
+		t.Errorf("CreateVirtualAccount called %d times during approval, want 0", fake.vaCallCount)
 	}
 
-	// PM row is now active.
-	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
-		t.Fatalf("reload PM row after attempt 2: %v", err)
-	}
-	if pm.ProvisioningStatus != models.PMProvisioningActive {
-		t.Errorf("attempt 2: provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
-	}
-	if pm.Status != models.PaymentMerchantStatusActive {
-		t.Errorf("attempt 2: PM status = %q, want %q", pm.Status, models.PaymentMerchantStatusActive)
-	}
-
-	// VA called twice (once failed, once succeeded) — the first attempt persisted
-	// no accountRef, so attempt 2 retried the create exactly once.
-	if fake.vaCallCount != 2 {
-		t.Errorf("attempt 2: CreateVirtualAccount total calls = %d, want 2", fake.vaCallCount)
-	}
-
-	// C1: the activated PM must persist the corporate fields captured at submit.
+	// Corporate fields captured at submit must persist onto the approved PM.
 	if pm.OperatorWalletAddress == "" {
-		t.Error("activated PM has empty OperatorWalletAddress — maker wallet not wired through")
+		t.Error("approved PM has empty OperatorWalletAddress — maker wallet not wired through")
 	}
 	if pm.SettlementBankCode == "" {
-		t.Error("activated PM has empty SettlementBankCode — settlement bank not wired through")
+		t.Error("approved PM has empty SettlementBankCode — settlement bank not wired through")
 	}
 	if pm.SettlementAccountName == "" {
-		t.Error("activated PM has empty SettlementAccountName — settlement account name not wired through")
+		t.Error("approved PM has empty SettlementAccountName — settlement account name not wired through")
 	}
 }
 
@@ -921,12 +888,11 @@ func TestApproveMerchantRequest_PMNonAdminForbidden(t *testing.T) {
 }
 
 // TestApproveMerchantRequest_PMAdminSucceeds: a true admin can approve a
-// p2p_merchant request and PM provisioning runs to active.
+// p2p_merchant request; the PM lands in 'approved' (awaiting merchant KYC
+// activation), with no VA provisioned during approval.
 func TestApproveMerchantRequest_PMAdminSucceeds(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	fake := &handlerFakeProvisioner{}
-	// Make VA succeed on the first call for this happy-path test.
-	fake.vaCallCount = 1
 	svc := services.NewPMOnboardingService(db, fake)
 	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
 
@@ -947,8 +913,11 @@ func TestApproveMerchantRequest_PMAdminSucceeds(t *testing.T) {
 	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
 		t.Fatalf("load PM row: %v", err)
 	}
-	if pm.ProvisioningStatus != models.PMProvisioningActive {
-		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		t.Errorf("PM status = %q, want approved", pm.Status)
+	}
+	if fake.vaCallCount != 0 {
+		t.Errorf("CreateVirtualAccount called %d times during approval, want 0", fake.vaCallCount)
 	}
 }
 
@@ -1001,12 +970,12 @@ func TestApproveMerchantRequest_PMDormantNoHalfApprove(t *testing.T) {
 
 // TestApproveMerchantRequest_ResumesStuckApprovedNoPMRow: an account that was
 // approved while PM was dormant (request 'approved', NO payment_merchants row)
-// must be resumable once Nomba is configured — re-approving provisions it to
-// active rather than 400-ing on "not pending". This unsticks the split-brain
-// accounts created before the pre-flight gate existed.
+// must be resumable once a provider is configured — re-approving creates the PM
+// row in 'approved' rather than 400-ing on "not pending". This unsticks the
+// split-brain accounts created before the pre-flight gate existed.
 func TestApproveMerchantRequest_ResumesStuckApprovedNoPMRow(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	fake := &handlerFakeProvisioner{vaCallCount: 1} // VA succeeds
+	fake := &handlerFakeProvisioner{}
 	svc := services.NewPMOnboardingService(db, fake)
 	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), svc)
 
@@ -1039,8 +1008,11 @@ func TestApproveMerchantRequest_ResumesStuckApprovedNoPMRow(t *testing.T) {
 	if err := db.Where("user_id = ?", user.ID).First(&pm).Error; err != nil {
 		t.Fatalf("load PM row after resume: %v", err)
 	}
-	if pm.ProvisioningStatus != models.PMProvisioningActive {
-		t.Errorf("provisioning_status = %q, want %q", pm.ProvisioningStatus, models.PMProvisioningActive)
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		t.Errorf("PM status = %q, want approved", pm.Status)
+	}
+	if fake.vaCallCount != 0 {
+		t.Errorf("CreateVirtualAccount called %d times during approval, want 0", fake.vaCallCount)
 	}
 }
 

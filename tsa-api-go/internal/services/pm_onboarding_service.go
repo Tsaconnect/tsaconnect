@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,12 +19,20 @@ var ErrPMProvisioningUnavailable = errors.New("PM provisioning unavailable: no f
 
 // NombaProvisioner is the minimal interface PMOnboardingService needs so tests
 // can inject a fake without depending on *NombaClient directly. Under the
-// VA-only corporate model a PM is a single Nomba virtual account under TSA's
-// parent business — provisioning needs only CreateVirtualAccount.
-// *NombaClient satisfies this interface.
+// VA-only corporate model a PM is a single virtual account under TSA's parent
+// business — provisioning needs only CreateVirtualAccount.
+//
+// idType ("BVN"|"NIN") + idNumber are the account holder's identity, required by
+// Flutterwave live mode for NGN static accounts. They are supplied by the
+// merchant at activation time and forwarded straight to the provider — never
+// stored in our DB. *NombaClient and *FlutterwaveVAProvisioner satisfy this.
 type NombaProvisioner interface {
-	CreateVirtualAccount(ctx context.Context, accountRef, accountName string) (bankAccountNumber string, err error)
+	CreateVirtualAccount(ctx context.Context, accountRef, accountName, idType, idNumber string) (bankAccountNumber string, err error)
 }
+
+// ErrPMKYCRequired is returned when activation is attempted without a valid
+// BVN/NIN. The handler validates shape up front; this is the service-side guard.
+var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the payment merchant")
 
 // PMOnboardingService provisions a Nomba virtual account (VA) for a new
 // corporate Payment-Merchant and activates the payment_merchants row.
@@ -53,51 +62,25 @@ func NewPMOnboardingService(db *gorm.DB, provisioner NombaProvisioner) *PMOnboar
 // rejects a duplicate accountRef), and unique per corporate user.
 func pmAccountRef(userID uuid.UUID) string { return "pm-" + userID.String() }
 
-// ProvisionAndActivate runs the VA-only Nomba provisioning for the corporate PM
-// identified by req.UserID:
+// ApproveFromRequest upserts the corporate PM row for req.UserID into the
+// 'approved' state — the merchant is cleared to operate but the NGN virtual
+// account is NOT created yet. VA creation is deferred to ActivateWithKYC, which
+// the merchant triggers by supplying their BVN/NIN (Flutterwave live mode
+// requires an account-holder identity we deliberately do not store).
 //
-//  1. Upsert a payment_merchants row (keyed on user_id, provisioning_status='pending').
-//  2. If NombaAccountRef == "" → CreateVirtualAccount(accountRef, businessName) →
-//     persist nomba_account_ref + inbound_account_number (the VA bankAccountNumber).
-//  3. Flip provisioning_status='active', status='active' and copy the
-//     (already validated at submit) settlement bank / maker wallet / caps.
+//  1. Upsert a payment_merchants row (keyed on user_id).
+//  2. Copy the (already validated at submit) settlement bank / maker wallet /
+//     caps and set status='approved', provisioning_status='pending'.
 //
-// On any Nomba error: persist whatever succeeded, leave the row non-active,
-// return the error. The caller can retry safely — a row whose nomba_account_ref
-// is already set skips the VA create on re-entry.
-func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
-	if s.provisioner == nil {
-		return nil, ErrPMProvisioningUnavailable
-	}
-
-	// ── Step 1: Upsert the payment_merchants row ──────────────────────────────
+// Idempotent: re-running on an already-approved/active row copies the same
+// fields without downgrading an active PM's status.
+func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
 	pm, err := s.upsertPendingRow(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("pm_onboarding: upsert: %w", err)
 	}
 
-	// ── Step 2: Virtual account (skip if already provisioned) ─────────────────
-	if pm.NombaAccountRef == "" {
-		accountRef := pmAccountRef(req.UserID)
-		vaNumber, err := s.provisioner.CreateVirtualAccount(ctx, accountRef, req.BusinessName)
-		if err != nil {
-			// nothing to persist — failed before any VA number returned.
-			return pm, fmt.Errorf("pm_onboarding: create virtual account: %w", err)
-		}
-		pm.NombaAccountRef = accountRef
-		pm.InboundAccountNumber = vaNumber
-		if err := s.persistFields(ctx, pm, map[string]interface{}{
-			"nomba_account_ref":      accountRef,
-			"inbound_account_number": vaNumber,
-		}); err != nil {
-			return pm, fmt.Errorf("pm_onboarding: persist virtual account: %w", err)
-		}
-	}
-
-	// ── Step 3: Activate (VA created + settlement/maker/caps copied) ──────────
-	activationFields := map[string]interface{}{
-		"provisioning_status":       models.PMProvisioningActive,
-		"status":                    models.PaymentMerchantStatusActive,
+	fields := map[string]interface{}{
 		"settlement_bank_code":      req.SettlementBankCode,
 		"settlement_account_number": req.SettlementAccountNumber,
 		"settlement_account_name":   req.SettlementAccountName,
@@ -105,11 +88,16 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 		"per_trade_cap_usd":         req.RequestedPerTradeCapUSD,
 		"daily_cap_usd":             req.RequestedDailyCapUSD,
 	}
-	if err := s.persistFields(ctx, pm, activationFields); err != nil {
-		return pm, fmt.Errorf("pm_onboarding: activate: %w", err)
+	// Only advance pending → approved; never downgrade an already-active PM.
+	if pm.Status == models.PaymentMerchantStatusPending {
+		fields["status"] = models.PaymentMerchantStatusApproved
 	}
-	pm.ProvisioningStatus = models.PMProvisioningActive
-	pm.Status = models.PaymentMerchantStatusActive
+	if err := s.persistFields(ctx, pm, fields); err != nil {
+		return pm, fmt.Errorf("pm_onboarding: approve: %w", err)
+	}
+	if pm.Status == models.PaymentMerchantStatusPending {
+		pm.Status = models.PaymentMerchantStatusApproved
+	}
 	pm.SettlementBankCode = req.SettlementBankCode
 	pm.SettlementAccountNumber = req.SettlementAccountNumber
 	pm.SettlementAccountName = req.SettlementAccountName
@@ -120,24 +108,15 @@ func (s *PMOnboardingService) ProvisionAndActivate(ctx context.Context, req *mod
 	return pm, nil
 }
 
-// ProvisionAndActivatePM approves an existing PENDING payment_merchants row by
-// id (admin-driven from the Payment Merchants page). Unlike ProvisionAndActivate
-// — which is keyed on a MerchantRequest and runs as part of merchant approval —
-// this works directly off the PM row whose settlement bank / maker wallet / caps
-// are already populated. It re-runs Nomba provisioning if it never completed and
-// flips the row to active. Idempotent on the VA create (anchored on the stored
-// nomba_account_ref), so a retry of a previously-failed approval is safe.
+// ApprovePM approves an existing PENDING payment_merchants row by id (admin-driven
+// from the Payment Merchants page): pending → approved. It does NOT create the NGN
+// virtual account — that is deferred to ActivateWithKYC, which the merchant triggers
+// by supplying their BVN/NIN. Only the admin review audit is recorded here.
 //
 // Errors:
-//   - ErrPMProvisioningUnavailable: Nomba not configured (provisioner nil).
 //   - ErrPMNotFound: no PM row with that id.
 //   - ErrInvalidPMTransition: PM is not currently pending.
-//   - wrapped Nomba error: VA creation failed (row left non-active, retry-safe).
-func (s *PMOnboardingService) ProvisionAndActivatePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
-	if s.provisioner == nil {
-		return nil, ErrPMProvisioningUnavailable
-	}
-
+func (s *PMOnboardingService) ApprovePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 	if err := s.db.WithContext(ctx).First(&pm, "id = ?", pmID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -149,11 +128,66 @@ func (s *PMOnboardingService) ProvisionAndActivatePM(ctx context.Context, pmID, 
 		return nil, ErrInvalidPMTransition
 	}
 
+	now := time.Now()
+	if err := s.persistFields(ctx, &pm, map[string]interface{}{
+		"status":      models.PaymentMerchantStatusApproved,
+		"reviewed_by": adminID,
+		"reviewed_at": now,
+	}); err != nil {
+		return &pm, fmt.Errorf("pm_onboarding: approve: %w", err)
+	}
+	pm.Status = models.PaymentMerchantStatusApproved
+	pm.ReviewedBy = adminID
+	pm.ReviewedAt = &now
+
+	return &pm, nil
+}
+
+// ActivateWithKYC creates the PM's NGN static virtual account using the merchant's
+// own BVN/NIN and flips the row to active. This is the merchant-triggered step that
+// completes onboarding:
+//
+//  1. Load the PM by id and verify it belongs to userID (else ErrPMNotFound — an
+//     ownership mismatch must not reveal that the row exists).
+//  2. Require status 'approved' (idempotent success if already 'active').
+//  3. If no VA yet → CreateVirtualAccount(accountRef, name, idType, idNumber) →
+//     persist nomba_account_ref + inbound_account_number.
+//  4. Flip status='active', provisioning_status='active'.
+//
+// idNumber (the BVN/NIN) is forwarded to the provider and NEVER stored or logged.
+// Retry-safe: a row whose nomba_account_ref is already set skips the VA create.
+func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error) {
+	if s.provisioner == nil {
+		return nil, ErrPMProvisioningUnavailable
+	}
+	if strings.TrimSpace(idNumber) == "" {
+		return nil, ErrPMKYCRequired
+	}
+
+	var pm models.PaymentMerchant
+	if err := s.db.WithContext(ctx).First(&pm, "id = ?", pmID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPMNotFound
+		}
+		return nil, err
+	}
+	if pm.UserID != userID {
+		// Do not leak existence of another user's PM.
+		return nil, ErrPMNotFound
+	}
+	if pm.Status == models.PaymentMerchantStatusActive {
+		return &pm, nil // already activated — idempotent success
+	}
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		return nil, ErrInvalidPMTransition
+	}
+
 	// ── Virtual account (skip if a prior attempt already created it) ──────────
 	if pm.NombaAccountRef == "" {
 		accountRef := pmAccountRef(pm.UserID)
-		vaNumber, err := s.provisioner.CreateVirtualAccount(ctx, accountRef, pm.Name)
+		vaNumber, err := s.provisioner.CreateVirtualAccount(ctx, accountRef, pm.Name, idType, idNumber)
 		if err != nil {
+			// Wrap without the id number; the provider error carries no PII.
 			return &pm, fmt.Errorf("pm_onboarding: create virtual account: %w", err)
 		}
 		pm.NombaAccountRef = accountRef
@@ -168,19 +202,14 @@ func (s *PMOnboardingService) ProvisionAndActivatePM(ctx context.Context, pmID, 
 	}
 
 	// ── Activate ──────────────────────────────────────────────────────────────
-	now := time.Now()
 	if err := s.persistFields(ctx, &pm, map[string]interface{}{
 		"provisioning_status": models.PMProvisioningActive,
 		"status":              models.PaymentMerchantStatusActive,
-		"reviewed_by":         adminID,
-		"reviewed_at":         now,
 	}); err != nil {
 		return &pm, fmt.Errorf("pm_onboarding: activate: %w", err)
 	}
 	pm.ProvisioningStatus = models.PMProvisioningActive
 	pm.Status = models.PaymentMerchantStatusActive
-	pm.ReviewedBy = adminID
-	pm.ReviewedAt = &now
 
 	return &pm, nil
 }

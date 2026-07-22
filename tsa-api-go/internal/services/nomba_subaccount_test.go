@@ -69,7 +69,7 @@ func TestNombaClient_CreateVirtualAccount_Success(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
+	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp", "", "")
 	if err != nil {
 		t.Fatalf("CreateVirtualAccount error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestNombaClient_CreateVirtualAccount_NonOK(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp", "", "")
 	if err == nil {
 		t.Fatal("expected error for 400 response, got nil")
 	}
@@ -124,7 +124,7 @@ func TestNombaClient_CreateVirtualAccount_StatusFalse(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp", "", "")
 	if err == nil {
 		t.Fatal("expected error for status:false, got nil")
 	}
@@ -158,7 +158,7 @@ func TestNombaClient_CreateVirtualAccount_SuccessWithStatusFalse(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Test PM")
+	acctNo, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Test PM", "", "")
 	if err != nil {
 		t.Fatalf("CreateVirtualAccount error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestNombaClient_CreateVirtualAccount_EmptyNumber(t *testing.T) {
 	})
 
 	c := newTestNombaClient(srv.URL)
-	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp")
+	_, err := c.CreateVirtualAccount(t.Context(), "pm-abc-123", "Acme Corp", "", "")
 	if err == nil {
 		t.Fatal("expected error for empty bankAccountNumber, got nil")
 	}

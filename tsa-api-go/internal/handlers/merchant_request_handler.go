@@ -402,9 +402,9 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// for retry (via isPMRetry above) if provisioning fails here. Admin-role and
 	// PMOnboarding-availability are already enforced in the pre-flight gate above.
 	if req.BusinessType == models.BusinessTypeP2PMerchant {
-		if _, err := h.PMOnboarding.ProvisionAndActivate(c.Request.Context(), &req); err != nil {
-			log.Printf("ApproveMerchantRequest: PM provisioning failed for request %s: %v", req.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM provisioning failed — retry the approval to resume")
+		if _, err := h.PMOnboarding.ApproveFromRequest(c.Request.Context(), &req); err != nil {
+			log.Printf("ApproveMerchantRequest: PM approval failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM setup failed — retry the approval to resume")
 			return
 		}
 	}

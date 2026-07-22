@@ -772,6 +772,24 @@ export async function getMyPmStatus(): Promise<MyPmStatus> {
   }
 }
 
+export type PmIdType = 'BVN' | 'NIN';
+
+/**
+ * Activate an APPROVED Payment Merchant by supplying the account holder's
+ * BVN or NIN. The id number is forwarded to the licensed fiat provider to mint
+ * the NGN virtual account and is NEVER stored by TSA — it only transits this
+ * request. On success the caller's PM flips to `active`.
+ *
+ * Returns the raw ApiResponse so the caller can surface the server message on
+ * validation (400) / not-approved (409) / not-found (404) errors.
+ */
+export function activatePmAccount(idType: PmIdType, idNumber: string) {
+  return request<{ status: string }>('POST', '/p2p/pm/activate', {
+    idType,
+    idNumber: idNumber.trim(),
+  });
+}
+
 // ─── Sellers ────────────────────────────────────────────────────────────────
 
 export const sellersApi = {

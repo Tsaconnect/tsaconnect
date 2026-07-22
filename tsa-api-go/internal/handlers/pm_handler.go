@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,28 +27,38 @@ type PMAutomation interface {
 	WithdrawToSettlement(ctx context.Context, pmID uuid.UUID, amount string) (string, error)
 }
 
-// PMStatusGetter is the narrow interface used by GetMyPMStatus to look up an
-// active PaymentMerchant by user ID. *services.PMService satisfies it; tests
+// PMStatusGetter is the narrow interface used by GetMyPMStatus / ActivatePM to
+// look up a PaymentMerchant by user ID. *services.PMService satisfies it; tests
 // can inject a fake without the full service graph.
 type PMStatusGetter interface {
-	GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error)
+	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error)
 }
 
-// PMApprover provisions + activates a pending PaymentMerchant by id (admin
-// approval from the Payment Merchants page). *services.PMOnboardingService
-// satisfies it. nil when Nomba is unconfigured — approval then returns 503.
+// PMApprover approves a pending PaymentMerchant by id (admin approval from the
+// Payment Merchants page): pending → approved. It does NOT create the virtual
+// account — that is deferred to merchant KYC activation (see PMActivator).
+// *services.PMOnboardingService satisfies it. nil when no fiat provider is
+// configured — approval then returns 503.
 type PMApprover interface {
-	ProvisionAndActivatePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error)
+	ApprovePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error)
+}
+
+// PMActivator creates the PM's virtual account from the merchant's own BVN/NIN
+// and flips it to active. *services.PMOnboardingService satisfies it. nil when
+// no fiat provider is configured — activation then returns 503.
+type PMActivator interface {
+	ActivateWithKYC(ctx context.Context, pmID, userID uuid.UUID, idType, idNumber string) (*models.PaymentMerchant, error)
 }
 
 // PMHandler serves the PM operator endpoints (manual-release queue, release
 // action, sell-payout kick, and the read-only PM list) plus the dormant-safe
 // user-facing PM-status read.
 type PMHandler struct {
-	auto     PMAutomation
-	pm       *services.PMService
-	pmStatus PMStatusGetter // nil when PM stack is unconfigured (dormant)
-	approver PMApprover     // nil when Nomba unconfigured: approve returns 503
+	auto      PMAutomation
+	pm        *services.PMService
+	pmStatus  PMStatusGetter // nil when PM stack is unconfigured (dormant)
+	approver  PMApprover     // nil when no fiat provider: approve returns 503
+	activator PMActivator    // nil when no fiat provider: activate returns 503
 }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
@@ -61,11 +72,17 @@ func NewPMHandler(auto PMAutomation, pm *services.PMService) *PMHandler {
 	return h
 }
 
-// SetApprover wires the PM provisioning service used by ApprovePM. Left nil
-// (the default) when Nomba creds are absent, in which case ApprovePM 503s.
+// SetApprover wires the PM onboarding service used by ApprovePM. Left nil
+// (the default) when no fiat provider is configured, in which case ApprovePM 503s.
 func (h *PMHandler) SetApprover(a PMApprover) { h.approver = a }
 
-// pmStatusResponse is the JSON payload for GetMyPMStatus.
+// SetActivator wires the PM onboarding service used by ActivatePM. Left nil
+// (the default) when no fiat provider is configured, in which case ActivatePM 503s.
+func (h *PMHandler) SetActivator(a PMActivator) { h.activator = a }
+
+// pmStatusResponse is the JSON payload for GetMyPMStatus. Status is the raw PM
+// status ("pending"|"approved"|"active"|"paused"|"rejected" or "" when none) so
+// the app can show the KYC-activation CTA on "approved".
 type pmStatusResponse struct {
 	IsPm   bool   `json:"isPm"`
 	Status string `json:"status"`
@@ -88,10 +105,14 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 		return
 	}
 
-	_, err := h.pmStatus.GetActiveByUserID(c.Request.Context(), user.ID)
+	pm, err := h.pmStatus.GetByUserID(c.Request.Context(), user.ID)
 	if err == nil {
-		// Active PM found.
-		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{IsPm: true, Status: "active"})
+		// isPm is true only for a live (active) PM; "approved" reports back so the
+		// app can prompt the merchant to complete KYC activation.
+		utils.SuccessResponse(c, http.StatusOK, "PM status", pmStatusResponse{
+			IsPm:   pm.Status == models.PaymentMerchantStatusActive,
+			Status: pm.Status,
+		})
 		return
 	}
 	if errors.Is(err, services.ErrPMNotFound) {
@@ -316,9 +337,10 @@ func (h *PMHandler) Withdraw(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Withdrawal initiated", gin.H{"payoutId": payoutID})
 }
 
-// ApprovePM handles POST /api/admin/pm/:id/approve — provisions the PM's Nomba
-// virtual account (if not already done) and activates it. Only valid from
-// pending. 503 when Nomba/approver is unconfigured.
+// ApprovePM handles POST /api/admin/pm/:id/approve — approves a pending PM
+// (pending → approved). It does NOT create the virtual account; the merchant
+// completes onboarding by activating with their BVN/NIN (POST /p2p/pm/activate).
+// Only valid from pending. 503 when no fiat provider is configured.
 func (h *PMHandler) ApprovePM(c *gin.Context) {
 	pmID, ok := parseUUIDParam(c, "id")
 	if !ok {
@@ -330,15 +352,15 @@ func (h *PMHandler) ApprovePM(c *gin.Context) {
 		return
 	}
 	if h.approver == nil {
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: Nomba not configured")
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: no fiat provider configured")
 		return
 	}
 
-	pm, err := h.approver.ProvisionAndActivatePM(c.Request.Context(), pmID, admin.ID)
+	pm, err := h.approver.ApprovePM(c.Request.Context(), pmID, admin.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrPMProvisioningUnavailable):
-			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: Nomba not configured")
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM approval unavailable: no fiat provider configured")
 		case errors.Is(err, services.ErrPMNotFound):
 			utils.ErrorResponse(c, http.StatusNotFound, "Payment merchant not found")
 		case errors.Is(err, services.ErrInvalidPMTransition):
@@ -350,6 +372,81 @@ func (h *PMHandler) ApprovePM(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchant approved", toPMListItem(pm))
+}
+
+// activateRequest is the JSON body for ActivatePM. idNumber is the merchant's
+// BVN or NIN — forwarded to the fiat provider and NEVER stored or logged.
+type activateRequest struct {
+	IDType   string `json:"idType"`   // "BVN" | "NIN"
+	IDNumber string `json:"idNumber"` // exactly 11 digits
+}
+
+// ngIDNumber matches a Nigerian BVN or NIN: exactly 11 digits.
+var ngIDNumber = regexp.MustCompile(`^\d{11}$`)
+
+// ActivatePM handles POST /api/p2p/pm/activate — the merchant completes their own
+// PM onboarding by supplying a BVN/NIN, which is forwarded to the fiat provider to
+// mint the NGN virtual account. The id number is passed straight through and never
+// persisted or logged. Only valid on the caller's own 'approved' PM.
+func (h *PMHandler) ActivatePM(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.activator == nil || h.pmStatus == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM activation unavailable: no fiat provider configured")
+		return
+	}
+
+	var req activateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	idType := strings.ToUpper(strings.TrimSpace(req.IDType))
+	if idType != "BVN" && idType != "NIN" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "idType must be BVN or NIN")
+		return
+	}
+	idNumber := strings.TrimSpace(req.IDNumber)
+	if !ngIDNumber.MatchString(idNumber) {
+		utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
+		return
+	}
+
+	// Resolve the caller's PM (never trust a client-supplied id — activation is
+	// always for the authenticated user's own PM).
+	pm, err := h.pmStatus.GetByUserID(c.Request.Context(), user.ID)
+	if err != nil {
+		if errors.Is(err, services.ErrPMNotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
+			return
+		}
+		log.Printf("[pm handler] ActivatePM lookup user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed")
+		return
+	}
+
+	out, err := h.activator.ActivateWithKYC(c.Request.Context(), pm.ID, user.ID, idType, idNumber)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrPMProvisioningUnavailable):
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM activation unavailable: no fiat provider configured")
+		case errors.Is(err, services.ErrPMKYCRequired):
+			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
+		case errors.Is(err, services.ErrPMNotFound):
+			utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
+		case errors.Is(err, services.ErrInvalidPMTransition):
+			utils.ErrorResponse(c, http.StatusConflict, "Payment merchant is not awaiting activation")
+		default:
+			// NB: never log the request body / id number — only the PM id + error.
+			log.Printf("[pm handler] ActivatePM pm=%s: %v", pm.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed — please try again")
+		}
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment merchant activated", toPMListItem(out))
 }
 
 // RejectPM handles POST /api/admin/pm/:id/reject — declines a pending PM. A

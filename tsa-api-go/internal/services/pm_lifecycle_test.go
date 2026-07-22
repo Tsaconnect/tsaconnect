@@ -131,101 +131,62 @@ func TestPauseResumePM(t *testing.T) {
 	})
 }
 
-func TestProvisionAndActivatePM(t *testing.T) {
+func TestApprovePM(t *testing.T) {
 	ctx := context.Background()
 	admin := uuid.New()
 
-	t.Run("pending → provisions VA + activates", func(t *testing.T) {
+	t.Run("pending → approved (no VA created)", func(t *testing.T) {
 		db := newSQLiteForOnboarding(t)
-		fake := &fakeNombaProvisioner{
-			createVirtualAccountFn: func(ctx context.Context, accountRef, accountName string) (string, error) {
-				return "9999000011", nil
-			},
-		}
+		fake := &fakeNombaProvisioner{}
 		svc := NewPMOnboardingService(db, fake)
 		pm := seedPM(t, db, models.PaymentMerchantStatusPending, "")
 
-		got, err := svc.ProvisionAndActivatePM(ctx, pm.ID, admin)
+		got, err := svc.ApprovePM(ctx, pm.ID, admin)
 		if err != nil {
-			t.Fatalf("ProvisionAndActivatePM: %v", err)
+			t.Fatalf("ApprovePM: %v", err)
 		}
-		if got.Status != models.PaymentMerchantStatusActive {
-			t.Fatalf("status = %q, want active", got.Status)
+		if got.Status != models.PaymentMerchantStatusApproved {
+			t.Fatalf("status = %q, want approved", got.Status)
 		}
-		if got.ProvisioningStatus != models.PMProvisioningActive {
-			t.Fatalf("provisioning = %q, want active", got.ProvisioningStatus)
+		if got.ReviewedBy != admin {
+			t.Fatalf("reviewedBy = %v, want %v", got.ReviewedBy, admin)
 		}
-		if got.InboundAccountNumber != "9999000011" {
-			t.Fatalf("inbound = %q, want 9999000011", got.InboundAccountNumber)
-		}
-		if got.NombaAccountRef != pmAccountRef(pm.UserID) {
-			t.Fatalf("accountRef = %q, want %q", got.NombaAccountRef, pmAccountRef(pm.UserID))
-		}
-		if fake.createVirtualAccountCalls != 1 {
-			t.Fatalf("VA create called %d times, want 1", fake.createVirtualAccountCalls)
-		}
-	})
-
-	t.Run("idempotent: skips VA create when accountRef already set", func(t *testing.T) {
-		db := newSQLiteForOnboarding(t)
-		fake := &fakeNombaProvisioner{
-			createVirtualAccountFn: func(ctx context.Context, accountRef, accountName string) (string, error) {
-				return "0000", nil
-			},
-		}
-		svc := NewPMOnboardingService(db, fake)
-		pm := seedPM(t, db, models.PaymentMerchantStatusPending, "pm-existing")
-
-		got, err := svc.ProvisionAndActivatePM(ctx, pm.ID, admin)
-		if err != nil {
-			t.Fatalf("ProvisionAndActivatePM: %v", err)
-		}
-		if got.Status != models.PaymentMerchantStatusActive {
-			t.Fatalf("status = %q, want active", got.Status)
-		}
+		// Approval must never provision a VA — that is deferred to activation.
 		if fake.createVirtualAccountCalls != 0 {
-			t.Fatalf("VA create called %d times, want 0 (already provisioned)", fake.createVirtualAccountCalls)
+			t.Fatalf("VA create called %d times, want 0 (approval never provisions)", fake.createVirtualAccountCalls)
+		}
+		if got.NombaAccountRef != "" || got.InboundAccountNumber != "" {
+			t.Fatalf("VA fields set on approval: ref=%q inbound=%q", got.NombaAccountRef, got.InboundAccountNumber)
 		}
 	})
 
-	t.Run("VA failure leaves row pending, retry-safe", func(t *testing.T) {
+	t.Run("works without a fiat provider (pure transition)", func(t *testing.T) {
 		db := newSQLiteForOnboarding(t)
-		fake := &fakeNombaProvisioner{
-			createVirtualAccountFn: func(ctx context.Context, accountRef, accountName string) (string, error) {
-				return "", errors.New("nomba 500")
-			},
-		}
-		svc := NewPMOnboardingService(db, fake)
+		svc := NewPMOnboardingService(db, nil)
 		pm := seedPM(t, db, models.PaymentMerchantStatusPending, "")
-
-		if _, err := svc.ProvisionAndActivatePM(ctx, pm.ID, admin); err == nil {
-			t.Fatal("expected error from VA failure")
+		got, err := svc.ApprovePM(ctx, pm.ID, admin)
+		if err != nil {
+			t.Fatalf("ApprovePM with nil provisioner should succeed: %v", err)
 		}
-		var reloaded models.PaymentMerchant
-		if err := db.First(&reloaded, "id = ?", pm.ID).Error; err != nil {
-			t.Fatalf("reload: %v", err)
-		}
-		if reloaded.Status != models.PaymentMerchantStatusPending {
-			t.Fatalf("status = %q, want still pending after failure", reloaded.Status)
+		if got.Status != models.PaymentMerchantStatusApproved {
+			t.Fatalf("status = %q, want approved", got.Status)
 		}
 	})
 
 	t.Run("non-pending → ErrInvalidPMTransition", func(t *testing.T) {
 		db := newSQLiteForOnboarding(t)
-		fake := &fakeNombaProvisioner{}
-		svc := NewPMOnboardingService(db, fake)
+		svc := NewPMOnboardingService(db, &fakeNombaProvisioner{})
 		pm := seedPM(t, db, models.PaymentMerchantStatusActive, "pm-x")
-		if _, err := svc.ProvisionAndActivatePM(ctx, pm.ID, admin); !errors.Is(err, ErrInvalidPMTransition) {
+		if _, err := svc.ApprovePM(ctx, pm.ID, admin); !errors.Is(err, ErrInvalidPMTransition) {
 			t.Fatalf("err = %v, want ErrInvalidPMTransition", err)
 		}
 	})
 
-	t.Run("provisioner nil → ErrPMProvisioningUnavailable", func(t *testing.T) {
+	t.Run("missing → ErrPMNotFound", func(t *testing.T) {
 		db := newSQLiteForOnboarding(t)
-		svc := NewPMOnboardingService(db, nil)
-		pm := seedPM(t, db, models.PaymentMerchantStatusPending, "")
-		if _, err := svc.ProvisionAndActivatePM(ctx, pm.ID, admin); !errors.Is(err, ErrPMProvisioningUnavailable) {
-			t.Fatalf("err = %v, want ErrPMProvisioningUnavailable", err)
+		svc := NewPMOnboardingService(db, &fakeNombaProvisioner{})
+		if _, err := svc.ApprovePM(ctx, uuid.New(), admin); !errors.Is(err, ErrPMNotFound) {
+			t.Fatalf("err = %v, want ErrPMNotFound", err)
 		}
 	})
 }
