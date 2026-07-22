@@ -12,7 +12,6 @@ export type BookingRequestStatus =
   | 'requested'
   | 'approved'
   | 'rejected'
-  | 'quoted'
   | 'expired'
   | 'converted'
   | 'cancelled';
@@ -28,6 +27,7 @@ export interface BookingRequest {
   status: BookingRequestStatus;
   rejectReason?: string;
   orderId?: string;
+  quotedAmountUsd?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -97,8 +97,11 @@ export async function listBookingRequests(
   }
 }
 
-export async function approveBookingRequest(reqId: string): Promise<ApiResponse<BookingRequest>> {
-  return mutate(`${API_BASE_URL}/services/requests/${reqId}/approve`);
+export async function approveBookingRequest(
+  reqId: string,
+  amountUsd?: number
+): Promise<ApiResponse<BookingRequest>> {
+  return mutate(`${API_BASE_URL}/services/requests/${reqId}/approve`, amountUsd != null ? { amountUsd } : undefined);
 }
 
 export async function rejectBookingRequest(

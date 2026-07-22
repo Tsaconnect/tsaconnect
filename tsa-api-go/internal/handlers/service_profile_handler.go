@@ -28,8 +28,6 @@ func (h *Handlers) GetServiceProfile(c *gin.Context) {
 				MaxCapacityPerSlot: 1,
 				BookingType:        models.BookingTypeInstant,
 				PricingMethod:      models.PricingMethodFixed,
-				Workflow:           models.WorkflowAutoAccept,
-				PaymentTiming:      models.PaymentTimingBefore,
 			})
 		return
 	}
@@ -51,13 +49,10 @@ type serviceProfileRequest struct {
 
 	// Unified booking-engine config (optional). Empty enum values keep the
 	// existing/default value; an invalid value is rejected.
-	BookingType    string                     `json:"bookingType"`
-	PricingMethod  string                     `json:"pricingMethod"`
-	Workflow       string                     `json:"workflow"`
-	PaymentTiming  string                     `json:"paymentTiming"`
-	DepositPercent int                        `json:"depositPercent"`
-	BookingFeeUSD  float64                    `json:"bookingFeeUsd"`
-	FieldConfig    *models.BookingFieldConfig `json:"fieldConfig"`
+	BookingType   string                     `json:"bookingType"`
+	PricingMethod string                     `json:"pricingMethod"`
+	BookingFeeUSD float64                    `json:"bookingFeeUsd"`
+	FieldConfig   *models.BookingFieldConfig `json:"fieldConfig"`
 }
 
 // UpsertServiceProfile handles PUT /api/services/:id/profile — the owning
@@ -80,10 +75,6 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Fees, duration and capacity cannot be negative")
 		return
 	}
-	if req.DepositPercent < 0 || req.DepositPercent > 100 {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Deposit percent must be between 0 and 100")
-		return
-	}
 	// Reject unknown enum values; an empty string keeps the existing/default.
 	if req.BookingType != "" && !models.ValidBookingType(req.BookingType) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid booking type")
@@ -93,27 +84,10 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid pricing method")
 		return
 	}
-	if req.Workflow != "" && !models.ValidWorkflow(req.Workflow) {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid workflow")
-		return
-	}
-	if req.PaymentTiming != "" && !models.ValidPaymentTiming(req.PaymentTiming) {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment timing")
-		return
-	}
 	if err := models.ValidateFieldConfig(req.FieldConfig); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	// A non-instant booking (request/approval, quote) creates an off-chain
-	// request that is priced and paid later without a slot pick — the pay step
-	// can't reserve a slot, so combining it with a slotted booking
-	// (SlotDurationMinutes > 0) would strand the buyer. Reject the combination.
-	if req.BookingType != "" && req.BookingType != models.BookingTypeInstant && req.SlotDurationMinutes > 0 {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Slot-based bookings must use instant booking; request/approval bookings cannot reserve a time slot")
-		return
-	}
-
 	var profile models.ServiceProfile
 	err = config.DB.Where("product_id = ?", productID).First(&profile).Error
 	profile.ProductID = productID
@@ -128,19 +102,12 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	profile.ReschedulePolicy = req.ReschedulePolicy
 	profile.RefundPolicy = req.RefundPolicy
 	profile.BookingRules = req.BookingRules
-	profile.DepositPercent = req.DepositPercent
 	profile.BookingFeeUSD = req.BookingFeeUSD
 	if req.BookingType != "" {
 		profile.BookingType = req.BookingType
 	}
 	if req.PricingMethod != "" {
 		profile.PricingMethod = req.PricingMethod
-	}
-	if req.Workflow != "" {
-		profile.Workflow = req.Workflow
-	}
-	if req.PaymentTiming != "" {
-		profile.PaymentTiming = req.PaymentTiming
 	}
 	// Guarantee non-empty enums (new profiles start zero-valued; don't rely on
 	// the DB default tag filling them on insert).
@@ -150,11 +117,19 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	if profile.PricingMethod == "" {
 		profile.PricingMethod = models.PricingMethodFixed
 	}
-	if profile.Workflow == "" {
-		profile.Workflow = models.WorkflowAutoAccept
+	// Reject invalid combinations on the EFFECTIVE (merged) values, so a partial
+	// update can't slip a bad combo through preserve-existing semantics.
+	//
+	// instant + on_request: can't prepay a price that's only named on approval.
+	if profile.BookingType == models.BookingTypeInstant && profile.PricingMethod == models.PricingMethodOnRequest {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Instant booking requires a fixed price; use 'request' for price-on-request")
+		return
 	}
-	if profile.PaymentTiming == "" {
-		profile.PaymentTiming = models.PaymentTimingBefore
+	// request + slot: a request is priced and paid later without a slot pick, so
+	// the pay step can't reserve a slot — the combination would strand the buyer.
+	if profile.BookingType != models.BookingTypeInstant && profile.SlotDurationMinutes > 0 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Slot-based bookings must use instant booking; request bookings cannot reserve a time slot")
+		return
 	}
 	profile.SetFieldConfig(req.FieldConfig)
 
