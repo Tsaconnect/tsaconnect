@@ -94,6 +94,13 @@ func (h *FlutterwaveWebhookHandler) Handle(c *gin.Context) {
 		log.Printf("[fw webhook] non-settling event=%s type=%s: %v (marking processed)", webhookID, eventType, dispErr)
 		h.markStatus(ctx, ev.EventID, "processed", nil)
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "processed (no action)"})
+	case errors.Is(dispErr, services.ErrChargeRejected):
+		// Terminal: the charge contradicts the webhook and will never settle.
+		// Mark 'rejected' (not 'failed') so it is never re-driven; the dispatcher
+		// already alarmed. Ack so Flutterwave stops re-delivering.
+		log.Printf("[fw webhook] REJECTED event=%s type=%s: %v (marking rejected, not retried)", webhookID, eventType, dispErr)
+		h.markStatus(ctx, ev.EventID, "rejected", dispErr)
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "received (rejected)"})
 	default:
 		log.Printf("[fw webhook] dispatch event=%s type=%s: %v", webhookID, eventType, dispErr)
 		h.markStatus(ctx, ev.EventID, "failed", dispErr)

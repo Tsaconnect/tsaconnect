@@ -43,6 +43,11 @@ type InboundPayment struct {
 	// always sets it so consumers can reject non-NGN credits they can't price.
 	Currency string
 	Status   string // "settled" | "pending" | ...
+	// ProviderChargeID is the provider's authoritative charge/transaction id
+	// (Flutterwave's data.id, e.g. "chg_..."). Used to re-fetch the charge from
+	// the provider API and verify it before crediting. Empty for providers that
+	// don't support charge verification (Nomba).
+	ProviderChargeID string
 }
 
 // PayoutStatus is a normalized payout-result webhook (sell flow).

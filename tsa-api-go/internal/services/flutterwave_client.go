@@ -658,6 +658,48 @@ func (c *FlutterwaveClient) GetTransfer(ctx context.Context, id string) (FWTrans
 	return parsed, nil
 }
 
+// ─── Charges (collection verification) ─────────────────────────────────────
+
+// FWCharge is the authoritative charge record fetched from GET /charges/{id}.
+// It is the source of truth used to verify a charge.completed webhook before
+// crediting money — the webhook body alone is not trusted (it can be stale,
+// replayed, or wrong even when signature-valid).
+type FWCharge struct {
+	ID        string      `json:"id"`
+	Reference string      `json:"reference"`
+	Amount    json.Number `json:"amount"`
+	Currency  string      `json:"currency"`
+	Status    string      `json:"status"`
+}
+
+// GetCharge fetches a single charge by its Flutterwave id (the charge.completed
+// webhook's data.id, e.g. "chg_..."). Used to independently confirm status,
+// amount, currency, and reference before settling.
+func (c *FlutterwaveClient) GetCharge(ctx context.Context, id string) (FWCharge, error) {
+	if !c.IsEnabled() {
+		return FWCharge{}, ErrFlutterwaveDisabled
+	}
+	if id == "" {
+		return FWCharge{}, errors.New("flutterwave get-charge: id required")
+	}
+	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/charges/"+url.PathEscape(id), nil, "")
+	if err != nil {
+		return FWCharge{}, fmt.Errorf("flutterwave get-charge: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return FWCharge{}, fwError("get-charge", resp.StatusCode, body)
+	}
+	var env fwEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return FWCharge{}, fmt.Errorf("flutterwave get-charge decode: %w", err)
+	}
+	var parsed FWCharge
+	if err := json.Unmarshal(env.Data, &parsed); err != nil {
+		return FWCharge{}, fmt.Errorf("flutterwave get-charge decode data: %w", err)
+	}
+	return parsed, nil
+}
+
 // ─── Fees + rates ──────────────────────────────────────────────────────────
 
 // FWFee is a provider fee quote for a prospective transfer/collection.

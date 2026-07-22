@@ -132,6 +132,7 @@ func ParseFlutterwaveInbound(raw []byte) (*InboundPayment, error) {
 		AmountNGN:         formatNaira(data.Amount.String()),
 		Currency:          strings.ToUpper(strings.TrimSpace(data.Currency)),
 		Status:            "settled",
+		ProviderChargeID:  data.ID,
 	}, nil
 }
 
