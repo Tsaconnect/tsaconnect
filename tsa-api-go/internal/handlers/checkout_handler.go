@@ -404,6 +404,16 @@ func resolveServiceTypeAndProfile(tx *gorm.DB, product *models.Product) (string,
 	return serviceType, profile
 }
 
+// rejectsInstantBuy reports whether a listing must NOT be bought directly on the
+// instant-checkout paths: a request-type booking requires a booking request the
+// provider approves (and, for on_request, prices) before payment. Without this,
+// a buyer could escrow the base fare and skip approval — and, for on_request,
+// skip the provider naming the price. The approval→pay path (PayBookingRequest)
+// does not call this, so it can still complete a request booking.
+func rejectsInstantBuy(serviceType string, profile *models.ServiceProfile) bool {
+	return serviceType == models.ServiceTypeBooking && profile.BookingType == models.BookingTypeRequest
+}
+
 // serviceContactGatePaid reports whether the buyer has paid the one-time
 // contact-reveal fee for a contact-type service (the checkout gate).
 func serviceContactGatePaid(tx *gorm.DB, buyerID, productID uuid.UUID) bool {
@@ -743,6 +753,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 					utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
 					return
 				}
+				if rejectsInstantBuy(serviceType, &serviceProfile) {
+					tx.Rollback()
+					utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s requires a booking request — submit a request and wait for the provider to approve before paying.", product.Name))
+					return
+				}
 			} else {
 				// Stock validation + decrement (products only).
 				if product.Stock < item.Quantity {
@@ -1066,6 +1081,11 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	if serviceType == models.ServiceTypeContact && !serviceContactGatePaid(tx, user.ID, product.ID) {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Pay the contact fee for %s before engaging it", product.Name))
+		return
+	}
+	if rejectsInstantBuy(serviceType, &profile) {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("%s requires a booking request — submit a request and wait for the provider to approve before paying.", product.Name))
 		return
 	}
 

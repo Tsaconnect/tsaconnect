@@ -275,6 +275,45 @@ func TestUpsertServiceProfile_RejectsRequestPlusSlot_PartialUpdate(t *testing.T)
 
 // A price-on-request booking: approval must carry a price, which becomes the
 // escrowed amount the buyer pays.
+// TestCreateServiceOrder_RejectsRequestBooking guards the money-path bypass:
+// a request-type booking must go through CreateBookingRequest → approval before
+// payment, so the instant single-service checkout must refuse it. Otherwise a
+// buyer escrows the base fare and skips approval (and, for on_request, skips the
+// provider naming the price).
+func TestCreateServiceOrder_RejectsRequestBooking(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+
+	// A request + fixed booking listing → instant buy must be rejected.
+	reqSvc := createTestService(t, db, seller.ID, &cat.ID, 5, 0)
+	writeBookingProfile(t, db, reqSvc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
+	if w := postJSON(t, buyer, nil, map[string]interface{}{
+		"token": "USDC", "productId": reqSvc.ID.String(),
+	}, ch.CreateServiceOrder); w.Code != http.StatusBadRequest {
+		t.Fatalf("instant buy of request booking: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// A plain instant booking (with a payable access fee) still buys directly —
+	// the guard must not block the legitimate instant path.
+	instSvc := createTestService(t, db, seller.ID, &cat.ID, 5, 0)
+	if err := db.Create(&models.ServiceProfile{
+		ID: uuid.New(), ProductID: instSvc.ID,
+		BookingType: models.BookingTypeInstant, PricingMethod: models.PricingMethodFixed,
+		AccessFeeUSD: 5, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("create instant profile: %v", err)
+	}
+	if w := postJSON(t, buyer, nil, map[string]interface{}{
+		"token": "USDC", "productId": instSvc.ID.String(),
+	}, ch.CreateServiceOrder); w.Code != http.StatusCreated {
+		t.Fatalf("instant buy of instant booking: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestBookingRequestOnRequestQuote(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
