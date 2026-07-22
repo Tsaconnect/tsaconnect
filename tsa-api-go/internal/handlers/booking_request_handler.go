@@ -256,8 +256,14 @@ func (ch *CheckoutHandler) ApproveBookingRequest(c *gin.Context) {
 	_ = c.ShouldBindJSON(&body)
 
 	// Price-on-request listings require the provider to name a price at approval.
+	// Fail closed if the profile can't be loaded: silently proceeding would
+	// leave PricingMethod == "" and approve an on_request booking with no price,
+	// so the buyer would later escrow the base fare instead of the named price.
 	var profile models.ServiceProfile
-	config.DB.Where("product_id = ?", r.ProductID).First(&profile)
+	if err := config.DB.Where("product_id = ?", r.ProductID).First(&profile).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load service listing")
+		return
+	}
 	if profile.PricingMethod == models.PricingMethodOnRequest {
 		if body.AmountUSD == nil || *body.AmountUSD <= 0 {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Set a price to approve this request")
