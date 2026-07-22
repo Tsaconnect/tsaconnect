@@ -711,6 +711,13 @@ func main() {
 			log.Printf("[pm] Flutterwave gateway dormant: FLUTTERWAVE_CLIENT_ID/SECRET missing — sell payouts error until configured")
 		}
 		pmAuto = services.NewPMAutomationService(config.DB, pmSvc, p2pTradeSvc, releaseSigner, pmNameLookup, gateway, cfg.NombaSenderName)
+		// Verify every Flutterwave charge.completed against the /charges API before
+		// crediting — a signed webhook alone is not trusted. Without this the
+		// dispatcher fails closed and refuses to settle charge events.
+		if fwClient.IsEnabled() {
+			pmAuto.SetFlutterwaveChargeVerifier(fwClient)
+			log.Printf("[fw] charge verification ACTIVE (webhook credits are API-confirmed)")
+		}
 		// IT automation — webhook routing always (references arrive regardless),
 		// payout gateway only when a LIVE gateway exists (the disabled gateway
 		// would flip HasAutoPayout and force bank capture with no way to pay).

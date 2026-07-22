@@ -216,6 +216,11 @@ func TestRetryFailedWebhooks_Flutterwave(t *testing.T) {
 	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
 		buyerID: "JOHN DOE",
 	}))
+	// charge.completed is verified against the /charges API before crediting;
+	// wire a verifier confirming this charge (id, ref, amount, NGN, succeeded).
+	auto.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		ch: FWCharge{ID: "chg_fw_retry_1", Reference: accountRef, Amount: "1500", Currency: "NGN", Status: "succeeded"},
+	})
 
 	// A `failed` Flutterwave charge.completed whose reference matches the PM's VA
 	// and whose amount/sender match the pending trade → re-dispatch settles it.
@@ -223,6 +228,7 @@ func TestRetryFailedWebhooks_Flutterwave(t *testing.T) {
 		"webhook_id": "fw-retry-1",
 		"type": "charge.completed",
 		"data": {
+			"id": "chg_fw_retry_1",
 			"reference": "` + accountRef + `",
 			"status": "succeeded",
 			"amount": 1500,

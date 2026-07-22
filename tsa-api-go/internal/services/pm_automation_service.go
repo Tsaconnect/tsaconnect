@@ -122,6 +122,10 @@ type PMAutomationService struct {
 	// itHooks routes IT-prefixed Flutterwave webhook references to the IT
 	// service (see flutterwave_dispatch.go); nil when IT is dormant.
 	itHooks ITWebhookHooks
+	// fwCharges independently re-fetches a Flutterwave charge to verify a
+	// charge.completed webhook before crediting (see flutterwave_dispatch.go).
+	// nil → charge settlement is refused (fail-closed).
+	fwCharges FlutterwaveChargeGetter
 }
 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
@@ -480,8 +484,21 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 		default:
 			err = s.Dispatch(ctx, r.Payload)
 		}
+		if err != nil && errors.Is(err, ErrChargeRejected) {
+			// Terminal — a retry can never settle it. Mark 'rejected' so it drops
+			// out of the failed pool instead of being re-driven every tick.
+			if uerr := s.db.WithContext(ctx).
+				Table("webhook_events").
+				Where("id = ?", r.ID).
+				Updates(map[string]any{"status": "rejected", "error": err.Error()}).Error; uerr != nil {
+				log.Printf("[pm recovery] mark webhook event=%s rejected: %v", r.EventID, uerr)
+				continue
+			}
+			retried++
+			continue
+		}
 		if err != nil && !errors.Is(err, ErrNonSettlingEvent) {
-			// Still failing — leave it for the next tick.
+			// Transient / not-yet-succeeded — leave it for the next tick.
 			log.Printf("[pm recovery] re-dispatch webhook event=%s still failing: %v", r.EventID, err)
 			continue
 		}

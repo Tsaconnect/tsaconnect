@@ -60,8 +60,13 @@ func TestDispatchFlutterwaveRoutesITRefs(t *testing.T) {
 	s := NewPMAutomationService(nil, nil, nil, nil, nil, nil, "")
 	hooks := &fakeITHooks{}
 	s.SetITHooks(hooks)
+	// charge.completed now verifies against the /charges API before crediting;
+	// wire a verifier that confirms the inbound charge.
+	s.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		ch: FWCharge{ID: "chg_w1", Reference: "IT-ABCDEF12345678", Amount: "500", Currency: "NGN", Status: "succeeded"},
+	})
 
-	inbound := []byte(`{"webhook_id":"w1","type":"charge.completed","data":{"reference":"IT-ABCDEF12345678","amount":500,"currency":"NGN","status":"succeeded"}}`)
+	inbound := []byte(`{"webhook_id":"w1","type":"charge.completed","data":{"id":"chg_w1","reference":"IT-ABCDEF12345678","amount":500,"currency":"NGN","status":"succeeded"}}`)
 	if err := s.DispatchFlutterwave(context.Background(), inbound); err != nil {
 		t.Fatalf("inbound dispatch: %v", err)
 	}

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -16,6 +17,86 @@ type ITWebhookHooks interface {
 
 // SetITHooks wires IT webhook routing (buy auto-credit + sell payout close).
 func (s *PMAutomationService) SetITHooks(h ITWebhookHooks) { s.itHooks = h }
+
+// FlutterwaveChargeGetter re-fetches a charge from the Flutterwave API so a
+// charge.completed webhook can be independently verified before any money
+// moves. *FlutterwaveClient satisfies it.
+type FlutterwaveChargeGetter interface {
+	GetCharge(ctx context.Context, id string) (FWCharge, error)
+}
+
+// SetFlutterwaveChargeVerifier wires the API-side charge verification used by
+// the charge.completed path. When left nil, charge settlement is refused
+// (fail-closed) — a signed webhook is never sufficient on its own.
+func (s *PMAutomationService) SetFlutterwaveChargeVerifier(g FlutterwaveChargeGetter) { s.fwCharges = g }
+
+// Charge-verification outcomes are split by whether a retry could ever change
+// them — this matters because a failed webhook is re-driven by the reconciler
+// (Flutterwave's own re-delivery is deduped away on webhook_id), and only a
+// bounded/terminal disposition stops that loop:
+//
+//   - ErrChargeRejected — TERMINAL. The API contradicts the webhook in a way a
+//     retry can't fix (known-dead status, wrong currency, reference mismatch,
+//     missing charge id). Fail-closed + loud alarm; the event is marked
+//     'rejected' and never re-driven.
+//   - ErrChargePending — RETRYABLE. The charge is not yet succeeded but might
+//     become so (pending/processing/unknown status). Left 'failed' so the
+//     reconciler re-checks until it succeeds or turns terminal.
+//   - a bare transport/API error — RETRYABLE (provider unreachable).
+var (
+	ErrChargeRejected = errors.New("flutterwave charge rejected (terminal: contradicts webhook, will not settle)")
+	ErrChargePending  = errors.New("flutterwave charge not yet succeeded (retryable)")
+)
+
+// fwChargeTerminal reports whether a charge status is a KNOWN dead end (will
+// never become succeeded). Unknown statuses are deliberately excluded so an
+// unfamiliar in-progress state keeps retrying rather than dropping a real
+// payment.
+func fwChargeTerminal(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "cancelled", "canceled", "reversed", "void", "voided", "declined", "expired":
+		return true
+	}
+	return false
+}
+
+// verifyFlutterwaveCharge re-fetches the charge named by the webhook and confirms
+// it against the provider's authoritative record before crediting. It returns the
+// API amount (the source of truth used for the actual credit) on success. See the
+// sentinel docs above for the retryable/terminal split.
+//
+// A webhook/API amount divergence is NOT fatal — the API is authoritative, so we
+// credit the API amount and log the divergence for observability.
+func verifyFlutterwaveCharge(ctx context.Context, g FlutterwaveChargeGetter, p *InboundPayment) (amountNGN string, err error) {
+	if p.ProviderChargeID == "" {
+		// A charge.completed with no id is malformed and won't self-heal.
+		return "", fmt.Errorf("%w: webhook carried no charge id (ref=%q)", ErrChargeRejected, p.AccountRef)
+	}
+	ch, err := g.GetCharge(ctx, p.ProviderChargeID)
+	if err != nil {
+		// Transport / provider error — retryable, do not classify as a rejection.
+		return "", fmt.Errorf("flutterwave verify charge %s: %w", p.ProviderChargeID, err)
+	}
+	if !fwSucceeded(ch.Status) {
+		if fwChargeTerminal(ch.Status) {
+			return "", fmt.Errorf("%w: api status %q for charge %s (ref=%q)", ErrChargeRejected, ch.Status, p.ProviderChargeID, p.AccountRef)
+		}
+		// Not-yet-succeeded (pending/processing/unknown) — retry until it settles.
+		return "", fmt.Errorf("%w: api status %q for charge %s (ref=%q)", ErrChargePending, ch.Status, p.ProviderChargeID, p.AccountRef)
+	}
+	if cur := strings.ToUpper(strings.TrimSpace(ch.Currency)); cur != "NGN" {
+		return "", fmt.Errorf("%w: api currency %q for charge %s", ErrChargeRejected, cur, p.ProviderChargeID)
+	}
+	if ch.Reference != p.AccountRef {
+		// Attribution mismatch — crediting would apply funds to the wrong order.
+		return "", fmt.Errorf("%w: api reference %q != webhook reference %q (charge %s)", ErrChargeRejected, ch.Reference, p.AccountRef, p.ProviderChargeID)
+	}
+	apiAmount := formatNaira(ch.Amount.String())
+	if apiAmount != p.AmountNGN {
+		log.Printf("[fw dispatch] charge %s webhook/api amount divergence: webhook=%s api=%s (ref=%q) — crediting api amount (source of truth)", p.ProviderChargeID, p.AmountNGN, apiAmount, p.AccountRef)
+	}
+	return apiAmount, nil
+}
 
 // DispatchFlutterwave is the Flutterwave counterpart of Dispatch: it owns
 // classify→parse→dispatch for v4 events so the webhook handler (live path)
@@ -49,6 +130,24 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 			log.Printf("[fw dispatch] %s in unsupported currency %q (ref=%q event=%s) — operator action required", eventType, p.Currency, p.AccountRef, webhookID)
 			return fmt.Errorf("%w: non-NGN charge currency %q", ErrNonSettlingEvent, p.Currency)
 		}
+		// Independently verify the charge against the Flutterwave API before any
+		// credit — a signed webhook is never trusted on its own. Fail-closed:
+		// with no verifier configured, refuse to settle.
+		if s.fwCharges == nil {
+			log.Printf("[fw dispatch] ALARM charge verification unavailable — refusing to settle ref=%q event=%s", p.AccountRef, webhookID)
+			return fmt.Errorf("flutterwave charge verification unavailable (ref=%q)", p.AccountRef)
+		}
+		verifiedAmountNGN, err := verifyFlutterwaveCharge(ctx, s.fwCharges, p)
+		if err != nil {
+			// Terminal rejections are alarmed once (they are marked 'rejected' and
+			// never re-driven). Pending/transport errors stay quiet — they retry.
+			if errors.Is(err, ErrChargeRejected) {
+				log.Printf("[fw dispatch] ALARM charge verification REJECTED (terminal) ref=%q event=%s: %v", p.AccountRef, webhookID, err)
+			}
+			return err
+		}
+		// Credit the API-authoritative amount, not the webhook's.
+		p.AmountNGN = verifiedAmountNGN
 		// IT buy references ("IT-…") route to the IT auto-credit; everything
 		// else is a PM inbound.
 		if s.itHooks != nil && strings.HasPrefix(p.AccountRef, "IT-") {
