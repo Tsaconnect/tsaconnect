@@ -375,9 +375,6 @@ type Config struct {
 	FlutterwaveCompanyName  string
 	FlutterwaveCompanyEmail string
 	FlutterwaveCompanyPhone string
-	// FiatProviderOverride pins the payout gateway: "flutterwave" | "nomba".
-	// Empty ⇒ auto: Flutterwave when its creds are present, else Nomba.
-	FiatProviderOverride string
 
 	// FeeQuote — deposit/withdrawal fee-quote engine (PM fee spec, batch 11).
 	// Quote-only: powers GET /api/it/quote so the app can show the itemized
@@ -647,7 +644,6 @@ func Load() *Config {
 	cfg.FlutterwaveCompanyName = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_NAME", "TSA Connect"))
 	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
 	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
-	cfg.FiatProviderOverride = strings.ToLower(strings.TrimSpace(getEnv("FIAT_PROVIDER", "")))
 
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values
 	// are PM-UNRESOLVED and intentionally config-first so flipping them is an
@@ -1052,22 +1048,17 @@ func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 	return c.GlobalPoolSettleInterval
 }
 
-// ResolveFiatProvider returns the effective payout/collections gateway:
-// FIAT_PROVIDER when explicitly set, otherwise Flutterwave when its creds are
-// present, otherwise Nomba. Central so the payout gateway, webhook wiring,
-// and bank-directory selection can never disagree.
+// ResolveFiatProvider names the active fiat gateway. Flutterwave is the sole
+// provider: Nomba never granted prod API access and is being retired, so the
+// resolver hard-returns "flutterwave" and can never select Nomba — even when FW
+// creds are absent the gateway simply stays dormant (its routes 503) rather than
+// silently falling back to a provider we can't use. The provider seam and its
+// interfaces remain so a replacement can be slotted in if FW ever refuses prod.
+//
+// Central so the payout gateway, webhook wiring, and bank-directory selection
+// can never disagree on the active provider.
 func (c *Config) ResolveFiatProvider() string {
-	if c == nil {
-		return "nomba"
-	}
-	switch c.FiatProviderOverride {
-	case "flutterwave", "nomba":
-		return c.FiatProviderOverride
-	}
-	if c.FlutterwaveClientID != "" && c.FlutterwaveClientSecret != "" {
-		return "flutterwave"
-	}
-	return "nomba"
+	return "flutterwave"
 }
 
 // parseProbeAmounts parses a "CUR:AMT,CUR:AMT" list into a map. Entries
