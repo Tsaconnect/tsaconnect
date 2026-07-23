@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -56,6 +57,59 @@ func (h *ITHandler) GetRate(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Rate", gin.H{
 		"buyRateKobo": buyKobo.String(), "sellRateKobo": sellKobo.String(),
 		"stale": fx.Stale,
+	})
+}
+
+// GET /api/it/withdraw/quote?ngn=<amt>&currency=<ISO> — live FX preview for a
+// multi-currency withdrawal: how much destCurrency an NGN amount converts to
+// right now, via a pass-through Flutterwave quote (no company spread). 400 on
+// bad params; 503 when the live FX quote source is unavailable (Flutterwave
+// dormant or an unusable rate).
+func (h *ITHandler) QuoteWithdrawal(c *gin.Context) {
+	currency := strings.ToUpper(strings.TrimSpace(c.Query("currency")))
+	if currency == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "currency is required")
+		return
+	}
+	ngn, err := strconv.ParseFloat(strings.TrimSpace(c.Query("ngn")), 64)
+	if err != nil || ngn <= 0 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "ngn must be a positive number")
+		return
+	}
+	destAmount, rate, err := h.it.QuoteWithdrawal(c.Request.Context(), ngn, currency)
+	if err != nil {
+		if errors.Is(err, services.ErrITQuoteUnavailable) {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer FX quote is temporarily unavailable")
+			return
+		}
+		if errors.Is(err, services.ErrUnsupportedWithdrawalCurrency) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Withdrawals in this currency are not yet supported")
+			return
+		}
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	// `stale` is additive for parity with GET /api/it/rate's response shape.
+	// This quote is fetched live per-request (no cached feed behind it), so
+	// there is no staleness signal to surface here — always false.
+	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
+		"destCurrency": currency,
+		"destAmount":   destAmount,
+		"rate":         rate,
+		"stale":        false,
+	})
+}
+
+// GET /api/it/withdraw/destinations — the v1 catalog of currency/rail (and,
+// for mobile_money, network) combinations IT withdrawal supports. The app's
+// destination picker renders only these entries so it never offers a rail
+// the API can't fulfill. Single source of truth:
+// services.WithdrawalDestinationCatalog — also backs
+// SupportedWithdrawalQuoteCurrencies and the Sell destination validation
+// below, so this list can't drift from what Sell actually accepts.
+func (h *ITHandler) WithdrawalDestinations(c *gin.Context) {
+	utils.SuccessResponse(c, http.StatusOK, "Destinations", gin.H{
+		"destinations": services.WithdrawalDestinationCatalog,
 	})
 }
 
@@ -152,6 +206,17 @@ type itSellReq struct {
 	BankCode      string `json:"bankCode"`
 	AccountNumber string `json:"accountNumber"`
 	AccountName   string `json:"accountName"`
+
+	// Multi-currency / mobile-money payout destination — optional. Empty
+	// DestinationCurrency and RailType ⇒ legacy NGN bank (unchanged, does not
+	// require these fields). When either is set, the (currency, rail[,
+	// network]) combination is validated against
+	// services.WithdrawalDestinationCatalog before the intent is created.
+	DestinationCurrency string `json:"destinationCurrency"`
+	RailType            string `json:"railType"`
+	MobileNetwork       string `json:"mobileNetwork"`
+	MobileCountry       string `json:"mobileCountry"`
+	MobileMsisdn        string `json:"mobileMsisdn"`
 }
 
 // POST /api/it/sell — debit credited premium (on-chain) and open the NGN payout.
@@ -170,18 +235,56 @@ func (h *ITHandler) Sell(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	// When auto-payout is wired, the destination is mandatory — a sell with no
-	// bank would silently fall back to the manual queue the PM wants retired.
-	var bank *services.ITSellBank
-	if req.BankCode != "" || req.AccountNumber != "" {
-		if req.BankCode == "" || len(req.AccountNumber) != 10 {
-			utils.ErrorResponse(c, http.StatusBadRequest, "bankCode and a 10-digit accountNumber are required")
+	// A rail/currency selection must resolve to a catalog entry BEFORE we ever
+	// touch the service — reject an unfulfillable destination up front rather
+	// than creating an intent the payout leg can't complete. Empty rail AND
+	// currency ⇒ legacy NGN bank, which needs no catalog check (it predates
+	// the catalog and isn't itself catalog-gated here).
+	if req.RailType != "" || req.DestinationCurrency != "" {
+		if !services.IsSupportedWithdrawalDestination(req.DestinationCurrency, req.RailType, req.MobileNetwork) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported withdrawal destination for this currency/rail combination")
 			return
 		}
-		bank = &services.ITSellBank{Code: req.BankCode, Number: req.AccountNumber, Name: req.AccountName}
-	} else if h.it.HasAutoPayout() {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Select a payout bank account")
-		return
+	}
+	rail := strings.ToLower(strings.TrimSpace(req.RailType))
+	// When auto-payout is wired, the destination is mandatory — a sell with no
+	// bank would silently fall back to the manual queue the PM wants retired.
+	// This bank-account requirement only applies to the bank rail (legacy NGN
+	// or a catalog bank currency like GHS); mobile_money's required fields are
+	// enforced by the service layer (validateSellBank).
+	var bank *services.ITSellBank
+	switch rail {
+	case "", "bank":
+		if req.BankCode != "" || req.AccountNumber != "" {
+			// The 10-digit NUBAN rule is NGN-specific — a non-NGN bank rail
+			// (e.g. GHS) has a different account-number format, so only
+			// require non-empty fields here and defer real format validation
+			// to Flutterwave/product, same as the mobile_money path below.
+			isNGN := req.DestinationCurrency == "" || strings.EqualFold(req.DestinationCurrency, "NGN")
+			if isNGN {
+				if req.BankCode == "" || len(req.AccountNumber) != 10 {
+					utils.ErrorResponse(c, http.StatusBadRequest, "bankCode and a 10-digit accountNumber are required")
+					return
+				}
+			} else if req.BankCode == "" || req.AccountNumber == "" {
+				utils.ErrorResponse(c, http.StatusBadRequest, "bankCode and accountNumber are required")
+				return
+			}
+			bank = &services.ITSellBank{Code: req.BankCode, Number: req.AccountNumber, Name: req.AccountName}
+		} else if h.it.HasAutoPayout() {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Select a payout bank account")
+			return
+		}
+	default:
+		bank = &services.ITSellBank{
+			MobileNetwork: req.MobileNetwork,
+			MobileCountry: req.MobileCountry,
+			MobileMsisdn:  req.MobileMsisdn,
+		}
+	}
+	if bank != nil {
+		bank.DestinationCurrency = req.DestinationCurrency
+		bank.RailType = req.RailType
 	}
 	intent, err := h.it.CreateSellIntent(c.Request.Context(), user.ID, user.WalletAddress, req.McgpAmount, bank)
 	if err != nil {

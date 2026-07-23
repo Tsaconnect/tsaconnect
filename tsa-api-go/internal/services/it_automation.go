@@ -28,11 +28,74 @@ import (
 // can route them away from PM-trade payouts (whose refs are bare trade UUIDs).
 const ITPayoutRefPrefix = "IT-SELL-"
 
-// ITSellBank is the payout destination captured at sell creation.
+// ITSellBank is the payout destination captured at sell creation. Bank fields
+// (Code/Number/Name) are the legacy NGN-bank rail; the rest support
+// cross-currency / mobile-money withdrawal (mirrors PayoutRequest). Empty
+// DestinationCurrency/RailType ⇒ legacy NGN bank behavior, unchanged.
 type ITSellBank struct {
 	Code   string
 	Number string
 	Name   string
+
+	DestinationCurrency string // ISO, e.g. "KES"; "" ⇒ "NGN"
+	RailType            string // "bank" | "mobile_money"; "" ⇒ "bank"
+	MobileNetwork       string // mobile_money only, e.g. "wave"
+	MobileCountry       string // mobile_money only, ISO-2, e.g. "SN"
+	MobileMsisdn        string // mobile_money only
+}
+
+// validateSellBank fails fast (before any chain call) on a malformed sell
+// destination. The legacy bank rail's field requirement is enforced by the
+// HTTP handler (bank is optional here for the manual-payout fallback); only
+// the mobile_money rail's required fields are checked at this layer.
+func validateSellBank(bank *ITSellBank) error {
+	if bank == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(bank.RailType)) {
+	case "", "bank":
+		return nil
+	case "mobile_money":
+		if strings.TrimSpace(bank.MobileNetwork) == "" || strings.TrimSpace(bank.MobileCountry) == "" || strings.TrimSpace(bank.MobileMsisdn) == "" {
+			return errors.New("it: mobile money sell requires network, country and phone number")
+		}
+		return nil
+	default:
+		return fmt.Errorf("it: unknown payout rail %q", bank.RailType)
+	}
+}
+
+// applySellBank copies the payout destination from the sell request onto the
+// intent. Extracted from CreateSellIntent so the field mapping is unit
+// testable independent of the on-chain debit path (which needs a live
+// blockchain client).
+func applySellBank(intent *models.ITIntent, bank *ITSellBank) {
+	if bank == nil {
+		return
+	}
+	intent.BankCode = strings.TrimSpace(bank.Code)
+	intent.AccountNumber = strings.TrimSpace(bank.Number)
+	intent.AccountName = strings.TrimSpace(bank.Name)
+	intent.DestinationCurrency = strings.ToUpper(strings.TrimSpace(bank.DestinationCurrency))
+	intent.RailType = strings.ToLower(strings.TrimSpace(bank.RailType))
+	intent.MobileNetwork = strings.TrimSpace(bank.MobileNetwork)
+	intent.MobileCountry = strings.ToUpper(strings.TrimSpace(bank.MobileCountry))
+	intent.MobileMsisdn = strings.TrimSpace(bank.MobileMsisdn)
+}
+
+// sellIntentHasPayoutDestination reports whether the intent carries a payout
+// destination for its rail: the legacy bank rail (empty or "bank") needs
+// BankCode+AccountNumber; mobile_money needs the mobile triple instead. An
+// unrecognized rail has no valid destination.
+func sellIntentHasPayoutDestination(intent *models.ITIntent) bool {
+	switch strings.ToLower(strings.TrimSpace(intent.RailType)) {
+	case "", "bank":
+		return intent.BankCode != "" && intent.AccountNumber != ""
+	case "mobile_money":
+		return intent.MobileNetwork != "" && intent.MobileCountry != "" && intent.MobileMsisdn != ""
+	default:
+		return false
+	}
 }
 
 // ITVAProvisioner issues a per-intent dynamic virtual account for a buy.
@@ -148,20 +211,28 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if intent.PayoutID != "" {
 		return nil
 	}
-	if intent.BankCode == "" || intent.AccountNumber == "" {
+	if !sellIntentHasPayoutDestination(intent) {
 		return errors.New("it: sell intent has no payout destination")
 	}
 	naira, err := koboToNairaString(intent.NgnKobo)
 	if err != nil {
 		return fmt.Errorf("it payout: bad intent amount: %w", err)
 	}
+	// AmountNGN is always our locked NGN amount — for a cross-currency/mobile
+	// rail the gateway converts via DestinationCurrency; for legacy NGN bank
+	// (DestinationCurrency empty) it pays it out as-is. See FlutterwaveGateway.
 	payoutID, err := s.payout.InitiatePayout(ctx, PayoutRequest{
-		BankCode:      intent.BankCode,
-		AccountNumber: intent.AccountNumber,
-		AccountName:   intent.AccountName,
-		AmountNGN:     naira,
-		Reference:     ITPayoutRefPrefix + intent.ID.String(),
-		SenderName:    "TSA Connect",
+		BankCode:            intent.BankCode,
+		AccountNumber:       intent.AccountNumber,
+		AccountName:         intent.AccountName,
+		AmountNGN:           naira,
+		Reference:           ITPayoutRefPrefix + intent.ID.String(),
+		SenderName:          "TSA Connect",
+		DestinationCurrency: intent.DestinationCurrency,
+		RailType:            intent.RailType,
+		MobileNetwork:       intent.MobileNetwork,
+		MobileCountry:       intent.MobileCountry,
+		MobileMsisdn:        intent.MobileMsisdn,
 	})
 	if err != nil {
 		_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).

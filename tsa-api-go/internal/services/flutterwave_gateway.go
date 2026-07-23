@@ -39,23 +39,60 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	if narration == "" {
 		narration = "TSA Connect"
 	}
-	transfer, err := g.client.DirectTransfer(ctx, FWDirectTransferRequest{
-		Action:    "instant",
-		Type:      "bank",
-		Reference: req.Reference,
-		Narration: narration,
-		PaymentInstruction: FWPaymentInstruction{
-			SourceCurrency:      "NGN",
-			DestinationCurrency: "NGN",
-			Amount:              FWAmount{Value: amount, AppliesTo: "destination_currency"},
-			Recipient: FWTransferRecipient{
-				Bank: &FWRecipientBank{
-					Code:          req.BankCode,
-					AccountNumber: req.AccountNumber,
-				},
-				Name: &FWRecipientName{Full: req.AccountName},
+
+	destCur := req.DestinationCurrency
+	if strings.TrimSpace(destCur) == "" {
+		destCur = "NGN"
+	}
+	destCur = strings.ToUpper(strings.TrimSpace(destCur))
+	rail := req.RailType
+	if strings.TrimSpace(rail) == "" {
+		rail = "bank"
+	}
+	rail = strings.ToLower(strings.TrimSpace(rail))
+
+	// applies_to governs fee incidence. For NGN→NGN payouts (source ==
+	// destination) we must keep the legacy behavior: the recipient gets
+	// exactly `value`, fees come out of our source balance separately —
+	// that's "destination_currency". For cross-currency payouts we hold
+	// NGN and send a known NGN amount for FW to convert, so fees must be
+	// taken from the source side — "source_currency".
+	appliesTo := "source_currency"
+	if strings.EqualFold(destCur, "NGN") {
+		appliesTo = "destination_currency"
+	}
+
+	pi := FWPaymentInstruction{
+		SourceCurrency:      "NGN",
+		DestinationCurrency: destCur,
+		Amount:              FWAmount{Value: amount, AppliesTo: appliesTo},
+	}
+	switch rail {
+	case "mobile_money":
+		pi.Recipient = FWTransferRecipient{
+			MobileMoney: &FWRecipientMobileMoney{
+				Network: req.MobileNetwork,
+				Country: req.MobileCountry,
+				Msisdn:  req.MobileMsisdn,
 			},
-		},
+			Name: &FWRecipientName{Full: req.AccountName},
+		}
+	default: // "bank"
+		pi.Recipient = FWTransferRecipient{
+			Bank: &FWRecipientBank{
+				Code:          req.BankCode,
+				AccountNumber: req.AccountNumber,
+			},
+			Name: &FWRecipientName{Full: req.AccountName},
+		}
+	}
+
+	transfer, err := g.client.DirectTransfer(ctx, FWDirectTransferRequest{
+		Action:             "instant",
+		Type:               rail,
+		Reference:          req.Reference,
+		Narration:          narration,
+		PaymentInstruction: pi,
 	})
 	if err != nil {
 		return "", err

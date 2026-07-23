@@ -485,6 +485,14 @@ func main() {
 		log.Printf("Flutterwave dormant: FLUTTERWAVE_CLIENT_ID / FLUTTERWAVE_CLIENT_SECRET not set")
 	}
 
+	// Wire IT's live withdrawal FX quote (GET /api/it/withdraw/quote) onto
+	// Flutterwave's pass-through rate feed. Optional seam — nil fwClient (or
+	// IT dormant) leaves QuoteWithdrawal returning ErrITQuoteUnavailable.
+	if itService != nil && fwClient != nil {
+		itService.SetRateQuoter(fwClient)
+		log.Printf("[it] withdrawal FX quote wired (Flutterwave, pass-through)")
+	}
+
 	// Resolve the company customer that parents all FW virtual accounts. Uses
 	// FLUTTERWAVE_CUSTOMER_ID when set, else mints one lazily and persists it
 	// (per environment) so operators needn't find it in the dashboard.

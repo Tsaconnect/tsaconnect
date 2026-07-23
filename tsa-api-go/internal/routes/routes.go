@@ -839,6 +839,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		it.Use(auth)
 		{
 			it.GET("/rate", ith.GetRate)
+			it.GET("/withdraw/quote", ith.QuoteWithdrawal)
+			it.GET("/withdraw/destinations", ith.WithdrawalDestinations)
 			it.GET("/balance", ith.GetBalance)
 			it.POST("/buy", ith.Buy)
 			it.POST("/sell", ith.Sell)
