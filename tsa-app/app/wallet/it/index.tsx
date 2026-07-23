@@ -9,7 +9,10 @@ import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Card, Divider, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import CurrencySelector from '@/components/currency/CurrencySelector';
 import { getITBalance, getITRate, type ITBalance, type ITRate } from '@/services/itApi';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { ngnToUsd } from './currency-display';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -28,6 +31,7 @@ const fmtNairaPerMcgp = (kobo?: string) => {
 
 export default function ITHub() {
   const { colors, spacing } = useTheme();
+  const { formatPrice, allRates } = useCurrency();
   const [bal, setBal] = useState<ITBalance | null>(null);
   const [rate, setRate] = useState<ITRate | null>(null);
   const [loading, setLoading] = useState(true);
@@ -48,12 +52,29 @@ export default function ITHub() {
     ? (BigInt(bal.premiumBought || '0') + BigInt(bal.premiumCredited || '0')).toString()
     : '0';
 
+  // The buy/sell rate is USD-anchored on the backend, but /api/it/rate only
+  // exposes the derived NGN figure (buyRateKobo/sellRateKobo). Convert back
+  // to USD via the live NGN rate so it can render in the selected display
+  // currency; fall back to raw Naira if the NGN rate hasn't loaded yet.
+  const ngnRate = allRates.NGN?.midRate ?? null;
+  const buyUsd = rate ? ngnToUsd(Number(rate.buyRateKobo) / 100, ngnRate) : null;
+  const sellUsd = rate ? ngnToUsd(Number(rate.sellRateKobo) / 100, ngnRate) : null;
+  const rateLine = rate
+    ? buyUsd != null && sellUsd != null
+      ? `Buy ${formatPrice(buyUsd)} · Sell ${formatPrice(sellUsd)} per MCGP`
+      : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)} per MCGP`
+    : null;
+
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}
         refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
       >
+        <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+          <CurrencySelector variant="header" />
+        </View>
+
         <AccentCard>
           <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
             Spendable MCGP
@@ -61,9 +82,9 @@ export default function ITHub() {
           <Text variant="title1" weight="700" numeric style={{ color: colors.textPrimary, marginTop: spacing.xs }}>
             {loading ? '—' : fmtMcgp(spendable)} MCGP
           </Text>
-          {rate ? (
+          {rateLine ? (
             <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-              Buy ₦{fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦{fmtNairaPerMcgp(rate.sellRateKobo)} per MCGP
+              {rateLine}
             </Text>
           ) : null}
         </AccentCard>
