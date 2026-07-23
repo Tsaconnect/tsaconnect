@@ -57,6 +57,14 @@ type ITIntent struct {
 	BankCode      string `gorm:"size:16" json:"bankCode,omitempty"`
 	AccountNumber string `gorm:"size:20" json:"accountNumber,omitempty"`
 	AccountName   string `gorm:"size:128" json:"accountName,omitempty"`
+	// Multi-currency / non-bank payout rail (optional; empty ⇒ legacy NGN bank
+	// via BankCode/AccountNumber above). Mirrors services.PayoutRequest so the
+	// sell payout path can pass these straight through to the gateway.
+	DestinationCurrency string `gorm:"size:8" json:"destinationCurrency,omitempty"`
+	RailType            string `gorm:"size:16" json:"railType,omitempty"`
+	MobileNetwork       string `gorm:"size:32" json:"mobileNetwork,omitempty"`
+	MobileCountry       string `gorm:"size:2" json:"mobileCountry,omitempty"`
+	MobileMsisdn        string `gorm:"size:20" json:"mobileMsisdn,omitempty"`
 	// PayoutID is the fiat provider's transfer id for the sell payout leg; the
 	// transfer.disburse webhook closes the intent against it.
 	PayoutID string `gorm:"size:64;index" json:"payoutId,omitempty"`

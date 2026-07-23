@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -64,6 +65,18 @@ type ITService struct {
 	// per-intent dynamic virtual accounts for buys. See it_automation.go.
 	payout NombaGateway
 	va     ITVAProvisioner
+
+	// rateQuoter is the live FX quote source for multi-currency withdrawal
+	// previews (Flutterwave). Optional — nil surfaces ErrITQuoteUnavailable.
+	// See it_quote.go.
+	rateQuoter FXRateQuoter
+
+	// quoteCacheMu guards quoteCache, a short-TTL cache of the derived
+	// NGN-per-destination-unit rate keyed by destination currency, so repeated
+	// withdrawal-quote requests don't each trigger a live Flutterwave probe.
+	// See it_quote.go.
+	quoteCacheMu sync.Mutex
+	quoteCache   map[string]quoteCacheEntry
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
@@ -304,6 +317,11 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 // CreateSellIntent debits the user's credited premium into pendingSettle
 // (on-chain, operator-signed) and records the intent as `debited` — the NGN
 // payout + settle/reverse follow. Quotes NGN at the locked sell rate.
+//
+// Catalog/destination validation (rail vs. currency, account-number format)
+// is performed by the HTTP handler before this is ever called — a future
+// second caller (e.g. a job or another handler) must re-validate the bank
+// destination itself; this method does not repeat that check.
 func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, walletAddr, mcgpWei string, bank *ITSellBank) (*models.ITIntent, error) {
 	if !s.IsConfigured() {
 		return nil, ErrITNotConfigured
@@ -311,6 +329,11 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	amount, ok := new(big.Int).SetString(strings.TrimSpace(mcgpWei), 10)
 	if !ok || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("invalid mcgpAmount")
+	}
+	// Fail fast on a malformed payout rail before any chain call — no orphan
+	// intent, no wasted operator gas.
+	if err := validateSellBank(bank); err != nil {
+		return nil, err
 	}
 	// Bound the operator gas/nonce surface: at most one in-flight sell per user.
 	// Each sell broadcasts an operator-signed debit, so without this a user could
@@ -353,11 +376,7 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		NgnKobo:       ngn.String(),
 		RateKobo:      sellRate.String(),
 	}
-	if bank != nil {
-		intent.BankCode = strings.TrimSpace(bank.Code)
-		intent.AccountNumber = strings.TrimSpace(bank.Number)
-		intent.AccountName = strings.TrimSpace(bank.Name)
-	}
+	applySellBank(intent, bank)
 	debitRef := itRef("IT:debit:", intent.ID)
 	intent.DebitRef = common.BytesToHash(debitRef[:]).Hex()
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
@@ -380,7 +399,7 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	// the intent carries a destination. A payout error is NOT a sell failure —
 	// the debit stands and the operator settles manually (legacy path); the
 	// error is recorded on the intent for visibility.
-	if s.payout != nil && intent.BankCode != "" && intent.AccountNumber != "" {
+	if s.payout != nil && sellIntentHasPayoutDestination(intent) {
 		if err := s.AutoPayout(ctx, intent); err != nil {
 			log.Printf("[it] auto-payout intent=%s failed (operator fallback): %v", intent.ID, err)
 		}

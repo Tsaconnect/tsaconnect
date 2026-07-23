@@ -25,6 +25,13 @@ type PayoutRequest struct {
 	// client.Transfer. The field is retained so existing call sites compile, but
 	// nothing sets it and the gateway ignores it.
 	SubAccountID string
+
+	// Multi-currency withdrawal (optional; empty ⇒ legacy NGN bank behavior).
+	DestinationCurrency string // ISO, e.g. "KES"; "" ⇒ "NGN"
+	RailType            string // "bank" | "mobile_money"; "" ⇒ "bank"
+	MobileNetwork       string // mobile_money only, e.g. "wave"
+	MobileCountry       string // mobile_money only, ISO-2, e.g. "SN"
+	MobileMsisdn        string // mobile_money only
 }
 
 // InboundPayment is a normalized inbound naira credit (buy flow). The webhook

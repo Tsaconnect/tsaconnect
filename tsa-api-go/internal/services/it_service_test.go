@@ -246,6 +246,109 @@ func TestCompanyPM_AlwaysConfiguredNoFallback(t *testing.T) {
 	}
 }
 
+// ─── Sell: destination currency + rail (Task 2.4) ──────────────────────────
+//
+// CreateSellIntent's happy path calls the live chain (PremiumCredited, then
+// OperatorDebitPremium/VerifyOperatorEvent) before it ever persists the
+// intent, and nothing in this package mocks that client (client=nil errors
+// "blockchain client not available" — true of every IT sell path today, not
+// new to this task). So the mapping CreateSellIntent uses to build the
+// intent's destination fields is extracted into applySellBank (in
+// it_automation.go) and exercised directly here; the fail-fast rail
+// validation runs before any chain call and IS exercised end-to-end through
+// CreateSellIntent below.
+
+func TestCreateSellIntent_MobileMoneyValidationFailsFast(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	// Missing MobileCountry/MobileMsisdn — must be rejected before any chain
+	// call or DB write (no orphan intent, no wasted operator gas).
+	bank := &ITSellBank{RailType: "mobile_money", MobileNetwork: "mpesa"}
+	if _, err := s.CreateSellIntent(ctx, uuid.New(), "0xWALLET", "1000000000000000000", bank); err == nil {
+		t.Fatal("expected error for incomplete mobile-money destination")
+	}
+	var n int64
+	s.db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("no intent should be created on failed rail validation, got %d", n)
+	}
+}
+
+func TestCreateSellIntent_UnknownRailValidationFailsFast(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	bank := &ITSellBank{RailType: "carrier_pigeon"}
+	if _, err := s.CreateSellIntent(ctx, uuid.New(), "0xWALLET", "1000000000000000000", bank); err == nil {
+		t.Fatal("expected error for unknown payout rail")
+	}
+}
+
+func TestCreateSellIntent_AppliesMobileMoneyDestination(t *testing.T) {
+	intent := &models.ITIntent{}
+	bank := &ITSellBank{
+		DestinationCurrency: "KES",
+		RailType:            "mobile_money",
+		MobileNetwork:       "mpesa",
+		MobileCountry:       "KE",
+		MobileMsisdn:        "254712345678",
+	}
+	applySellBank(intent, bank)
+	if intent.DestinationCurrency != "KES" || intent.RailType != "mobile_money" ||
+		intent.MobileNetwork != "mpesa" || intent.MobileCountry != "KE" || intent.MobileMsisdn != "254712345678" {
+		t.Fatalf("rail fields not persisted onto intent: %+v", intent)
+	}
+	if intent.BankCode != "" || intent.AccountNumber != "" || intent.AccountName != "" {
+		t.Fatalf("mobile-money sell must not populate legacy bank fields: %+v", intent)
+	}
+}
+
+// TestCreateSellIntent_NormalizesRailAndCurrencyCase guards against
+// case-sensitive downstream consumers (FlutterwaveGateway.InitiatePayout
+// switches on rail with a raw string match and checks destCur == "NGN";
+// SupportedWithdrawalQuoteCurrencies keys on uppercase codes) silently
+// falling through to the wrong branch/allowlist miss when the caller sends
+// mixed-case input. applySellBank is the single point of truth for
+// normalization, so mixed case in must come out normalized.
+func TestCreateSellIntent_NormalizesRailAndCurrencyCase(t *testing.T) {
+	intent := &models.ITIntent{}
+	bank := &ITSellBank{
+		RailType:            "Mobile_Money",
+		DestinationCurrency: "ghs",
+		MobileCountry:       "sn",
+	}
+	applySellBank(intent, bank)
+	if intent.RailType != "mobile_money" {
+		t.Fatalf("RailType not lowercased: got %q", intent.RailType)
+	}
+	if intent.DestinationCurrency != "GHS" {
+		t.Fatalf("DestinationCurrency not uppercased: got %q", intent.DestinationCurrency)
+	}
+	if intent.MobileCountry != "SN" {
+		t.Fatalf("MobileCountry not uppercased: got %q", intent.MobileCountry)
+	}
+}
+
+func TestCreateSellIntent_AppliesLegacyBankDestination(t *testing.T) {
+	intent := &models.ITIntent{}
+	bank := &ITSellBank{Code: "044", Number: "0123456789", Name: "JOHN DOE"}
+	applySellBank(intent, bank)
+	if intent.BankCode != "044" || intent.AccountNumber != "0123456789" || intent.AccountName != "JOHN DOE" {
+		t.Fatalf("legacy bank fields not persisted onto intent: %+v", intent)
+	}
+	if intent.DestinationCurrency != "" || intent.RailType != "" || intent.MobileNetwork != "" ||
+		intent.MobileCountry != "" || intent.MobileMsisdn != "" {
+		t.Fatalf("NGN-bank sell must not populate rail fields — legacy behavior must stay byte-for-byte unchanged: %+v", intent)
+	}
+}
+
+func TestCreateSellIntent_NilBankLeavesDestinationEmpty(t *testing.T) {
+	intent := &models.ITIntent{}
+	applySellBank(intent, nil)
+	if intent.BankCode != "" || intent.RailType != "" || intent.DestinationCurrency != "" {
+		t.Fatalf("nil bank must leave all destination fields empty: %+v", intent)
+	}
+}
+
 func TestCreateBuyIntent_NoPM(t *testing.T) {
 	s := newITTestService(t)
 	ctx := context.Background()
