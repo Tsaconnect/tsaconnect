@@ -11,11 +11,14 @@ import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AmountInput, Button, Card, CopyableField, Divider, Icon, SummaryCard, SummaryRow, Text } from '@/components/ui';
 import { itBuy, type ITIntent, type ITPayTo } from '@/services/itApi';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
 
 type Screen = 'form' | 'submitting' | 'instructions' | 'error';
 
 export default function ITBuy() {
   const { colors, spacing } = useTheme();
+  const { formatPrice, allRates, currency } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
   const [naira, setNaira] = useState('');
   const [error, setError] = useState('');
@@ -48,6 +51,14 @@ export default function ITBuy() {
     setScreen('instructions');
   };
 
+  // Payment is always a real Naira bank transfer (Nomba only settles NGN) —
+  // the "Pay ₦X" instruction itself must stay in Naira. This is only a
+  // secondary, informational conversion in the user's selected display
+  // currency, shown alongside (never instead of) the Naira amount.
+  const ngnRate = allRates.NGN?.midRate ?? null;
+  const payUsd = ngnToUsd(Number(naira) || 0, ngnRate);
+  const showPaySecondary = payUsd != null && shouldShowNgnSecondary(currency.code);
+
   if (screen === 'submitting') {
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
@@ -61,9 +72,14 @@ export default function ITBuy() {
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
           <Card>
-            <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.sm }}>
+            <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
               Pay ₦{Number(naira).toLocaleString()} to complete
             </Text>
+            {showPaySecondary ? (
+              <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
+                ≈ {formatPrice(payUsd as number)}
+              </Text>
+            ) : null}
             <SummaryCard>
               <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
               <Divider spacing="xs" />

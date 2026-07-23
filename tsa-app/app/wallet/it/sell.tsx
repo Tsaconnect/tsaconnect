@@ -10,17 +10,21 @@ import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AmountInput, Button, Card, Icon, SummaryCard, SummaryRow, Text } from '@/components/ui';
 import { getITBalance, getITRate, itSell } from '@/services/itApi';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
 
 type Screen = 'form' | 'submitting' | 'done' | 'error';
 
 export default function ITSell() {
   const { colors, spacing } = useTheme();
+  const { formatPrice, allRates, currency } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
   const [credited, setCredited] = useState('0'); // wei
   const [sellRateKobo, setSellRateKobo] = useState('0');
-  const [ngnOut, setNgnOut] = useState('');
+  const [ngnOut, setNgnOut] = useState(''); // formatted for display
+  const [ngnOutValue, setNgnOutValue] = useState<number | null>(null); // raw Naira amount
 
   useEffect(() => {
     (async () => {
@@ -57,12 +61,22 @@ export default function ITSell() {
     }
     try {
       const naira = (Number(ethers.formatUnits(wei, 18)) * (Number(sellRateKobo) / 100));
+      setNgnOutValue(naira);
       setNgnOut(naira.toLocaleString(undefined, { maximumFractionDigits: 2 }));
     } catch {
+      setNgnOutValue(null);
       setNgnOut('');
     }
     setScreen('done');
   };
+
+  // The payout itself is always real Naira (Nomba settles NGN only) — the
+  // "→ ₦X" figure must stay in Naira. This is only a secondary, informational
+  // conversion in the user's selected display currency, shown alongside
+  // (never instead of) the Naira payout.
+  const ngnRate = allRates.NGN?.midRate ?? null;
+  const payoutUsd = ngnOutValue != null ? ngnToUsd(ngnOutValue, ngnRate) : null;
+  const showPayoutSecondary = payoutUsd != null && shouldShowNgnSecondary(currency.code);
 
   if (screen === 'submitting') {
     return (
@@ -80,6 +94,11 @@ export default function ITSell() {
         <Text variant="body" style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}>
           {amount} MCGP{ngnOut ? ` → ₦${ngnOut}` : ''}. Your Naira payout is processing.
         </Text>
+        {showPayoutSecondary ? (
+          <Text variant="bodySm" style={{ marginTop: spacing.xs, color: colors.textMuted, textAlign: 'center' }}>
+            ≈ {formatPrice(payoutUsd as number)}
+          </Text>
+        ) : null}
         <View style={{ height: spacing.xl }} />
         <Button title="Done" onPress={() => router.replace('/wallet/it')} />
       </SafeAreaView>

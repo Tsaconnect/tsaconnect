@@ -9,6 +9,7 @@
 import React from "react";
 import { View, Image, ImageSourcePropType } from "react-native";
 import { useTheme } from "@/theme";
+import { useCurrency } from "@/contexts/CurrencyContext";
 import { Surface, Text } from "@/components/ui";
 import { assets } from "../../constants";
 
@@ -98,9 +99,14 @@ export const People: React.FC = () => {
   );
 };
 
-// Component for displaying price
+// Component for displaying price. `price` is a USD-anchored figure (product
+// prices are stored/returned in USD — see tsa-app/CLAUDE.md); render it in the
+// user's selected display currency via CurrencyContext instead of the
+// previously hardcoded "Amount in NGN" label paired with a "$" value (a
+// stale/mismatched leftover — the label and the symbol never agreed).
 export const Price: React.FC<PriceProps> = ({ price }) => {
   const { spacing } = useTheme();
+  const { formatPrice, currency } = useCurrency();
   return (
     <Surface
       elevation="sm"
@@ -113,9 +119,9 @@ export const Price: React.FC<PriceProps> = ({ price }) => {
         maxWidth: "50%",
       }}
     >
-      <Text variant="caption">Amount in NGN</Text>
+      <Text variant="caption">Amount in {currency.code}</Text>
       <Text variant="title3" weight="600">
-        ${price}
+        {formatPrice(price)}
       </Text>
     </Surface>
   );
