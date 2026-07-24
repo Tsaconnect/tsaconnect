@@ -89,25 +89,24 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 	first, last := splitPersonName(user.Name)
 	reqRef := ITVARefPrefix + strings.ReplaceAll(user.ID.String(), "-", "")
 
+	// Identity (BVN/NIN) goes on the VA — not the customer. Sending id_type /
+	// id_number on /customers is rejected as REQUEST_NOT_VALID. Phone must be
+	// the nested {country_code,number} object; omit when we can't normalize.
 	custReq := FWCustomerRequest{
 		Email:         user.Email,
 		Name:          &FWName{First: first, Last: last},
-		Phone:         strings.TrimSpace(user.PhoneNumber),
-		IDType:        idType,
-		IDNumber:      idNumber,
+		Phone:         ParseFWPhone(user.PhoneNumber),
 		MetaReference: "it-cust-" + strings.ReplaceAll(user.ID.String(), "-", ""),
 	}
 	customerID, err := s.fw.CreateCustomer(ctx, custReq)
-	if err != nil {
-		// Identity may only be accepted on the VA (PM path). Retry without
-		// customer-level id fields — never log idNumber.
-		log.Printf("[it va] CreateCustomer with id fields failed user=%s: %v — retrying without", user.ID, err)
-		custReq.IDType = ""
-		custReq.IDNumber = ""
+	if err != nil && custReq.Phone != nil {
+		// Phone still wrong shape / rejected — retry email+name only.
+		log.Printf("[it va] CreateCustomer with phone failed user=%s: %v — retrying without phone", user.ID, err)
+		custReq.Phone = nil
 		customerID, err = s.fw.CreateCustomer(ctx, custReq)
-		if err != nil {
-			return nil, fmt.Errorf("it va create customer: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("it va create customer: %w", err)
 	}
 
 	vaReq := FWVirtualAccountRequest{
