@@ -23,6 +23,9 @@ const (
 	ITStatusReversed       = "reversed"        // sell payout failed, premium restored
 	ITStatusFailed         = "failed"
 	ITStatusCancelled      = "cancelled"
+	// ITStatusAwaitingRate parks a VA credit when FX is stale at settlement —
+	// money already landed; never credit at a stale rate (Spec 1).
+	ITStatusAwaitingRate = "awaiting_rate"
 )
 
 // ITIntent is one IT buy or sell. Amounts are base-unit decimal strings (MCGP

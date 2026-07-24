@@ -66,6 +66,9 @@ type ITService struct {
 	payout NombaGateway
 	va     ITVAProvisioner
 
+	// fw is the Flutterwave client for Spec 1 per-user static VA activate.
+	fw *FlutterwaveClient
+
 	// rateQuoter is the live FX quote source for multi-currency withdrawal
 	// previews (Flutterwave). Optional — nil surfaces ErrITQuoteUnavailable.
 	// See it_quote.go.

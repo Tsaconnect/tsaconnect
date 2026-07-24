@@ -490,7 +490,8 @@ func main() {
 	// IT dormant) leaves QuoteWithdrawal returning ErrITQuoteUnavailable.
 	if itService != nil && fwClient != nil {
 		itService.SetRateQuoter(fwClient)
-		log.Printf("[it] withdrawal FX quote wired (Flutterwave, pass-through)")
+		itService.SetFlutterwaveClient(fwClient)
+		log.Printf("[it] withdrawal FX quote + per-user fiat VA activate wired (Flutterwave)")
 	}
 
 	// Resolve the company customer that parents all FW virtual accounts. Uses
@@ -737,12 +738,6 @@ func main() {
 				log.Printf("[it] sell auto-payout ACTIVE (gateway live)")
 			} else {
 				log.Printf("[it] sell auto-payout dormant: no live payout gateway")
-			}
-			if vaProv := services.NewFlutterwaveVAProvisioner(fwClient, fwCustomerID); vaProv != nil {
-				itService.SetVAProvisioner(vaProv)
-				log.Printf("[it] buy dynamic-VA provisioning ACTIVE")
-			} else {
-				log.Printf("[it] buy dynamic VAs dormant: FW client or FLUTTERWAVE_CUSTOMER_ID missing — company static VA fallback")
 			}
 		}
 		pmh = handlers.NewPMHandler(pmAuto, pmSvc)

@@ -26,6 +26,11 @@ func IsValidBVN(bvn string) bool {
 	return bvnRegex.MatchString(bvn)
 }
 
+// IsValidNgIDNumber checks a Nigerian BVN or NIN: exactly 11 digits.
+func IsValidNgIDNumber(id string) bool {
+	return bvnRegex.MatchString(id)
+}
+
 // IsValidPhoneNumber checks if the given string is a valid phone number.
 func IsValidPhoneNumber(phone string) bool {
 	return phoneRegex.MatchString(phone)

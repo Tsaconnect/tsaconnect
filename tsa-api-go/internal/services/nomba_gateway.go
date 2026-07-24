@@ -55,6 +55,9 @@ type InboundPayment struct {
 	// the provider API and verify it before crediting. Empty for providers that
 	// don't support charge verification (Nomba).
 	ProviderChargeID string
+	// CustomerID is the Flutterwave customer id on charge.completed (Spec 1
+	// standing-VA attribution). Empty for Nomba / older parsers.
+	CustomerID string
 }
 
 // PayoutStatus is a normalized payout-result webhook (sell flow).
