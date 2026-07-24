@@ -1,15 +1,27 @@
 // app/wallet/it/buy.tsx
 //
-// Buy MCGP with Naira. Creates an intent + payment reference; the user pays the
-// company merchant via Nomba including the reference, and the balance updates
-// once the payment is confirmed (no client signing).
+// Buy MCGP with Naira (PM flow shell). Payment currency and method are locked
+// to NGN / bank transfer until multi-currency collection is product-ready.
+// Continue creates an intent + payment reference; the user pays the company
+// merchant via bank transfer including the reference.
 import React, { useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
-import { AmountInput, Button, Card, CopyableField, Divider, Icon, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import {
+  AmountInput,
+  Button,
+  Card,
+  CopyableField,
+  Divider,
+  Icon,
+  SelectRow,
+  SummaryCard,
+  SummaryRow,
+  Text,
+} from '@/components/ui';
 import { itBuy, type ITIntent, type ITPayTo } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
@@ -51,10 +63,8 @@ export default function ITBuy() {
     setScreen('instructions');
   };
 
-  // Payment is always a real Naira bank transfer (Nomba only settles NGN) —
-  // the "Pay ₦X" instruction itself must stay in Naira. This is only a
-  // secondary, informational conversion in the user's selected display
-  // currency, shown alongside (never instead of) the Naira amount.
+  // Payment is always a real Naira bank transfer — the "Pay ₦X" instruction
+  // itself must stay in Naira. Secondary line is display-currency only.
   const ngnRate = allRates.NGN?.midRate ?? null;
   const payUsd = ngnToUsd(Number(naira) || 0, ngnRate);
   const showPaySecondary = payUsd != null && shouldShowNgnSecondary(currency.code);
@@ -141,9 +151,28 @@ export default function ITBuy() {
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
-      <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
+      <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }} keyboardShouldPersistTaps="handled">
+        <Text variant="bodySm" style={{ color: colors.textMuted }}>
+          Buy spendable MCGP with a Naira bank transfer. More payment currencies will open later.
+        </Text>
+
+        <SelectRow
+          label="Payment currency"
+          value="NGN · Nigerian Naira"
+          leftIcon="wallet"
+          disabled
+          onPress={() => {}}
+        />
+        <SelectRow
+          label="Method of payment"
+          value="Bank transfer"
+          leftIcon="bank"
+          disabled
+          onPress={() => {}}
+        />
+
         <AmountInput
-          label="Amount in Naira"
+          label="Amount to buy"
           value={naira}
           onChangeText={setNaira}
           symbol="₦"

@@ -2,38 +2,24 @@ package services
 
 import "testing"
 
-// TestWithdrawalDestinationCatalog pins the resolved v1 catalog: NGN/bank,
-// GHS/bank, XOF/mobile_money/wave — nothing more, nothing less.
+// TestWithdrawalDestinationCatalog pins the product catalog: NGN/bank only
+// until multi-currency withdrawal is re-enabled.
 func TestWithdrawalDestinationCatalog(t *testing.T) {
-	if len(WithdrawalDestinationCatalog) != 3 {
-		t.Fatalf("catalog has %d entries, want 3: %+v", len(WithdrawalDestinationCatalog), WithdrawalDestinationCatalog)
+	if len(WithdrawalDestinationCatalog) != 1 {
+		t.Fatalf("catalog has %d entries, want 1: %+v", len(WithdrawalDestinationCatalog), WithdrawalDestinationCatalog)
 	}
-	want := map[string]WithdrawalDestination{
-		"NGN": {Currency: "NGN", Rail: "bank"},
-		"GHS": {Currency: "GHS", Rail: "bank"},
-		"XOF": {Currency: "XOF", Rail: "mobile_money", Network: "wave"},
+	got := WithdrawalDestinationCatalog[0]
+	if got.Currency != "NGN" || got.Rail != "bank" || got.Network != "" {
+		t.Fatalf("catalog entry = %+v, want NGN/bank", got)
 	}
-	for _, got := range WithdrawalDestinationCatalog {
-		w, ok := want[got.Currency]
-		if !ok {
-			t.Fatalf("unexpected catalog currency %q", got.Currency)
-		}
-		if got.Rail != w.Rail || got.Network != w.Network {
-			t.Fatalf("catalog entry for %s = %+v, want rail=%q network=%q", got.Currency, got, w.Rail, w.Network)
-		}
-		if got.Label == "" {
-			t.Fatalf("catalog entry for %s has no label", got.Currency)
-		}
-		delete(want, got.Currency)
-	}
-	if len(want) != 0 {
-		t.Fatalf("catalog missing currencies: %+v", want)
+	if got.Label == "" {
+		t.Fatal("catalog entry for NGN has no label")
 	}
 }
 
 // TestSupportedWithdrawalQuoteCurrencies_DerivesFromCatalog confirms the FX
-// quote allowlist is exactly "the catalog's currencies minus NGN" — the two
-// must never be maintained as separate lists that can drift.
+// quote allowlist is exactly "the catalog's currencies minus NGN" — empty
+// while the product catalog is NGN-only.
 func TestSupportedWithdrawalQuoteCurrencies_DerivesFromCatalog(t *testing.T) {
 	want := map[string]bool{}
 	for _, d := range WithdrawalDestinationCatalog {
@@ -55,24 +41,22 @@ func TestSupportedWithdrawalQuoteCurrencies_DerivesFromCatalog(t *testing.T) {
 	}
 }
 
-// TestIsSupportedWithdrawalDestination pins the accept/reject matrix from the
-// task brief.
+// TestIsSupportedWithdrawalDestination pins the accept/reject matrix for the
+// NGN-only product catalog.
 func TestIsSupportedWithdrawalDestination(t *testing.T) {
 	cases := []struct {
 		name                    string
 		currency, rail, network string
 		want                    bool
 	}{
-		{"GHS bank accepted", "GHS", "bank", "", true},
-		{"XOF mobile_money wave accepted", "XOF", "mobile_money", "wave", true},
 		{"NGN bank accepted", "NGN", "bank", "", true},
-		{"case-insensitive currency+rail", "ghs", "BANK", "", true},
-		{"case-insensitive network", "xof", "Mobile_Money", "WAVE", true},
-		{"USD bank rejected (unknown currency)", "USD", "bank", "", false},
-		{"GHS mobile_money rejected (wrong rail for currency)", "GHS", "mobile_money", "", false},
-		{"XOF mobile_money mpesa rejected (wrong network)", "XOF", "mobile_money", "mpesa", false},
+		{"case-insensitive currency+rail", "ngn", "BANK", "", true},
+		{"GHS bank rejected (not in product catalog)", "GHS", "bank", "", false},
+		{"XOF mobile_money wave rejected (not in product catalog)", "XOF", "mobile_money", "wave", false},
+		{"USD bank rejected", "USD", "bank", "", false},
+		{"NGN mobile_money rejected", "NGN", "mobile_money", "", false},
 		{"empty currency rejected", "", "bank", "", false},
-		{"empty rail rejected", "GHS", "", "", false},
+		{"empty rail rejected", "NGN", "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -100,11 +100,11 @@ func (h *ITHandler) QuoteWithdrawal(c *gin.Context) {
 	})
 }
 
-// GET /api/it/withdraw/destinations — the v1 catalog of currency/rail (and,
-// for mobile_money, network) combinations IT withdrawal supports. The app's
-// destination picker renders only these entries so it never offers a rail
-// the API can't fulfill. Single source of truth:
-// services.WithdrawalDestinationCatalog — also backs
+// GET /api/it/withdraw/destinations — the product catalog of currency/rail
+// (and, for mobile_money, network) combinations IT withdrawal supports.
+// Currently NGN/bank only. The app's destination picker renders only these
+// entries so it never offers a rail the API can't fulfill. Single source of
+// truth: services.WithdrawalDestinationCatalog — also backs
 // SupportedWithdrawalQuoteCurrencies and the Sell destination validation
 // below, so this list can't drift from what Sell actually accepts.
 func (h *ITHandler) WithdrawalDestinations(c *gin.Context) {

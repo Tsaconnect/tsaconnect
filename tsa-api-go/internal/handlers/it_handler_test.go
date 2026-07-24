@@ -147,29 +147,27 @@ func TestSell_UnsupportedDestination_Returns400NoIntent(t *testing.T) {
 	}
 }
 
-// TestSell_ValidDestination_PassesCatalogGate covers the accept side: a
-// supported (currency, rail, network) combo must NOT be rejected by the
-// destination-catalog check. It still fails later (nil blockchain client —
-// see newITTestHandler), but that failure must come from the service, not
-// from our new validation, proving the gate let it through.
+// TestSell_ValidDestination_PassesCatalogGate covers the accept side: an
+// explicit NGN/bank catalog selection must NOT be rejected by the destination
+// gate. It still fails later (nil blockchain client — see newITTestHandler),
+// but that failure must come from the service, not catalog validation.
 func TestSell_ValidDestination_PassesCatalogGate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, db := newITTestHandler(t)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
 
-	cases := []map[string]any{
-		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "GHS", "railType": "bank",
-			"bankCode": "044", "accountNumber": "0123456789", "accountName": "JOHN DOE"},
-		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "XOF", "railType": "mobile_money",
-			"mobileNetwork": "wave", "mobileCountry": "SN", "mobileMsisdn": "221771234567"},
-	}
-	for _, body := range cases {
-		w := doITSell(h, user, body)
-		resp := decodeITResponse(t, w)
-		msg, _ := resp["message"].(string)
-		if msg == "Unsupported withdrawal destination for this currency/rail combination" {
-			t.Fatalf("case %+v: valid destination wrongly rejected by catalog gate (body=%s)", body, w.Body.String())
-		}
+	w := doITSell(h, user, map[string]any{
+		"mcgpAmount":          "1000000000000000000",
+		"destinationCurrency": "NGN",
+		"railType":            "bank",
+		"bankCode":            "044",
+		"accountNumber":       "0123456789",
+		"accountName":         "JOHN DOE",
+	})
+	resp := decodeITResponse(t, w)
+	msg, _ := resp["message"].(string)
+	if msg == "Unsupported withdrawal destination for this currency/rail combination" {
+		t.Fatalf("NGN/bank destination wrongly rejected by catalog gate (body=%s)", w.Body.String())
 	}
 
 	var n int64
@@ -236,12 +234,11 @@ func TestSell_BadBankFields_StillRejected(t *testing.T) {
 	}
 }
 
-// TestSell_NonNGNBank_NonTenDigitAccountNumber_NotRejectedByNubanRule covers
-// the bug fix: the 10-digit NUBAN check must be scoped to NGN only. A GHS
-// bank withdrawal with a realistic 7-digit Ghanaian account number must NOT
-// be rejected by the "10-digit accountNumber" gate — it may still fail later
-// (nil blockchain client, per newITTestHandler), but not from this check.
-func TestSell_NonNGNBank_NonTenDigitAccountNumber_NotRejectedByNubanRule(t *testing.T) {
+// TestSell_NonNGNBank_RejectedByCatalog covers the NGN-only product lock: a
+// GHS bank withdrawal is rejected at the catalog gate (400) before NUBAN or
+// chain logic runs. When multi-currency sell is re-enabled, restore a
+// NUBAN-scope regression for non-NGN account formats.
+func TestSell_NonNGNBank_RejectedByCatalog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, db := newITTestHandler(t)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
@@ -251,13 +248,16 @@ func TestSell_NonNGNBank_NonTenDigitAccountNumber_NotRejectedByNubanRule(t *test
 		"destinationCurrency": "GHS",
 		"railType":            "bank",
 		"bankCode":            "044",
-		"accountNumber":       "1234567", // 7 digits — realistic Ghanaian account number, not NUBAN
+		"accountNumber":       "1234567",
 		"accountName":         "JOHN DOE",
 	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
 	resp := decodeITResponse(t, w)
 	msg, _ := resp["message"].(string)
-	if msg == "bankCode and a 10-digit accountNumber are required" {
-		t.Fatalf("GHS/bank sell with non-10-digit accountNumber wrongly rejected by the NGN NUBAN rule (body=%s)", w.Body.String())
+	if msg != "Unsupported withdrawal destination for this currency/rail combination" {
+		t.Fatalf("message = %q, want catalog-validation message", msg)
 	}
 
 	var n int64
@@ -265,7 +265,7 @@ func TestSell_NonNGNBank_NonTenDigitAccountNumber_NotRejectedByNubanRule(t *test
 		t.Fatalf("count intents: %v", err)
 	}
 	if n != 0 {
-		t.Fatalf("no intent should be persisted (chain call fails first in this test setup), got %d", n)
+		t.Fatalf("no intent should be created for an unsupported destination, got %d", n)
 	}
 }
 

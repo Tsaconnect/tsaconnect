@@ -1,6 +1,7 @@
 // app/wallet/it/index.tsx
 //
-// Instant Transfer hub: spendable (premium) MCGP balance + buy/sell with Naira.
+// Instant Transfer hub: spendable MCGP balance + Buy/Sell entry points.
+// Buy/Sell open the PM full-page forms; breakdown preview lives on those flows.
 import React, { useCallback, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,7 +9,7 @@ import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
-import { AccentCard, Button, Card, Divider, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import { AccentCard, Button, Spinner, Text } from '@/components/ui';
 import CurrencySelector from '@/components/currency/CurrencySelector';
 import { getITBalance, getITRate, type ITBalance, type ITRate } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
@@ -93,25 +94,12 @@ export default function ITHub() {
 
         <View style={{ flexDirection: 'row', gap: spacing.md }}>
           <View style={{ flex: 1 }}>
-            <Button title="Buy with ₦" onPress={() => router.push('/wallet/it/buy')} />
+            <Button title="Buy" onPress={() => router.push('/wallet/it/buy')} />
           </View>
           <View style={{ flex: 1 }}>
-            <Button title="Sell for ₦" variant="secondary" onPress={() => router.push('/wallet/it/sell')} />
+            <Button title="Sell" variant="secondary" onPress={() => router.push('/wallet/it/sell')} />
           </View>
         </View>
-
-        <Card>
-          <SummaryCard>
-            <SummaryRow label="Bought (USDC)" value={`${fmtMcgp(bal?.premiumBought)} MCGP`} />
-            <Divider spacing="xs" />
-            <SummaryRow label="Credited (Naira)" value={`${fmtMcgp(bal?.premiumCredited)} MCGP`} />
-            <SummaryRow label="Selling (pending ₦)" value={`${fmtMcgp(bal?.pendingSettle)} MCGP`} />
-          </SummaryCard>
-          <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-            MCGP bought with Naira is spendable in the marketplace and cashed out by selling back for
-            Naira.
-          </Text>
-        </Card>
 
         {loading ? <Spinner /> : null}
       </ScrollView>

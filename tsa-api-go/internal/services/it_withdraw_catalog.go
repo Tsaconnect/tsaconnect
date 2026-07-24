@@ -16,18 +16,19 @@ type WithdrawalDestination struct {
 	Label   string `json:"label"`
 }
 
-// WithdrawalDestinationCatalog is the resolved v1 catalog. Deliberately
-// minimal/conservative — FW-account-confirmation (a separate sandbox gate) is
-// not a reason to withhold a currency here; only add an entry once the rail
-// is actually fulfillable end-to-end.
+// WithdrawalDestinationCatalog is the product catalog of withdrawal
+// destinations IT currently offers. NGN bank only until African-currency /
+// mobile-money payouts are sandbox-proven and re-enabled as product.
 //
-// NGN needs no FX quote (it's the source currency, 1:1 — see
-// SupportedWithdrawalQuoteCurrencies) but IS a valid withdrawal destination,
-// so it's listed here even though it's excluded from the quote allowlist.
+// Cross-currency gateway + quote code remains in-tree; with no non-NGN catalog
+// entries, SupportedWithdrawalQuoteCurrencies is empty and Sell rejects any
+// foreign destination at the handler.
+//
+// NGN needs no FX quote (it's the source currency, 1:1) but IS a valid
+// withdrawal destination, so it is listed even though it is excluded from the
+// quote allowlist.
 var WithdrawalDestinationCatalog = []WithdrawalDestination{
 	{Currency: "NGN", Rail: "bank", Label: "Nigerian Bank Account"},
-	{Currency: "GHS", Rail: "bank", Label: "Ghanaian Bank Account"},
-	{Currency: "XOF", Rail: "mobile_money", Network: "wave", Label: "Wave Mobile Money"},
 }
 
 // IsSupportedWithdrawalDestination reports whether (currency, rail, network)

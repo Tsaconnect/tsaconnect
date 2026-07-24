@@ -8,12 +8,22 @@ import (
 	"testing"
 )
 
+// allowQuoteCurrency temporarily adds a currency to the FX-quote allowlist so
+// dormant quote-math tests can still exercise QuoteWithdrawal while the
+// product catalog is NGN-only (SupportedWithdrawalQuoteCurrencies is empty).
+func allowQuoteCurrency(t *testing.T, currency string) {
+	t.Helper()
+	SupportedWithdrawalQuoteCurrencies[currency] = true
+	t.Cleanup(func() { delete(SupportedWithdrawalQuoteCurrencies, currency) })
+}
+
 // TestQuoteWithdrawal pins the direction-robust derivation (see it_quote.go):
 // FW's /transfers/rates is destination-amount shaped; instead of trusting the
 // ambiguous top-level "rate" field, QuoteWithdrawal derives
 // ngnPerDestUnit = Source.Amount / Destination.Amount from the probed 1-unit
 // destination amount, then destAmount = ngnAmount / ngnPerDestUnit.
 func TestQuoteWithdrawal(t *testing.T) {
+	allowQuoteCurrency(t, "GHS")
 	var tokenCalls, rateCalls int32
 	var gotBody map[string]any
 	mux := http.NewServeMux()
@@ -66,6 +76,7 @@ func TestQuoteWithdrawal(t *testing.T) {
 // TestQuoteWithdrawal_NoQuoter confirms the dormant-by-default posture: with
 // no live FX source wired, QuoteWithdrawal fails clearly instead of guessing.
 func TestQuoteWithdrawal_NoQuoter(t *testing.T) {
+	allowQuoteCurrency(t, "GHS")
 	svc := NewITService(nil, nil, nil)
 	if _, _, err := svc.QuoteWithdrawal(context.Background(), 15000, "GHS"); err != ErrITQuoteUnavailable {
 		t.Fatalf("err = %v, want ErrITQuoteUnavailable", err)
@@ -76,6 +87,7 @@ func TestQuoteWithdrawal_NoQuoter(t *testing.T) {
 // rate from a degenerate FW response (zero/negative Source or Destination
 // amount) instead of dividing by zero or returning a bogus quote.
 func TestQuoteWithdrawal_ZeroAmounts(t *testing.T) {
+	allowQuoteCurrency(t, "GHS")
 	var tokenCalls int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
@@ -100,8 +112,10 @@ func TestQuoteWithdrawal_ZeroAmounts(t *testing.T) {
 }
 
 // TestQuoteWithdrawal_UnsupportedCurrency confirms QuoteWithdrawal rejects a
-// destination currency outside the v1 allowlist BEFORE ever calling
-// Flutterwave (no wasted live probe for a currency we can't offer).
+// destination currency outside the allowlist BEFORE ever calling Flutterwave
+// (no wasted live probe). With the NGN-only product catalog the allowlist is
+// empty, so every foreign currency is rejected — including previously offered
+// African corridors.
 func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 	var tokenCalls, rateCalls int32
 	mux := http.NewServeMux()
@@ -122,8 +136,10 @@ func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 	svc := NewITService(nil, nil, nil)
 	svc.SetRateQuoter(c)
 
-	if _, _, err := svc.QuoteWithdrawal(context.Background(), 15000, "USD"); err != ErrUnsupportedWithdrawalCurrency {
-		t.Fatalf("err = %v, want ErrUnsupportedWithdrawalCurrency", err)
+	for _, currency := range []string{"USD", "GHS", "XOF"} {
+		if _, _, err := svc.QuoteWithdrawal(context.Background(), 15000, currency); err != ErrUnsupportedWithdrawalCurrency {
+			t.Fatalf("%s: err = %v, want ErrUnsupportedWithdrawalCurrency", currency, err)
+		}
 	}
 	if rateCalls != 0 {
 		t.Fatalf("rateCalls = %d, want 0 (FW must not be called for an unsupported currency)", rateCalls)
@@ -135,6 +151,7 @@ func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 // reuse the cached rate instead of re-probing Flutterwave, and different NGN
 // amounts still derive correct destAmounts off the shared cached rate.
 func TestQuoteWithdrawal_CacheHit(t *testing.T) {
+	allowQuoteCurrency(t, "GHS")
 	var tokenCalls, rateCalls int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
