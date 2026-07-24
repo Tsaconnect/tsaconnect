@@ -192,8 +192,34 @@ const SignupScreen1: React.FC<SignupScreen1Props> = ({
         onPress={handleNext}
         loading={isLoading}
         disabled={isLoading}
-        style={{ marginTop: spacing.sm, marginBottom: spacing['2xl'] }}
+        style={{ marginTop: spacing.sm }}
       />
+
+      {/* Consent-by-action notice. Both stores require the terms and privacy
+          policy to be reachable before an account is created, not only after. */}
+      <View style={{ marginTop: spacing.md, marginBottom: spacing['2xl'] }}>
+        <Text variant="caption" color="textMuted" align="center">
+          By creating an account you agree to our{' '}
+          <Text
+            variant="caption"
+            weight="600"
+            color="accent"
+            onPress={() => router.push('/legal/terms')}
+          >
+            Terms of Service
+          </Text>{' '}
+          and{' '}
+          <Text
+            variant="caption"
+            weight="600"
+            color="accent"
+            onPress={() => router.push('/legal/privacy')}
+          >
+            Privacy Policy
+          </Text>
+          .
+        </Text>
+      </View>
 
       <View
         style={{

@@ -6,9 +6,12 @@ import {
   StyleSheet,
   ScrollView,
   Alert,
+  Linking,
 } from "react-native";
 import { Icon } from "react-native-elements";
 import { router } from "expo-router";
+import Constants from "expo-constants";
+import { COMPANY } from "@/constants/legal";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAuth } from "../../AuthContext/AuthContext";
 import CurrencySelector from "../../components/currency/CurrencySelector";
@@ -155,23 +158,10 @@ const SettingsScreen = () => {
     );
   };
 
-  const handleDeleteAccount = () => {
-    Alert.alert(
-      "Delete Account",
-      "This action is permanent and cannot be undone. All your data will be lost.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            // TODO: Implement account deletion API call
-            Alert.alert("Coming Soon", "Account deletion will be available soon.");
-          },
-        },
-      ]
-    );
-  };
+  // The confirmation, password re-auth and consequences live on the dedicated
+  // screen — an Alert can't carry the non-custodial-wallet caveat or the
+  // retention notice, and both matter before someone deletes.
+  const handleDeleteAccount = () => router.push("/delete-account");
 
   const sections: SettingsSection[] = [
     {
@@ -263,15 +253,40 @@ const SettingsScreen = () => {
         {
           icon: "help-outline",
           label: "Contact Support",
-          description: "Get in touch with our support team",
-          onPress: () =>
-            Alert.alert("Support", "Email us at support@tsaconnect.com"),
+          description: `Email ${COMPANY.supportEmail}`,
+          onPress: () => {
+            Linking.openURL(`mailto:${COMPANY.supportEmail}`).catch(() =>
+              Alert.alert("Support", `Email us at ${COMPANY.supportEmail}`)
+            );
+          },
         },
         {
           icon: "info-outline",
           label: "About TSA Connect",
           description: "App version and information",
-          onPress: () => Alert.alert("TSA Connect", "Version 1.0.0"),
+          onPress: () =>
+            Alert.alert(
+              "TSA Connect",
+              `Version ${Constants.expoConfig?.version ?? "1.0.0"}` +
+                `\n\nOperated by ${COMPANY.legalName} (${COMPANY.registrationNumber}).`
+            ),
+        },
+      ],
+    },
+    {
+      title: "Legal",
+      items: [
+        {
+          icon: "privacy-tip",
+          label: "Privacy Policy",
+          description: "How we collect, use and protect your data",
+          onPress: () => router.push("/legal/privacy"),
+        },
+        {
+          icon: "gavel",
+          label: "Terms of Service",
+          description: "The agreement governing your use of TSA Connect",
+          onPress: () => router.push("/legal/terms"),
         },
       ],
     },
