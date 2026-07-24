@@ -32,6 +32,17 @@ const (
 	SecurityPasswordChanged = "security.password_changed"
 	SecurityAccountLocked   = "security.account_locked"
 
+	// Account-deletion events (Apple 5.1.1(v) self-service deletion).
+	// AccountDeletionRequested fires twice per request: once for the departing
+	// user (confirmation + grace-window notice) and once per admin/super-admin
+	// (review queue). Data carries "requestId", "userId", "email", "reason" and
+	// "purgeAfter". AccountDeletionRestored fires when an admin reinstates an
+	// account. Both email — a departing user must get a paper trail, and a
+	// silent reinstatement would be a security hole.
+	AccountDeletionRequested = "account.deletion_requested"
+	AccountDeletionCompleted = "account.deletion_completed"
+	AccountDeletionRestored  = "account.deletion_restored"
+
 	// Verification events
 	VerificationSubmitted = "verification.submitted"
 	VerificationApproved  = "verification.approved"
