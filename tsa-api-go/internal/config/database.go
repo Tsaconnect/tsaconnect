@@ -121,6 +121,8 @@ func AutoMigrate() error {
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
 		&models.ITRate{},
+		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
+		&models.FiatVirtualAccount{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
 		&models.SpotListing{},

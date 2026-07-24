@@ -29,7 +29,7 @@ func newITTestService(t *testing.T) *ITService {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}, &models.FiatVirtualAccount{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})

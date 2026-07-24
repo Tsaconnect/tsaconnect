@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -381,9 +380,6 @@ type activateRequest struct {
 	IDNumber string `json:"idNumber"` // exactly 11 digits
 }
 
-// ngIDNumber matches a Nigerian BVN or NIN: exactly 11 digits.
-var ngIDNumber = regexp.MustCompile(`^\d{11}$`)
-
 // ActivatePM handles POST /api/p2p/pm/activate — the merchant completes their own
 // PM onboarding by supplying a BVN/NIN, which is forwarded to the fiat provider to
 // mint the NGN virtual account. The id number is passed straight through and never
@@ -410,7 +406,7 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		return
 	}
 	idNumber := strings.TrimSpace(req.IDNumber)
-	if !ngIDNumber.MatchString(idNumber) {
+	if !utils.IsValidNgIDNumber(idNumber) {
 		utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
 		return
 	}

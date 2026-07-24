@@ -12,6 +12,7 @@ import (
 // IT-prefixed references to. *ITService satisfies it.
 type ITWebhookHooks interface {
 	AutoCreditFromInbound(ctx context.Context, paymentRef, amountNGN string) error
+	AutoCreditFromVA(ctx context.Context, fwCustomerID, reference, chargeID, amountNGN string) error
 	ResolvePayoutFromWebhook(ctx context.Context, merchantTxRef, status string) error
 }
 
@@ -28,7 +29,9 @@ type FlutterwaveChargeGetter interface {
 // SetFlutterwaveChargeVerifier wires the API-side charge verification used by
 // the charge.completed path. When left nil, charge settlement is refused
 // (fail-closed) — a signed webhook is never sufficient on its own.
-func (s *PMAutomationService) SetFlutterwaveChargeVerifier(g FlutterwaveChargeGetter) { s.fwCharges = g }
+func (s *PMAutomationService) SetFlutterwaveChargeVerifier(g FlutterwaveChargeGetter) {
+	s.fwCharges = g
+}
 
 // Charge-verification outcomes are split by whether a retry could ever change
 // them — this matters because a failed webhook is re-driven by the reconciler
@@ -148,10 +151,23 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 		}
 		// Credit the API-authoritative amount, not the webhook's.
 		p.AmountNGN = verifiedAmountNGN
-		// IT buy references ("IT-…") route to the IT auto-credit; everything
-		// else is a PM inbound.
-		if s.itHooks != nil && strings.HasPrefix(p.AccountRef, "IT-") {
-			return s.itHooks.AutoCreditFromInbound(ctx, p.AccountRef, p.AmountNGN)
+		if s.itHooks != nil {
+			// Spec 1 standing VA (request refs are ITVA-…; response refs may differ).
+			if strings.HasPrefix(p.AccountRef, ITVARefPrefix) {
+				return s.itHooks.AutoCreditFromVA(ctx, p.CustomerID, p.AccountRef, p.ProviderChargeID, p.AmountNGN)
+			}
+			// Legacy per-intent dynamic buy VA (keep for one release).
+			if strings.HasPrefix(p.AccountRef, "IT-") {
+				return s.itHooks.AutoCreditFromInbound(ctx, p.AccountRef, p.AmountNGN)
+			}
+			// Standing VA whose response reference does not keep the ITVA- prefix —
+			// resolve by Flutterwave customer id; unknown customers fall through to PM.
+			if p.CustomerID != "" {
+				err := s.itHooks.AutoCreditFromVA(ctx, p.CustomerID, p.AccountRef, p.ProviderChargeID, p.AmountNGN)
+				if err == nil || !errors.Is(err, ErrITVANotFound) {
+					return err
+				}
+			}
 		}
 		return s.HandleInbound(ctx, *p)
 	case fwEventTransferDisburse:

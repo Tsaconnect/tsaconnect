@@ -63,13 +63,42 @@ export interface ITPayTo {
   accountNumber: string;
   bank: string;
   accountName: string;
-  reference: string;
+  /** @deprecated Spec 1 standing VA — no user-typed reference */
+  reference?: string;
 }
 
-// ngnKobo = naira * 100 (string). Returns the intent + paymentRef + the company
-// pay-into account (payTo is null when no payment account is configured).
+export interface ITBuyQuote {
+  ngnKobo: string;
+  mcgpAmount: string;
+  rateKobo: string;
+}
+
+export interface ITBuyResult {
+  needsActivation: boolean;
+  quote: ITBuyQuote;
+  payTo: ITPayTo | null;
+}
+
+// ngnKobo = naira * 100 (string). Spec 1: indicative quote + standing VA
+// (no intent created). needsActivation=true when the user has no VA yet.
 export const itBuy = (ngnKobo: string) =>
-  req<{ intent: ITIntent; paymentRef: string; payTo: ITPayTo | null }>('POST', '/it/buy', { ngnKobo });
+  req<ITBuyResult>('POST', '/it/buy', { ngnKobo });
+
+export interface ITVA {
+  id: string;
+  currency: string;
+  accountNumber: string;
+  bankName: string;
+  accountName: string;
+  status: string;
+}
+
+export const getITVA = () =>
+  req<{ va: ITVA; payTo: ITPayTo }>('GET', '/it/va');
+
+// One-time BVN/NIN gate — idNumber is never stored client-side beyond the request.
+export const activateITVA = (idType: 'BVN' | 'NIN', idNumber: string) =>
+  req<{ va: ITVA; payTo: ITPayTo }>('POST', '/it/va/activate', { idType, idNumber });
 
 // One entry from GET /it/withdraw/destinations — product catalog of
 // currency/rail (and, for mobile_money, network) combinations IT withdrawal

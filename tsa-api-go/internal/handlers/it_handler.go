@@ -141,8 +141,104 @@ type itBuyReq struct {
 	NgnKobo string `json:"ngnKobo"`
 }
 
-// POST /api/it/buy — create a buy intent; returns the payment reference to
-// include in the Nomba transfer to the company PM.
+type itActivateVAReq struct {
+	IDType   string `json:"idType"`
+	IDNumber string `json:"idNumber"`
+}
+
+func fiatVAPayTo(va *models.FiatVirtualAccount) gin.H {
+	return gin.H{
+		"accountNumber": va.AccountNumber,
+		"bank":          va.BankName,
+		"accountName":   va.AccountName,
+	}
+}
+
+// GET /api/it/va — standing pay-into account for IT buys (Spec 1).
+func (h *ITHandler) GetVA(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+	if err != nil {
+		if errors.Is(err, services.ErrITVANotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, "No Instant Transfer account yet — activate with BVN or NIN")
+			return
+		}
+		log.Printf("[it] GetVA user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account", gin.H{
+		"va":    va,
+		"payTo": fiatVAPayTo(va),
+	})
+}
+
+// POST /api/it/va/activate — one-time BVN/NIN gate; mints permanent static VA.
+// idNumber is forwarded to Flutterwave and NEVER stored or logged.
+func (h *ITHandler) ActivateVA(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if user.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		return
+	}
+	if !h.it.HasFiatVAProvisioning() {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
+		return
+	}
+	var req itActivateVAReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	idType := strings.ToUpper(strings.TrimSpace(req.IDType))
+	if idType != "BVN" && idType != "NIN" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "idType must be BVN or NIN")
+		return
+	}
+	idNumber := strings.TrimSpace(req.IDNumber)
+	if !utils.IsValidNgIDNumber(idNumber) {
+		utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
+		return
+	}
+
+	va, err := h.it.ActivateFiatVA(c.Request.Context(), user, idType, idNumber)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrITVANotConfigured):
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
+		case errors.Is(err, services.ErrITVAWalletRequired):
+			utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		case errors.Is(err, services.ErrITKYCRequired):
+			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
+		default:
+			// Never log idNumber — only user id + error.
+			log.Printf("[it] ActivateVA user=%s: %v", user.ID, err)
+			msg := err.Error()
+			if strings.Contains(msg, "flutterwave") {
+				utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify identity — check your "+idType+" and try again")
+				return
+			}
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed — please try again")
+		}
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account activated", gin.H{
+		"va":    va,
+		"payTo": fiatVAPayTo(va),
+	})
+}
+
+// POST /api/it/buy — indicative quote + standing VA details (Spec 1).
+// No intent is created here; the charge.completed webhook creates and credits
+// the intent when funds land. Returns needsActivation when the user has no VA.
 func (h *ITHandler) Buy(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -158,44 +254,35 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	intent, err := h.it.CreateBuyIntent(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo, nil)
+	mcgp, rate, err := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Surface the real pay-into account. Preferred: a per-intent dynamic
-	// Flutterwave VA (amount-locked, reference = PaymentRef → webhook
-	// auto-credit). Fallback: the company PM's static VA (operator-matched).
-	// payTo is null when neither exists so the app can show a clear
-	// "payments unavailable" state instead of a fake account.
-	var payTo interface{}
-	if h.it.HasVAProvisioning() {
-		if err := h.it.ProvisionBuyVA(c.Request.Context(), intent); err != nil {
-			log.Printf("[it] dynamic VA for intent %s failed (falling back to company VA): %v", intent.ID, err)
-		} else {
-			payTo = gin.H{
-				"accountNumber": intent.VAAccountNumber,
-				"bank":          intent.VABankName,
-				"accountName":   "TSA Connect",
-				"reference":     intent.PaymentRef,
-				"expiresInSec":  3600,
-			}
-		}
+	quote := gin.H{
+		"ngnKobo":    strings.TrimSpace(req.NgnKobo),
+		"mcgpAmount": mcgp.String(),
+		"rateKobo":   rate.String(),
 	}
-	if payTo == nil {
-		if pm, _ := h.it.CompanyPM(c.Request.Context()); pm != nil {
-			payTo = gin.H{
-				"accountNumber": pm.InboundAccountNumber,
-				"bank":          pm.InboundBank,
-				"accountName":   pm.Name,
-				"reference":     intent.PaymentRef,
-			}
-		}
+
+	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+	if errors.Is(err, services.ErrITVANotFound) {
+		utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
+			"needsActivation": true,
+			"quote":           quote,
+			"payTo":           nil,
+		})
+		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Buy intent created", gin.H{
-		"intent":     intent,
-		"paymentRef": intent.PaymentRef,
-		"payTo":      payTo,
+	if err != nil {
+		log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Buy quote", gin.H{
+		"needsActivation": false,
+		"quote":           quote,
+		"payTo":           fiatVAPayTo(va),
 	})
 }
 

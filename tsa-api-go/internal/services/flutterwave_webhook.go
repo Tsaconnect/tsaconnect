@@ -95,6 +95,7 @@ type fwChargeData struct {
 }
 
 type fwParty struct {
+	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Email string `json:"email"`
 }
@@ -133,6 +134,7 @@ func ParseFlutterwaveInbound(raw []byte) (*InboundPayment, error) {
 		Currency:          strings.ToUpper(strings.TrimSpace(data.Currency)),
 		Status:            "settled",
 		ProviderChargeID:  data.ID,
+		CustomerID:        strings.TrimSpace(data.Customer.ID),
 	}, nil
 }
 

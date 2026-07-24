@@ -842,6 +842,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			it.GET("/withdraw/quote", ith.QuoteWithdrawal)
 			it.GET("/withdraw/destinations", ith.WithdrawalDestinations)
 			it.GET("/balance", ith.GetBalance)
+			it.GET("/va", ith.GetVA)
+			it.POST("/va/activate", ith.ActivateVA)
 			it.POST("/buy", ith.Buy)
 			it.POST("/sell", ith.Sell)
 			it.GET("/intents", ith.ListIntents)
