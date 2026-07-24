@@ -45,6 +45,12 @@ func (s *PMAutomationService) SetFlutterwaveChargeVerifier(g FlutterwaveChargeGe
 //   - ErrChargePending — RETRYABLE. The charge is not yet succeeded but might
 //     become so (pending/processing/unknown status). Left 'failed' so the
 //     reconciler re-checks until it succeeds or turns terminal.
+//   - ErrFWChargeNotFound — RETRYABLE, THEN TERMINAL. A 404 usually means the
+//     charge is not visible to the API *yet* (read-after-write lag right after
+//     the webhook fires), so it must be retried — but a charge that is still
+//     absent much later never existed on this tenant and can never settle.
+//     RetryFailedWebhooks owns that cutoff, because only it knows the event's
+//     age; see fwChargeNotFoundGrace.
 //   - a bare transport/API error — RETRYABLE (provider unreachable).
 var (
 	ErrChargeRejected = errors.New("flutterwave charge rejected (terminal: contradicts webhook, will not settle)")
@@ -78,6 +84,8 @@ func verifyFlutterwaveCharge(ctx context.Context, g FlutterwaveChargeGetter, p *
 	ch, err := g.GetCharge(ctx, p.ProviderChargeID)
 	if err != nil {
 		// Transport / provider error — retryable, do not classify as a rejection.
+		// ErrFWChargeNotFound rides through wrapped so the retry job can age it
+		// out into a terminal rejection rather than re-driving it forever.
 		return "", fmt.Errorf("flutterwave verify charge %s: %w", p.ProviderChargeID, err)
 	}
 	if !fwSucceeded(ch.Status) {

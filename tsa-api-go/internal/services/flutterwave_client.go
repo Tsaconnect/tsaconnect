@@ -87,6 +87,12 @@ var ErrFlutterwaveDisabled = errors.New("flutterwave not configured")
 // the account number does not resolve at the supplied bank.
 var ErrFWAccountNotFound = errors.New("account not found")
 
+// ErrFWChargeNotFound is returned by GetCharge on a 404 — Flutterwave stating
+// the charge does not exist on this tenant. Distinct from a transport error:
+// this is the provider's authoritative answer, not a failure to reach it.
+// Callers use it to stop retrying a lookup that can never succeed.
+var ErrFWChargeNotFound = errors.New("charge not found")
+
 // NewFlutterwaveClient returns nil if any required credential is missing —
 // callers must check IsEnabled() so dev environments keep booting without
 // Flutterwave creds.
@@ -751,6 +757,10 @@ func (c *FlutterwaveClient) GetCharge(ctx context.Context, id string) (FWCharge,
 	resp, body, err := c.authedRequest(ctx, http.MethodGet, "/charges/"+url.PathEscape(id), nil, "")
 	if err != nil {
 		return FWCharge{}, fmt.Errorf("flutterwave get-charge: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// Authoritative "this charge does not exist" — retrying cannot change it.
+		return FWCharge{}, fmt.Errorf("%w: %v", ErrFWChargeNotFound, fwError("get-charge", resp.StatusCode, body))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return FWCharge{}, fwError("get-charge", resp.StatusCode, body)

@@ -2,6 +2,9 @@ package services
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +268,121 @@ func TestRetryFailedWebhooks_Flutterwave(t *testing.T) {
 	db.First(&tradeP, "id = ?", trade.ID)
 	if tradeP.Status != models.P2PTradeStatusReleased {
 		t.Errorf("trade status = %q, want released", tradeP.Status)
+	}
+}
+
+// seedFailedFWCharge stores a `failed` charge.completed event received at the
+// given time, for the not-found aging tests below.
+func seedFailedFWCharge(t *testing.T, db *gorm.DB, eventID, chargeID string, receivedAt time.Time) *models.WebhookEvent {
+	t.Helper()
+	body := []byte(`{
+		"webhook_id": "` + eventID + `",
+		"type": "charge.completed",
+		"data": {
+			"id": "` + chargeID + `",
+			"reference": "ITVA-orphan",
+			"status": "succeeded",
+			"amount": 1500,
+			"currency": "NGN",
+			"customer": {"name": {"first": "Ada", "last": "Lovelace"}}
+		}
+	}`)
+	row := &models.WebhookEvent{
+		ID: uuid.New(), Provider: ProviderFlutterwave, EventID: eventID,
+		Payload: body, Signature: "sig", Status: "failed", ReceivedAt: receivedAt,
+	}
+	if err := db.Create(row).Error; err != nil {
+		t.Fatalf("seed failed FW webhook: %v", err)
+	}
+	return row
+}
+
+// A charge the provider cannot find may simply not have propagated yet, so a
+// RECENT 404 must stay in the retry pool — giving up early would discard a real
+// payment.
+func TestRetryFailedWebhooks_RecentChargeNotFoundKeepsRetrying(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createWebhookEventsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	auto, _ := newPMAutomationService(t, db, esc, svc, nameMap(nil))
+	auto.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		err: fmt.Errorf("flutterwave get-charge: %w: HTTP 404: CHARGE_NOT_FOUND", ErrFWChargeNotFound),
+	})
+
+	row := seedFailedFWCharge(t, db, "fw-404-recent", "chg_recent", time.Now().Add(-5*time.Minute))
+
+	if _, err := auto.RetryFailedWebhooks(context.Background(), 5*time.Minute); err != nil {
+		t.Fatalf("RetryFailedWebhooks: %v", err)
+	}
+
+	var after models.WebhookEvent
+	db.First(&after, "id = ?", row.ID)
+	if after.Status != "failed" {
+		t.Errorf("status = %q, want failed (a fresh 404 must stay retryable)", after.Status)
+	}
+}
+
+// REGRESSION: a charge still missing long after arrival never existed on this
+// tenant. It must go terminal instead of re-driving every tick forever and
+// crowding the oldest-first retry pool.
+func TestRetryFailedWebhooks_AgedChargeNotFoundGoesTerminal(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createWebhookEventsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	auto, _ := newPMAutomationService(t, db, esc, svc, nameMap(nil))
+	auto.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		err: fmt.Errorf("flutterwave get-charge: %w: HTTP 404: CHARGE_NOT_FOUND", ErrFWChargeNotFound),
+	})
+
+	old := time.Now().Add(-fwChargeNotFoundGrace - time.Hour)
+	row := seedFailedFWCharge(t, db, "fw-404-aged", "chg_aged", old)
+
+	if _, err := auto.RetryFailedWebhooks(context.Background(), 5*time.Minute); err != nil {
+		t.Fatalf("RetryFailedWebhooks: %v", err)
+	}
+
+	var after models.WebhookEvent
+	db.First(&after, "id = ?", row.ID)
+	if after.Status != "rejected" {
+		t.Errorf("status = %q, want rejected (aged-out 404 is terminal)", after.Status)
+	}
+	// Rejected must never read as settled.
+	if after.ProcessedAt != nil {
+		t.Error("aged-out 404 was marked processed — it settled nothing")
+	}
+}
+
+// A still-failing event must carry the CURRENT cause, not the first one it ever
+// hit — a stale reason sends operators chasing the wrong bug.
+func TestRetryFailedWebhooks_RefreshesStoredError(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createWebhookEventsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	auto, _ := newPMAutomationService(t, db, esc, svc, nameMap(nil))
+	auto.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		err: errors.New("connection refused talking to flutterwave"),
+	})
+
+	row := seedFailedFWCharge(t, db, "fw-stale-err", "chg_stale", time.Now().Add(-5*time.Minute))
+	if err := db.Model(&models.WebhookEvent{}).Where("id = ?", row.ID).
+		Update("error", "parse flutterwave inbound data: json: cannot unmarshal object").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := auto.RetryFailedWebhooks(context.Background(), 5*time.Minute); err != nil {
+		t.Fatalf("RetryFailedWebhooks: %v", err)
+	}
+
+	var after models.WebhookEvent
+	db.First(&after, "id = ?", row.ID)
+	if strings.Contains(after.Error, "cannot unmarshal") {
+		t.Errorf("stored error still the original parse failure: %q", after.Error)
+	}
+	if !strings.Contains(after.Error, "connection refused") {
+		t.Errorf("stored error = %q, want the current cause", after.Error)
 	}
 }
 

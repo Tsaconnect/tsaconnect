@@ -347,3 +347,41 @@ func TestFWIdempotencyKeyWindow(t *testing.T) {
 		t.Fatalf("in-window key changed: %q", k)
 	}
 }
+
+// A 404 from /charges is Flutterwave's authoritative "this charge does not
+// exist", not a failure to reach it. It must be distinguishable so the retry
+// job can age it out instead of re-driving it forever; every other non-2xx
+// stays an ordinary (retryable) error.
+func TestGetChargeNotFoundIsDistinguishable(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/charges/chg_missing", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "failed",
+			"error":  map[string]any{"type": "CHARGE_NOT_FOUND", "message": "Charge not found"},
+		})
+	})
+	mux.HandleFunc("/charges/chg_boom", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "failed", "message": "server error"})
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	_, err := c.GetCharge(context.Background(), "chg_missing")
+	if err == nil {
+		t.Fatal("want an error for a 404 charge")
+	}
+	if !errors.Is(err, ErrFWChargeNotFound) {
+		t.Errorf("404 did not surface ErrFWChargeNotFound: %v", err)
+	}
+
+	_, err = c.GetCharge(context.Background(), "chg_boom")
+	if err == nil {
+		t.Fatal("want an error for a 500")
+	}
+	if errors.Is(err, ErrFWChargeNotFound) {
+		t.Errorf("a 500 must NOT be treated as charge-not-found: %v", err)
+	}
+}
