@@ -30,6 +30,7 @@ import {
   activateITVA,
   itBuy,
   type ITBuyQuote,
+  type ITIntent,
   type ITPayTo,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
@@ -54,6 +55,7 @@ export default function ITBuy() {
   const [error, setError] = useState('');
   const [quote, setQuote] = useState<ITBuyQuote | null>(null);
   const [payTo, setPayTo] = useState<ITPayTo | null>(null);
+  const [intent, setIntent] = useState<ITIntent | null>(null);
   const [estMcgp, setEstMcgp] = useState('');
 
   const [paymentCurrency, setPaymentCurrency] = useState('NGN');
@@ -71,9 +73,10 @@ export default function ITBuy() {
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === paymentMethod)?.label ?? paymentMethod;
 
-  const applyQuote = (q: ITBuyQuote, to: ITPayTo | null) => {
+  const applyQuote = (q: ITBuyQuote, to: ITPayTo | null, nextIntent?: ITIntent | null) => {
     setQuote(q);
     setPayTo(to);
+    if (nextIntent !== undefined) setIntent(nextIntent);
     try {
       setEstMcgp(
         Number(ethers.formatUnits(q.mcgpAmount, 18)).toLocaleString(undefined, {
@@ -96,16 +99,16 @@ export default function ITBuy() {
     const kobo = String(Math.round(amt * 100));
     const r = await itBuy(kobo);
     if (!r.success || !r.data) {
-      setError(r.message || 'Could not create the buy quote');
+      setError(r.message || 'Could not open the buy order');
       setScreen('error');
       return;
     }
     if (r.data.needsActivation) {
-      applyQuote(r.data.quote, null);
+      applyQuote(r.data.quote, null, null);
       setScreen('activate');
       return;
     }
-    applyQuote(r.data.quote, r.data.payTo);
+    applyQuote(r.data.quote, r.data.payTo, r.data.intent ?? null);
     setScreen('instructions');
   };
 
@@ -126,11 +129,11 @@ export default function ITBuy() {
     const kobo = String(Math.round(Number(naira) * 100));
     const r = await itBuy(kobo);
     if (!r.success || !r.data || r.data.needsActivation) {
-      applyQuote(quote ?? { ngnKobo: kobo, mcgpAmount: '0', rateKobo: '0' }, act.data.payTo);
+      applyQuote(quote ?? { ngnKobo: kobo, mcgpAmount: '0', rateKobo: '0' }, act.data.payTo, null);
       setScreen('instructions');
       return;
     }
-    applyQuote(r.data.quote, r.data.payTo);
+    applyQuote(r.data.quote, r.data.payTo, r.data.intent ?? null);
     setScreen('instructions');
   };
 
@@ -224,7 +227,10 @@ export default function ITBuy() {
             <SummaryCard>
               <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
               <Divider spacing="xs" />
-              <SummaryRow label="Status" value="Awaiting transfer" />
+              <SummaryRow
+                label="Status"
+                value={intent?.status === 'pending_payment' ? 'Awaiting transfer' : (intent?.status || 'Awaiting transfer')}
+              />
             </SummaryCard>
 
             {payTo ? (

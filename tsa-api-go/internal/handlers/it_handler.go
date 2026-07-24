@@ -240,9 +240,9 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 	})
 }
 
-// POST /api/it/buy — indicative quote + standing VA details (Spec 1).
-// No intent is created here; the charge.completed webhook creates and credits
-// the intent when funds land. Returns needsActivation when the user has no VA.
+// POST /api/it/buy — open a pending buy order + standing VA details.
+// Settlement still happens when funds land (live rate, actual amount); the
+// pending intent gives the user progress on the hub until then.
 func (h *ITHandler) Buy(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -258,23 +258,23 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	mcgp, rate, err := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	quote := gin.H{
-		"ngnKobo":    strings.TrimSpace(req.NgnKobo),
-		"mcgpAmount": mcgp.String(),
-		"rateKobo":   rate.String(),
-	}
 
 	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
 	if errors.Is(err, services.ErrITVANotFound) {
+		mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
+		if qerr != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
+			return
+		}
 		utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
 			"needsActivation": true,
-			"quote":           quote,
-			"payTo":           nil,
+			"quote": gin.H{
+				"ngnKobo":    strings.TrimSpace(req.NgnKobo),
+				"mcgpAmount": mcgp.String(),
+				"rateKobo":   rate.String(),
+			},
+			"payTo":  nil,
+			"intent": nil,
 		})
 		return
 	}
@@ -283,10 +283,21 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Buy quote", gin.H{
+
+	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
 		"needsActivation": false,
-		"quote":           quote,
-		"payTo":           fiatVAPayTo(va, user.Name),
+		"quote": gin.H{
+			"ngnKobo":    intent.NgnKobo,
+			"mcgpAmount": intent.McgpAmount,
+			"rateKobo":   intent.RateKobo,
+		},
+		"payTo":  fiatVAPayTo(va, user.Name),
+		"intent": intent,
 	})
 }
 
@@ -393,6 +404,9 @@ func (h *ITHandler) ListIntents(c *gin.Context) {
 		return
 	}
 	intents, _ := h.it.ListUserIntents(c.Request.Context(), user.ID)
+	for i := range intents {
+		intents[i].FailureReason = services.UserFacingITFailure(intents[i].FailureReason)
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Intents", gin.H{"intents": intents})
 }
 
@@ -413,6 +427,7 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
 		return
 	}
+	intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
 	utils.SuccessResponse(c, http.StatusOK, "Intent", gin.H{"intent": intent})
 }
 

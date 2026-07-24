@@ -349,19 +349,30 @@ func TestCreateSellIntent_NilBankLeavesDestinationEmpty(t *testing.T) {
 	}
 }
 
-func TestCreateBuyIntent_NoPM(t *testing.T) {
+func TestOpenBuyOrder_WorksWithoutPMAndSupersedesPrior(t *testing.T) {
 	s := newITTestService(t)
 	ctx := context.Background()
 	if _, err := s.SetRate(ctx, uuid.New(), 20000, 500); err != nil {
 		t.Fatalf("set rate: %v", err)
 	}
-	// Rate set but no IT_PM_ID configured -> buy fails fast (no orphan intent).
-	if _, err := s.CreateBuyIntent(ctx, uuid.New(), "0xWALLET", "1000", nil); err != ErrITNoPM {
-		t.Fatalf("expected ErrITNoPM, got %v", err)
+	// Spec 1 standing-VA buys do not require the company PM.
+	user := uuid.New()
+	first, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "1000")
+	if err != nil {
+		t.Fatalf("open buy without PM: %v", err)
 	}
-	var n int64
-	s.db.Model(&models.ITIntent{}).Count(&n)
-	if n != 0 {
-		t.Fatalf("no intent should be created when PM missing, got %d", n)
+	second, err := s.OpenBuyOrder(ctx, user, "0xWALLET", "2000")
+	if err != nil {
+		t.Fatalf("open second buy: %v", err)
+	}
+	var prior models.ITIntent
+	if err := s.db.First(&prior, "id = ?", first.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if prior.Status != models.ITStatusCancelled {
+		t.Fatalf("prior status = %s, want cancelled", prior.Status)
+	}
+	if second.Status != models.ITStatusPendingPayment || second.NgnKobo != "2000" {
+		t.Fatalf("second = %+v", second)
 	}
 }
