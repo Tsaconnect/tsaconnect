@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -171,6 +172,44 @@ func TestSellPayoutRequest_MobileMoneyRail(t *testing.T) {
 	}
 	if intent.PayoutID != "pay_mobile_1" {
 		t.Fatalf("intent.PayoutID = %q, want pay_mobile_1", intent.PayoutID)
+	}
+}
+
+// REGRESSION: Flutterwave rejects a transfer reference longer than 42 chars
+// ("size must be between 6 and 42"). "IT-SELL-" + a canonical 36-char UUID is
+// 44, so live sell payouts 400'd. The reference must stay within the limit and
+// still map back to the intent on the transfer webhook.
+func TestSellPayoutRef_WithinFlutterwaveLimitAndRoundTrips(t *testing.T) {
+	s := newITTestService(t)
+	gw := &fakeNombaGateway{payoutID: "pay_ref_1"}
+	s.SetPayoutGateway(gw)
+	intent := &models.ITIntent{
+		ID: uuid.New(), UserID: uuid.New(), Direction: models.ITDirectionSell,
+		Status: models.ITStatusDebited, McgpAmount: "1000000000000000000",
+		NgnKobo: "150000", RateKobo: "1500",
+		BankCode: "044", AccountNumber: "0123456789", AccountName: "JOHN DOE",
+	}
+	if err := s.db.Create(intent).Error; err != nil {
+		t.Fatalf("seed intent: %v", err)
+	}
+	if err := s.AutoPayout(context.Background(), intent); err != nil {
+		t.Fatalf("AutoPayout: %v", err)
+	}
+	ref := gw.calls[0].Reference
+	if len(ref) < 6 || len(ref) > 42 {
+		t.Fatalf("reference %q len=%d, Flutterwave requires 6..42", ref, len(ref))
+	}
+	if !strings.HasPrefix(ref, ITPayoutRefPrefix) {
+		t.Fatalf("reference %q lost its routing prefix", ref)
+	}
+	// The transfer.disburse webhook must resolve this exact ref back to the
+	// intent — otherwise the sell never settles.
+	got, err := uuid.Parse(strings.TrimPrefix(ref, ITPayoutRefPrefix))
+	if err != nil {
+		t.Fatalf("reference does not parse back to a UUID: %v", err)
+	}
+	if got != intent.ID {
+		t.Fatalf("reference round-trip = %s, want %s", got, intent.ID)
 	}
 }
 

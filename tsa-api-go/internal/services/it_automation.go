@@ -28,6 +28,16 @@ import (
 // can route them away from PM-trade payouts (whose refs are bare trade UUIDs).
 const ITPayoutRefPrefix = "IT-SELL-"
 
+// itPayoutRef builds the provider transfer reference for a sell payout. The
+// UUID's hyphens are stripped so the whole reference is 40 chars ("IT-SELL-" +
+// 32 hex): Flutterwave rejects references longer than 42 ("size must be between
+// 6 and 42"), and the canonical 36-char UUID plus the prefix is 44. uuid.Parse
+// accepts the hyphen-less form, so ResolvePayoutFromWebhook round-trips it —
+// keep these two in lockstep.
+func itPayoutRef(intentID uuid.UUID) string {
+	return ITPayoutRefPrefix + strings.ReplaceAll(intentID.String(), "-", "")
+}
+
 // ITSellBank is the payout destination captured at sell creation. Bank fields
 // (Code/Number/Name) are the legacy NGN-bank rail; the rest support
 // cross-currency / mobile-money withdrawal (mirrors PayoutRequest). Empty
@@ -226,7 +236,7 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		AccountNumber:       intent.AccountNumber,
 		AccountName:         intent.AccountName,
 		AmountNGN:           naira,
-		Reference:           ITPayoutRefPrefix + intent.ID.String(),
+		Reference:           itPayoutRef(intent.ID),
 		SenderName:          "TSA Connect",
 		DestinationCurrency: intent.DestinationCurrency,
 		RailType:            intent.RailType,
