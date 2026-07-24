@@ -6,10 +6,13 @@
 export interface LegalSection {
   /** Numbered heading, e.g. "4. How we use your information". */
   heading: string;
-  /** Paragraphs, rendered in order. */
+  /** Paragraphs, rendered in order, before any bullets. */
   body?: string[];
   /** Bulleted items, rendered after `body`. */
   bullets?: string[];
+  /** Paragraphs rendered after the bullets — for a closing note that only
+   *  makes sense once the reader has seen the list. */
+  footnote?: string[];
 }
 
 export interface LegalDocument {

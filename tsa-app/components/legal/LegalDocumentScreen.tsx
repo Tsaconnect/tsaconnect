@@ -72,6 +72,17 @@ export default function LegalDocumentScreen({ document }: Props) {
                   </Text>
                 </View>
               ))}
+
+              {section.footnote?.map((paragraph) => (
+                <Text
+                  key={paragraph.slice(0, 40)}
+                  variant="bodySm"
+                  color="textSecondary"
+                  style={{ marginTop: spacing.xs }}
+                >
+                  {paragraph}
+                </Text>
+              ))}
             </View>
           ))}
 

@@ -42,7 +42,7 @@ export const PRIVACY_POLICY: LegalDocument = {
         'Device and technical data: device model, operating system version, app version, language, and a push notification token if you enable notifications.',
         'Usage and security data: IP address, login timestamps, failed login attempts and similar records we keep to detect fraud and abuse.',
       ],
-      body: [
+      footnote: [
         'The App does not use third-party advertising networks and does not track you across other companies’ apps or websites.',
       ],
     },
