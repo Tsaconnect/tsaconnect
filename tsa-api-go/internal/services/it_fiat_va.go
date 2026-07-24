@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/utils"
 	"gorm.io/gorm"
 )
 
@@ -23,6 +24,12 @@ const (
 	// Attribution uses the persisted RESPONSE reference + fw_customer_id; this
 	// prefix is a secondary dispatch hint when the response ref still starts ITVA-.
 	ITVARefPrefix = "ITVA-"
+
+	// itVARefDomain namespaces the on-chain credit ref for VA settlement. The
+	// ref is keccak(domain || providerChargeID) — keyed on the CHARGE, not the
+	// intent, so the contract's single-use `usedRef` rejects a second credit
+	// even if two intent rows were somehow created for one charge (Spec 1 §3).
+	itVARefDomain = "IT:va:"
 )
 
 var (
@@ -76,7 +83,9 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 	if idType != "BVN" && idType != "NIN" {
 		return nil, ErrITKYCRequired
 	}
-	if len(idNumber) != 11 {
+	// Same 11-digit rule the handler enforces — re-checked here because the
+	// service is the boundary any other caller crosses.
+	if !utils.IsValidNgIDNumber(idNumber) {
 		return nil, ErrITKYCRequired
 	}
 
@@ -154,10 +163,16 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 }
 
 // AutoCreditFromVA settles a charge against a standing FiatVirtualAccount.
-// Resolves the VA by fw customer id (primary) or reference (fallback), prices
-// at the live buy rate, settles into the user's open pending buy order when
-// one exists (so the hub order progresses to credited), otherwise creates a
-// new buy ITIntent. Idempotent on payment_ref (= provider charge id).
+// Resolves the VA by reference (API-verified) or fw customer id, prices at the
+// live buy rate, settles into the user's open pending buy order when one exists
+// (so the hub order progresses to credited), otherwise creates a new buy
+// ITIntent.
+//
+// Idempotency has three layers, because this is the point where real money
+// becomes an on-chain credit: the payment_ref lookup below, the partial unique
+// index uq_it_intents_payment_ref underneath it, and the charge-derived
+// single-use on-chain ref. It NEVER returns nil for a charge it did not
+// actually settle — a nil marks the webhook processed and stops all re-drives.
 func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, reference, chargeID, amountNGN string) error {
 	if !s.IsConfigured() {
 		return ErrITNotConfigured
@@ -167,22 +182,52 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		return errors.New("it va credit: empty charge id")
 	}
 
-	// Idempotency: already credited for this charge.
+	// The on-chain credit ref is derived from the charge, so every path below
+	// (first attempt, webhook redelivery, reconciler re-drive) presents the SAME
+	// ref to the contract and only one can ever succeed.
+	chargeRef := itRefKey(itVARefDomain, chargeID)
+
+	// Idempotency: have we already seen this charge?
 	var existing models.ITIntent
 	err := s.db.WithContext(ctx).
 		Where("payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).
 		First(&existing).Error
 	if err == nil {
-		if existing.Status == models.ITStatusCredited || existing.Status == models.ITStatusAwaitingRate {
-			return nil
-		}
-		if existing.Status == models.ITStatusPendingPayment || existing.Status == models.ITStatusFailed {
-			_, err = s.ApproveBuyCredit(ctx, existing.ID, "")
+		switch existing.Status {
+		case models.ITStatusCredited:
+			return nil // settled
+		case models.ITStatusAwaitingRate:
+			return nil // parked for the operator; RepriceAndCreditAwaitingRate owns it
+		case models.ITStatusPendingPayment, models.ITStatusFailed:
+			_, err = s.approveBuyCreditWithRef(ctx, existing.ID, "", &chargeRef)
 			return err
+		case models.ITStatusCancelled:
+			// The order was superseded in the window between our reading it and
+			// claiming it. The money is real and is this user's — detach the charge
+			// from the dead row and settle it below as if freshly arrived.
+			res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+				Where("id = ? AND status = ? AND payment_ref = ?",
+					existing.ID, models.ITStatusCancelled, chargeID).
+				Update("payment_ref", "")
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				// Someone moved it under us — retry rather than risk double-settling.
+				return fmt.Errorf("it va credit: intent %s changed during recovery", existing.ID)
+			}
+			log.Printf("[it va] charge=%s was attributed to superseded intent=%s — re-settling", chargeID, existing.ID)
+			// falls through to the normal settle flow below
+		default:
+			// `processing` (a broadcast that never reported back) or any future
+			// status. The money HAS landed and is not credited — returning nil here
+			// would mark the webhook processed and drop it silently, so alarm and
+			// stay retryable for the reconciler.
+			log.Printf("[it va] ALARM charge=%s landed but intent=%s is %q — not credited, will retry",
+				chargeID, existing.ID, existing.Status)
+			return fmt.Errorf("it va credit: intent %s in non-creditable state %q", existing.ID, existing.Status)
 		}
-		return nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
 
@@ -247,7 +292,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		intent.PaymentRef = chargeID
 		intent.RateKobo = "0"
 		intent.McgpAmount = "0"
-		if intent.ID == pending.ID && pendErr == nil {
+		if pendErr == nil {
 			if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
 				"status": intent.Status, "failure_reason": intent.FailureReason,
 				"ngn_kobo": intent.NgnKobo, "payment_ref": intent.PaymentRef,
@@ -277,7 +322,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		}).Error; err != nil {
 			return err
 		}
-		_, err = s.ApproveBuyCredit(ctx, pending.ID, wallet)
+		_, err = s.approveBuyCreditWithRef(ctx, pending.ID, wallet, &chargeRef)
 		return err
 	}
 	if !errors.Is(pendErr, gorm.ErrRecordNotFound) {
@@ -298,22 +343,34 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	}
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		if isUniqueViolation(err) {
-			return s.AutoCreditFromVA(ctx, fwCustomerID, reference, chargeID, amountNGN)
+			// A concurrent delivery of this charge won the race and owns the
+			// intent. Return retryable rather than recursing — the re-drive takes
+			// the idempotency branch above and observes the winner's outcome.
+			log.Printf("[it va] charge=%s lost create race (concurrent delivery) — deferring", chargeID)
+			return fmt.Errorf("it va credit: concurrent settlement of charge %s", chargeID)
 		}
 		return err
 	}
 
-	_, err = s.ApproveBuyCredit(ctx, intent.ID, wallet)
+	_, err = s.approveBuyCreditWithRef(ctx, intent.ID, wallet, &chargeRef)
 	return err
 }
 
+// resolveFiatVA maps a settled charge back to the account that received it.
+//
+// Reference FIRST, customer id second: the dispatcher verifies the reference
+// against the Flutterwave API before we are called (verifyFlutterwaveCharge
+// rejects a reference the API does not confirm), whereas the customer id is
+// taken from the webhook body and is not independently checked. Preferring the
+// verified key means a payload pairing one user's reference with another user's
+// customer id can never credit the wrong account.
 func (s *ITService) resolveFiatVA(ctx context.Context, fwCustomerID, reference string) (*models.FiatVirtualAccount, error) {
 	fwCustomerID = strings.TrimSpace(fwCustomerID)
 	reference = strings.TrimSpace(reference)
 	var va models.FiatVirtualAccount
-	if fwCustomerID != "" {
+	if reference != "" {
 		err := s.db.WithContext(ctx).
-			Where("fw_customer_id = ? AND status = ?", fwCustomerID, models.FiatVAStatusActive).
+			Where("reference = ? AND status = ?", reference, models.FiatVAStatusActive).
 			First(&va).Error
 		if err == nil {
 			return &va, nil
@@ -322,9 +379,9 @@ func (s *ITService) resolveFiatVA(ctx context.Context, fwCustomerID, reference s
 			return nil, err
 		}
 	}
-	if reference != "" {
+	if fwCustomerID != "" {
 		err := s.db.WithContext(ctx).
-			Where("reference = ? AND status = ?", reference, models.FiatVAStatusActive).
+			Where("fw_customer_id = ? AND status = ?", fwCustomerID, models.FiatVAStatusActive).
 			First(&va).Error
 		if err == nil {
 			return &va, nil

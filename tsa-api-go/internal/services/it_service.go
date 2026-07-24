@@ -256,7 +256,7 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 		RateKobo:      buyRate.String(),
 		PMID:          pmID,
 	}
-	intent.PaymentRef = "IT-" + strings.ToUpper(strings.ReplaceAll(intent.ID.String(), "-", ""))[:14]
+	intent.PaymentRef = mintedRefPrefix + strings.ToUpper(strings.ReplaceAll(intent.ID.String(), "-", ""))[:14]
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		return nil, err
 	}
@@ -267,10 +267,14 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 // their standing VA. Supersedes any prior pending buy for the same user so the
 // hub shows one clear awaiting-transfer order. Actual settlement still prices
 // at the live rate when funds land (amount may differ from the quote).
+// Only orders still carrying their MINTED reference are superseded. VA
+// settlement overwrites payment_ref with the provider charge id the moment
+// money is attributed to an order — superseding one of those would cancel an
+// order a payment is already landing against.
 func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string) (*models.ITIntent, error) {
 	_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("user_id = ? AND direction = ? AND status = ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment).
+		Where("user_id = ? AND direction = ? AND status = ? AND payment_ref LIKE ?",
+			userID, models.ITDirectionBuy, models.ITStatusPendingPayment, mintedRefPrefix+"%").
 		Updates(map[string]any{
 			"status":         models.ITStatusCancelled,
 			"failure_reason": "superseded by new buy order",
@@ -282,6 +286,16 @@ func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAd
 // Operator-signed; verified on-chain before the intent is marked credited.
 // Idempotent: a credited intent returns success.
 func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, walletAddr string) (*models.ITIntent, error) {
+	return s.approveBuyCreditWithRef(ctx, intentID, walletAddr, nil)
+}
+
+// approveBuyCreditWithRef is ApproveBuyCredit with an optional explicit on-chain
+// ref. The default ref keys on the intent id, which makes the contract's
+// single-use `usedRef` idempotent per INTENT. VA settlement passes a
+// charge-derived ref instead so the backstop is idempotent per PROVIDER CHARGE —
+// two intents accidentally created for one charge then collide on-chain and the
+// second credit is rejected (Spec 1 §3).
+func (s *ITService) approveBuyCreditWithRef(ctx context.Context, intentID uuid.UUID, walletAddr string, onChainRef *[32]byte) (*models.ITIntent, error) {
 	if !s.IsConfigured() {
 		return nil, ErrITNotConfigured
 	}
@@ -294,6 +308,13 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 	}
 	if intent.Direction != models.ITDirectionBuy {
 		return nil, ErrITBadState
+	}
+	// Parse BEFORE claiming: an unparseable amount would otherwise reach
+	// abi.Pack as a nil *big.Int and panic, with the intent already claimed
+	// into `processing` and no way back.
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(intent.McgpAmount), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("intent %s has unusable mcgpAmount %q", intent.ID, intent.McgpAmount)
 	}
 	// Atomically claim the intent so two concurrent admin approvals can't both
 	// broadcast (the on-chain usedRef is the backstop; this avoids wasted gas).
@@ -310,18 +331,20 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 		return nil, ErrITBadState // already processing or terminal
 	}
 	wallet := s.intentWallet(intent, walletAddr)
-	amount, _ := new(big.Int).SetString(intent.McgpAmount, 10)
 	ref := itRef("IT:credit:", intent.ID)
+	if onChainRef != nil {
+		ref = *onChainRef
+	}
 
 	txHash, err := s.swap.OperatorCreditPremium(ctx, wallet, amount, ref)
 	if err != nil {
 		log.Printf("[IT] credit broadcast failed intent=%s operator=%s: %v", intent.ID, s.swap.OperatorAddress(), err)
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, err.Error())
+		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "credit broadcast: "+err.Error())
 		return nil, err
 	}
 	if _, err := s.swap.VerifyOperatorEvent("PremiumCredited", txHash, common.HexToAddress(wallet), ref); err != nil {
 		log.Printf("[IT] credit verify failed intent=%s tx=%s: %v", intent.ID, txHash, err)
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, err.Error())
+		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "credit verify: "+err.Error())
 		return nil, err
 	}
 	intent.TxHash = txHash
@@ -331,6 +354,54 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 		return intent, nil
 	}
 	return intent, nil
+}
+
+// RepriceAndCreditAwaitingRate is the operator recovery for a buy parked as
+// `awaiting_rate` — money landed while the FX feed was stale, so the intent was
+// stored with no rate and no MCGP (Spec 1 §Error handling). It reprices the
+// stored NGN at the CURRENT live rate and credits, keyed on the same
+// charge-derived on-chain ref the automatic path would have used, so an
+// operator retry can never double-credit.
+func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
+	if !s.IsConfigured() {
+		return nil, ErrITNotConfigured
+	}
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	if intent.Direction != models.ITDirectionBuy || intent.Status != models.ITStatusAwaitingRate {
+		return nil, ErrITBadState
+	}
+	paid, ok := new(big.Int).SetString(strings.TrimSpace(intent.NgnKobo), 10)
+	if !ok || paid.Sign() <= 0 {
+		return nil, fmt.Errorf("intent %s has no positive ngnKobo to reprice", intent.ID)
+	}
+	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if fx.Stale {
+		// Repricing at a stale rate is the exact thing the park exists to prevent.
+		return nil, ErrITFxUnavailable
+	}
+	mcgp := mcgpForNgn(paid, buyRate)
+	if mcgp.Sign() <= 0 {
+		return nil, fmt.Errorf("amount too small after repricing")
+	}
+	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"rate_kobo":      buyRate.String(),
+		"mcgp_amount":    mcgp.String(),
+		"status":         models.ITStatusPendingPayment,
+		"failure_reason": "",
+	}).Error; err != nil {
+		return nil, err
+	}
+	intent.RateKobo = buyRate.String()
+	intent.McgpAmount = mcgp.String()
+	intent.Status = models.ITStatusPendingPayment
+	ref := itRefKey(itVARefDomain, intent.PaymentRef)
+	return s.approveBuyCreditWithRef(ctx, intent.ID, "", &ref)
 }
 
 // ─────────────────────────────── sell ─────────────────────────────────────
@@ -498,6 +569,9 @@ func (s *ITService) getIntent(ctx context.Context, id uuid.UUID) (*models.ITInte
 // failure (review H2). A failed write past a verified on-chain op is logged as
 // RECONCILE NEEDED for the operator/reconciler to heal.
 func (s *ITService) setStatus(ctx context.Context, intent *models.ITIntent, status, reason string) error {
+	// failure_reason is varchar(256); a raw RPC/revert string can exceed it and
+	// a rejected write would strand the intent in `processing`.
+	reason = truncateReason(reason)
 	intent.Status = status
 	intent.FailureReason = reason
 	intent.UpdatedAt = time.Now()
@@ -532,8 +606,29 @@ func (s *ITService) intentWallet(intent *models.ITIntent, fallback string) strin
 
 // itRef = keccak256(domain || intentID) — domain-separated, single-use on-chain.
 func itRef(domain string, id uuid.UUID) [32]byte {
-	h := crypto.Keccak256Hash([]byte(domain + id.String()))
+	return itRefKey(domain, id.String())
+}
+
+// itRefKey is itRef over an arbitrary key so a ref can be derived from
+// something other than the intent id (VA settlement keys on the charge id).
+func itRefKey(domain, key string) [32]byte {
+	h := crypto.Keccak256Hash([]byte(domain + key))
 	var out [32]byte
 	copy(out[:], h.Bytes())
 	return out
+}
+
+// maxFailureReason matches ITIntent.FailureReason's varchar(256).
+const maxFailureReason = 256
+
+// mintedRefPrefix marks a payment_ref this service generated at intent creation
+// (as opposed to a provider charge id written in at settlement).
+const mintedRefPrefix = "IT-"
+
+func truncateReason(reason string) string {
+	if len(reason) <= maxFailureReason {
+		return reason
+	}
+	// Cut on a rune boundary so the stored value stays valid UTF-8.
+	return strings.ToValidUTF8(reason[:maxFailureReason], "")
 }

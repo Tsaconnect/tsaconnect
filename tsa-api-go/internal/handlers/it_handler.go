@@ -158,6 +158,22 @@ func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
 	}
 }
 
+// fiatVAView is the client-safe projection of a FiatVirtualAccount. The raw
+// model is deliberately NOT serialized: fw_customer_id and reference are the
+// keys webhook settlement attributes payments on, and clients have no use for
+// them.
+func fiatVAView(va *models.FiatVirtualAccount) gin.H {
+	return gin.H{
+		"id":            va.ID,
+		"currency":      va.Currency,
+		"accountNumber": va.AccountNumber,
+		"bankName":      va.BankName,
+		"accountName":   va.AccountName,
+		"status":        va.Status,
+		"createdAt":     va.CreatedAt,
+	}
+}
+
 // GET /api/it/va — standing pay-into account for IT buys (Spec 1).
 func (h *ITHandler) GetVA(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -176,7 +192,7 @@ func (h *ITHandler) GetVA(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account", gin.H{
-		"va":    va,
+		"va":    fiatVAView(va),
 		"payTo": fiatVAPayTo(va, user.Name),
 	})
 }
@@ -235,7 +251,7 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account activated", gin.H{
-		"va":    va,
+		"va":    fiatVAView(va),
 		"payTo": fiatVAPayTo(va, user.Name),
 	})
 }
@@ -487,6 +503,15 @@ func (h *ITHandler) AdminSetRate(c *gin.Context) {
 func (h *ITHandler) AdminApproveCredit(c *gin.Context) {
 	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
 		return h.it.ApproveBuyCredit(c.Request.Context(), intentID, wallet)
+	})
+}
+
+// POST /api/it/admin/reprice/:id — reprice and credit a buy parked as
+// `awaiting_rate` (money landed while the FX feed was stale). Prices at the
+// CURRENT live rate; refuses while FX is still stale.
+func (h *ITHandler) AdminRepriceCredit(c *gin.Context) {
+	h.adminIntentAction(c, func(intentID uuid.UUID, _ string) (*models.ITIntent, error) {
+		return h.it.RepriceAndCreditAwaitingRate(c.Request.Context(), intentID)
 	})
 }
 
