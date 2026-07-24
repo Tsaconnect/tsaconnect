@@ -855,6 +855,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.GET("/rate", ith.AdminGetRate)
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.POST("/credit/:id", ith.AdminApproveCredit)
+			adminIT.POST("/reprice/:id", ith.AdminRepriceCredit)
 			adminIT.POST("/settle/:id", ith.AdminSettle)
 			adminIT.POST("/reverse/:id", ith.AdminReverse)
 		}

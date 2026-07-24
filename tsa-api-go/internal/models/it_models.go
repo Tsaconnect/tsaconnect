@@ -46,8 +46,11 @@ type ITIntent struct {
 	NgnKobo    string `gorm:"type:numeric(38,0);not null" json:"ngnKobo"`    // naira*100
 	RateKobo   string `gorm:"type:numeric(38,0);not null" json:"rateKobo"`   // kobo per 1 MCGP, locked
 
-	// PaymentRef is the strong NGN attribution key the user includes in their
-	// transfer (narration / dedicated VA reference). Unique. Buy only.
+	// PaymentRef is the strong NGN attribution key: the minted "IT-…" reference
+	// at creation, overwritten with the provider charge id once VA settlement
+	// attributes a payment to this intent. Buy only. Uniqueness is enforced by
+	// the partial index uq_it_intents_payment_ref (config/database.go) rather
+	// than a struct tag, because sell intents leave it empty.
 	PaymentRef string `gorm:"size:64;index" json:"paymentRef,omitempty"`
 	// DebitRef is the on-chain bytes32 ref (hex) for the sell two-phase debit.
 	DebitRef string `gorm:"size:66;index" json:"debitRef,omitempty"`

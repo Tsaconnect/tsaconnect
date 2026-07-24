@@ -28,29 +28,46 @@ func TestGetFiatVA_NotFound(t *testing.T) {
 	}
 }
 
-func TestResolveFiatVA_ByCustomerThenReference(t *testing.T) {
+func TestResolveFiatVA_PrefersVerifiedReference(t *testing.T) {
 	s := newITTestService(t)
-	userID := uuid.New()
 	row := &models.FiatVirtualAccount{
-		UserID: userID, Currency: "NGN", Provider: models.FiatVAProviderFlutterwave,
+		UserID: uuid.New(), Currency: "NGN", Provider: models.FiatVAProviderFlutterwave,
 		FwCustomerID: "cus_abc", Reference: "resp-ref-1",
 		AccountNumber: "1234567890", BankName: "Test Bank", AccountName: "Ada L",
 		Status: models.FiatVAStatusActive,
 	}
-	if err := s.db.Create(row).Error; err != nil {
-		t.Fatal(err)
+	other := &models.FiatVirtualAccount{
+		UserID: uuid.New(), Currency: "NGN", Provider: models.FiatVAProviderFlutterwave,
+		FwCustomerID: "cus_mallory", Reference: "resp-ref-2",
+		AccountNumber: "9999999999", BankName: "Test Bank", AccountName: "Mallory",
+		Status: models.FiatVAStatusActive,
+	}
+	for _, r := range []*models.FiatVirtualAccount{row, other} {
+		if err := s.db.Create(r).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	got, err := s.resolveFiatVA(context.Background(), "cus_abc", "other")
-	if err != nil || got.AccountNumber != "1234567890" {
-		t.Fatalf("by customer: %v %+v", err, got)
+	// The reference is verified against the Flutterwave API upstream; the
+	// customer id is not. When they disagree, the verified key must win —
+	// otherwise a payload pairing one account's reference with another's
+	// customer id would credit the wrong user.
+	got, err := s.resolveFiatVA(context.Background(), "cus_mallory", "resp-ref-1")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
-	got, err = s.resolveFiatVA(context.Background(), "cus_missing", "resp-ref-1")
+	if got.AccountNumber != "1234567890" {
+		t.Fatalf("resolved to %q — customer id overrode the verified reference", got.AccountNumber)
+	}
+
+	// Customer id still resolves when the reference is unknown (the response
+	// reference may not match what we sent).
+	got, err = s.resolveFiatVA(context.Background(), "cus_abc", "unknown-ref")
 	if err != nil || got.FwCustomerID != "cus_abc" {
-		t.Fatalf("by reference fallback: %v %+v", err, got)
+		t.Fatalf("by customer fallback: %v %+v", err, got)
 	}
-	_, err = s.resolveFiatVA(context.Background(), "cus_x", "ref_x")
-	if !errors.Is(err, ErrITVANotFound) {
+
+	if _, err := s.resolveFiatVA(context.Background(), "cus_x", "ref_x"); !errors.Is(err, ErrITVANotFound) {
 		t.Fatalf("want ErrITVANotFound, got %v", err)
 	}
 }
