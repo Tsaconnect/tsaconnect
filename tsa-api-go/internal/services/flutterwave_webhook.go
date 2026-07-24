@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -95,9 +96,54 @@ type fwChargeData struct {
 }
 
 type fwParty struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	ID    string         `json:"id"`
+	Name  fwFlexibleName `json:"name"`
+	Email string         `json:"email"`
 }
+
+// fwFlexibleName accepts either a string or the nested {first,last[,full]}
+// object Flutterwave uses on customers / charge.completed webhooks. Live VA
+// credits send the object form; older fixtures used a bare string.
+type fwFlexibleName string
+
+func (n *fwFlexibleName) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*n = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*n = fwFlexibleName(strings.TrimSpace(s))
+		return nil
+	}
+	var obj struct {
+		First  string `json:"first"`
+		Middle string `json:"middle"`
+		Last   string `json:"last"`
+		Full   string `json:"full"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return err
+	}
+	if full := strings.TrimSpace(obj.Full); full != "" {
+		*n = fwFlexibleName(full)
+		return nil
+	}
+	parts := make([]string, 0, 3)
+	for _, p := range []string{obj.First, obj.Middle, obj.Last} {
+		if s := strings.TrimSpace(p); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	*n = fwFlexibleName(strings.Join(parts, " "))
+	return nil
+}
+
+func (n fwFlexibleName) String() string { return string(n) }
 
 // ParseFlutterwaveInbound converts a charge.completed event into the shared
 // InboundPayment DTO. Returns ErrNonSettlingEvent for a well-formed charge
@@ -128,11 +174,12 @@ func ParseFlutterwaveInbound(raw []byte) (*InboundPayment, error) {
 	return &InboundPayment{
 		EventID:           env.WebhookID,
 		AccountRef:        data.Reference,
-		SenderAccountName: data.Customer.Name,
+		SenderAccountName: data.Customer.Name.String(),
 		AmountNGN:         formatNaira(data.Amount.String()),
 		Currency:          strings.ToUpper(strings.TrimSpace(data.Currency)),
 		Status:            "settled",
 		ProviderChargeID:  data.ID,
+		CustomerID:        strings.TrimSpace(data.Customer.ID),
 	}, nil
 }
 

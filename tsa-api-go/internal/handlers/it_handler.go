@@ -141,8 +141,124 @@ type itBuyReq struct {
 	NgnKobo string `json:"ngnKobo"`
 }
 
-// POST /api/it/buy — create a buy intent; returns the payment reference to
-// include in the Nomba transfer to the company PM.
+type itActivateVAReq struct {
+	IDType   string `json:"idType"`
+	IDNumber string `json:"idNumber"`
+}
+
+func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
+	name := strings.TrimSpace(va.AccountName)
+	if name == "" {
+		name = strings.TrimSpace(fallbackName)
+	}
+	return gin.H{
+		"accountNumber": va.AccountNumber,
+		"bank":          va.BankName,
+		"accountName":   name,
+	}
+}
+
+// fiatVAView is the client-safe projection of a FiatVirtualAccount. The raw
+// model is deliberately NOT serialized: fw_customer_id and reference are the
+// keys webhook settlement attributes payments on, and clients have no use for
+// them.
+func fiatVAView(va *models.FiatVirtualAccount) gin.H {
+	return gin.H{
+		"id":            va.ID,
+		"currency":      va.Currency,
+		"accountNumber": va.AccountNumber,
+		"bankName":      va.BankName,
+		"accountName":   va.AccountName,
+		"status":        va.Status,
+		"createdAt":     va.CreatedAt,
+	}
+}
+
+// GET /api/it/va — standing pay-into account for IT buys (Spec 1).
+func (h *ITHandler) GetVA(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+	if err != nil {
+		if errors.Is(err, services.ErrITVANotFound) {
+			utils.ErrorResponse(c, http.StatusNotFound, "No Instant Transfer account yet — activate with BVN or NIN")
+			return
+		}
+		log.Printf("[it] GetVA user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account", gin.H{
+		"va":    fiatVAView(va),
+		"payTo": fiatVAPayTo(va, user.Name),
+	})
+}
+
+// POST /api/it/va/activate — one-time BVN/NIN gate; mints permanent static VA.
+// idNumber is forwarded to Flutterwave and NEVER stored or logged.
+func (h *ITHandler) ActivateVA(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if user.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		return
+	}
+	if !h.it.HasFiatVAProvisioning() {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
+		return
+	}
+	var req itActivateVAReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	idType := strings.ToUpper(strings.TrimSpace(req.IDType))
+	if idType != "BVN" && idType != "NIN" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "idType must be BVN or NIN")
+		return
+	}
+	idNumber := strings.TrimSpace(req.IDNumber)
+	if !utils.IsValidNgIDNumber(idNumber) {
+		utils.ErrorResponse(c, http.StatusBadRequest, idType+" must be exactly 11 digits")
+		return
+	}
+
+	va, err := h.it.ActivateFiatVA(c.Request.Context(), user, idType, idNumber)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrITVANotConfigured):
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
+		case errors.Is(err, services.ErrITVAWalletRequired):
+			utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		case errors.Is(err, services.ErrITKYCRequired):
+			utils.ErrorResponse(c, http.StatusBadRequest, "A BVN or NIN is required")
+		default:
+			// Never log idNumber — only user id + error.
+			log.Printf("[it] ActivateVA user=%s: %v", user.ID, err)
+			msg := err.Error()
+			if strings.Contains(msg, "flutterwave") {
+				utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify identity — check your "+idType+" and try again")
+				return
+			}
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed — please try again")
+		}
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account activated", gin.H{
+		"va":    fiatVAView(va),
+		"payTo": fiatVAPayTo(va, user.Name),
+	})
+}
+
+// POST /api/it/buy — open a pending buy order + standing VA details.
+// Settlement still happens when funds land (live rate, actual amount); the
+// pending intent gives the user progress on the hub until then.
 func (h *ITHandler) Buy(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -158,44 +274,46 @@ func (h *ITHandler) Buy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	intent, err := h.it.CreateBuyIntent(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo, nil)
+
+	va, err := h.it.GetFiatVA(c.Request.Context(), user.ID, "NGN")
+	if errors.Is(err, services.ErrITVANotFound) {
+		mcgp, rate, qerr := h.it.QuoteBuyAmount(c.Request.Context(), req.NgnKobo)
+		if qerr != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, qerr.Error())
+			return
+		}
+		utils.SuccessResponse(c, http.StatusOK, "Activation required", gin.H{
+			"needsActivation": true,
+			"quote": gin.H{
+				"ngnKobo":    strings.TrimSpace(req.NgnKobo),
+				"mcgpAmount": mcgp.String(),
+				"rateKobo":   rate.String(),
+			},
+			"payTo":  nil,
+			"intent": nil,
+		})
+		return
+	}
+	if err != nil {
+		log.Printf("[it] Buy GetFiatVA user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load Instant Transfer account")
+		return
+	}
+
+	intent, err := h.it.OpenBuyOrder(c.Request.Context(), user.ID, user.WalletAddress, req.NgnKobo)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Surface the real pay-into account. Preferred: a per-intent dynamic
-	// Flutterwave VA (amount-locked, reference = PaymentRef → webhook
-	// auto-credit). Fallback: the company PM's static VA (operator-matched).
-	// payTo is null when neither exists so the app can show a clear
-	// "payments unavailable" state instead of a fake account.
-	var payTo interface{}
-	if h.it.HasVAProvisioning() {
-		if err := h.it.ProvisionBuyVA(c.Request.Context(), intent); err != nil {
-			log.Printf("[it] dynamic VA for intent %s failed (falling back to company VA): %v", intent.ID, err)
-		} else {
-			payTo = gin.H{
-				"accountNumber": intent.VAAccountNumber,
-				"bank":          intent.VABankName,
-				"accountName":   "TSA Connect",
-				"reference":     intent.PaymentRef,
-				"expiresInSec":  3600,
-			}
-		}
-	}
-	if payTo == nil {
-		if pm, _ := h.it.CompanyPM(c.Request.Context()); pm != nil {
-			payTo = gin.H{
-				"accountNumber": pm.InboundAccountNumber,
-				"bank":          pm.InboundBank,
-				"accountName":   pm.Name,
-				"reference":     intent.PaymentRef,
-			}
-		}
-	}
-	utils.SuccessResponse(c, http.StatusOK, "Buy intent created", gin.H{
-		"intent":     intent,
-		"paymentRef": intent.PaymentRef,
-		"payTo":      payTo,
+	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
+		"needsActivation": false,
+		"quote": gin.H{
+			"ngnKobo":    intent.NgnKobo,
+			"mcgpAmount": intent.McgpAmount,
+			"rateKobo":   intent.RateKobo,
+		},
+		"payTo":  fiatVAPayTo(va, user.Name),
+		"intent": intent,
 	})
 }
 
@@ -302,6 +420,9 @@ func (h *ITHandler) ListIntents(c *gin.Context) {
 		return
 	}
 	intents, _ := h.it.ListUserIntents(c.Request.Context(), user.ID)
+	for i := range intents {
+		intents[i].FailureReason = services.UserFacingITFailure(intents[i].FailureReason)
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Intents", gin.H{"intents": intents})
 }
 
@@ -322,6 +443,7 @@ func (h *ITHandler) GetIntent(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "Intent not found")
 		return
 	}
+	intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
 	utils.SuccessResponse(c, http.StatusOK, "Intent", gin.H{"intent": intent})
 }
 
@@ -381,6 +503,15 @@ func (h *ITHandler) AdminSetRate(c *gin.Context) {
 func (h *ITHandler) AdminApproveCredit(c *gin.Context) {
 	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {
 		return h.it.ApproveBuyCredit(c.Request.Context(), intentID, wallet)
+	})
+}
+
+// POST /api/it/admin/reprice/:id — reprice and credit a buy parked as
+// `awaiting_rate` (money landed while the FX feed was stale). Prices at the
+// CURRENT live rate; refuses while FX is still stale.
+func (h *ITHandler) AdminRepriceCredit(c *gin.Context) {
+	h.adminIntentAction(c, func(intentID uuid.UUID, _ string) (*models.ITIntent, error) {
+		return h.it.RepriceAndCreditAwaitingRate(c.Request.Context(), intentID)
 	})
 }
 

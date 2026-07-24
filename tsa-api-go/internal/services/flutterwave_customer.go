@@ -59,7 +59,7 @@ func ResolveFlutterwaveCompanyCustomer(
 	id, err := client.CreateCustomer(ctx, FWCustomerRequest{
 		Email:         email,
 		Name:          &FWName{First: strings.TrimSpace(params.Name)},
-		Phone:         strings.TrimSpace(params.Phone),
+		Phone:         ParseFWPhone(params.Phone),
 		MetaReference: "company-" + baseURL,
 	})
 	if err != nil {

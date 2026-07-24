@@ -21,8 +21,9 @@ export default function ITLayout() {
   return (
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ title: 'Instant Transfer' }} />
-      <Stack.Screen name="buy" options={{ title: 'Buy with Naira' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell for Naira' }} />
+      <Stack.Screen name="buy" options={{ title: 'Buy' }} />
+      <Stack.Screen name="sell" options={{ title: 'Sell' }} />
+      <Stack.Screen name="intent/[id]" options={{ title: 'Order' }} />
     </Stack>
   );
 }

@@ -73,6 +73,27 @@ func TestParseFlutterwaveInbound(t *testing.T) {
 		t.Fatalf("fields wrong: %+v", p)
 	}
 
+	// Live charge.completed payloads send customer.name as {first,last}.
+	objName := []byte(`{
+		"webhook_id": "wh_obj",
+		"type": "charge.completed",
+		"data": {
+			"id": "chg_obj",
+			"reference": "ITVA-abc",
+			"amount": 100,
+			"currency": "NGN",
+			"status": "succeeded",
+			"customer": {"id": "cus_1", "name": {"first": "Ada", "last": "Lovelace"}, "email": "ada@x.com"}
+		}
+	}`)
+	p2, err := ParseFlutterwaveInbound(objName)
+	if err != nil {
+		t.Fatalf("parse object name: %v", err)
+	}
+	if p2.SenderAccountName != "Ada Lovelace" || p2.CustomerID != "cus_1" {
+		t.Fatalf("object name fields wrong: %+v", p2)
+	}
+
 	// Failed charge → benign non-settling sentinel, not a hard error.
 	failed := []byte(`{"webhook_id":"wh2","type":"charge.completed","data":{"reference":"r","status":"failed","amount":10,"currency":"NGN"}}`)
 	if _, err := ParseFlutterwaveInbound(failed); !errors.Is(err, ErrNonSettlingEvent) {

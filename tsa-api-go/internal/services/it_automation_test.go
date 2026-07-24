@@ -41,14 +41,29 @@ func TestNairaKoboHelpers(t *testing.T) {
 
 // fakeITHooks records routing decisions made by DispatchFlutterwave.
 type fakeITHooks struct {
-	credited  []string
-	resolved  []string
-	creditErr error
+	credited    []string
+	vaCredited  []string
+	resolved    []string
+	creditErr   error
+	vaCreditErr error
+	vaOK        bool // when true, AutoCreditFromVA succeeds (Spec 1 path)
 }
 
 func (f *fakeITHooks) AutoCreditFromInbound(_ context.Context, ref, amount string) error {
 	f.credited = append(f.credited, ref+"|"+amount)
 	return f.creditErr
+}
+
+func (f *fakeITHooks) AutoCreditFromVA(_ context.Context, fwCustomerID, reference, chargeID, amountNGN string) error {
+	f.vaCredited = append(f.vaCredited, chargeID+"|"+amountNGN+"|"+fwCustomerID+"|"+reference)
+	if f.vaCreditErr != nil {
+		return f.vaCreditErr
+	}
+	if f.vaOK {
+		return nil
+	}
+	// Default: unknown customer → dispatcher falls through to PM inbound.
+	return ErrITVANotFound
 }
 
 func (f *fakeITHooks) ResolvePayoutFromWebhook(_ context.Context, ref, status string) error {
@@ -92,6 +107,26 @@ func TestDispatchFlutterwaveRoutesITRefs(t *testing.T) {
 	}
 	if len(hooks.credited) != 1 {
 		t.Fatalf("failed charge reached credit hook: %+v", hooks.credited)
+	}
+}
+
+func TestDispatchFlutterwaveRoutesITVARefs(t *testing.T) {
+	s := NewPMAutomationService(nil, nil, nil, nil, nil, nil, "")
+	hooks := &fakeITHooks{vaOK: true}
+	s.SetITHooks(hooks)
+	s.SetFlutterwaveChargeVerifier(&fakeChargeGetter{
+		ch: FWCharge{ID: "chg_va1", Reference: "ITVA-deadbeef", Amount: "2500", Currency: "NGN", Status: "succeeded"},
+	})
+
+	body := []byte(`{"webhook_id":"wva1","type":"charge.completed","data":{"id":"chg_va1","reference":"ITVA-deadbeef","amount":2500,"currency":"NGN","status":"succeeded","customer":{"id":"cus_user1"}}}`)
+	if err := s.DispatchFlutterwave(context.Background(), body); err != nil {
+		t.Fatalf("ITVA dispatch: %v", err)
+	}
+	if len(hooks.credited) != 0 {
+		t.Fatalf("ITVA must not hit legacy IT- credit: %+v", hooks.credited)
+	}
+	if len(hooks.vaCredited) != 1 || hooks.vaCredited[0] != "chg_va1|2500.00|cus_user1|ITVA-deadbeef" {
+		t.Fatalf("VA credit routing wrong: %+v", hooks.vaCredited)
 	}
 }
 

@@ -5,7 +5,7 @@
 // Ordering | Booking) each lazily fetch ~5 recent rows from their own source:
 //
 //   Orders    — GET /orders?role=buyer (services/orderApi.getOrders)
-//   Products  — GET /products?sort=recent (api.getMarketplaceProducts)
+//   Products  — GET /products?type=Product&sort=recent (api.getMarketplaceProducts)
 //   Contact   — GET /services/contact-payments?role=caller (serviceContactApi)
 //   Ordering  — GET /orders?role=seller (merchant's incoming orders)
 //   Booking   — GET /services/requests?role=buyer (bookingRequestApi)
@@ -193,25 +193,35 @@ function orderToRow(o: any, counterpart: 'seller' | 'buyer'): RwmRow {
 interface LoadResult {
   ok: boolean;
   rows: RwmRow[];
+  /**
+   * Why the tab came back empty. Contact/Ordering degrade failures to the same
+   * "Nothing here yet" state as genuine emptiness, so without this a 401 or a
+   * timeout is indistinguishable from an account that simply has no rows.
+   */
+  reason?: string;
 }
 
 const loadOrders = async (): Promise<LoadResult> => {
   try {
     const res = await withTimeout(getOrders({ page: 1, limit: LIMIT, role: 'buyer' }));
-    if (!res.success || !res.data) return { ok: false, rows: [] };
+    if (!res.success || !res.data) return { ok: false, rows: [], reason: res.message || 'no data' };
     return {
       ok: true,
       rows: (res.data.orders || []).slice(0, LIMIT).map((o) => orderToRow(o, 'seller')),
     };
-  } catch {
-    return { ok: false, rows: [] };
+  } catch (err: any) {
+    return { ok: false, rows: [], reason: err?.message || 'threw' };
   }
 };
 
 const loadProducts = async (): Promise<LoadResult> => {
   try {
-    const res = await withTimeout(api.getMarketplaceProducts({ sort: 'recent', limit: LIMIT }));
-    if (!res.success || !res.data) return { ok: false, rows: [] };
+    // type=Product — /products serves both goods and service listings; without
+    // the filter, contact/order/booking services leak into the Products tab.
+    const res = await withTimeout(
+      api.getMarketplaceProducts({ type: 'Product', sort: 'recent', limit: LIMIT })
+    );
+    if (!res.success || !res.data) return { ok: false, rows: [], reason: res.message || 'no data' };
     const rows = (res.data.products || []).slice(0, LIMIT).map((p: Product): RwmRow => ({
       key: p.id || p._id || p.name,
       title: p.name || 'Product',
@@ -226,15 +236,15 @@ const loadProducts = async (): Promise<LoadResult> => {
       icon: 'storefront',
     }));
     return { ok: true, rows };
-  } catch {
-    return { ok: false, rows: [] };
+  } catch (err: any) {
+    return { ok: false, rows: [], reason: err?.message || 'threw' };
   }
 };
 
 const loadBooking = async (): Promise<LoadResult> => {
   try {
     const res = await withTimeout(listBookingRequests('buyer'));
-    if (!res.success || !res.data) return { ok: false, rows: [] };
+    if (!res.success || !res.data) return { ok: false, rows: [], reason: res.message || 'no data' };
     const rows = (res.data.requests || []).slice(0, LIMIT).map((r: BookingRequestRow): RwmRow => ({
       key: r.request?.id || `${r.serviceName}-${r.request?.createdAt}`,
       title: r.serviceName || 'Service booking',
@@ -243,8 +253,8 @@ const loadBooking = async (): Promise<LoadResult> => {
       icon: 'clock',
     }));
     return { ok: true, rows };
-  } catch {
-    return { ok: false, rows: [] };
+  } catch (err: any) {
+    return { ok: false, rows: [], reason: err?.message || 'threw' };
   }
 };
 
@@ -254,13 +264,13 @@ const loadBooking = async (): Promise<LoadResult> => {
 const loadOrdering = async (): Promise<LoadResult> => {
   try {
     const res = await withTimeout(getOrders({ page: 1, limit: LIMIT, role: 'seller' }));
-    if (!res.success || !res.data) return { ok: true, rows: [] };
+    if (!res.success || !res.data) return { ok: true, rows: [], reason: res.message || 'no data' };
     return {
       ok: true,
       rows: (res.data.orders || []).slice(0, LIMIT).map((o) => orderToRow(o, 'buyer')),
     };
-  } catch {
-    return { ok: true, rows: [] };
+  } catch (err: any) {
+    return { ok: true, rows: [], reason: err?.message || 'threw' };
   }
 };
 
@@ -270,7 +280,7 @@ const loadOrdering = async (): Promise<LoadResult> => {
 const loadContact = async (): Promise<LoadResult> => {
   try {
     const res = await withTimeout(listContactPayments({ role: 'caller', page: 1, limit: LIMIT }));
-    if (!res.success || !res.data) return { ok: true, rows: [] };
+    if (!res.success || !res.data) return { ok: true, rows: [], reason: res.message || 'no data' };
     const rows = (res.data.items || []).slice(0, LIMIT).map((c): RwmRow => ({
       key: c.id,
       title: c.service?.name || 'Service contact',
@@ -283,8 +293,8 @@ const loadContact = async (): Promise<LoadResult> => {
       icon: 'mail',
     }));
     return { ok: true, rows };
-  } catch {
-    return { ok: true, rows: [] };
+  } catch (err: any) {
+    return { ok: true, rows: [], reason: err?.message || 'threw' };
   }
 };
 
@@ -321,6 +331,12 @@ export const RWMWidget: React.FC<RWMWidgetProps> = ({ isValuesHidden, refreshSig
   const load = useCallback(async (tab: TabKey) => {
     setTabs((prev) => ({ ...prev, [tab]: { ...prev[tab], status: 'loading' } }));
     const result = await LOADERS[tab]();
+    if (__DEV__) {
+      console.log(
+        `[RWM] ${tab}: ok=${result.ok} rows=${result.rows.length}` +
+          (result.reason ? ` reason="${result.reason}"` : '')
+      );
+    }
     if (!mounted.current) return;
     setTabs((prev) => ({
       ...prev,
