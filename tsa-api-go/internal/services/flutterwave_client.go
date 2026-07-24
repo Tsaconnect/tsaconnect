@@ -184,9 +184,39 @@ func (e fwEnvelope) failed() bool {
 
 // fwError extracts the most useful message from an error body.
 func fwError(op string, status int, body []byte) error {
-	var env fwEnvelope
+	var env struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Error   *struct {
+			Type             string `json:"type"`
+			Code             string `json:"code"`
+			Message          string `json:"message"`
+			ValidationErrors []struct {
+				Field   string `json:"field"`
+				Message string `json:"message"`
+			} `json:"validation_errors"`
+		} `json:"error"`
+	}
 	_ = json.Unmarshal(body, &env)
 	msg := env.Message
+	if env.Error != nil {
+		if env.Error.Message != "" {
+			msg = env.Error.Message
+		}
+		for _, ve := range env.Error.ValidationErrors {
+			if ve.Message == "" {
+				continue
+			}
+			if ve.Field != "" {
+				msg += "; " + ve.Field + ": " + ve.Message
+			} else {
+				msg += "; " + ve.Message
+			}
+		}
+		if env.Error.Type != "" && msg != "" {
+			msg = env.Error.Type + ": " + msg
+		}
+	}
 	if msg == "" {
 		msg = strings.TrimSpace(string(body))
 	}
@@ -382,16 +412,14 @@ func (c *FlutterwaveClient) ResolveAccount(ctx context.Context, currency, bankCo
 // ─── Customers + virtual accounts (collections) ────────────────────────────
 
 // FWCustomerRequest creates the customer a virtual account hangs off. Name is
-// nested {first,last} (sandbox-verified 2026-07-19). The sandbox did NOT
-// enforce BVN/NIN at customer creation; production NGN VAs may still require
-// it — the identification shape stays best-effort until a live-mode check.
+// nested {first,last} (sandbox-verified 2026-07-19). Phone is nested
+// {country_code,number} — a bare string is rejected as REQUEST_NOT_VALID.
+// BVN/NIN are NOT customer fields; they go on CreateVirtualAccount (PM path).
 type FWCustomerRequest struct {
-	Email         string  `json:"email"`
-	Name          *FWName `json:"name,omitempty"`
-	Phone         string  `json:"phone,omitempty"`
-	IDType        string  `json:"id_type,omitempty"`   // "BVN" | "NIN" (live-mode TBC)
-	IDNumber      string  `json:"id_number,omitempty"` // the BVN/NIN digits
-	MetaReference string  `json:"-"`
+	Email         string   `json:"email"`
+	Name          *FWName  `json:"name,omitempty"`
+	Phone         *FWPhone `json:"phone,omitempty"`
+	MetaReference string   `json:"-"`
 }
 
 // FWName is the nested name object used by customers (and transfer
@@ -399,6 +427,44 @@ type FWCustomerRequest struct {
 type FWName struct {
 	First string `json:"first,omitempty"`
 	Last  string `json:"last,omitempty"`
+}
+
+// FWPhone is the nested phone object Flutterwave v4 expects on /customers.
+type FWPhone struct {
+	CountryCode string `json:"country_code"`
+	Number      string `json:"number"`
+}
+
+// ParseFWPhone normalizes a user-entered phone into the FW v4 shape. Returns
+// nil when the input can't be parsed confidently — callers should omit phone
+// rather than send a malformed value (FW returns empty validation_errors).
+func ParseFWPhone(raw string) *FWPhone {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	// Keep digits only (+, spaces, dashes dropped).
+	digits := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] >= '0' && raw[i] <= '9' {
+			digits = append(digits, raw[i])
+		}
+	}
+	s := string(digits)
+	if s == "" {
+		return nil
+	}
+	// Nigeria is the only corridor for Spec 1 / PM today.
+	switch {
+	case strings.HasPrefix(s, "234") && len(s) >= 13:
+		return &FWPhone{CountryCode: "234", Number: strings.TrimPrefix(s, "234")}
+	case strings.HasPrefix(s, "0") && len(s) == 11:
+		return &FWPhone{CountryCode: "234", Number: s[1:]}
+	case len(s) == 10 && (s[0] == '7' || s[0] == '8' || s[0] == '9'):
+		return &FWPhone{CountryCode: "234", Number: s}
+	default:
+		return nil
+	}
 }
 
 type fwCustomerResp struct {
