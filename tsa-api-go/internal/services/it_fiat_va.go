@@ -142,8 +142,10 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 		Reference:     respRef,
 		AccountNumber: fwVA.AccountNumber,
 		BankName:      fwVA.BankName,
-		AccountName:   fwVA.AccountName,
-		Status:        models.FiatVAStatusActive,
+		// FW sometimes returns an empty account_name on static VAs; fall back to
+		// the KYC'd profile name so the buy screen never shows a blank row.
+		AccountName: firstNonEmpty(fwVA.AccountName, strings.TrimSpace(user.Name)),
+		Status:      models.FiatVAStatusActive,
 	}
 	if err := s.db.WithContext(ctx).Create(row).Error; err != nil {
 		return nil, fmt.Errorf("it va persist: %w", err)
@@ -316,6 +318,15 @@ func splitPersonName(full string) (first, last string) {
 		return parts[0], parts[0]
 	}
 	return parts[0], strings.Join(parts[1:], " ")
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func isUniqueViolation(err error) bool {

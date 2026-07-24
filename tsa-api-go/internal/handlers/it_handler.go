@@ -146,11 +146,15 @@ type itActivateVAReq struct {
 	IDNumber string `json:"idNumber"`
 }
 
-func fiatVAPayTo(va *models.FiatVirtualAccount) gin.H {
+func fiatVAPayTo(va *models.FiatVirtualAccount, fallbackName string) gin.H {
+	name := strings.TrimSpace(va.AccountName)
+	if name == "" {
+		name = strings.TrimSpace(fallbackName)
+	}
 	return gin.H{
 		"accountNumber": va.AccountNumber,
 		"bank":          va.BankName,
-		"accountName":   va.AccountName,
+		"accountName":   name,
 	}
 }
 
@@ -173,7 +177,7 @@ func (h *ITHandler) GetVA(c *gin.Context) {
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account", gin.H{
 		"va":    va,
-		"payTo": fiatVAPayTo(va),
+		"payTo": fiatVAPayTo(va, user.Name),
 	})
 }
 
@@ -232,7 +236,7 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Instant Transfer account activated", gin.H{
 		"va":    va,
-		"payTo": fiatVAPayTo(va),
+		"payTo": fiatVAPayTo(va, user.Name),
 	})
 }
 
@@ -282,7 +286,7 @@ func (h *ITHandler) Buy(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Buy quote", gin.H{
 		"needsActivation": false,
 		"quote":           quote,
-		"payTo":           fiatVAPayTo(va),
+		"payTo":           fiatVAPayTo(va, user.Name),
 	})
 }
 
