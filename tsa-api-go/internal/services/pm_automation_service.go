@@ -439,11 +439,21 @@ func (s *PMAutomationService) RecoverStuckTrades(ctx context.Context, olderThan 
 
 // retryWebhookRow is the lightweight projection scanned for RetryFailedWebhooks.
 type retryWebhookRow struct {
-	ID       uuid.UUID
-	EventID  string
-	Provider string
-	Payload  []byte
+	ID         uuid.UUID
+	EventID    string
+	Provider   string
+	Payload    []byte
+	ReceivedAt time.Time
 }
+
+// fwChargeNotFoundGrace is how long a charge may keep 404-ing before the event
+// is treated as permanently unsettleable. Generous on purpose: a 404 shortly
+// after the webhook is normal read-after-write lag at the provider, and giving
+// up on a real payment is far worse than a few extra retries. Past this, the
+// charge does not exist on this tenant (wrong environment, or an event from a
+// provider account we no longer talk to) and re-driving it forever only
+// crowds the oldest-first retry pool.
+const fwChargeNotFoundGrace = 6 * time.Hour
 
 // RetryFailedWebhooks re-dispatches fiat webhook events that the live handler
 // could not settle: rows left `failed` (a dispatch error), or `pending` rows
@@ -466,7 +476,7 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 	var rows []retryWebhookRow
 	if err := s.db.WithContext(ctx).
 		Table("webhook_events").
-		Select("id, event_id, provider, payload").
+		Select("id, event_id, provider, payload, received_at").
 		Where("provider IN ?", []string{ProviderNomba, ProviderFlutterwave}).
 		Where("status = ? OR (status = ? AND received_at < ?)", "failed", "pending", cutoff).
 		Order("received_at ASC").
@@ -484,9 +494,21 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 		default:
 			err = s.Dispatch(ctx, r.Payload)
 		}
-		if err != nil && errors.Is(err, ErrChargeRejected) {
+		// A charge the provider still cannot find long after the event arrived
+		// never existed here — age it out into the same terminal disposition as
+		// an outright rejection, rather than re-driving it every tick forever.
+		agedOutNotFound := err != nil &&
+			errors.Is(err, ErrFWChargeNotFound) &&
+			!r.ReceivedAt.IsZero() &&
+			time.Since(r.ReceivedAt) > fwChargeNotFoundGrace
+
+		if err != nil && (errors.Is(err, ErrChargeRejected) || agedOutNotFound) {
 			// Terminal — a retry can never settle it. Mark 'rejected' so it drops
 			// out of the failed pool instead of being re-driven every tick.
+			if agedOutNotFound {
+				log.Printf("[pm recovery] ALARM event=%s charge still not found %s after arrival — marking rejected, NOT settled: %v",
+					r.EventID, time.Since(r.ReceivedAt).Round(time.Minute), err)
+			}
 			if uerr := s.db.WithContext(ctx).
 				Table("webhook_events").
 				Where("id = ?", r.ID).
@@ -498,8 +520,17 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 			continue
 		}
 		if err != nil && !errors.Is(err, ErrNonSettlingEvent) {
-			// Transient / not-yet-succeeded — leave it for the next tick.
+			// Transient / not-yet-succeeded — leave it for the next tick, but
+			// refresh the stored cause. Without this the row keeps the FIRST
+			// failure forever, so an operator reading the table sees a stale
+			// reason that no longer matches why it is failing now.
 			log.Printf("[pm recovery] re-dispatch webhook event=%s still failing: %v", r.EventID, err)
+			if uerr := s.db.WithContext(ctx).
+				Table("webhook_events").
+				Where("id = ?", r.ID).
+				Update("error", err.Error()).Error; uerr != nil {
+				log.Printf("[pm recovery] refresh error for event=%s: %v", r.EventID, uerr)
+			}
 			continue
 		}
 		// nil OR ErrNonSettlingEvent → done; flip to processed.
