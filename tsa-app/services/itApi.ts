@@ -71,9 +71,9 @@ export interface ITPayTo {
 export const itBuy = (ngnKobo: string) =>
   req<{ intent: ITIntent; paymentRef: string; payTo: ITPayTo | null }>('POST', '/it/buy', { ngnKobo });
 
-// One entry from GET /it/withdraw/destinations — the v1 catalog of
+// One entry from GET /it/withdraw/destinations — product catalog of
 // currency/rail (and, for mobile_money, network) combinations IT withdrawal
-// supports. The sell screen's destination picker renders only these entries.
+// supports. Currently NGN/bank only until multi-currency sell is re-enabled.
 export interface WithdrawDestination {
   currency: string;
   rail: 'bank' | 'mobile_money' | string;
@@ -81,10 +81,9 @@ export interface WithdrawDestination {
   label: string;
 }
 
-// GET /api/it/withdraw/destinations — v1 catalog (NGN/bank, GHS/bank,
-// XOF/mobile_money(wave) as of Task 2.5). Single source of truth also used to
-// validate the sell submission server-side, so the app never offers a rail
-// the backend can't fulfill.
+// GET /api/it/withdraw/destinations — product catalog (NGN/bank only until
+// multi-currency sell is re-enabled). Single source of truth also used to
+// validate the sell submission server-side.
 export const getWithdrawDestinations = () =>
   req<{ destinations: WithdrawDestination[] }>('GET', '/it/withdraw/destinations');
 
@@ -95,14 +94,61 @@ export interface WithdrawQuote {
   stale: boolean;
 }
 
-// GET /api/it/withdraw/quote?ngn=<amt>&currency=<ISO> — live FX preview: how
-// much destCurrency the given NGN amount converts to right now. 400 for an
-// unsupported currency (or bad params); 503 when the live FX quote source is
-// unavailable. NGN needs no quote (it's the source currency) — callers should
-// check needsQuote()-equivalent logic (app/wallet/it/sell-quote.ts) before
-// calling this for NGN.
+// GET /api/it/withdraw/quote?ngn=<amt>&currency=<ISO> — live FX preview for a
+// non-NGN destination. With the NGN-only product catalog this is unused by
+// the app; kept for when foreign corridors reopen.
 export const quoteWithdrawal = (ngn: number, currency: string) =>
   req<WithdrawQuote>('GET', `/it/withdraw/quote?ngn=${encodeURIComponent(ngn)}&currency=${encodeURIComponent(currency)}`);
+
+// Fee line from GET /api/it/quote — minor units + display string.
+export interface ITFeeLine {
+  minor: string;
+  display: string;
+}
+
+// Itemized deposit/withdrawal fee quote (MCGP ↔ NGN). Quote-only; never moves money.
+export interface ITFeeQuote {
+  flow: 'deposit' | 'withdraw' | string;
+  asset: string;
+  currency: string;
+  amount: ITFeeLine;
+  platformFee: { usdCents: number; usd: string; inCurrency: ITFeeLine };
+  providerFee: { fee: ITFeeLine; source: string; fallbackBps?: number };
+  tax: {
+    basis: string;
+    base: ITFeeLine;
+    vatBps: number;
+    vat: ITFeeLine;
+    platformTaxBps: number;
+    platformTax: ITFeeLine;
+    total: ITFeeLine;
+  };
+  swapFee: { fee: ITFeeLine; bps: number; legs?: string[] };
+  totalFees: ITFeeLine;
+  netAmount: ITFeeLine;
+  viable: boolean;
+  assetOutEstimate?: string | null;
+}
+
+// GET /api/it/quote?flow=&asset=&amount=&currency= — itemized fee breakdown
+// shown on sell Review (and available for buy). Amount is a positive decimal
+// in `currency` (NGN for IT), max 2dp.
+export const getITFeeQuote = (params: {
+  flow: 'deposit' | 'withdraw';
+  asset: 'MCGP' | 'USDC' | 'USDT';
+  amount: string;
+  currency?: string;
+  chain?: string;
+}) => {
+  const q = new URLSearchParams({
+    flow: params.flow,
+    asset: params.asset,
+    amount: params.amount,
+    currency: params.currency || 'NGN',
+  });
+  if (params.chain) q.set('chain', params.chain);
+  return req<{ quote: ITFeeQuote }>('GET', `/it/quote?${q.toString()}`);
+};
 
 // Optional payout destination for /it/sell. Omit entirely (or leave every
 // field empty) for the legacy NGN manual-payout-queue path — unchanged
