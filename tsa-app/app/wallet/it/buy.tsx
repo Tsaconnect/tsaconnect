@@ -214,15 +214,15 @@ export default function ITBuy() {
             </Text>
             {showPaySecondary ? (
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
-                Indicative for ₦{Number(naira).toLocaleString()} ≈ {formatPrice(payUsd as number)}
+                For ₦{Number(naira).toLocaleString()} ≈ {formatPrice(payUsd as number)}
               </Text>
             ) : (
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
-                Indicative for ₦{Number(naira).toLocaleString()} — rate locks when payment arrives
+                For ₦{Number(naira).toLocaleString()} — rate locks when payment arrives
               </Text>
             )}
             <SummaryCard>
-              <SummaryRow label="You get (indicative)" value={`${estMcgp} MCGP`} />
+              <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
               <Divider spacing="xs" />
               <SummaryRow label="Status" value="Awaiting transfer" />
             </SummaryCard>
@@ -296,7 +296,7 @@ export default function ITBuy() {
         />
 
         <AmountInput
-          label="Amount (indicative)"
+          label="Amount"
           value={naira}
           onChangeText={setNaira}
           symbol="₦"
