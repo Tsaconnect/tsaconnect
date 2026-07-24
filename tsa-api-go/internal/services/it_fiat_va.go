@@ -155,8 +155,9 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 
 // AutoCreditFromVA settles a charge against a standing FiatVirtualAccount.
 // Resolves the VA by fw customer id (primary) or reference (fallback), prices
-// at the live buy rate, creates a buy ITIntent, and credits MCGP. Idempotent
-// on payment_ref (= provider charge id).
+// at the live buy rate, settles into the user's open pending buy order when
+// one exists (so the hub order progresses to credited), otherwise creates a
+// new buy ITIntent. Idempotent on payment_ref (= provider charge id).
 func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, reference, chargeID, amountNGN string) error {
 	if !s.IsConfigured() {
 		return ErrITNotConfigured
@@ -218,23 +219,43 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		pmID = &pm.ID
 	}
 
-	intent := &models.ITIntent{
-		ID:            uuid.New(),
-		UserID:        va.UserID,
-		WalletAddress: wallet,
-		Direction:     models.ITDirectionBuy,
-		Status:        models.ITStatusPendingPayment,
-		NgnKobo:       paidKobo.String(),
-		RateKobo:      "0",
-		McgpAmount:    "0",
-		PaymentRef:    chargeID,
-		PMID:          pmID,
-	}
+	// Prefer the user's open buy order so the hub "Awaiting transfer" row
+	// progresses to credited instead of leaving an orphan pending + a new intent.
+	var pending models.ITIntent
+	pendErr := s.db.WithContext(ctx).
+		Where("user_id = ? AND direction = ? AND status = ?",
+			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment).
+		Order("created_at DESC").
+		First(&pending).Error
 
 	if fx.Stale {
+		intent := &pending
+		if errors.Is(pendErr, gorm.ErrRecordNotFound) {
+			intent = &models.ITIntent{
+				ID:            uuid.New(),
+				UserID:        va.UserID,
+				WalletAddress: wallet,
+				Direction:     models.ITDirectionBuy,
+				PMID:          pmID,
+			}
+		} else if pendErr != nil {
+			return pendErr
+		}
 		intent.Status = models.ITStatusAwaitingRate
 		intent.FailureReason = "fx stale at settlement — operator must reprice"
-		if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
+		intent.NgnKobo = paidKobo.String()
+		intent.PaymentRef = chargeID
+		intent.RateKobo = "0"
+		intent.McgpAmount = "0"
+		if intent.ID == pending.ID && pendErr == nil {
+			if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+				"status": intent.Status, "failure_reason": intent.FailureReason,
+				"ngn_kobo": intent.NgnKobo, "payment_ref": intent.PaymentRef,
+				"rate_kobo": intent.RateKobo, "mcgp_amount": intent.McgpAmount,
+			}).Error; err != nil {
+				return err
+			}
+		} else if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 			return err
 		}
 		log.Printf("[it va] ALARM awaiting_rate intent=%s charge=%s — stale FX, no credit", intent.ID, chargeID)
@@ -245,10 +266,37 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if mcgp.Sign() <= 0 {
 		return fmt.Errorf("it va credit: amount too small after pricing")
 	}
-	intent.RateKobo = buyRate.String()
-	intent.McgpAmount = mcgp.String()
+
+	if pendErr == nil {
+		if err := s.db.WithContext(ctx).Model(&pending).Updates(map[string]any{
+			"payment_ref":    chargeID,
+			"ngn_kobo":       paidKobo.String(),
+			"rate_kobo":      buyRate.String(),
+			"mcgp_amount":    mcgp.String(),
+			"wallet_address": firstNonEmpty(pending.WalletAddress, wallet),
+		}).Error; err != nil {
+			return err
+		}
+		_, err = s.ApproveBuyCredit(ctx, pending.ID, wallet)
+		return err
+	}
+	if !errors.Is(pendErr, gorm.ErrRecordNotFound) {
+		return pendErr
+	}
+
+	intent := &models.ITIntent{
+		ID:            uuid.New(),
+		UserID:        va.UserID,
+		WalletAddress: wallet,
+		Direction:     models.ITDirectionBuy,
+		Status:        models.ITStatusPendingPayment,
+		NgnKobo:       paidKobo.String(),
+		RateKobo:      buyRate.String(),
+		McgpAmount:    mcgp.String(),
+		PaymentRef:    chargeID,
+		PMID:          pmID,
+	}
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
-		// Unique payment_ref race — redelivery.
 		if isUniqueViolation(err) {
 			return s.AutoCreditFromVA(ctx, fwCustomerID, reference, chargeID, amountNGN)
 		}

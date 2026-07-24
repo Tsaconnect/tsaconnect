@@ -209,8 +209,8 @@ func ngnForMcgp(mcgpWei, sellRateKobo *big.Int) *big.Int {
 
 // ─────────────────────────────── buy ──────────────────────────────────────
 // CreateBuyIntent locks the rate, computes the MCGP for the given NGN, mints a
-// payment reference, and stores a pending intent. The user pays the company PM's
-// Nomba VA including PaymentRef; an admin/automation then approves the credit.
+// payment reference, and stores a pending intent. Used by OpenBuyOrder so the
+// user has a visible awaiting-transfer order before the VA webhook settles.
 func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string, pmID *uuid.UUID) (*models.ITIntent, error) {
 	if !s.IsConfigured() {
 		return nil, ErrITNotConfigured
@@ -233,17 +233,17 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	if mcgp.Sign() <= 0 {
 		return nil, fmt.Errorf("amount too small")
 	}
-	// Resolve the company PM (the pay-into account). IT requires it — fail fast
-	// rather than create an unpayable intent with no destination account.
+	// Company PM is optional metadata for Spec 1 standing-VA buys — pay-into is
+	// the user's FiatVirtualAccount, not the company inbound. Still attach when
+	// configured so admin tooling can group IT volume.
 	if pmID == nil {
 		pm, e := s.CompanyPM(ctx)
 		if e != nil {
 			return nil, e
 		}
-		if pm == nil {
-			return nil, ErrITNoPM
+		if pm != nil {
+			pmID = &pm.ID
 		}
-		pmID = &pm.ID
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
@@ -261,6 +261,21 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 		return nil, err
 	}
 	return intent, nil
+}
+
+// OpenBuyOrder creates a pending buy the user can track while transferring into
+// their standing VA. Supersedes any prior pending buy for the same user so the
+// hub shows one clear awaiting-transfer order. Actual settlement still prices
+// at the live rate when funds land (amount may differ from the quote).
+func (s *ITService) OpenBuyOrder(ctx context.Context, userID uuid.UUID, walletAddr, ngnKobo string) (*models.ITIntent, error) {
+	_ = s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("user_id = ? AND direction = ? AND status = ?",
+			userID, models.ITDirectionBuy, models.ITStatusPendingPayment).
+		Updates(map[string]any{
+			"status":         models.ITStatusCancelled,
+			"failure_reason": "superseded by new buy order",
+		}).Error
+	return s.CreateBuyIntent(ctx, userID, walletAddr, ngnKobo, nil)
 }
 
 // ApproveBuyCredit credits the user's spend-only premium for a paid buy intent.
@@ -300,11 +315,13 @@ func (s *ITService) ApproveBuyCredit(ctx context.Context, intentID uuid.UUID, wa
 
 	txHash, err := s.swap.OperatorCreditPremium(ctx, wallet, amount, ref)
 	if err != nil {
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "credit broadcast: "+err.Error())
+		log.Printf("[IT] credit broadcast failed intent=%s operator=%s: %v", intent.ID, s.swap.OperatorAddress(), err)
+		_ = s.setStatus(ctx, intent, models.ITStatusFailed, err.Error())
 		return nil, err
 	}
 	if _, err := s.swap.VerifyOperatorEvent("PremiumCredited", txHash, common.HexToAddress(wallet), ref); err != nil {
-		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "credit verify: "+err.Error())
+		log.Printf("[IT] credit verify failed intent=%s tx=%s: %v", intent.ID, txHash, err)
+		_ = s.setStatus(ctx, intent, models.ITStatusFailed, err.Error())
 		return nil, err
 	}
 	intent.TxHash = txHash

@@ -77,10 +77,11 @@ export interface ITBuyResult {
   needsActivation: boolean;
   quote: ITBuyQuote;
   payTo: ITPayTo | null;
+  intent?: ITIntent | null;
 }
 
-// ngnKobo = naira * 100 (string). Spec 1: indicative quote + standing VA
-// (no intent created). needsActivation=true when the user has no VA yet.
+// ngnKobo = naira * 100 (string). Opens a pending buy order + standing VA
+// details. needsActivation=true when the user has no VA yet.
 export const itBuy = (ngnKobo: string) =>
   req<ITBuyResult>('POST', '/it/buy', { ngnKobo });
 
