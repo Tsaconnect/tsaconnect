@@ -38,8 +38,8 @@ import {
   type ITFeeQuote,
 } from '@/services/itApi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
-import { mcgpAmountToNgn } from './sell-quote';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { mcgpAmountToNgn } from '@/utils/sellQuote';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 
 type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
 

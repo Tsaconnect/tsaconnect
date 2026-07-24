@@ -1,4 +1,4 @@
-// app/p2p/__tests__/pm-cta.test.ts
+// utils/__tests__/pmCta.test.ts
 //
 // Tests for Task 4 (spec A3):
 //   (a) On the pm=1 view with useIsPaymentMerchant → {isPm:false}, the
@@ -16,7 +16,7 @@
 
 // ─── shouldShowPmCta ─────────────────────────────────────────────────────────
 
-import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '../pm-cta';
+import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 
 describe('shouldShowPmCta — PM CTA visibility predicate', () => {
   it('returns true when pm param is set and user is NOT a PM', () => {

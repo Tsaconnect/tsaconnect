@@ -18,7 +18,7 @@ import {
 import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
-import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from './pm-cta';
+import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';

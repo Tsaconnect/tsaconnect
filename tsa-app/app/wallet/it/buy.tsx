@@ -35,7 +35,7 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';

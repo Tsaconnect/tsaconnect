@@ -10,7 +10,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { isValidPmIdNumber } from '../activate-pm';
+import { isValidPmIdNumber } from '@/app/merchants/activate-pm';
 
 describe('isValidPmIdNumber', () => {
   it('accepts exactly 11 digits', () => {

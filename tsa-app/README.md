@@ -25,6 +25,20 @@ In the output, you'll find options to open the app in a
 
 You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
 
+## Release builds
+
+`npm run build:android` / `build:ios` / `update` shell out to the EAS CLI, which
+authenticates from the `EXPO_TOKEN` environment variable. Export it in your shell
+(or your CI secret store) before running them:
+
+```bash
+export EXPO_TOKEN=<your expo access token>
+```
+
+Never inline the token into `package.json` — it is committed to git and grants
+full access to the Expo project. Tokens are issued and revoked at
+https://expo.dev/accounts/mcgp/settings/access-tokens.
+
 ## Get a fresh project
 
 When you're ready, run:

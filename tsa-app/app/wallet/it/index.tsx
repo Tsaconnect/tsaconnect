@@ -31,7 +31,7 @@ import {
   type ITRate,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { ngnToUsd } from './currency-display';
+import { ngnToUsd } from '@/utils/currencyDisplay';
 import ITAgreementGate from '@/components/it/ITAgreementGate';
 
 const fmtMcgp = (wei?: string) => {

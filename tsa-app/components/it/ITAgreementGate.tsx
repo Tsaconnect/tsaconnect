@@ -13,7 +13,7 @@ import { useTheme } from '@/theme';
 import { Button, Card, Spinner, Text } from '@/components/ui';
 import { acceptITAgreement, getITAgreement, type ITAgreement } from '@/services/itApi';
 import api from '@/components/services/api';
-import { agreementGreeting } from '@/app/wallet/it/agreement-copy';
+import { agreementGreeting } from '@/utils/agreementCopy';
 
 interface Props {
   onAccepted: () => void;
