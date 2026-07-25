@@ -7,8 +7,9 @@
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, type Href } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
+import { fiatRails, type FiatDirection } from '@/utils/fiatRails';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -403,57 +404,112 @@ const AssetRow: React.FC<{
   );
 };
 
-// ── Fund Sheet ──
-const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Sheet visible={visible} onClose={onClose} title="Fund Your Wallet">
-    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+// ── Fiat rail chooser ──
+// Second step of both the Fund and Send sheets: pick which of the three fiat
+// rails to trade through. Routes come from utils/fiatRails so Fund and Send
+// can't drift apart.
+const FiatRailOptions: React.FC<{ direction: FiatDirection; onNavigate: () => void }> = ({
+  direction,
+  onNavigate,
+}) => (
+  <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+    {fiatRails(direction).map(rail => (
       <SheetOption
-        icon="bank"
-        title="Fiat Deposit"
-        desc="Bank transfer or credit card"
+        key={rail.key}
+        icon={rail.icon}
+        title={rail.title}
+        desc={rail.desc}
         onPress={() => {
-          onClose();
-          router.push('/fundfiat');
+          onNavigate();
+          router.push(rail.route as Href);
         }}
       />
-      <SheetOption
-        icon="wallet"
-        title="Crypto Deposit"
-        desc="From external wallet or exchange"
-        onPress={() => {
-          onClose();
-          router.push('/fund');
-        }}
-      />
-    </View>
-  </Sheet>
+    ))}
+  </View>
 );
 
+// Both sheets are two-step: the rail chooser replaces the sheet body in place
+// rather than pushing a screen, so backing out lands on the fund/send choice
+// instead of unwinding the whole wallet stack.
+const useSheetStep = (visible: boolean) => {
+  const [step, setStep] = useState<'root' | 'fiat'>('root');
+  // Reset on open rather than on close: resetting on close would flip the body
+  // back to the root list while the panel is still animating out.
+  useEffect(() => {
+    if (visible) setStep('root');
+  }, [visible]);
+  return { step, showFiat: () => setStep('fiat'), showRoot: () => setStep('root') };
+};
+
+// ── Fund Sheet ──
+const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const { step, showFiat, showRoot } = useSheetStep(visible);
+  return (
+    <Sheet
+      visible={visible}
+      onClose={onClose}
+      title={step === 'fiat' ? 'Fund with Fiat' : 'Fund Your Wallet'}
+      onBack={step === 'fiat' ? showRoot : undefined}
+    >
+      {step === 'fiat' ? (
+        <FiatRailOptions direction="buy" onNavigate={onClose} />
+      ) : (
+        <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+          <SheetOption
+            icon="bank"
+            title="Fiat Deposit"
+            desc="Buy crypto with your local currency"
+            onPress={showFiat}
+          />
+          <SheetOption
+            icon="wallet"
+            title="Crypto Deposit"
+            desc="From external wallet or exchange"
+            onPress={() => {
+              onClose();
+              router.push('/fund');
+            }}
+          />
+        </View>
+      )}
+    </Sheet>
+  );
+};
+
 // ── Send Sheet ──
-const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Sheet visible={visible} onClose={onClose} title="Send Funds">
-    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
-      <SheetOption
-        icon="card"
-        title="Withdraw as Fiat"
-        desc="Bank transfer or mobile money"
-        onPress={() => {
-          onClose();
-          router.push('/sendfiat');
-        }}
-      />
-      <SheetOption
-        icon="wallet"
-        title="Send Crypto"
-        desc="To external wallet or exchange"
-        onPress={() => {
-          onClose();
-          router.push('/wallet/send');
-        }}
-      />
-    </View>
-  </Sheet>
-);
+const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const { step, showFiat, showRoot } = useSheetStep(visible);
+  return (
+    <Sheet
+      visible={visible}
+      onClose={onClose}
+      title={step === 'fiat' ? 'Withdraw as Fiat' : 'Send Funds'}
+      onBack={step === 'fiat' ? showRoot : undefined}
+    >
+      {step === 'fiat' ? (
+        <FiatRailOptions direction="sell" onNavigate={onClose} />
+      ) : (
+        <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+          <SheetOption
+            icon="card"
+            title="Withdraw as Fiat"
+            desc="Sell crypto for your local currency"
+            onPress={showFiat}
+          />
+          <SheetOption
+            icon="wallet"
+            title="Send Crypto"
+            desc="To external wallet or exchange"
+            onPress={() => {
+              onClose();
+              router.push('/wallet/send');
+            }}
+          />
+        </View>
+      )}
+    </Sheet>
+  );
+};
 
 // Shared sheet option row (icon tile + title/desc + chevron).
 const SheetOption: React.FC<{
