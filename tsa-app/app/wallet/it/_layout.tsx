@@ -7,6 +7,13 @@ import { Spinner } from '@/components/ui';
 import ITAgreementGate from '@/components/it/ITAgreementGate';
 import { getITAgreement } from '@/services/itApi';
 
+// Anchor the stack to the hub. The wallet's fiat sheet links straight to
+// /wallet/it/buy and /wallet/it/sell, and expo-router builds a nested stack's
+// routes array from the URL alone — without this the stack would be
+// routes: [buy] at index 0, leaving the header back button with nothing to pop.
+// With it, getStateFromPath inserts the hub beneath the target.
+export const unstable_settings = { initialRouteName: 'index' };
+
 // Instant Transfer (IT) — buy/sell MCGP with Naira via the company PM.
 //
 // The trading agreement gates the whole group, not just the hub: buy and sell
@@ -54,7 +61,14 @@ export default function ITLayout() {
   }
 
   if (!agreed) {
-    return <ITAgreementGate onAccepted={() => setAgreed(true)} onCancel={() => router.back()} />;
+    // Cancel leaves IT altogether. The gate stands in for the whole navigator,
+    // so popping a single route would re-render the same gate over the hub and
+    // read as a dead button — unwind to the stack's anchor, then pop the group.
+    const leave = () => {
+      router.dismissAll();
+      if (router.canGoBack()) router.back();
+    };
+    return <ITAgreementGate onAccepted={() => setAgreed(true)} onCancel={leave} />;
   }
 
   return (
