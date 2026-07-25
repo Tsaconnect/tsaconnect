@@ -555,6 +555,29 @@ func (s *ITService) ListUserIntents(ctx context.Context, userID uuid.UUID) ([]mo
 	return out, err
 }
 
+// ListIntentsAdmin returns intents across all users for the operator console,
+// newest first, with optional direction/status filters and offset pagination.
+// Empty direction/status mean "any". Returns the page plus the unpaginated
+// total for the filter (so the UI can show counts / more-pages).
+func (s *ITService) ListIntentsAdmin(ctx context.Context, direction, status string, limit, offset int) ([]models.ITIntent, int64, error) {
+	q := s.db.WithContext(ctx).Model(&models.ITIntent{})
+	if d := strings.TrimSpace(direction); d != "" {
+		q = q.Where("direction = ?", d)
+	}
+	if st := strings.TrimSpace(status); st != "" {
+		q = q.Where("status = ?", st)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var out []models.ITIntent
+	if err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&out).Error; err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
 func (s *ITService) getIntent(ctx context.Context, id uuid.UUID) (*models.ITIntent, error) {
 	var i models.ITIntent
 	err := s.db.WithContext(ctx).First(&i, "id = ?", id).Error

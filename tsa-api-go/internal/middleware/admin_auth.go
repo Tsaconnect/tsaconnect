@@ -156,3 +156,38 @@ func RequireP2PAdmin() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// RequireSuperAdmin gates an action to super_admin only. Used for operations a
+// plain admin must not perform even though they can view the surrounding page —
+// e.g. IT order money-movements (reverse/settle/credit/reprice), where the
+// admin UI shows the list to any admin but restricts the action buttons.
+// Layer AFTER an auth middleware that sets the "user" context value.
+func RequireSuperAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		val, ok := c.Get("user")
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false, "message": "Please authenticate",
+			})
+			return
+		}
+		user, ok := val.(models.User)
+		if !ok {
+			if p, pok := val.(*models.User); pok {
+				user = *p
+			} else {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"success": false, "message": "Please authenticate",
+				})
+				return
+			}
+		}
+		if user.Role != models.RoleSuperAdmin {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"success": false, "message": "Super admin role required",
+			})
+			return
+		}
+		c.Next()
+	}
+}
