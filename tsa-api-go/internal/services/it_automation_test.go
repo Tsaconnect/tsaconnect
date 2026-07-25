@@ -93,7 +93,7 @@ func TestDispatchFlutterwaveRoutesITRefs(t *testing.T) {
 		t.Fatalf("credit routing wrong: %+v", hooks.credited)
 	}
 
-	payout := []byte(`{"webhook_id":"w2","type":"transfer.disburse","data":{"id":1,"reference":"IT-SELL-3f2b8c9e-1111-2222-3333-444444444444","status":"SUCCESSFUL"}}`)
+	payout := []byte(`{"webhook_id":"w2","type":"transfer.disburse","data":{"id":"trf_test1","reference":"IT-SELL-3f2b8c9e-1111-2222-3333-444444444444","status":"SUCCESSFUL"}}`)
 	if err := s.DispatchFlutterwave(context.Background(), payout); err != nil {
 		t.Fatalf("payout dispatch: %v", err)
 	}

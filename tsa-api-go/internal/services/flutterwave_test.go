@@ -114,8 +114,11 @@ func TestParseFlutterwaveInbound(t *testing.T) {
 }
 
 func TestParseFlutterwavePayout(t *testing.T) {
+	// v4 transfer ids are string references ("trf_…"), not numbers — using the
+	// real shape here is what guards the regression where fwTransferData.ID was
+	// json.Number and every transfer.disburse webhook failed to parse.
 	mk := func(evType, status string) []byte {
-		return []byte(`{"webhook_id":"wh_p","type":"` + evType + `","data":{"id":98765,"reference":"3f2b8c9e-0000-0000-0000-000000000000","status":"` + status + `","amount":500,"currency":"NGN"}}`)
+		return []byte(`{"webhook_id":"wh_p","type":"` + evType + `","data":{"id":"trf_ujFmOq7yqNtsQIF1tKiGP","reference":"3f2b8c9e-0000-0000-0000-000000000000","status":"` + status + `","amount":500,"currency":"NGN"}}`)
 	}
 	cases := []struct {
 		evType, status, want string
@@ -134,7 +137,7 @@ func TestParseFlutterwavePayout(t *testing.T) {
 		if p.Status != c.want {
 			t.Fatalf("%s/%s: status %q want %q", c.evType, c.status, p.Status, c.want)
 		}
-		if p.PayoutID != "98765" || p.MerchantTxRef != "3f2b8c9e-0000-0000-0000-000000000000" {
+		if p.PayoutID != "trf_ujFmOq7yqNtsQIF1tKiGP" || p.MerchantTxRef != "3f2b8c9e-0000-0000-0000-000000000000" {
 			t.Fatalf("%s/%s: keys wrong: %+v", c.evType, c.status, p)
 		}
 	}
