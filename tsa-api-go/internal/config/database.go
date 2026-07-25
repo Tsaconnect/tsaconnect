@@ -123,6 +123,8 @@ func AutoMigrate() error {
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},
+		// IT trading agreement — append-only acceptance audit trail.
+		&models.ITAgreementAcceptance{},
 		// Spot Trade — admin-curated pairs shown on the Spot tab; Buy/Sell reuse
 		// existing swap flows. Composite unique index on (base,quote,chain).
 		&models.SpotListing{},

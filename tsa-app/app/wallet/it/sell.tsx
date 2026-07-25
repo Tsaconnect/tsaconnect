@@ -34,6 +34,7 @@ import {
   getITFeeQuote,
   getITRate,
   itSell,
+  IT_AGREEMENT_REQUIRED,
   type ITFeeQuote,
 } from '@/services/itApi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
@@ -268,6 +269,12 @@ export default function ITSell() {
       accountNumber: reviewAccountNumber,
       accountName: reviewAccountName,
     });
+    if (r.code === IT_AGREEMENT_REQUIRED) {
+      // Reached here without accepting (deep link / stale state) — the hub owns
+      // the agreement gate; send them there.
+      router.replace('/wallet/it');
+      return;
+    }
     if (!r.success || !r.data) {
       setError(r.message || 'Sell failed');
       setScreen('error');

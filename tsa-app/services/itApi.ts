@@ -31,7 +31,9 @@ export interface ITIntent {
   createdAt: string;
 }
 
-export type ApiResult<T> = { success: boolean; data?: T; message?: string };
+// code carries the backend's machine error code (e.g. "it_agreement_required")
+// so callers can branch on it instead of matching message strings.
+export type ApiResult<T> = { success: boolean; data?: T; message?: string; code?: string };
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
   try {
@@ -48,11 +50,28 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<Api
       /* empty */
     }
     if (json?.success) return { success: true, data: json.data as T };
-    return { success: false, message: json?.message || `Request failed (${res.status})` };
+    return { success: false, message: json?.message || `Request failed (${res.status})`, code: json?.code };
   } catch (e: any) {
     return { success: false, message: e?.message || 'Network error' };
   }
 }
+
+// Backend machine code returned by the trade endpoints when the user has not
+// accepted the current trading agreement.
+export const IT_AGREEMENT_REQUIRED = 'it_agreement_required';
+
+// Trading agreement — must be accepted (current version) before the first IT
+// transaction. getITAgreement returns the text + whether the caller has agreed.
+export interface ITAgreement {
+  version: string;
+  title: string;
+  intro: string;
+  clauses: string[];
+  accepted: boolean;
+}
+export const getITAgreement = () => req<ITAgreement>('GET', '/it/agreement');
+export const acceptITAgreement = () =>
+  req<{ version: string; accepted: boolean }>('POST', '/it/agreement/accept');
 
 export const getITRate = () => req<ITRate>('GET', '/it/rate');
 export const getITBalance = () => req<ITBalance>('GET', '/it/balance');

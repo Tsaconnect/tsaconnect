@@ -51,7 +51,7 @@ func newITTestHandler(t *testing.T) (*ITHandler, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITRate{}, &models.PaymentMerchant{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	swap := services.NewMCGPSwapService(nil, &config.Config{
@@ -64,6 +64,10 @@ func newITTestHandler(t *testing.T) (*ITHandler, *gorm.DB) {
 }
 
 func doITSell(h *ITHandler, user *models.User, body map[string]any) *httptest.ResponseRecorder {
+	// These tests exercise Sell's input/catalog validation, which sits behind
+	// the trading-agreement gate. Satisfy the gate so the logic under test is
+	// reached; the gate's own blocking behaviour is covered separately below.
+	_ = h.it.AcceptITAgreement(context.Background(), user.ID, "", "")
 	b, _ := json.Marshal(body)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -72,6 +76,38 @@ func doITSell(h *ITHandler, user *models.User, body map[string]any) *httptest.Re
 	c.Set("user", user)
 	h.Sell(c)
 	return w
+}
+
+// TestIT_AgreementGate_BlocksTrade pins the enforcement: a user who has NOT
+// accepted the current agreement is refused a trade with 403 + the machine code
+// the app matches on, and no intent is created.
+func TestIT_AgreementGate_BlocksTrade(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, db := newITTestHandler(t)
+	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body, _ := json.Marshal(map[string]any{
+		"mcgpAmount": "1000000000000000000", "bankCode": "044", "accountNumber": "0123456789",
+	})
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/it/sell", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", user)
+	h.Sell(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body=%s)", w.Code, w.Body.String())
+	}
+	resp := decodeITResponse(t, w)
+	if resp["code"] != "it_agreement_required" {
+		t.Fatalf("code = %v, want it_agreement_required", resp["code"])
+	}
+	var n int64
+	db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("an intent was created despite the gate (%d rows)", n)
+	}
 }
 
 func decodeITResponse(t *testing.T, w *httptest.ResponseRecorder) map[string]any {

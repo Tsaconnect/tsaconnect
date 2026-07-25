@@ -209,6 +209,9 @@ func (h *ITHandler) ActivateVA(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
 		return
 	}
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
 	if !h.it.HasFiatVAProvisioning() {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Instant Transfer account activation unavailable")
 		return
@@ -267,6 +270,9 @@ func (h *ITHandler) Buy(c *gin.Context) {
 	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
 		return
 	}
 	var req itBuyReq
@@ -346,6 +352,9 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
 		return
 	}
 	var req itSellReq
@@ -551,4 +560,69 @@ func (h *ITHandler) adminIntentAction(c *gin.Context, fn func(uuid.UUID, string)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": out})
+}
+
+// GET /api/it/agreement — the current trading agreement plus whether the caller
+// has already accepted it. The app renders the greeting from the user's profile.
+func (h *ITHandler) GetAgreement(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	accepted, err := h.it.HasAcceptedITAgreement(c.Request.Context(), user.ID)
+	if err != nil {
+		log.Printf("[it] GetAgreement user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load the agreement")
+		return
+	}
+	ag := services.CurrentITAgreement()
+	utils.SuccessResponse(c, http.StatusOK, "Agreement", gin.H{
+		"version":  ag.Version,
+		"title":    ag.Title,
+		"intro":    ag.Intro,
+		"clauses":  ag.Clauses,
+		"accepted": accepted,
+	})
+}
+
+// POST /api/it/agreement/accept — record the caller's acceptance of the current
+// version. Idempotent. The user must be able to trade IT (has a wallet) — but
+// the agreement itself gates trading, so we accept without a wallet check here.
+func (h *ITHandler) AcceptAgreement(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if err := h.it.AcceptITAgreement(c.Request.Context(), user.ID, c.ClientIP(), c.Request.UserAgent()); err != nil {
+		log.Printf("[it] AcceptAgreement user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not record acceptance")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Agreement accepted", gin.H{
+		"version":  services.ITAgreementVersion,
+		"accepted": true,
+	})
+}
+
+// requireITAgreement is the shared trade gate for ActivateVA/Buy/Sell. It writes
+// a 403 with a machine code the app matches on to show the agreement, and
+// returns false when the caller is blocked (handler must stop).
+func (h *ITHandler) requireITAgreement(c *gin.Context, userID uuid.UUID) bool {
+	err := h.it.RequireITAgreement(c.Request.Context(), userID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, services.ErrITAgreementRequired) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"code":    "it_agreement_required",
+			"message": "Please review and accept the trading agreement to continue",
+		})
+		return false
+	}
+	log.Printf("[it] agreement gate user=%s: %v", userID, err)
+	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify the trading agreement")
+	return false
 }

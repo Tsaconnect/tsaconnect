@@ -29,6 +29,7 @@ import type { PickerItem } from '@/components/ui';
 import {
   activateITVA,
   itBuy,
+  IT_AGREEMENT_REQUIRED,
   type ITBuyQuote,
   type ITIntent,
   type ITPayTo,
@@ -98,6 +99,12 @@ export default function ITBuy() {
     setScreen('submitting');
     const kobo = String(Math.round(amt * 100));
     const r = await itBuy(kobo);
+    if (r.code === IT_AGREEMENT_REQUIRED) {
+      // Reached here without accepting (deep link / stale state) — the hub owns
+      // the agreement gate; send them there.
+      router.replace('/wallet/it');
+      return;
+    }
     if (!r.success || !r.data) {
       setError(r.message || 'Could not open the buy order');
       setScreen('error');
