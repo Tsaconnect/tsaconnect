@@ -32,6 +32,14 @@ func AutoMigrate() error {
 	// keep chain_id = NULL (the legacy global), so this is a safe backfill.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token")
 
+	// Same move again for the transaction-tax work: fee_configs gained a
+	// nullable direction column and the unique index widened from
+	// (feature, token_symbol, chain_id) → (..., direction) so a per-leg rate can
+	// coexist with the NULL any-direction row. The 3-col UNIQUE would reject the
+	// new rows, so drop it explicitly before AutoMigrate adds the 4-col one.
+	// Existing rows keep direction = NULL and resolve exactly as before.
+	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token_chain")
+
 	// IT rates moved from Naira columns (buy_rate_kobo / sell_rate_kobo) to an
 	// admin-set USD price + sell-discount, with Naira derived live from FX. The
 	// legacy row carries no USD value and the new columns are NOT NULL, so drop
