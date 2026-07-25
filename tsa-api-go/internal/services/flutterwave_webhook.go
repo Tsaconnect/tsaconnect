@@ -185,7 +185,11 @@ func ParseFlutterwaveInbound(raw []byte) (*InboundPayment, error) {
 
 // fwTransferData is the transfer.disburse / transfer.reversal payload slice.
 type fwTransferData struct {
-	ID        json.Number `json:"id"`
+	// v4 transfer ids are string references ("trf_…"), NOT numbers — unmarshaling
+	// into json.Number fails the whole parse ("invalid number literal"), so the
+	// transfer.disburse webhook never settles the sell and it hangs on
+	// "payout in progress" despite the money having left.
+	ID        string      `json:"id"`
 	Reference string      `json:"reference"`
 	Status    string      `json:"status"`
 	Amount    json.Number `json:"amount"`
@@ -231,7 +235,7 @@ func ParseFlutterwavePayout(raw []byte) (*PayoutStatus, error) {
 
 	return &PayoutStatus{
 		EventID:       env.WebhookID,
-		PayoutID:      data.ID.String(),
+		PayoutID:      data.ID,
 		MerchantTxRef: data.Reference,
 		Status:        status,
 	}, nil
