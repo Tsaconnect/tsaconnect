@@ -50,6 +50,32 @@ func TestITAgreement_GateAcceptAndReconsent(t *testing.T) {
 	}
 }
 
+// The DB, not just the pre-check, enforces one acceptance per (user, version):
+// a second row bypassing AcceptITAgreement's guard must be rejected. This is
+// what makes the concurrent-accept race (two callers both past the read check)
+// collapse to a single audit row.
+func TestITAgreement_UniquePerUserVersion(t *testing.T) {
+	s := newITTestService(t)
+	user := uuid.New()
+
+	first := &models.ITAgreementAcceptance{UserID: user, Version: ITAgreementVersion}
+	if err := s.db.Create(first).Error; err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	dup := &models.ITAgreementAcceptance{UserID: user, Version: ITAgreementVersion}
+	if err := s.db.Create(dup).Error; err == nil {
+		t.Fatal("duplicate (user, version) acceptance was allowed — unique index missing")
+	} else if !isUniqueViolation(err) {
+		t.Fatalf("duplicate insert failed with a non-unique error: %v", err)
+	}
+
+	// A different version is a legitimate re-consent, not a conflict.
+	other := &models.ITAgreementAcceptance{UserID: user, Version: "2.0"}
+	if err := s.db.Create(other).Error; err != nil {
+		t.Fatalf("re-consent to a new version should be allowed: %v", err)
+	}
+}
+
 // A user who accepted an OLDER version must re-consent when the version bumps —
 // the gate compares against the current version only.
 func TestITAgreement_ReconsentOnVersionBump(t *testing.T) {
