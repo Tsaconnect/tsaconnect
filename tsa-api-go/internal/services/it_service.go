@@ -60,6 +60,12 @@ type ITService struct {
 	fx          FxProvider // NGN/USD source for USD→Naira conversion
 	companyPMID string     // PaymentMerchant UUID for the IT pay-into account (optional)
 
+	// minSellNgnKobo is the smallest NGN payout a sell may produce, in kobo.
+	// Flutterwave rejects transfers below ₦100 (TRANSFER_AMOUNT_LIMIT), and a
+	// sell that clears the on-chain debit before that payout fails strands the
+	// user's premium — so this is enforced BEFORE the debit. 0 ⇒ the default.
+	minSellNgnKobo int64
+
 	// Automation seams (all optional — absent keeps the legacy operator-manual
 	// flow): payout fires sell payouts through the fiat gateway; va provisions
 	// per-intent dynamic virtual accounts for buys. See it_automation.go.
@@ -88,6 +94,25 @@ func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService 
 
 // SetCompanyPMID pins which PaymentMerchant IT buyers pay into (from IT_PM_ID).
 func (s *ITService) SetCompanyPMID(id string) { s.companyPMID = strings.TrimSpace(id) }
+
+// defaultMinSellNgnKobo is Flutterwave's ₦100 payout floor (TRANSFER_AMOUNT_LIMIT).
+const defaultMinSellNgnKobo = 10000 // ₦100
+
+// SetMinSellNgnKobo overrides the minimum sell payout (kobo). A non-positive
+// value keeps the default.
+func (s *ITService) SetMinSellNgnKobo(kobo int64) {
+	if kobo > 0 {
+		s.minSellNgnKobo = kobo
+	}
+}
+
+// minSellKobo returns the effective minimum sell payout in kobo.
+func (s *ITService) minSellKobo() int64 {
+	if s.minSellNgnKobo > 0 {
+		return s.minSellNgnKobo
+	}
+	return defaultMinSellNgnKobo
+}
 
 // IsConfigured reports whether IT can operate (swap + operator signer present).
 func (s *ITService) IsConfigured() bool {
@@ -454,8 +479,11 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		return nil, ErrITFxUnavailable
 	}
 	ngn := ngnForMcgp(amount, sellRate)
-	if ngn.Sign() <= 0 {
-		return nil, fmt.Errorf("amount too small")
+	// Enforce the minimum payout BEFORE the on-chain debit: a sell whose NGN
+	// falls under Flutterwave's ₦100 floor would debit the user's premium and
+	// then fail the payout, stranding it. Reject up front so nothing moves.
+	if minKobo := s.minSellKobo(); ngn.Cmp(big.NewInt(minKobo)) < 0 {
+		return nil, fmt.Errorf("minimum sale is ₦%d", minKobo/100)
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
