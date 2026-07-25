@@ -857,10 +857,15 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.GET("/rate", ith.AdminGetRate)
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.GET("/intents", ith.AdminListIntents)
-			adminIT.POST("/credit/:id", ith.AdminApproveCredit)
-			adminIT.POST("/reprice/:id", ith.AdminRepriceCredit)
-			adminIT.POST("/settle/:id", ith.AdminSettle)
-			adminIT.POST("/reverse/:id", ith.AdminReverse)
+			// Money-movement actions are super_admin only — a plain admin may
+			// view the orders console but not credit/reprice/settle/reverse.
+			// The admin UI hides these buttons for non-super_admins; this is the
+			// enforcing gate behind that UI restriction.
+			superIT := adminIT.Group("", middleware.RequireSuperAdmin())
+			superIT.POST("/credit/:id", ith.AdminApproveCredit)
+			superIT.POST("/reprice/:id", ith.AdminRepriceCredit)
+			superIT.POST("/settle/:id", ith.AdminSettle)
+			superIT.POST("/reverse/:id", ith.AdminReverse)
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")

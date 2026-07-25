@@ -564,14 +564,27 @@ func (h *ITHandler) AdminListIntents(c *gin.Context) {
 		return
 	}
 
+	// Resolve all account identities in one query, not one per row.
+	ids := make([]uuid.UUID, 0, len(intents))
+	for i := range intents {
+		ids = append(ids, intents[i].UserID)
+	}
+	accounts := make(map[uuid.UUID]gin.H, len(ids))
+	if len(ids) > 0 {
+		var users []models.User
+		if err := h.db.WithContext(c.Request.Context()).
+			Select("id", "username", "name", "email").
+			Where("id IN ?", ids).Find(&users).Error; err == nil {
+			for _, u := range users {
+				accounts[u.ID] = gin.H{"username": u.Username, "name": u.Name, "email": u.Email}
+			}
+		}
+	}
 	rows := make([]gin.H, 0, len(intents))
 	for i := range intents {
 		row := gin.H{"intent": intents[i]}
-		var u models.User
-		if err := h.db.WithContext(c.Request.Context()).
-			Select("username", "name", "email").
-			First(&u, "id = ?", intents[i].UserID).Error; err == nil {
-			row["account"] = gin.H{"username": u.Username, "name": u.Name, "email": u.Email}
+		if acc, ok := accounts[intents[i].UserID]; ok {
+			row["account"] = acc
 		}
 		rows = append(rows, row)
 	}
