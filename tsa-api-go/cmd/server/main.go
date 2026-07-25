@@ -211,6 +211,7 @@ func main() {
 				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
 				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
+				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}

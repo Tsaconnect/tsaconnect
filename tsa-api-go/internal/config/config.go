@@ -238,6 +238,11 @@ type Config struct {
 	// reports payments unavailable rather than misrouting to another merchant.
 	ITPMID string
 
+	// ITMinSellNgnKobo is the smallest NGN payout an IT sell may produce, in kobo
+	// (default ₦100 = 10000, Flutterwave's TRANSFER_AMOUNT_LIMIT floor). Raise to
+	// tighten the dust-sell guard without a code change.
+	ITMinSellNgnKobo int64
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -482,6 +487,7 @@ func Load() *Config {
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
 	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
 	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
+	cfg.ITMinSellNgnKobo = getEnvInt64("IT_MIN_SELL_NGN_KOBO", 10000) // ₦100
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
