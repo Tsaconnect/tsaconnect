@@ -538,6 +538,48 @@ func (h *ITHandler) AdminReverse(c *gin.Context) {
 	})
 }
 
+// GET /api/it/admin/intents?direction=&status=&limit=&offset= — the operator
+// order console. Cross-user, newest first, with optional filters. Each row
+// carries the account identity so a reviewer knows whose order it is, and the
+// RAW failure_reason (not the softened user copy) so operators see the real
+// cause.
+func (h *ITHandler) AdminListIntents(c *gin.Context) {
+	direction := strings.ToLower(strings.TrimSpace(c.Query("direction")))
+	if direction != "" && direction != models.ITDirectionBuy && direction != models.ITDirectionSell {
+		utils.ErrorResponse(c, http.StatusBadRequest, "direction must be buy or sell")
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+
+	limit := clamp(atoiDefault(c.Query("limit"), defaultPageSize), 1, maxPageSize)
+	offset := atoiDefault(c.Query("offset"), 0)
+	if offset < 0 {
+		offset = 0
+	}
+
+	intents, total, err := h.it.ListIntentsAdmin(c.Request.Context(), direction, status, limit, offset)
+	if err != nil {
+		log.Printf("[it] AdminListIntents: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load orders")
+		return
+	}
+
+	rows := make([]gin.H, 0, len(intents))
+	for i := range intents {
+		row := gin.H{"intent": intents[i]}
+		var u models.User
+		if err := h.db.WithContext(c.Request.Context()).
+			Select("username", "name", "email").
+			First(&u, "id = ?", intents[i].UserID).Error; err == nil {
+			row["account"] = gin.H{"username": u.Username, "name": u.Name, "email": u.Email}
+		}
+		rows = append(rows, row)
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Orders", gin.H{
+		"intents": rows, "total": total, "limit": limit, "offset": offset,
+	})
+}
+
 func (h *ITHandler) adminIntentAction(c *gin.Context, fn func(uuid.UUID, string) (*models.ITIntent, error)) {
 	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
