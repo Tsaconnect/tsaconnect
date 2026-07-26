@@ -6,7 +6,7 @@
 // (api.getCategoryTree / api.getProfile), state, effects, the category
 // transform, role gating, and all navigation routes + params are unchanged —
 // this is a visual / structural migration only.
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -104,6 +104,19 @@ const MarketplaceScreen: React.FC = () => {
   // Active service sub-tab (Contact/Order/Booking); only used when the Services
   // tab is selected. Defaults to 'contact'.
   const [serviceSubTab, setServiceSubTab] = useState<ServiceType>('contact');
+  // Deep-link preselection, e.g. the home RWM card's "View all" on a service
+  // tab arrives as ?tab=services&serviceType=booking.
+  const { tab: tabParam, serviceType: serviceTypeParam } = useLocalSearchParams<{
+    tab?: string;
+    serviceType?: string;
+  }>();
+
+  useEffect(() => {
+    if (tabParam === 'products' || tabParam === 'services') setSelectedTab(tabParam);
+    if (serviceTypeParam === 'contact' || serviceTypeParam === 'order' || serviceTypeParam === 'booking') {
+      setServiceSubTab(serviceTypeParam);
+    }
+  }, [tabParam, serviceTypeParam]);
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
