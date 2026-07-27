@@ -1397,6 +1397,13 @@ class APIService {
     category?: string;
     subcategory?: string;
     type?: 'Product' | 'Service';
+    /**
+     * Narrows services to one category serviceType. The server classifies by
+     * CATEGORY, not by the listing's merchant-entered `type`, so `type: 'Product'`
+     * excludes listings sitting in a service category even when they claim
+     * otherwise — and `serviceType` picks a single service bucket.
+     */
+    serviceType?: 'contact' | 'order' | 'booking';
     location?: string;
     minPrice?: number;
     maxPrice?: number;

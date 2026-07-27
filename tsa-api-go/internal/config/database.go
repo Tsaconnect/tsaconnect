@@ -133,6 +133,11 @@ func AutoMigrate() error {
 		// OTC listing controls — singleton row of per-direction kill-switches
 		// (buy/sell) + listing metadata for the app's Easyswap "OTC" tab.
 		&models.OTCSettings{},
+		// Fee wallet — singleton record of the admin-assigned destination for
+		// system fees (seeded from SYSTEM_WALLET_ADDRESS on first read), plus
+		// the append-only history of every reassignment.
+		&models.FeeWalletSetting{},
+		&models.FeeWalletAssignment{},
 		// Non-EVM chains — per-wallet derived addresses (keyed wallet_id+chain_key)
 		// and cached normalized tx history.
 		&models.WalletAddress{},
@@ -140,6 +145,12 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+
+	// The admin fee tracker filters and aggregates fee_distributions by date
+	// (list ORDER BY created_at DESC, summary WHERE created_at >= ?); without
+	// this index both are sequential scans that grow with every settled fee.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_fee_distributions_created_at
+		ON fee_distributions (created_at DESC)`)
 
 	// TP leaderboard ranks by users.tp_balance; without this index it's a full
 	// scan once the table grows. Partial: only rows the leaderboard can return.

@@ -1,7 +1,7 @@
 // utils/__tests__/itAnchor.test.ts
 //
-// The wallet fiat sheet deep-links straight to /wallet/it/buy and
-// /wallet/it/sell, skipping the IT hub. expo-router builds a nested stack's
+// The wallet's Deposit and Withdraw sheets deep-link straight to
+// /wallet/it/buy and /wallet/it/sell, skipping the IT hub. expo-router builds a nested stack's
 // routes array from the URL alone, so without an anchor the IT stack becomes
 // routes: [buy] at index 0 — and native-stack renders a working header back
 // button only when a route precedes the current one in that same navigator.
@@ -24,18 +24,18 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 import { unstable_settings } from '@/app/wallet/it/_layout';
-import { fiatRails } from '@/utils/fiatRails';
+import { RAIL_ROUTES } from '@/constants/rails';
 
 describe('IT stack anchor', () => {
   it('anchors the IT stack to the hub so deep-linked screens have a back route', () => {
     expect(unstable_settings?.initialRouteName).toBe('index');
   });
 
-  it('is required because the fiat sheet links past the hub', () => {
-    const itRoutes = (['buy', 'sell'] as const).map(
-      (d) => fiatRails(d).find((r) => r.key === 'it')?.route,
-    );
+  it('is required because the wallet sheets link past the hub', () => {
     // If these ever stop pointing below /wallet/it, revisit the anchor above.
-    expect(itRoutes).toEqual(['/wallet/it/buy', '/wallet/it/sell']);
+    expect([RAIL_ROUTES.itBuy, RAIL_ROUTES.itSell]).toEqual([
+      '/wallet/it/buy',
+      '/wallet/it/sell',
+    ]);
   });
 });

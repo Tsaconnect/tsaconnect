@@ -12,6 +12,7 @@ import { Stack } from 'expo-router';
 import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { useTheme, fontFamily } from '@/theme';
 import { P2PTabBar } from '../../components/p2p/P2PTabBar';
+import { RAILS, railLabel } from '../../constants/rails';
 
 const P2PLayout = () => {
   const { colors, type } = useTheme();
@@ -37,12 +38,14 @@ const P2PLayout = () => {
     <View style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
         <Stack screenOptions={screenOptions}>
-          <Stack.Screen name="index" options={{ title: 'P2P Marketplace' }} />
+          {/* index sets its own title — it renders both the Individual Payment
+              feed and the Payment Merchant feed (?pm=1). */}
+          <Stack.Screen name="index" options={{ title: railLabel('p2p') }} />
           <Stack.Screen name="my-ads" options={{ title: 'My Ads' }} />
           <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
           <Stack.Screen name="create-ad" options={{ title: 'Create Sell Ad' }} />
           <Stack.Screen name="create-buy-ad" options={{ title: 'Post Buy Ad' }} />
-          <Stack.Screen name="pool" options={{ title: 'P2P Pool' }} />
+          <Stack.Screen name="pool" options={{ title: `${RAILS.p2p.name} Pool` }} />
           <Stack.Screen name="ad/[adId]" options={{ title: 'Ad Detail' }} />
           <Stack.Screen name="trade/[tradeId]" options={{ title: 'Trade' }} />
           <Stack.Screen name="dispute/[tradeId]" options={{ title: 'Open Dispute' }} />

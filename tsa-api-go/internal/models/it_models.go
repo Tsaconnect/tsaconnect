@@ -46,6 +46,26 @@ type ITIntent struct {
 	NgnKobo    string `gorm:"type:numeric(38,0);not null" json:"ngnKobo"`    // naira*100
 	RateKobo   string `gorm:"type:numeric(38,0);not null" json:"rateKobo"`   // kobo per 1 MCGP, locked
 
+	// ── Fees (both directions) ──
+	// NgnKobo above stays the GROSS valuation of the MCGP leg — what the asset
+	// was worth at the locked rate. These record what the fee engine took out
+	// of it and what actually moves as a result:
+	//
+	//	sell:  payout disburses NetNgnKobo; FeeNgnKobo stays in the payout balance
+	//	buy:   McgpAmount credited is already net; FeeNgnKobo is the naira value
+	//	       withheld, whose MCGP equivalent is never minted to the user
+	//
+	// Empty on intents created before fee deduction shipped — readers must
+	// treat "" as "no fee taken, net == gross" so in-flight intents settle at
+	// the terms they were created under.
+	FeeNgnKobo string `gorm:"type:numeric(38,0)" json:"feeNgnKobo,omitempty"`
+	NetNgnKobo string `gorm:"type:numeric(38,0)" json:"netNgnKobo,omitempty"`
+	// PlatformKeptKobo is the slice of FeeNgnKobo the platform actually retains
+	// (swap + platform fee) — the provider's pass-through and tax are excluded.
+	// This is the base the cashback/TP carve is computed from, recorded so a
+	// later rate change can't retro-explain an old payout.
+	PlatformKeptKobo string `gorm:"type:numeric(38,0)" json:"platformKeptKobo,omitempty"`
+
 	// PaymentRef is the strong NGN attribution key: the minted "IT-…" reference
 	// at creation, overwritten with the provider charge id once VA settlement
 	// attributes a payment to this intent. Buy only. Uniqueness is enforced by

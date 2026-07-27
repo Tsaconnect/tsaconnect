@@ -6,7 +6,7 @@
 // (api.getCategoryTree / api.getProfile), state, effects, the category
 // transform, role gating, and all navigation routes + params are unchanged —
 // this is a visual / structural migration only.
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -34,6 +34,7 @@ import {
   type IconName,
 } from '@/components/ui';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
+import { RAIL_ROUTES, railLabel } from '@/constants/rails';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_GAP = 10;
@@ -104,6 +105,19 @@ const MarketplaceScreen: React.FC = () => {
   // Active service sub-tab (Contact/Order/Booking); only used when the Services
   // tab is selected. Defaults to 'contact'.
   const [serviceSubTab, setServiceSubTab] = useState<ServiceType>('contact');
+  // Deep-link preselection, e.g. the home RWM card's "View all" on a service
+  // tab arrives as ?tab=services&serviceType=booking.
+  const { tab: tabParam, serviceType: serviceTypeParam } = useLocalSearchParams<{
+    tab?: string;
+    serviceType?: string;
+  }>();
+
+  useEffect(() => {
+    if (tabParam === 'products' || tabParam === 'services') setSelectedTab(tabParam);
+    if (serviceTypeParam === 'contact' || serviceTypeParam === 'order' || serviceTypeParam === 'booking') {
+      setServiceSubTab(serviceTypeParam);
+    }
+  }, [tabParam, serviceTypeParam]);
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -220,9 +234,10 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'products', label: 'Products' },
     { key: 'services', label: 'Services' },
     { key: 'trade', label: 'Trade & Earn', route: '/trade' },
-    { key: 'p2p', label: 'P2P', route: '/p2p' },
-    { key: 'pm', label: 'Payment Merchants', route: '/pm' },
-    { key: 'it', label: 'Instant Transfer', route: '/wallet/it' },
+    { key: 'p2p', label: railLabel('p2p'), route: RAIL_ROUTES.p2pBuy },
+    // PM has no screen of its own — it is the P2P feed filtered to merchant ads.
+    { key: 'pm', label: railLabel('pm'), route: RAIL_ROUTES.pm },
+    { key: 'it', label: railLabel('it'), route: RAIL_ROUTES.it },
   ];
 
   // On the Services tab, filter the grid to the selected sub-tab's serviceType.

@@ -5,7 +5,7 @@
 // permanent standing VA (any amount accepted). First-time users complete a
 // one-time BVN/NIN gate to mint the VA. Settlement happens when funds land —
 // no payment reference to type, no per-intent expiry.
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -36,6 +36,7 @@ import {
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
+import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
@@ -232,7 +233,7 @@ export default function ITBuy() {
               </Text>
             )}
             <SummaryCard>
-              <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
+              <SummaryRow label="You get" value={`${estMcgp} MCGP`} hint="After fees" />
               <Divider spacing="xs" />
               <SummaryRow
                 label="Status"
@@ -259,8 +260,8 @@ export default function ITBuy() {
                 </View>
                 <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
                   This is your permanent Instant Transfer account — no reference to type, no
-                  expiry. Transfer any Naira amount; your spendable MCGP appears when the
-                  payment is confirmed at the live rate.
+                  expiry. Transfer any Naira amount; your spendable MCGP appears when the payment
+                  is confirmed, priced at the live rate and net of transfer fees.
                 </Text>
               </>
             ) : (
@@ -291,7 +292,8 @@ export default function ITBuy() {
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }} keyboardShouldPersistTaps="handled">
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Buy spendable MCGP with a Naira bank transfer into your permanent account. More payment
+          Buy spendable MCGP with a Naira bank transfer into your permanent account. Transfer fees
+          come out of the amount you send — the MCGP shown next is what you receive. More payment
           currencies will open later.
         </Text>
 
@@ -317,6 +319,22 @@ export default function ITBuy() {
           error={error || undefined}
         />
         <Button title="Continue" onPress={submit} />
+
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: spacing.sm,
+            backgroundColor: colors.infoBg,
+            borderRadius: radius.sm,
+            padding: spacing.md,
+          }}
+        >
+          <Icon name="info" size={16} color={colors.info} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            Note: All {RAILS.it.name} ({RAILS.it.acronym}) buys are received instantly.
+          </Text>
+        </View>
       </ScrollView>
 
       <PickerSheet

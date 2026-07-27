@@ -75,6 +75,11 @@ type ITService struct {
 	// fw is the Flutterwave client for Spec 1 per-user static VA activate.
 	fw *FlutterwaveClient
 
+	// feeQuoter prices the fee deducted from each leg; fees carves what the
+	// platform keeps into system / cashback / TP. See it_fees.go.
+	feeQuoter ITFeeQuoter
+	fees      *FeeDistributionService
+
 	// rateQuoter is the live FX quote source for multi-currency withdrawal
 	// previews (Flutterwave). Optional — nil surfaces ErrITQuoteUnavailable.
 	// See it_quote.go.
@@ -254,9 +259,11 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	if fx.Stale {
 		return nil, ErrITFxUnavailable
 	}
-	mcgp := mcgpForNgn(ngn, buyRate)
-	if mcgp.Sign() <= 0 {
-		return nil, fmt.Errorf("amount too small")
+	// Fees come off the naira before it buys anything, so the intent quotes the
+	// asset the user will actually receive.
+	mcgp, fees, err := s.creditableMcgp(ctx, ngn, buyRate)
+	if err != nil {
+		return nil, err
 	}
 	// Company PM is optional metadata for Spec 1 standing-VA buys — pay-into is
 	// the user's FiatVirtualAccount, not the company inbound. Still attach when
@@ -281,6 +288,7 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 		RateKobo:      buyRate.String(),
 		PMID:          pmID,
 	}
+	applyFees(intent, fees)
 	intent.PaymentRef = mintedRefPrefix + strings.ToUpper(strings.ReplaceAll(intent.ID.String(), "-", ""))[:14]
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		return nil, err
@@ -376,8 +384,12 @@ func (s *ITService) approveBuyCreditWithRef(ctx context.Context, intentID uuid.U
 	if err := s.setStatus(ctx, intent, models.ITStatusCredited, ""); err != nil {
 		// On-chain credit SUCCEEDED but the status write failed — do NOT report
 		// failure; the reconciler/operator must heal the row (see logged warning).
+		s.settleITFee(ctx, intent)
 		return intent, nil
 	}
+	// The user's naira arrived and their (net) MCGP is credited, so the withheld
+	// portion is collected — carve it into system / cashback / TP.
+	s.settleITFee(ctx, intent)
 	return intent, nil
 }
 
@@ -410,13 +422,17 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 		// Repricing at a stale rate is the exact thing the park exists to prevent.
 		return nil, ErrITFxUnavailable
 	}
-	mcgp := mcgpForNgn(paid, buyRate)
-	if mcgp.Sign() <= 0 {
-		return nil, fmt.Errorf("amount too small after repricing")
+	mcgp, fees, err := s.creditableMcgp(ctx, paid, buyRate)
+	if err != nil {
+		return nil, err
 	}
+	applyFees(intent, fees)
 	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"rate_kobo":      buyRate.String(),
-		"mcgp_amount":    mcgp.String(),
+		"rate_kobo":          buyRate.String(),
+		"mcgp_amount":        mcgp.String(),
+		"fee_ngn_kobo":       intent.FeeNgnKobo,
+		"net_ngn_kobo":       intent.NetNgnKobo,
+		"platform_kept_kobo": intent.PlatformKeptKobo,
 		"status":         models.ITStatusPendingPayment,
 		"failure_reason": "",
 	}).Error; err != nil {
@@ -479,11 +495,19 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		return nil, ErrITFxUnavailable
 	}
 	ngn := ngnForMcgp(amount, sellRate)
+	// Fees come out of the payout, so price them BEFORE the on-chain debit —
+	// the floor and the viability check both apply to what the user actually
+	// receives, not to the gross valuation of their MCGP.
+	fees, err := s.quoteITFees(ctx, FeeFlowWithdraw, ngn)
+	if err != nil {
+		return nil, err
+	}
 	// Enforce the minimum payout BEFORE the on-chain debit: a sell whose NGN
 	// falls under Flutterwave's ₦100 floor would debit the user's premium and
 	// then fail the payout, stranding it. Reject up front so nothing moves.
-	if minKobo := s.minSellKobo(); ngn.Cmp(big.NewInt(minKobo)) < 0 {
-		return nil, fmt.Errorf("minimum sale is ₦%d", minKobo/100)
+	// The floor is on the NET — that is the amount handed to the gateway.
+	if minKobo := s.minSellKobo(); fees.Net.Cmp(big.NewInt(minKobo)) < 0 {
+		return nil, fmt.Errorf("minimum payout is ₦%d after fees — sell a little more", minKobo/100)
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
@@ -495,6 +519,7 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		NgnKobo:       ngn.String(),
 		RateKobo:      sellRate.String(),
 	}
+	applyFees(intent, fees)
 	applySellBank(intent, bank)
 	debitRef := itRef("IT:debit:", intent.ID)
 	intent.DebitRef = common.BytesToHash(debitRef[:]).Hex()
@@ -569,6 +594,12 @@ func (s *ITService) resolveSell(ctx context.Context, intentID uuid.UUID, walletA
 	}
 	intent.TxHash = txHash
 	_ = s.setStatus(ctx, intent, doneStatus, "")
+	// The payout landed and the debit is settled, so the fee is genuinely
+	// collected — only now may it fund cashback and TP. A reversal collects
+	// nothing and books nothing.
+	if settle {
+		s.settleITFee(ctx, intent)
+	}
 	return intent, nil
 }
 

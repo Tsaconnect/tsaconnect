@@ -6,6 +6,7 @@ import { useTheme, fontFamily } from '@/theme';
 import { Spinner } from '@/components/ui';
 import ITAgreementGate from '@/components/it/ITAgreementGate';
 import { getITAgreement } from '@/services/itApi';
+import { railLabel } from '@/constants/rails';
 
 // Anchor the stack to the hub. The wallet's fiat sheet links straight to
 // /wallet/it/buy and /wallet/it/sell, and expo-router builds a nested stack's
@@ -14,12 +15,13 @@ import { getITAgreement } from '@/services/itApi';
 // With it, getStateFromPath inserts the hub beneath the target.
 export const unstable_settings = { initialRouteName: 'index' };
 
-// Instant Transfer (IT) — buy/sell MCGP with Naira via the company PM.
+// Instant Transfer (IT) — fiat & crypto swap; buy/sell MCGP with Naira via the
+// company Payment Merchant.
 //
 // The trading agreement gates the whole group, not just the hub: buy and sell
-// are linked directly from the wallet's fiat sheet, so gating only the hub
-// would let a user fill in an entire buy form before the backend — which
-// enforces the same agreement on every trade — rejected it at submit.
+// are linked directly from the wallet's Deposit/Withdraw sheets, so gating only
+// the hub would let a user fill in an entire buy form before the backend —
+// which enforces the same agreement on every trade — rejected it at submit.
 export default function ITLayout() {
   const { colors, type } = useTheme();
   // null = still checking; false = must accept before any IT screen renders.
@@ -73,9 +75,9 @@ export default function ITLayout() {
 
   return (
     <Stack screenOptions={screenOptions}>
-      <Stack.Screen name="index" options={{ title: 'Instant Transfer' }} />
-      <Stack.Screen name="buy" options={{ title: 'Buy' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell' }} />
+      <Stack.Screen name="index" options={{ title: railLabel('it') }} />
+      <Stack.Screen name="buy" options={{ title: 'Deposit · Buy' }} />
+      <Stack.Screen name="sell" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="intent/[id]" options={{ title: 'Order' }} />
     </Stack>
   );

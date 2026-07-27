@@ -18,7 +18,45 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
+
+// applyCatalogueFilters narrows q to the requested Product/Service split and,
+// when given, to a single service bucket.
+//
+// A listing's own `type` is merchant-entered and often says "Product" for what
+// is plainly a service (a flight, a haircut), so the CATEGORY decides: anything
+// sitting in a service-hosting category is a service regardless of what the
+// listing claims. serviceCatIDs is every such category; bucketIDs is the subset
+// matching the requested serviceType.
+//
+// Shared by the listing query and the featured strip so the two cannot drift.
+func applyCatalogueFilters(q *gorm.DB, productType, serviceType string, serviceCatIDs, bucketIDs []uuid.UUID) *gorm.DB {
+	switch productType {
+	case "Product":
+		q = q.Where("type = ?", productType)
+		if len(serviceCatIDs) > 0 {
+			q = q.Where("(category_id IS NULL OR category_id NOT IN ?)", serviceCatIDs)
+		}
+	case "Service":
+		if len(serviceCatIDs) > 0 {
+			q = q.Where("(type = ? OR category_id IN ?)", productType, serviceCatIDs)
+		} else {
+			q = q.Where("type = ?", productType)
+		}
+	}
+
+	// An unknown serviceType deliberately matches nothing rather than silently
+	// returning the whole catalogue.
+	if serviceType != "" {
+		if len(bucketIDs) == 0 {
+			q = q.Where("1 = 0")
+		} else {
+			q = q.Where("category_id IN ?", bucketIDs)
+		}
+	}
+	return q
+}
 
 // populateSellerVerified sets SellerVerified on each product by batch-querying
 // the users table for their verification status.
@@ -1216,6 +1254,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 
 	category := c.Query("category")
 	productType := c.Query("type")
+	serviceType := c.Query("serviceType")
 	location := c.Query("location")
 	minPriceStr := c.Query("minPrice")
 	maxPriceStr := c.Query("maxPrice")
@@ -1241,9 +1280,16 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 		}
 	}
 
-	if productType != "" && (productType == "Product" || productType == "Service") {
-		query = query.Where("type = ?", productType)
+	// Categories are a small table, so one read serves both the split below and
+	// the featured strip further down.
+	var allCategories []models.Category
+	if productType != "" || serviceType != "" {
+		config.DB.Find(&allCategories)
 	}
+	serviceCatIDs := models.ServiceCategoryIDs(allCategories, "")
+	bucketIDs := models.ServiceCategoryIDs(allCategories, serviceType)
+
+	query = applyCatalogueFilters(query, productType, serviceType, serviceCatIDs, bucketIDs)
 
 	if location != "" {
 		query = query.Where("location ILIKE ?", "%"+location+"%")
@@ -1299,9 +1345,9 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 			featuredQuery = featuredQuery.Where("category_id = ?", catOID)
 		}
 	}
-	if productType != "" && (productType == "Product" || productType == "Service") {
-		featuredQuery = featuredQuery.Where("type = ?", productType)
-	}
+	// Featured mirrors the main query's split so a mislabeled service can't
+	// reappear in the featured strip of the Products tab.
+	featuredQuery = applyCatalogueFilters(featuredQuery, productType, serviceType, serviceCatIDs, bucketIDs)
 
 	var featuredProducts []models.Product
 	featuredQuery.Limit(5).Find(&featuredProducts)
@@ -1322,12 +1368,13 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 			"hasPrevPage": page > 1,
 		},
 		"filters": gin.H{
-			"category":   category,
-			"type":       productType,
-			"location":   location,
-			"priceRange": gin.H{"minPrice": minPriceStr, "maxPrice": maxPriceStr},
-			"sort":       sortParam,
-			"search":     search,
+			"category":    category,
+			"type":        productType,
+			"serviceType": serviceType,
+			"location":    location,
+			"priceRange":  gin.H{"minPrice": minPriceStr, "maxPrice": maxPriceStr},
+			"sort":        sortParam,
+			"search":      search,
 		},
 	})
 }
