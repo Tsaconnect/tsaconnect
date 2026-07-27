@@ -35,12 +35,18 @@ var emailEvents = map[string]bool{
 	events.SecurityFailedAttempts:  true,
 	events.SecurityPasswordChanged: true,
 	events.SecurityAccountLocked:   true,
-	events.VerificationApproved:    true,
-	events.VerificationRejected:    true,
-	events.MerchantApproved:        true,
-	events.MerchantRejected:        true,
-	events.ProductApproved:         true,
-	events.ProductRejected:         true,
+	// Account deletion: the departing user needs a written record of what was
+	// closed and how to come back inside the grace window, and a reinstatement
+	// they didn't ask for must be visible to them out-of-band. In-app delivery
+	// is useless here — a deleted account can't open the app.
+	events.AccountDeletionRequested: true,
+	events.AccountDeletionRestored:  true,
+	events.VerificationApproved:     true,
+	events.VerificationRejected:     true,
+	events.MerchantApproved:         true,
+	events.MerchantRejected:         true,
+	events.ProductApproved:          true,
+	events.ProductRejected:          true,
 	// TP reward (fee/TP overhaul SP8 §7): a level-up unlocks real claimable MCGP,
 	// so notify the user by email too (the generic "both"-channel composer).
 	events.TPLevelUp: true,

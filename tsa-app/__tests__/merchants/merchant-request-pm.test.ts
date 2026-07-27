@@ -1,4 +1,4 @@
-// app/merchants/__tests__/merchant-request-pm.test.ts
+// __tests__/merchants/merchant-request-pm.test.ts
 //
 // Unit tests for the corporate P2P Merchant application fields added to
 // merchant-request.tsx.
@@ -30,7 +30,7 @@ import {
   isPickerLocked,
   resolveMerchantGate,
   type PmFields,
-} from '../merchant-request';
+} from '@/app/merchants/merchant-request';
 
 // ─── isValidEvmAddress ────────────────────────────────────────────────────────
 

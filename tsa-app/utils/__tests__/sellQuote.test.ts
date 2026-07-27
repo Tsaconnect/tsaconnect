@@ -1,4 +1,4 @@
-// app/wallet/it/__tests__/sell-quote.test.ts
+// utils/__tests__/sellQuote.test.ts
 //
 // Tests for Task 2.6: the IT sell screen's currency/rail destination picker
 // and live FX quote. We test the pure logic that drives the screen —
@@ -17,7 +17,7 @@ import {
   mcgpAmountToNgn,
   WithdrawDestination,
   WithdrawQuote,
-} from '../sell-quote';
+} from '@/utils/sellQuote';
 
 const CATALOG: WithdrawDestination[] = [
   { currency: 'NGN', rail: 'bank', label: 'Nigerian Bank Account' },

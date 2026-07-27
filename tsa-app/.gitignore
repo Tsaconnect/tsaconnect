@@ -10,6 +10,11 @@ npm-debug.*
 *.p12
 *.key
 *.mobileprovision
+
+# Store submission credentials — referenced by eas.json submit profiles.
+google-play-service-account.json
+google-services.json
+GoogleService-Info.plist
 *.orig.*
 web-build/
 

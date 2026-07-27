@@ -422,59 +422,8 @@ func (h *Handlers) ChangePassword(c *gin.Context) {
 	})
 }
 
-// deleteAccountRequest defines the expected JSON body for account deletion.
-type deleteAccountRequest struct {
-	Password string `json:"password"`
-}
-
-// DeleteAccount handles DELETE /api/users/account (auth required, soft delete).
-func (h *Handlers) DeleteAccount(c *gin.Context) {
-	user := getUserFromContext(c)
-	if user == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Unauthorized",
-		})
-		return
-	}
-
-	var req deleteAccountRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": "Password is required to delete account",
-		})
-		return
-	}
-
-	// Verify password
-	if err := user.ComparePassword(req.Password); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Incorrect password",
-		})
-		return
-	}
-
-	now := time.Now()
-	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
-		"account_status": models.AccountStatusDeleted,
-		"deleted_at":     now,
-		"updated_at":     now,
-	}).Error; err != nil {
-		log.Printf("DeleteAccount error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to delete account",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Account deleted successfully",
-	})
-}
+// Account deletion lives in account_deletion_handler.go — it soft-deletes the
+// user AND files an admin review row, so it can't be a bare UPDATE here.
 
 // GetReferralStats handles GET /api/users/referral-stats (auth required).
 func (h *Handlers) GetReferralStats(c *gin.Context) {

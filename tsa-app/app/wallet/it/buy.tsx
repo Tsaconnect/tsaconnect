@@ -28,7 +28,6 @@ import {
 import type { PickerItem } from '@/components/ui';
 import {
   activateITVA,
-  getITAgreement,
   itBuy,
   IT_AGREEMENT_REQUIRED,
   type ITBuyQuote,
@@ -36,7 +35,7 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
@@ -75,23 +74,6 @@ export default function ITBuy() {
     CURRENCY_OPTIONS.find((o) => o.id === paymentCurrency)?.label ?? paymentCurrency;
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === paymentMethod)?.label ?? paymentMethod;
-
-  // The wallet's Deposit sheet links straight here, so this screen can be the
-  // user's first IT surface. The hub owns the trading-agreement gate — bounce
-  // an un-agreed user there before they fill in an amount, rather than at
-  // submit time. A failed check is not a block: the backend still gates itBuy.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const ag = await getITAgreement();
-      if (!cancelled && ag.success && ag.data && !ag.data.accepted) {
-        router.replace('/wallet/it');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const applyQuote = (q: ITBuyQuote, to: ITPayTo | null, nextIntent?: ITIntent | null) => {
     setQuote(q);

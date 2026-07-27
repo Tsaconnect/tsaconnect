@@ -22,7 +22,6 @@ import {
 } from '@/components/ui';
 import CurrencySelector from '@/components/currency/CurrencySelector';
 import {
-  getITAgreement,
   getITBalance,
   getITRate,
   listITIntents,
@@ -31,8 +30,7 @@ import {
   type ITRate,
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
-import { ngnToUsd } from './currency-display';
-import ITAgreementGate from '@/components/it/ITAgreementGate';
+import { ngnToUsd } from '@/utils/currencyDisplay';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -94,37 +92,20 @@ export default function ITHub() {
   const [intents, setIntents] = useState<ITIntent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  // null = not checked yet; false = must agree before trading; true = cleared.
-  const [agreed, setAgreed] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     setError('');
-    const [b, r, list, ag] = await Promise.all([
-      getITBalance(), getITRate(), listITIntents(), getITAgreement(),
+    const [b, r, list] = await Promise.all([
+      getITBalance(), getITRate(), listITIntents(),
     ]);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
     if (list.success && list.data?.intents) setIntents(list.data.intents);
-    // If the agreement can't be loaded, don't hard-block the hub — the backend
-    // still gates each trade, so a transient failure won't let an un-agreed
-    // user through.
-    if (ag.success && ag.data) setAgreed(ag.data.accepted);
     setLoading(false);
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
-
-  // Block the hub behind the agreement until the user accepts the current
-  // version. Cancel takes them out of IT entirely.
-  if (agreed === false) {
-    return (
-      <ITAgreementGate
-        onAccepted={() => { setAgreed(true); load(); }}
-        onCancel={() => router.back()}
-      />
-    );
-  }
 
   const spendable = bal
     ? (BigInt(bal.premiumBought || '0') + BigInt(bal.premiumCredited || '0')).toString()

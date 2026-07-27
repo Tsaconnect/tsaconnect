@@ -70,6 +70,8 @@ func AutoMigrate() error {
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
 		&models.MerchantRequest{},
+		// Self-service account deletion audit trail (Apple 5.1.1(v)).
+		&models.AccountDeletionRequest{},
 		&models.Notification{},
 		&models.DeviceToken{},
 		&models.EmailVerification{},

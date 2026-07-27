@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "myapp",
+    "scheme": "tsaconnect",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
@@ -16,9 +16,14 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.mcgp.TsaApp",
+      "config": {
+        "usesNonExemptEncryption": false
+      },
       "infoPlist": {
-        "NSCameraUsageDescription": "We need camera access to verify your identity",
-        "NSMicrophoneUsageDescription": "We need microphone access for identity verification"
+        "NSCameraUsageDescription": "TSA Connect uses the camera to photograph your ID document and take the selfie required for identity verification.",
+        "NSMicrophoneUsageDescription": "TSA Connect uses the microphone during the video step of identity verification.",
+        "NSPhotoLibraryUsageDescription": "TSA Connect needs access to your photos so you can upload product images, proof of payment, and your profile picture.",
+        "NSFaceIDUsageDescription": "TSA Connect uses Face ID to unlock the app and to authorise wallet transactions."
       }
     },
     "android": {
@@ -28,7 +33,20 @@
       },
       "softwareKeyboardLayoutMode": "pan",
       "package": "com.mcgp.TsaApp",
-      "permissions": ["CAMERA"]
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "VIBRATE",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT",
+        "POST_NOTIFICATIONS"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -43,7 +61,19 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "We need camera access to verify your identity"
+          "cameraPermission": "TSA Connect uses the camera to photograph your ID document and take the selfie required for identity verification."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "TSA Connect needs access to your photos so you can upload product images, proof of payment, and your profile picture."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "TSA Connect uses Face ID to unlock the app and to authorise wallet transactions."
         }
       ],
       [
@@ -63,7 +93,9 @@
         "projectId": "d5cecf6b-afa9-43a6-9f36-f705f3cfac28"
       }
     },
-    "runtimeVersion": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "updates": {
       "enabled": true,
       "checkAutomatically": "ON_LOAD",

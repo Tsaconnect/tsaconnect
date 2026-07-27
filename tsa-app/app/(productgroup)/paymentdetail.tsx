@@ -6,9 +6,10 @@
 //
 // FINANCIAL: amounts, payment details and the Proceed → /paymentproof flow are
 // preserved verbatim. This screen previously delegated to
-// components/orders/bankdetails.tsx (legacy COLORS/SIZES); that shared component
-// is still used by screens/sendFiat.tsx and is left untouched. The bank-detail
-// presentation is inlined here on design-system primitives — the params read
+// components/orders/bankdetails.tsx (legacy COLORS/SIZES); its only other
+// consumer, screens/sendFiat.tsx, has since been deleted, so that component now
+// has no callers. The bank-detail presentation is inlined here on design-system
+// primitives — the params read
 // (accountNumber/accountName/bankName/id) and the navigation
 // (router.push({ pathname: "/paymentproof", params: { id } })) are identical.
 import React from 'react';

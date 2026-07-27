@@ -76,6 +76,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		userGroup.GET("", h.GetAllUsers)
 		userGroup.GET("/:id", h.GetUserByID)
 		userGroup.PATCH("/:id/role", adminAuth, h.UpdateUserRole)
+
+		// Self-service account deletion (Apple 5.1.1(v)). Soft-deletes the
+		// caller immediately and files an admin review row — see
+		// account_deletion_handler.go.
+		userGroup.POST("/account/deletion-request", h.RequestAccountDeletion)
 	}
 
 	// Admin routes
@@ -83,6 +88,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	adminGroup.Use(adminAuth)
 	{
 		adminGroup.GET("/stats", h.GetAdminStats)
+
+		// Account-deletion review queue. The handlers re-check for a true admin
+		// role on top of adminAuth (which also admits merchant/support) because
+		// restoring an account is a security-sensitive action.
+		adminGroup.GET("/account-deletion-requests", h.ListAccountDeletionRequests)
+		adminGroup.POST("/account-deletion-requests/:id/complete", h.CompleteAccountDeletionRequest)
+		adminGroup.POST("/account-deletion-requests/:id/restore", h.RestoreAccountDeletionRequest)
 	}
 
 	// Admin fee-config routes — unified, tunable fee-rate table. These mutate the

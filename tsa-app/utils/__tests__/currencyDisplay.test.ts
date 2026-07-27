@@ -1,4 +1,4 @@
-// app/wallet/it/__tests__/currency-display.test.ts
+// utils/__tests__/currencyDisplay.test.ts
 //
 // Tests for the pure helpers that wire the IT (Instant Transfer) screens to
 // CurrencyContext (task 1.1). IT is priced and settled in Naira on the
@@ -7,7 +7,7 @@
 // informational USD-anchored conversion (ngnToUsd) and decide when it's
 // worth showing (shouldShowNgnSecondary).
 
-import { ngnToUsd, shouldShowNgnSecondary } from '../currency-display';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 
 describe('ngnToUsd', () => {
   it('converts a Naira amount to USD using the NGN rate (1 USD = X NGN)', () => {

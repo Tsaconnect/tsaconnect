@@ -623,7 +623,7 @@ const TradeAndEarnScreen: React.FC = () => {
 
         {/* CTA */}
         <PressableScale
-          onPress={() => router.push('/marketplace')}
+          onPress={() => router.push('/products')}
           style={{
             backgroundColor: colors.accent,
             flexDirection: 'row',
@@ -642,7 +642,7 @@ const TradeAndEarnScreen: React.FC = () => {
         </PressableScale>
 
         <PressableScale
-          onPress={() => router.push('/services')}
+          onPress={() => router.push('/serviceshome')}
           style={{
             backgroundColor: colors.surface,
             flexDirection: 'row',

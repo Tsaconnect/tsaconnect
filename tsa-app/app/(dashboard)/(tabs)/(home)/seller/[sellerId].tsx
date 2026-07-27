@@ -13,6 +13,8 @@ import {
   FlatList,
   Image,
   RefreshControl,
+  Linking,
+  Share,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -35,6 +37,7 @@ import {
   Spinner,
   Surface,
   Text,
+  useToast,
 } from '@/components/ui';
 
 export default function SellerCatalogueScreen() {
@@ -53,6 +56,7 @@ export default function SellerCatalogueScreen() {
   const router = useRouter();
   const { colors, spacing } = useTheme();
   const { currency, rate } = useCurrency();
+  const toast = useToast();
 
   const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
 
@@ -98,44 +102,47 @@ export default function SellerCatalogueScreen() {
     if (router.canGoBack()) {
       router.back();
     } else {
-      router.push('/marketplace');
+      // '/marketplace' is not a route — the marketplace tab is a route GROUP, so
+      // its own index resolves to '/' and collides with the app entry screen.
+      // '/products' is the marketplace's addressable landing screen.
+      router.push('/products');
     }
   }, [router]);
-
-  const handleContactSeller = useCallback(() => {
-    if (sellerData?.email) {
-      router.push({
-        pathname: '/messages/chat',
-        params: {
-          recipientEmail: sellerData.email,
-          recipientName: sellerData.name
-        }
-      });
-    }
-  }, [sellerData, router]);
-
-  const handleShareSeller = useCallback(() => {
-    // Implement share functionality
-    if (sellerData) {
-      const shareMessage = `Check out ${sellerData.name}'s products on our marketplace!`;
-      console.log('Share seller:', shareMessage);
-      // You can implement native sharing here using expo-sharing or react-native-share
-    }
-  }, [sellerData]);
-
-  const handleCallSeller = useCallback(() => {
-    if (sellerData?.phoneNumber && sellerData.phoneNumber !== 'N/A' && sellerData.phoneNumber !== 'Contact for details') {
-      const phoneNumber = sellerData.phoneNumber.replace(/\D/g, '');
-      const url = `tel:${phoneNumber}`;
-      console.log('Call seller:', url);
-      // You can implement phone calling using Linking.openURL(url)
-    }
-  }, [sellerData]);
 
   const showCall =
     !!sellerData?.phoneNumber &&
     sellerData.phoneNumber !== 'N/A' &&
     sellerData.phoneNumber !== 'Contact for details';
+
+  // There is no in-app messaging feature, so "Contact" hands off to the device
+  // mail client rather than navigating to a route that does not exist.
+  const handleContactSeller = useCallback(() => {
+    if (!sellerData?.email) return;
+    const subject = encodeURIComponent('Enquiry from TSA Connect');
+    const body = encodeURIComponent(
+      `Hi ${sellerData.name ?? 'there'},\n\nI found your store on TSA Connect and would like to ask about your listings.\n\n`
+    );
+    Linking.openURL(`mailto:${sellerData.email}?subject=${subject}&body=${body}`).catch(() => {
+      toast.error('No email app is set up on this device');
+    });
+  }, [sellerData, toast]);
+
+  const handleShareSeller = useCallback(() => {
+    if (!sellerData) return;
+    Share.share({
+      message: `Check out ${sellerData.name}'s store on TSA Connect.`,
+    }).catch(() => {
+      /* user dismissed the share sheet — nothing to report */
+    });
+  }, [sellerData]);
+
+  const handleCallSeller = useCallback(() => {
+    if (!showCall || !sellerData?.phoneNumber) return;
+    const digits = sellerData.phoneNumber.replace(/[^\d+]/g, '');
+    Linking.openURL(`tel:${digits}`).catch(() => {
+      toast.error('Could not start the call');
+    });
+  }, [sellerData, showCall, toast]);
 
   const renderProduct = useCallback(({ item }: { item: any }) => (
     <PressableScale
@@ -343,7 +350,7 @@ export default function SellerCatalogueScreen() {
         title="No Products Yet"
         subtitle={`${sellerData?.name ?? 'This seller'} hasn't listed any products yet.`}
         actionLabel="Browse Other Sellers"
-        onAction={() => router.push('/marketplace')}
+        onAction={() => router.push('/products')}
       />
     </View>
   ), [sellerData, router]);

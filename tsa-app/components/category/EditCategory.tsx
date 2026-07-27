@@ -229,7 +229,7 @@ const EditCategoryScreen = () => {
         }
         Alert.alert("success", "The category was updated successfully.");
         //@ts-ignore
-        router.push("/category");
+        router.push("/categories");
       }
     } catch (error) {
       console.error("Error Updating Category", error);

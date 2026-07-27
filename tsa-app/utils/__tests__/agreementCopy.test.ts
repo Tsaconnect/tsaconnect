@@ -1,6 +1,6 @@
 // Tests for the pure greeting helper backing the IT trading-agreement gate.
 
-import { agreementGreeting } from '../agreement-copy';
+import { agreementGreeting } from '../agreementCopy';
 
 describe('agreementGreeting', () => {
   it('greets by first name only', () => {

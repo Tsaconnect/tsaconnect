@@ -30,7 +30,6 @@ import {
 } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 import {
-  getITAgreement,
   getITBalance,
   getITFeeQuote,
   getITRate,
@@ -39,8 +38,8 @@ import {
   type ITFeeQuote,
 } from '@/services/itApi';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
-import { mcgpAmountToNgn } from './sell-quote';
-import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { mcgpAmountToNgn } from '@/utils/sellQuote';
+import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
@@ -111,23 +110,6 @@ export default function ITSell() {
       if (b.success && b.data) setCredited(b.data.premiumCredited);
       if (r.success && r.data) setSellRateKobo(r.data.sellRateKobo);
     })();
-  }, []);
-
-  // The wallet's Withdraw sheet links straight here, so this screen can be the
-  // user's first IT surface. The hub owns the trading-agreement gate — bounce
-  // an un-agreed user there before they fill in bank details, rather than at
-  // submit time. A failed check is not a block: the backend still gates itSell.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const ag = await getITAgreement();
-      if (!cancelled && ag.success && ag.data && !ag.data.accepted) {
-        router.replace('/wallet/it');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   useEffect(() => {
