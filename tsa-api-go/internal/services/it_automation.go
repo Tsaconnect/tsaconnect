@@ -224,7 +224,13 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if !sellIntentHasPayoutDestination(intent) {
 		return errors.New("it: sell intent has no payout destination")
 	}
-	naira, err := koboToNairaString(intent.NgnKobo)
+	// Disburse the NET — the fee stays behind in the payout balance as fiat.
+	// Pre-deduction intents carry no net and settle at their gross terms.
+	net, err := payoutKobo(intent)
+	if err != nil {
+		return fmt.Errorf("it payout: %w", err)
+	}
+	naira, err := koboToNairaString(net.String())
 	if err != nil {
 		return fmt.Errorf("it payout: bad intent amount: %w", err)
 	}

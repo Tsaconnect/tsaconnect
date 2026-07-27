@@ -300,12 +300,15 @@ export default function ITSell() {
       return;
     }
 
-    // Settlement pays the gross NgnKobo — /api/it/quote is display-only and is
-    // not deducted from the payout (yet). Never promise feeQuote.netAmount here.
-    setReceiveLabel(
-      `₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-    );
-    setNgnOutValue(reviewNgnGross);
+    // The payout disburses the NET the backend computed and echoed on the
+    // intent; fall back to the local quote, then to gross, so the confirmation
+    // never overstates what will land.
+    const netKobo = Number(r.data.intent?.netNgnKobo ?? '');
+    const net = Number.isFinite(netKobo) && netKobo > 0
+      ? netKobo / 100
+      : Number(feeQuote?.netAmount?.minor ?? 0) / 100 || reviewNgnGross;
+    setReceiveLabel(`₦${net.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+    setNgnOutValue(net);
     setScreen('done');
   };
 
@@ -354,10 +357,12 @@ export default function ITSell() {
   }
 
   if (screen === 'review') {
-    // Fees are quote-only (not deducted from settlement). Wait for the quote
-    // attempt to finish for a complete Review, but never block Transfer on
-    // viable/net — payout is the gross NGN amount.
-    const transferBlocked = feeLoading;
+    // Fees ARE deducted at settlement (backend quotes the same engine), so the
+    // Review must wait for a quote and refuse to continue without one.
+    // Fees are deducted at settlement, so a transfer can't be authorized on an
+    // unknown quote: the backend refuses to price it and the user would have
+    // confirmed an amount nobody could compute.
+    const transferBlocked = feeLoading || !feeQuote;
     return (
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
@@ -368,10 +373,15 @@ export default function ITSell() {
           <Card>
             <SummaryCard>
               <SummaryRow label="You sell" value={`${reviewAmount} MCGP`} />
+              <SummaryRow
+                label="Sale value"
+                value={`₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+              />
+              <SummaryRow label="Fees" value={feeQuote ? `−₦${feeDisplay(feeQuote.totalFees)}` : '—'} />
               <Divider spacing="xs" />
               <SummaryRow
                 label="You receive (NGN)"
-                value={`₦${reviewNgnGross.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                value={feeQuote ? `₦${feeDisplay(feeQuote.netAmount)}` : '—'}
               />
               <Divider spacing="xs" />
               <SummaryRow label="Payout currency" value={currencyLabel} />
@@ -389,7 +399,7 @@ export default function ITSell() {
               Estimated fees
             </Text>
             <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.sm }}>
-              Informational only — not deducted from this payout yet.
+              Deducted from this payout — your bank receives the amount below.
             </Text>
             {feeLoading ? (
               <Spinner inline label="Loading fee quote…" />
@@ -407,10 +417,7 @@ export default function ITSell() {
                 <SummaryRow label="Swap fee" value={`₦${feeDisplay(feeQuote.swapFee.fee)}`} />
                 <Divider spacing="xs" />
                 <SummaryRow label="Total fees" value={`₦${feeDisplay(feeQuote.totalFees)}`} />
-                <SummaryRow
-                  label="Est. net if deducted"
-                  value={`₦${feeDisplay(feeQuote.netAmount)}`}
-                />
+                <SummaryRow label="You receive" value={`₦${feeDisplay(feeQuote.netAmount)}`} />
               </SummaryCard>
             ) : null}
           </Card>

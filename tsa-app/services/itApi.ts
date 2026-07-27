@@ -25,6 +25,10 @@ export interface ITIntent {
   mcgpAmount: string;
   ngnKobo: string;
   rateKobo: string;
+  /** Fees withheld from this leg, and what actually moves (kobo). Absent on
+   *  intents created before fee deduction shipped. */
+  feeNgnKobo?: string;
+  netNgnKobo?: string;
   paymentRef?: string;
   txHash?: string;
   failureReason?: string;
@@ -87,9 +91,14 @@ export interface ITPayTo {
 }
 
 export interface ITBuyQuote {
+  /** What the user transfers, in kobo. */
   ngnKobo: string;
+  /** MCGP credited — already NET of feeNgnKobo. */
   mcgpAmount: string;
   rateKobo: string;
+  /** Naira withheld as fees; the MCGP it would have bought is never minted. */
+  feeNgnKobo?: string;
+  netNgnKobo?: string;
 }
 
 export interface ITBuyResult {

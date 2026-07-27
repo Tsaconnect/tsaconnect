@@ -251,7 +251,7 @@ export default function ITBuy() {
               </Text>
             )}
             <SummaryCard>
-              <SummaryRow label="You get" value={`${estMcgp} MCGP`} />
+              <SummaryRow label="You get" value={`${estMcgp} MCGP`} hint="After fees" />
               <Divider spacing="xs" />
               <SummaryRow
                 label="Status"
@@ -278,8 +278,8 @@ export default function ITBuy() {
                 </View>
                 <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
                   This is your permanent Instant Transfer account — no reference to type, no
-                  expiry. Transfer any Naira amount; your spendable MCGP appears when the
-                  payment is confirmed at the live rate.
+                  expiry. Transfer any Naira amount; your spendable MCGP appears when the payment
+                  is confirmed, priced at the live rate and net of transfer fees.
                 </Text>
               </>
             ) : (
@@ -310,7 +310,8 @@ export default function ITBuy() {
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }} keyboardShouldPersistTaps="handled">
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Buy spendable MCGP with a Naira bank transfer into your permanent account. More payment
+          Buy spendable MCGP with a Naira bank transfer into your permanent account. Transfer fees
+          come out of the amount you send — the MCGP shown next is what you receive. More payment
           currencies will open later.
         </Text>
 
