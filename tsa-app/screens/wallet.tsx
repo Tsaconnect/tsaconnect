@@ -1,13 +1,15 @@
 // screens/wallet.tsx
 //
 // Multi-chain wallet home — total balance hero, quick actions, asset list with
-// chain filter, recent activity, and the fund / send / wallet-selector /
-// manage-tokens sheets. Migrated onto the TSA Signature design system
+// chain filter, recent activity, and the deposit / withdraw / wallet-selector /
+// manage-tokens sheets. Deposit and Withdraw each list every live rail
+// (Instant Transfer, Individual Payment, Payment Merchant, plain crypto) —
+// names come from constants/rails.ts. Migrated onto the TSA Signature design system
 // (theme tokens + @/components/ui primitives). All data fetching, state,
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
@@ -51,6 +53,7 @@ import { type SpotCategory } from '../services/spotApi';
 import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
 import { useSpotListings } from '../hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
+import { RAILS, RAIL_ROUTES, railLabel } from '../constants/rails';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
@@ -254,9 +257,9 @@ async function mergeCustomTokens(
 
 // ── Quick Actions ──
 const QUICK_ACTIONS = [
-  { key: 'fund', label: 'Fund', icon: 'bank' as const },
+  { key: 'fund', label: 'Deposit', icon: 'bank' as const },
   { key: 'swap', label: 'Swap', icon: 'swap' as const },
-  { key: 'send', label: 'Send', icon: 'send' as const },
+  { key: 'send', label: 'Withdraw', icon: 'send' as const },
   { key: 'instant-pay', label: 'Instant Pay', icon: 'bolt' as const },
 ] as const;
 
@@ -403,57 +406,83 @@ const AssetRow: React.FC<{
   );
 };
 
-// ── Fund Sheet ──
-const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Sheet visible={visible} onClose={onClose} title="Fund Your Wallet">
-    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
-      <SheetOption
-        icon="bank"
-        title="Fiat Deposit"
-        desc="Bank transfer or credit card"
-        onPress={() => {
-          onClose();
-          router.push('/fundfiat');
-        }}
-      />
-      <SheetOption
-        icon="wallet"
-        title="Crypto Deposit"
-        desc="From external wallet or exchange"
-        onPress={() => {
-          onClose();
-          router.push('/fund');
-        }}
-      />
-    </View>
-  </Sheet>
-);
+// ── Deposit Sheet ──
+// Every live deposit rail: Instant Transfer (fiat in, bank rails), the two
+// counterparty markets (individual and merchant), and a plain crypto receive.
+const FundModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const go = (route: string) => {
+    onClose();
+    router.push(route as any);
+  };
+  return (
+    <Sheet visible={visible} onClose={onClose} title="Deposit into Your Wallet">
+      <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+        <SheetOption
+          icon="bolt"
+          title={railLabel('it')}
+          desc={RAILS.it.depositDesc}
+          onPress={() => go(RAIL_ROUTES.itBuy)}
+        />
+        <SheetOption
+          icon="user"
+          title={railLabel('p2p')}
+          desc={RAILS.p2p.depositDesc}
+          onPress={() => go(RAIL_ROUTES.p2pBuy)}
+        />
+        <SheetOption
+          icon="storefront"
+          title={railLabel('pm')}
+          desc={RAILS.pm.depositDesc}
+          onPress={() => go(RAIL_ROUTES.pmBuy)}
+        />
+        <SheetOption
+          icon="wallet"
+          title="Crypto Deposit"
+          desc="From an external wallet or exchange"
+          onPress={() => go('/fund')}
+        />
+      </View>
+    </Sheet>
+  );
+};
 
-// ── Send Sheet ──
-const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => (
-  <Sheet visible={visible} onClose={onClose} title="Send Funds">
-    <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
-      <SheetOption
-        icon="card"
-        title="Withdraw as Fiat"
-        desc="Bank transfer or mobile money"
-        onPress={() => {
-          onClose();
-          router.push('/sendfiat');
-        }}
-      />
-      <SheetOption
-        icon="wallet"
-        title="Send Crypto"
-        desc="To external wallet or exchange"
-        onPress={() => {
-          onClose();
-          router.push('/wallet/send');
-        }}
-      />
-    </View>
-  </Sheet>
-);
+// ── Withdraw Sheet ──
+const SendModal: React.FC<{ visible: boolean; onClose: () => void }> = ({ visible, onClose }) => {
+  const go = (route: string) => {
+    onClose();
+    router.push(route as any);
+  };
+  return (
+    <Sheet visible={visible} onClose={onClose} title="Withdraw / Send">
+      <View style={{ paddingHorizontal: 16, paddingTop: 16 }}>
+        <SheetOption
+          icon="bolt"
+          title={railLabel('it')}
+          desc={RAILS.it.withdrawDesc}
+          onPress={() => go(RAIL_ROUTES.itSell)}
+        />
+        <SheetOption
+          icon="user"
+          title={railLabel('p2p')}
+          desc={RAILS.p2p.withdrawDesc}
+          onPress={() => go(RAIL_ROUTES.p2pSell)}
+        />
+        <SheetOption
+          icon="storefront"
+          title={railLabel('pm')}
+          desc={RAILS.pm.withdrawDesc}
+          onPress={() => go(RAIL_ROUTES.pmSell)}
+        />
+        <SheetOption
+          icon="wallet"
+          title="Send Crypto"
+          desc="To an external wallet or exchange"
+          onPress={() => go('/wallet/send')}
+        />
+      </View>
+    </Sheet>
+  );
+};
 
 // Shared sheet option row (icon tile + title/desc + chevron).
 const SheetOption: React.FC<{
@@ -720,6 +749,16 @@ const WalletScreen: React.FC = () => {
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
   const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
   const [showFilterSheet, setShowFilterSheet] = useState(false);
+
+  // ?sheet=deposit|withdraw opens the matching rail sheet, so a shortcut
+  // elsewhere in the app can land on the full list of rails instead of
+  // preempting the choice by deep-linking into one of them. Keyed on the param
+  // (not run on mount alone) because this tab stays mounted once visited.
+  const { sheet } = useLocalSearchParams<{ sheet?: string }>();
+  useEffect(() => {
+    if (sheet === 'deposit') setShowFundModal(true);
+    else if (sheet === 'withdraw') setShowSendModal(true);
+  }, [sheet]);
   // SYMBOL → taxonomy category, from the shared listings cache. When the fetch
   // fails the map is empty and every asset falls back to "spot", which would
   // silently produce wrong CATEGORY results — so the sheet surfaces the error

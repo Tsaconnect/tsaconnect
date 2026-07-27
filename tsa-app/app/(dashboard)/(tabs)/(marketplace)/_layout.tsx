@@ -7,24 +7,45 @@ export default function Layout() {
   return (
     <GestureHandlerRootView>
       <Stack screenOptions={screenOptions}>
-        {/* index / products / digital all render the self-contained
-            MarketplaceScreen (own top chrome), so the native Stack header would
-            be a stray second header with a "back" chevron on a tab root. Hide
-            it for these; secondary screens keep the default header. */}
+        {/* `index` is the tab ROOT: the drawer header covers it, so a native
+            header here would be a stray second bar with a back chevron on a
+            tab root. `products` and `digital` render the same self-contained
+            MarketplaceScreen but are PUSHED — and that screen's chrome has no
+            back button, so without a header they'd be a dead end. `pm`
+            redirects on mount; a header would only flash. */}
         <Stack.Screen
           name="index"
           options={{ headerShown: false }}
         />
         <Stack.Screen
           name="products"
-          options={{ headerShown: false }}
+          options={{ title: "Marketplace" }}
         />
         <Stack.Screen
           name="digital"
-          options={{ headerShown: false }}
+          options={{ title: "Digital Products" }}
         />
         <Stack.Screen
           name="pm"
+          options={{ headerShown: false }}
+        />
+        {/* Unregistered routes fall back to the route NAME as their title, which
+            now reads as "favourites"/"service" on the only header the screen
+            has. buyp2p/sellp2p redirect on mount, so they get no header. */}
+        <Stack.Screen
+          name="favourites"
+          options={{ title: "Favourites" }}
+        />
+        <Stack.Screen
+          name="service"
+          options={{ title: "Services" }}
+        />
+        <Stack.Screen
+          name="buyp2p"
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen
+          name="sellp2p"
           options={{ headerShown: false }}
         />
       </Stack>

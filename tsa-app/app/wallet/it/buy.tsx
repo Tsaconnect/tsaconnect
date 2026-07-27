@@ -5,7 +5,7 @@
 // permanent standing VA (any amount accepted). First-time users complete a
 // one-time BVN/NIN gate to mint the VA. Settlement happens when funds land —
 // no payment reference to type, no per-intent expiry.
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -28,6 +28,7 @@ import {
 import type { PickerItem } from '@/components/ui';
 import {
   activateITVA,
+  getITAgreement,
   itBuy,
   IT_AGREEMENT_REQUIRED,
   type ITBuyQuote,
@@ -36,6 +37,7 @@ import {
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
@@ -73,6 +75,23 @@ export default function ITBuy() {
     CURRENCY_OPTIONS.find((o) => o.id === paymentCurrency)?.label ?? paymentCurrency;
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === paymentMethod)?.label ?? paymentMethod;
+
+  // The wallet's Deposit sheet links straight here, so this screen can be the
+  // user's first IT surface. The hub owns the trading-agreement gate — bounce
+  // an un-agreed user there before they fill in an amount, rather than at
+  // submit time. A failed check is not a block: the backend still gates itBuy.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ag = await getITAgreement();
+      if (!cancelled && ag.success && ag.data && !ag.data.accepted) {
+        router.replace('/wallet/it');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const applyQuote = (q: ITBuyQuote, to: ITPayTo | null, nextIntent?: ITIntent | null) => {
     setQuote(q);
@@ -317,6 +336,22 @@ export default function ITBuy() {
           error={error || undefined}
         />
         <Button title="Continue" onPress={submit} />
+
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: spacing.sm,
+            backgroundColor: colors.infoBg,
+            borderRadius: radius.sm,
+            padding: spacing.md,
+          }}
+        >
+          <Icon name="info" size={16} color={colors.info} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            Note: All {RAILS.it.name} ({RAILS.it.acronym}) buys are received instantly.
+          </Text>
+        </View>
       </ScrollView>
 
       <PickerSheet

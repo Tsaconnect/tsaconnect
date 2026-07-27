@@ -39,10 +39,14 @@ export default function Layout() {
           name="multiswap"
           options={{ title: "Multi-Asset Swap" }}
         />
+        {/* Screens below hide this header only because they draw their own
+            top bar WITH a back button. Trade & Earn doesn't, so it takes the
+            native one — the drawer header no longer covers pushed screens. */}
         <Stack.Screen
           name="trade"
-          options={{ headerShown: false }}
+          options={{ title: "Trade & Earn" }}
         />
+        {/* Own top bar + back button — keep the native header off. */}
         <Stack.Screen
           name="rewards"
           options={{ headerShown: false }}

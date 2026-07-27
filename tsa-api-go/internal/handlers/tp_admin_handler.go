@@ -198,6 +198,69 @@ func (h *TPAdminHandler) ListFeeDistributions(c *gin.Context) {
 	})
 }
 
+// GetFeeSummary — GET /api/admin/tp/fee-summary?from=&to=
+//
+// What reached the system wallet, and from where. Every fee row already carries
+// the section that produced it (feature, e.g. "p2p") and the originating record
+// (source_type/source_id), so the summary is a grouped read of the same ledger
+// the tracker lists row-by-row: one line per (section, source type) with the
+// total fee charged and the system's share of it, plus a grand total.
+func (h *TPAdminHandler) GetFeeSummary(c *gin.Context) {
+	if h.requireAdmin(c) == nil {
+		return
+	}
+	q := h.DB.WithContext(c.Request.Context()).Model(&models.FeeDistribution{})
+	if from, ok := parseDayParam(c.Query("from")); ok {
+		q = q.Where("created_at >= ?", from)
+	}
+	if to, ok := parseDayParam(c.Query("to")); ok {
+		q = q.Where("created_at < ?", to.Add(24*time.Hour))
+	}
+
+	type summaryRow struct {
+		Feature     string  `json:"feature"`
+		SourceType  string  `json:"sourceType"`
+		Count       int64   `json:"count"`
+		FeeUSD      float64 `json:"feeUsd"`
+		SystemUSD   float64 `json:"systemUsd"`
+		TPPoolUSD   float64 `json:"tpPoolUsd"`
+		CashbackUSD float64 `json:"cashbackUsd"`
+	}
+	var rows []summaryRow
+	if err := q.
+		Select(`feature,
+			source_type,
+			COUNT(*) AS count,
+			COALESCE(SUM(fee_usd), 0) AS fee_usd,
+			COALESCE(SUM(system_usd), 0) AS system_usd,
+			COALESCE(SUM(tp_pool_usd), 0) AS tp_pool_usd,
+			COALESCE(SUM(buyer_cashback_usd + upline_cashback_usd + provider_cashback_usd), 0) AS cashback_usd`).
+		Group("feature, source_type").
+		Order("system_usd DESC").
+		Scan(&rows).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to summarise fees")
+		return
+	}
+
+	var totalFee, totalSystem, totalTP, totalCashback float64
+	var totalCount int64
+	for _, r := range rows {
+		totalFee += r.FeeUSD
+		totalSystem += r.SystemUSD
+		totalTP += r.TPPoolUSD
+		totalCashback += r.CashbackUSD
+		totalCount += r.Count
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Fee summary", gin.H{
+		"rows": rows,
+		"totals": gin.H{
+			"count": totalCount, "feeUsd": totalFee, "systemUsd": totalSystem,
+			"tpPoolUsd": totalTP, "cashbackUsd": totalCashback,
+		},
+	})
+}
+
 // GetFeeDistributionDetail — GET /api/admin/tp/distributions/:sourceType/:sourceId
 // The tap-through: the carve plus every TP and cashback recipient, with usernames.
 func (h *TPAdminHandler) GetFeeDistributionDetail(c *gin.Context) {

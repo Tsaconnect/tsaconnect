@@ -340,7 +340,7 @@ export default function ProductDetailsScreen() {
         <Stack.Screen
           options={{
             headerShown: true,
-            headerTitle: '',
+            headerTitle: 'Product Details',
             headerBackTitle: 'Back',
             headerTintColor: colors.accent,
             headerStyle: { backgroundColor: colors.surface },
@@ -376,10 +376,12 @@ export default function ProductDetailsScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      {/* The title was blank while the drawer header sat above this one; now
+          that this is the screen's only header, it has to name the screen. */}
       <Stack.Screen
         options={{
           headerShown: true,
-          headerTitle: '',
+          headerTitle: product.name || 'Product Details',
           headerBackTitle: 'Back',
           headerTintColor: colors.accent,
           headerStyle: { backgroundColor: colors.surface },

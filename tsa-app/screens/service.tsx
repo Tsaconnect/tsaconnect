@@ -1,10 +1,12 @@
 // screens/service.tsx
 //
-// Services landing — the grid hub launching into P2P, the marketplace, vendor
-// browsing, listing flows, plus quick actions. Restyled onto the TSA Signature
-// design system (theme tokens + @/components/ui primitives). Behavior, the item
-// catalog, and every navigation route are unchanged — this is a visual/structural
-// restyle only.
+// Services landing — the grid hub launching into the three money rails
+// (Individual Payment, Payment Merchant, Instant Transfer), Trade & Earn, the
+// marketplace, vendor browsing, listing flows, plus quick actions. Styled on the
+// TSA Signature design system (theme tokens + @/components/ui primitives).
+//
+// Tile titles and routes are product copy — they come from constants/rails.ts
+// so the rail names stay consistent with the wallet and marketplace.
 import { router } from 'expo-router';
 import React from 'react';
 import { ScrollView, View } from 'react-native';
@@ -18,6 +20,7 @@ import {
   PressableScale,
   Text,
 } from '@/components/ui';
+import { RAILS, RAIL_ROUTES, railLabel } from '@/constants/rails';
 
 // Each tile carries a route + the accent hue used to tint its icon chip. Tokens
 // drive the surfaces/typography; the per-item `tone` keys into the theme so the
@@ -41,14 +44,40 @@ interface QuickAction {
   route: string;
 }
 
+// The three money rails plus Trade & Earn lead the grid — Services is the menu
+// users are told to find them in, so they sit above the listing/browse tiles.
 const SERVICE_ITEMS: ServiceItem[] = [
   {
     key: 'p2p',
-    title: 'P2P Merchant',
-    description: 'Buy & sell USDT peer-to-peer',
-    icon: 'swap',
+    title: railLabel('p2p'),
+    description: RAILS.p2p.tagline,
+    icon: 'user',
     tone: 'warning',
-    route: '/p2p',
+    route: RAIL_ROUTES.p2pBuy,
+  },
+  {
+    key: 'pm',
+    title: railLabel('pm'),
+    description: RAILS.pm.tagline,
+    icon: 'storefront',
+    tone: 'info',
+    route: RAIL_ROUTES.pm,
+  },
+  {
+    key: 'it',
+    title: railLabel('it'),
+    description: RAILS.it.tagline,
+    icon: 'bolt',
+    tone: 'accent',
+    route: RAIL_ROUTES.it,
+  },
+  {
+    key: 'trade-earn',
+    title: 'Trade & Earn',
+    description: 'Trade Points, cashback and referral rewards',
+    icon: 'trendingUp',
+    tone: 'success',
+    route: '/trade',
   },
   {
     key: 'marketplace',
@@ -85,7 +114,10 @@ const SERVICE_ITEMS: ServiceItem[] = [
 ];
 
 const QUICK_ACTIONS: QuickAction[] = [
-  { key: 'deposit', label: 'Deposit', icon: 'wallet', tone: 'success', route: '/p2p' },
+  // Opens the wallet with its Deposit sheet already up — the sheet is the one
+  // place that lists every deposit rail, so this shortcut shouldn't preempt it
+  // by dropping the user into a single one.
+  { key: 'deposit', label: 'Deposit', icon: 'wallet', tone: 'success', route: '/tokenization?sheet=deposit' },
   { key: 'my-listings', label: 'My Listings', icon: 'list', tone: 'info', route: '/myAdverts' },
   { key: 'merchant', label: 'Become Merchant', icon: 'storefront', tone: 'accent', route: '/merchants/merchant-request' },
   { key: 'wallet', label: 'Wallet', icon: 'bank', tone: 'escrow', route: '/tokenization' },
@@ -162,7 +194,9 @@ const ServicesScreen: React.FC = () => {
                   >
                     <Icon name={item.icon} size={26} color={tone.fg} />
                   </View>
-                  <Text variant="bodyMed" weight="700" numberOfLines={1}>
+                  {/* Two lines: the expanded rail names ("Individual Payment
+                      (P2P)") don't fit a half-width tile on one. */}
+                  <Text variant="bodyMed" weight="700" numberOfLines={2}>
                     {item.title}
                   </Text>
                   <Text
@@ -222,7 +256,7 @@ const ServicesScreen: React.FC = () => {
         </View>
 
         {/* P2P Highlight Banner */}
-        <PressableScale onPress={() => router.push('/p2p')} style={{ marginTop: spacing['2xl'] }}>
+        <PressableScale onPress={() => router.push(RAIL_ROUTES.p2pBuy as never)} style={{ marginTop: spacing['2xl'] }}>
           <AccentCard padding="lg">
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
               <View
@@ -239,10 +273,10 @@ const ServicesScreen: React.FC = () => {
               </View>
               <View style={{ flex: 1 }}>
                 <Text variant="bodyMed" weight="700">
-                  TSA Connect P2P Trading
+                  TSA Connect {RAILS.p2p.name}
                 </Text>
                 <Text variant="caption" color="textSecondary" style={{ marginTop: 2 }}>
-                  Browse open ads or post your own to trade USDT with verified payment proofs
+                  Browse open ads or post your own to trade crypto with verified payment proofs
                 </Text>
               </View>
               <Icon name="chevronRight" size={22} color={colors.accent} />

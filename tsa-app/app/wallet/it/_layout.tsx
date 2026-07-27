@@ -2,8 +2,10 @@ import React from 'react';
 import { Stack } from 'expo-router';
 import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { useTheme, fontFamily } from '@/theme';
+import { railLabel } from '@/constants/rails';
 
-// Instant Transfer (IT) — buy/sell MCGP with Naira via the company PM.
+// Instant Transfer (IT) — fiat & crypto swap; buy/sell MCGP with Naira via the
+// company Payment Merchant.
 export default function ITLayout() {
   const { colors, type } = useTheme();
   const screenOptions: NativeStackNavigationOptions = {
@@ -20,9 +22,9 @@ export default function ITLayout() {
   };
   return (
     <Stack screenOptions={screenOptions}>
-      <Stack.Screen name="index" options={{ title: 'Instant Transfer' }} />
-      <Stack.Screen name="buy" options={{ title: 'Buy' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell' }} />
+      <Stack.Screen name="index" options={{ title: railLabel('it') }} />
+      <Stack.Screen name="buy" options={{ title: 'Deposit · Buy' }} />
+      <Stack.Screen name="sell" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="intent/[id]" options={{ title: 'Order' }} />
     </Stack>
   );

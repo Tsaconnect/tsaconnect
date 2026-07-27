@@ -82,13 +82,13 @@ export default function MerchantLayout() {
             <Stack.Screen
                 name="sell-usdt/index"
                 options={{
-                    title: 'P2P: Sell USDT',
+                    title: 'Payment Merchant: Sell USDT',
                 }}
             />
             <Stack.Screen
                 name="buy-usdt/index"
                 options={{
-                    title: 'P2P: Buy USDT/USDC',
+                    title: 'Payment Merchant: Buy USDT/USDC',
                 }}
             />
             <Stack.Screen

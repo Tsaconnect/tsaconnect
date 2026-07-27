@@ -1,28 +1,42 @@
 // components/dashboard/RWMWidget.tsx
 //
 // "Real World Marketplace" (RWM) homepage widget — the tabbed card that replaced
-// Recent Activity on the dashboard. Five tabs (Orders | Products | Contact |
-// Ordering | Booking) each lazily fetch ~5 recent rows from their own source:
+// Recent Activity on the dashboard. Five tabs, four of them a browsable
+// catalogue and one a history:
 //
-//   Orders    — GET /orders?role=buyer (services/orderApi.getOrders)
-//   Products  — GET /products?type=Product&sort=recent (api.getMarketplaceProducts)
-//   Contact   — GET /services/contact-payments?role=caller (serviceContactApi)
-//   Ordering  — GET /orders?role=seller (merchant's incoming orders)
-//   Booking   — GET /services/requests?role=buyer (bookingRequestApi)
+//   Orders    — GET /orders?role=buyer (history; row opens the order)
+//   Products  — GET /products?type=Product              → Buy
+//   Contact   — GET /products?type=Service&serviceType=contact → Contact
+//   Ordering  — GET /products?type=Service&serviceType=order   → Order
+//   Booking   — GET /products?type=Service&serviceType=booking → Book
 //
-// Ordering/Contact degrade to the "Nothing here yet" empty state on any
-// failure (their detail screens land on a parallel branch) — never a crash,
-// never an endless spinner. The other three sources show a Retry empty state
-// on failure instead. Presentation follows the dashboard card pattern
-// (Surface + header + Divider + rows) from RecentActivity.
+// The four catalogue tabs are one query with different filters, because
+// products and services live in one collection and are told apart by their
+// CATEGORY — a merchant filing a flight as type "Product" must still land under
+// Booking. The server does that classification (models.ServiceCategoryIDs); the
+// tab wiring and row routing live in utils/rwmCatalogue.
+//
+// Every row is tappable and carries a CTA to the same destination: the listing's
+// own page, where the user adds to cart, unlocks a contact, orders, or books.
+// A failed tab shows a Retry empty state — never a crash, never an endless
+// spinner. Presentation follows the dashboard card pattern (Surface + header +
+// Divider + rows) from RecentActivity.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Image, ScrollView, View } from 'react-native';
 import { router } from 'expo-router';
 import { api, Product } from '@/components/services/api';
 import { getOrders, formatTokenAmount } from '@/services/orderApi';
-import { listBookingRequests, BookingRequestRow } from '@/services/bookingRequestApi';
-import { listContactPayments } from '@/services/serviceContactApi';
 import { formatDate, formatStatus } from '@/constants/orderStatus';
+import {
+  CTA_LABEL,
+  SERVICE_TAB_TYPE,
+  listingSection,
+  listingTarget,
+  targetHref,
+  viewAllHref,
+  type RwmHref,
+  type RwmTarget,
+} from '@/utils/rwmCatalogue';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import {
@@ -50,17 +64,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'booking', label: 'Booking' },
 ];
 
-// "View all" destinations. Ordering/Contact screens land on a parallel branch
-// (feat/request-screens) — navigation is wrapped in try/catch so a missing
-// route never crashes the home.
-const VIEW_ALL_ROUTES: Record<TabKey, string> = {
-  orders: '/orderlist',
-  products: '/products',
-  contact: '/(dashboard)/contact-requests',
-  ordering: '/(dashboard)/ordering-requests',
-  booking: '/booking-requests',
-};
-
 const EMPTY_ICONS: Record<TabKey, IconName> = {
   orders: 'cart',
   products: 'storefront',
@@ -72,9 +75,9 @@ const EMPTY_ICONS: Record<TabKey, IconName> = {
 const EMPTY_HINTS: Record<TabKey, string> = {
   orders: 'Your marketplace orders will show up here.',
   products: 'New marketplace listings will show up here.',
-  contact: 'Contacts you unlock will show up here.',
-  ordering: 'Incoming orders from buyers will show up here.',
-  booking: 'Your booking requests will show up here.',
+  contact: 'Services you can call up will show up here.',
+  ordering: 'Services you can order from will show up here.',
+  booking: 'Services you can book a slot with will show up here.',
 };
 
 // ── Row model (one shape for all five tabs) ──
@@ -93,6 +96,8 @@ interface RwmRow {
   promo?: boolean;
   imageUrl?: string;
   icon?: IconName;
+  /** Where tapping the row (or its CTA) goes. Rows without one are inert. */
+  target?: RwmTarget;
 }
 
 type TabStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -139,8 +144,6 @@ const STATUS_TONES: Record<string, Tone> = {
   expired: 'neutral',
   refunded: 'neutral',
   sold_out: 'neutral',
-  // Contact payments have no lifecycle — every row is an unlocked contact.
-  revealed: 'success',
 };
 
 // Compact labels where formatStatus() would be too wide for the pill.
@@ -160,6 +163,8 @@ function statusLabel(status: string): string {
 
 const LIMIT = 5;
 const TIMEOUT_MS = 12000;
+/** Keeps Buy / Contact / Order / Book buttons the same width down a column. */
+const CTA_MIN_WIDTH = 62;
 
 /** Guard a service call so a hung request can never leave the tab spinning. */
 function withTimeout<T>(promise: Promise<T>, ms: number = TIMEOUT_MS): Promise<T> {
@@ -187,17 +192,14 @@ function orderToRow(o: any, counterpart: 'seller' | 'buyer'): RwmRow {
     status: typeof o?.status === 'string' ? o.status : undefined,
     imageUrl: typeof o?.product?.imageUrl === 'string' ? o.product.imageUrl : undefined,
     icon: 'cart',
+    target: o?.id ? { kind: 'order', id: String(o.id), title } : undefined,
   };
 }
 
 interface LoadResult {
   ok: boolean;
   rows: RwmRow[];
-  /**
-   * Why the tab came back empty. Contact/Ordering degrade failures to the same
-   * "Nothing here yet" state as genuine emptiness, so without this a 401 or a
-   * timeout is indistinguishable from an account that simply has no rows.
-   */
+  /** Why the tab came back empty — surfaced in the dev log, not the UI. */
   reason?: string;
 }
 
@@ -214,96 +216,50 @@ const loadOrders = async (): Promise<LoadResult> => {
   }
 };
 
-const loadProducts = async (): Promise<LoadResult> => {
-  try {
-    // type=Product — /products serves both goods and service listings; without
-    // the filter, contact/order/booking services leak into the Products tab.
-    const res = await withTimeout(
-      api.getMarketplaceProducts({ type: 'Product', sort: 'recent', limit: LIMIT })
-    );
-    if (!res.success || !res.data) return { ok: false, rows: [], reason: res.message || 'no data' };
-    const rows = (res.data.products || []).slice(0, LIMIT).map((p: Product): RwmRow => ({
-      key: p.id || p._id || p.name,
-      title: p.name || 'Product',
-      subtitle:
-        (typeof p.category === 'object' && p.category ? p.category.title : p.categoryName) ||
-        p.location ||
-        undefined,
-      amountUsd: Number.isFinite(p.price) ? p.price : undefined,
-      status: p.status,
-      promo: !!p.isFeatured,
-      imageUrl: p.images?.[0]?.url || undefined,
-      icon: 'storefront',
-    }));
-    return { ok: true, rows };
-  } catch (err: any) {
-    return { ok: false, rows: [], reason: err?.message || 'threw' };
-  }
-};
-
-const loadBooking = async (): Promise<LoadResult> => {
-  try {
-    const res = await withTimeout(listBookingRequests('buyer'));
-    if (!res.success || !res.data) return { ok: false, rows: [], reason: res.message || 'no data' };
-    const rows = (res.data.requests || []).slice(0, LIMIT).map((r: BookingRequestRow): RwmRow => ({
-      key: r.request?.id || `${r.serviceName}-${r.request?.createdAt}`,
-      title: r.serviceName || 'Service booking',
-      subtitle: formatDate(r.request?.createdAt),
-      status: r.request?.status,
-      icon: 'clock',
-    }));
-    return { ok: true, rows };
-  } catch (err: any) {
-    return { ok: false, rows: [], reason: err?.message || 'threw' };
-  }
-};
-
-// Ordering = the merchant side of the same escrow orders list (role=seller).
-// Non-merchants simply get an empty list; any failure degrades to the empty
-// state ("Nothing here yet"), never the error/Retry state.
-const loadOrdering = async (): Promise<LoadResult> => {
-  try {
-    const res = await withTimeout(getOrders({ page: 1, limit: LIMIT, role: 'seller' }));
-    if (!res.success || !res.data) return { ok: true, rows: [], reason: res.message || 'no data' };
-    return {
-      ok: true,
-      rows: (res.data.orders || []).slice(0, LIMIT).map((o) => orderToRow(o, 'buyer')),
-    };
-  } catch (err: any) {
-    return { ok: true, rows: [], reason: err?.message || 'threw' };
-  }
-};
-
-// Contact = the caller's paid contact unlocks. There is no lifecycle for these
-// (each row is a completed ContactFeePaid event), so status is a constant
-// "Revealed". Failures degrade to the empty state, never the Retry state.
-const loadContact = async (): Promise<LoadResult> => {
-  try {
-    const res = await withTimeout(listContactPayments({ role: 'caller', page: 1, limit: LIMIT }));
-    if (!res.success || !res.data) return { ok: true, rows: [], reason: res.message || 'no data' };
-    const rows = (res.data.items || []).slice(0, LIMIT).map((c): RwmRow => ({
-      key: c.id,
-      title: c.service?.name || 'Service contact',
-      subtitle: [c.counterparty?.name || c.counterparty?.username, formatDate(c.createdAt)]
-        .filter(Boolean)
-        .join(' · '),
-      amount: Number.isFinite(c.feeUSD) ? `Paid $${c.feeUSD.toFixed(2)}` : undefined,
-      sensitive: true,
-      status: 'revealed',
-      icon: 'mail',
-    }));
-    return { ok: true, rows };
-  } catch (err: any) {
-    return { ok: true, rows: [], reason: err?.message || 'threw' };
-  }
-};
+/**
+ * The four catalogue tabs: one listings query, filtered by what the tab
+ * browses. Products asks for goods; the service tabs ask for their own
+ * serviceType bucket. Classification is the server's job — it reads the
+ * listing's category rather than trusting the listing's own `type`.
+ */
+const loadCatalogue =
+  (tab: Exclude<TabKey, 'orders'>) => async (): Promise<LoadResult> => {
+    try {
+      const res = await withTimeout(
+        api.getMarketplaceProducts({
+          sort: 'recent',
+          limit: LIMIT,
+          ...(tab === 'products'
+            ? { type: 'Product' as const }
+            : { type: 'Service' as const, serviceType: SERVICE_TAB_TYPE[tab] }),
+        })
+      );
+      if (!res.success || !res.data)
+        return { ok: false, rows: [], reason: res.message || 'no data' };
+      const rows = (res.data.products || []).slice(0, LIMIT).map((p: Product): RwmRow => ({
+        key: p.id || p._id || p.name,
+        title: p.name || 'Listing',
+        // The category is the row's section tag — "Flights", "Hair Extensions".
+        subtitle: listingSection(p),
+        amountUsd: Number.isFinite(p.price) ? p.price : undefined,
+        status: p.status,
+        promo: !!p.isFeatured,
+        imageUrl: p.images?.[0]?.url || undefined,
+        icon: EMPTY_ICONS[tab],
+        target: listingTarget(p, tab),
+      }));
+      return { ok: true, rows };
+    } catch (err: any) {
+      return { ok: false, rows: [], reason: err?.message || 'threw' };
+    }
+  };
 
 const LOADERS: Record<TabKey, () => Promise<LoadResult>> = {
   orders: loadOrders,
-  products: loadProducts,
-  contact: loadContact,
-  ordering: loadOrdering,
-  booking: loadBooking,
+  products: loadCatalogue('products'),
+  contact: loadCatalogue('contact'),
+  ordering: loadCatalogue('ordering'),
+  booking: loadCatalogue('booking'),
 };
 
 // ── Component ──
@@ -355,14 +311,17 @@ export const RWMWidget: React.FC<RWMWidgetProps> = ({ isValuesHidden, refreshSig
     setTabs(freshTabs());
   }, [refreshSignal]);
 
-  const onViewAll = () => {
+  // Navigation is guarded: a home screen must never crash on a route that a
+  // parallel branch hasn't landed yet.
+  const go = useCallback((href: RwmHref) => {
     try {
-      router.push(VIEW_ALL_ROUTES[active] as any);
+      router.push(href as any);
     } catch (err) {
-      // Ordering/Contact screens ship on a parallel branch — never crash the home.
-      console.warn('RWM view-all navigation unavailable:', err);
+      console.warn('RWM navigation unavailable:', err);
     }
-  };
+  }, []);
+
+  const onViewAll = () => go(viewAllHref(active));
 
   const toneColors = (tone: Tone): { color: string; bg: string } => {
     switch (tone) {
@@ -463,9 +422,20 @@ export const RWMWidget: React.FC<RWMWidgetProps> = ({ isValuesHidden, refreshSig
           const amountText = isValuesHidden && row.sensitive && rawAmount ? '••••' : rawAmount;
           const tone = row.status ? STATUS_TONES[row.status.toLowerCase()] ?? 'neutral' : 'neutral';
           const tc = toneColors(tone);
+          const open = row.target ? () => go(targetHref(row.target!)) : undefined;
+          const ctaLabel = CTA_LABEL[active];
+          // Catalogue queries only return active listings, so an "Active" badge
+          // on every row is noise competing with the CTA. Anything else — sold
+          // out, an order's lifecycle — still earns its place.
+          const showStatus = !!row.status && !(ctaLabel && row.status === 'active');
           return (
             <View key={row.key}>
-              <View
+              {/* PressableScale with no onPress is inert, so history rows with no
+                  destination stay non-interactive without a second component. */}
+              <PressableScale
+                onPress={open}
+                accessibilityRole={open ? 'button' : undefined}
+                accessibilityLabel={open ? `Open ${row.title}` : undefined}
                 style={{
                   flexDirection: 'row',
                   alignItems: 'center',
@@ -520,17 +490,39 @@ export const RWMWidget: React.FC<RWMWidgetProps> = ({ isValuesHidden, refreshSig
                     </Text>
                   )}
                 </View>
-                <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                <View style={{ alignItems: 'flex-end', gap: 4, flexShrink: 1 }}>
                   {!!amountText && (
-                    <Text variant="bodySm" weight="700" numeric>
+                    <Text variant="bodySm" weight="700" numeric numberOfLines={1}>
                       {amountText}
                     </Text>
                   )}
-                  {!!row.status && (
-                    <Badge label={statusLabel(row.status)} size="sm" color={tc.color} background={tc.bg} />
+                  {showStatus && (
+                    <Badge label={statusLabel(row.status!)} size="sm" color={tc.color} background={tc.bg} />
                   )}
                 </View>
-              </View>
+
+                {/* CTA — Buy / Contact / Order / Book. Same destination as the
+                    row tap; it's there to say what happens next. */}
+                {!!ctaLabel && !!open && (
+                  <PressableScale
+                    onPress={open}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${ctaLabel} ${row.title}`}
+                    style={{
+                      paddingVertical: spacing.xs,
+                      paddingHorizontal: spacing.md,
+                      borderRadius: radius.md,
+                      backgroundColor: colors.accent,
+                      minWidth: CTA_MIN_WIDTH,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text variant="caption" weight="700" style={{ color: colors.onAccent }}>
+                      {ctaLabel}
+                    </Text>
+                  </PressableScale>
+                )}
+              </PressableScale>
               {!isLast && <Divider inset={spacing.lg} />}
             </View>
           );
