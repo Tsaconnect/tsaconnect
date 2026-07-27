@@ -1,5 +1,11 @@
 // screens/sendFiat.tsx
 //
+// RETIRED (2026-07-27): nothing navigates here any more. Its merchant catalog
+// was hardcoded, so the flow could never actually pay out. Fiat withdrawal now
+// runs through Instant Transfer (app/wallet/it/sell.tsx) and the P2P /
+// Payment Merchant markets, reachable from the wallet's Withdraw sheet.
+// Kept for reference until the replacement rails have run in production.
+//
 // Sell-USDT-for-fiat withdrawal flow — a 3-step wizard (amount → merchant →
 // release) with bank-details setup, country selection, a sell-terms notice, a
 // payment-confirmation gate, and biometric/PIN authorization before release.

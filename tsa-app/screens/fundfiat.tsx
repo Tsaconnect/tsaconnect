@@ -1,5 +1,9 @@
 // screens/fundfiat.tsx
 //
+// RETIRED (2026-07-27): unreferenced. Fiat deposits are live via Instant
+// Transfer (app/wallet/it/buy.tsx) and the P2P / Payment Merchant markets,
+// reachable from the wallet's Deposit sheet.
+//
 // Fiat funding placeholder — a "Coming Soon" notice with a Go Back action.
 // Restyled onto the TSA Signature design system (theme tokens + @/components/ui
 // primitives). Behavior is unchanged: the only action still calls router.back().

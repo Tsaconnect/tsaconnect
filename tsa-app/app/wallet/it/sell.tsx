@@ -30,6 +30,7 @@ import {
 } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 import {
+  getITAgreement,
   getITBalance,
   getITFeeQuote,
   getITRate,
@@ -40,6 +41,7 @@ import {
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import { mcgpAmountToNgn } from './sell-quote';
 import { ngnToUsd, shouldShowNgnSecondary } from './currency-display';
+import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
 
@@ -60,7 +62,7 @@ function feeDisplay(line?: { display?: string } | null): string {
 }
 
 export default function ITSell() {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
   const { currency: displayCurrency, formatPrice, allRates } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
@@ -109,6 +111,23 @@ export default function ITSell() {
       if (b.success && b.data) setCredited(b.data.premiumCredited);
       if (r.success && r.data) setSellRateKobo(r.data.sellRateKobo);
     })();
+  }, []);
+
+  // The wallet's Withdraw sheet links straight here, so this screen can be the
+  // user's first IT surface. The hub owns the trading-agreement gate — bounce
+  // an un-agreed user there before they fill in bank details, rather than at
+  // submit time. A failed check is not a block: the backend still gates itSell.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ag = await getITAgreement();
+      if (!cancelled && ag.success && ag.data && !ag.data.accepted) {
+        router.replace('/wallet/it');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -550,6 +569,23 @@ export default function ITSell() {
         ) : null}
 
         <Button title="Review" onPress={goReview} disabled={!amount || !bankReady} />
+
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: spacing.sm,
+            backgroundColor: colors.warningBg,
+            borderRadius: radius.sm,
+            padding: spacing.md,
+          }}
+        >
+          <Icon name="warning" size={16} color={colors.warning} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            Note: {RAILS.it.name} ({RAILS.it.acronym}) payouts are not always received instantly —
+            payout limits from our partner or settlement differences can delay them.
+          </Text>
+        </View>
       </ScrollView>
 
       <PickerSheet

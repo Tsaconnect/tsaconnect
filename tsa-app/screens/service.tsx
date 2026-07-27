@@ -18,6 +18,7 @@ import {
   PressableScale,
   Text,
 } from '@/components/ui';
+import { RAIL_ROUTES, railLabel } from '@/constants/rails';
 
 // Each tile carries a route + the accent hue used to tint its icon chip. Tokens
 // drive the surfaces/typography; the per-item `tone` keys into the theme so the
@@ -44,11 +45,11 @@ interface QuickAction {
 const SERVICE_ITEMS: ServiceItem[] = [
   {
     key: 'p2p',
-    title: 'P2P Merchant',
-    description: 'Buy & sell USDT peer-to-peer',
+    title: railLabel('p2p'),
+    description: 'Buy & sell crypto directly with another user',
     icon: 'swap',
     tone: 'warning',
-    route: '/p2p',
+    route: RAIL_ROUTES.p2pBuy,
   },
   {
     key: 'marketplace',

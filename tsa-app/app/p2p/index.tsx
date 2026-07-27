@@ -2,7 +2,7 @@
 //
 // P2P marketplace — browse sell-ads (user buys crypto) and buy-ads (user sells
 // crypto to a merchant). Restyled onto the TSA Signature design system.
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import { BackHandler, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,6 +19,7 @@ import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from './pm-cta';
+import { RAILS, railLabel } from '../../constants/rails';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { useTheme } from '@/theme';
@@ -189,6 +190,8 @@ const P2PMarketScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      {/* One screen, two rails — the header names whichever feed is showing. */}
+      <Stack.Screen options={{ title: isPmView ? railLabel('pm') : railLabel('p2p') }} />
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         refreshControl={
@@ -205,13 +208,11 @@ const P2PMarketScreen: React.FC = () => {
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View style={{ flex: 1 }}>
             <Text variant="title1" weight="700">
-              {isPmView ? 'Payment Merchant' : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
+              {isPmView ? railLabel('pm') : (adSide === 'sell' ? `Buy ${token}` : `Sell ${token}`)}
             </Text>
-            {isPmView && (
-              <Text variant="caption" color="textSecondary">
-                Instant buy / sell with verified merchants
-              </Text>
-            )}
+            <Text variant="caption" color="textSecondary">
+              {isPmView ? RAILS.pm.tagline : RAILS.p2p.tagline}
+            </Text>
           </View>
           <CurrencySelector variant="header" selectedCode={currency.code} onSelectCode={setMarketCurrency} />
         </View>
@@ -256,7 +257,7 @@ const P2PMarketScreen: React.FC = () => {
                     Want to sell?
                   </Text>
                   <Text variant="caption" color="textSecondary">
-                    Become a merchant to publish P2P ads.
+                    Become a merchant to publish {RAILS.p2p.name} ({RAILS.p2p.acronym}) ads.
                   </Text>
                 </View>
                 <Icon name="chevronRight" size={20} color={colors.textMuted} />
