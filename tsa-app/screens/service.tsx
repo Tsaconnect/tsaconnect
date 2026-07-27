@@ -2,10 +2,11 @@
 //
 // Services landing — the grid hub launching into the three money rails
 // (Individual Payment, Payment Merchant, Instant Transfer), Trade & Earn, the
-// marketplace, vendor browsing, listing flows, plus quick actions. Restyled onto the TSA Signature
-// design system (theme tokens + @/components/ui primitives). Behavior, the item
-// catalog, and every navigation route are unchanged — this is a visual/structural
-// restyle only.
+// marketplace, vendor browsing, listing flows, plus quick actions. Styled on the
+// TSA Signature design system (theme tokens + @/components/ui primitives).
+//
+// Tile titles and routes are product copy — they come from constants/rails.ts
+// so the rail names stay consistent with the wallet and marketplace.
 import { router } from 'expo-router';
 import React from 'react';
 import { ScrollView, View } from 'react-native';
@@ -113,7 +114,10 @@ const SERVICE_ITEMS: ServiceItem[] = [
 ];
 
 const QUICK_ACTIONS: QuickAction[] = [
-  { key: 'deposit', label: 'Deposit', icon: 'wallet', tone: 'success', route: '/p2p' },
+  // Opens the wallet with its Deposit sheet already up — the sheet is the one
+  // place that lists every deposit rail, so this shortcut shouldn't preempt it
+  // by dropping the user into a single one.
+  { key: 'deposit', label: 'Deposit', icon: 'wallet', tone: 'success', route: '/tokenization?sheet=deposit' },
   { key: 'my-listings', label: 'My Listings', icon: 'list', tone: 'info', route: '/myAdverts' },
   { key: 'merchant', label: 'Become Merchant', icon: 'storefront', tone: 'accent', route: '/merchants/merchant-request' },
   { key: 'wallet', label: 'Wallet', icon: 'bank', tone: 'escrow', route: '/tokenization' },

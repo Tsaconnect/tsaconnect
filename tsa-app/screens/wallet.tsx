@@ -9,7 +9,7 @@
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
@@ -749,6 +749,16 @@ const WalletScreen: React.FC = () => {
   const [selectedChain, setSelectedChain] = useState<'all' | AnyChainKey>('all');
   const [selectedCategory, setSelectedCategory] = useState<SpotCategory | 'all'>('all');
   const [showFilterSheet, setShowFilterSheet] = useState(false);
+
+  // ?sheet=deposit|withdraw opens the matching rail sheet, so a shortcut
+  // elsewhere in the app can land on the full list of rails instead of
+  // preempting the choice by deep-linking into one of them. Keyed on the param
+  // (not run on mount alone) because this tab stays mounted once visited.
+  const { sheet } = useLocalSearchParams<{ sheet?: string }>();
+  useEffect(() => {
+    if (sheet === 'deposit') setShowFundModal(true);
+    else if (sheet === 'withdraw') setShowSendModal(true);
+  }, [sheet]);
   // SYMBOL → taxonomy category, from the shared listings cache. When the fetch
   // fails the map is empty and every asset falls back to "spot", which would
   // silently produce wrong CATEGORY results — so the sheet surfaces the error

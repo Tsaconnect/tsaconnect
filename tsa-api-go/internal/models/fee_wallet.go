@@ -47,6 +47,35 @@ func (FeeWalletSetting) TableName() string {
 	return "fee_wallet_settings"
 }
 
+// FeeWalletAssignment is the append-only history behind FeeWalletSetting: one
+// row per reassignment, keeping the address that was replaced. The singleton
+// alone cannot answer "who was receiving our fees on the 14th, and who moved
+// it?" — for the destination of every fee the platform charges, that question
+// has to stay answerable. Never updated or deleted.
+type FeeWalletAssignment struct {
+	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	// Address is the wallet assigned by this change; PreviousAddress is what it
+	// replaced (empty for the seed row).
+	Address         string     `gorm:"not null" json:"address"`
+	PreviousAddress string     `json:"previousAddress"`
+	AssignedBy      *uuid.UUID `gorm:"type:uuid" json:"assignedBy,omitempty"`
+	Note            string     `json:"note"`
+	CreatedAt       time.Time  `gorm:"index" json:"createdAt"`
+}
+
+// TableName overrides the default table name.
+func (FeeWalletAssignment) TableName() string {
+	return "fee_wallet_assignments"
+}
+
+// BeforeCreate assigns a UUID when one isn't set.
+func (a *FeeWalletAssignment) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	return nil
+}
+
 // BeforeCreate assigns a UUID when one isn't set, so inserts work regardless of
 // the DB's default (Postgres gen_random_uuid() vs SQLite in tests / seeds).
 func (s *FeeWalletSetting) BeforeCreate(tx *gorm.DB) error {

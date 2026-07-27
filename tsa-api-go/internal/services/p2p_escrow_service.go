@@ -343,8 +343,11 @@ func (s *P2PEscrowService) ReadSystemWallet() (string, error) {
 		return "", fmt.Errorf("call systemWallet: %w", err)
 	}
 	vals, err := parsedP2PEscrowABI.Unpack("systemWallet", out)
-	if err != nil || len(vals) == 0 {
+	if err != nil {
 		return "", fmt.Errorf("unpack systemWallet: %w", err)
+	}
+	if len(vals) == 0 {
+		return "", fmt.Errorf("systemWallet returned no value")
 	}
 	addr, ok := vals[0].(common.Address)
 	if !ok {
