@@ -314,9 +314,13 @@ func (h *ITHandler) Buy(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Buy order opened", gin.H{
 		"needsActivation": false,
 		"quote": gin.H{
+			// ngnKobo is what the user transfers; mcgpAmount is what they get
+			// AFTER fees — feeNgnKobo is the difference, in naira.
 			"ngnKobo":    intent.NgnKobo,
 			"mcgpAmount": intent.McgpAmount,
 			"rateKobo":   intent.RateKobo,
+			"feeNgnKobo": intent.FeeNgnKobo,
+			"netNgnKobo": intent.NetNgnKobo,
 		},
 		"payTo":  fiatVAPayTo(va, user.Name),
 		"intent": intent,

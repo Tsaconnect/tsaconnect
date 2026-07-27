@@ -307,18 +307,22 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		return nil
 	}
 
-	mcgp := mcgpForNgn(paidKobo, buyRate)
-	if mcgp.Sign() <= 0 {
-		return fmt.Errorf("it va credit: amount too small after pricing")
+	// Fees come off the naira that landed; only the net buys MCGP.
+	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate)
+	if err != nil {
+		return fmt.Errorf("it va credit: %w", err)
 	}
 
 	if pendErr == nil {
 		if err := s.db.WithContext(ctx).Model(&pending).Updates(map[string]any{
-			"payment_ref":    chargeID,
-			"ngn_kobo":       paidKobo.String(),
-			"rate_kobo":      buyRate.String(),
-			"mcgp_amount":    mcgp.String(),
-			"wallet_address": firstNonEmpty(pending.WalletAddress, wallet),
+			"payment_ref":        chargeID,
+			"ngn_kobo":           paidKobo.String(),
+			"rate_kobo":          buyRate.String(),
+			"mcgp_amount":        mcgp.String(),
+			"fee_ngn_kobo":       fees.Fee.String(),
+			"net_ngn_kobo":       fees.Net.String(),
+			"platform_kept_kobo": fees.PlatformKept.String(),
+			"wallet_address":     firstNonEmpty(pending.WalletAddress, wallet),
 		}).Error; err != nil {
 			return err
 		}

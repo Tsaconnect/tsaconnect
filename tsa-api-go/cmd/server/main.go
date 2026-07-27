@@ -517,21 +517,32 @@ func main() {
 		log.Printf("[fw] company customer resolved (VA parent)")
 	}
 
-	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11) — quote-only,
-	// always registered. Provider fees pass through live Flutterwave GetFees
-	// when the client is up, else the config fallback percentage; the P2P FX
-	// feed converts the flat USD platform fee for NGN quotes. Nothing here
-	// moves money — deduction wiring lands after PM sign-off.
+	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Provider fees
+	// pass through live Flutterwave GetFees when the client is up, else the
+	// config fallback percentage; the P2P FX feed converts the flat USD platform
+	// fee for NGN quotes. The same engine now DEDUCTS on the Instant Transfer
+	// legs (see the IT wiring below) — the quote the user is shown is the one
+	// the money follows.
 	feeQuoteQuoter := services.NewFlutterwaveFeeQuoter(fwClient)
 	if feeQuoteQuoter == nil {
 		log.Printf("[fee-quote] provider fees on config fallback (%d bps): Flutterwave dormant", cfg.FeeQuote.ProviderFallbackBps)
 	} else {
 		log.Printf("[fee-quote] provider fees live via Flutterwave GetFees")
 	}
+	feeQuoteService := services.NewFeeQuoteService(cfg.FeeQuote, feeQuoteQuoter)
 	feeQuoteHandler := handlers.NewFeeQuoteHandler(
-		services.NewFeeQuoteService(cfg.FeeQuote, feeQuoteQuoter),
+		feeQuoteService,
 		services.NewP2PFxProvider(p2pService),
 	)
+
+	// Instant Transfer settles NET of fees: the same quote the app shows is the
+	// one the payout and the credit are computed from. Without a quoter IT
+	// refuses to price a transfer rather than settling one for free, so this
+	// wiring is required for IT to operate at all.
+	if itService != nil {
+		itService.SetFeeQuoter(feeQuoteService)
+		itService.SetFeeDistributor(feeDistributionService)
+	}
 
 	// Bank directory + name enquiry follow the resolved fiat provider so the
 	// app's bank dropdown and the payout gateway can never disagree on codes.
