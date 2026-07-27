@@ -43,6 +43,7 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"","type":"bytes32"}],"name":"trades","outputs":[{"name":"seller","type":"address"},{"name":"buyer","type":"address"},{"name":"token","type":"address"},{"name":"amount","type":"uint96"},{"name":"createdAt","type":"uint40"},{"name":"autoReleaseAt","type":"uint40"},{"name":"status","type":"uint8"},{"name":"funding","type":"uint8"},{"name":"feeBps","type":"uint16"},{"name":"platformFeeBpsSnapshot","type":"uint16"},{"name":"gasFeeBpsSnapshot","type":"uint16"},{"name":"voucherHash","type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"systemWallet","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Deposited","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Withdrawn","type":"event"},
@@ -322,6 +323,34 @@ func (s *P2PEscrowService) ReadAllowance(seller, token string) (*big.Int, error)
 		return nil, fmt.Errorf("p2p escrow: no chain client")
 	}
 	return s.client.GetTokenAllowance(token, seller, s.contractAddress)
+}
+
+// ReadSystemWallet returns the address the escrow actually pays trade fees to
+// (`systemWallet()`). The admin fee-wallet panel compares it against the
+// wallet the PM assigned — an assignment the contract hasn't been pointed at
+// is the failure mode worth surfacing, since fees keep landing at the old
+// address until the owner calls setSystemWallet.
+func (s *P2PEscrowService) ReadSystemWallet() (string, error) {
+	if err := s.requireConfigured(); err != nil {
+		return "", err
+	}
+	data, err := parsedP2PEscrowABI.Pack("systemWallet")
+	if err != nil {
+		return "", fmt.Errorf("pack systemWallet: %w", err)
+	}
+	out, err := s.callContract(data)
+	if err != nil {
+		return "", fmt.Errorf("call systemWallet: %w", err)
+	}
+	vals, err := parsedP2PEscrowABI.Unpack("systemWallet", out)
+	if err != nil || len(vals) == 0 {
+		return "", fmt.Errorf("unpack systemWallet: %w", err)
+	}
+	addr, ok := vals[0].(common.Address)
+	if !ok {
+		return "", fmt.Errorf("unexpected systemWallet return type")
+	}
+	return addr.Hex(), nil
 }
 
 // PrepareDeposit builds the unsigned tx for `deposit(token, amount)`. The

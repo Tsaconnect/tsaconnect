@@ -57,8 +57,8 @@ const SWAP_PAIRS: Array<{ from: string; to: string; label: string }> = [
 
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
-// OTC sub-tabs. Direct hosts the live MCGP/USDC desk; Presale is a
-// coming-soon placeholder until presale listings exist.
+// OTC sub-tabs. Direct hosts the live MCGP/USDC desk; Presale is empty until
+// presale listings exist.
 type OtcTab = 'direct' | 'presale';
 
 const OTC_TABS: { key: OtcTab; label: string }[] = [
@@ -611,7 +611,7 @@ const SwapScreen = () => {
       <View style={{ flex: 1, justifyContent: 'center' }}>
         <EmptyState
           icon="clock"
-          title="Presale coming soon"
+          title="No active-presale"
           subtitle="Presale listings will appear here once they go live."
         />
       </View>

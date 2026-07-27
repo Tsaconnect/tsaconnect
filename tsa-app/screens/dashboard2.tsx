@@ -242,35 +242,43 @@ const Dashboard: React.FC = () => {
         />
 
         {/* TP & Cashback Summary */}
+        {/* Each half taps through to where that balance is explained: TP to
+            Trade & Earn (Trade Points), cashback to the cashback breakdown. */}
         {(tpBalance > 0 || cashbackBalance > 0) && (
-          <PressableScale onPress={() => router.push('/cashback')} style={{ marginTop: spacing.md }}>
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
-                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
-                  <Icon name="star" size={16} color={colors.accent} />
-                  <Text variant="bodyMed" weight="700" numeric>
-                    {tpBalance.toFixed(2)}
-                  </Text>
-                  <Text variant="caption" color="textMuted">
-                    TP
-                  </Text>
-                </View>
-                <Divider vertical spacing="md" />
-                <View style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}>
-                  <Icon name="wallet" size={16} color={colors.success} />
-                  <Text variant="bodyMed" weight="700" numeric>
-                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
-                  </Text>
-                  <Text variant="caption" color="textMuted">
-                    Cashback
-                  </Text>
-                </View>
-              </View>
-            </AccentCard>
-          </PressableScale>
+          <AccentCard padding="md" style={{ marginTop: spacing.md }}>
+            <View style={{ flexDirection: 'row', alignItems: 'stretch' }}>
+              <PressableScale
+                onPress={() => router.push('/trade')}
+                accessibilityLabel="View Trade Points"
+                style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}
+              >
+                <Icon name="star" size={16} color={colors.accent} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {tpBalance.toFixed(2)}
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  TP
+                </Text>
+              </PressableScale>
+              <Divider vertical spacing="md" />
+              <PressableScale
+                onPress={() => router.push('/cashback')}
+                accessibilityLabel="View cashback"
+                style={{ flex: 1, alignItems: 'center', gap: spacing.xs }}
+              >
+                <Icon name="wallet" size={16} color={colors.success} />
+                <Text variant="bodyMed" weight="700" numeric>
+                  {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
+                </Text>
+                <Text variant="caption" color="textMuted">
+                  Cashback
+                </Text>
+              </PressableScale>
+            </View>
+          </AccentCard>
         )}
 
         <TokenMarketList

@@ -1,7 +1,8 @@
 // screens/service.tsx
 //
-// Services landing — the grid hub launching into P2P, the marketplace, vendor
-// browsing, listing flows, plus quick actions. Restyled onto the TSA Signature
+// Services landing — the grid hub launching into the three money rails
+// (Individual Payment, Payment Merchant, Instant Transfer), Trade & Earn, the
+// marketplace, vendor browsing, listing flows, plus quick actions. Restyled onto the TSA Signature
 // design system (theme tokens + @/components/ui primitives). Behavior, the item
 // catalog, and every navigation route are unchanged — this is a visual/structural
 // restyle only.
@@ -18,7 +19,7 @@ import {
   PressableScale,
   Text,
 } from '@/components/ui';
-import { RAIL_ROUTES, railLabel } from '@/constants/rails';
+import { RAILS, RAIL_ROUTES, railLabel } from '@/constants/rails';
 
 // Each tile carries a route + the accent hue used to tint its icon chip. Tokens
 // drive the surfaces/typography; the per-item `tone` keys into the theme so the
@@ -42,14 +43,40 @@ interface QuickAction {
   route: string;
 }
 
+// The three money rails plus Trade & Earn lead the grid — Services is the menu
+// users are told to find them in, so they sit above the listing/browse tiles.
 const SERVICE_ITEMS: ServiceItem[] = [
   {
     key: 'p2p',
     title: railLabel('p2p'),
-    description: 'Buy & sell crypto directly with another user',
-    icon: 'swap',
+    description: RAILS.p2p.tagline,
+    icon: 'user',
     tone: 'warning',
     route: RAIL_ROUTES.p2pBuy,
+  },
+  {
+    key: 'pm',
+    title: railLabel('pm'),
+    description: RAILS.pm.tagline,
+    icon: 'storefront',
+    tone: 'info',
+    route: RAIL_ROUTES.pm,
+  },
+  {
+    key: 'it',
+    title: railLabel('it'),
+    description: RAILS.it.tagline,
+    icon: 'bolt',
+    tone: 'accent',
+    route: RAIL_ROUTES.it,
+  },
+  {
+    key: 'trade-earn',
+    title: 'Trade & Earn',
+    description: 'Trade Points, cashback and referral rewards',
+    icon: 'trendingUp',
+    tone: 'success',
+    route: '/trade',
   },
   {
     key: 'marketplace',
@@ -163,7 +190,9 @@ const ServicesScreen: React.FC = () => {
                   >
                     <Icon name={item.icon} size={26} color={tone.fg} />
                   </View>
-                  <Text variant="bodyMed" weight="700" numberOfLines={1}>
+                  {/* Two lines: the expanded rail names ("Individual Payment
+                      (P2P)") don't fit a half-width tile on one. */}
+                  <Text variant="bodyMed" weight="700" numberOfLines={2}>
                     {item.title}
                   </Text>
                   <Text
@@ -223,7 +252,7 @@ const ServicesScreen: React.FC = () => {
         </View>
 
         {/* P2P Highlight Banner */}
-        <PressableScale onPress={() => router.push('/p2p')} style={{ marginTop: spacing['2xl'] }}>
+        <PressableScale onPress={() => router.push(RAIL_ROUTES.p2pBuy as never)} style={{ marginTop: spacing['2xl'] }}>
           <AccentCard padding="lg">
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
               <View
@@ -240,10 +269,10 @@ const ServicesScreen: React.FC = () => {
               </View>
               <View style={{ flex: 1 }}>
                 <Text variant="bodyMed" weight="700">
-                  TSA Connect P2P Trading
+                  TSA Connect {RAILS.p2p.name}
                 </Text>
                 <Text variant="caption" color="textSecondary" style={{ marginTop: 2 }}>
-                  Browse open ads or post your own to trade USDT with verified payment proofs
+                  Browse open ads or post your own to trade crypto with verified payment proofs
                 </Text>
               </View>
               <Icon name="chevronRight" size={22} color={colors.accent} />

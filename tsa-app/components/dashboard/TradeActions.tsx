@@ -1,9 +1,8 @@
 // components/dashboard/TradeActions.tsx
 //
-// "Trade Now" shortcut cards (Buy Product / Order Services / Trade & Earn).
-// Migrated onto the TSA Signature design system — the three navigation routes
-// are preserved verbatim; only presentation moved to @/theme tokens +
-// @/components/ui primitives.
+// "Trade Now" shortcut cards (Buy Product / Order Services / Trade & Earn /
+// Trade Crypto). Trade & Earn opens the Trade Points screen; Trade Crypto opens
+// the OTC / Spot Trade / All Swap page.
 import React from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';
@@ -38,9 +37,17 @@ const TRADE_ITEMS: {
   {
     key: 'trade',
     title: 'Trade & Earn',
-    subtitle: 'Swap and earn rewards',
+    subtitle: 'Trade Points, cashback and rewards',
     icon: 'trendingUp',
     tone: 'success',
+    route: '/trade',
+  },
+  {
+    key: 'trade-crypto',
+    title: 'Trade Crypto',
+    subtitle: 'OTC, Spot Trade and All Swap',
+    icon: 'swap',
+    tone: 'accent',
     route: '/easyswap',
   },
 ];

@@ -321,6 +321,10 @@ func main() {
 	// OTC listing controls — PM buy/sell kill-switches + listing metadata for
 	// the app's Easyswap "OTC" tab (DB-only; no on-chain interaction).
 	osh := handlers.NewOTCSettingsHandler(config.DB)
+	// Fee wallet — the admin-assigned destination for system fees. The escrow
+	// service is passed so the panel can compare the assignment against the
+	// address the deployed contract actually pays.
+	fwlh := handlers.NewFeeWalletHandler(config.DB, cfg.SystemWalletAddress, p2pEscrowService)
 	// Reward programme enrolment forms — reuses the existing eligibility and
 	// referral-graph services rather than restating their rules.
 	rewardClaimService := services.NewRewardClaimService(config.DB, rewardEligibilityService, referralGraphService)
@@ -858,7 +862,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh)
 
 	// Configure HTTP server
 	port := cfg.Port

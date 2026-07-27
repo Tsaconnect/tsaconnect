@@ -131,6 +131,9 @@ func AutoMigrate() error {
 		// OTC listing controls — singleton row of per-direction kill-switches
 		// (buy/sell) + listing metadata for the app's Easyswap "OTC" tab.
 		&models.OTCSettings{},
+		// Fee wallet — singleton record of the admin-assigned destination for
+		// system fees, seeded from SYSTEM_WALLET_ADDRESS on first read.
+		&models.FeeWalletSetting{},
 		// Non-EVM chains — per-wallet derived addresses (keyed wallet_id+chain_key)
 		// and cached normalized tx history.
 		&models.WalletAddress{},
