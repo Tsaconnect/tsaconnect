@@ -36,6 +36,7 @@ import {
 } from '@/services/itApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
+import { buyFeeBreakdown } from '@/utils/buyQuote';
 import { RAILS } from '@/constants/rails';
 
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
@@ -149,6 +150,10 @@ export default function ITBuy() {
   const payUsd = ngnToUsd(Number(naira) || 0, ngnRate);
   const showPaySecondary = payUsd != null && shouldShowNgnSecondary(currency.code);
 
+  // The same quote restated in MCGP — what you pay for, what covers fees, what
+  // lands. Absent (hasFees false) on an API that predates fee deduction.
+  const fees = useMemo(() => (quote ? buyFeeBreakdown(quote) : null), [quote]);
+
   if (screen === 'submitting') {
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
@@ -233,13 +238,31 @@ export default function ITBuy() {
               </Text>
             )}
             <SummaryCard>
-              <SummaryRow label="You get" value={`${estMcgp} MCGP`} hint="After fees" />
+              {fees?.hasFees ? (
+                <>
+                  <SummaryRow label="You pay for" value={`${fees.grossMcgp} MCGP`} />
+                  <SummaryRow
+                    label="Fees"
+                    value={`−${fees.feeMcgp} MCGP`}
+                    hint={`≈ ₦${fees.feeNgn}`}
+                  />
+                  <Divider spacing="xs" />
+                  <SummaryRow label="You receive" value={`${fees.netMcgp} MCGP`} />
+                </>
+              ) : (
+                <SummaryRow label="You get" value={`${estMcgp} MCGP`} hint="After fees" />
+              )}
               <Divider spacing="xs" />
               <SummaryRow
                 label="Status"
                 value={intent?.status === 'pending_payment' ? 'Awaiting transfer' : (intent?.status || 'Awaiting transfer')}
               />
             </SummaryCard>
+            {fees?.hasFees ? (
+              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
+                Fees are taken in MCGP — that portion is never issued to your wallet.
+              </Text>
+            ) : null}
 
             {payTo ? (
               <>
