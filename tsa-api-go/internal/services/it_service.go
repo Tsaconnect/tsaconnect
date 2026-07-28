@@ -261,7 +261,7 @@ func (s *ITService) CreateBuyIntent(ctx context.Context, userID uuid.UUID, walle
 	}
 	// Fees come off the naira before it buys anything, so the intent quotes the
 	// asset the user will actually receive.
-	mcgp, fees, err := s.creditableMcgp(ctx, ngn, buyRate)
+	mcgp, fees, err := s.creditableMcgp(ctx, ngn, buyRate, itDepositCurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +422,7 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 		// Repricing at a stale rate is the exact thing the park exists to prevent.
 		return nil, ErrITFxUnavailable
 	}
-	mcgp, fees, err := s.creditableMcgp(ctx, paid, buyRate)
+	mcgp, fees, err := s.creditableMcgp(ctx, paid, buyRate, itDepositCurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +498,9 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	// Fees come out of the payout, so price them BEFORE the on-chain debit —
 	// the floor and the viability check both apply to what the user actually
 	// receives, not to the gross valuation of their MCGP.
-	fees, err := s.quoteITFees(ctx, FeeFlowWithdraw, ngn)
+	// The platform tier follows the payout destination: a foreign rail owes the
+	// FX tier even though the valuation is in naira. Blank ⇒ the legacy NGN bank.
+	fees, err := s.quoteITFees(ctx, FeeFlowWithdraw, ngn, bank.DestinationCurrency)
 	if err != nil {
 		return nil, err
 	}

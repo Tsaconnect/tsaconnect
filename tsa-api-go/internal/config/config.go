@@ -163,10 +163,21 @@ type NonEVMChainConfig struct {
 // the calculator never touches float64 for money.
 type FeeQuoteConfig struct {
 	// PlatformStableUSD is the flat platform fee on stablecoin (USDC/USDT)
-	// flows, in whole USD. MCGP flows always carry a $0 platform fee.
+	// flows, in whole USD.
 	// PM-UNRESOLVED: the spec gives both $1 and $2 — default $2 until the PM
 	// settles it (FEE_PLATFORM_STABLE_USD).
 	PlatformStableUSD int64
+	// PlatformNgnBps / PlatformFxBps are the platform's own cut on the MCGP
+	// fiat ramps, tiered by PAYMENT CURRENCY (PM spec, 28/07): 0.5% on NGN,
+	// 2% on every other currency. This is the only line the platform keeps —
+	// the provider fee is passthrough and the tax is remitted — so it is what
+	// funds cashback, TradePoints and the ecosystem generally.
+	//
+	// It applies to BOTH legs ("same fees apply"): withheld as un-issued MCGP
+	// on the contract for deposits, and left in the payout balance as fiat for
+	// withdrawals. FEE_PLATFORM_NGN_BPS / FEE_PLATFORM_FX_BPS.
+	PlatformNgnBps int64
+	PlatformFxBps  int64
 	// ProviderFallbackBps prices the provider (Flutterwave) fee when a live
 	// GetFees quote is unavailable (client dormant or the call fails).
 	ProviderFallbackBps int64
@@ -660,6 +671,8 @@ func Load() *Config {
 	//                             prose. Default "fee" (receipt evidence).
 	cfg.FeeQuote = FeeQuoteConfig{
 		PlatformStableUSD:    getEnvInt64("FEE_PLATFORM_STABLE_USD", 2),
+		PlatformNgnBps:       getEnvInt64("FEE_PLATFORM_NGN_BPS", 50),
+		PlatformFxBps:        getEnvInt64("FEE_PLATFORM_FX_BPS", 200),
 		ProviderFallbackBps:  getEnvInt64("FEE_PROVIDER_FALLBACK_BPS", 200),
 		TaxBasis:             strings.ToLower(strings.TrimSpace(getEnv("FEE_TAX_BASIS", "fee"))),
 		VATBps:               getEnvInt64("FEE_VAT_BPS", 750),
