@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -25,6 +26,13 @@ import (
 // KEPT portion only (swap + platform fee). The provider's fee is money that
 // leaves for Flutterwave and the tax line is remitted — paying cashback on
 // either would distribute revenue the platform never received.
+
+// itDepositCurrency is the fiat rail IT collects buys on. Only NGN virtual
+// accounts exist today, so the two pre-payment quote paths (intent creation and
+// the operator reprice) can name it directly. The settlement path passes the
+// VA's own Currency instead — when multi-currency VAs land, the money path is
+// already correct and only these two quotes need resolving from the user's VA.
+const itDepositCurrency = "NGN"
 
 // ErrITFeeQuoteUnavailable is returned when fees can't be priced for a
 // transfer. It fails the transfer rather than silently falling back to a
@@ -65,18 +73,27 @@ type ITFeeBreakdown struct {
 
 // quoteITFees prices one IT leg. flow is FeeFlowWithdraw for a sell (naira
 // leaving to the user) and FeeFlowDeposit for a buy (naira arriving).
-func (s *ITService) quoteITFees(ctx context.Context, flow FeeFlow, grossKobo *big.Int) (*ITFeeBreakdown, error) {
+//
+// Every IT leg is DENOMINATED in naira — the rate engine prices MCGP in NGN
+// and the gateway converts at settlement — but payCurrency is what the user
+// actually pays in or is paid out in, and that is what selects the platform
+// tier (0.5% local, 2% foreign). Empty means the legacy NGN rail.
+func (s *ITService) quoteITFees(ctx context.Context, flow FeeFlow, grossKobo *big.Int, payCurrency string) (*ITFeeBreakdown, error) {
 	if grossKobo == nil || grossKobo.Sign() <= 0 {
 		return nil, fmt.Errorf("it fees: gross must be positive")
 	}
 	if s.feeQuoter == nil {
 		return nil, ErrITFeeQuoteUnavailable
 	}
+	if strings.TrimSpace(payCurrency) == "" {
+		payCurrency = "NGN"
+	}
 	q, err := s.feeQuoter.Quote(ctx, FeeQuoteInput{
-		Flow:     flow,
-		Asset:    FeeAssetMCGP,
-		Amount:   koboToNairaDecimal(grossKobo),
-		Currency: "NGN",
+		Flow:            flow,
+		Asset:           FeeAssetMCGP,
+		Amount:          koboToNairaDecimal(grossKobo),
+		Currency:        "NGN",
+		PaymentCurrency: payCurrency,
 	})
 	if err != nil || q == nil {
 		return nil, ErrITFeeQuoteUnavailable
@@ -111,8 +128,8 @@ func (s *ITService) quoteITFees(ctx context.Context, flow FeeFlow, grossKobo *bi
 // Every path that turns naira into credited MCGP goes through here (intent
 // quote, VA settlement, operator reprice, indicative quote) so none of them can
 // drift into crediting the gross.
-func (s *ITService) creditableMcgp(ctx context.Context, paidKobo, buyRateKobo *big.Int) (*big.Int, *ITFeeBreakdown, error) {
-	fees, err := s.quoteITFees(ctx, FeeFlowDeposit, paidKobo)
+func (s *ITService) creditableMcgp(ctx context.Context, paidKobo, buyRateKobo *big.Int, payCurrency string) (*big.Int, *ITFeeBreakdown, error) {
+	fees, err := s.quoteITFees(ctx, FeeFlowDeposit, paidKobo, payCurrency)
 	if err != nil {
 		return nil, nil, err
 	}

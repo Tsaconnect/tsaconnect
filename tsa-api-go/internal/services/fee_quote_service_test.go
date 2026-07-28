@@ -15,6 +15,8 @@ import (
 func feeTestConfig() config.FeeQuoteConfig {
 	return config.FeeQuoteConfig{
 		PlatformStableUSD:    2,
+		PlatformNgnBps:       50,
+		PlatformFxBps:        200,
 		ProviderFallbackBps:  200,
 		TaxBasis:             "fee",
 		VATBps:               750,
@@ -60,13 +62,15 @@ func TestFeeQuote_PMReceipt(t *testing.T) {
 		t.Fatalf("VAT display = %q, want 0.75", q.Tax.VAT.Display)
 	}
 	assertMinor(t, "platformTax", q.Tax.PlatformTax, "5")
-	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "0") // MCGP ⇒ $0
+	// The receipt predates the 28/07 platform fee; the ₦2.50 (0.5% NGN tier)
+	// is charged on top of it now, and is never denominated in USD.
+	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "250")
 	if q.PlatformFee.USDCents != 0 {
-		t.Fatalf("platform USD cents = %d, want 0", q.PlatformFee.USDCents)
+		t.Fatalf("platform USD cents = %d, want 0 — MCGP is rate-based, not flat USD", q.PlatformFee.USDCents)
 	}
 	assertMinor(t, "swapFee", q.SwapFee.Fee, "0") // MCGP deposit ⇒ no swap leg
-	assertMinor(t, "totalFees", q.TotalFees, "1080")
-	assertMinor(t, "netAmount", q.NetAmount, "48920")
+	assertMinor(t, "totalFees", q.TotalFees, "1330")
+	assertMinor(t, "netAmount", q.NetAmount, "48670")
 	if !q.Viable {
 		t.Fatal("expected viable")
 	}
@@ -99,17 +103,17 @@ func TestFeeQuote_FlowsAndTaxBases(t *testing.T) {
 			name:     "deposit fiat→MCGP NGN basis=fee",
 			basis:    "fee",
 			in:       FeeQuoteInput{Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: "NGN"},
-			platform: "0", provider: "1000", vat: "75", ptax: "5",
+			platform: "250", provider: "1000", vat: "75", ptax: "5", // platform = 0.5% NGN tier
 			swapBps: 0, swap: "0", legs: "",
-			total: "1080", net: "48920", viable: true,
+			total: "1330", net: "48670", viable: true,
 		},
 		{
 			name:     "deposit fiat→MCGP NGN basis=amount",
 			basis:    "amount",
 			in:       FeeQuoteInput{Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: "NGN"},
-			platform: "0", provider: "1000", vat: "3750", ptax: "250",
+			platform: "250", provider: "1000", vat: "3750", ptax: "250",
 			swapBps: 0, swap: "0", legs: "",
-			total: "5000", net: "45000", viable: true,
+			total: "5250", net: "44750", viable: true,
 		},
 		{
 			name:     "deposit fiat→USDT NGN basis=fee",
@@ -132,17 +136,17 @@ func TestFeeQuote_FlowsAndTaxBases(t *testing.T) {
 			name:     "withdraw MCGP→fiat USD basis=fee",
 			basis:    "fee",
 			in:       FeeQuoteInput{Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP, Amount: "100", Currency: "USD"},
-			platform: "0", provider: "200", vat: "15", ptax: "1",
+			platform: "200", provider: "200", vat: "15", ptax: "1", // platform = 2% non-NGN tier
 			swapBps: 500, swap: "500", legs: "mcgpSwap+lifiRoute",
-			total: "716", net: "9284", viable: true,
+			total: "916", net: "9084", viable: true,
 		},
 		{
 			name:     "withdraw MCGP→fiat NGN basis=amount",
 			basis:    "amount",
 			in:       FeeQuoteInput{Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP, Amount: "500", Currency: "NGN"},
-			platform: "0", provider: "1000", vat: "3750", ptax: "250",
+			platform: "250", provider: "1000", vat: "3750", ptax: "250",
 			swapBps: 500, swap: "2500", legs: "mcgpSwap+lifiRoute",
-			total: "7500", net: "42500", viable: true,
+			total: "7750", net: "42250", viable: true,
 		},
 		{
 			name:     "withdraw USDT on polygon → LiFi leg only (3%)",
@@ -260,7 +264,9 @@ func TestFeeQuote_InputValidation(t *testing.T) {
 	}{
 		{"bad flow", func(in *FeeQuoteInput) { in.Flow = "transfer" }, ErrFeeQuoteBadFlow},
 		{"bad asset", func(in *FeeQuoteInput) { in.Asset = "BTC" }, ErrFeeQuoteBadAsset},
-		{"bad currency", func(in *FeeQuoteInput) { in.Currency = "GBP" }, ErrFeeQuoteBadCurrency},
+		// GBP and the rest of the gateway's currencies are quotable since the
+		// multi-currency tiering landed; only a code off the catalogue fails.
+		{"bad currency", func(in *FeeQuoteInput) { in.Currency = "ZZZ" }, ErrFeeQuoteBadCurrency},
 		{"zero amount", func(in *FeeQuoteInput) { in.Amount = "0" }, ErrFeeQuoteBadAmount},
 		{"negative amount", func(in *FeeQuoteInput) { in.Amount = "-5" }, ErrFeeQuoteBadAmount},
 		{"3dp amount", func(in *FeeQuoteInput) { in.Amount = "1.234" }, ErrFeeQuoteBadAmount},
@@ -382,5 +388,145 @@ func assertMinor(t *testing.T, label string, line FeeLine, want string) {
 	t.Helper()
 	if line.Minor == nil || line.Minor.String() != want {
 		t.Fatalf("%s minor = %v, want %s", label, line.Minor, want)
+	}
+}
+
+// ─────────────── platform fee: currency-tiered (PM spec, 28/07) ──────────────
+// The PM reversed the "no company charge on deposits" call: every fiat ramp now
+// carries a platform fee, tiered by the FIAT currency — 0.5% on NGN, 2% on
+// every other currency (USD/EUR/GBP/AED/…). It is the only line the platform
+// actually keeps; provider is passthrough and tax is remitted.
+
+func TestFeeQuote_NgnMcgpDepositChargesHalfPercentPlatformFee(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: "NGN",
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	// 0.5% of ₦500 = ₦2.50.
+	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "250")
+	if q.PlatformFee.Bps != 50 {
+		t.Fatalf("platformFee.bps = %d, want 50", q.PlatformFee.Bps)
+	}
+	// provider ₦10 + tax ₦0.80 + platform ₦2.50, no swap leg on an MCGP deposit.
+	assertMinor(t, "totalFees", q.TotalFees, "1330")
+	assertMinor(t, "netAmount", q.NetAmount, "48670")
+}
+
+func TestFeeQuote_NonNgnMcgpDepositChargesTwoPercentPlatformFee(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	for _, currency := range []string{"USD", "GBP", "EUR", "AED"} {
+		q, err := s.Quote(context.Background(), FeeQuoteInput{
+			Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: currency,
+		})
+		if err != nil {
+			t.Fatalf("%s quote: %v", currency, err)
+		}
+		// 2% of 500.00 = 10.00 in the quote currency.
+		assertMinor(t, currency+" platformFee", q.PlatformFee.InCurrency, "1000")
+		if q.PlatformFee.Bps != 200 {
+			t.Fatalf("%s platformFee.bps = %d, want 200", currency, q.PlatformFee.Bps)
+		}
+	}
+}
+
+// "Same fees apply" — the withdrawal leg carries the platform fee too, on top
+// of the existing swap legs.
+func TestFeeQuote_McgpWithdrawalCarriesThePlatformFee(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	// The PM's own sell: 6 MCGP valued at ₦165.66.
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP, Amount: "165.66", Currency: "NGN",
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "82") // 0.5%
+	assertMinor(t, "providerFee", q.ProviderFee.Fee, "331")       // 2%
+	assertMinor(t, "tax", q.Tax.Total, "25")                      // 8% of provider
+	assertMinor(t, "swapFee", q.SwapFee.Fee, "828")               // 5%
+	assertMinor(t, "totalFees", q.TotalFees, "1266")
+	assertMinor(t, "netAmount", q.NetAmount, "15300") // ₦153.00 reaches the bank
+}
+
+// Multi-currency rails (PM batch 9): the engine must price every payment
+// currency the gateway supports, not just NGN and USD.
+func TestFeeQuote_AcceptsEveryPaymentCurrency(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	for _, currency := range []string{"NGN", "USD", "GBP", "EUR", "AED", "GHS", "KES", "ZAR", "UGX", "TZS", "XOF", "XAF", "RWF", "MWK", "ZMW"} {
+		if _, err := s.Quote(context.Background(), FeeQuoteInput{
+			Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: currency,
+		}); err != nil {
+			t.Fatalf("%s must be quotable: %v", currency, err)
+		}
+	}
+	if _, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowDeposit, Asset: FeeAssetMCGP, Amount: "500", Currency: "ZZZ",
+	}); !errors.Is(err, ErrFeeQuoteBadCurrency) {
+		t.Fatalf("unknown currency err = %v, want ErrFeeQuoteBadCurrency", err)
+	}
+}
+
+// The stablecoin flat-USD platform fee is a separate, untouched lever — the
+// currency tier applies to the MCGP (Instant Transfer) ramps only until the PM
+// rules on the stable rails.
+func TestFeeQuote_StablecoinKeepsTheFlatUsdPlatformFee(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowDeposit, Asset: FeeAssetUSDC, Amount: "500", Currency: "USD",
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "200") // $2.00 flat
+	if q.PlatformFee.Bps != 0 {
+		t.Fatalf("platformFee.bps = %d, want 0 (flat fee, not a percentage)", q.PlatformFee.Bps)
+	}
+}
+
+// A cross-currency payout is VALUED in naira (the IT sell rate prices MCGP in
+// NGN and Flutterwave converts at settlement) but the user is PAID in the
+// destination currency. The platform tier follows what the user pays/receives,
+// not what the amount happens to be denominated in — otherwise every foreign
+// rail would quietly bill at the cheap local rate.
+func TestFeeQuote_PaymentCurrencySelectsTheTier(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP,
+		Amount: "500", Currency: "NGN", PaymentCurrency: "GHS",
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if q.PlatformFee.Bps != 200 {
+		t.Fatalf("platformFee.bps = %d, want 200 (FX tier — the user is paid in GHS)", q.PlatformFee.Bps)
+	}
+	assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "1000") // 2% of ₦500
+}
+
+func TestFeeQuote_PaymentCurrencyDefaultsToTheQuoteCurrency(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP, Amount: "500", Currency: "NGN",
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if q.PlatformFee.Bps != 50 {
+		t.Fatalf("platformFee.bps = %d, want 50 — an unset payment currency means the quote currency", q.PlatformFee.Bps)
+	}
+}
+
+// An unknown payment currency must not silently fall through to the cheap NGN
+// tier; it is a bad request like any other unsupported currency.
+func TestFeeQuote_RejectsUnknownPaymentCurrency(t *testing.T) {
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	if _, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetMCGP,
+		Amount: "500", Currency: "NGN", PaymentCurrency: "ZZZ",
+	}); !errors.Is(err, ErrFeeQuoteBadCurrency) {
+		t.Fatalf("err = %v, want ErrFeeQuoteBadCurrency", err)
 	}
 }

@@ -16,20 +16,21 @@ import (
 // Fee-quote engine (PM fee spec, batch 11) — the "user sees total fees before
 // confirming" layer for the four fiat ramps:
 //
-//	deposit  fiat → MCGP          platform $0            no swap fee
+//	deposit  fiat → MCGP          platform 0.5%/2%       no swap fee
 //	deposit  fiat → USDC/USDT     platform $X (config)   conversion bps
-//	withdraw MCGP → fiat          platform $0            mcgpSwap + lifiRoute bps
+//	withdraw MCGP → fiat          platform 0.5%/2%       mcgpSwap + lifiRoute bps
 //	withdraw USDC/USDT → fiat     platform $X (config)   lifiRoute bps (already on
 //	                                                     Polygon) else both legs
 //
-// On top of every flow: the provider (Flutterwave) fee — passthrough, quoted
-// live via GetFees when the client is up, else a config fallback percentage —
-// and the tax line (VAT + platform tax) whose BASE is config: "fee" (the
-// provider fee, matching the PM's receipt) or "amount" (their prose).
+// The MCGP platform fee is tiered by PAYMENT CURRENCY — 0.5% on NGN, 2% on
+// every other currency (PM spec, 28/07) — and is the only line the platform
+// retains. On top of every flow: the provider (Flutterwave) fee — passthrough,
+// quoted live via GetFees when the client is up, else a config fallback
+// percentage — and the tax line (VAT + platform tax) whose BASE is config:
+// "fee" (the provider fee, matching the PM's receipt) or "amount".
 //
-// QUOTE-ONLY: nothing here moves money. Fee deduction is wired into the actual
-// deposit/withdraw paths only after PM sign-off on the two unresolved config
-// values (see config.FeeQuoteConfig).
+// This engine only PRICES. The Instant Transfer legs deduct from it (see
+// it_fees.go) so the quote the user is shown is the one the money follows.
 //
 // All money math is big.Int over minor units (kobo/cents) — float64 never
 // touches an amount. Percentages are basis points over bpsDenom (it_service.go).
@@ -84,14 +85,21 @@ type ProviderFeeQuoter interface {
 // FxMinorPerUSD is how many minor units of Currency equal 1 USD (kobo per
 // dollar for NGN, 100 for USD) — needed only to price the flat USD platform
 // fee on stablecoin flows. Nil is fine for USD (implied 100) and for all MCGP
-// flows (platform fee is $0).
+// flows, whose platform fee is a percentage of the amount already in Currency.
 type FeeQuoteInput struct {
-	Flow          FeeFlow
-	Asset         FeeAsset
-	Chain         string
-	Amount        string
-	Currency      string
-	FxMinorPerUSD *big.Int
+	Flow     FeeFlow
+	Asset    FeeAsset
+	Chain    string
+	Amount   string
+	Currency string
+	// PaymentCurrency is the currency the user actually pays in or is paid out
+	// in, which selects the platform-fee tier. It differs from Currency only on
+	// a cross-currency rail: an IT sell to a Ghanaian bank is VALUED in naira
+	// (the sell rate prices MCGP in NGN and the gateway converts at settlement)
+	// but PAID in GHS, so it owes the 2% FX tier, not the 0.5% local one.
+	// Empty means "same as Currency".
+	PaymentCurrency string
+	FxMinorPerUSD   *big.Int
 }
 
 // FeeLine is one itemized fee: minor units plus the 2dp display string. It
@@ -136,13 +144,22 @@ type FeeProviderQuote struct {
 	FallbackBps int64 `json:"fallbackBps,omitempty"`
 }
 
-// FeePlatformQuote is the flat USD platform fee and its conversion into the
-// quote currency.
+// FeePlatformQuote is the platform's own fee — the only line the platform
+// actually keeps. It is priced one of two ways:
+//
+//	MCGP ramps      a percentage of the amount, tiered by fiat currency
+//	                (Bps set, USDCents 0)
+//	stablecoin ramps a flat USD amount converted into the quote currency
+//	                (USDCents set, Bps 0)
 type FeePlatformQuote struct {
 	USDCents int64  `json:"usdCents"`
 	USD      string `json:"usd"`
-	// InCurrency is the fee converted into the quote currency (equal to the
-	// USD value when the quote currency is USD).
+	// Bps is the percentage charged when the fee is rate-based; 0 for the flat
+	// USD stablecoin fee. Recorded so a receipt stays explainable after a
+	// config change.
+	Bps int64 `json:"bps,omitempty"`
+	// InCurrency is the fee in the quote currency — the authoritative amount
+	// however it was derived.
 	InCurrency FeeLine `json:"inCurrency"`
 }
 
@@ -212,8 +229,16 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		return nil, ErrFeeQuoteBadAsset
 	}
 	currency := strings.ToUpper(strings.TrimSpace(in.Currency))
-	if currency != "NGN" && currency != "USD" {
-		return nil, fmt.Errorf("%w: %q (NGN or USD)", ErrFeeQuoteBadCurrency, in.Currency)
+	if !isKnownCurrency(currency) {
+		return nil, fmt.Errorf("%w: %q", ErrFeeQuoteBadCurrency, in.Currency)
+	}
+	payCurrency := strings.ToUpper(strings.TrimSpace(in.PaymentCurrency))
+	if payCurrency == "" {
+		payCurrency = currency
+	} else if !isKnownCurrency(payCurrency) {
+		// Never fall through to the cheap local tier on a typo — an unpriceable
+		// rail must fail loudly, not bill at 0.5%.
+		return nil, fmt.Errorf("%w: payment currency %q", ErrFeeQuoteBadCurrency, in.PaymentCurrency)
 	}
 	chain := strings.ToLower(strings.TrimSpace(in.Chain))
 	if flow == FeeFlowWithdraw && asset.IsStable() && chain == "" {
@@ -226,23 +251,33 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		return nil, ErrFeeQuoteBadAmount
 	}
 
-	// Platform fee — flat USD on stablecoin flows, $0 on MCGP.
+	// Platform fee — the platform's own cut, priced two different ways:
+	//   MCGP ramps       a percentage tiered by payment currency (0.5% NGN,
+	//                    2% every other currency), on BOTH legs
+	//   stablecoin ramps the legacy flat USD amount, converted via fx
+	// The stablecoin rails are deliberately untouched by the 28/07 currency
+	// tiering — the PM specified the MCGP fiat ramps and has not ruled on the
+	// stable ones; charging both would silently double the PM-side fee.
 	platformCents := int64(0)
+	platformBps := int64(0)
+	platformMinor := big.NewInt(0)
 	if asset.IsStable() {
 		platformCents = s.cfg.PlatformStableUSD * 100
-	}
-	fx := in.FxMinorPerUSD
-	if fx == nil && currency == "USD" {
-		fx = big.NewInt(100) // 100 cents per USD
-	}
-	platformMinor := big.NewInt(0)
-	if platformCents > 0 {
-		if fx == nil || fx.Sign() <= 0 {
-			return nil, ErrFeeQuoteNeedFx
+		fx := in.FxMinorPerUSD
+		if fx == nil && currency == "USD" {
+			fx = big.NewInt(100) // 100 cents per USD
 		}
-		// cents × (minor per USD) / 100.
-		platformMinor = new(big.Int).Mul(big.NewInt(platformCents), fx)
-		platformMinor.Div(platformMinor, big.NewInt(100))
+		if platformCents > 0 {
+			if fx == nil || fx.Sign() <= 0 {
+				return nil, ErrFeeQuoteNeedFx
+			}
+			// cents × (minor per USD) / 100.
+			platformMinor = new(big.Int).Mul(big.NewInt(platformCents), fx)
+			platformMinor.Div(platformMinor, big.NewInt(100))
+		}
+	} else {
+		platformBps = s.platformBps(payCurrency)
+		platformMinor = bpsShare(amount, platformBps)
 	}
 
 	// Provider fee — live passthrough when a quoter is wired and answers,
@@ -299,6 +334,7 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		PlatformFee: FeePlatformQuote{
 			USDCents:   platformCents,
 			USD:        fmt.Sprintf("%d.%02d", platformCents/100, platformCents%100),
+			Bps:        platformBps,
 			InCurrency: feeLine(platformMinor),
 		},
 		ProviderFee: provider,
@@ -308,6 +344,16 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		NetAmount:   feeLine(net),
 		Viable:      viable,
 	}, nil
+}
+
+// platformBps is the platform's cut for a payment currency: the NGN tier for
+// naira, the FX tier for everything else. Naira is cheaper because the local
+// rail costs the platform less to operate than the cross-border ones.
+func (s *FeeQuoteService) platformBps(payCurrency string) int64 {
+	if payCurrency == "NGN" {
+		return s.cfg.PlatformNgnBps
+	}
+	return s.cfg.PlatformFxBps
 }
 
 // swapLegs resolves the swap/conversion bps + its named components:
