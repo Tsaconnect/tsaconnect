@@ -25,6 +25,8 @@ func (s stubFx) NgnPerUsd(context.Context) (float64, bool, error) { return s.rat
 func feeQuoteTestService() *services.FeeQuoteService {
 	return services.NewFeeQuoteService(config.FeeQuoteConfig{
 		PlatformStableUSD:    2,
+		PlatformNgnBps:       50,
+		PlatformFxBps:        200,
 		ProviderFallbackBps:  200,
 		TaxBasis:             "fee",
 		VATBps:               750,
@@ -103,11 +105,15 @@ func TestFeeQuoteHandler_MCGPDepositReceipt(t *testing.T) {
 	if got := lineMinor(t, tax, "vat"); got != "75" {
 		t.Fatalf("VAT minor = %s, want 75", got)
 	}
-	if got := lineMinor(t, q, "totalFees"); got != "1080" {
-		t.Fatalf("totalFees minor = %s, want 1080", got)
+	platform := q["platformFee"].(map[string]any)
+	if got := lineMinor(t, platform, "inCurrency"); got != "250" {
+		t.Fatalf("platform fee minor = %s, want 250 (0.5%% NGN tier)", got)
 	}
-	if got := lineMinor(t, q, "netAmount"); got != "48920" {
-		t.Fatalf("netAmount minor = %s, want 48920", got)
+	if got := lineMinor(t, q, "totalFees"); got != "1330" {
+		t.Fatalf("totalFees minor = %s, want 1330", got)
+	}
+	if got := lineMinor(t, q, "netAmount"); got != "48670" {
+		t.Fatalf("netAmount minor = %s, want 48670", got)
 	}
 	if _, hasFx := resp["data"].(map[string]any)["fx"]; hasFx {
 		t.Fatal("fx meta must be omitted when no conversion happened")
@@ -177,7 +183,7 @@ func TestFeeQuoteHandler_BadInput400(t *testing.T) {
 		"bad asset":                 "flow=deposit&asset=DOGE&amount=500",
 		"missing amount":            "flow=deposit&asset=MCGP",
 		"zero amount":               "flow=deposit&asset=MCGP&amount=0",
-		"bad currency":              "flow=deposit&asset=MCGP&amount=500&currency=GBP",
+		"bad currency":              "flow=deposit&asset=MCGP&amount=500&currency=ZZZ",
 		"stable withdraw w/o chain": "flow=withdraw&asset=USDT&amount=100&currency=USD",
 	} {
 		w, resp := serveFeeQuote(t, h, query)

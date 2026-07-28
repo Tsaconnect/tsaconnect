@@ -11,12 +11,16 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// liveFeeQuoteConfig mirrors the deployed defaults: MCGP carries no platform
-// fee, the provider falls back to 2%, tax applies to the provider fee, and a
-// withdrawal pays both swap legs (2% + 3%).
+// liveFeeQuoteConfig mirrors the deployed defaults: MCGP carries the platform
+// fee tiered by payment currency (0.5% NGN / 2% other), the provider falls back
+// to 2%, tax applies to the provider fee, and a withdrawal pays both swap legs
+// (2% + 3%). Keep this in step with config.Load — a stale literal here silently
+// tests a fee regime that is not the one deployed.
 func liveFeeQuoteConfig() config.FeeQuoteConfig {
 	return config.FeeQuoteConfig{
 		PlatformStableUSD:    2,
+		PlatformNgnBps:       50,
+		PlatformFxBps:        200,
 		ProviderFallbackBps:  200,
 		TaxBasis:             "fee",
 		VATBps:               750,
@@ -39,21 +43,23 @@ func TestQuoteITFees_SellMatchesTheQuotedReceipt(t *testing.T) {
 	s.SetFeeQuoter(feeQuoterForTest())
 
 	gross := big.NewInt(13785) // ₦137.85
-	b, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, gross)
+	b, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, gross, "NGN")
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}
-	if b.Fee.String() != "985" {
-		t.Fatalf("fee = %s kobo, want 985 (₦9.85 as shown to the PM)", b.Fee)
+	// ₦0.68 platform (0.5% NGN) + ₦2.75 provider + ₦0.21 tax + ₦6.89 swap.
+	if b.Fee.String() != "1053" {
+		t.Fatalf("fee = %s kobo, want 1053", b.Fee)
 	}
-	if b.Net.String() != "12800" {
-		t.Fatalf("net = %s kobo, want 12800 (₦128.00)", b.Net)
+	if b.Net.String() != "12732" {
+		t.Fatalf("net = %s kobo, want 12732 (₦127.32)", b.Net)
 	}
-	// Cashback/TP fund from what the platform keeps — the ₦6.89 swap fee only.
-	// The ₦2.75 provider fee leaves for Flutterwave and the ₦0.21 tax is
-	// remitted; distributing on either would pay out revenue never received.
-	if b.PlatformKept.String() != "689" {
-		t.Fatalf("platformKept = %s kobo, want 689 (swap fee only)", b.PlatformKept)
+	// Cashback/TP fund from what the platform keeps — the ₦6.89 swap fee plus
+	// the ₦0.68 platform fee. The ₦2.75 provider fee leaves for Flutterwave and
+	// the ₦0.21 tax is remitted; distributing on either would pay out revenue
+	// never received.
+	if b.PlatformKept.String() != "757" {
+		t.Fatalf("platformKept = %s kobo, want 757 (swap + platform fee)", b.PlatformKept)
 	}
 	// Gross must survive untouched — it is the valuation of the MCGP leg.
 	if b.Gross.String() != "13785" {
@@ -69,19 +75,22 @@ func TestQuoteITFees_DepositHasNoSwapLeg(t *testing.T) {
 	s := newITTestService(t)
 	s.SetFeeQuoter(feeQuoterForTest())
 
-	b, err := s.quoteITFees(context.Background(), FeeFlowDeposit, big.NewInt(50000)) // ₦500
+	b, err := s.quoteITFees(context.Background(), FeeFlowDeposit, big.NewInt(50000), "NGN") // ₦500
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}
-	// provider 2% = ₦10.00; tax 8% of that = ₦0.80; no swap fee on MCGP in.
-	if b.Fee.String() != "1080" {
-		t.Fatalf("fee = %s kobo, want 1080 (provider + tax, no swap leg)", b.Fee)
+	// platform 0.5% = ₦2.50; provider 2% = ₦10.00; tax 8% of that = ₦0.80; no
+	// swap fee on MCGP in.
+	if b.Fee.String() != "1330" {
+		t.Fatalf("fee = %s kobo, want 1330 (platform + provider + tax, no swap leg)", b.Fee)
 	}
-	if b.Net.String() != "48920" {
-		t.Fatalf("net = %s kobo, want 48920", b.Net)
+	if b.Net.String() != "48670" {
+		t.Fatalf("net = %s kobo, want 48670", b.Net)
 	}
-	if b.PlatformKept.Sign() != 0 {
-		t.Fatalf("platformKept = %s, want 0 — an MCGP deposit keeps nothing beyond the pass-through", b.PlatformKept)
+	// The whole point of the 28/07 spec: a deposit now retains the platform fee.
+	// It is withheld as MCGP that is never issued, so it stays on the contract.
+	if b.PlatformKept.String() != "250" {
+		t.Fatalf("platformKept = %s kobo, want 250 (the 0.5%% NGN platform fee)", b.PlatformKept)
 	}
 }
 
@@ -89,7 +98,7 @@ func TestQuoteITFees_RefusesWhenUnpriceable(t *testing.T) {
 	s := newITTestService(t)
 	s.feeQuoter = nil // an unwired deployment
 
-	if _, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(13785)); err != ErrITFeeQuoteUnavailable {
+	if _, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(13785), "NGN"); err != ErrITFeeQuoteUnavailable {
 		t.Fatalf("err = %v, want ErrITFeeQuoteUnavailable — an unpriceable transfer must be refused, not settled gross", err)
 	}
 }
@@ -103,7 +112,7 @@ func TestQuoteITFees_RejectsAmountBelowFees(t *testing.T) {
 	cfg.LifiRouteBps = 2000
 	s.SetFeeQuoter(NewFeeQuoteService(cfg, nil))
 
-	if _, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(1000)); err != ErrITAmountBelowFees {
+	if _, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(1000), "NGN"); err != ErrITAmountBelowFees {
 		t.Fatalf("err = %v, want ErrITAmountBelowFees", err)
 	}
 }
@@ -114,7 +123,7 @@ func TestCreditableMcgp_PricesTheNetNotTheGross(t *testing.T) {
 
 	paid := big.NewInt(50000) // ₦500 landed
 	rate := big.NewInt(2757)  // ₦27.57 per MCGP
-	mcgp, fees, err := s.creditableMcgp(context.Background(), paid, rate)
+	mcgp, fees, err := s.creditableMcgp(context.Background(), paid, rate, "NGN")
 	if err != nil {
 		t.Fatalf("creditableMcgp: %v", err)
 	}
@@ -181,4 +190,43 @@ func TestSettleITFee_SkipsWhenNothingWasKept(t *testing.T) {
 	// No distributor and no kept amount — must be a silent no-op, not a panic.
 	s.settleITFee(context.Background(), &models.ITIntent{ID: uuid.New()})
 	s.settleITFee(context.Background(), &models.ITIntent{ID: uuid.New(), PlatformKeptKobo: "0"})
+}
+
+// A sell paid out to a foreign rail owes the FX tier, not the local one. The
+// gross is still naira (the sell rate prices MCGP in NGN); only the tier moves.
+func TestQuoteITFees_ForeignPayoutPaysTheFxTier(t *testing.T) {
+	s := newITTestService(t)
+	s.SetFeeQuoter(feeQuoterForTest())
+
+	local, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(50000), "NGN")
+	if err != nil {
+		t.Fatalf("ngn quote: %v", err)
+	}
+	foreign, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(50000), "GHS")
+	if err != nil {
+		t.Fatalf("ghs quote: %v", err)
+	}
+	// 0.5% = ₦2.50 kept locally, 2% = ₦10.00 kept on the foreign rail; the
+	// swap leg (₦25.00) is identical either way, so the whole difference is
+	// the platform tier.
+	if local.PlatformKept.String() != "2750" {
+		t.Fatalf("local platformKept = %s kobo, want 2750 (swap 2500 + 0.5%% 250)", local.PlatformKept)
+	}
+	if foreign.PlatformKept.String() != "3500" {
+		t.Fatalf("foreign platformKept = %s kobo, want 3500 (swap 2500 + 2%% 1000)", foreign.PlatformKept)
+	}
+}
+
+// An empty destination currency is the legacy NGN bank rail, not an error.
+func TestQuoteITFees_EmptyPayoutCurrencyMeansNaira(t *testing.T) {
+	s := newITTestService(t)
+	s.SetFeeQuoter(feeQuoterForTest())
+
+	blank, err := s.quoteITFees(context.Background(), FeeFlowWithdraw, big.NewInt(50000), "")
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if blank.PlatformKept.String() != "2750" {
+		t.Fatalf("platformKept = %s kobo, want 2750 — blank must mean NGN", blank.PlatformKept)
+	}
 }

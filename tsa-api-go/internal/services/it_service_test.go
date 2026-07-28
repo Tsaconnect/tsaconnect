@@ -163,15 +163,19 @@ func TestCreateBuyIntent_LocksRateAndComputesMcgp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create buy: %v", err)
 	}
-	// ₦50 in, minus deposit fees: provider 2% = 100 kobo, then tax on that fee —
-	// VAT 7.5% floors to 7 kobo and the 0.5% platform tax floors to 0, so 107
-	// kobo total (each component floors independently, never the sum). ₦48.93
-	// buys MCGP at 3000 kobo/MCGP. The withheld ₦1.07 buys nothing — that MCGP
-	// is never minted and stays with the contract float.
-	if intent.NetNgnKobo != "4893" || intent.FeeNgnKobo != "107" {
-		t.Fatalf("fee/net recorded as %s/%s, want 107/4893", intent.FeeNgnKobo, intent.NetNgnKobo)
+	// ₦50 in, minus deposit fees: platform 0.5% = 25 kobo, provider 2% = 100
+	// kobo, then tax on the provider fee — VAT 7.5% floors to 7 kobo and the
+	// 0.5% platform tax floors to 0, so 132 kobo total (each component floors
+	// independently, never the sum). ₦48.68 buys MCGP at 3000 kobo/MCGP. The
+	// withheld ₦1.32 buys nothing — that MCGP is never minted and stays with
+	// the contract float, which is where the platform's 25 kobo is retained.
+	if intent.NetNgnKobo != "4868" || intent.FeeNgnKobo != "132" {
+		t.Fatalf("fee/net recorded as %s/%s, want 132/4868", intent.FeeNgnKobo, intent.NetNgnKobo)
 	}
-	want := new(big.Int).Div(new(big.Int).Mul(big.NewInt(4893), oneE18), big.NewInt(3000)).String()
+	if intent.PlatformKeptKobo != "25" {
+		t.Fatalf("platformKept = %s, want 25 (the 0.5%% NGN platform fee)", intent.PlatformKeptKobo)
+	}
+	want := new(big.Int).Div(new(big.Int).Mul(big.NewInt(4868), oneE18), big.NewInt(3000)).String()
 	if intent.McgpAmount != want {
 		t.Fatalf("mcgp = %s want %s (net-priced, not gross)", intent.McgpAmount, want)
 	}

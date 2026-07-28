@@ -308,7 +308,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	}
 
 	// Fees come off the naira that landed; only the net buys MCGP.
-	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate)
+	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate, va.Currency)
 	if err != nil {
 		return fmt.Errorf("it va credit: %w", err)
 	}

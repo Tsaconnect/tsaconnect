@@ -190,7 +190,7 @@ func (h *Handlers) publishAccountDeletionEvents(req models.AccountDeletionReques
 		UserID: user.ID,
 		Title:  "Your account has been deleted",
 		Message: fmt.Sprintf(
-			"Your TSA Connect account is now closed and you have been signed out. We keep a limited record for %d days — contact support@tsaconnect.com before %s if you want it restored. Your crypto wallet is non-custodial: your recovery phrase still controls your funds.",
+			"Your TSA Connect account is now closed and you have been signed out. We keep a limited record for %d days — contact support@tsaconnectworld.com before %s if you want it restored. Your crypto wallet is non-custodial: your recovery phrase still controls your funds.",
 			models.AccountDeletionGraceDays, purgeAfter.Format("2 January 2006"),
 		),
 		Data: data,
@@ -379,7 +379,7 @@ func (h *Handlers) RestoreAccountDeletionRequest(c *gin.Context) {
 			Type:    events.AccountDeletionRestored,
 			UserID:  req.UserID,
 			Title:   "Your account has been restored",
-			Message: "Your TSA Connect account has been reinstated by our support team and you can sign in again. If you did not ask for this, contact support@tsaconnect.com immediately.",
+			Message: "Your TSA Connect account has been reinstated by our support team and you can sign in again. If you did not ask for this, contact support@tsaconnectworld.com immediately.",
 			Data: map[string]interface{}{
 				"requestId": req.ID.String(),
 				"userId":    req.UserID.String(),
