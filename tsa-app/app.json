@@ -32,7 +32,7 @@
         "backgroundColor": "#000000"
       },
       "softwareKeyboardLayoutMode": "pan",
-      "package": "com.mcgp.TsaApp",
+      "package": "com.tsaconnectworld.mobile",
       "permissions": [
         "CAMERA",
         "INTERNET",
