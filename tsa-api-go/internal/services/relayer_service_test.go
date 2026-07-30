@@ -33,14 +33,17 @@ func (f *fakeRelaySigner) SignAndBroadcast(_ context.Context, _ []byte) (string,
 
 type fakeRelayChain struct {
 	callErr    error
+	callReturn []byte
 	balance    *big.Int
 	balanceErr error
 	callCount  int
 }
 
+func (f *fakeRelayChain) ChainID() *big.Int { return big.NewInt(146) }
+
 func (f *fakeRelayChain) CallContract(_ context.Context, _ ethereum.CallMsg, _ *big.Int) ([]byte, error) {
 	f.callCount++
-	return nil, f.callErr
+	return f.callReturn, f.callErr
 }
 func (f *fakeRelayChain) BalanceAt(_ context.Context, _ common.Address, _ *big.Int) (*big.Int, error) {
 	if f.balanceErr != nil {

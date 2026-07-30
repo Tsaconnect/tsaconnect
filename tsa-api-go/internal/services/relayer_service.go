@@ -89,6 +89,32 @@ type RelayerLimits struct {
 type relayChain interface {
 	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	ChainID() *big.Int
+}
+
+// EIP712Domain is the domain the app must sign under. It is READ FROM THE
+// FORWARDER rather than assembled from config: an independently-packed domain
+// that disagrees with the contract fails as an opaque InvalidSigner, which is
+// the same class of bug as the P2P chainId invariant in tsa-dev/CLAUDE.md.
+type EIP712Domain struct {
+	Name              string `json:"name"`
+	Version           string `json:"version"`
+	ChainID           string `json:"chainId"`
+	VerifyingContract string `json:"verifyingContract"`
+}
+
+// ForwardRequestScaffold is everything the app needs to build and sign a
+// request. The app still reconstructs `Data` locally and compares before
+// signing — see the app's relay path — so this is a convenience, not a source
+// of truth for what is being authorised.
+type ForwardRequestScaffold struct {
+	Domain   EIP712Domain `json:"domain"`
+	To       string       `json:"to"`
+	Data     string       `json:"data"`
+	Gas      uint64       `json:"gas"`
+	Nonce    string       `json:"nonce"`
+	Deadline uint64       `json:"deadline"`
+	Value    string       `json:"value"`
 }
 
 // relayTxBuilder builds the unsigned tx the signer will broadcast.
@@ -117,7 +143,11 @@ type NoopRelayMetrics struct{}
 func (NoopRelayMetrics) RelayAttempt(string, string) {}
 func (NoopRelayMetrics) RelayGasSpent(*big.Int)      {}
 
-const forwarderExecuteABI = `[{"inputs":[{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"gas","type":"uint256"},{"name":"deadline","type":"uint48"},{"name":"data","type":"bytes"},{"name":"signature","type":"bytes"}],"name":"request","type":"tuple"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]`
+const forwarderExecuteABI = `[
+{"inputs":[{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"gas","type":"uint256"},{"name":"deadline","type":"uint48"},{"name":"data","type":"bytes"},{"name":"signature","type":"bytes"}],"name":"request","type":"tuple"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"},
+{"inputs":[{"name":"owner","type":"address"}],"name":"nonces","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+{"inputs":[],"name":"eip712Domain","outputs":[{"name":"fields","type":"bytes1"},{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"},{"name":"salt","type":"bytes32"},{"name":"extensions","type":"uint256[]"}],"stateMutability":"view","type":"function"}
+]`
 
 type RelayerService struct {
 	signer    ReleaseSigner
@@ -135,6 +165,7 @@ type RelayerService struct {
 	spentDay string                 // UTC date of spentGas
 	spentGas *big.Int
 	killed   bool
+	domain   EIP712Domain // cached after the first read from the forwarder
 }
 
 func NewRelayerService(
@@ -474,6 +505,105 @@ func (r *RelayerService) SpentToday() *big.Int {
 	defer r.mu.Unlock()
 	r.rollDayLocked()
 	return new(big.Int).Set(r.spentGas)
+}
+
+// Nonce reads the forwarder's per-`from` nonce. Requests are only valid at the
+// current nonce, so a stale one fails signature validation.
+func (r *RelayerService) Nonce(ctx context.Context, from string) (*big.Int, error) {
+	if !r.IsEnabled() {
+		return nil, ErrRelayerDisabled
+	}
+	data, err := r.fwdABI.Pack("nonces", common.HexToAddress(from))
+	if err != nil {
+		return nil, fmt.Errorf("relayer: pack nonces: %w", err)
+	}
+	to := common.HexToAddress(r.forwarder)
+	out, err := r.chain.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("relayer: read nonce: %w", err)
+	}
+	vals, err := r.fwdABI.Unpack("nonces", out)
+	if err != nil || len(vals) == 0 {
+		return nil, fmt.Errorf("relayer: decode nonce: %w", err)
+	}
+	n, ok := vals[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("relayer: unexpected nonce type")
+	}
+	return n, nil
+}
+
+// Domain reads the forwarder's own EIP-712 domain. Read, never assembled: a
+// domain the backend guesses at is a signature that silently fails to verify.
+func (r *RelayerService) Domain(ctx context.Context) (EIP712Domain, error) {
+	if !r.IsEnabled() {
+		return EIP712Domain{}, ErrRelayerDisabled
+	}
+	r.mu.Lock()
+	cached := r.domain
+	r.mu.Unlock()
+	if cached.Name != "" {
+		return cached, nil
+	}
+
+	data, err := r.fwdABI.Pack("eip712Domain")
+	if err != nil {
+		return EIP712Domain{}, fmt.Errorf("relayer: pack eip712Domain: %w", err)
+	}
+	to := common.HexToAddress(r.forwarder)
+	out, err := r.chain.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
+	if err != nil {
+		return EIP712Domain{}, fmt.Errorf("relayer: read eip712Domain: %w", err)
+	}
+	vals, err := r.fwdABI.Unpack("eip712Domain", out)
+	if err != nil || len(vals) < 5 {
+		return EIP712Domain{}, fmt.Errorf("relayer: decode eip712Domain: %w", err)
+	}
+	name, _ := vals[1].(string)
+	version, _ := vals[2].(string)
+	chainID, _ := vals[3].(*big.Int)
+	verifying, _ := vals[4].(common.Address)
+	if chainID == nil {
+		chainID = r.chain.ChainID()
+	}
+	d := EIP712Domain{
+		Name:              name,
+		Version:           version,
+		ChainID:           chainID.String(),
+		VerifyingContract: verifying.Hex(),
+	}
+
+	r.mu.Lock()
+	r.domain = d
+	r.mu.Unlock()
+	return d, nil
+}
+
+// Scaffold assembles everything the app needs to sign one request.
+func (r *RelayerService) Scaffold(ctx context.Context, from, to string, data []byte, gas uint64) (ForwardRequestScaffold, error) {
+	if !r.IsEnabled() {
+		return ForwardRequestScaffold{}, ErrRelayerDisabled
+	}
+	domain, err := r.Domain(ctx)
+	if err != nil {
+		return ForwardRequestScaffold{}, err
+	}
+	nonce, err := r.Nonce(ctx, from)
+	if err != nil {
+		return ForwardRequestScaffold{}, err
+	}
+	if gas == 0 || gas > r.limits.GasCeiling {
+		gas = r.limits.GasCeiling
+	}
+	return ForwardRequestScaffold{
+		Domain:   domain,
+		To:       to,
+		Data:     "0x" + common.Bytes2Hex(data),
+		Gas:      gas,
+		Nonce:    nonce.String(),
+		Deadline: uint64(r.now().Add(r.limits.MaxDeadline).Unix()),
+		Value:    "0",
+	}, nil
 }
 
 // SelectorOf returns the 4-byte selector for a canonical signature such as

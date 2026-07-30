@@ -234,6 +234,59 @@ func (s *MCGPSwapService) callUint(method string, args ...interface{}) (*big.Int
 	return v, nil
 }
 
+// callAddress and callBool mirror callUint for the V2 role/config reads used by
+// the relayer's boot-time separation check and by ops tooling.
+func (s *MCGPSwapService) callRaw(ctx context.Context, method string, args ...interface{}) ([]interface{}, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("blockchain client not available")
+	}
+	data, err := s.pack(method, args...)
+	if err != nil {
+		return nil, err
+	}
+	addr := common.HexToAddress(s.address)
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := s.client.Client.CallContract(cctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s call failed: %w", method, err)
+	}
+	vals, err := parsedMCGPSwapABI.Unpack(method, out)
+	if err != nil || len(vals) == 0 {
+		return nil, fmt.Errorf("decode %s: %w", method, err)
+	}
+	return vals, nil
+}
+
+func (s *MCGPSwapService) callAddress(ctx context.Context, method string, args ...interface{}) (string, error) {
+	vals, err := s.callRaw(ctx, method, args...)
+	if err != nil {
+		return "", err
+	}
+	a, ok := vals[0].(common.Address)
+	if !ok {
+		return "", fmt.Errorf("%s returned unexpected type %T", method, vals[0])
+	}
+	return a.Hex(), nil
+}
+
+func (s *MCGPSwapService) callBool(ctx context.Context, method string, args ...interface{}) (bool, error) {
+	vals, err := s.callRaw(ctx, method, args...)
+	if err != nil {
+		return false, err
+	}
+	b, ok := vals[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("%s returned unexpected type %T", method, vals[0])
+	}
+	return b, nil
+}
+
+// TrustedForwarder reports the forwarder V2 currently trusts (zero = gasless off).
+func (s *MCGPSwapService) TrustedForwarder(ctx context.Context) (string, error) {
+	return s.callAddress(ctx, "trustedForwarder")
+}
+
 // PremiumBalance returns the total spendable premium (bought + credited, 18dp).
 func (s *MCGPSwapService) PremiumBalance(user string) (*big.Int, error) {
 	return s.callUint("premiumBalanceOf", common.HexToAddress(user))

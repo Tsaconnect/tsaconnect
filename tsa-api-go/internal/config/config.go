@@ -238,6 +238,22 @@ type Config struct {
 	// and project memory project_mcgp-differentiated-swap.
 	MCGPSwapBAddress string
 
+	// Gasless relaying (EIP-2771). All dormant unless BOTH the forwarder address
+	// and the relayer key are set — with either missing the /mcgp/relay endpoints
+	// report relayerEnabled:false and the app self-pays, exactly as before.
+	//
+	// RelayerPrivateKey MUST NOT be the owner, operator or guardian key: it is a
+	// hot key broadcasting from a server, and sharing it would turn a relayer
+	// compromise into an operator one. Asserted on-chain at boot.
+	MCGPForwarderAddress   string
+	RelayerPrivateKey      string
+	RelayerMaxDeadline     time.Duration
+	RelayerGasCeiling      uint64
+	RelayerPerUserPerHour  int
+	RelayerDailyGasBudget  string // decimal gas units per UTC day
+	RelayerBalanceFloorWei string // refuse to relay below this native balance
+	RelayerMinSponsored    string // smallest amount worth sponsoring (base units)
+
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
 	// only; prod MUST use KMS. UNSET ⇒ IT operator path + /api/it routes dormant.
@@ -494,6 +510,16 @@ func Load() *Config {
 	cfg.OTCMarketplaceAddress = getEnv("OTC_MARKETPLACE_ADDRESS", "")
 	// McgpEntitlementSwap (Swap Contract B) — UNSET keeps the /api/mcgp routes dormant.
 	cfg.MCGPSwapBAddress = strings.TrimSpace(getEnv("MCGP_SWAP_B_ADDRESS", ""))
+	// Gasless relaying — dormant unless both of the first two are set.
+	cfg.MCGPForwarderAddress = strings.TrimSpace(getEnv("MCGP_FORWARDER_ADDRESS", ""))
+	cfg.RelayerPrivateKey = strings.TrimSpace(getEnv("RELAYER_PRIVATE_KEY", ""))
+	// Short by design: a signed request is executable by ANYONE until it expires.
+	cfg.RelayerMaxDeadline = time.Duration(getEnvInt64("RELAYER_MAX_DEADLINE_SECONDS", 300)) * time.Second
+	cfg.RelayerGasCeiling = uint64(getEnvInt64("RELAYER_GAS_CEILING", 500_000))
+	cfg.RelayerPerUserPerHour = int(getEnvInt64("RELAYER_PER_USER_PER_HOUR", 20))
+	cfg.RelayerDailyGasBudget = strings.TrimSpace(getEnv("RELAYER_DAILY_GAS_BUDGET", "200000000"))
+	cfg.RelayerBalanceFloorWei = strings.TrimSpace(getEnv("RELAYER_BALANCE_FLOOR_WEI", "1000000000000000000")) // 1 S
+	cfg.RelayerMinSponsored = strings.TrimSpace(getEnv("RELAYER_MIN_SPONSORED", "0"))
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.
 	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
