@@ -15,5 +15,9 @@
 import type { Href } from 'expo-router';
 
 /** The Marketplace tab's root screen. Use for every "go to the marketplace"
- *  action — pushing `/products` instead duplicates the screen (see above). */
-export const MARKETPLACE_TAB = '/(dashboard)/(tabs)/(marketplace)' as Href;
+ *  action — pushing `/products` instead duplicates the screen (see above).
+ *
+ *  `satisfies` rather than `as`: a cast would silently accept a typo, which is
+ *  the exact failure this whole change exists to fix. This way tsc checks the
+ *  literal against the generated route union AND keeps its narrow type. */
+export const MARKETPLACE_TAB = '/(dashboard)/(tabs)/(marketplace)' satisfies Href;

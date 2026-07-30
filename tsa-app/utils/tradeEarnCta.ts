@@ -14,16 +14,23 @@
 // application they already completed is the bug this prevents. Kept pure so the
 // pairing is tested without mounting the screen (mirrors utils/pmCta.ts).
 
+// `satisfies Href` on both routes, never `as`: tsc checks each literal against
+// the generated route union while keeping its narrow type, so a typo is a build
+// error rather than a screen that silently fails to exist. A cast would defeat
+// exactly the check this change is about.
+import type { Href } from 'expo-router';
+
 /** Where a user who has NOT been approved as a merchant goes to apply. */
-export const MERCHANT_ONBOARDING_ROUTE = '/merchants/merchant-request?type=p2p_merchant';
+export const MERCHANT_ONBOARDING_ROUTE =
+  '/merchants/merchant-request?type=p2p_merchant' satisfies Href;
 
 /** Where an existing merchant goes instead — their own ad book. */
-export const MERCHANT_ADS_ROUTE = '/p2p/my-ads';
+export const MERCHANT_ADS_ROUTE = '/p2p/my-ads' satisfies Href;
 
 export interface MerchantCta {
   label: string;
-  route: string;
-  /** True until useUserRole resolves; the button must not act on a guess. */
+  route: Href;
+  /** True until the role resolves; the button must not act on a guess. */
   disabled: boolean;
 }
 

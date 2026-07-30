@@ -6,7 +6,7 @@
 // (theme tokens + @/components/ui primitives). All data fetching, state,
 // effects, navigation routes, clipboard/share behavior, and number formatting
 // are unchanged — this is a visual/structural restyle only.
-import { router, type Href } from 'expo-router';
+import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView, Share, Alert, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -24,20 +24,23 @@ import {
   Text,
 } from '@/components/ui';
 import api, { rewardsApi, type RewardSummary } from '../components/services/api';
-import { useUserRole } from '@/hooks/useUserRole';
+import { isMerchantRole } from '@/hooks/useUserRole';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import { merchantCta } from '@/utils/tradeEarnCta';
 
 const TradeAndEarnScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
-  const { isMerchant, loading: roleLoading } = useUserRole();
-  const merchant = merchantCta({ isMerchant, loading: roleLoading });
   const [referralCode, setReferralCode] = useState('');
   const [tpBalance, setTpBalance] = useState(0);
   const [cashbackBalance, setCashbackBalance] = useState(0);
   const [totalReferrals, setTotalReferrals] = useState(0);
   const [summary, setSummary] = useState<RewardSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Merchant status drives the second CTA. Derived from the /profile response
+  // fetchData already makes — useUserRole() would have been a second, identical
+  // request on mount, and two copies of the same answer can disagree.
+  const [isMerchant, setIsMerchant] = useState(false);
+  const [roleResolved, setRoleResolved] = useState(false);
 
   const fetchData = async () => {
     try {
@@ -51,6 +54,7 @@ const TradeAndEarnScreen: React.FC = () => {
 
       if (profileRes.success && profileRes.data) {
         setReferralCode(profileRes.data.referralCode || profileRes.data.username || '');
+        setIsMerchant(isMerchantRole(profileRes.data.role));
       }
       if (tpRes.success && tpRes.data) {
         setTpBalance(tpRes.data.tpBalance || 0);
@@ -71,12 +75,19 @@ const TradeAndEarnScreen: React.FC = () => {
       console.error('Error fetching trade & earn data:', error);
     } finally {
       setRefreshing(false);
+      // Resolved even on failure, so a dropped request can't leave the CTA
+      // disabled forever. Unknown role falls back to the non-merchant path,
+      // which is the safe default: onboarding rejects an existing merchant far
+      // more gracefully than the ad book handles someone who isn't one.
+      setRoleResolved(true);
     }
   };
 
   useEffect(() => {
     fetchData();
   }, []);
+
+  const merchant = merchantCta({ isMerchant, loading: !roleResolved });
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -655,7 +666,7 @@ const TradeAndEarnScreen: React.FC = () => {
             taps early isn't sent to an application they've already completed. */}
         <PressableScale
           disabled={merchant.disabled}
-          onPress={() => router.push(merchant.route as Href)}
+          onPress={() => router.push(merchant.route)}
           style={{
             backgroundColor: colors.surface,
             flexDirection: 'row',
