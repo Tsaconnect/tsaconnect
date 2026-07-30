@@ -75,5 +75,7 @@ npx hardhat run scripts/deploy-p2p-escrow.js --network sonicTestnet  # CHECK_ONL
 
 ## Git
 
-- Current branch: `main` (P2P trading feature developed on `feat/p2p-trading`)
-- Do not commit unless explicitly asked
+- Feature work happens on `feat/*` branches off `main`; check `git branch --show-current` rather
+  than assuming.
+- Do not commit unless explicitly asked. No `Co-Authored-By` trailer in commit messages.
+- Never publish an EAS update or preview build unless explicitly asked.

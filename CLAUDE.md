@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Sibling repos (admin console, landing site, MCGP OTC contracts) and the shared `docs/` are mapped
+in `../CLAUDE.md`.
+
 ## Monorepo layout
 
 Three independent projects that together make up **TSA Connect**, a marketplace + multi-chain
@@ -23,8 +26,8 @@ The app calls the Go API over HTTPS/WebSocket; the Go API is the only thing that
 smart contracts (RPC reads + building unsigned txs). Contracts are deployed once to Sonic/BSC;
 the API's config hardcodes the deployed proxy addresses per network.
 
-The **P2P trading feature** (current focus, branch `feat/p2p-trading`) is the clearest example of
-all three working together — read `docs/p2p-smoke-test.md` for the full end-to-end flow. In short:
+The **P2P trading feature** is the clearest example of all three working together — read
+`docs/p2p-smoke-test.md` for the full end-to-end flow. In short:
 
 - **`P2PEscrow.sol`** is a pool-based escrow. A seller `deposit()`s once into a per-(seller,token)
   `available` balance, then publishes unlimited ads *off-chain* by signing **EIP-712 `AdVoucher`s**
