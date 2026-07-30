@@ -279,6 +279,31 @@ func (h *MCGPSwapHandler) PrepareWithdraw(c *gin.Context) {
 type payReq struct {
 	Username   string `json:"username"`
 	McgpAmount string `json:"mcgpAmount"`
+	// IdempotencyKey makes the derived `ref` stable across retries of one
+	// payment intent. Also accepted as the `Idempotency-Key` header.
+	IdempotencyKey string `json:"idempotencyKey"`
+}
+
+// payRef derives the single-use `ref` for a spend.
+//
+// With an idempotency key the ref is DERIVED from (payer, key), so retrying the
+// same intent yields the SAME ref and the on-chain `usedRef` guard collapses the
+// duplicate. That is what stops a relayed spend and a self-paid retry of the same
+// payment from both landing — two independent prepares would otherwise mint two
+// different refs, and neither the chain nor the ledger's ref_hash index could tell
+// they were one intent.
+//
+// Without a key we mint a random ref, preserving the behaviour older app builds
+// depend on: still single-use, just unable to dedupe a retry.
+//
+// The payer is bound into the hash so one user cannot burn another user's key.
+func payRef(payerWallet, idempotencyKey string) common.Hash {
+	key := strings.TrimSpace(idempotencyKey)
+	if key == "" {
+		return crypto.Keccak256Hash([]byte("mcgp-pay:" + uuid.New().String()))
+	}
+	payer := strings.ToLower(strings.TrimSpace(payerWallet))
+	return crypto.Keccak256Hash([]byte("mcgp-pay:v2:" + payer + ":" + key))
 }
 
 // POST /api/mcgp/pay/prepare — peer pay-by-username. Resolves the recipient,
@@ -323,8 +348,13 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 		return
 	}
 
-	// Single-use ref (idempotency key, also enforced on-chain via usedRef).
-	ref := crypto.Keccak256Hash([]byte("mcgp-pay:" + uuid.New().String()))
+	// Single-use ref (also enforced on-chain via usedRef). Derived from the
+	// caller's idempotency key when one is supplied — see payRef.
+	idem := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if idem == "" {
+		idem = req.IdempotencyKey
+	}
+	ref := payRef(user.WalletAddress, idem)
 	var ref32 [32]byte
 	copy(ref32[:], ref.Bytes())
 
