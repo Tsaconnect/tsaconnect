@@ -9,6 +9,7 @@ import {
 import Icon from "@expo/vector-icons/FontAwesome";
 import { COLORS } from "../../constants"; // Adjust the path according to your project structure
 import { router } from "expo-router";
+import { MARKETPLACE_TAB } from "@/constants/routes";
 
 const ConfirmationScreen = () => {
   return (
@@ -27,7 +28,7 @@ const ConfirmationScreen = () => {
         />
         <TouchableOpacity
           onPress={() => {
-            router.push("/products");
+            router.push(MARKETPLACE_TAB);
           }}
           style={styles.back}
         >

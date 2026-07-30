@@ -6,7 +6,7 @@
 // (theme tokens + @/components/ui primitives). All data fetching, state,
 // effects, navigation routes, clipboard/share behavior, and number formatting
 // are unchanged — this is a visual/structural restyle only.
-import { router } from 'expo-router';
+import { router, type Href } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { View, ScrollView, Share, Alert, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -24,9 +24,14 @@ import {
   Text,
 } from '@/components/ui';
 import api, { rewardsApi, type RewardSummary } from '../components/services/api';
+import { useUserRole } from '@/hooks/useUserRole';
+import { MARKETPLACE_TAB } from '@/constants/routes';
+import { merchantCta } from '@/utils/tradeEarnCta';
 
 const TradeAndEarnScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
+  const { isMerchant, loading: roleLoading } = useUserRole();
+  const merchant = merchantCta({ isMerchant, loading: roleLoading });
   const [referralCode, setReferralCode] = useState('');
   const [tpBalance, setTpBalance] = useState(0);
   const [cashbackBalance, setCashbackBalance] = useState(0);
@@ -621,9 +626,11 @@ const TradeAndEarnScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* CTA */}
+        {/* CTA — the Marketplace tab ROOT, not `/products` (see MARKETPLACE_TAB:
+            pushing `/products` stacked an identical Marketplace on top of the
+            tab root, so back landed on the same screen in another tab). */}
         <PressableScale
-          onPress={() => router.push('/products')}
+          onPress={() => router.push(MARKETPLACE_TAB)}
           style={{
             backgroundColor: colors.accent,
             flexDirection: 'row',
@@ -641,8 +648,14 @@ const TradeAndEarnScreen: React.FC = () => {
           </Text>
         </PressableScale>
 
+        {/* This pointed at `/serviceshome` — the Services TAB root, which is
+            neither merchant onboarding nor a screen you can back out of. Now
+            role-aware: apply if you aren't a merchant yet, manage your ads if
+            you already are. Disabled until the role resolves so a merchant who
+            taps early isn't sent to an application they've already completed. */}
         <PressableScale
-          onPress={() => router.push('/serviceshome')}
+          disabled={merchant.disabled}
+          onPress={() => router.push(merchant.route as Href)}
           style={{
             backgroundColor: colors.surface,
             flexDirection: 'row',
@@ -653,11 +666,12 @@ const TradeAndEarnScreen: React.FC = () => {
             gap: spacing.sm,
             borderWidth: 1.5,
             borderColor: colors.accent,
+            opacity: merchant.disabled ? 0.6 : 1,
           }}
         >
           <Icon name="storefront" size={22} color={colors.accent} />
           <Text variant="bodyMed" weight="700" color="accent">
-            Become a P2P Merchant
+            {merchant.label}
           </Text>
         </PressableScale>
       </ScrollView>

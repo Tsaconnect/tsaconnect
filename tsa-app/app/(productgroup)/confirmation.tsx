@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Icon, Spinner, Text } from '@/components/ui';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 
 const Confirmation = () => {
   const { colors, spacing, radius } = useTheme();
@@ -66,7 +67,7 @@ const Confirmation = () => {
           variant="primary"
           rightIcon="arrowRight"
           onPress={() => {
-            router.push('/products');
+            router.push(MARKETPLACE_TAB);
           }}
           style={{ marginTop: spacing.xl, alignSelf: 'stretch' }}
         />

@@ -4,9 +4,13 @@
 // NotificationContext with the paginated REST feed; supports pull-to-refresh,
 // infinite scroll, tap-to-mark-read + deep-link, and mark-all-read.
 //
-// Rendered by both the dashboard tab (app/(dashboard)/(tabs)/notifications.tsx)
-// and the P2P-stack route (app/p2p/notifications.tsx) so the inbox is reachable
-// from either context with one source of truth.
+// Rendered by the dashboard route app/(dashboard)/(tabs)/notifications.tsx.
+// That route is a Tabs.Screen with `href: null` — it is hidden from the tab bar
+// and only reached by pushing from the header bell (components/NotificationBell)
+// — and the Tabs screenOptions hide the header. So this screen has to draw its
+// own back affordance or the bell is a one-way trip. ScreenHeader is
+// canGoBack()-guarded and falls back to /home, which also covers arriving here
+// cold from a push notification.
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, FlatList, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -23,6 +27,7 @@ import {
   Icon,
   IconName,
   PressableScale,
+  ScreenHeader,
   SkeletonGroup,
   Spinner,
   Text,
@@ -192,13 +197,9 @@ const NotificationInbox: React.FC = () => {
   if (loading) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+        <ScreenHeader title="Notifications" />
         <View style={{ padding: spacing.lg }}>
-          <Text variant="title1" weight="700">
-            Notifications
-          </Text>
-          <View style={{ marginTop: spacing.lg }}>
-            <SkeletonGroup shape="tradeRow" count={6} />
-          </View>
+          <SkeletonGroup shape="tradeRow" count={6} />
         </View>
       </SafeAreaView>
     );
@@ -206,6 +207,20 @@ const NotificationInbox: React.FC = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+      <ScreenHeader
+        title="Notifications"
+        right={
+          mergedNotifications.length > 0 ? (
+            <Button
+              title="Mark all read"
+              variant="ghost"
+              size="sm"
+              fullWidth={false}
+              onPress={handleMarkAllRead}
+            />
+          ) : undefined
+        }
+      />
       <FlatList
         data={mergedNotifications}
         keyExtractor={(item) => item.id}
@@ -216,29 +231,6 @@ const NotificationInbox: React.FC = () => {
         }
         onEndReached={loadMore}
         onEndReachedThreshold={0.3}
-        ListHeaderComponent={
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: spacing.lg,
-            }}
-          >
-            <Text variant="title1" weight="700">
-              Notifications
-            </Text>
-            {mergedNotifications.length > 0 && (
-              <Button
-                title="Mark all read"
-                variant="ghost"
-                size="sm"
-                fullWidth={false}
-                onPress={handleMarkAllRead}
-              />
-            )}
-          </View>
-        }
         ListFooterComponent={
           !loading && refreshing === false && mergedNotifications.length > 0 && hasMore ? (
             <View style={{ paddingVertical: spacing.lg }}>

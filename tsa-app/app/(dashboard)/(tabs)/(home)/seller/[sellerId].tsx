@@ -22,6 +22,7 @@ import { useSellerData } from '@/hooks/useSellerData';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
 import { useTheme } from '@/theme';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 import {
   AccentCard,
   Avatar,
@@ -102,10 +103,10 @@ export default function SellerCatalogueScreen() {
     if (router.canGoBack()) {
       router.back();
     } else {
-      // '/marketplace' is not a route — the marketplace tab is a route GROUP, so
-      // its own index resolves to '/' and collides with the app entry screen.
-      // '/products' is the marketplace's addressable landing screen.
-      router.push('/products');
+      // Nothing to pop back to (deep link). MARKETPLACE_TAB is the tab root
+      // itself — '/products' would land a second copy of the same screen on
+      // top of it, so back from here would go nowhere useful.
+      router.replace(MARKETPLACE_TAB);
     }
   }, [router]);
 
@@ -350,7 +351,7 @@ export default function SellerCatalogueScreen() {
         title="No Products Yet"
         subtitle={`${sellerData?.name ?? 'This seller'} hasn't listed any products yet.`}
         actionLabel="Browse Other Sellers"
-        onAction={() => router.push('/products')}
+        onAction={() => router.push(MARKETPLACE_TAB)}
       />
     </View>
   ), [sellerData, router]);

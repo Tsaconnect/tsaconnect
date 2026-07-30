@@ -27,6 +27,7 @@ import {
   IconButton,
   IconName,
   PressableScale,
+  ScreenHeader,
   Spinner,
   Text,
 } from "@/components/ui";
@@ -195,6 +196,10 @@ const ProfileScreen = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      {/* /profile sits outside the (dashboard) drawer and its layout registers
+          index with headerShown:false, so nothing else draws a back control —
+          the drawer avatar and Settings both pushed users into a dead end. */}
+      <ScreenHeader title="Profile" />
       {loading || !user ? (
         <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
           <Spinner size="large" label="Loading profile..." />

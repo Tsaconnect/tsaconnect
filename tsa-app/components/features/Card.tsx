@@ -3,6 +3,7 @@ import { Image, StyleSheet, Text, View, TouchableOpacity } from "react-native";
 import { MaterialIcons } from "@expo/vector-icons";
 import { COLORS, SIZES } from "../../constants";
 import { router } from "expo-router";
+import { MARKETPLACE_TAB } from "@/constants/routes";
 
 interface CardProps {
   iconName?: string;
@@ -21,8 +22,7 @@ const Card: React.FC<CardProps> = ({
     <TouchableOpacity
       onPress={() => {
         if (buttonTitle === "Register / Trade") {
-          //@ts-ignore
-          router.push("/products");
+          router.push(MARKETPLACE_TAB);
         } else {
           alert("Coming soon");
         }
