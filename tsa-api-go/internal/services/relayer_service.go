@@ -1,0 +1,494 @@
+package services
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+)
+
+// RelayerService sponsors gas for user-signed EIP-2771 ForwardRequests.
+//
+// WHAT THIS PROTECTS, AND WHAT IT DOES NOT.
+//
+// OpenZeppelin's ERC2771Forwarder.execute is PERMISSIONLESS: anyone holding a
+// validly signed request can submit it, and pay for it themselves. So none of the
+// controls below are access control on the target contract — they exist to stop
+// OUR relayer's balance from being drained, and to stop us broadcasting
+// transactions that will fail. On-chain, the only guarantees are the forwarder's
+// EIP-712 signature check, its per-`from` nonce, the request deadline, and
+// whatever the target enforces via _msgSender().
+//
+// Dormant-by-default: with no signer or no forwarder address configured the
+// service reports IsEnabled() == false and every Relay call returns
+// ErrRelayerDisabled, which the app treats as an explicit "self-pay instead"
+// signal rather than an error.
+var (
+	ErrRelayerDisabled       = errors.New("relayer not configured")
+	ErrSenderMismatch        = errors.New("forward request `from` does not match the authenticated wallet")
+	ErrTargetNotAllowed      = errors.New("relaying to this contract is not allowed")
+	ErrSelectorNotAllowed    = errors.New("relaying this function is not allowed")
+	ErrDeadlineExpired       = errors.New("forward request deadline has passed")
+	ErrDeadlineTooFar        = errors.New("forward request deadline is too far in the future")
+	ErrGasCeiling            = errors.New("forward request gas exceeds the sponsored ceiling")
+	ErrBelowMinSponsored     = errors.New("amount is below the minimum we sponsor gas for")
+	ErrRateLimited           = errors.New("too many sponsored transactions; try again shortly")
+	ErrDailyCapExceeded      = errors.New("daily gas-sponsorship budget exhausted")
+	ErrRelayerUnderfunded    = errors.New("relayer balance is below its floor")
+	ErrSimulationReverted    = errors.New("transaction would revert")
+	ErrSimulationUnavailable = errors.New("could not simulate the transaction; try again")
+	ErrRoleSeparation        = errors.New("relayer key must not also be owner, operator, or guardian")
+)
+
+// ForwardRequest mirrors ERC2771Forwarder.ForwardRequestData.
+type ForwardRequest struct {
+	From      string   `json:"from"`
+	To        string   `json:"to"`
+	Value     *big.Int `json:"value"`
+	Gas       uint64   `json:"gas"`
+	Deadline  uint64   `json:"deadline"` // uint48 on-chain
+	Data      []byte   `json:"data"`
+	Signature []byte   `json:"signature"`
+}
+
+// AllowedCall is a (target, selector) pair we are willing to sponsor. The
+// allowlist is a PAIR list, not a selector set: the same 4 bytes can mean
+// something entirely different on another contract.
+type AllowedCall struct {
+	Target   string
+	Selector [4]byte
+	// AmountWordIndex is the zero-based 32-byte word of the amount argument
+	// within the calldata (after the selector), or -1 when the call has no
+	// amount to threshold on. Used for the minimum-sponsored-amount check so
+	// dust transfers cannot burn more gas than they move.
+	AmountWordIndex int
+}
+
+// RelayerLimits are the budget controls. All are required; zero values would
+// disable the protection they exist to provide.
+type RelayerLimits struct {
+	MaxDeadline      time.Duration // reject requests valid for longer than this
+	GasCeiling       uint64        // per-request gas cap
+	PerUserPerWindow int           // sponsored requests per user per window
+	Window           time.Duration
+	DailyGasBudget   *big.Int // wei of S per UTC day across all users
+	BalanceFloor     *big.Int // refuse to relay below this balance
+	MinSponsored     *big.Int // minimum amount (token base units) worth sponsoring
+}
+
+// relayChain is the slice of the EVM client the relayer needs.
+type relayChain interface {
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+}
+
+// relayTxBuilder builds the unsigned tx the signer will broadcast.
+type relayTxBuilder interface {
+	BuildUnsignedTx(from, to string, callData []byte) ([]byte, error)
+}
+
+// relayRoleReader is used once at boot to prove the relayer key holds no
+// privileged role on the swap contract.
+type relayRoleReader interface {
+	Owner(ctx context.Context) (string, error)
+	IsOperator(ctx context.Context, addr string) (bool, error)
+	IsGuardian(ctx context.Context, addr string) (bool, error)
+}
+
+// RelayMetrics is an injected recorder so tests can assert on counters instead
+// of scraping log lines.
+type RelayMetrics interface {
+	RelayAttempt(outcome, reason string)
+	RelayGasSpent(wei *big.Int)
+}
+
+// NoopRelayMetrics is the default when nothing is wired.
+type NoopRelayMetrics struct{}
+
+func (NoopRelayMetrics) RelayAttempt(string, string) {}
+func (NoopRelayMetrics) RelayGasSpent(*big.Int)      {}
+
+const forwarderExecuteABI = `[{"inputs":[{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"gas","type":"uint256"},{"name":"deadline","type":"uint48"},{"name":"data","type":"bytes"},{"name":"signature","type":"bytes"}],"name":"request","type":"tuple"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"}]`
+
+type RelayerService struct {
+	signer    ReleaseSigner
+	chain     relayChain
+	builder   relayTxBuilder
+	forwarder string
+	allow     []AllowedCall
+	limits    RelayerLimits
+	metrics   RelayMetrics
+	now       func() time.Time
+	fwdABI    abi.ABI
+
+	mu       sync.Mutex
+	perUser  map[string][]time.Time // rolling window of sponsored requests
+	spentDay string                 // UTC date of spentGas
+	spentGas *big.Int
+	killed   bool
+}
+
+func NewRelayerService(
+	signer ReleaseSigner,
+	chain relayChain,
+	builder relayTxBuilder,
+	forwarder string,
+	allow []AllowedCall,
+	limits RelayerLimits,
+	metrics RelayMetrics,
+	now func() time.Time,
+) (*RelayerService, error) {
+	parsed, err := abi.JSON(strings.NewReader(forwarderExecuteABI))
+	if err != nil {
+		return nil, fmt.Errorf("relayer: parse forwarder ABI: %w", err)
+	}
+	if metrics == nil {
+		metrics = NoopRelayMetrics{}
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &RelayerService{
+		signer: signer, chain: chain, builder: builder,
+		forwarder: strings.ToLower(strings.TrimSpace(forwarder)),
+		allow:     allow, limits: limits, metrics: metrics, now: now, fwdABI: parsed,
+		perUser: map[string][]time.Time{}, spentGas: new(big.Int),
+	}, nil
+}
+
+// IsEnabled reports whether relaying is available. The app keys its self-pay
+// fallback off this, so it must be an explicit signal — never an error.
+func (r *RelayerService) IsEnabled() bool {
+	return r != nil && r.signer != nil && r.chain != nil && r.builder != nil &&
+		r.forwarder != "" && !r.killed
+}
+
+// SetKillSwitch forces every request to self-pay regardless of configuration.
+// For a relayer that is up but misbehaving — bad nonces, unexpected spend — where
+// removing the key is slower than flipping a flag.
+func (r *RelayerService) SetKillSwitch(on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.killed = on
+}
+
+// AssertRoleSeparation fails startup if the relayer key also holds a privileged
+// role. A relayer key is hot — it broadcasts constantly from a server — so it is
+// far more exposed than the operator key. If they are the same EOA, a relayer
+// compromise becomes an operator compromise.
+func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRoleReader) error {
+	if !r.IsEnabled() || roles == nil {
+		return nil
+	}
+	addr := strings.ToLower(r.signer.Address())
+
+	owner, err := roles.Owner(ctx)
+	if err != nil {
+		return fmt.Errorf("relayer: read owner: %w", err)
+	}
+	if strings.EqualFold(owner, addr) {
+		return fmt.Errorf("%w: relayer is the owner", ErrRoleSeparation)
+	}
+	isOp, err := roles.IsOperator(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("relayer: read operator: %w", err)
+	}
+	if isOp {
+		return fmt.Errorf("%w: relayer is an operator", ErrRoleSeparation)
+	}
+	isGuard, err := roles.IsGuardian(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("relayer: read guardian: %w", err)
+	}
+	if isGuard {
+		return fmt.Errorf("%w: relayer is a guardian", ErrRoleSeparation)
+	}
+	return nil
+}
+
+// Relay validates and broadcasts a user-signed ForwardRequest.
+//
+// `authenticatedWallet` is the wallet the API session belongs to. Binding it to
+// req.From is the single most important check here: without it the endpoint is a
+// free "relay anything anyone signed" oracle.
+func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, req ForwardRequest) (string, error) {
+	if !r.IsEnabled() {
+		r.metrics.RelayAttempt("rejected", "disabled")
+		return "", ErrRelayerDisabled
+	}
+	if err := r.validate(authenticatedWallet, req); err != nil {
+		return "", err
+	}
+
+	execData, err := r.packExecute(req)
+	if err != nil {
+		r.metrics.RelayAttempt("rejected", "encode")
+		return "", err
+	}
+
+	if err := r.checkFunding(ctx, req.Gas); err != nil {
+		return "", err
+	}
+	if err := r.simulate(ctx, execData); err != nil {
+		return "", err
+	}
+
+	unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
+	if err != nil {
+		r.metrics.RelayAttempt("rejected", "build")
+		return "", fmt.Errorf("relayer: build tx: %w", err)
+	}
+
+	txHash, err := r.signer.SignAndBroadcast(ctx, unsigned)
+	if err != nil {
+		r.metrics.RelayAttempt("error", "broadcast")
+		return "", fmt.Errorf("relayer: broadcast: %w", err)
+	}
+
+	r.recordSpend(req)
+	r.metrics.RelayAttempt("ok", "")
+	return txHash, nil
+}
+
+func (r *RelayerService) validate(authenticatedWallet string, req ForwardRequest) error {
+	if !strings.EqualFold(strings.TrimSpace(authenticatedWallet), strings.TrimSpace(req.From)) {
+		r.metrics.RelayAttempt("rejected", "sender_mismatch")
+		return ErrSenderMismatch
+	}
+	if len(req.Signature) == 0 {
+		r.metrics.RelayAttempt("rejected", "signature")
+		return fmt.Errorf("relayer: missing signature")
+	}
+	if len(req.Data) < 4 {
+		r.metrics.RelayAttempt("rejected", "calldata")
+		return fmt.Errorf("relayer: calldata too short")
+	}
+
+	allowed, err := r.lookupAllowed(req.To, req.Data)
+	if err != nil {
+		return err
+	}
+
+	now := r.now()
+	if req.Deadline <= uint64(now.Unix()) {
+		r.metrics.RelayAttempt("rejected", "deadline_expired")
+		return ErrDeadlineExpired
+	}
+	// A signed request is executable by ANYONE until it expires, so a generous
+	// deadline is a standing replay window against a much later contract state.
+	if req.Deadline > uint64(now.Add(r.limits.MaxDeadline).Unix()) {
+		r.metrics.RelayAttempt("rejected", "deadline_too_far")
+		return ErrDeadlineTooFar
+	}
+	if req.Gas > r.limits.GasCeiling {
+		r.metrics.RelayAttempt("rejected", "gas_ceiling")
+		return ErrGasCeiling
+	}
+	if err := r.checkMinSponsored(allowed, req.Data); err != nil {
+		return err
+	}
+	return r.checkRateLimit(req.From)
+}
+
+// lookupAllowed returns the matching allowlist entry, or an error naming which
+// half of the (target, selector) pair failed. Matching on the pair matters: the
+// same 4 bytes mean something entirely different on another contract.
+func (r *RelayerService) lookupAllowed(to string, data []byte) (AllowedCall, error) {
+	var sel [4]byte
+	copy(sel[:], data[:4])
+
+	targetKnown := false
+	for _, a := range r.allow {
+		if strings.EqualFold(a.Target, to) {
+			targetKnown = true
+			if a.Selector == sel {
+				return a, nil
+			}
+		}
+	}
+	if !targetKnown {
+		r.metrics.RelayAttempt("rejected", "target")
+		return AllowedCall{}, ErrTargetNotAllowed
+	}
+	r.metrics.RelayAttempt("rejected", "selector")
+	return AllowedCall{}, ErrSelectorNotAllowed
+}
+
+func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
+	if a.AmountWordIndex < 0 || r.limits.MinSponsored == nil || r.limits.MinSponsored.Sign() == 0 {
+		return nil
+	}
+	start := 4 + a.AmountWordIndex*32
+	if len(data) < start+32 {
+		r.metrics.RelayAttempt("rejected", "calldata")
+		return fmt.Errorf("relayer: calldata too short for the amount argument")
+	}
+	amount := new(big.Int).SetBytes(data[start : start+32])
+	if amount.Cmp(r.limits.MinSponsored) < 0 {
+		r.metrics.RelayAttempt("rejected", "below_min")
+		return ErrBelowMinSponsored
+	}
+	return nil
+}
+
+func (r *RelayerService) checkRateLimit(from string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := strings.ToLower(strings.TrimSpace(from))
+	now := r.now()
+	cutoff := now.Add(-r.limits.Window)
+
+	kept := r.perUser[key][:0]
+	for _, t := range r.perUser[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	r.perUser[key] = kept
+
+	if len(kept) >= r.limits.PerUserPerWindow {
+		r.metrics.RelayAttempt("rejected", "rate_limit")
+		return ErrRateLimited
+	}
+	r.perUser[key] = append(kept, now)
+	return nil
+}
+
+func (r *RelayerService) checkFunding(ctx context.Context, requestGas uint64) error {
+	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
+	if err != nil {
+		r.metrics.RelayAttempt("error", "balance")
+		return fmt.Errorf("relayer: read balance: %w", err)
+	}
+	if r.limits.BalanceFloor != nil && bal.Cmp(r.limits.BalanceFloor) < 0 {
+		// Refuse rather than broadcast transactions that will fail for gas.
+		r.metrics.RelayAttempt("rejected", "underfunded")
+		return ErrRelayerUnderfunded
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rollDayLocked()
+	if r.limits.DailyGasBudget != nil {
+		// Include the incoming request, so the budget is a true ceiling rather
+		// than one that can be overshot by a whole request's worth of gas.
+		projected := new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
+		if projected.Cmp(r.limits.DailyGasBudget) > 0 {
+			r.metrics.RelayAttempt("rejected", "daily_cap")
+			return ErrDailyCapExceeded
+		}
+	}
+	return nil
+}
+
+func (r *RelayerService) rollDayLocked() {
+	day := r.now().UTC().Format("2006-01-02")
+	if r.spentDay != day {
+		r.spentDay = day
+		r.spentGas = new(big.Int)
+	}
+}
+
+// simulate runs the exact call through eth_call first. A revert here means the
+// request is bad and must not be broadcast; an RPC failure is transient and the
+// caller may retry — conflating the two is how a relayer either burns gas on
+// doomed transactions or drops good ones.
+func (r *RelayerService) simulate(ctx context.Context, execData []byte) error {
+	to := common.HexToAddress(r.forwarder)
+	from := common.HexToAddress(r.signer.Address())
+	_, err := r.chain.CallContract(ctx, ethereum.CallMsg{From: from, To: &to, Data: execData}, nil)
+	if err == nil {
+		return nil
+	}
+	if reason, isRevert := revertReason(err); isRevert {
+		r.metrics.RelayAttempt("rejected", "would_revert")
+		return fmt.Errorf("%w: %s", ErrSimulationReverted, reason)
+	}
+	r.metrics.RelayAttempt("error", "simulate_unavailable")
+	return fmt.Errorf("%w: %v", ErrSimulationUnavailable, err)
+}
+
+// revertReason distinguishes an on-chain revert from an RPC/transport failure.
+func revertReason(err error) (string, bool) {
+	msg := err.Error()
+	for _, marker := range []string{"execution reverted", "revert", "VM Exception"} {
+		if strings.Contains(msg, marker) {
+			return msg, true
+		}
+	}
+	return "", false
+}
+
+func (r *RelayerService) packExecute(req ForwardRequest) ([]byte, error) {
+	value := req.Value
+	if value == nil {
+		value = new(big.Int)
+	}
+	// The tuple field order must match ERC2771Forwarder.ForwardRequestData.
+	arg := struct {
+		From      common.Address `json:"from"`
+		To        common.Address `json:"to"`
+		Value     *big.Int       `json:"value"`
+		Gas       *big.Int       `json:"gas"`
+		Deadline  *big.Int       `json:"deadline"`
+		Data      []byte         `json:"data"`
+		Signature []byte         `json:"signature"`
+	}{
+		From:      common.HexToAddress(req.From),
+		To:        common.HexToAddress(req.To),
+		Value:     value,
+		Gas:       new(big.Int).SetUint64(req.Gas),
+		Deadline:  new(big.Int).SetUint64(req.Deadline),
+		Data:      req.Data,
+		Signature: req.Signature,
+	}
+	// executeBatch is deliberately never used: with a non-zero refundReceiver it
+	// lets individual sub-requests fail silently instead of reverting.
+	return r.fwdABI.Pack("execute", arg)
+}
+
+func (r *RelayerService) recordSpend(req ForwardRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rollDayLocked()
+	// Charge the request's declared gas against the daily budget. This
+	// deliberately over-counts versus gas actually burned — budgeting on the
+	// worst case is what keeps the cap meaningful.
+	r.spentGas = new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(req.Gas))
+	r.metrics.RelayGasSpent(new(big.Int).SetUint64(req.Gas))
+}
+
+// SpentToday exposes the running daily total for monitoring.
+func (r *RelayerService) SpentToday() *big.Int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rollDayLocked()
+	return new(big.Int).Set(r.spentGas)
+}
+
+// SelectorOf returns the 4-byte selector for a canonical signature such as
+// "spend(address,uint256,bytes32)".
+func SelectorOf(signature string) [4]byte {
+	var out [4]byte
+	copy(out[:], crypto.Keccak256([]byte(signature))[:4])
+	return out
+}
+
+// MarshalForwardRequest is a small helper for logging a request without its
+// signature, which should never reach a log.
+func MarshalForwardRequest(req ForwardRequest) string {
+	redacted := req
+	redacted.Signature = nil
+	b, _ := json.Marshal(redacted)
+	return string(b)
+}
