@@ -24,6 +24,9 @@ import {
   Text,
 } from '@/components/ui';
 import api, { rewardsApi, type RewardSummary } from '../components/services/api';
+import { isMerchantRole } from '@/hooks/useUserRole';
+import { MARKETPLACE_TAB } from '@/constants/routes';
+import { merchantCta } from '@/utils/tradeEarnCta';
 
 const TradeAndEarnScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -33,6 +36,11 @@ const TradeAndEarnScreen: React.FC = () => {
   const [totalReferrals, setTotalReferrals] = useState(0);
   const [summary, setSummary] = useState<RewardSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Merchant status drives the second CTA. Derived from the /profile response
+  // fetchData already makes — useUserRole() would have been a second, identical
+  // request on mount, and two copies of the same answer can disagree.
+  const [isMerchant, setIsMerchant] = useState(false);
+  const [roleResolved, setRoleResolved] = useState(false);
 
   const fetchData = async () => {
     try {
@@ -46,6 +54,7 @@ const TradeAndEarnScreen: React.FC = () => {
 
       if (profileRes.success && profileRes.data) {
         setReferralCode(profileRes.data.referralCode || profileRes.data.username || '');
+        setIsMerchant(isMerchantRole(profileRes.data.role));
       }
       if (tpRes.success && tpRes.data) {
         setTpBalance(tpRes.data.tpBalance || 0);
@@ -66,12 +75,19 @@ const TradeAndEarnScreen: React.FC = () => {
       console.error('Error fetching trade & earn data:', error);
     } finally {
       setRefreshing(false);
+      // Resolved even on failure, so a dropped request can't leave the CTA
+      // disabled forever. Unknown role falls back to the non-merchant path,
+      // which is the safe default: onboarding rejects an existing merchant far
+      // more gracefully than the ad book handles someone who isn't one.
+      setRoleResolved(true);
     }
   };
 
   useEffect(() => {
     fetchData();
   }, []);
+
+  const merchant = merchantCta({ isMerchant, loading: !roleResolved });
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -621,9 +637,11 @@ const TradeAndEarnScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* CTA */}
+        {/* CTA — the Marketplace tab ROOT, not `/products` (see MARKETPLACE_TAB:
+            pushing `/products` stacked an identical Marketplace on top of the
+            tab root, so back landed on the same screen in another tab). */}
         <PressableScale
-          onPress={() => router.push('/products')}
+          onPress={() => router.push(MARKETPLACE_TAB)}
           style={{
             backgroundColor: colors.accent,
             flexDirection: 'row',
@@ -641,8 +659,14 @@ const TradeAndEarnScreen: React.FC = () => {
           </Text>
         </PressableScale>
 
+        {/* This pointed at `/serviceshome` — the Services TAB root, which is
+            neither merchant onboarding nor a screen you can back out of. Now
+            role-aware: apply if you aren't a merchant yet, manage your ads if
+            you already are. Disabled until the role resolves so a merchant who
+            taps early isn't sent to an application they've already completed. */}
         <PressableScale
-          onPress={() => router.push('/serviceshome')}
+          disabled={merchant.disabled}
+          onPress={() => router.push(merchant.route)}
           style={{
             backgroundColor: colors.surface,
             flexDirection: 'row',
@@ -653,11 +677,12 @@ const TradeAndEarnScreen: React.FC = () => {
             gap: spacing.sm,
             borderWidth: 1.5,
             borderColor: colors.accent,
+            opacity: merchant.disabled ? 0.6 : 1,
           }}
         >
           <Icon name="storefront" size={22} color={colors.accent} />
           <Text variant="bodyMed" weight="700" color="accent">
-            Become a P2P Merchant
+            {merchant.label}
           </Text>
         </PressableScale>
       </ScrollView>

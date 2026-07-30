@@ -51,3 +51,37 @@ describe('showDrawerHeader', () => {
     expect(showDrawerHeader(tabsAt(1))).toBe(false);
   });
 });
+
+// Push-only tabs (href: null) — the bell opens `notifications`, which is a
+// Tabs.Screen rather than a stack push. It has no nested navigator, so its
+// state is undefined and the ordinary "no stack means tab root" rule would
+// keep the drawer header up. The screen draws its own back header, so leaving
+// the drawer header visible stacked two nav bars.
+const focusedTabNamed = (name: string): NestedNavState => ({
+  index: 0,
+  routes: [{ name }, { name: '(marketplace)', state: { index: 0, routes: [{}] } }],
+});
+
+describe('push-only tabs', () => {
+  it('does not treat the notifications tab as a tab root', () => {
+    expect(isAtTabRoot(focusedTabNamed('notifications'))).toBe(false);
+  });
+
+  it('hides the drawer header there, so the screen owns the only header', () => {
+    expect(showDrawerHeader(focusedTabNamed('notifications'))).toBe(false);
+  });
+
+  it('still treats an ordinary tab with no pushed screen as a root', () => {
+    expect(isAtTabRoot(focusedTabNamed('(home)'))).toBe(true);
+    expect(showDrawerHeader(focusedTabNamed('(home)'))).toBe(true);
+  });
+
+  it('only applies to the focused tab', () => {
+    // notifications present but NOT focused — drawer header stays up.
+    const state: NestedNavState = {
+      index: 1,
+      routes: [{ name: 'notifications' }, { name: '(home)', state: { index: 0, routes: [{}] } }],
+    };
+    expect(showDrawerHeader(state)).toBe(true);
+  });
+});

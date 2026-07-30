@@ -17,8 +17,20 @@
 /** The slice of React Navigation's (partial) state this needs. */
 export interface NestedNavState {
   index?: number;
-  routes?: { state?: NestedNavState }[];
+  routes?: { name?: string; state?: NestedNavState }[];
 }
+
+/**
+ * Tabs registered with `href: null` — hidden from the tab bar and reached only
+ * by pushing (the header bell opens `notifications`).
+ *
+ * These break the "focused tab with no nested stack is a tab root" rule below.
+ * A plain screen has no nested navigator, so its state is undefined and it
+ * would read as a root, leaving the drawer header up while the screen also
+ * draws its own back header — two nav bars stacked. They are destinations you
+ * arrive at and back out of, so the drawer header stands down for them.
+ */
+export const PUSH_ONLY_TABS = ['notifications'];
 
 /**
  * True when the focused tab is showing its ROOT screen — nothing pushed on top.
@@ -30,6 +42,8 @@ export interface NestedNavState {
 export function isAtTabRoot(state?: NestedNavState): boolean {
   if (!state) return true;
   const focusedTab = state.routes?.[state.index ?? 0];
+  // A push-only tab is never a root, however empty its state looks.
+  if (focusedTab?.name && PUSH_ONLY_TABS.includes(focusedTab.name)) return false;
   const tabStack = focusedTab?.state;
   if (!tabStack) return true;
   return (tabStack.index ?? 0) === 0;
