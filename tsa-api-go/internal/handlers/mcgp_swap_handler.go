@@ -425,9 +425,12 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 	// decides which path to take; a scaffold being absent is the explicit
 	// "self-pay" signal.
 	if h.relayEnabled() {
-		callData, err := h.swap.PrepareSpend(user.WalletAddress, target.WalletAddress, amount, ref32)
-		if err == nil {
-			if scaffold, sErr := h.relay.Scaffold(c.Request.Context(), user.WalletAddress, h.swapAddress, spendCallData(callData), 0); sErr == nil {
+		// Reuse the calldata from the tx prepared above. Calling PrepareSpend a
+		// second time would repeat its GetNonce + SuggestGasPrice + EstimateGas —
+		// three extra RPC round trips on the hot path of every payment, purely to
+		// recompute bytes we already hold.
+		if callData := spendCallData(tx); len(callData) > 0 {
+			if scaffold, sErr := h.relay.Scaffold(c.Request.Context(), user.WalletAddress, h.swapAddress, callData, 0); sErr == nil {
 				payload["forwardRequest"] = scaffold
 			}
 		}
@@ -462,6 +465,10 @@ func (h *MCGPSwapHandler) RelayStatus(c *gin.Context) {
 	})
 }
 
+// maxRelayBodyBytes bounds the relay endpoint's request body. A ForwardRequest
+// is a few hundred bytes even with generous calldata.
+const maxRelayBodyBytes = 64 << 10
+
 type relaySubmitReq struct {
 	From      string `json:"from"`
 	To        string `json:"to"`
@@ -487,6 +494,13 @@ func (h *MCGPSwapHandler) SubmitRelay(c *gin.Context) {
 		})
 		return
 	}
+
+	// Cap the body before decoding. `data` and `signature` are caller-supplied
+	// hex, and nothing else in the middleware chain bounds request size — the IP
+	// rate limiter allows 500 requests per 15 minutes, which is a lot of room to
+	// push large bodies through an authenticated endpoint. A ForwardRequest is a
+	// few hundred bytes; 64 KiB is generous.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRelayBodyBytes)
 
 	var req relaySubmitReq
 	if err := c.ShouldBindJSON(&req); err != nil {

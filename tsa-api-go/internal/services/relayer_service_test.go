@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 
 // ── doubles ──────────────────────────────────────────────────────────────
 
+// The doubles are mutex-guarded because the concurrency regression tests below
+// drive them from many goroutines at once.
 type fakeRelaySigner struct {
+	mu             sync.Mutex
 	addr           string
 	broadcastCalls int
 	txHash         string
@@ -24,14 +28,22 @@ type fakeRelaySigner struct {
 
 func (f *fakeRelaySigner) Address() string { return f.addr }
 func (f *fakeRelaySigner) SignAndBroadcast(_ context.Context, _ []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.broadcastCalls++
 	if f.err != nil {
 		return "", f.err
 	}
 	return f.txHash, nil
 }
+func (f *fakeRelaySigner) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.broadcastCalls
+}
 
 type fakeRelayChain struct {
+	mu         sync.Mutex
 	callErr    error
 	callReturn []byte
 	balance    *big.Int
@@ -42,10 +54,14 @@ type fakeRelayChain struct {
 func (f *fakeRelayChain) ChainID() *big.Int { return big.NewInt(146) }
 
 func (f *fakeRelayChain) CallContract(_ context.Context, _ ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.callCount++
 	return f.callReturn, f.callErr
 }
 func (f *fakeRelayChain) BalanceAt(_ context.Context, _ common.Address, _ *big.Int) (*big.Int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.balanceErr != nil {
 		return nil, f.balanceErr
 	}
@@ -67,20 +83,27 @@ func (f *fakeRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error
 type attempt struct{ outcome, reason string }
 
 type fakeRelayMetrics struct {
+	mu       sync.Mutex
 	attempts []attempt
 	gas      *big.Int
 }
 
 func (m *fakeRelayMetrics) RelayAttempt(outcome, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.attempts = append(m.attempts, attempt{outcome, reason})
 }
-func (m *fakeRelayMetrics) RelayGasSpent(w *big.Int) {
+func (m *fakeRelayMetrics) RelayGasUnits(w *big.Int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.gas == nil {
 		m.gas = new(big.Int)
 	}
 	m.gas.Add(m.gas, w)
 }
 func (m *fakeRelayMetrics) last() attempt {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.attempts) == 0 {
 		return attempt{}
 	}
@@ -512,5 +535,92 @@ func TestRelayer_RejectsMalformedRequests(t *testing.T) {
 				t.Fatal("malformed requests must not be broadcast")
 			}
 		})
+	}
+}
+
+// Regression tests for the two concurrency defects found in review. Both were
+// invisible to the single-goroutine suite above — the race detector reported
+// nothing until requests actually overlapped.
+
+func TestRelayer_DailyBudgetHoldsUnderConcurrency(t *testing.T) {
+	r := newRig(t, func(l *RelayerLimits) {
+		l.DailyGasBudget = big.NewInt(1_000_000) // exactly 5 x 200k
+		l.PerUserPerWindow = 1000                // isolate the budget from the rate limit
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = r.svc.Relay(context.Background(), userAddr, r.req())
+		}()
+	}
+	wg.Wait()
+
+	// Before the fix this broadcast 10 times against a 5-request budget: the
+	// check and the record took the mutex separately, so every goroutine saw the
+	// pre-spend total. The overrun scaled with concurrency.
+	if got := r.signer.calls(); got > 5 {
+		t.Fatalf("budget overrun: %d broadcasts against a 5-request budget", got)
+	}
+	if got := r.svc.SpentToday(); got.Cmp(big.NewInt(1_000_000)) > 0 {
+		t.Fatalf("recorded spend %s exceeds the budget", got)
+	}
+}
+
+func TestRelayer_KillSwitchIsRaceFree(t *testing.T) {
+	r := newRig(t, func(l *RelayerLimits) { l.PerUserPerWindow = 1000 })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _ = r.svc.Relay(context.Background(), userAddr, r.req()) }()
+		wg.Add(1)
+		go func() { defer wg.Done(); r.svc.SetKillSwitch(false) }()
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = r.svc.IsEnabled() }()
+	}
+	wg.Wait() // -race fails this if IsEnabled reads `killed` unsynchronised
+}
+
+// A relayer-side outage should not burn the caller's hourly quota; a request
+// that would revert is the caller's own doing and should.
+func TestRelayer_RateLimitSlotRefundedOnlyWhenTheFailureIsOurs(t *testing.T) {
+	t.Run("simulation unavailable refunds the slot", func(t *testing.T) {
+		r := newRig(t, func(l *RelayerLimits) { l.PerUserPerWindow = 1 })
+		r.chain.callErr = fmt.Errorf("dial tcp: connection refused")
+		if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); !errors.Is(err, ErrSimulationUnavailable) {
+			t.Fatalf("setup: %v", err)
+		}
+		r.chain.callErr = nil
+		if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err != nil {
+			t.Fatalf("the slot should have been returned: %v", err)
+		}
+	})
+
+	t.Run("a would-revert request consumes the slot", func(t *testing.T) {
+		r := newRig(t, func(l *RelayerLimits) { l.PerUserPerWindow = 1 })
+		r.chain.callErr = fmt.Errorf("execution reverted: Ref already used")
+		if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); !errors.Is(err, ErrSimulationReverted) {
+			t.Fatalf("setup: %v", err)
+		}
+		r.chain.callErr = nil
+		if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("expected the slot to stay consumed, got %v", err)
+		}
+	})
+}
+
+// The budget must not leak on a request that never reached the chain.
+func TestRelayer_BudgetReleasedWhenTheRequestNeverBroadcasts(t *testing.T) {
+	r := newRig(t)
+	r.chain.callErr = fmt.Errorf("execution reverted: nope")
+
+	if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err == nil {
+		t.Fatal("expected a rejection")
+	}
+	if got := r.svc.SpentToday(); got.Sign() != 0 {
+		t.Fatalf("budget leaked %s gas on a request that never broadcast", got)
 	}
 }

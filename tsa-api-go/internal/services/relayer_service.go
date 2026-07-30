@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -80,7 +79,7 @@ type RelayerLimits struct {
 	GasCeiling       uint64        // per-request gas cap
 	PerUserPerWindow int           // sponsored requests per user per window
 	Window           time.Duration
-	DailyGasBudget   *big.Int // wei of S per UTC day across all users
+	DailyGasBudget   *big.Int // GAS UNITS per UTC day across all users (not wei)
 	BalanceFloor     *big.Int // refuse to relay below this balance
 	MinSponsored     *big.Int // minimum amount (token base units) worth sponsoring
 }
@@ -134,14 +133,19 @@ type relayRoleReader interface {
 // of scraping log lines.
 type RelayMetrics interface {
 	RelayAttempt(outcome, reason string)
-	RelayGasSpent(wei *big.Int)
+	// RelayGasUnits records the request's declared gas, in GAS UNITS. Deliberately
+	// not wei: converting would need a gas price per request, and the budget this
+	// feeds is expressed in units. Note it counts the INNER request gas only, so
+	// actual S burn is higher by the outer transaction's overhead — size the
+	// budget with headroom.
+	RelayGasUnits(units *big.Int)
 }
 
 // NoopRelayMetrics is the default when nothing is wired.
 type NoopRelayMetrics struct{}
 
 func (NoopRelayMetrics) RelayAttempt(string, string) {}
-func (NoopRelayMetrics) RelayGasSpent(*big.Int)      {}
+func (NoopRelayMetrics) RelayGasUnits(*big.Int)      {}
 
 const forwarderExecuteABI = `[
 {"inputs":[{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"gas","type":"uint256"},{"name":"deadline","type":"uint48"},{"name":"data","type":"bytes"},{"name":"signature","type":"bytes"}],"name":"request","type":"tuple"}],"name":"execute","outputs":[],"stateMutability":"payable","type":"function"},
@@ -198,9 +202,17 @@ func NewRelayerService(
 
 // IsEnabled reports whether relaying is available. The app keys its self-pay
 // fallback off this, so it must be an explicit signal — never an error.
+//
+// `killed` is read under the mutex: this is the incident-response lever, and an
+// unsynchronised read of it is a data race the detector flags the moment two
+// requests overlap.
 func (r *RelayerService) IsEnabled() bool {
-	return r != nil && r.signer != nil && r.chain != nil && r.builder != nil &&
-		r.forwarder != "" && !r.killed
+	if r == nil || r.signer == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.killed
 }
 
 // SetKillSwitch forces every request to self-pay regardless of configuration.
@@ -266,26 +278,55 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		return "", err
 	}
 
-	if err := r.checkFunding(ctx, req.Gas); err != nil {
+	if err := r.checkBalance(ctx); err != nil {
 		return "", err
 	}
+
+	// Reserve the user's slot and the day's gas BEFORE doing anything that can
+	// broadcast, then hand back whatever the request did not consume.
+	slot, err := r.reserveRateLimit(req.From)
+	if err != nil {
+		return "", err
+	}
+	res, err := r.reserveBudget(req.Gas)
+	if err != nil {
+		r.releaseRateLimit(slot)
+		return "", err
+	}
+
+	// Nothing below broadcasts without succeeding first, so the budget is always
+	// handed back on failure. The rate-limit slot is only handed back when the
+	// failure was OURS: a request that would revert is the caller's doing, and
+	// letting it retry for free is a griefing vector once relaying is gasless.
+	releaseOurFault := func() {
+		r.releaseBudget(res)
+		r.releaseRateLimit(slot)
+	}
+
 	if err := r.simulate(ctx, execData); err != nil {
+		if errors.Is(err, ErrSimulationUnavailable) {
+			releaseOurFault()
+		} else {
+			r.releaseBudget(res)
+		}
 		return "", err
 	}
 
 	unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
 	if err != nil {
+		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
 		return "", fmt.Errorf("relayer: build tx: %w", err)
 	}
 
 	txHash, err := r.signer.SignAndBroadcast(ctx, unsigned)
 	if err != nil {
+		releaseOurFault()
 		r.metrics.RelayAttempt("error", "broadcast")
 		return "", fmt.Errorf("relayer: broadcast: %w", err)
 	}
 
-	r.recordSpend(req)
+	r.metrics.RelayGasUnits(new(big.Int).SetUint64(req.Gas))
 	r.metrics.RelayAttempt("ok", "")
 	return txHash, nil
 }
@@ -324,10 +365,9 @@ func (r *RelayerService) validate(authenticatedWallet string, req ForwardRequest
 		r.metrics.RelayAttempt("rejected", "gas_ceiling")
 		return ErrGasCeiling
 	}
-	if err := r.checkMinSponsored(allowed, req.Data); err != nil {
-		return err
-	}
-	return r.checkRateLimit(req.From)
+	// The rate-limit slot is NOT claimed here: Relay reserves it once the request
+	// is known to be well-formed, so it can be handed back if we fail it later.
+	return r.checkMinSponsored(allowed, req.Data)
 }
 
 // lookupAllowed returns the matching allowlist entry, or an error naming which
@@ -371,7 +411,8 @@ func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
 	return nil
 }
 
-func (r *RelayerService) checkRateLimit(from string) error {
+// reserveRateLimit prunes the window and claims a slot in one critical section.
+func (r *RelayerService) reserveRateLimit(from string) (reservation, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -389,13 +430,31 @@ func (r *RelayerService) checkRateLimit(from string) error {
 
 	if len(kept) >= r.limits.PerUserPerWindow {
 		r.metrics.RelayAttempt("rejected", "rate_limit")
-		return ErrRateLimited
+		return reservation{}, ErrRateLimited
 	}
 	r.perUser[key] = append(kept, now)
-	return nil
+	return reservation{user: key, at: now}, nil
 }
 
-func (r *RelayerService) checkFunding(ctx context.Context, requestGas uint64) error {
+// releaseRateLimit gives a slot back when the request failed through no fault
+// of the caller — a relayer outage should not burn the user's hourly quota.
+func (r *RelayerService) releaseRateLimit(res reservation) {
+	if res.user == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entries := r.perUser[res.user]
+	for i, t := range entries {
+		if t.Equal(res.at) {
+			r.perUser[res.user] = append(entries[:i], entries[i+1:]...)
+			return
+		}
+	}
+}
+
+func (r *RelayerService) checkBalance(ctx context.Context) error {
 	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
 	if err != nil {
 		r.metrics.RelayAttempt("error", "balance")
@@ -406,20 +465,58 @@ func (r *RelayerService) checkFunding(ctx context.Context, requestGas uint64) er
 		r.metrics.RelayAttempt("rejected", "underfunded")
 		return ErrRelayerUnderfunded
 	}
+	return nil
+}
 
+// reservation records what a request consumed so it can be handed back if the
+// request never reaches the chain.
+type reservation struct {
+	day  string
+	gas  uint64
+	user string
+	at   time.Time
+}
+
+// reserveBudget checks AND reserves in ONE critical section.
+//
+// Checking in one lock acquisition and recording in another is check-then-act:
+// concurrent requests all observe the pre-spend total, all pass, and all
+// broadcast. Measured at 2x the cap with 50 goroutines against a 5-request
+// budget — and the overrun scales with concurrency, not with a fixed factor.
+// The daily cap is the only defence against sybil signups bypassing the
+// per-user limit, so it has to hold under load or it defends nothing.
+func (r *RelayerService) reserveBudget(requestGas uint64) (reservation, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rollDayLocked()
+
 	if r.limits.DailyGasBudget != nil {
-		// Include the incoming request, so the budget is a true ceiling rather
-		// than one that can be overshot by a whole request's worth of gas.
 		projected := new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
 		if projected.Cmp(r.limits.DailyGasBudget) > 0 {
 			r.metrics.RelayAttempt("rejected", "daily_cap")
-			return ErrDailyCapExceeded
+			return reservation{}, ErrDailyCapExceeded
 		}
 	}
-	return nil
+	r.spentGas = new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
+	return reservation{day: r.spentDay, gas: requestGas}, nil
+}
+
+// releaseBudget hands back gas for a request that never broadcast. Skipped if
+// the UTC day rolled in between, because the counter it would decrement is a
+// different day's.
+func (r *RelayerService) releaseBudget(res reservation) {
+	if res.gas == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.spentDay != res.day {
+		return
+	}
+	r.spentGas = new(big.Int).Sub(r.spentGas, new(big.Int).SetUint64(res.gas))
+	if r.spentGas.Sign() < 0 {
+		r.spentGas = new(big.Int)
+	}
 }
 
 func (r *RelayerService) rollDayLocked() {
@@ -488,18 +585,7 @@ func (r *RelayerService) packExecute(req ForwardRequest) ([]byte, error) {
 	return r.fwdABI.Pack("execute", arg)
 }
 
-func (r *RelayerService) recordSpend(req ForwardRequest) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rollDayLocked()
-	// Charge the request's declared gas against the daily budget. This
-	// deliberately over-counts versus gas actually burned — budgeting on the
-	// worst case is what keeps the cap meaningful.
-	r.spentGas = new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(req.Gas))
-	r.metrics.RelayGasSpent(new(big.Int).SetUint64(req.Gas))
-}
-
-// SpentToday exposes the running daily total for monitoring.
+// SpentToday exposes the running daily total, in gas units, for monitoring.
 func (r *RelayerService) SpentToday() *big.Int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -612,13 +698,4 @@ func SelectorOf(signature string) [4]byte {
 	var out [4]byte
 	copy(out[:], crypto.Keccak256([]byte(signature))[:4])
 	return out
-}
-
-// MarshalForwardRequest is a small helper for logging a request without its
-// signature, which should never reach a log.
-func MarshalForwardRequest(req ForwardRequest) string {
-	redacted := req
-	redacted.Signature = nil
-	b, _ := json.Marshal(redacted)
-	return string(b)
 }
