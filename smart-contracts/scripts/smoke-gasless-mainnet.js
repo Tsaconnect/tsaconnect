@@ -5,15 +5,17 @@
 // covers the mechanism against a real ERC2771Forwarder, but only a live run
 // exercises the actual chain, RPC, gas market and deployed bytecode together.
 //
-// Requires the deployer to hold MCGP (funded from V1's withdrawable excess) and
-// to be V2's owner, which it is until ownership transfers at cutover.
+// Requires the deployer to hold a little MCGP and to be V2's owner, which it is
+// until ownership transfers at cutover. The deployer holds no MCGP by default —
+// send it a few from the owner wallet (which holds ~198k), or withdraw some of
+// V1's excess (10,002 MCGP against 197.9 owed to users).
 //
-//   FUND_MCGP=100 npx hardhat run scripts/smoke-gasless-mainnet.js --network sonicMainnet
+//   npx hardhat run scripts/smoke-gasless-mainnet.js --network sonicMainnet
 //
 // Env:
-//   FUND_MCGP        MCGP to move into V2 as backing (default 50)
-//   CREDIT_MCGP      spend-only premium to credit the test wallet (default 10)
-//   SPEND_MCGP       amount the zero-S wallet spends (default 1)
+//   FUND_MCGP        MCGP to move into V2 as backing (default 2)
+//   CREDIT_MCGP      spend-only premium to credit the test wallet (default 1)
+//   SPEND_MCGP       amount the zero-S wallet spends (default 0.1)
 //   KEEP_FORWARDER=1 leave trustedForwarder set afterwards (default: restore to 0x0)
 //   CHECK_ONLY=1     print the plan and exit
 
@@ -45,9 +47,9 @@ async function main() {
   const fwd = await ethers.getContractAt("TSAForwarder", FORWARDER);
   const token = await ethers.getContractAt("MockERC20", MCGP); // ERC-20 surface only
 
-  const fund = mcgp(process.env.FUND_MCGP || "50");
-  const credit = mcgp(process.env.CREDIT_MCGP || "10");
-  const spend = mcgp(process.env.SPEND_MCGP || "1");
+  const fund = mcgp(process.env.FUND_MCGP || "2");
+  const credit = mcgp(process.env.CREDIT_MCGP || "1");
+  const spend = mcgp(process.env.SPEND_MCGP || "0.1");
 
   const relayerMcgp = await token.balanceOf(relayer.address);
   console.log("relayer/owner :", relayer.address);
@@ -57,7 +59,7 @@ async function main() {
 
   if (process.env.CHECK_ONLY) return console.log("CHECK_ONLY=1 — nothing sent.");
   if (relayerMcgp < fund) {
-    throw new Error(`need ${fmt(fund)} MCGP, hold ${fmt(relayerMcgp)} — withdraw V1's excess to this address first`);
+    throw new Error(`need ${fmt(fund)} MCGP, hold ${fmt(relayerMcgp)} — send some to ${relayer.address} first`);
   }
 
   // A brand-new wallet that has never held anything. This is the whole point:
