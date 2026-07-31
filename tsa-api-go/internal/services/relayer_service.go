@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"sync"
@@ -334,6 +335,12 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 func (r *RelayerService) validate(authenticatedWallet string, req ForwardRequest) error {
 	if !strings.EqualFold(strings.TrimSpace(authenticatedWallet), strings.TrimSpace(req.From)) {
 		r.metrics.RelayAttempt("rejected", "sender_mismatch")
+		// Durable trace, not just a counter: a session trying to relay for a
+		// DIFFERENT wallet is the signature of a compromised client or a probing
+		// attacker, and "it happened N times" is useless after the fact without
+		// knowing who and when. Signatures are never logged.
+		log.Printf("[relayer] ALERT relayer_sender_mismatch_total=1 session=%s claimed_from=%s",
+			strings.ToLower(strings.TrimSpace(authenticatedWallet)), strings.ToLower(strings.TrimSpace(req.From)))
 		return ErrSenderMismatch
 	}
 	if len(req.Signature) == 0 {
@@ -426,10 +433,19 @@ func (r *RelayerService) reserveRateLimit(from string) (reservation, error) {
 			kept = append(kept, t)
 		}
 	}
-	r.perUser[key] = kept
+	if len(kept) == 0 {
+		// Drop the key rather than leaving an empty slice behind. Pruning only
+		// WITHIN a key leaks one map entry per distinct address forever, and
+		// addresses are free to mint — cheap signups would grow this without
+		// bound.
+		delete(r.perUser, key)
+	} else {
+		r.perUser[key] = kept
+	}
 
 	if len(kept) >= r.limits.PerUserPerWindow {
 		r.metrics.RelayAttempt("rejected", "rate_limit")
+		log.Printf("[relayer] relayer_rate_limited_total=1 from=%s", key)
 		return reservation{}, ErrRateLimited
 	}
 	r.perUser[key] = append(kept, now)
@@ -448,7 +464,15 @@ func (r *RelayerService) releaseRateLimit(res reservation) {
 	entries := r.perUser[res.user]
 	for i, t := range entries {
 		if t.Equal(res.at) {
-			r.perUser[res.user] = append(entries[:i], entries[i+1:]...)
+			remaining := append(entries[:i], entries[i+1:]...)
+			if len(remaining) == 0 {
+				// Refunding the only slot must drop the key too, or every
+				// refunded request leaves an empty entry behind — the same
+				// unbounded growth the prune path guards against.
+				delete(r.perUser, res.user)
+			} else {
+				r.perUser[res.user] = remaining
+			}
 			return
 		}
 	}
@@ -494,6 +518,10 @@ func (r *RelayerService) reserveBudget(requestGas uint64) (reservation, error) {
 		projected := new(big.Int).Add(r.spentGas, new(big.Int).SetUint64(requestGas))
 		if projected.Cmp(r.limits.DailyGasBudget) > 0 {
 			r.metrics.RelayAttempt("rejected", "daily_cap")
+			// Budget exhaustion means gasless is DOWN for every user until UTC
+			// midnight, so it needs to page someone rather than only increment.
+			log.Printf("[relayer] ALERT relayer_daily_cap_exhausted_total=1 spent=%s budget=%s",
+				r.spentGas, r.limits.DailyGasBudget)
 			return reservation{}, ErrDailyCapExceeded
 		}
 	}

@@ -12,9 +12,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -390,5 +392,65 @@ func TestMCGPSwapHandler_SubmitRelay_RejectsMalformedHex(t *testing.T) {
 	}
 	if rr.relay.relayCalls != 0 {
 		t.Fatal("malformed requests must not reach the relayer")
+	}
+}
+
+// The relayer wraps the underlying RPC error on a transport failure, so passing
+// err.Error() straight through hands an authenticated caller our internal RPC
+// topology.
+func TestMCGPSwapHandler_SubmitRelay_DoesNotLeakInternalRPCDetail(t *testing.T) {
+	rr := newRelayRig(t, true)
+	rr.relay.relayErr = fmt.Errorf("%w: dial tcp 10.0.0.5:8545: connect: connection refused",
+		services.ErrSimulationUnavailable)
+
+	code, resp := rr.post(t, "/relay", map[string]any{
+		"from": rr.payer.WalletAddress, "to": "0x1111111111111111111111111111111111111111",
+		"value": "0", "gas": 200000, "deadline": 1234567890,
+		"data": "0xaabbcc", "signature": "0xdeadbeef",
+	}, nil)
+
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", code)
+	}
+	body, _ := json.Marshal(resp)
+	for _, leak := range []string{"10.0.0.5", "8545", "dial tcp"} {
+		if bytes.Contains(body, []byte(leak)) {
+			t.Fatalf("response leaked %q: %s", leak, body)
+		}
+	}
+}
+
+// The on-chain revert reason IS safe to pass through — it is public on the chain
+// and it is the only way the user learns why their payment failed.
+func TestMCGPSwapHandler_SubmitRelay_SurfacesTheRevertReason(t *testing.T) {
+	rr := newRelayRig(t, true)
+	rr.relay.relayErr = fmt.Errorf("%w: Ref already used", services.ErrSimulationReverted)
+
+	_, resp := rr.post(t, "/relay", map[string]any{
+		"from": rr.payer.WalletAddress, "to": "0x1111111111111111111111111111111111111111",
+		"value": "0", "gas": 200000, "deadline": 1234567890,
+		"data": "0xaabbcc", "signature": "0xdeadbeef",
+	}, nil)
+
+	body, _ := json.Marshal(resp)
+	if !bytes.Contains(body, []byte("Ref already used")) {
+		t.Fatalf("the revert reason should reach the caller: %s", body)
+	}
+}
+
+// Oversized bodies must be rejected before decoding.
+func TestMCGPSwapHandler_SubmitRelay_RejectsOversizedBody(t *testing.T) {
+	rr := newRelayRig(t, true)
+	huge := strings.Repeat("ab", 80<<10) // 160 KiB of hex, over the 64 KiB cap
+
+	code, _ := rr.post(t, "/relay", map[string]any{
+		"from": rr.payer.WalletAddress, "data": "0x" + huge, "signature": "0xdead",
+	}, nil)
+
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an oversized body, got %d", code)
+	}
+	if rr.relay.relayCalls != 0 {
+		t.Fatal("an oversized body must not reach the relayer")
 	}
 }

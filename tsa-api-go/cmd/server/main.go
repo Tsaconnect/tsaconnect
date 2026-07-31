@@ -222,7 +222,15 @@ func main() {
 
 		// Gasless relaying (EIP-2771). Dormant unless BOTH the forwarder address
 		// and a relayer key are configured; with either missing the app self-pays.
-		if cfg.MCGPForwarderAddress != "" && cfg.RelayerPrivateKey != "" && sonicClient != nil {
+		if cfg.Env == "production" && cfg.RelayerPrivateKey != "" {
+			// Same rule the IT operator key already follows (review L4): a raw key
+			// out of the environment is a dev convenience, not a production key
+			// store. The relayer key is HOTTER than the operator key — it signs
+			// continuously from a network-facing process — so if anything it
+			// deserves the stricter treatment. Gasless stays dormant; the app
+			// self-pays.
+			log.Printf("[config] gasless dormant: raw RELAYER_PRIVATE_KEY refused in production (use KMS)")
+		} else if cfg.MCGPForwarderAddress != "" && cfg.RelayerPrivateKey != "" && sonicClient != nil {
 			if key, kerr := crypto.HexToECDSA(cfg.RelayerPrivateKey); kerr != nil {
 				log.Printf("[config] relayer key invalid; gasless dormant: %v", kerr)
 			} else {

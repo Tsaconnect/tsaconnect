@@ -532,10 +532,41 @@ func (h *MCGPSwapHandler) SubmitRelay(c *gin.Context) {
 		Signature: sig,
 	})
 	if err != nil {
-		utils.ErrorResponse(c, relayStatusCode(err), err.Error())
+		utils.ErrorResponse(c, relayStatusCode(err), clientSafeRelayMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Relayed", gin.H{"txHash": txHash})
+}
+
+// clientSafeRelayMessage keeps internal detail out of the response body.
+//
+// The relayer wraps the underlying RPC error on a transport failure, so
+// err.Error() can read "dial tcp 10.0.0.5:8545: connect: connection refused" —
+// handing an authenticated but untrusted caller our internal RPC topology. Only
+// the on-chain revert reason is safe to pass through, and only because it is
+// already public on the chain.
+func clientSafeRelayMessage(err error) string {
+	switch {
+	case errors.Is(err, services.ErrSimulationReverted):
+		return err.Error() // the revert reason is public on-chain and actionable
+	case errors.Is(err, services.ErrSimulationUnavailable):
+		return "Could not check the transaction right now. Please try again."
+	case errors.Is(err, services.ErrRelayerUnderfunded), errors.Is(err, services.ErrDailyCapExceeded):
+		return "Gas sponsorship is temporarily unavailable. Please try again later."
+	case errors.Is(err, services.ErrRateLimited),
+		errors.Is(err, services.ErrSenderMismatch),
+		errors.Is(err, services.ErrTargetNotAllowed),
+		errors.Is(err, services.ErrSelectorNotAllowed),
+		errors.Is(err, services.ErrDeadlineExpired),
+		errors.Is(err, services.ErrDeadlineTooFar),
+		errors.Is(err, services.ErrGasCeiling),
+		errors.Is(err, services.ErrBelowMinSponsored),
+		errors.Is(err, services.ErrRelayerDisabled):
+		return err.Error() // these are our own sentinels; no internal detail in them
+	default:
+		// Anything unclassified may be a wrapped infrastructure error.
+		return "Could not relay the transaction."
+	}
 }
 
 // relayStatusCode maps relayer errors to HTTP codes. The distinction that
