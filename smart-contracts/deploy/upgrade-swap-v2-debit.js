@@ -54,19 +54,40 @@ async function main(hre) {
 
   const implBefore = await upgrades.erc1967.getImplementationAddress(proxy);
 
-  const upgraded = await upgrades.upgradeProxy(proxy, Swap, {
-    call: { fn: "initializeDebitCaps", args: [perTx, window, windowCap] },
-  });
+  // initializeDebitCaps is reinitializer(2) — it runs exactly once ever. On any
+  // subsequent upgrade the caps are already set, and passing `call` again would
+  // revert the whole upgrade on InvalidInitialization. Detect and skip.
+  let alreadyInitialised = false;
+  try {
+    alreadyInitialised = (await live.maxDebitPerTx()) > 0n;
+  } catch {
+    alreadyInitialised = false; // pre-debit implementation: the getter does not exist
+  }
+  console.log("debit caps     :", alreadyInitialised ? "already set — skipping re-initializer" : "will initialise");
+
+  const upgraded = await upgrades.upgradeProxy(
+    proxy,
+    Swap,
+    alreadyInitialised ? {} : { call: { fn: "initializeDebitCaps", args: [perTx, window, windowCap] } },
+  );
   await upgraded.waitForDeployment();
 
   // Read the ERC-1967 slot straight from storage. getImplementationAddress can
   // return the PRE-upgrade address here — it did on the first run, and the stale
   // value went into the ledger, which is the one record of what is deployed.
+  // The node is eventually consistent for read-after-write: the first upgrade
+  // read a STALE (pre-upgrade) address and recorded it, and the second read the
+  // pre-upgrade address again and wrongly concluded the upgrade had failed — after
+  // it had in fact succeeded. Poll until the slot actually moves.
   const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-  const raw = await ethers.provider.getStorage(proxy, IMPL_SLOT);
-  const impl = ethers.getAddress("0x" + raw.slice(26));
+  let impl = implBefore;
+  for (let attempt = 0; attempt < 10 && impl.toLowerCase() === implBefore.toLowerCase(); attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
+    const raw = await ethers.provider.getStorage(proxy, IMPL_SLOT);
+    impl = ethers.getAddress("0x" + raw.slice(26));
+  }
   if (impl.toLowerCase() === implBefore.toLowerCase()) {
-    throw new Error(`implementation did not change (still ${impl}) — upgrade did not take`);
+    throw new Error(`implementation still ${impl} after polling — upgrade did not take`);
   }
   writeLedger(network.name, "McgpEntitlementSwapV2", { proxy, impl });
 

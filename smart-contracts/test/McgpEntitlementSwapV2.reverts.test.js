@@ -104,10 +104,10 @@ describe("McgpEntitlementSwapV2 — remaining revert paths", function () {
       await fundMcgp(mcgp(1000));
       await swap.connect(operator).creditPremium(alice.address, mcgp(10), refOf("d:seed"));
       await expect(swap.connect(operator).debitPremium(alice.address, mcgp(1), ZERO_REF)).to.be.revertedWith("Invalid ref");
-      // Message changed with the bucket rule: a debit may now draw on bought too,
-      // so the shortfall is against the COMBINED balance.
+      // debitPremium is credited-only, so an over-draw is still a credited
+      // shortfall — same wording as V1.
       await expect(swap.connect(operator).debitPremium(alice.address, mcgp(11), refOf("d:over")))
-        .to.be.revertedWith("Insufficient premium balance");
+        .to.be.revertedWith("Insufficient credited premium");
     });
 
     it("debitPremium is blocked while paused", async function () {

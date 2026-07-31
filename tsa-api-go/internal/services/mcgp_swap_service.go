@@ -391,6 +391,26 @@ func (s *MCGPSwapService) OperatorDebitPremium(ctx context.Context, user string,
 	return s.operatorBroadcast(ctx, data)
 }
 
+// OperatorDebitSpendable begins a debit that may draw on the user's BOUGHT
+// premium, up to maxFromBought.
+//
+// Use this only where spending self-exitable value is intended — paying a utility
+// bill from "spendable MCGP". IT sell must keep using OperatorDebitPremium, which
+// the contract confines to the credited bucket, so a bug here cannot quietly sell
+// a user's bought premium for Naira at the wrong exit rate.
+func (s *MCGPSwapService) OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error) {
+	data, err := s.pack("debitSpendable", common.HexToAddress(user), amount, maxFromBought, debitRef)
+	if err != nil {
+		return "", err
+	}
+	return s.operatorBroadcast(ctx, data)
+}
+
+// DebitFromBought reports how much of a pending debit came from bought premium.
+func (s *MCGPSwapService) DebitFromBought(debitRef [32]byte) (*big.Int, error) {
+	return s.callUint("debitFromBought", debitRef)
+}
+
 // OperatorSettleDebit finalizes a debit after a confirmed Nomba payout.
 func (s *MCGPSwapService) OperatorSettleDebit(ctx context.Context, debitRef [32]byte) (string, error) {
 	data, err := s.pack("settleDebit", debitRef)

@@ -31,15 +31,16 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *     mcgpToken.balanceOf(this) >= accountedMcgp at all times.
  *   - premiumBought is the ONLY bucket `withdrawPremiumToWallet`/`sellPremium`
  *     can draw from.
- *   - CHANGED IN V2: operators are no longer confined to premiumCredited.
- *     `debitPremium` draws credited-first then BOUGHT, so a user who bought
- *     premium with USDC can still pay a utility bill. The cost is real and should
- *     not be glossed: a compromised operator key can now move self-exitable value
- *     into pendingSettle, and `settleDebit` then frees it as owner-withdrawable
- *     excess. V1's operator key could never reach bought premium at all. What
- *     bounds it now is the per-tx cap plus the rolling debit window, and a
- *     guardian pause (settleDebit is whenNotPaused; reverseDebit stays open so
- *     users can still be made whole).
+ *   - CHANGED IN V2: an operator CAN reach premiumBought, but only via
+ *     `debitSpendable`, which takes an explicit per-call `maxFromBought`.
+ *     `debitPremium` stays credited-only and is byte-for-byte V1 in effect, so
+ *     existing callers (IT sell) cannot touch self-exitable value even if their
+ *     own balance check is removed. Bills opt in; nothing else does.
+ *     The residual cost is real and should not be glossed: a COMPROMISED operator
+ *     simply passes a large maxFromBought, so the opt-in bounds our own code, not
+ *     a stolen key. What bounds a stolen key is the per-tx cap, the rolling debit
+ *     window, and a guardian pause (settleDebit is whenNotPaused; reverseDebit
+ *     stays open so users can still be made whole).
  *   - `spend` debits credited-first then bought and credits the recipient the
  *     SAME bucket type, so credited value can never become self-exitable.
  *
@@ -470,33 +471,61 @@ contract McgpEntitlementSwapV2 is
         emit PremiumCredited(user, amount, ref);
     }
 
-    /// @notice Begin an operator-settled debit — an NGN sell, or a utility bill
-    ///         paid in MCGP. Moves premium into `pendingSettle` pending an
-    ///         off-chain outcome, then `settleDebit` on success or `reverseDebit`
-    ///         on failure.
-    ///
-    /// @dev Draws CREDITED-FIRST then BOUGHT, exactly like `spend`, so a user who
-    ///      bought premium with USDC can still pay a bill. Draining credited first
-    ///      preserves the user's more valuable (self-exitable) balance for as long
-    ///      as possible. The split is recorded so a reversal can restore it.
+    /// @notice Begin an operator-settled debit against CREDITED premium only.
+    ///         Identical to V1 — existing callers (IT sell) keep exact V1
+    ///         semantics and cannot touch a user's self-exitable balance.
     function debitPremium(address user, uint256 amount, bytes32 debitRef)
         external
         onlyOperator
         nonReentrant
         whenNotPaused
     {
+        _debit(user, amount, 0, debitRef);
+    }
+
+    /// @notice Begin an operator-settled debit that MAY spill into bought premium,
+    ///         up to `maxFromBought`. This is what lets a user who bought premium
+    ///         with USDC pay a utility bill.
+    ///
+    /// @dev Reaching bought premium is opt-in PER CALL rather than global. IT sell
+    ///      and bills both debit, but only bills should be able to touch
+    ///      self-exitable value — and relying on each caller to check the credited
+    ///      balance first leaves that distinction one deleted `if` away from
+    ///      silently selling a user's bought premium at the wrong exit rate.
+    ///      Note this bounds OUR OWN code, not a compromised operator: a stolen key
+    ///      simply passes a large maxFromBought. The per-tx and window caps plus a
+    ///      guardian pause are what bound that.
+    function debitSpendable(address user, uint256 amount, uint256 maxFromBought, bytes32 debitRef)
+        external
+        onlyOperator
+        nonReentrant
+        whenNotPaused
+    {
+        _debit(user, amount, maxFromBought, debitRef);
+    }
+
+    function _debit(address user, uint256 amount, uint256 maxFromBought, bytes32 debitRef) internal {
         require(amount > 0, "Amount must be > 0");
         require(amount <= maxDebitPerTx, "Over per-tx debit cap");
         require(debitRef != bytes32(0), "Invalid ref");
         require(debits[debitRef].state == DebitState.None, "Debit exists");
-        require(premiumBalanceOf(user) >= amount, "Insufficient premium balance");
+
+        uint256 credited = premiumCredited[user];
+        uint256 fromCredited = credited >= amount ? amount : credited;
+        uint256 fromBought = amount - fromCredited;
+        // Keep V1's wording for the credited-only case: a `debitPremium` caller
+        // that over-draws is short of CREDITED premium, and telling it about a
+        // "bought draw" it never asked for is just confusing.
+        if (fromBought > maxFromBought) {
+            require(maxFromBought > 0, "Insufficient credited premium");
+            revert("Exceeds allowed bought draw");
+        }
+        require(premiumBought[user] >= fromBought, "Insufficient premium balance");
 
         _rollDebitWindow();
         require(debitedInWindow + amount <= debitWindowCap, "Over debit window cap");
         debitedInWindow += amount;
 
-        uint256 fromCredited = premiumCredited[user] >= amount ? amount : premiumCredited[user];
-        uint256 fromBought = amount - fromCredited;
         if (fromCredited > 0) premiumCredited[user] -= fromCredited;
         if (fromBought > 0) {
             premiumBought[user] -= fromBought;

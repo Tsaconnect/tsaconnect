@@ -4,10 +4,9 @@
 //
 // Two properties carry the weight here:
 //
-//   1. A debit draws credited-first then BOUGHT, so a user who bought premium
-//      with USDC can still pay a bill. That is a deliberate weakening — V1's
-//      operator could never reach bought premium — so the caps below are what
-//      bound it.
+//   1. Reaching BOUGHT premium is opt-in per call (`debitSpendable`), so bills
+//      can serve USDC buyers while IT sell — which calls `debitPremium` — keeps
+//      exact V1 semantics and cannot touch self-exitable value.
 //   2. A reversal restores each bucket EXACTLY as drawn. Returning a
 //      bought-funded debit as credited would convert self-exitable MCGP into
 //      spend-only, so a failed bill would quietly cost the user their withdrawal
@@ -86,7 +85,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
       await giveCredited(alice.address, mcgp(30));
       await giveBought(alice, mcgp(70));
 
-      await swap.connect(operator).debitPremium(alice.address, mcgp(50), refOf("d2"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(50), mcgp(1000), refOf("d2"));
 
       expect(await swap.premiumCredited(alice.address)).to.equal(0n);
       expect(await swap.premiumBought(alice.address)).to.equal(mcgp(50)); // 70 - 20 spill
@@ -96,7 +95,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
     // The whole reason for the bucket change: bills must work for USDC buyers.
     it("a user holding ONLY bought premium can be debited", async function () {
       await giveBought(alice, mcgp(40));
-      await swap.connect(operator).debitPremium(alice.address, mcgp(15), refOf("d3"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(15), mcgp(1000), refOf("d3"));
 
       expect(await swap.premiumBought(alice.address)).to.equal(mcgp(25));
       expect(await swap.debitFromBought(refOf("d3"))).to.equal(mcgp(15));
@@ -105,8 +104,36 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
     it("rejects a debit beyond the COMBINED balance", async function () {
       await giveCredited(alice.address, mcgp(10));
       await giveBought(alice, mcgp(10));
-      await expect(swap.connect(operator).debitPremium(alice.address, mcgp(21), refOf("d4")))
+      await expect(swap.connect(operator).debitSpendable(alice.address, mcgp(21), mcgp(1000), refOf("d4")))
         .to.be.revertedWith("Insufficient premium balance");
+    });
+  });
+
+  describe("bought premium is opt-in per call", function () {
+    // The whole point of the split: IT sell calls debitPremium and must be unable
+    // to reach self-exitable value even if its own balance check is removed.
+    it("debitPremium cannot touch bought premium at all", async function () {
+      await giveBought(alice, mcgp(50));
+      await expect(swap.connect(operator).debitPremium(alice.address, mcgp(10), refOf("x1")))
+        .to.be.revertedWith("Insufficient credited premium");
+      expect(await swap.premiumBought(alice.address)).to.equal(mcgp(50));
+    });
+
+    it("debitPremium still works against credited, exactly as V1", async function () {
+      await giveCredited(alice.address, mcgp(30));
+      await swap.connect(operator).debitPremium(alice.address, mcgp(30), refOf("x2"));
+      expect(await swap.pendingSettle(alice.address)).to.equal(mcgp(30));
+      expect(await swap.debitFromBought(refOf("x2"))).to.equal(0n);
+    });
+
+    it("debitSpendable is capped by the allowance the caller passes", async function () {
+      await giveCredited(alice.address, mcgp(10));
+      await giveBought(alice, mcgp(40));
+      // Needs 15 from bought, but the caller only permits 5.
+      await expect(swap.connect(operator).debitSpendable(alice.address, mcgp(25), mcgp(5), refOf("x3")))
+        .to.be.revertedWith("Exceeds allowed bought draw");
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(25), mcgp(15), refOf("x4"));
+      expect(await swap.debitFromBought(refOf("x4"))).to.equal(mcgp(15));
     });
   });
 
@@ -114,7 +141,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
     it("a mixed debit comes back to the same two buckets", async function () {
       await giveCredited(alice.address, mcgp(30));
       await giveBought(alice, mcgp(70));
-      await swap.connect(operator).debitPremium(alice.address, mcgp(50), refOf("r1"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(50), mcgp(1000), refOf("r1"));
 
       await swap.connect(operator).reverseDebit(refOf("r1"));
 
@@ -128,7 +155,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
     // credited would leave the user unable to withdraw or sell what they bought.
     it("a bought-funded reversal does NOT downgrade to spend-only", async function () {
       await giveBought(alice, mcgp(40));
-      await swap.connect(operator).debitPremium(alice.address, mcgp(40), refOf("r2"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(40), mcgp(1000), refOf("r2"));
       expect(await swap.premiumBought(alice.address)).to.equal(0n);
 
       await swap.connect(operator).reverseDebit(refOf("r2"));
@@ -142,7 +169,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
 
     it("clears the recorded split so a ref cannot be reversed twice", async function () {
       await giveBought(alice, mcgp(10));
-      await swap.connect(operator).debitPremium(alice.address, mcgp(10), refOf("r3"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(10), mcgp(1000), refOf("r3"));
       await swap.connect(operator).reverseDebit(refOf("r3"));
 
       expect(await swap.debitFromBought(refOf("r3"))).to.equal(0n);
@@ -152,7 +179,7 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
     it("settle frees backing regardless of which bucket funded it", async function () {
       await giveBought(alice, mcgp(20));
       const accountedBefore = await swap.accountedMcgp();
-      await swap.connect(operator).debitPremium(alice.address, mcgp(20), refOf("s1"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(20), mcgp(1000), refOf("s1"));
       expect(await swap.accountedMcgp()).to.equal(accountedBefore); // not yet freed
 
       await swap.connect(operator).settleDebit(refOf("s1"));
@@ -227,11 +254,11 @@ describe("McgpEntitlementSwapV2 — operator debit (bills)", function () {
         (await swap.pendingSettle(alice.address));
 
       expect(await swap.accountedMcgp()).to.equal(await sum());
-      await swap.connect(operator).debitPremium(alice.address, mcgp(50), refOf("i1"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(50), mcgp(1000), refOf("i1"));
       expect(await swap.accountedMcgp()).to.equal(await sum());
       await swap.connect(operator).reverseDebit(refOf("i1"));
       expect(await swap.accountedMcgp()).to.equal(await sum());
-      await swap.connect(operator).debitPremium(alice.address, mcgp(50), refOf("i2"));
+      await swap.connect(operator).debitSpendable(alice.address, mcgp(50), mcgp(1000), refOf("i2"));
       await swap.connect(operator).settleDebit(refOf("i2"));
       expect(await swap.accountedMcgp()).to.equal(await sum());
 
