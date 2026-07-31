@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -217,6 +218,54 @@ func main() {
 			}
 		} else {
 			log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY not set")
+		}
+
+		// Gasless relaying (EIP-2771). Dormant unless BOTH the forwarder address
+		// and a relayer key are configured; with either missing the app self-pays.
+		if cfg.Env == "production" && cfg.RelayerPrivateKey != "" {
+			// Same rule the IT operator key already follows (review L4): a raw key
+			// out of the environment is a dev convenience, not a production key
+			// store. The relayer key is HOTTER than the operator key — it signs
+			// continuously from a network-facing process — so if anything it
+			// deserves the stricter treatment. Gasless stays dormant; the app
+			// self-pays.
+			log.Printf("[config] gasless dormant: raw RELAYER_PRIVATE_KEY refused in production (use KMS)")
+		} else if cfg.MCGPForwarderAddress != "" && cfg.RelayerPrivateKey != "" && sonicClient != nil {
+			if key, kerr := crypto.HexToECDSA(cfg.RelayerPrivateKey); kerr != nil {
+				log.Printf("[config] relayer key invalid; gasless dormant: %v", kerr)
+			} else {
+				signer := services.NewLocalKeyReleaseSigner(key, sonicClient)
+				limits := services.RelayerLimits{
+					MaxDeadline:      cfg.RelayerMaxDeadline,
+					GasCeiling:       cfg.RelayerGasCeiling,
+					PerUserPerWindow: cfg.RelayerPerUserPerHour,
+					Window:           time.Hour,
+					DailyGasBudget:   bigFromDecimal(cfg.RelayerDailyGasBudget),
+					BalanceFloor:     bigFromDecimal(cfg.RelayerBalanceFloorWei),
+					MinSponsored:     bigFromDecimal(cfg.RelayerMinSponsored),
+				}
+				allow := []services.AllowedCall{
+					// spend(to, amount, ref) — amount is calldata word 1.
+					{Target: cfg.MCGPSwapBAddress, Selector: services.SelectorOf("spend(address,uint256,bytes32)"), AmountWordIndex: 1},
+				}
+				relayer, rerr := services.NewRelayerService(
+					signer, services.EVMRelayChain{Client: sonicClient},
+					services.EVMRelayTxBuilder{Client: sonicClient},
+					cfg.MCGPForwarderAddress, allow, limits, nil, nil,
+				)
+				if rerr != nil {
+					log.Printf("[config] relayer init failed; gasless dormant: %v", rerr)
+				} else if serr := relayer.AssertRoleSeparation(context.Background(), services.SwapRoleReader{Swap: mcgpSwapService}); serr != nil {
+					// Hard-fail rather than run: a relayer key that is also the
+					// operator turns a hot-key compromise into an operator one.
+					log.Fatalf("[config] REFUSING TO START: %v", serr)
+				} else {
+					mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)
+					log.Printf("[config] gasless relaying enabled; forwarder=%s relayer=%s", cfg.MCGPForwarderAddress, signer.Address())
+				}
+			}
+		} else {
+			log.Printf("gasless relaying dormant: MCGP_FORWARDER_ADDRESS / RELAYER_PRIVATE_KEY not set")
 		}
 	} else {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
@@ -950,4 +999,18 @@ func verifyEscrowAdmin(s *services.EscrowService) {
 		return
 	}
 	log.Printf("Escrow contract owner (on-chain): %s", onchain)
+}
+
+// bigFromDecimal parses a decimal config string; empty or invalid yields nil,
+// which the relayer treats as "limit not configured".
+func bigFromDecimal(s string) *big.Int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil
+	}
+	return v
 }

@@ -852,6 +852,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			mcgp.POST("/confirm", msh.ConfirmSwap)
 			mcgp.POST("/pay/prepare", msh.PreparePay)
 			mcgp.POST("/pay/confirm", msh.ConfirmPay)
+			// Gasless relaying. Registered unconditionally: /relay/status must be
+			// answerable even when relaying is off, because that answer is how the
+			// app knows to self-pay.
+			mcgp.GET("/relay/status", msh.RelayStatus)
+			mcgp.POST("/relay", msh.SubmitRelay)
 		}
 	} else {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")

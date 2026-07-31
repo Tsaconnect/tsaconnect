@@ -122,6 +122,7 @@ func AutoMigrate() error {
 		&models.MCGPSwapLedgerEntry{},
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
+		&models.BillPayment{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},

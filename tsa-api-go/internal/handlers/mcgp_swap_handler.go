@@ -1,6 +1,10 @@
 package handlers
 
 import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"strings"
@@ -22,14 +26,56 @@ import (
 // on-chain event. Audit ledger rows are written at CONFIRM time (after the
 // event is verified), so an abandoned prepare leaves no orphan rows. Routes are
 // registered only when the swap service is configured (dormant-by-default).
+// mcgpSwapPort is the slice of *services.MCGPSwapService this handler needs.
+// Declared on the consumer side so the handler can be exercised end to end
+// without an EVM client — the concrete service reaches a chain on construction,
+// which is why these endpoints previously had no tests at all.
+type mcgpSwapPort interface {
+	Allowance(token, owner string) (*big.Int, error)
+	LegacyEntitlement(user string) (*big.Int, error)
+	LegacyRemaining(user string) (*big.Int, error)
+	PremiumBalance(user string) (*big.Int, error)
+	PrepareApprove(from, token string, amount *big.Int) ([]byte, error)
+	PrepareBuyPremium(from string, mcgpAmount, maxUsdc *big.Int) ([]byte, error)
+	PrepareSellLegacy(from string, mcgpAmount, minUsdc *big.Int) ([]byte, error)
+	PrepareSellPremium(from string, mcgpAmount, minUsdc *big.Int) ([]byte, error)
+	PrepareSpend(from, to string, amount *big.Int, ref [32]byte) ([]byte, error)
+	PrepareWithdrawPremium(from string, mcgpAmount *big.Int) ([]byte, error)
+	Quote(kind uint8, mcgpAmount *big.Int) (*big.Int, error)
+	VerifyAmountEvent(eventName, txHash string, account common.Address) (*services.AmountEvent, error)
+	VerifyPremiumSpent(txHash string, from, to common.Address, ref [32]byte) (*services.PremiumSpentEvent, error)
+}
+
+// mcgpRelayPort is the relayer subset. Nil (or a disabled relayer) means every
+// flow self-pays, which is the pre-gasless behaviour.
+type mcgpRelayPort interface {
+	IsEnabled() bool
+	Relay(ctx context.Context, authenticatedWallet string, req services.ForwardRequest) (string, error)
+	Scaffold(ctx context.Context, from, to string, data []byte, gas uint64) (services.ForwardRequestScaffold, error)
+}
+
 type MCGPSwapHandler struct {
-	db   *gorm.DB
-	swap *services.MCGPSwapService
+	db          *gorm.DB
+	swap        mcgpSwapPort
+	relay       mcgpRelayPort
+	swapAddress string
 }
 
 // NewMCGPSwapHandler returns a handler bound to the swap service.
 func NewMCGPSwapHandler(db *gorm.DB, swap *services.MCGPSwapService) *MCGPSwapHandler {
 	return &MCGPSwapHandler{db: db, swap: swap}
+}
+
+// WithRelayer enables the gasless path. Left unset, IsRelayEnabled() reports
+// false and the app self-pays — the dormant-by-default pattern.
+func (h *MCGPSwapHandler) WithRelayer(relay mcgpRelayPort, swapAddress string) *MCGPSwapHandler {
+	h.relay = relay
+	h.swapAddress = swapAddress
+	return h
+}
+
+func (h *MCGPSwapHandler) relayEnabled() bool {
+	return h.relay != nil && h.relay.IsEnabled()
 }
 
 // parseAmount parses a positive base-unit decimal string into a big.Int.
@@ -279,6 +325,31 @@ func (h *MCGPSwapHandler) PrepareWithdraw(c *gin.Context) {
 type payReq struct {
 	Username   string `json:"username"`
 	McgpAmount string `json:"mcgpAmount"`
+	// IdempotencyKey makes the derived `ref` stable across retries of one
+	// payment intent. Also accepted as the `Idempotency-Key` header.
+	IdempotencyKey string `json:"idempotencyKey"`
+}
+
+// payRef derives the single-use `ref` for a spend.
+//
+// With an idempotency key the ref is DERIVED from (payer, key), so retrying the
+// same intent yields the SAME ref and the on-chain `usedRef` guard collapses the
+// duplicate. That is what stops a relayed spend and a self-paid retry of the same
+// payment from both landing — two independent prepares would otherwise mint two
+// different refs, and neither the chain nor the ledger's ref_hash index could tell
+// they were one intent.
+//
+// Without a key we mint a random ref, preserving the behaviour older app builds
+// depend on: still single-use, just unable to dedupe a retry.
+//
+// The payer is bound into the hash so one user cannot burn another user's key.
+func payRef(payerWallet, idempotencyKey string) common.Hash {
+	key := strings.TrimSpace(idempotencyKey)
+	if key == "" {
+		return crypto.Keccak256Hash([]byte("mcgp-pay:" + uuid.New().String()))
+	}
+	payer := strings.ToLower(strings.TrimSpace(payerWallet))
+	return crypto.Keccak256Hash([]byte("mcgp-pay:v2:" + payer + ":" + key))
 }
 
 // POST /api/mcgp/pay/prepare — peer pay-by-username. Resolves the recipient,
@@ -323,8 +394,13 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 		return
 	}
 
-	// Single-use ref (idempotency key, also enforced on-chain via usedRef).
-	ref := crypto.Keccak256Hash([]byte("mcgp-pay:" + uuid.New().String()))
+	// Single-use ref (also enforced on-chain via usedRef). Derived from the
+	// caller's idempotency key when one is supplied — see payRef.
+	idem := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if idem == "" {
+		idem = req.IdempotencyKey
+	}
+	ref := payRef(user.WalletAddress, idem)
 	var ref32 [32]byte
 	copy(ref32[:], ref.Bytes())
 
@@ -333,13 +409,184 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Prepared", gin.H{
+	payload := gin.H{
 		"ref":           ref.Hex(),
 		"recipient":     target.Username,
 		"recipientName": target.Name,
-		"mcgpAmount":    amount.String(),
-		"tx":            rawJSON(tx),
+		// The resolved on-chain address, so the app can rebuild the calldata
+		// locally and byte-compare before signing. Without it the app is
+		// blind-signing a payee it never saw.
+		"recipientAddress": target.WalletAddress,
+		"mcgpAmount":       amount.String(),
+		"tx":               rawJSON(tx),
+	}
+
+	// When relaying is available, hand back the EIP-712 scaffold too. The app
+	// decides which path to take; a scaffold being absent is the explicit
+	// "self-pay" signal.
+	if h.relayEnabled() {
+		// Reuse the calldata from the tx prepared above. Calling PrepareSpend a
+		// second time would repeat its GetNonce + SuggestGasPrice + EstimateGas —
+		// three extra RPC round trips on the hot path of every payment, purely to
+		// recompute bytes we already hold.
+		if callData := spendCallData(tx); len(callData) > 0 {
+			if scaffold, sErr := h.relay.Scaffold(c.Request.Context(), user.WalletAddress, h.swapAddress, callData, 0); sErr == nil {
+				payload["forwardRequest"] = scaffold
+			}
+		}
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Prepared", payload)
+}
+
+// spendCallData extracts the raw calldata from a prepared unsigned tx. The
+// prepare helpers return a JSON envelope; the forwarder needs just the bytes.
+func spendCallData(prepared []byte) []byte {
+	var env struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(prepared, &env); err != nil {
+		return nil
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(env.Data, "0x"))
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// GET /api/mcgp/relay/status — the app's explicit signal for whether to relay
+// or self-pay. Deliberately a 200 with a boolean rather than an error, because a
+// transport failure must NOT be read as "relayer down": falling back on an
+// ambiguous outcome is how one intent becomes two on-chain spends.
+func (h *MCGPSwapHandler) RelayStatus(c *gin.Context) {
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{
+		"relayerEnabled": h.relayEnabled(),
 	})
+}
+
+// maxRelayBodyBytes bounds the relay endpoint's request body. A ForwardRequest
+// is a few hundred bytes even with generous calldata.
+const maxRelayBodyBytes = 64 << 10
+
+type relaySubmitReq struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Value     string `json:"value"`
+	Gas       uint64 `json:"gas"`
+	Deadline  uint64 `json:"deadline"`
+	Data      string `json:"data"`
+	Signature string `json:"signature"`
+}
+
+// POST /api/mcgp/relay — submit a user-signed ForwardRequest for sponsorship.
+func (h *MCGPSwapHandler) SubmitRelay(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if !h.relayEnabled() {
+		// 200 with the disabled flag, not an error: the app must be able to tell
+		// "relaying is off" apart from "the request failed".
+		utils.SuccessResponse(c, http.StatusOK, "Relaying is not available", gin.H{
+			"relayerEnabled": false,
+		})
+		return
+	}
+
+	// Cap the body before decoding. `data` and `signature` are caller-supplied
+	// hex, and nothing else in the middleware chain bounds request size — the IP
+	// rate limiter allows 500 requests per 15 minutes, which is a lot of room to
+	// push large bodies through an authenticated endpoint. A ForwardRequest is a
+	// few hundred bytes; 64 KiB is generous.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRelayBodyBytes)
+
+	var req relaySubmitReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	data, err := hex.DecodeString(strings.TrimPrefix(req.Data, "0x"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid calldata")
+		return
+	}
+	sig, err := hex.DecodeString(strings.TrimPrefix(req.Signature, "0x"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signature")
+		return
+	}
+	value, ok := new(big.Int).SetString(strings.TrimSpace(req.Value), 10)
+	if !ok {
+		value = new(big.Int)
+	}
+
+	txHash, err := h.relay.Relay(c.Request.Context(), user.WalletAddress, services.ForwardRequest{
+		From:      req.From,
+		To:        req.To,
+		Value:     value,
+		Gas:       req.Gas,
+		Deadline:  req.Deadline,
+		Data:      data,
+		Signature: sig,
+	})
+	if err != nil {
+		utils.ErrorResponse(c, relayStatusCode(err), clientSafeRelayMessage(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Relayed", gin.H{"txHash": txHash})
+}
+
+// clientSafeRelayMessage keeps internal detail out of the response body.
+//
+// The relayer wraps the underlying RPC error on a transport failure, so
+// err.Error() can read "dial tcp 10.0.0.5:8545: connect: connection refused" —
+// handing an authenticated but untrusted caller our internal RPC topology. Only
+// the on-chain revert reason is safe to pass through, and only because it is
+// already public on the chain.
+func clientSafeRelayMessage(err error) string {
+	switch {
+	case errors.Is(err, services.ErrSimulationReverted):
+		return err.Error() // the revert reason is public on-chain and actionable
+	case errors.Is(err, services.ErrSimulationUnavailable):
+		return "Could not check the transaction right now. Please try again."
+	case errors.Is(err, services.ErrRelayerUnderfunded), errors.Is(err, services.ErrDailyCapExceeded):
+		return "Gas sponsorship is temporarily unavailable. Please try again later."
+	case errors.Is(err, services.ErrRateLimited),
+		errors.Is(err, services.ErrSenderMismatch),
+		errors.Is(err, services.ErrTargetNotAllowed),
+		errors.Is(err, services.ErrSelectorNotAllowed),
+		errors.Is(err, services.ErrDeadlineExpired),
+		errors.Is(err, services.ErrDeadlineTooFar),
+		errors.Is(err, services.ErrGasCeiling),
+		errors.Is(err, services.ErrBelowMinSponsored),
+		errors.Is(err, services.ErrRelayerDisabled):
+		return err.Error() // these are our own sentinels; no internal detail in them
+	default:
+		// Anything unclassified may be a wrapped infrastructure error.
+		return "Could not relay the transaction."
+	}
+}
+
+// relayStatusCode maps relayer errors to HTTP codes. The distinction that
+// matters: 503 means "try again", everything else means "do not retry this
+// request as-is".
+func relayStatusCode(err error) int {
+	switch {
+	case errors.Is(err, services.ErrRelayerDisabled):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrSimulationUnavailable),
+		errors.Is(err, services.ErrRelayerUnderfunded),
+		errors.Is(err, services.ErrDailyCapExceeded):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrRateLimited):
+		return http.StatusTooManyRequests
+	case errors.Is(err, services.ErrSenderMismatch):
+		return http.StatusForbidden
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // ─────────────────────────── confirm endpoints ────────────────────────────
