@@ -16,7 +16,8 @@ const PREMIUM_BUY = 0;
 const mcgp = (n) => ethers.parseUnits(String(n), 18);
 const usdc = (n) => ethers.parseUnits(String(n), 6);
 const refOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
-const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
+// minCredit, maxCreditPerTx, creditWindow, creditWindowCap, maxDebitPerTx, debitWindow, debitWindowCap
+const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000), mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
 
 const FORWARDER_NAME = "TSAConnectForwarder";
 

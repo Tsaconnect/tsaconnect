@@ -57,9 +57,16 @@ async function main() {
   console.log("relayer S     :", ethers.formatEther(await ethers.provider.getBalance(relayer.address)));
   console.log("plan          : fund", fmt(fund), "→ credit", fmt(credit), "→ gasless spend", fmt(spend));
 
+  // Backing may already be present: a plain ERC-20 transfer straight to the
+  // contract credits backing just as fund() does, since backing is measured as
+  // balanceOf(this). Only top up when what's there is short.
+  const [heldNow] = await swap.backing();
+  const needTopUp = heldNow < fund;
+  console.log("backing on-chain:", fmt(heldNow), needTopUp ? `(topping up to ${fmt(fund)})` : "(sufficient — no funding needed)");
+
   if (process.env.CHECK_ONLY) return console.log("CHECK_ONLY=1 — nothing sent.");
-  if (relayerMcgp < fund) {
-    throw new Error(`need ${fmt(fund)} MCGP, hold ${fmt(relayerMcgp)} — send some to ${relayer.address} first`);
+  if (needTopUp && relayerMcgp < fund - heldNow) {
+    throw new Error(`backing ${fmt(heldNow)} + deployer ${fmt(relayerMcgp)} < ${fmt(fund)} MCGP needed`);
   }
 
   // A brand-new wallet that has never held anything. This is the whole point:
@@ -71,9 +78,14 @@ async function main() {
   if (userS !== 0n) throw new Error("test wallet is not empty — it must have zero S");
 
   // 1. Back the contract, then credit the user spend-only premium.
-  console.log("\n1. funding V2 …");
-  await (await token.approve(SWAP, fund)).wait();
-  await (await swap.fund(MCGP, fund)).wait();
+  if (needTopUp) {
+    console.log("\n1. topping up V2 backing …");
+    const delta = fund - heldNow;
+    await (await token.approve(SWAP, delta)).wait();
+    await (await swap.fund(MCGP, delta)).wait();
+  } else {
+    console.log("\n1. backing already funded — skipping");
+  }
 
   console.log("2. adding operator + crediting the test wallet …");
   if (!(await swap.operators(relayer.address))) {

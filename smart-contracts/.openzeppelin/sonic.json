@@ -2587,6 +2587,466 @@
           ]
         }
       }
+    },
+    "5c475ebc85d466a588a2de11789d01c21a542d4ef3b596db1203d4576f93efc8": {
+      "address": "0x9a58E4E09a55A8EEF73A0146910a904b215F39eE",
+      "txHash": "0x45c975b68d1651a329b1920752ab60ffdf675969099b79456afbcff4e40f106d",
+      "layout": {
+        "solcVersion": "0.8.24",
+        "storage": [
+          {
+            "label": "mcgpToken",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_contract(IERC20)1345",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:80"
+          },
+          {
+            "label": "usdcToken",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_contract(IERC20)1345",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:81"
+          },
+          {
+            "label": "_reentrancyStatus",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:87"
+          },
+          {
+            "label": "_phases",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_mapping(t_uint8,t_array(t_struct(PricePhase)2572_storage)dyn_storage)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:110"
+          },
+          {
+            "label": "activePhase",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_mapping(t_uint8,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:112"
+          },
+          {
+            "label": "legacyEntitlement",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:117"
+          },
+          {
+            "label": "legacyRedeemed",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:118"
+          },
+          {
+            "label": "premiumBought",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:118"
+          },
+          {
+            "label": "premiumCredited",
+            "offset": 0,
+            "slot": "8",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:120"
+          },
+          {
+            "label": "pendingSettle",
+            "offset": 0,
+            "slot": "9",
+            "type": "t_mapping(t_address,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:121"
+          },
+          {
+            "label": "accountedMcgp",
+            "offset": 0,
+            "slot": "10",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:122"
+          },
+          {
+            "label": "usedSpendRef",
+            "offset": 0,
+            "slot": "11",
+            "type": "t_mapping(t_bytes32,t_bool)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:125"
+          },
+          {
+            "label": "usedCreditRef",
+            "offset": 0,
+            "slot": "12",
+            "type": "t_mapping(t_bytes32,t_bool)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:126"
+          },
+          {
+            "label": "debits",
+            "offset": 0,
+            "slot": "13",
+            "type": "t_mapping(t_bytes32,t_struct(Debit)2627_storage)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:132"
+          },
+          {
+            "label": "operators",
+            "offset": 0,
+            "slot": "14",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:134"
+          },
+          {
+            "label": "guardians",
+            "offset": 0,
+            "slot": "15",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:135"
+          },
+          {
+            "label": "minCredit",
+            "offset": 0,
+            "slot": "16",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:137"
+          },
+          {
+            "label": "maxCreditPerTx",
+            "offset": 0,
+            "slot": "17",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:140"
+          },
+          {
+            "label": "creditWindow",
+            "offset": 0,
+            "slot": "18",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:141"
+          },
+          {
+            "label": "creditWindowCap",
+            "offset": 0,
+            "slot": "19",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:142"
+          },
+          {
+            "label": "windowStart",
+            "offset": 0,
+            "slot": "20",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:143"
+          },
+          {
+            "label": "creditedInWindow",
+            "offset": 0,
+            "slot": "21",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:144"
+          },
+          {
+            "label": "trustedForwarder",
+            "offset": 0,
+            "slot": "22",
+            "type": "t_address",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:149"
+          },
+          {
+            "label": "feeManager",
+            "offset": 0,
+            "slot": "23",
+            "type": "t_address",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:152"
+          },
+          {
+            "label": "maxDebitPerTx",
+            "offset": 0,
+            "slot": "24",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:158"
+          },
+          {
+            "label": "debitWindow",
+            "offset": 0,
+            "slot": "25",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:164"
+          },
+          {
+            "label": "debitWindowCap",
+            "offset": 0,
+            "slot": "26",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:165"
+          },
+          {
+            "label": "debitWindowStart",
+            "offset": 0,
+            "slot": "27",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:166"
+          },
+          {
+            "label": "debitedInWindow",
+            "offset": 0,
+            "slot": "28",
+            "type": "t_uint256",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:168"
+          },
+          {
+            "label": "_debitFromBought",
+            "offset": 0,
+            "slot": "29",
+            "type": "t_mapping(t_bytes32,t_uint256)",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:175"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "30",
+            "type": "t_array(t_uint256)44_storage",
+            "contract": "McgpEntitlementSwapV2",
+            "src": "contracts/McgpEntitlementSwapV2.sol:178"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_struct(InitializableStorage)369_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)13_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(PausableStorage)115_storage": {
+            "label": "struct PausableUpgradeable.PausableStorage",
+            "members": [
+              {
+                "label": "_paused",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_struct(PricePhase)2572_storage)dyn_storage": {
+            "label": "struct McgpEntitlementSwapV2.PricePhase[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_uint256)44_storage": {
+            "label": "uint256[44]",
+            "numberOfBytes": "1408"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_contract(IERC20)1345": {
+            "label": "contract IERC20",
+            "numberOfBytes": "20"
+          },
+          "t_enum(DebitState)2619": {
+            "label": "enum McgpEntitlementSwapV2.DebitState",
+            "members": [
+              "None",
+              "Pending",
+              "Resolved"
+            ],
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_uint256)": {
+            "label": "mapping(address => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_bool)": {
+            "label": "mapping(bytes32 => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(Debit)2627_storage)": {
+            "label": "mapping(bytes32 => struct McgpEntitlementSwapV2.Debit)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_uint256)": {
+            "label": "mapping(bytes32 => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint8,t_array(t_struct(PricePhase)2572_storage)dyn_storage)": {
+            "label": "mapping(uint8 => struct McgpEntitlementSwapV2.PricePhase[])",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint8,t_uint256)": {
+            "label": "mapping(uint8 => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_string_storage": {
+            "label": "string",
+            "numberOfBytes": "32"
+          },
+          "t_struct(Debit)2627_storage": {
+            "label": "struct McgpEntitlementSwapV2.Debit",
+            "members": [
+              {
+                "label": "user",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "state",
+                "type": "t_enum(DebitState)2619",
+                "offset": 0,
+                "slot": "2"
+              }
+            ],
+            "numberOfBytes": "96"
+          },
+          "t_struct(PricePhase)2572_storage": {
+            "label": "struct McgpEntitlementSwapV2.PricePhase",
+            "members": [
+              {
+                "label": "price",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "name",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint8": {
+            "label": "uint8",
+            "numberOfBytes": "1"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Pausable": [
+            {
+              "contract": "PausableUpgradeable",
+              "label": "_paused",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol:21",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
     }
   }
 }

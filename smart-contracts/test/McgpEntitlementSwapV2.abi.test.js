@@ -96,6 +96,7 @@ describe("McgpEntitlementSwapV2 — ABI compatibility", function () {
     // Inherited OZ events (Ownable/Pausable/ERC1967) plus V2's two new ones.
     expect(added.sort()).to.deep.equal(
       [
+        "DebitCapsUpdated(uint256,uint256,uint256)",
         "FeeManagerUpdated(address,address)",
         "Initialized(uint64)",
         "OwnershipTransferred(address,address)",

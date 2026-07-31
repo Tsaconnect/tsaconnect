@@ -41,7 +41,8 @@ const usdc = (n) => ethers.parseUnits(String(n), 6);
 const refOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 
 // Permissive by design: these must not constrain any ported assertion.
-const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
+// minCredit, maxCreditPerTx, creditWindow, creditWindowCap, maxDebitPerTx, debitWindow, debitWindowCap
+const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000), mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
 
 describe("McgpEntitlementSwapV2 — parity with deployed V1", function () {
   let swap, mcgpToken, usdcToken;

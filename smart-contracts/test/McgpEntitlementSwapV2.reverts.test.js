@@ -16,7 +16,8 @@ const usdc = (n) => ethers.parseUnits(String(n), 6);
 const refOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 const ZERO = ethers.ZeroAddress;
 const ZERO_REF = "0x" + "00".repeat(32);
-const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
+// minCredit, maxCreditPerTx, creditWindow, creditWindowCap, maxDebitPerTx, debitWindow, debitWindowCap
+const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000), mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
 
 describe("McgpEntitlementSwapV2 — remaining revert paths", function () {
   let swap, mcgpToken, usdcToken;
@@ -103,8 +104,10 @@ describe("McgpEntitlementSwapV2 — remaining revert paths", function () {
       await fundMcgp(mcgp(1000));
       await swap.connect(operator).creditPremium(alice.address, mcgp(10), refOf("d:seed"));
       await expect(swap.connect(operator).debitPremium(alice.address, mcgp(1), ZERO_REF)).to.be.revertedWith("Invalid ref");
+      // Message changed with the bucket rule: a debit may now draw on bought too,
+      // so the shortfall is against the COMBINED balance.
       await expect(swap.connect(operator).debitPremium(alice.address, mcgp(11), refOf("d:over")))
-        .to.be.revertedWith("Insufficient credited premium");
+        .to.be.revertedWith("Insufficient premium balance");
     });
 
     it("debitPremium is blocked while paused", async function () {

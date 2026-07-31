@@ -30,7 +30,16 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *   - accountedMcgp == Σ(premiumBought + premiumCredited + pendingSettle), and
  *     mcgpToken.balanceOf(this) >= accountedMcgp at all times.
  *   - premiumBought is the ONLY bucket `withdrawPremiumToWallet`/`sellPremium`
- *     can draw from; operators only ever touch premiumCredited/pendingSettle.
+ *     can draw from.
+ *   - CHANGED IN V2: operators are no longer confined to premiumCredited.
+ *     `debitPremium` draws credited-first then BOUGHT, so a user who bought
+ *     premium with USDC can still pay a utility bill. The cost is real and should
+ *     not be glossed: a compromised operator key can now move self-exitable value
+ *     into pendingSettle, and `settleDebit` then frees it as owner-withdrawable
+ *     excess. V1's operator key could never reach bought premium at all. What
+ *     bounds it now is the per-tx cap plus the rolling debit window, and a
+ *     guardian pause (settleDebit is whenNotPaused; reverseDebit stays open so
+ *     users can still be made whole).
  *   - `spend` debits credited-first then bought and credits the recipient the
  *     SAME bucket type, so credited value can never become self-exitable.
  *
@@ -135,9 +144,31 @@ contract McgpEntitlementSwapV2 is
     ///         (deployed inert, so day-one behaviour matches V1 byte-for-byte).
     address public feeManager;
 
-    /// @dev Storage headroom for future upgrades. Shrink by exactly the number of
-    ///      slots appended above it.
-    uint256[50] private __gap;
+    // ───────────────── Operator debit (bills / NGN sell) ──────────────
+    /// @notice Per-call ceiling on `debitPremium`. Bounds a compromised operator
+    ///         key the way `maxCreditPerTx` bounds crediting. Must be non-zero —
+    ///         see the note on the credit caps.
+    uint256 public maxDebitPerTx;
+    /// @notice Rolling-window ceiling on debits, mirroring the credit window.
+    ///         A per-tx cap alone bounds nothing: a compromised operator just
+    ///         issues many debits under it. This is what actually limits how much
+    ///         a stolen key can move before a guardian pauses.
+    uint256 public debitWindow;     // seconds (must be > 0)
+    uint256 public debitWindowCap;  // max debited per window (must be > 0)
+    uint256 public debitWindowStart;
+    uint256 public debitedInWindow;
+
+    /// @dev How much of a debit came from `premiumBought` rather than
+    ///      `premiumCredited`. Recorded because `reverseDebit` MUST return value
+    ///      to the bucket it came from: restoring a bought-funded debit as
+    ///      credited would silently strip the user's ability to withdraw or sell
+    ///      it, turning a failed payment into a downgrade.
+    mapping(bytes32 => uint256) private _debitFromBought;
+
+    /// @dev Storage headroom for future upgrades. Shrunk by exactly the number of
+    ///      slots appended above it (50 → 44: maxDebitPerTx, debitWindow,
+    ///      debitWindowCap, debitWindowStart, debitedInWindow, _debitFromBought).
+    uint256[44] private __gap;
 
     // ───────────────────────────── Events ──────────────────────────────
     // Signatures are IDENTICAL to V1 — the backend decodes these by topic0.
@@ -156,6 +187,7 @@ contract McgpEntitlementSwapV2 is
     event GuardianAdded(address indexed guardian);
     event GuardianRemoved(address indexed guardian);
     event CreditCapsUpdated(uint256 minCredit, uint256 maxCreditPerTx, uint256 creditWindow, uint256 creditWindowCap);
+    event DebitCapsUpdated(uint256 maxDebitPerTx, uint256 debitWindow, uint256 debitWindowCap);
     event PhaseAdded(uint8 indexed kind, uint256 indexed index, uint256 price, string name);
     event PhaseActivated(uint8 indexed kind, uint256 indexed index);
     event PhasePriceUpdated(uint8 indexed kind, uint256 indexed index, uint256 newPrice);
@@ -187,7 +219,10 @@ contract McgpEntitlementSwapV2 is
         uint256 _minCredit,
         uint256 _maxCreditPerTx,
         uint256 _creditWindow,
-        uint256 _creditWindowCap
+        uint256 _creditWindowCap,
+        uint256 _maxDebitPerTx,
+        uint256 _debitWindow,
+        uint256 _debitWindowCap
     ) external initializer {
         require(_mcgpToken != address(0), "Invalid MCGP address");
         require(_usdcToken != address(0), "Invalid USDC address");
@@ -201,7 +236,20 @@ contract McgpEntitlementSwapV2 is
         usdcToken = IERC20(_usdcToken);
 
         _setCreditCaps(_minCredit, _maxCreditPerTx, _creditWindow, _creditWindowCap);
+        _setDebitCaps(_maxDebitPerTx, _debitWindow, _debitWindowCap);
         // trustedForwarder and feeManager stay zero: deployed dark, flipped later.
+    }
+
+    /// @notice One-shot re-initializer for proxies deployed before the operator
+    ///         debit path existed. `upgradeProxy` does NOT re-run `initialize`, so
+    ///         the freshly-added `maxDebitPerTx` slot would otherwise read zero —
+    ///         and zero would make every `debitPremium` revert on the cap check,
+    ///         which fails closed but is still wrong.
+    function initializeDebitCaps(uint256 perTx, uint256 window, uint256 windowCap)
+        external
+        reinitializer(2)
+    {
+        _setDebitCaps(perTx, window, windowCap);
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
@@ -422,7 +470,15 @@ contract McgpEntitlementSwapV2 is
         emit PremiumCredited(user, amount, ref);
     }
 
-    /// @notice Begin an NGN sell: move credited premium into pendingSettle.
+    /// @notice Begin an operator-settled debit — an NGN sell, or a utility bill
+    ///         paid in MCGP. Moves premium into `pendingSettle` pending an
+    ///         off-chain outcome, then `settleDebit` on success or `reverseDebit`
+    ///         on failure.
+    ///
+    /// @dev Draws CREDITED-FIRST then BOUGHT, exactly like `spend`, so a user who
+    ///      bought premium with USDC can still pay a bill. Draining credited first
+    ///      preserves the user's more valuable (self-exitable) balance for as long
+    ///      as possible. The split is recorded so a reversal can restore it.
     function debitPremium(address user, uint256 amount, bytes32 debitRef)
         external
         onlyOperator
@@ -430,15 +486,47 @@ contract McgpEntitlementSwapV2 is
         whenNotPaused
     {
         require(amount > 0, "Amount must be > 0");
+        require(amount <= maxDebitPerTx, "Over per-tx debit cap");
         require(debitRef != bytes32(0), "Invalid ref");
         require(debits[debitRef].state == DebitState.None, "Debit exists");
-        require(premiumCredited[user] >= amount, "Insufficient credited premium");
+        require(premiumBalanceOf(user) >= amount, "Insufficient premium balance");
 
-        premiumCredited[user] -= amount;
+        _rollDebitWindow();
+        require(debitedInWindow + amount <= debitWindowCap, "Over debit window cap");
+        debitedInWindow += amount;
+
+        uint256 fromCredited = premiumCredited[user] >= amount ? amount : premiumCredited[user];
+        uint256 fromBought = amount - fromCredited;
+        if (fromCredited > 0) premiumCredited[user] -= fromCredited;
+        if (fromBought > 0) {
+            premiumBought[user] -= fromBought;
+            _debitFromBought[debitRef] = fromBought;
+        }
         pendingSettle[user] += amount;
         debits[debitRef] = Debit({ user: user, amount: amount, state: DebitState.Pending });
 
         emit PremiumDebitPending(user, amount, debitRef);
+    }
+
+    /// @notice How much of a pending debit was drawn from `premiumBought`.
+    function debitFromBought(bytes32 debitRef) external view returns (uint256) {
+        return _debitFromBought[debitRef];
+    }
+
+    function setDebitCaps(uint256 perTx, uint256 window, uint256 windowCap) external onlyOwner {
+        _setDebitCaps(perTx, window, windowCap);
+    }
+
+    function _setDebitCaps(uint256 perTx, uint256 window, uint256 windowCap) internal {
+        require(perTx > 0, "maxDebitPerTx must be > 0");
+        require(window > 0, "debitWindow must be > 0");
+        require(windowCap > 0, "debitWindowCap must be > 0");
+        maxDebitPerTx = perTx;
+        debitWindow = window;
+        debitWindowCap = windowCap;
+        debitWindowStart = block.timestamp;
+        debitedInWindow = 0;
+        emit DebitCapsUpdated(perTx, window, windowCap);
     }
 
     /// @notice Finalize an NGN sell after a confirmed payout: free the backing
@@ -453,16 +541,37 @@ contract McgpEntitlementSwapV2 is
         emit PremiumDebitSettled(d.user, d.amount, debitRef);
     }
 
-    /// @notice Reverse an NGN sell whose payout failed: restore the user's
-    ///         credited premium. Backing unchanged. Deliberately callable while
-    ///         paused — it only makes a user whole, never frees backing.
+    /// @notice Reverse a debit whose off-chain leg failed — a rejected bill vend
+    ///         or a failed NGN payout. Backing unchanged. Deliberately callable
+    ///         while paused: it only ever makes a user whole, never frees backing.
+    ///
+    /// @dev Restores each bucket EXACTLY as it was drawn. Returning a
+    ///      bought-funded debit as credited would quietly convert self-exitable
+    ///      MCGP into spend-only, so a failed payment would cost the user their
+    ///      withdrawal rights.
     function reverseDebit(bytes32 debitRef) external onlyOperator nonReentrant {
         Debit storage d = debits[debitRef];
         require(d.state == DebitState.Pending, "Not pending");
         d.state = DebitState.Resolved;
+
+        uint256 fromBought = _debitFromBought[debitRef];
+        uint256 fromCredited = d.amount - fromBought;
+
         pendingSettle[d.user] -= d.amount;
-        premiumCredited[d.user] += d.amount;
+        if (fromCredited > 0) premiumCredited[d.user] += fromCredited;
+        if (fromBought > 0) {
+            premiumBought[d.user] += fromBought;
+            delete _debitFromBought[debitRef];
+        }
+
         emit PremiumDebitReversed(d.user, d.amount, debitRef);
+    }
+
+    function _rollDebitWindow() internal {
+        if (block.timestamp >= debitWindowStart + debitWindow) {
+            debitWindowStart = block.timestamp;
+            debitedInWindow = 0;
+        }
     }
 
     function _rollWindow() internal {

@@ -18,7 +18,8 @@ const refOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 const ZERO = "0x0000000000000000000000000000000000000000";
 const ZERO_REF = "0x" + "00".repeat(32);
 
-const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
+// minCredit, maxCreditPerTx, creditWindow, creditWindowCap, maxDebitPerTx, debitWindow, debitWindowCap
+const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000), mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
 
 describe("McgpEntitlementSwapV2 — guards", function () {
   let swap, mcgpToken, usdcToken;
@@ -220,10 +221,15 @@ describe("McgpEntitlementSwapV2 — guards", function () {
       const Swap = await ethers.getContractFactory("McgpEntitlementSwapV2");
       const args = (caps) => [owner.address, mcgpToken.target, usdcToken.target, ...caps];
 
+      const DEBIT_OK = [mcgp(1), 3600, mcgp(1)];
       for (const [caps, reason] of [
-        [[0, 0, 3600, mcgp(1)], "maxCreditPerTx must be > 0"],
-        [[0, mcgp(1), 0, mcgp(1)], "creditWindow must be > 0"],
-        [[0, mcgp(1), 3600, 0], "creditWindowCap must be > 0"],
+        [[0, 0, 3600, mcgp(1), ...DEBIT_OK], "maxCreditPerTx must be > 0"],
+        [[0, mcgp(1), 0, mcgp(1), ...DEBIT_OK], "creditWindow must be > 0"],
+        [[0, mcgp(1), 3600, 0, ...DEBIT_OK], "creditWindowCap must be > 0"],
+        // The debit caps get the same treatment: zero is never "unlimited".
+        [[0, mcgp(1), 3600, mcgp(1), 0, 3600, mcgp(1)], "maxDebitPerTx must be > 0"],
+        [[0, mcgp(1), 3600, mcgp(1), mcgp(1), 0, mcgp(1)], "debitWindow must be > 0"],
+        [[0, mcgp(1), 3600, mcgp(1), mcgp(1), 3600, 0], "debitWindowCap must be > 0"],
       ]) {
         await expect(upgrades.deployProxy(Swap, args(caps), { kind: "uups" })).to.be.revertedWith(reason);
       }
@@ -234,7 +240,7 @@ describe("McgpEntitlementSwapV2 — guards", function () {
       await expect(
         upgrades.deployProxy(
           Swap,
-          [owner.address, mcgpToken.target, usdcToken.target, mcgp(10), mcgp(1), 3600, mcgp(100)],
+          [owner.address, mcgpToken.target, usdcToken.target, mcgp(10), mcgp(1), 3600, mcgp(100), mcgp(1), 3600, mcgp(1)],
           { kind: "uups" },
         ),
       ).to.be.revertedWith("minCredit exceeds per-tx cap");

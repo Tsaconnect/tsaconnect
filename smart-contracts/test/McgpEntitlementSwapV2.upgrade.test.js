@@ -12,7 +12,8 @@ const PREMIUM_BUY = 0;
 const mcgp = (n) => ethers.parseUnits(String(n), 18);
 const usdc = (n) => ethers.parseUnits(String(n), 6);
 const refOf = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
-const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
+// minCredit, maxCreditPerTx, creditWindow, creditWindowCap, maxDebitPerTx, debitWindow, debitWindowCap
+const DEFAULT_CAPS = [0, mcgp(1_000_000_000), 3600, mcgp(1_000_000_000), mcgp(1_000_000_000), 3600, mcgp(1_000_000_000)];
 
 describe("McgpEntitlementSwapV2 — upgrade safety", function () {
   let swap, mcgpToken, usdcToken;
@@ -119,9 +120,12 @@ describe("McgpEntitlementSwapV2 — upgrade safety", function () {
     expect(await upgraded.premiumCredited(bob.address)).to.equal(mcgp(200));
   });
 
-  it("the __gap is present and 50 slots wide", async function () {
-    // A shrinking gap is how appended state silently collides on the next
-    // upgrade; assert the declared width so a hand edit has to be deliberate.
+  it("the __gap shrank 1:1 with the slots appended after it", async function () {
+    // The gap started at 50. Every slot appended below the original storage must
+    // come OUT of the gap, or the next upgrade's appended state collides with
+    // whatever the gap was reserving. Six slots have been added since
+    // (maxDebitPerTx, debitWindow, debitWindowCap, debitWindowStart,
+    // debitedInWindow, _debitFromBought), so the gap must now read 44.
     const layout = await upgrades.erc1967.getImplementationAddress(await swap.getAddress());
     expect(layout).to.properAddress;
 
@@ -129,6 +133,8 @@ describe("McgpEntitlementSwapV2 — upgrade safety", function () {
       require("path").join(__dirname, "../contracts/McgpEntitlementSwapV2.sol"),
       "utf8",
     );
-    expect(source).to.match(/uint256\[50\] private __gap;/);
+    const GAP_ORIGINAL = 50;
+    const APPENDED = 6;
+    expect(source).to.match(new RegExp(`uint256\\[${GAP_ORIGINAL - APPENDED}\\] private __gap;`));
   });
 });
