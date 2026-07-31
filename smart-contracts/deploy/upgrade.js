@@ -6,6 +6,9 @@ const LEDGER_KEY = {
   ProductEscrowV2: "ProductEscrowV2",
   ServiceContactV2: "ServiceContactV2",
   FeeManager: "FeeManager",
+  // Without an entry here `upgrade` throws on an unknown contract, so a UUPS
+  // contract absent from this map cannot actually be upgraded.
+  McgpEntitlementSwapV2: "McgpEntitlementSwapV2",
 };
 
 async function upgrade(hre, { contract, proxy } = {}) {
