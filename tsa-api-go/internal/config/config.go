@@ -270,6 +270,30 @@ type Config struct {
 	// tighten the dust-sell guard without a code change.
 	ITMinSellNgnKobo int64
 
+	// ClubKonnect (Nellobyte) — prepaid utility-bill vendor. Bills are dormant
+	// unless BOTH ClubkonnectUserID and ClubkonnectAPIKey are set AND the MCGP
+	// operator signer (ITOperatorPrivateKey) is wired: users pay bills with
+	// spendable MCGP via the operator debit path, so no operator ⇒ no bills.
+	// The API key rides in the query string on every call — it must never be
+	// logged (the client redacts it from errors).
+	ClubkonnectUserID  string
+	ClubkonnectAPIKey  string
+	ClubkonnectBaseURL string
+	// ClubkonnectDataplanField picks which catalog field is sent as the vend's
+	// DataPlan param: "code" (PRODUCT_CODE) or "id" (PRODUCT_ID). The gated API
+	// docs don't say which; the default is validated by the live smoke test and
+	// this switch avoids a redeploy if it proves wrong.
+	ClubkonnectDataplanField string
+
+	// BillsDataMarkupBps is retail markup on data bundles, in basis points over
+	// ClubKonnect's cost price (other categories charge face value and earn the
+	// provider discount). BillsQuoteTTL bounds how long a ₦→MCGP quote stays
+	// payable. BillsFloatAlertNgn is the ClubKonnect wallet balance (whole ₦)
+	// below which the float monitor starts alerting.
+	BillsDataMarkupBps int
+	BillsQuoteTTL      time.Duration
+	BillsFloatAlertNgn int64
+
 	// RewardDistributorAddress is the deployed MCGPRewardDistributor proxy/
 	// contract (fee/TP overhaul SP6) the admin publishes cumulative merkle roots
 	// to and users claim MCGP from. UNSET = SP6 root-publishing dormant (the
@@ -526,6 +550,14 @@ func Load() *Config {
 	cfg.ITOperatorPrivateKey = strings.TrimSpace(getEnv("IT_OPERATOR_PRIVATE_KEY", ""))
 	cfg.ITPMID = strings.TrimSpace(getEnv("IT_PM_ID", ""))
 	cfg.ITMinSellNgnKobo = getEnvInt64("IT_MIN_SELL_NGN_KOBO", 10000) // ₦100
+
+	cfg.ClubkonnectUserID = strings.TrimSpace(getEnv("CLUBKONNECT_USER_ID", ""))
+	cfg.ClubkonnectAPIKey = strings.TrimSpace(getEnv("CLUBKONNECT_API_KEY", ""))
+	cfg.ClubkonnectBaseURL = strings.TrimSpace(getEnv("CLUBKONNECT_BASE_URL", "https://www.nellobytesystems.com"))
+	cfg.ClubkonnectDataplanField = strings.TrimSpace(getEnv("CLUBKONNECT_DATAPLAN_FIELD", "code"))
+	cfg.BillsDataMarkupBps = int(getEnvInt64("BILLS_DATA_MARKUP_BPS", 300))
+	cfg.BillsQuoteTTL = time.Duration(getEnvInt64("BILLS_QUOTE_TTL_SECONDS", 300)) * time.Second
+	cfg.BillsFloatAlertNgn = getEnvInt64("BILLS_FLOAT_ALERT_NGN", 100000)
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
 	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if

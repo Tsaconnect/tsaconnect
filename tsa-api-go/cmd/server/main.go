@@ -288,6 +288,24 @@ func main() {
 	// Initialize OTC service
 	otcService := services.NewOTCService(sonicClient, cfg)
 
+	// Utility bills — ClubKonnect vend paid with spendable MCGP via the operator
+	// debit path. Needs BOTH the vendor credentials and the MCGP operator signer
+	// (set in the IT block above); missing either keeps /api/bills dormant.
+	var billHandler *handlers.BillHandler
+	var billService *services.BillService
+	clubkonnect := services.NewClubkonnectClient(cfg)
+	if clubkonnect.IsEnabled() && mcgpSwapService.HasOperator() {
+		billPaymentService := services.NewBillPaymentService(config.DB, mcgpSwapService)
+		billService = services.NewBillService(
+			config.DB, clubkonnect, billPaymentService, mcgpSwapService,
+			services.NewP2PFxProvider(p2pService), cfg.BillsDataMarkupBps, cfg.BillsQuoteTTL,
+		)
+		billHandler = handlers.NewBillHandler(billService)
+		log.Printf("[config] utility bills enabled (ClubKonnect user %s)", cfg.ClubkonnectUserID)
+	} else if clubkonnect.IsEnabled() {
+		log.Printf("[config] bills dormant: ClubKonnect configured but no MCGP operator signer")
+	}
+
 	// Initialize event bus and WebSocket hub
 	eventBus := events.NewBus()
 	wsHub := ws.NewHub()
@@ -303,6 +321,13 @@ func main() {
 	// the swap being configured; never moves money (alerts only).
 	if mcgpSwapService.IsConfigured() {
 		scheduler.Register(jobs.NewMCGPSwapReconciler(mcgpSwapService, config.DB, time.Minute))
+	}
+
+	// Bill orders: drive lost vends / deferred settles to terminal states, and
+	// watch the prepaid ClubKonnect float (alert-only).
+	if billService != nil {
+		scheduler.Register(jobs.NewBillReconciler(billService, time.Minute))
+		scheduler.Register(jobs.NewBillFloatMonitor(clubkonnect, cfg.BillsFloatAlertNgn, 10*time.Minute))
 	}
 
 	// Fee/TP overhaul v2 — SP5 payout-computation engine. Turns accrued TP +
@@ -922,7 +947,7 @@ func main() {
 	})
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
