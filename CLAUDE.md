@@ -68,7 +68,7 @@ Base, Optimism, Avalanche, Linea). Token addresses are keyed `"chain:symbol"` (e
 
 Several integrations are **dormant-by-default**: if their credentials are absent the service boots
 and the relevant routes return a clear error (Nomba bank directory, P2P trade routes when
-`P2P_ESCROW_ADDRESS` is unset, Cloudinary, LiFi, Persona KYC). Don't add hard failures for missing
+`P2P_ESCROW_ADDRESS` is unset, Cloudinary, LiFi, Didit KYC). Don't add hard failures for missing
 optional credentials — keep dev environments bootable.
 
 ## Commands cheat-sheet

@@ -102,6 +102,13 @@ Required (set in `.env`):
 - `ENV` - `development` or `production`
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 
+Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
+- `DIDIT_API_KEY` - Application API key from https://business.didit.me
+- `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID
+- `DIDIT_WEBHOOK_SECRET` - Destination `secret_shared_key` from webhook setup
+- `DIDIT_CALLBACK_URL` - Hosted-flow redirect after completion (default `tsaconnect://kyc/callback`)
+- `DIDIT_BASE_URL` - Defaults to `https://verification.didit.me/v3`
+
 Blockchain (wallet feature):
 - `SONIC_RPC_URL` - Sonic testnet RPC (default: `https://rpc.testnet.soniclabs.com`)
 - `SONIC_CHAIN_ID` - Sonic chain ID (default: `14601`)

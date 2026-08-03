@@ -17,33 +17,33 @@ type ProfilePhoto struct {
 
 // User represents a user record in PostgreSQL.
 type User struct {
-	ID                         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Name                       string         `gorm:"not null" json:"name"`
-	Username                   string         `gorm:"uniqueIndex;not null" json:"username"`
-	Email                      string         `gorm:"uniqueIndex;not null" json:"email"`
-	Password                   string         `gorm:"not null" json:"-"`
-	Role                       string         `gorm:"default:'user'" json:"role"`
-	PhoneNumber                string         `gorm:"uniqueIndex" json:"phoneNumber"`
-	Country                    string         `json:"country"`
-	State                      string         `json:"state,omitempty"`
-	City                       string         `json:"city,omitempty"`
-	Address                    string         `json:"address"`
-	ProfilePhoto               datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
-	ReferralCode               string         `json:"referralCode,omitempty"`
-	ReferredBy                 *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
-	PersonaInquiryID               string         `json:"personaInquiryId,omitempty"`
-	VerificationStatus         string         `gorm:"default:'pending'" json:"verificationStatus"`
-	VerificationNotes          string         `json:"verificationNotes,omitempty"`
-	AccountStatus              string         `gorm:"default:'active'" json:"accountStatus"`
-	LastLogin                  *time.Time     `json:"lastLogin,omitempty"`
-	LoginAttempts              int            `gorm:"default:0" json:"loginAttempts"`
-	LockUntil                  *time.Time     `json:"lockUntil,omitempty"`
-	WalletAddress              string         `json:"walletAddress,omitempty"`
-	SeedPhraseBackedUp         bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
-	MuteNotifications          bool           `gorm:"default:false" json:"muteNotifications"`
-	MuteEmail                  bool           `gorm:"default:false" json:"muteEmail"`
-	TPBalance                  float64    `gorm:"default:0" json:"tpBalance"`
-	CashbackBalance            float64    `gorm:"default:0" json:"cashbackBalance"`
+	ID                 uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name               string         `gorm:"not null" json:"name"`
+	Username           string         `gorm:"uniqueIndex;not null" json:"username"`
+	Email              string         `gorm:"uniqueIndex;not null" json:"email"`
+	Password           string         `gorm:"not null" json:"-"`
+	Role               string         `gorm:"default:'user'" json:"role"`
+	PhoneNumber        string         `gorm:"uniqueIndex" json:"phoneNumber"`
+	Country            string         `json:"country"`
+	State              string         `json:"state,omitempty"`
+	City               string         `json:"city,omitempty"`
+	Address            string         `json:"address"`
+	ProfilePhoto       datatypes.JSON `gorm:"type:jsonb" json:"profilePhoto,omitempty"`
+	ReferralCode       string         `json:"referralCode,omitempty"`
+	ReferredBy         *uuid.UUID     `gorm:"type:uuid" json:"referredBy,omitempty"`
+	DiditSessionID     string         `json:"diditSessionId,omitempty"`
+	VerificationStatus string         `gorm:"default:'pending'" json:"verificationStatus"`
+	VerificationNotes  string         `json:"verificationNotes,omitempty"`
+	AccountStatus      string         `gorm:"default:'active'" json:"accountStatus"`
+	LastLogin          *time.Time     `json:"lastLogin,omitempty"`
+	LoginAttempts      int            `gorm:"default:0" json:"loginAttempts"`
+	LockUntil          *time.Time     `json:"lockUntil,omitempty"`
+	WalletAddress      string         `json:"walletAddress,omitempty"`
+	SeedPhraseBackedUp bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
+	MuteNotifications  bool           `gorm:"default:false" json:"muteNotifications"`
+	MuteEmail          bool           `gorm:"default:false" json:"muteEmail"`
+	TPBalance          float64        `gorm:"default:0" json:"tpBalance"`
+	CashbackBalance    float64        `gorm:"default:0" json:"cashbackBalance"`
 
 	// LastSettledGlobalIndex is the user's checkpoint into the global-pool
 	// cumulative index (models.GlobalTPPool.PerUserIndexScaled, same scaled-int
@@ -55,12 +55,12 @@ type User struct {
 	// user is owed 0 for all epochs before they existed; they only share epochs
 	// AFTER they join). A non-nil 0 would wrongly grant the user every epoch's
 	// share since the index began.
-	LastSettledGlobalIndex     *int64     `gorm:"default:null" json:"lastSettledGlobalIndex,omitempty"`
+	LastSettledGlobalIndex *int64 `gorm:"default:null" json:"lastSettledGlobalIndex,omitempty"`
 
-	EmailVerified              bool           `gorm:"default:false" json:"emailVerified"`
-	DeletedAt                  *time.Time     `json:"deletedAt,omitempty"`
-	CreatedAt                  time.Time      `json:"createdAt"`
-	UpdatedAt                  time.Time      `json:"updatedAt"`
+	EmailVerified bool       `gorm:"default:false" json:"emailVerified"`
+	DeletedAt     *time.Time `json:"deletedAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.

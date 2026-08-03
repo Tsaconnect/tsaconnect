@@ -671,7 +671,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	}
 
-	// P2P routes — every endpoint requires JWT auth + Persona-verified KYC
+	// P2P routes — every endpoint requires JWT auth + Didit-verified KYC
 	// (the handler itself enforces verification via the require() helper).
 	// Idempotency is applied to the write paths so retries are safe.
 	if p2p != nil && p2p.IsConfigured() {

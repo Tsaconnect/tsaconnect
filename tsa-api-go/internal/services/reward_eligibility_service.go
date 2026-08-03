@@ -19,8 +19,9 @@ import (
 // when ALL of the following hold:
 //
 //	(a) KYC verified — user.verification_status == "verified" (the codebase's
-//	    APPROVED value, models.VerificationStatusVerified; set by the Persona
-//	    webhook on inquiry.completed and by the admin KYC override).
+//	    APPROVED value, models.VerificationStatusVerified; set by the Didit
+//	    webhook on status.updated with status "Approved" and by the admin
+//	    KYC override).
 //	(a2) Account active — user.account_status == "active". A suspended/deleted
 //	    account is the admin's enforcement action against a bad actor (spec §6)
 //	    and blocks the claim on its own, without also needing a reward_flag.

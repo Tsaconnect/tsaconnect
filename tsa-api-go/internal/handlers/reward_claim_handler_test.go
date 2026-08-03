@@ -42,7 +42,7 @@ func setupRewardClaimTestDB(t *testing.T) *gorm.DB {
 			profile_photo TEXT,
 			referral_code TEXT,
 			referred_by TEXT,
-			persona_inquiry_id TEXT,
+			didit_session_id TEXT,
 			verification_status TEXT DEFAULT 'pending',
 			verification_notes TEXT,
 			account_status TEXT DEFAULT 'active',

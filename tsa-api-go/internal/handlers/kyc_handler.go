@@ -10,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,7 +20,31 @@ import (
 	"gorm.io/datatypes"
 )
 
-// CreateKYCSession creates a Persona inquiry for the authenticated user.
+// diditHTTPClient bounds calls to the Didit API so a hung upstream can't pin
+// request goroutines indefinitely.
+var diditHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// diditSessionCreateResponse is the 201 body from POST /v3/session/.
+type diditSessionCreateResponse struct {
+	SessionID    string `json:"session_id"`
+	SessionToken string `json:"session_token"`
+	URL          string `json:"url"`
+	Status       string `json:"status"`
+	VendorData   string `json:"vendor_data"`
+	Detail       string `json:"detail"`
+}
+
+// diditWebhookPayload is the V3 status.updated / data.updated envelope.
+type diditWebhookPayload struct {
+	EventID     string `json:"event_id"`
+	WebhookType string `json:"webhook_type"`
+	Timestamp   int64  `json:"timestamp"`
+	SessionID   string `json:"session_id"`
+	Status      string `json:"status"`
+	VendorData  string `json:"vendor_data"`
+}
+
+// CreateKYCSession creates a Didit verification session for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -31,17 +57,24 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	apiKey := h.Config.PersonaAPIKey
-	templateID := h.Config.PersonaTemplateID
-	baseURL := h.Config.PersonaBaseURL
+	apiKey := h.Config.DiditAPIKey
+	workflowID := h.Config.DiditWorkflowID
+	baseURL := strings.TrimRight(h.Config.DiditBaseURL, "/")
+
+	if apiKey == "" || workflowID == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"message": "KYC verification is not configured",
+		})
+		return
+	}
 
 	payload := map[string]interface{}{
-		"data": map[string]interface{}{
-			"attributes": map[string]interface{}{
-				"inquiry-template-id": templateID,
-				"reference-id":        user.ID.String(),
-			},
-		},
+		"workflow_id": workflowID,
+		"vendor_data": user.ID.String(),
+	}
+	if callback := h.Config.DiditCallbackURL; callback != "" {
+		payload["callback"] = callback
 	}
 
 	body, err := json.Marshal(payload)
@@ -50,70 +83,85 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/inquiries", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", baseURL+"/session/", bytes.NewReader(body))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Persona-Version", "2023-01-05")
-	req.Header.Set("Key-Inflection", "kebab")
+	req.Header.Set("x-api-key", apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := diditHTTPClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Persona"})
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Didit"})
 		return
 	}
 	defer resp.Body.Close()
 
-	var personaResp map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&personaResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Persona"})
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
+		return
+	}
+
+	var diditResp diditSessionCreateResponse
+	if err := json.Unmarshal(respBody, &diditResp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		log.Printf("[KYC] Persona API error: status=%d response=%v", resp.StatusCode, personaResp)
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Persona returned an error", "details": personaResp})
+		log.Printf("[KYC] Didit API error: status=%d body=%s", resp.StatusCode, string(respBody))
+		msg := "Didit returned an error"
+		if diditResp.Detail != "" {
+			msg = diditResp.Detail
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": msg})
 		return
 	}
 
-	// Extract inquiry ID and URL from Persona response
-	data, _ := personaResp["data"].(map[string]interface{})
-	inquiryID, _ := data["id"].(string)
-	attrs, _ := data["attributes"].(map[string]interface{})
-
-	// Build the hosted inquiry URL
-	inquiryURL := fmt.Sprintf("https://inquiry.withpersona.com/verify?inquiry-id=%s", inquiryID)
-	if env, ok := attrs["environment"].(string); ok && env == "sandbox" {
-		inquiryURL += "&sandbox=true"
+	if diditResp.SessionID == "" || diditResp.URL == "" {
+		log.Printf("[KYC] Didit response missing session fields: %s", string(respBody))
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Didit returned an incomplete session"})
+		return
 	}
 
-	config.DB.Model(&user).Updates(map[string]interface{}{
-		"persona_inquiry_id": inquiryID,
-	})
+	if err := config.DB.Model(&user).Updates(map[string]interface{}{
+		"didit_session_id":    diditResp.SessionID,
+		"verification_status": models.VerificationStatusInReview,
+	}).Error; err != nil {
+		log.Printf("[KYC] failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to save session"})
+		return
+	}
 
-	metadata, _ := json.Marshal(map[string]string{"inquiry_id": inquiryID})
-	config.DB.Create(&models.VerificationLog{
-		UserID:   user.ID,
-		Action:   models.VerificationActionPersonaInitiated,
-		Status:   models.VerificationLogStatusInReview,
-		Notes:    "Persona verification inquiry created",
-		Metadata: datatypes.JSON(metadata),
+	metadata, _ := json.Marshal(map[string]string{
+		"session_id": diditResp.SessionID,
 	})
+	if err := config.DB.Create(&models.VerificationLog{
+		UserID:   user.ID,
+		Action:   models.VerificationActionDiditInitiated,
+		Status:   models.VerificationLogStatusInReview,
+		Notes:    "Didit verification session created",
+		Metadata: datatypes.JSON(metadata),
+	}).Error; err != nil {
+		log.Printf("[KYC] failed to write verification log for user %s: %v", user.ID, err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "KYC session created",
 		"data": gin.H{
-			"inquiryId":  inquiryID,
-			"inquiryUrl": inquiryURL,
+			"sessionId":  diditResp.SessionID,
+			"sessionUrl": diditResp.URL,
+			// Backward-compatible aliases for older app builds.
+			"inquiryId":  diditResp.SessionID,
+			"inquiryUrl": diditResp.URL,
 		},
 	})
 }
 
-// KYCWebhook receives verification results from Persona.
+// KYCWebhook receives verification results from Didit.
 func (h *Handlers) KYCWebhook(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -121,150 +169,204 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		return
 	}
 
-	secret := h.Config.PersonaWebhookSecret
-	if secret != "" {
-		sig := c.GetHeader("Persona-Signature")
-		// Persona signature format: "t=<timestamp>,v1=<signature>"
-		parts := parsePersonaSignature(sig)
-		if parts.timestamp == "" || parts.signature == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature format"})
+	secret := h.Config.DiditWebhookSecret
+	if secret == "" {
+		// Fail closed once Didit is configured; when KYC is fully dormant,
+		// acknowledge without processing — never act on unsigned payloads.
+		if h.Config.DiditAPIKey != "" {
+			log.Printf("[KYC] DIDIT_WEBHOOK_SECRET is unset; rejecting webhook")
+			c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Webhook secret not configured"})
 			return
 		}
-		// Compute HMAC-SHA256 over "timestamp.body"
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write([]byte(parts.timestamp + "."))
-		mac.Write(bodyBytes)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(parts.signature), []byte(expected)) {
-			c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
-			return
-		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "KYC not configured; event ignored"})
+		return
+	} else if !verifyDiditWebhook(bodyBytes, c.GetHeader("X-Timestamp"),
+		c.GetHeader("X-Signature"), c.GetHeader("X-Signature-Simple"), secret) {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
+		return
 	}
 
-	var payload map[string]interface{}
+	var payload diditWebhookPayload
 	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid JSON"})
 		return
 	}
 
-	// Extract event name and inquiry data from Persona webhook payload
-	data, _ := payload["data"].(map[string]interface{})
-	attrs, _ := data["attributes"].(map[string]interface{})
-	eventName, _ := attrs["name"].(string)
-
-	// Get the inquiry from the included array
-	included, _ := payload["included"].([]interface{})
-	var inquiryID string
-	var referenceID string
-	for _, item := range included {
-		obj, _ := item.(map[string]interface{})
-		if objType, _ := obj["type"].(string); objType == "inquiry" {
-			inquiryID, _ = obj["id"].(string)
-			objAttrs, _ := obj["attributes"].(map[string]interface{})
-			referenceID, _ = objAttrs["reference-id"].(string)
-			break
-		}
+	// Only session status changes drive verification_status updates.
+	if payload.WebhookType != "status.updated" {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event type"})
+		return
 	}
 
-	if inquiryID == "" || referenceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing inquiry data"})
+	if payload.SessionID == "" && payload.VendorData == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Missing session data"})
 		return
 	}
 
 	var user models.User
-	if err := config.DB.Where("persona_inquiry_id = ? OR id = ?", inquiryID, referenceID).First(&user).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "User not found for inquiry"})
+	query := config.DB
+	switch {
+	case payload.SessionID != "" && payload.VendorData != "":
+		query = query.Where("didit_session_id = ? OR id = ?", payload.SessionID, payload.VendorData)
+	case payload.SessionID != "":
+		query = query.Where("didit_session_id = ?", payload.SessionID)
+	default:
+		query = query.Where("id = ?", payload.VendorData)
+	}
+	if err := query.First(&user).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "User not found for session"})
 		return
 	}
 
-	// Check for duplicate processing
-	var existingLog models.VerificationLog
-	alreadyProcessed := config.DB.Where("user_id = ? AND metadata->>'inquiry_id' = ? AND action IN ?",
-		user.ID, inquiryID,
-		[]string{models.VerificationActionPersonaPassed, models.VerificationActionPersonaFailed},
-	).First(&existingLog).Error == nil
-
-	if alreadyProcessed {
-		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Already processed"})
-		return
+	// Idempotency: same Didit event_id already processed.
+	if payload.EventID != "" {
+		var existingLog models.VerificationLog
+		alreadyProcessed := config.DB.Where(
+			"user_id = ? AND metadata->>'event_id' = ? AND action IN ?",
+			user.ID, payload.EventID,
+			[]string{models.VerificationActionDiditPassed, models.VerificationActionDiditFailed, models.VerificationActionDiditInitiated},
+		).First(&existingLog).Error == nil
+		if alreadyProcessed {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "Already processed"})
+			return
+		}
 	}
 
-	metadata, _ := json.Marshal(payload)
-
-	// inquiry.started = user began the flow, set to in_review
-	if eventName == "inquiry.started" || eventName == "inquiry.transitioned" {
-		config.DB.Model(&user).Updates(map[string]interface{}{
-			"verification_status": models.VerificationStatusInReview,
-		})
-		config.DB.Create(&models.VerificationLog{
-			UserID:   user.ID,
-			Action:   models.VerificationActionPersonaInitiated,
-			Status:   models.VerificationLogStatusInReview,
-			Notes:    fmt.Sprintf("Persona event: %s", eventName),
-			Metadata: datatypes.JSON(metadata),
-		})
-		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Webhook processed"})
-		return
+	metadataMap := map[string]string{
+		"session_id":   payload.SessionID,
+		"event_id":     payload.EventID,
+		"status":       payload.Status,
+		"webhook_type": payload.WebhookType,
 	}
+	metadata, _ := json.Marshal(metadataMap)
 
-	// inquiry.completed = passed, inquiry.failed/inquiry.expired = failed
-	passed := eventName == "inquiry.completed"
+	status := strings.TrimSpace(payload.Status)
+	var updates map[string]interface{}
+	logEntry := models.VerificationLog{UserID: user.ID, Metadata: datatypes.JSON(metadata)}
 
-	if passed {
-		now := time.Now()
-		config.DB.Model(&user).Updates(map[string]interface{}{
+	// A user can start a new session (the app allows retrying), so events may
+	// arrive from sessions that are no longer current — Expired fires days
+	// later. Approval stays monotonic (processed from any session the user
+	// completed); everything else from a non-current session is ignored so a
+	// stale terminal event can't revoke or disturb the current state.
+	staleSession := payload.SessionID != "" && user.DiditSessionID != "" &&
+		payload.SessionID != user.DiditSessionID
+
+	switch status {
+	case "Approved":
+		updates = map[string]interface{}{
 			"verification_status": models.VerificationStatusVerified,
-			"verification_notes":  "Persona verification completed",
-			"updated_at":          now,
-		})
-		config.DB.Create(&models.VerificationLog{
-			UserID:   user.ID,
-			Action:   models.VerificationActionPersonaPassed,
-			Status:   models.VerificationLogStatusVerified,
-			Notes:    "Persona verification completed",
-			Metadata: datatypes.JSON(metadata),
-		})
-	} else {
-		config.DB.Model(&user).Updates(map[string]interface{}{
+			"verification_notes":  "Didit verification approved",
+			"didit_session_id":    payload.SessionID,
+			"updated_at":          time.Now(),
+		}
+		logEntry.Action = models.VerificationActionDiditPassed
+		logEntry.Status = models.VerificationLogStatusVerified
+		logEntry.Notes = "Didit verification approved"
+
+	case "Declined", "Abandoned", "Expired", "Kyc Expired":
+		if staleSession {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event from non-current session"})
+			return
+		}
+		updates = map[string]interface{}{
 			"verification_status": models.VerificationStatusRejected,
-			"verification_notes":  fmt.Sprintf("Persona verification event: %s", eventName),
-		})
-		config.DB.Create(&models.VerificationLog{
-			UserID:   user.ID,
-			Action:   models.VerificationActionPersonaFailed,
-			Status:   models.VerificationLogStatusRejected,
-			Notes:    fmt.Sprintf("Persona verification event: %s", eventName),
-			Metadata: datatypes.JSON(metadata),
-		})
+			"verification_notes":  fmt.Sprintf("Didit verification status: %s", status),
+			"didit_session_id":    payload.SessionID,
+		}
+		logEntry.Action = models.VerificationActionDiditFailed
+		logEntry.Status = models.VerificationLogStatusRejected
+		logEntry.Notes = fmt.Sprintf("Didit verification status: %s", status)
+
+	case "In Review", "In Progress", "Resubmitted", "Awaiting User", "Not Started":
+		if staleSession {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored event from non-current session"})
+			return
+		}
+		// A late or redelivered non-terminal event must not downgrade a user
+		// who is already verified (verified gates P2P + reward eligibility).
+		if user.VerificationStatus == models.VerificationStatusVerified {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "Ignored non-terminal status for verified user"})
+			return
+		}
+		updates = map[string]interface{}{
+			"verification_status": models.VerificationStatusInReview,
+			"didit_session_id":    payload.SessionID,
+		}
+		logEntry.Action = models.VerificationActionDiditInitiated
+		logEntry.Status = models.VerificationLogStatusInReview
+		logEntry.Notes = fmt.Sprintf("Didit status: %s", status)
+
+	default:
+		log.Printf("[KYC] Unhandled Didit status=%q session=%s", status, payload.SessionID)
+	}
+
+	if updates != nil {
+		// Return 500 on persistence failures so Didit redelivers the event.
+		if err := config.DB.Model(&user).Updates(updates).Error; err != nil {
+			log.Printf("[KYC] failed to update user %s for status %q: %v", user.ID, status, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to persist verification status"})
+			return
+		}
+		if err := config.DB.Create(&logEntry).Error; err != nil {
+			log.Printf("[KYC] failed to write verification log for user %s: %v", user.ID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to record verification event"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Webhook processed"})
 }
 
-// personaSignatureParts holds parsed Persona webhook signature components.
-type personaSignatureParts struct {
-	timestamp string
-	signature string
-}
+// verifyDiditWebhook validates Didit HMAC signatures.
+// Prefers X-Signature (raw body), falls back to X-Signature-Simple (envelope fields).
+func verifyDiditWebhook(body []byte, timestampHeader, sigRaw, sigSimple, secret string) bool {
+	if timestampHeader == "" {
+		return false
+	}
+	ts, err := strconv.ParseInt(timestampHeader, 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().Unix()
+	if diff := now - ts; diff > 300 || diff < -300 {
+		return false
+	}
 
-// parsePersonaSignature parses the "t=<ts>,v1=<sig>" format from Persona-Signature header.
-func parsePersonaSignature(header string) personaSignatureParts {
-	var parts personaSignatureParts
-	for _, segment := range bytes.Split([]byte(header), []byte(",")) {
-		kv := bytes.SplitN(segment, []byte("="), 2)
-		if len(kv) != 2 {
-			continue
-		}
-		key := string(bytes.TrimSpace(kv[0]))
-		val := string(bytes.TrimSpace(kv[1]))
-		switch key {
-		case "t":
-			parts.timestamp = val
-		case "v1":
-			parts.signature = val
+	// The header is not covered by the raw-body HMAC, so also require the
+	// signed payload's own timestamp to be fresh — otherwise a captured body
+	// could be replayed under a fresh X-Timestamp header.
+	var envelope diditWebhookPayload
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	if envelope.Timestamp != 0 {
+		if diff := now - envelope.Timestamp; diff > 300 || diff < -300 {
+			return false
 		}
 	}
-	return parts
+
+	if sigRaw != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(strings.ToLower(sigRaw)), []byte(expected)) {
+			return true
+		}
+	}
+
+	if sigSimple != "" {
+		canonical := fmt.Sprintf("%d:%s:%s:%s",
+			envelope.Timestamp, envelope.SessionID, envelope.Status, envelope.WebhookType)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(canonical))
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(strings.ToLower(sigSimple)), []byte(expected)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // GetKYCStatus returns the current KYC verification status for the authenticated user.
@@ -283,7 +385,7 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 		"data": gin.H{
 			"verificationStatus": user.VerificationStatus,
 			"verificationNotes":  user.VerificationNotes,
-			"personaInquiryId":   user.PersonaInquiryID,
+			"diditSessionId":     user.DiditSessionID,
 			"lastAction":         latestLog.Action,
 			"lastActionAt":       latestLog.CreatedAt,
 		},
@@ -413,7 +515,7 @@ func (h *Handlers) GetAllVerifications(c *gin.Context) {
 	query.Count(&total)
 
 	var users []models.User
-	query.Select("id, name, email, phone_number, verification_status, verification_notes, persona_inquiry_id, created_at, updated_at, profile_photo").
+	query.Select("id, name, email, phone_number, verification_status, verification_notes, didit_session_id, created_at, updated_at, profile_photo").
 		Order("updated_at DESC").
 		Offset(offset).
 		Limit(limit).

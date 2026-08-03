@@ -242,8 +242,8 @@ func (h *Handlers) GetVerificationStatus(c *gin.Context) {
 	status := gin.H{
 		"overall":   dbUser.VerificationStatus,
 		"notes":     dbUser.VerificationNotes,
-		"personaInquiryId": dbUser.PersonaInquiryID,
-		"completed": dbUser.VerificationStatus == models.VerificationStatusVerified,
+		"diditSessionId": dbUser.DiditSessionID,
+		"completed":      dbUser.VerificationStatus == models.VerificationStatusVerified,
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -279,7 +279,7 @@ func (h *Handlers) GetDocuments(c *gin.Context) {
 		"data": gin.H{
 			"verificationStatus": dbUser.VerificationStatus,
 			"verificationNotes":  dbUser.VerificationNotes,
-			"personaInquiryId":   dbUser.PersonaInquiryID,
+			"diditSessionId":     dbUser.DiditSessionID,
 		},
 	})
 }

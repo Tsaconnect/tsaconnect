@@ -213,11 +213,20 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS p2p_ratings_trade_rater_uq
 	         ON p2p_ratings (trade_id, rater_id)`)
 
-	// Rename smile_job_id → persona_inquiry_id (Persona KYC migration)
-	DB.Exec("ALTER TABLE users RENAME COLUMN smile_job_id TO persona_inquiry_id")
-
-	// Reset any in_review users from old provider to pending
-	DB.Exec("UPDATE users SET verification_status = 'pending', persona_inquiry_id = '' WHERE verification_status = 'in_review'")
+	// KYC provider column lineage: smile_job_id → persona_inquiry_id → didit_session_id.
+	// AutoMigrate above has already added didit_session_id from the model, so a
+	// RENAME would fail ("column already exists") and — because the error is
+	// swallowed — leave the stale column behind forever, re-running the
+	// in_review reset on every boot and wiping legitimate Didit sessions.
+	// The old provider IDs are dead data: DROP the stale columns instead. The
+	// drop is what makes the guarded reset genuinely one-time.
+	if DB.Migrator().HasColumn(&models.User{}, "smile_job_id") {
+		DB.Exec("ALTER TABLE users DROP COLUMN smile_job_id")
+	}
+	if DB.Migrator().HasColumn(&models.User{}, "persona_inquiry_id") {
+		DB.Exec("ALTER TABLE users DROP COLUMN persona_inquiry_id")
+		DB.Exec("UPDATE users SET verification_status = 'pending', didit_session_id = '' WHERE verification_status = 'in_review'")
+	}
 
 	// Replace the default unique index on wallet_address with a partial
 	// unique index that only enforces uniqueness for non-empty values.

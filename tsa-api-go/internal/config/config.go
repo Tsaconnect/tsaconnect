@@ -309,11 +309,12 @@ type Config struct {
 	// enable Expo's enhanced push security. Dormant if unset.
 	ExpoAccessToken string
 
-	// Persona KYC verification
-	PersonaAPIKey        string
-	PersonaTemplateID    string
-	PersonaBaseURL       string
-	PersonaWebhookSecret string
+	// Didit KYC verification
+	DiditAPIKey        string
+	DiditWorkflowID    string
+	DiditBaseURL       string
+	DiditWebhookSecret string
+	DiditCallbackURL   string
 
 	// LiFi swap aggregator
 	LiFiAPIKey        string
@@ -616,11 +617,12 @@ func Load() *Config {
 	// Expo push notifications (optional)
 	cfg.ExpoAccessToken = os.Getenv("EXPO_ACCESS_TOKEN")
 
-	// Persona KYC
-	cfg.PersonaAPIKey = os.Getenv("PERSONA_API_KEY")
-	cfg.PersonaTemplateID = os.Getenv("PERSONA_TEMPLATE_ID")
-	cfg.PersonaBaseURL = getEnv("PERSONA_BASE_URL", "https://withpersona.com/api/v1")
-	cfg.PersonaWebhookSecret = os.Getenv("PERSONA_WEBHOOK_SECRET")
+	// Didit KYC
+	cfg.DiditAPIKey = os.Getenv("DIDIT_API_KEY")
+	cfg.DiditWorkflowID = os.Getenv("DIDIT_WORKFLOW_ID")
+	cfg.DiditBaseURL = getEnv("DIDIT_BASE_URL", "https://verification.didit.me/v3")
+	cfg.DiditWebhookSecret = os.Getenv("DIDIT_WEBHOOK_SECRET")
+	cfg.DiditCallbackURL = getEnv("DIDIT_CALLBACK_URL", "tsaconnect://kyc/callback")
 
 	// LiFi swap aggregator. API key is optional — without it we hit the
 	// anonymous tier (rate-limited). Integrator + fee are also optional;

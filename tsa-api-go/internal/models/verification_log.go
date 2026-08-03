@@ -27,11 +27,11 @@ func (VerificationLog) TableName() string {
 
 // Verification log action constants.
 const (
-	VerificationActionPersonaInitiated = "persona_initiated"
-	VerificationActionPersonaPassed    = "persona_passed"
-	VerificationActionPersonaFailed    = "persona_failed"
-	VerificationActionAdminOverride    = "admin_override_approved"
-	VerificationActionAdminRejection   = "admin_rejection"
+	VerificationActionDiditInitiated = "didit_initiated"
+	VerificationActionDiditPassed    = "didit_passed"
+	VerificationActionDiditFailed    = "didit_failed"
+	VerificationActionAdminOverride  = "admin_override_approved"
+	VerificationActionAdminRejection = "admin_rejection"
 )
 
 // Verification log status constants.

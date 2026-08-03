@@ -626,24 +626,31 @@ class APIService {
 
   // ==================== SIGNUP FLOW ENDPOINTS ====================
 
-  // Create a KYC session via Persona
+  // Create a KYC session via Didit
   async createKYCSession(): Promise<ApiResponse<{
-    inquiryId: string;
-    inquiryUrl: string;
+    sessionId: string;
+    sessionUrl: string;
+    inquiryId?: string;
+    inquiryUrl?: string;
   }>> {
     const headers = this.getHeaders();
     const response = await fetch(`${API_BASE_URL}/kyc/session`, {
       method: 'POST',
       headers,
     });
-    return this.handleResponse<{ inquiryId: string; inquiryUrl: string }>(response);
+    return this.handleResponse<{
+      sessionId: string;
+      sessionUrl: string;
+      inquiryId?: string;
+      inquiryUrl?: string;
+    }>(response);
   }
 
   // Get KYC verification status
   async getKYCStatus(): Promise<ApiResponse<{
     verificationStatus: string;
     verificationNotes: string;
-    personaInquiryId: string;
+    diditSessionId: string;
     lastAction: string;
     lastActionAt: string;
   }>> {
@@ -655,7 +662,7 @@ class APIService {
     return this.handleResponse<{
       verificationStatus: string;
       verificationNotes: string;
-      personaInquiryId: string;
+      diditSessionId: string;
       lastAction: string;
       lastActionAt: string;
     }>(response);

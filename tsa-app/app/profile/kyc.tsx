@@ -1,13 +1,8 @@
 // app/profile/kyc.tsx
 //
-// KYC identity-verification flow (Persona inquiry in a WebView). Restyled onto the
-// TSA Signature design system (@/theme tokens + @/components/ui primitives).
-//
-// VERIFICATION screen: the KYC status check (api.getKYCStatus), session creation
-// (api.createKYCSession), camera-permission request, Persona WebView (document /
-// selfie capture) and its completion-redirect detection, and all status gating
-// (loading / not_started / webview_active / in_progress / verified / rejected) are
-// preserved verbatim — this is a visual/structural restyle only.
+// KYC identity-verification flow (Didit hosted session in a WebView).
+// Status check → create session → camera permission → Didit WebView →
+// callback/completion detection → poll status.
 import React, { useState, useCallback } from "react";
 import { View, ActivityIndicator, Alert, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -25,7 +20,7 @@ export default function KYCScreen() {
   const { colors, spacing, radius } = useTheme();
   const [state, setState] = useState<KYCState>("loading");
   const [notes, setNotes] = useState("");
-  const [inquiryUrl, setInquiryUrl] = useState<string | null>(null);
+  const [sessionUrl, setSessionUrl] = useState<string | null>(null);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -83,7 +78,13 @@ export default function KYCScreen() {
         return;
       }
 
-      setInquiryUrl(response.data.inquiryUrl);
+      const url = response.data.sessionUrl || response.data.inquiryUrl;
+      if (!url) {
+        Alert.alert("Error", "Failed to start verification");
+        setState("not_started");
+        return;
+      }
+      setSessionUrl(url);
       setState("webview_active");
     } catch (error: any) {
       Alert.alert("Error", api.getErrorMessage(error) || "Something went wrong");
@@ -92,9 +93,19 @@ export default function KYCScreen() {
   };
 
   const handleWebViewNavigationChange = (navState: { url: string }) => {
-    // Persona redirects to a completion page when the inquiry is done
-    if (navState.url.includes("/done") || navState.url.includes("completed")) {
-      setInquiryUrl(null);
+    // Didit redirects to callback with verificationSessionId + status,
+    // or to our tsaconnect://kyc/callback deep link.
+    const url = navState.url.toLowerCase();
+    const finished =
+      url.includes("verificationsessionid=") ||
+      url.includes("tsaconnect://kyc/callback") ||
+      url.includes("/kyc/callback") ||
+      url.includes("status=approved") ||
+      url.includes("status=declined") ||
+      url.includes("status=in%20review") ||
+      url.includes("status=in+review");
+    if (finished) {
+      setSessionUrl(null);
       setState("in_progress");
     }
   };
@@ -191,11 +202,11 @@ export default function KYCScreen() {
     );
   }
 
-  if (state === "webview_active" && inquiryUrl) {
+  if (state === "webview_active" && sessionUrl) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
         <WebView
-          source={{ uri: inquiryUrl }}
+          source={{ uri: sessionUrl }}
           onNavigationStateChange={handleWebViewNavigationChange}
           javaScriptEnabled
           domStorageEnabled

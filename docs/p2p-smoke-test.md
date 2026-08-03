@@ -69,7 +69,7 @@ contract's `hashVoucher` digest (§4).
   - ⚠️ **do not** use `scripts/mint-to-user.js` — it targets stale token addresses.
 - **`DEPLOYER_PRIVATE_KEY`** (a key holding testnet S) for the automated round-trip
   in §9 — it self-funds the ephemeral wallets and mints their tokens.
-- **Persona sandbox** + **two app devices** + **PostgreSQL** + **Cloudinary** for the
+- **Didit sandbox** + **two app devices** + **PostgreSQL** + **Cloudinary** for the
   manual app matrix (§10).
 
 ---

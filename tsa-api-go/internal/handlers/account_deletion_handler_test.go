@@ -36,7 +36,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 			name TEXT NOT NULL, username TEXT NOT NULL UNIQUE, email TEXT NOT NULL UNIQUE,
 			password TEXT NOT NULL, role TEXT DEFAULT 'user', phone_number TEXT,
 			country TEXT, state TEXT, city TEXT, address TEXT, profile_photo TEXT,
-			referral_code TEXT, referred_by TEXT, persona_inquiry_id TEXT,
+			referral_code TEXT, referred_by TEXT, didit_session_id TEXT,
 			verification_status TEXT DEFAULT 'pending', verification_notes TEXT,
 			account_status TEXT DEFAULT 'active', last_login DATETIME,
 			login_attempts INTEGER DEFAULT 0, lock_until DATETIME, wallet_address TEXT,
