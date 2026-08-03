@@ -416,18 +416,26 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 	// Atomic quoted→paying transition. Two concurrent Pay calls both read
 	// `quoted` above; without this CAS both would debit-and-vend, and the vend
 	// has no on-chain/DB idempotency backstop (only ClubKonnect's RequestID
-	// dedupe, which we cannot verify). Exactly one caller wins the row.
+	// dedupe, which we cannot verify). Exactly one caller wins the row. The
+	// expiry re-check lives INSIDE the predicate: the IsExpired() check above
+	// used the earlier read, and a quote that lapsed in between must not lock
+	// in its stale ₦/MCGP rate.
 	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
-		Where("id = ? AND status = ?", order.ID, models.BillStatusQuoted).
+		Where("id = ? AND status = ? AND quote_expires_at > ?",
+			order.ID, models.BillStatusQuoted, time.Now()).
 		Update("status", models.BillStatusPaying)
 	if res.Error != nil {
 		return nil, res.Error
 	}
 	if res.RowsAffected == 0 {
-		// Lost the race — the other caller owns the flow now. Return the
-		// current state as an idempotent replay.
+		// Lost the race (another caller owns the flow) or expired under us.
 		if err := s.db.WithContext(ctx).First(&order, "id = ?", order.ID).Error; err != nil {
 			return nil, err
+		}
+		if order.IsExpired(time.Now()) {
+			order.Status = models.BillStatusExpired
+			s.db.WithContext(ctx).Save(&order)
+			return nil, ErrBillQuoteExpired
 		}
 		return &order, nil
 	}
