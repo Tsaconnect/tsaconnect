@@ -301,7 +301,7 @@ func main() {
 			services.NewP2PFxProvider(p2pService), cfg.BillsDataMarkupBps, cfg.BillsQuoteTTL,
 		)
 		billHandler = handlers.NewBillHandler(billService)
-		log.Printf("[config] utility bills enabled (ClubKonnect user %s)", cfg.ClubkonnectUserID)
+		log.Printf("[config] utility bills enabled (ClubKonnect)")
 	} else if clubkonnect.IsEnabled() {
 		log.Printf("[config] bills dormant: ClubKonnect configured but no MCGP operator signer")
 	}

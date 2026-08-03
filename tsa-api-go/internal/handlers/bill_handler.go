@@ -39,7 +39,7 @@ func NewBillHandler(bills billService) *BillHandler {
 func (h *BillHandler) GetProviders(c *gin.Context) {
 	list, err := h.bills.Providers(c.Request.Context(), c.Param("category"))
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Providers", list)
@@ -49,7 +49,7 @@ func (h *BillHandler) GetProviders(c *gin.Context) {
 func (h *BillHandler) GetPlans(c *gin.Context) {
 	plans, err := h.bills.Plans(c.Request.Context(), c.Param("category"), c.Param("provider"))
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Plans", plans)
@@ -70,7 +70,7 @@ func (h *BillHandler) Validate(c *gin.Context) {
 	}
 	name, err := h.bills.Validate(c.Request.Context(), req.Category, req.Provider, req.CustomerID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Validated", gin.H{"customerName": name})
@@ -111,7 +111,7 @@ func (h *BillHandler) Quote(c *gin.Context) {
 		NgnAmount:    req.NgnAmount,
 	})
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
@@ -136,7 +136,7 @@ func (h *BillHandler) Pay(c *gin.Context) {
 	}
 	order, err := h.bills.Pay(c.Request.Context(), user.ID, user.WalletAddress, orderID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment accepted", order)
@@ -156,7 +156,7 @@ func (h *BillHandler) GetOrder(c *gin.Context) {
 	}
 	order, err := h.bills.GetOrder(c.Request.Context(), user.ID, orderID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), err.Error())
+		utils.ErrorResponse(c, billStatus(err), billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Order", order)
@@ -171,24 +171,44 @@ func (h *BillHandler) ListOrders(c *gin.Context) {
 	}
 	orders, err := h.bills.ListOrders(c.Request.Context(), user.ID, 50)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		utils.ErrorResponse(c, http.StatusInternalServerError, billMessage(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Orders", orders)
 }
 
-// billStatus maps service errors to HTTP status codes.
+// billStatus maps service errors to HTTP status codes, and billMessage decides
+// what text a client may see. Only sentinel errors pass their message through;
+// anything else is internal detail (vendor transport errors embed request
+// URLs, GORM errors embed SQL) and is replaced with a generic line — the full
+// error is logged server-side by the service layer.
 func billStatus(err error) int {
 	switch {
 	case errors.Is(err, services.ErrBillsDisabled),
 		errors.Is(err, services.ErrClubkonnectDisabled),
 		errors.Is(err, services.ErrBillRateStale):
 		return http.StatusServiceUnavailable
-	case errors.Is(err, services.ErrBillNotFound):
+	case errors.Is(err, services.ErrBillNotFound),
+		errors.Is(err, services.ErrBillCustomerNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, services.ErrBillPayInsufficient):
 		return http.StatusPaymentRequired
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+func billMessage(err error) string {
+	for _, known := range []error{
+		services.ErrBillsDisabled, services.ErrClubkonnectDisabled,
+		services.ErrBillRateStale, services.ErrBillNotFound,
+		services.ErrBillCustomerNotFound, services.ErrBillPayInsufficient,
+		services.ErrBillQuoteExpired, services.ErrBillBadState,
+		services.ErrBillBadCategory, services.ErrBillBadRequest,
+	} {
+		if errors.Is(err, known) {
+			return err.Error()
+		}
+	}
+	return "Could not process this bill request. Please try again."
 }

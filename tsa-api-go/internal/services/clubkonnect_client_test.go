@@ -171,11 +171,32 @@ func TestErrorsNeverLeakAPIKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	if strings.Contains(err.Error(), "SECRETKEY123") {
-		t.Fatalf("API key leaked into error: %v", err)
+	for _, secret := range []string{"SECRETKEY123", "CK101"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("credential %q leaked into error: %v", secret, err)
+		}
 	}
-	if !strings.Contains(err.Error(), "[REDACTED]") {
+	if !strings.Contains(err.Error(), "params-redacted") && !strings.Contains(err.Error(), "[REDACTED]") {
 		t.Fatalf("expected redaction marker, got: %v", err)
+	}
+}
+
+func TestTransportErrorsNeverLeakURL(t *testing.T) {
+	// *url.Error embeds the ENTIRE request URL — including UserID and APIKey in
+	// the query string. Point the client at a dead listener to force one.
+	c := NewClubkonnectClient(&config.Config{
+		ClubkonnectBaseURL: "http://127.0.0.1:1", // nothing listens here
+		ClubkonnectUserID:  "CK101",
+		ClubkonnectAPIKey:  "SECRETKEY123",
+	})
+	_, err := c.VendAirtime(context.Background(), "01", "08030001111", 100, "r")
+	if err == nil {
+		t.Fatal("want transport error")
+	}
+	for _, secret := range []string{"SECRETKEY123", "CK101", "APIKey="} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("%q leaked in transport error: %v", secret, err)
+		}
 	}
 }
 

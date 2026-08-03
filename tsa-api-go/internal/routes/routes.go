@@ -908,14 +908,28 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	if bh != nil {
 		bills := api.Group("/bills")
 		bills.Use(auth)
+		// Per-USER limiter on the endpoints that hit the paid vendor API or
+		// write rows. The global IP limiter is weak cover here: mobile users
+		// share carrier NAT IPs, and /validate is a name-lookup oracle for
+		// meter/smartcard numbers if left open to enumeration.
+		billWriteLimit := middleware.RateLimiterBy(20, time.Minute, func(c *gin.Context) string {
+			v, _ := c.Get("user")
+			switch u := v.(type) {
+			case models.User:
+				return "bills:" + u.ID.String()
+			case *models.User:
+				return "bills:" + u.ID.String()
+			}
+			return "" // falls back to client IP inside RateLimiterBy
+		})
 		{
 			bills.GET("/catalog/:category", bh.GetProviders)
 			bills.GET("/catalog/:category/:provider/plans", bh.GetPlans)
-			bills.POST("/validate", bh.Validate)
-			bills.POST("/quote", bh.Quote)
+			bills.POST("/validate", billWriteLimit, bh.Validate)
+			bills.POST("/quote", billWriteLimit, bh.Quote)
 			bills.GET("/orders", bh.ListOrders)
 			bills.GET("/orders/:id", bh.GetOrder)
-			bills.POST("/orders/:id/pay", bh.Pay)
+			bills.POST("/orders/:id/pay", billWriteLimit, bh.Pay)
 		}
 	} else {
 		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")

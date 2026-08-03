@@ -27,6 +27,7 @@ type fakeBillVendor struct {
 	queryErr    error
 	verifyName  string
 	verifyErr   error
+	plansErr    error // injected into DataPlans (vend-time catalog outage)
 }
 
 func (f *fakeBillVendor) record(requestID string) { f.vendCalls++; f.lastRequest = requestID }
@@ -71,6 +72,9 @@ func (f *fakeBillVendor) DataNetworks(context.Context) ([]BillProvider, error) {
 	return []BillProvider{{Code: "01", Name: "MTN"}}, nil
 }
 func (f *fakeBillVendor) DataPlans(context.Context, string) ([]BillPlan, error) {
+	if f.plansErr != nil {
+		return nil, f.plansErr
+	}
 	return []BillPlan{{Code: "2", ProductID: "500", Name: "500 MB - Weekly (SME)", CostNGN: 307}}, nil
 }
 func (f *fakeBillVendor) Discos(context.Context) ([]BillProvider, error) {
@@ -99,18 +103,28 @@ type fakeBillPayer struct {
 	reverses    int
 	disabled    bool
 	leaveDebiting bool // simulate broadcast-without-verify
+	leaveFailed   bool // simulate a failed broadcast (row persisted as failed)
 }
 
 func (f *fakeBillPayer) IsEnabled() bool { return !f.disabled }
 func (f *fakeBillPayer) Debit(ctx context.Context, in DebitInput) (*models.BillPayment, error) {
 	f.debits++
 	if f.debitErr != nil {
+		status := ""
 		if f.leaveDebiting {
-			pay := &models.BillPayment{ID: uuid.New(), UserID: in.UserID, OrderID: in.OrderID,
-				WalletAddress: in.WalletAddress, McgpAmount: in.McgpAmount.String(),
-				NgnKobo: "0", RateKobo: "0", DebitRef: "0x" + in.OrderID.String(),
-				Status: models.BillPayStatusDebiting}
-			f.db.WithContext(ctx).Create(pay)
+			status = models.BillPayStatusDebiting
+		} else if f.leaveFailed {
+			status = models.BillPayStatusFailed
+		}
+		if status != "" {
+			var existing models.BillPayment
+			if f.db.WithContext(ctx).Where("order_id = ?", in.OrderID).First(&existing).Error != nil {
+				pay := &models.BillPayment{ID: uuid.New(), UserID: in.UserID, OrderID: in.OrderID,
+					WalletAddress: in.WalletAddress, McgpAmount: in.McgpAmount.String(),
+					NgnKobo: "0", RateKobo: "0", DebitRef: "0x" + in.OrderID.String(),
+					Status: status}
+				f.db.WithContext(ctx).Create(pay)
+			}
 		}
 		return nil, f.debitErr
 	}
@@ -440,6 +454,135 @@ func TestBillPayUnverifiedDebitHolds(t *testing.T) {
 	}
 }
 
+func TestBillPayFailedDebitIsTerminalNotReplayable(t *testing.T) {
+	// THE critical case: a broadcast-failed debit leaves a `failed` payment
+	// row. Replaying Pay on that order must never turn into a free vend — the
+	// order goes terminal and a retry needs a fresh order (fresh on-chain ref).
+	r := newBillServiceRig(t)
+	r.payer.debitErr = fmt.Errorf("broadcast: nonce too low")
+	r.payer.leaveFailed = true
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err == nil {
+		t.Fatal("want error from failed debit")
+	}
+	var o models.BillOrder
+	r.db.First(&o, "id = ?", q.Order.ID)
+	if o.Status != models.BillStatusFailed {
+		t.Fatalf("failed debit must terminate the order, got %s", o.Status)
+	}
+	// Replay: must not vend, must not deliver.
+	r.payer.debitErr = nil // even if a fresh debit would now "succeed"
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); !errors.Is(err, ErrBillBadState) {
+		t.Fatalf("replaying a failed order must be rejected, got %v", err)
+	}
+	if r.vendor.vendCalls != 0 {
+		t.Fatalf("vendCalls = %d — a failed payment must never vend", r.vendor.vendCalls)
+	}
+}
+
+func TestBillPaymentDebitNeverReplaysFailedRow(t *testing.T) {
+	// Companion guard at the payment-service layer: an existing `failed` row
+	// must not be returned as a successful debit.
+	svc, _ := newBillRig(t)
+	orderID := uuid.New()
+	in := debitInput(orderID, 5)
+	pay := &models.BillPayment{ID: uuid.New(), UserID: in.UserID, OrderID: orderID,
+		WalletAddress: billWallet, McgpAmount: "5", NgnKobo: "0", RateKobo: "0",
+		DebitRef: "0xfailedref", Status: models.BillPayStatusFailed}
+	if err := svc.db.Create(pay).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Debit(context.Background(), in); !errors.Is(err, ErrBillPayBadState) {
+		t.Fatalf("want ErrBillPayBadState for failed row, got %v", err)
+	}
+}
+
+func TestBillPayReplayWhileInProgress(t *testing.T) {
+	// An order already in `paying` (another request owns it) replays as-is
+	// instead of double-driving the flow.
+	r := newBillServiceRig(t)
+	q := r.airtimeQuote(t)
+	r.db.Model(&models.BillOrder{}).Where("id = ?", q.Order.ID).
+		Update("status", models.BillStatusPaying)
+	o, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID)
+	if err != nil || o.Status != models.BillStatusPaying {
+		t.Fatalf("in-flight order must replay untouched: %v %+v", err, o)
+	}
+	if r.payer.debits != 0 || r.vendor.vendCalls != 0 {
+		t.Fatal("replay must neither debit nor vend")
+	}
+}
+
+func TestBillVendDataTransientCatalogStaysVending(t *testing.T) {
+	// A transient catalog failure at vend time must NOT refund — the plan may
+	// still be perfectly vendable; the reconciler retries.
+	r := newBillServiceRig(t)
+	q, err := r.svc.Quote(context.Background(), BillQuoteInput{
+		UserID: r.userID, Category: models.BillCategoryData, Provider: "01",
+		PhoneNumber: "08030001111", PlanRef: "2",
+	})
+	if err != nil {
+		t.Fatalf("quote should pre-date the outage: %v", err)
+	}
+	// Outage begins between quote and vend.
+	r.vendor.plansErr = fmt.Errorf("catalog timeout")
+	o, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Status != models.BillStatusVending {
+		t.Fatalf("status = %s, want vending (not refunded)", o.Status)
+	}
+	if r.payer.reverses != 0 {
+		t.Fatal("transient catalog failure must not reverse the payment")
+	}
+}
+
+func TestBillValidateHardening(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.verifyName = "ADA OBI"
+	// Unknown provider is rejected before the vendor is called.
+	if _, err := r.svc.Validate(context.Background(), models.BillCategoryElectricity, "99", "123456789"); err == nil {
+		t.Fatal("unknown provider must fail")
+	}
+	// Bad customer ids are rejected before the vendor is called.
+	for _, id := range []string{"123", "abcdefgh", strings.Repeat("1", 30)} {
+		if _, err := r.svc.Validate(context.Background(), models.BillCategoryElectricity, "01", id); err == nil {
+			t.Fatalf("customer id %q must be rejected", id)
+		}
+	}
+	if _, err := r.svc.Validate(context.Background(), models.BillCategoryElectricity, "01", "123456789"); err != nil {
+		t.Fatalf("valid lookup: %v", err)
+	}
+}
+
+func TestBillQuoteOpenQuoteCap(t *testing.T) {
+	r := newBillServiceRig(t)
+	for i := 0; i < 20; i++ {
+		r.airtimeQuote(t)
+	}
+	_, err := r.svc.Quote(context.Background(), BillQuoteInput{
+		UserID: r.userID, Category: models.BillCategoryAirtime, Provider: "01",
+		PhoneNumber: "08030001111", NgnAmount: 1000,
+	})
+	if !errors.Is(err, ErrBillBadRequest) {
+		t.Fatalf("21st open quote must be rejected, got %v", err)
+	}
+}
+
+func TestTruncate512RuneSafe(t *testing.T) {
+	s := strings.Repeat("é", 600) // 2 bytes per rune
+	out := truncate512(s)
+	for _, r := range out {
+		if r == '�' {
+			t.Fatal("truncate512 split a multi-byte rune")
+		}
+	}
+	if len([]rune(out)) > 512 {
+		t.Fatalf("rune length %d > 512", len([]rune(out)))
+	}
+}
+
 func TestBillPayExpiredQuote(t *testing.T) {
 	r := newBillServiceRig(t)
 	q := r.airtimeQuote(t)
@@ -586,7 +729,7 @@ func TestReconcileRetriesDeferredSettle(t *testing.T) {
 func TestBillValidate(t *testing.T) {
 	r := newBillServiceRig(t)
 	r.vendor.verifyName = "ADA OBI"
-	name, err := r.svc.Validate(context.Background(), models.BillCategoryElectricity, "01", "12345")
+	name, err := r.svc.Validate(context.Background(), models.BillCategoryElectricity, "01", "123456")
 	if err != nil || name != "ADA OBI" {
 		t.Fatalf("electricity: %q %v", name, err)
 	}

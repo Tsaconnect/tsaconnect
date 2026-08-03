@@ -186,6 +186,15 @@ func (s *BillService) Quote(ctx context.Context, in BillQuoteInput) (*BillQuoteR
 	if err := s.resolveProduct(ctx, order); err != nil {
 		return nil, err
 	}
+	// Cheap abuse valve: quotes are free to request but each one is a DB row.
+	// Nobody legitimately holds this many live quotes at once.
+	var open int64
+	if err := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Where("user_id = ? AND status = ? AND quote_expires_at > ?",
+			in.UserID, models.BillStatusQuoted, time.Now()).
+		Count(&open).Error; err == nil && open >= 20 {
+		return nil, fmt.Errorf("%w: too many open quotes; pay or let one expire", ErrBillBadRequest)
+	}
 	rate, err := s.billRateKobo(ctx)
 	if err != nil {
 		return nil, err
@@ -404,10 +413,25 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 	}
 	rate, _ := new(big.Int).SetString(order.RateKobo, 10)
 
-	order.Status = models.BillStatusPaying
-	if err := s.db.WithContext(ctx).Save(&order).Error; err != nil {
-		return nil, err
+	// Atomic quoted→paying transition. Two concurrent Pay calls both read
+	// `quoted` above; without this CAS both would debit-and-vend, and the vend
+	// has no on-chain/DB idempotency backstop (only ClubKonnect's RequestID
+	// dedupe, which we cannot verify). Exactly one caller wins the row.
+	res := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Where("id = ? AND status = ?", order.ID, models.BillStatusQuoted).
+		Update("status", models.BillStatusPaying)
+	if res.Error != nil {
+		return nil, res.Error
 	}
+	if res.RowsAffected == 0 {
+		// Lost the race — the other caller owns the flow now. Return the
+		// current state as an idempotent replay.
+		if err := s.db.WithContext(ctx).First(&order, "id = ?", order.ID).Error; err != nil {
+			return nil, err
+		}
+		return &order, nil
+	}
+	order.Status = models.BillStatusPaying
 
 	_, err := s.payer.Debit(ctx, DebitInput{
 		UserID:        userID,
@@ -421,20 +445,40 @@ func (s *BillService) Pay(ctx context.Context, userID uuid.UUID, walletAddress s
 		AllowBought: mcgp,
 	})
 	if err != nil {
-		// If a payment row survived in `debiting`, the debit may be live
-		// on-chain — hold the order for the reconciler. Otherwise the debit
-		// never happened: put the order back up for a retry.
+		// What happens to the order depends on how far the debit got:
+		//   no payment row   → nothing was broadcast (balance/validation
+		//                      failure) — safe to reopen the quote for a retry.
+		//   row `debiting`   → broadcast but unverified; may be live on-chain —
+		//                      hold for the reconciler.
+		//   row `failed`     → a broadcast attempt failed. TERMINAL for this
+		//                      order: the on-chain ref is order-derived, so
+		//                      replaying this order could only ever surface the
+		//                      failed row again — a retry needs a fresh order.
+		//   anything else    → a concurrent Pay moved money; don't touch it.
 		var pay models.BillPayment
 		perr := s.db.WithContext(ctx).Where("order_id = ?", order.ID).First(&pay).Error
-		if perr == nil && pay.Status == models.BillPayStatusDebiting {
+		switch {
+		case errors.Is(perr, gorm.ErrRecordNotFound):
+			order.Status = models.BillStatusQuoted
+			order.FailureReason = truncateReason(err.Error())
+			s.db.WithContext(ctx).Save(&order)
+			return nil, err
+		case perr != nil:
+			return nil, err
+		case pay.Status == models.BillPayStatusDebiting:
 			order.FailureReason = truncateReason("debit unconfirmed: " + err.Error())
 			s.db.WithContext(ctx).Save(&order)
 			return nil, fmt.Errorf("payment pending confirmation; it will resolve shortly")
+		case pay.Status == models.BillPayStatusFailed:
+			order.Status = models.BillStatusFailed
+			order.FailureReason = truncateReason(err.Error())
+			s.db.WithContext(ctx).Save(&order)
+			return nil, err
+		default:
+			// Debited (or beyond) by a concurrent caller — leave the flow to it
+			// and the reconciler.
+			return nil, fmt.Errorf("payment already in progress")
 		}
-		order.Status = models.BillStatusQuoted
-		order.FailureReason = truncateReason(err.Error())
-		s.db.WithContext(ctx).Save(&order)
-		return nil, err
 	}
 
 	order.Status = models.BillStatusPaid
@@ -468,8 +512,15 @@ func (s *BillService) callVendor(ctx context.Context, o *models.BillOrder) (Bill
 	case models.BillCategoryData:
 		plan, err := s.findPlan(ctx, s.vendor.DataPlans, o.Provider, o.PlanRef)
 		if err != nil {
-			// Catalog rotated since the quote — outcome is knowable: nothing sent.
-			return BillVendResult{StatusCode: 400, Status: "ORDER_ERROR", Remark: "plan no longer available"}, nil
+			// Two very different failures share this branch. Plan confirmed
+			// absent from a good catalog → terminal, nothing was sent. Catalog
+			// fetch itself failed → transient; erroring parks the order in
+			// `vending` for the reconciler instead of refunding a bill whose
+			// plan is still perfectly vendable.
+			if errors.Is(err, ErrBillBadRequest) {
+				return BillVendResult{StatusCode: 400, Status: "ORDER_ERROR", Remark: "plan no longer available"}, nil
+			}
+			return BillVendResult{}, err
 		}
 		return s.vendor.VendData(ctx, o.Provider, *plan, o.PhoneNumber, requestID)
 	case models.BillCategoryElectricity:
@@ -507,11 +558,24 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 	case VendSuccess:
 		o.Status = models.BillStatusDelivered
 		o.FailureReason = ""
-		s.db.WithContext(ctx).Save(o)
+		// The delivery (meter token / PIN) must be on disk BEFORE the debit is
+		// settled: settling is irreversible, and settling a delivery we failed
+		// to record charges the user for a product they cannot retrieve.
+		if err := s.db.WithContext(ctx).Save(o).Error; err != nil {
+			log.Printf("[bills] ALERT bill_delivery_persist_failed_total=1 order=%s: %v", o.ID, err)
+			return // stays non-terminal; the reconciler re-queries and retries
+		}
 		if _, err := s.payer.Settle(ctx, o.ID); err != nil {
-			// Delivered but unsettled — MCGP is safe in pendingSettle; the
-			// reconciler sweep retries the settle.
-			log.Printf("[bills] settle deferred order=%s: %v", o.ID, err)
+			if errors.Is(err, ErrBillPayBadState) || errors.Is(err, ErrBillPayNotFound) {
+				// A delivered bill whose payment cannot settle means a vend
+				// happened without a matching confirmed debit — the signature
+				// of a free vend. Page-level, never routine.
+				log.Printf("[bills] ALERT bill_settle_impossible_total=1 order=%s: %v", o.ID, err)
+			} else {
+				// Transient — MCGP is safe in pendingSettle; the reconciler
+				// sweep retries the settle.
+				log.Printf("[bills] settle deferred order=%s: %v", o.ID, err)
+			}
 		}
 	case VendFailed:
 		o.Status = models.BillStatusVendFail
@@ -523,7 +587,10 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 			reason = "service temporarily unavailable" // never blame the user for our float
 		}
 		o.FailureReason = truncateReason(reason)
-		s.db.WithContext(ctx).Save(o)
+		if err := s.db.WithContext(ctx).Save(o).Error; err != nil {
+			log.Printf("[bills] vend-fail persist failed order=%s: %v", o.ID, err)
+			return // reconciler re-queries and re-adopts
+		}
 		if _, err := s.payer.Reverse(ctx, o.ID); err != nil {
 			log.Printf("[bills] reverse deferred order=%s: %v", o.ID, err)
 			return
@@ -547,8 +614,20 @@ func (s *BillService) Validate(ctx context.Context, category, provider, customer
 	customerID = strings.TrimSpace(customerID)
 	switch category {
 	case models.BillCategoryElectricity:
+		if err := checkLookupInput(customerID); err != nil {
+			return "", err
+		}
+		if _, err := findProvider(s.vendor.Discos)(ctx, provider); err != nil {
+			return "", err
+		}
 		return s.vendor.VerifyElectricity(ctx, provider, customerID)
 	case models.BillCategoryCableTV:
+		if err := checkLookupInput(customerID); err != nil {
+			return "", err
+		}
+		if _, err := findProvider(s.vendor.CableProviders)(ctx, provider); err != nil {
+			return "", err
+		}
 		return s.vendor.VerifyCableTV(ctx, provider, customerID)
 	case models.BillCategoryAirtime, models.BillCategoryData, models.BillCategoryEpin:
 		if !validNigerianPhone(customerID) {
@@ -652,6 +731,19 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 		if s.reconcileOrder(ctx, &orders[i]) {
 			changed++
 		}
+	}
+
+	// Invariant: every delivered order must have a payment that at least
+	// reached `debited`. A delivered order whose payment failed or never
+	// existed is a vend nobody paid for — the free-vend signature. Alert-only.
+	var freeVends int64
+	if err := s.db.WithContext(ctx).Model(&models.BillOrder{}).
+		Joins("LEFT JOIN bill_payments ON bill_payments.order_id = bill_orders.id").
+		Where("bill_orders.status = ? AND (bill_payments.id IS NULL OR bill_payments.status IN ?)",
+			models.BillStatusDelivered,
+			[]string{models.BillPayStatusFailed, models.BillPayStatusDebiting}).
+		Count(&freeVends).Error; err == nil && freeVends > 0 {
+		log.Printf("[bills] ALERT bill_delivered_without_payment_total=%d — vend without a confirmed debit", freeVends)
 	}
 
 	// Orders terminal but whose payment leg didn't resolve (settle/reverse
@@ -774,9 +866,27 @@ func allDigits(s string) bool {
 	return true
 }
 
+// checkLookupInput bounds what may be forwarded to the vendor's verify
+// endpoints. Meter and smartcard numbers are digit strings; anything else is
+// rejected before it burns paid vendor-API quota. The bound also keeps the
+// endpoint from being a free-text relay.
+func checkLookupInput(customerID string) error {
+	if len(customerID) < 6 || len(customerID) > 20 || !allDigits(customerID) {
+		return fmt.Errorf("%w: invalid customer number", ErrBillBadRequest)
+	}
+	return nil
+}
+
+// truncate512 is rune-safe: a byte slice could cut a multi-byte character in
+// half, and Postgres rejects invalid UTF-8 — which would fail the exact Save
+// that records a delivered token/PIN.
 func truncate512(s string) string {
 	if len(s) <= 512 {
 		return s
 	}
-	return s[:512]
+	r := []rune(s)
+	if len(r) > 512 {
+		r = r[:512]
+	}
+	return string(r)
 }

@@ -27,7 +27,10 @@ func NewBillReconciler(svc billReconcileSvc, interval time.Duration) *BillReconc
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	return &BillReconciler{svc: svc, interval: interval, grace: 2 * time.Minute}
+	// Grace must comfortably exceed the debit (broadcast + receipt) plus the
+	// 75s vend timeout, or the reconciler can race a still-in-flight Pay and
+	// re-vend an order whose first vend hasn't answered yet.
+	return &BillReconciler{svc: svc, interval: interval, grace: 5 * time.Minute}
 }
 
 func (w *BillReconciler) Name() string            { return "bill-reconciler" }

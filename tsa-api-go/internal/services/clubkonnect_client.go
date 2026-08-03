@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,7 +40,16 @@ var (
 	// 417) — a platform incident, never a user error. Callers must alert, not
 	// blame the customer.
 	ErrBillFloatLow = errors.New("bill vendor float exhausted")
+	// ErrBillCustomerNotFound: a verify lookup found no account holder. A
+	// sentinel so handlers can pass this one through to users while treating
+	// every other vendor error as internal.
+	ErrBillCustomerNotFound = errors.New("customer not found")
 )
+
+// ckQueryRE matches a URL query string so redact() can strip it wholesale —
+// transport errors (*url.Error) embed the ENTIRE request URL, credentials
+// included, and allowlisting individual secrets is a losing game.
+var ckQueryRE = regexp.MustCompile(`\?[^\s"]*`)
 
 // vendTimeout covers ClubKonnect's up-to-60s network wait before it parks an
 // order as 201; catalogTimeout is for the cheap public reads.
@@ -124,15 +134,20 @@ func (c *ClubkonnectClient) IsEnabled() bool {
 	return c != nil && c.userID != "" && c.apiKey != ""
 }
 
-// redact strips the API key (raw and URL-encoded) from any string that might
-// travel to a log or an error response.
+// redact strips credential material from any string that might travel to a
+// log or an error response: whole query strings first (transport errors embed
+// the full request URL), then the API key and UserID (both halves of the
+// credential pair) raw and URL-encoded.
 func (c *ClubkonnectClient) redact(s string) string {
-	if c.apiKey == "" {
-		return s
-	}
-	s = strings.ReplaceAll(s, c.apiKey, "[REDACTED]")
-	if esc := url.QueryEscape(c.apiKey); esc != c.apiKey {
-		s = strings.ReplaceAll(s, esc, "[REDACTED]")
+	s = ckQueryRE.ReplaceAllString(s, "?[params-redacted]")
+	for _, secret := range []string{c.apiKey, c.userID} {
+		if secret == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, secret, "[REDACTED]")
+		if esc := url.QueryEscape(secret); esc != secret {
+			s = strings.ReplaceAll(s, esc, "[REDACTED]")
+		}
 	}
 	return s
 }
@@ -408,7 +423,7 @@ func (c *ClubkonnectClient) verify(ctx context.Context, path string, params url.
 	}
 	name := extractCustomerName(body)
 	if name == "" || strings.Contains(strings.ToUpper(name), "INVALID") {
-		return "", fmt.Errorf("customer not found")
+		return "", ErrBillCustomerNotFound
 	}
 	return name, nil
 }
