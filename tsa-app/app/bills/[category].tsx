@@ -138,15 +138,26 @@ export default function BillPurchase() {
   const [providerSheet, setProviderSheet] = useState(false);
   const [planSheet, setPlanSheet] = useState(false);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const [catalogErr, setCatalogErr] = useState('');
   const [localErr, setLocalErr] = useState('');
+  // Which (provider, customerId) pair the verified name belongs to. A vend is
+  // irreversible once settled, so a name verified against a meter number the
+  // user has since edited must not authorise the purchase.
+  const [verifiedFor, setVerifiedFor] = useState<string | null>(null);
 
-  // Operator catalog for the category.
+  // Operator catalog for the category. A failure here must be visible: bills
+  // are dormant until the vendor credentials are configured, and silently
+  // rendering an empty picker looks like "no providers exist".
   useEffect(() => {
     setLoadingCatalog(true);
     getBillProviders(category).then((r) => {
       if (r.success && Array.isArray(r.data)) {
         setProviders(r.data);
+        setCatalogErr(r.data.length === 0 ? 'No providers are available right now.' : '');
         if (r.data.length === 1) setProvider(r.data[0]);
+      } else {
+        setProviders([]);
+        setCatalogErr(r.message || 'Bill payments are unavailable right now. Please try again later.');
       }
       setLoadingCatalog(false);
     });
@@ -157,7 +168,13 @@ export default function BillPurchase() {
     if (cfg.amountSource !== 'plan' || !provider) return;
     setLoadingCatalog(true);
     getBillPlans(category, provider.code).then((r) => {
-      if (r.success && Array.isArray(r.data)) setPlans(r.data);
+      if (r.success && Array.isArray(r.data)) {
+        setPlans(r.data);
+        setCatalogErr(r.data.length === 0 ? 'No plans are available for this provider.' : '');
+      } else {
+        setPlans([]);
+        setCatalogErr(r.message || 'Could not load plans. Please try again.');
+      }
       setLoadingCatalog(false);
     });
   }, [category, cfg.amountSource, provider]);
@@ -179,13 +196,19 @@ export default function BillPurchase() {
   );
   const insufficient = state.status === 'quoted' && mcgpNeeded > mcgpPremium;
 
-  const canQuote = !!provider && effectiveNgn > 0 && customerId.trim().length > 0 && !busy;
+  // A verified name only authorises the exact account it was checked against.
+  const verifyKey = provider ? `${provider.code}:${customerId.trim()}` : '';
+  const isVerified = !cfg.validates || (!!state.customerName && verifiedFor === verifyKey);
+
+  const canQuote =
+    !!provider && effectiveNgn > 0 && customerId.trim().length > 0 && isVerified && !busy;
 
   const onValidate = async () => {
     setLocalErr('');
     if (!provider) return setLocalErr('Choose a provider');
     if (!customerId.trim()) return setLocalErr(`Enter the ${cfg.customerLabel.toLowerCase()}`);
-    await validate(category, provider.code, customerId.trim());
+    const name = await validate(category, provider.code, customerId.trim());
+    setVerifiedFor(name === null ? null : verifyKey);
   };
 
   const onGetQuote = async () => {
@@ -193,6 +216,8 @@ export default function BillPurchase() {
     if (!provider) return setLocalErr('Choose a provider');
     if (effectiveNgn <= 0) return setLocalErr('Enter an amount');
     if (!customerId.trim()) return setLocalErr(`Enter the ${cfg.customerLabel.toLowerCase()}`);
+    if (!isVerified)
+      return setLocalErr(`Verify the ${cfg.customerLabel.toLowerCase()} before paying`);
     if (provider.minAmount && cfg.amountSource === 'free' && effectiveNgn < provider.minAmount)
       return setLocalErr(`Minimum is ₦${provider.minAmount.toLocaleString()}`);
     if (provider.maxAmount && cfg.amountSource === 'free' && effectiveNgn > provider.maxAmount)
@@ -460,7 +485,13 @@ export default function BillPurchase() {
             </Text>
             <AmountInput
               value={customerId}
-              onChangeText={(v) => setCustomerId(v.replace(/[^0-9]/g, ''))}
+              onChangeText={(v) => {
+                setCustomerId(v.replace(/[^0-9]/g, ''));
+                // Editing the account invalidates any prior verification —
+                // otherwise a name checked against one meter could authorise a
+                // payment to another.
+                if (verifiedFor) setVerifiedFor(null);
+              }}
               placeholder={cfg.customerPlaceholder}
               symbol={undefined}
             />
@@ -474,17 +505,22 @@ export default function BillPurchase() {
                 }}
               >
                 <Button
-                  title="Verify"
+                  title={isVerified ? 'Verified' : 'Verify'}
                   size="sm"
                   variant="secondary"
                   onPress={onValidate}
+                  disabled={isVerified}
                   loading={state.status === 'validating'}
                 />
-                {state.customerName ? (
+                {isVerified && state.customerName ? (
                   <Text variant="bodySm" weight="600" style={{ color: colors.success }}>
                     {state.customerName}
                   </Text>
-                ) : null}
+                ) : (
+                  <Text variant="bodySm" style={{ color: colors.textMuted, flex: 1 }}>
+                    Verify the account before paying
+                  </Text>
+                )}
               </View>
             )}
           </View>
@@ -545,9 +581,9 @@ export default function BillPurchase() {
           </SummaryCard>
         )}
 
-        {(localErr || state.error) && (
+        {(localErr || state.error || catalogErr) && (
           <Text variant="bodySm" style={{ color: colors.danger }}>
-            {localErr || state.error}
+            {localErr || state.error || catalogErr}
           </Text>
         )}
 
