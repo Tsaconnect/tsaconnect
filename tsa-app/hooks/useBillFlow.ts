@@ -92,6 +92,13 @@ export function useBillFlow() {
           dispatch({ type: 'ORDER_UPDATE', order });
         }
       }
+      // Out of attempts with the order still unresolved. Say so and point at
+      // history — the vend is genuinely still in flight (ClubKonnect confirms
+      // asynchronously and the backend reconciler settles it), so silently
+      // leaving the spinner up strands a paid-for bill with nowhere to look.
+      if (runRef.current === run && !isTerminal(statusFromOrder(order))) {
+        dispatch({ type: 'POLL_EXHAUSTED' });
+      }
     },
     []
   );

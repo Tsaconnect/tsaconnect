@@ -111,6 +111,33 @@ describe('billFlowReducer', () => {
     expect(s.error).toBe('Quote expired');
   });
 
+  it('lands on stillProcessing when polling outlives the vend', () => {
+    // The real-world case: airtime delivers, but ClubKonnect confirms
+    // asynchronously and the backend reconciler settles it minutes later —
+    // past the app's polling window. Previously the loop just ended and the
+    // screen span forever with no way back to the order.
+    let s = billFlowReducer({ status: 'vending' }, { type: 'POLL_EXHAUSTED' });
+    expect(s.status).toBe('stillProcessing');
+    expect(isTerminal('stillProcessing')).toBe(true);
+
+    // A paying order that never confirmed gets the same treatment.
+    s = billFlowReducer({ status: 'paying' }, { type: 'POLL_EXHAUSTED' });
+    expect(s.status).toBe('stillProcessing');
+  });
+
+  it('does not overwrite a resolved order with stillProcessing', () => {
+    for (const status of ['delivered', 'refunded', 'failed', 'error'] as const) {
+      expect(billFlowReducer({ status }, { type: 'POLL_EXHAUSTED' }).status).toBe(status);
+    }
+  });
+
+  it('still resolves normally when the vend confirms in time', () => {
+    let s = billFlowReducer({ status: 'vending' }, { type: 'ORDER_UPDATE', order: order('delivered') });
+    expect(s.status).toBe('delivered');
+    s = billFlowReducer(s, { type: 'POLL_EXHAUSTED' });
+    expect(s.status).toBe('delivered');
+  });
+
   it('keeps validation failures on the form', () => {
     const s = billFlowReducer({ status: 'validating' }, { type: 'VALIDATE_ERR', error: 'not found' });
     expect(s.status).toBe('idle');

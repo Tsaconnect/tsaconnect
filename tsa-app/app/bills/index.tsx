@@ -51,9 +51,22 @@ export default function BillsHub() {
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
-        <Text variant="bodySm" style={{ color: colors.textSecondary }}>
-          Pay with your MCGP balance — no gas, nothing to sign.
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text variant="bodySm" style={{ color: colors.textSecondary, flex: 1 }}>
+            Pay with your MCGP balance — no gas, nothing to sign.
+          </Text>
+          <PressableScale
+            onPress={() => router.push('/bills/orders' as any)}
+            accessibilityRole="button"
+            accessibilityLabel="Bill history"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingLeft: 12 }}
+          >
+            <Icon name="clock" size={16} color={colors.accent} />
+            <Text variant="bodySm" weight="600" style={{ color: colors.accent }}>
+              History
+            </Text>
+          </PressableScale>
+        </View>
         {TILES.map((t) => {
           const tc = toneColors(t.tone);
           return (

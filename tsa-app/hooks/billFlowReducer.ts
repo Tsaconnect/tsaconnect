@@ -19,6 +19,12 @@ export type BillFlowStatus =
   | 'quoted'
   | 'paying'
   | 'vending'
+  // `stillProcessing` is where a vend lands when it outlives the app's polling
+  // window. ClubKonnect accepts before it confirms, and the backend reconciler
+  // can take minutes to settle — far longer than anyone will hold a spinner.
+  // It is terminal FOR THE SCREEN, not for the order: the bill is paid for and
+  // still on its way, and history is where the real outcome shows up.
+  | 'stillProcessing'
   | 'delivered'
   | 'refunded'
   | 'failed'
@@ -34,6 +40,7 @@ export interface BillFlowState {
 
 export type BillFlowAction =
   | { type: 'RESET' }
+  | { type: 'POLL_EXHAUSTED' }
   | { type: 'VALIDATE_START' }
   | { type: 'VALIDATE_OK'; name: string }
   | { type: 'VALIDATE_ERR'; error: string }
@@ -100,6 +107,12 @@ export function billFlowReducer(state: BillFlowState, action: BillFlowAction): B
               : state.error,
       };
     }
+    case 'POLL_EXHAUSTED':
+      // Only give up on a screen that is still waiting — a terminal update may
+      // have landed in the same tick.
+      return state.status === 'vending' || state.status === 'paying'
+        ? { ...state, status: 'stillProcessing' }
+        : state;
     case 'ERROR':
       return { ...state, status: 'error', error: action.error };
     default:
@@ -107,6 +120,15 @@ export function billFlowReducer(state: BillFlowState, action: BillFlowAction): B
   }
 }
 
+// Terminal for the PURCHASE SCREEN. `stillProcessing` is included because the
+// screen must stop waiting even though the order itself is unresolved —
+// leaving it out is what produced an endless spinner on every airtime buy.
 export function isTerminal(status: BillFlowStatus): boolean {
-  return status === 'delivered' || status === 'refunded' || status === 'failed' || status === 'error';
+  return (
+    status === 'delivered' ||
+    status === 'refunded' ||
+    status === 'failed' ||
+    status === 'error' ||
+    status === 'stillProcessing'
+  );
 }

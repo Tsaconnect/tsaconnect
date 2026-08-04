@@ -215,6 +215,44 @@ export default function BillPurchase() {
     refreshBalance();
   };
 
+  // ── Still processing after the polling window ──────────────────────────────
+  // The bill is paid for and in flight; the screen stops waiting but must not
+  // imply success or failure, and must offer somewhere to actually look.
+  if (state.status === 'stillProcessing') {
+    return (
+      <SafeAreaView
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: spacing.xl,
+          backgroundColor: colors.background,
+        }}
+      >
+        <Icon name="clock" size={64} color={colors.warning} />
+        <Text
+          variant="title3"
+          weight="700"
+          style={{ marginTop: spacing.lg, color: colors.textPrimary, textAlign: 'center' }}
+        >
+          Still processing
+        </Text>
+        <Text
+          variant="bodySm"
+          style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}
+        >
+          Your payment went through and the provider is still confirming. This usually completes
+          within a few minutes — you don’t need to pay again. The result will appear in your bill
+          history.
+        </Text>
+        <View style={{ height: spacing.xl }} />
+        <Button title="View bill history" onPress={() => router.replace('/bills/orders' as any)} fullWidth />
+        <View style={{ height: spacing.sm }} />
+        <Button title="Done" variant="ghost" onPress={() => router.replace('/bills' as any)} fullWidth />
+      </SafeAreaView>
+    );
+  }
+
   // ── Terminal result states ─────────────────────────────────────────────────
   if (
     state.status === 'delivered' ||
@@ -312,10 +350,17 @@ export default function BillPurchase() {
           {label}
         </Text>
         {state.status === 'vending' && (
-          <Text variant="bodySm" style={{ color: colors.textMuted, textAlign: 'center' }}>
-            This can take a moment. You can close this screen — the result will appear in your bill
-            history.
-          </Text>
+          <>
+            <Text variant="bodySm" style={{ color: colors.textMuted, textAlign: 'center' }}>
+              This can take a moment. You can leave this screen — the result will appear in your bill
+              history.
+            </Text>
+            <Button
+              title="View bill history"
+              variant="ghost"
+              onPress={() => router.replace('/bills/orders' as any)}
+            />
+          </>
         )}
       </SafeAreaView>
     );
