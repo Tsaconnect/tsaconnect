@@ -72,12 +72,17 @@ module.exports = {
     },
   },
   etherscan: {
-    apiKey: {
-      sonicMainnet: process.env.SONICSCAN_API_KEY || "",
-      sonicTestnet: process.env.SONICSCAN_API_KEY || "",
-      bsc: process.env.BSCSCAN_API_KEY || "",
-      bscTestnet: process.env.BSCSCAN_API_KEY || "",
-    },
+    // Etherscan V2: ONE key covers every supported chain, Sonic and BSC
+    // included, and the per-network V1 endpoints now reject requests outright
+    // ("You are using a deprecated V1 endpoint"). Get a key at
+    // https://etherscan.io/myapikey — a Sonicscan-specific key is no longer
+    // what this wants. ETHERSCAN_API_KEY is the new name; the old vars are
+    // still read so existing .env files keep working.
+    apiKey:
+      process.env.ETHERSCAN_API_KEY ||
+      process.env.SONICSCAN_API_KEY ||
+      process.env.BSCSCAN_API_KEY ||
+      "",
     customChains: [
       {
         network: "sonicMainnet",

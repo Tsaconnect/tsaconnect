@@ -7,3 +7,4 @@ coverage.json
 .env
 scripts/.pm-e2e-state.json
 deployments/*.json
+verification/
