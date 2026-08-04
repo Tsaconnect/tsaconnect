@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,17 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
+
+// billFail logs the REAL error server-side and answers the client with the
+// sanitized mapping. Client messages are deliberately generic for non-sentinel
+// errors (vendor errors embed URLs, GORM errors embed SQL), which makes this
+// log line the only place the actual failure is visible — without it a live
+// 400 is undebuggable. Vendor-originated errors are already credential-redacted
+// at the client layer before they reach here.
+func billFail(c *gin.Context, err error) {
+	log.Printf("[bills] %s %s failed: %v", c.Request.Method, c.FullPath(), err)
+	utils.ErrorResponse(c, billStatus(err), billMessage(err))
+}
 
 // billService is the subset of *services.BillService the handler uses; an
 // interface so the handler is unit-testable with a fake.
@@ -39,7 +51,7 @@ func NewBillHandler(bills billService) *BillHandler {
 func (h *BillHandler) GetProviders(c *gin.Context) {
 	list, err := h.bills.Providers(c.Request.Context(), c.Param("category"))
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Providers", list)
@@ -49,7 +61,7 @@ func (h *BillHandler) GetProviders(c *gin.Context) {
 func (h *BillHandler) GetPlans(c *gin.Context) {
 	plans, err := h.bills.Plans(c.Request.Context(), c.Param("category"), c.Param("provider"))
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Plans", plans)
@@ -70,7 +82,7 @@ func (h *BillHandler) Validate(c *gin.Context) {
 	}
 	name, err := h.bills.Validate(c.Request.Context(), req.Category, req.Provider, req.CustomerID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Validated", gin.H{"customerName": name})
@@ -111,7 +123,7 @@ func (h *BillHandler) Quote(c *gin.Context) {
 		NgnAmount:    req.NgnAmount,
 	})
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
@@ -136,7 +148,7 @@ func (h *BillHandler) Pay(c *gin.Context) {
 	}
 	order, err := h.bills.Pay(c.Request.Context(), user.ID, user.WalletAddress, orderID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment accepted", order)
@@ -156,7 +168,7 @@ func (h *BillHandler) GetOrder(c *gin.Context) {
 	}
 	order, err := h.bills.GetOrder(c.Request.Context(), user.ID, orderID)
 	if err != nil {
-		utils.ErrorResponse(c, billStatus(err), billMessage(err))
+		billFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Order", order)
@@ -171,6 +183,7 @@ func (h *BillHandler) ListOrders(c *gin.Context) {
 	}
 	orders, err := h.bills.ListOrders(c.Request.Context(), user.ID, 50)
 	if err != nil {
+		log.Printf("[bills] GET %s failed: %v", c.FullPath(), err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, billMessage(err))
 		return
 	}
@@ -180,8 +193,8 @@ func (h *BillHandler) ListOrders(c *gin.Context) {
 // billStatus maps service errors to HTTP status codes, and billMessage decides
 // what text a client may see. Only sentinel errors pass their message through;
 // anything else is internal detail (vendor transport errors embed request
-// URLs, GORM errors embed SQL) and is replaced with a generic line — the full
-// error is logged server-side by the service layer.
+// URLs, GORM errors embed SQL) and is replaced with a generic line — billFail
+// above logs the full error server-side.
 func billStatus(err error) int {
 	switch {
 	case errors.Is(err, services.ErrBillsDisabled),
