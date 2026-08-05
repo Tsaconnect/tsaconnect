@@ -123,9 +123,10 @@ describe("McgpEntitlementSwapV2 — upgrade safety", function () {
   it("the __gap shrank 1:1 with the slots appended after it", async function () {
     // The gap started at 50. Every slot appended below the original storage must
     // come OUT of the gap, or the next upgrade's appended state collides with
-    // whatever the gap was reserving. Six slots have been added since
-    // (maxDebitPerTx, debitWindow, debitWindowCap, debitWindowStart,
-    // debitedInWindow, _debitFromBought), so the gap must now read 44.
+    // whatever the gap was reserving. Eight slots have been added since: six for
+    // operator debit (maxDebitPerTx, debitWindow, debitWindowCap,
+    // debitWindowStart, debitedInWindow, _debitFromBought) and two for the V1
+    // migration (premiumMigrated, migrationClosed), so the gap must now read 42.
     const layout = await upgrades.erc1967.getImplementationAddress(await swap.getAddress());
     expect(layout).to.properAddress;
 
@@ -134,7 +135,7 @@ describe("McgpEntitlementSwapV2 — upgrade safety", function () {
       "utf8",
     );
     const GAP_ORIGINAL = 50;
-    const APPENDED = 6;
+    const APPENDED = 8;
     expect(source).to.match(new RegExp(`uint256\\[${GAP_ORIGINAL - APPENDED}\\] private __gap;`));
   });
 });

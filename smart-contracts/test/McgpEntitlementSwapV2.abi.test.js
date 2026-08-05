@@ -93,14 +93,18 @@ describe("McgpEntitlementSwapV2 — ABI compatibility", function () {
       .map((f) => f.format("sighash"));
     const added = actual.filter((sig) => !V1_EVENTS.includes(sig));
 
-    // Inherited OZ events (Ownable/Pausable/ERC1967) plus V2's two new ones.
+    // Inherited OZ events (Ownable/Pausable/ERC1967), V2's own, and the two
+    // one-time migration events. Every V1 signature the backend decodes by
+    // topic0 is unchanged — this list is only what was ADDED.
     expect(added.sort()).to.deep.equal(
       [
         "DebitCapsUpdated(uint256,uint256,uint256)",
         "FeeManagerUpdated(address,address)",
         "Initialized(uint64)",
+        "MigrationClosed()",
         "OwnershipTransferred(address,address)",
         "Paused(address)",
+        "PremiumMigrated(address,uint256,uint256)",
         "TrustedForwarderUpdated(address,address)",
         "Unpaused(address)",
         "Upgraded(address)",

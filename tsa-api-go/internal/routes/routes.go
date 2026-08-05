@@ -29,7 +29,7 @@ var wsUpgrader = websocket.Upgrader{
 // SetupRoutes registers all route groups and endpoints on the router.
 // Params carry both the Phase-2 (osh/rch/tph) and Flutterwave (fwh/fqh)
 // handlers — the two FW params are appended after main's signature.
-func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler) {
+func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, ch *handlers.CheckoutHandler, mrh *handlers.MerchantRequestHandler, sch *handlers.ServiceContactHandler, swh *handlers.SwapHandler, slh *handlers.SwapLiFiHandler, psh *handlers.PrivateSaleHandler, wsHub *ws.Hub, eh *handlers.ExchangeHandler, p2p *handlers.P2PHandler, fch *handlers.FeeConfigHandler, rfh *handlers.RewardFlagHandler, rdh *handlers.RewardDistributionHandler, rsh *handlers.RewardSummaryHandler, fah *handlers.FeeAdminHandler, rph *handlers.RewardPayoutHandler, pmh *handlers.PMHandler, nwh *handlers.NombaWebhookHandler, msh *handlers.MCGPSwapHandler, ith *handlers.ITHandler, osh *handlers.OTCSettingsHandler, rch *handlers.RewardClaimHandler, tph *handlers.TPAdminHandler, fwh *handlers.FlutterwaveWebhookHandler, fqh *handlers.FeeQuoteHandler, fwlh *handlers.FeeWalletHandler, bh *handlers.BillHandler) {
 	// API info
 	router.GET("/api", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -900,6 +900,39 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
+	}
+
+	// Utility bills — airtime/data/electricity/cable/betting/exam e-PINs paid
+	// with spendable MCGP (operator debit path) and vended via ClubKonnect.
+	// Registered only when the bill stack is fully wired (bh != nil).
+	if bh != nil {
+		bills := api.Group("/bills")
+		bills.Use(auth)
+		// Per-USER limiter on the endpoints that hit the paid vendor API or
+		// write rows. The global IP limiter is weak cover here: mobile users
+		// share carrier NAT IPs, and /validate is a name-lookup oracle for
+		// meter/smartcard numbers if left open to enumeration.
+		billWriteLimit := middleware.RateLimiterBy(20, time.Minute, func(c *gin.Context) string {
+			v, _ := c.Get("user")
+			switch u := v.(type) {
+			case models.User:
+				return "bills:" + u.ID.String()
+			case *models.User:
+				return "bills:" + u.ID.String()
+			}
+			return "" // falls back to client IP inside RateLimiterBy
+		})
+		{
+			bills.GET("/catalog/:category", bh.GetProviders)
+			bills.GET("/catalog/:category/:provider/plans", bh.GetPlans)
+			bills.POST("/validate", billWriteLimit, bh.Validate)
+			bills.POST("/quote", billWriteLimit, bh.Quote)
+			bills.GET("/orders", bh.ListOrders)
+			bills.GET("/orders/:id", bh.GetOrder)
+			bills.POST("/orders/:id/pay", billWriteLimit, bh.Pay)
+		}
+	} else {
+		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")
 	}
 
 	// Deposit/withdrawal fee quotes — ALWAYS registered, independent of the IT

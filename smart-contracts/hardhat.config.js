@@ -32,6 +32,24 @@ module.exports = {
     // also eliminates the runs=1 runtime-gas penalty on every openTrade/release.
   },
   networks: {
+    // Local fork of a live chain, for rehearsing migrations/upgrades against
+    // real state before touching mainnet. Inert unless FORK_RPC is set, so
+    // ordinary `hardhat test` runs are unaffected.
+    hardhat: process.env.FORK_RPC
+      ? {
+          forking: {
+            url: process.env.FORK_RPC,
+            ...(process.env.FORK_BLOCK ? { blockNumber: Number(process.env.FORK_BLOCK) } : {}),
+          },
+          // Sonic is not in Hardhat's built-in hardfork history, so forked
+          // historical calls fail without an explicit activation table. The key
+          // must be a plain number and the value a hardfork→block map.
+          hardfork: "cancun",
+          chains: {
+            146: { hardforkHistory: { shanghai: 0, cancun: 1 } },
+          },
+        }
+      : {},
     sonicTestnet: {
       url: process.env.SONIC_TESTNET_RPC || "https://rpc.testnet.soniclabs.com",
       chainId: 14601,
@@ -54,12 +72,17 @@ module.exports = {
     },
   },
   etherscan: {
-    apiKey: {
-      sonicMainnet: process.env.SONICSCAN_API_KEY || "",
-      sonicTestnet: process.env.SONICSCAN_API_KEY || "",
-      bsc: process.env.BSCSCAN_API_KEY || "",
-      bscTestnet: process.env.BSCSCAN_API_KEY || "",
-    },
+    // Etherscan V2: ONE key covers every supported chain, Sonic and BSC
+    // included, and the per-network V1 endpoints now reject requests outright
+    // ("You are using a deprecated V1 endpoint"). Get a key at
+    // https://etherscan.io/myapikey — a Sonicscan-specific key is no longer
+    // what this wants. ETHERSCAN_API_KEY is the new name; the old vars are
+    // still read so existing .env files keep working.
+    apiKey:
+      process.env.ETHERSCAN_API_KEY ||
+      process.env.SONICSCAN_API_KEY ||
+      process.env.BSCSCAN_API_KEY ||
+      "",
     customChains: [
       {
         network: "sonicMainnet",

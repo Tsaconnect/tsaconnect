@@ -123,6 +123,9 @@ func AutoMigrate() error {
 		// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM.
 		&models.ITIntent{},
 		&models.BillPayment{},
+		// Utility bills v2 — what was bought (ClubKonnect vend); the MCGP money
+		// leg lives in BillPayment, keyed by order ID.
+		&models.BillOrder{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},

@@ -1,0 +1,93 @@
+{
+  "network": "sonicMainnet",
+  "chainId": 146,
+  "v1Proxy": "0xF27Fe8091c31FAa0101B8Ef86421035bbAda8E52",
+  "block": 77025687,
+  "takenAtPaused": false,
+  "totals": {
+    "bought": "249107550000000000000",
+    "credited": "136139237058661146075",
+    "pendingSettle": "0",
+    "accountedMcgp": "385246787058661146075"
+  },
+  "holders": [
+    {
+      "user": "0x8468922134272f99933e8B9ffA7256b0f5588D74",
+      "bought": "229107550000000000000",
+      "credited": "17901897601145721446",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x09124A9E3c1B5ACf4207e33828195D00846e5ea8",
+      "bought": "8000000000000000000",
+      "credited": "14111480652646068503",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x6D321115A1e84f7316CE6eddF30Cba46238aDE07",
+      "bought": "0",
+      "credited": "17901897601145721446",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0xd9839a20D2d7F1888C2cB7F7E41eb8BEb5114189",
+      "bought": "0",
+      "credited": "17507194244604316546",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0xB1f3ffaDebC9C271Df42866421CC6A4FF6Fa1eCD",
+      "bought": "0",
+      "credited": "12513494062612450521",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0xCbEcD72481EED51cAFef33737967828A446182D2",
+      "bought": "0",
+      "credited": "10519452449567723342",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x84aD9525BDE4d2c1b6b511e8aA08d6993D1aE8C7",
+      "bought": "0",
+      "credited": "10504316546762589928",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x5D246d9E01e6D0E119D76F44EcB187bdD5C44a38",
+      "bought": "0",
+      "credited": "10500539374325782092",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x87C2422Be9a11B71a5C530Ecd156134d3B04E3Ce",
+      "bought": "10000000000000000000",
+      "credited": "0",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",
+      "bought": "2000000000000000000",
+      "credited": "7953321364452423698",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0xA151A6234BCf7295787E6946b0E04c4DF2Be1a78",
+      "bought": "0",
+      "credited": "7178750897343862167",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x25e4D0C2f12618C01B205375642e14f2d4f6B41c",
+      "bought": "0",
+      "credited": "6982783357245337159",
+      "pendingSettle": "0"
+    },
+    {
+      "user": "0x2Fb00b5B78faf9a1Cb1813FCA4F0dC0ebBF1A9E3",
+      "bought": "0",
+      "credited": "2564108906809149227",
+      "pendingSettle": "0"
+    }
+  ]
+}

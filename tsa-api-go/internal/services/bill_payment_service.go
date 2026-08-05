@@ -110,10 +110,16 @@ func (s *BillPaymentService) Debit(ctx context.Context, in DebitInput) (*models.
 	}
 
 	// Return an existing attempt untouched. Checked before anything is
-	// broadcast, so a retry can never open a second debit.
+	// broadcast, so a retry can never open a second debit. A FAILED attempt is
+	// not success and must never be replayed as one — returning it nil-error
+	// would let the caller treat an unpaid order as paid (free vend). The ref
+	// is derived from the order id, so the safe retry path is a new order.
 	var existing models.BillPayment
 	err := s.db.WithContext(ctx).Where("order_id = ?", in.OrderID).First(&existing).Error
 	if err == nil {
+		if existing.Status == models.BillPayStatusFailed {
+			return nil, ErrBillPayBadState
+		}
 		return &existing, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {

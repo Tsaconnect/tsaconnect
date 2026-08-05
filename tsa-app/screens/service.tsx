@@ -72,6 +72,14 @@ const SERVICE_ITEMS: ServiceItem[] = [
     route: RAIL_ROUTES.it,
   },
   {
+    key: 'pay-bills',
+    title: 'Pay Bills',
+    description: 'Airtime, data, electricity & more — paid with MCGP',
+    icon: 'bolt',
+    tone: 'warning',
+    route: '/bills',
+  },
+  {
     key: 'trade-earn',
     title: 'Trade & Earn',
     description: 'Trade Points, cashback and referral rewards',

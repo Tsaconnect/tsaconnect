@@ -166,10 +166,23 @@ contract McgpEntitlementSwapV2 is
     ///      it, turning a failed payment into a downgrade.
     mapping(bytes32 => uint256) private _debitFromBought;
 
+    // ──────────────── One-time migration from the V1 proxy ─────────────
+    /// @dev V2 is a SEPARATE proxy from V1 (0xF27F…8E52), so it starts with an
+    ///      empty ledger. `buyPremium` is the only writer of `premiumBought`, and
+    ///      it charges the user USDC — so without an admin path, moving a user's
+    ///      already-paid-for bought premium across would mean charging them twice.
+    ///      `migratePremium` is that path, and it is deliberately sealable:
+    ///      `closeMigration` permanently revokes the owner's ability to conjure
+    ///      entitlement, restoring the invariant that bought premium can only
+    ///      come from a real USDC payment.
+    mapping(address => bool) public premiumMigrated;
+    bool public migrationClosed;
+
     /// @dev Storage headroom for future upgrades. Shrunk by exactly the number of
     ///      slots appended above it (50 → 44: maxDebitPerTx, debitWindow,
-    ///      debitWindowCap, debitWindowStart, debitedInWindow, _debitFromBought).
-    uint256[44] private __gap;
+    ///      debitWindowCap, debitWindowStart, debitedInWindow, _debitFromBought;
+    ///      44 → 42: premiumMigrated, migrationClosed).
+    uint256[42] private __gap;
 
     // ───────────────────────────── Events ──────────────────────────────
     // Signatures are IDENTICAL to V1 — the backend decodes these by topic0.
@@ -197,6 +210,8 @@ contract McgpEntitlementSwapV2 is
     // V2-only
     event TrustedForwarderUpdated(address indexed previous, address indexed current);
     event FeeManagerUpdated(address indexed previous, address indexed current);
+    event PremiumMigrated(address indexed user, uint256 bought, uint256 credited);
+    event MigrationClosed();
 
     // Operator/guardian checks use RAW msg.sender: a relayer must never assume a role.
     modifier onlyOperator() {
@@ -631,6 +646,60 @@ contract McgpEntitlementSwapV2 is
             legacyEntitlement[users[i]] = amounts[i];
             emit LegacySeeded(users[i], amounts[i]);
         }
+    }
+
+    /// @notice One-time import of premium balances from the V1 proxy.
+    /// @dev Callable in batches; each user may be migrated exactly once, because a
+    ///      repeat would inflate `accountedMcgp` and silently underback the
+    ///      contract. The backing assertion runs once at the end of the batch:
+    ///      the intermediate state during a loop is not observable, only the
+    ///      final one has to be solvent. Fund BEFORE migrating.
+    ///
+    ///      `pendingSettle` is intentionally NOT migratable. An in-flight debit
+    ///      belongs to whichever contract holds its `debits[ref]` entry; moving
+    ///      the balance without the debit record would strand the settle/reverse.
+    ///      Drain V1's pending debits first (they were zero at cutover).
+    function migratePremium(
+        address[] calldata users,
+        uint256[] calldata bought,
+        uint256[] calldata credited
+    ) external onlyOwner {
+        require(!migrationClosed, "Migration closed");
+        require(users.length == bought.length && users.length == credited.length, "Length mismatch");
+        require(users.length > 0, "Empty batch");
+
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[i];
+            require(user != address(0), "Invalid user");
+            require(!premiumMigrated[user], "Already migrated");
+            uint256 total = bought[i] + credited[i];
+            require(total > 0, "Nothing to migrate");
+
+            premiumMigrated[user] = true;
+            premiumBought[user] += bought[i];
+            premiumCredited[user] += credited[i];
+            accountedMcgp += total;
+
+            emit PremiumMigrated(user, bought[i], credited[i]);
+        }
+
+        require(mcgpToken.balanceOf(address(this)) >= accountedMcgp, "Underbacked: fund MCGP first");
+    }
+
+    /// @notice Seal migration in THIS implementation. While it is open the owner
+    ///         can mint entitlement out of nothing, which is exactly the power
+    ///         `buyPremium` exists to prevent — so seal the moment the import is
+    ///         verified.
+    /// @dev    Not irreversible in an absolute sense: this is a UUPS proxy, so
+    ///         the owner can always upgrade to an implementation that resets the
+    ///         flag or reintroduces a mint path. Sealing removes the capability
+    ///         from the current ABI; the owner's upgrade right remains the
+    ///         underlying trust assumption, as it does for every other invariant
+    ///         here.
+    function closeMigration() external onlyOwner {
+        require(!migrationClosed, "Already closed");
+        migrationClosed = true;
+        emit MigrationClosed();
     }
 
     function addOperator(address op) external onlyOwner {
