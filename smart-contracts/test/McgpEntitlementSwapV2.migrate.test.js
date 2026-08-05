@@ -9,7 +9,7 @@
 //   1. It cannot run twice for a user (a repeat inflates accountedMcgp and
 //      silently underbacks every other holder).
 //   2. It cannot leave the contract underbacked.
-//   3. It can be sealed permanently, and the seal is irreversible.
+//   3. It can be sealed, closing the mint path in this implementation.
 //   4. Migrated balances behave EXACTLY like natively-created ones — bought
 //      stays self-exitable, credited stays spend-only.
 
@@ -127,7 +127,7 @@ describe("McgpEntitlementSwapV2 — premium migration from V1", function () {
     await expect(swap.migratePremium([alice.address], [0], [0])).to.be.revertedWith("Nothing to migrate");
   });
 
-  it("seals permanently, and the seal cannot be lifted", async function () {
+  it("seals migration in this implementation, and the seal cannot be lifted from its ABI", async function () {
     await fund(mcgp(1000));
     await swap.migratePremium([alice.address], [mcgp(10)], [0]);
     await expect(swap.closeMigration()).to.emit(swap, "MigrationClosed");

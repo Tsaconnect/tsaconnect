@@ -216,7 +216,12 @@ function fromBillOrder(o: any): ActivityItem {
   const target = o.customerId || o.phoneNumber || '';
   const failed = o.status === 'vend_failed' || o.status === 'failed' || o.status === 'expired';
   const refunded = o.status === 'refunded';
-  const pending = o.status === 'vending' || o.status === 'paid' || o.status === 'paying';
+  // `quoted` counts as pending: the API returns every order including quotes the
+  // user abandoned, and falling through to the 'completed' default would show a
+  // bill they never paid for as a completed payment.
+  const pending =
+    o.status === 'vending' || o.status === 'paid' || o.status === 'paying' || o.status === 'quoted';
+  const unpaid = o.status === 'quoted';
 
   let status = 'completed';
   if (pending) status = 'pending';
@@ -228,9 +233,11 @@ function fromBillOrder(o: any): ActivityItem {
     type: 'bill',
     subtype: o.category,
     title: `${label}${o.providerName ? ` — ${o.providerName}` : ''}`,
-    subtitle: pending
-      ? 'Processing…'
-      : refunded
+    subtitle: unpaid
+      ? 'Not paid'
+      : pending
+        ? 'Processing…'
+        : refunded
         ? 'Refunded to your MCGP balance'
         : failed
           ? o.failureReason || 'Could not be completed'

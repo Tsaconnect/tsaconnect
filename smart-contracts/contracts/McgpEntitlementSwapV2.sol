@@ -686,10 +686,16 @@ contract McgpEntitlementSwapV2 is
         require(mcgpToken.balanceOf(address(this)) >= accountedMcgp, "Underbacked: fund MCGP first");
     }
 
-    /// @notice Permanently seal migration. Irreversible by design: while it is
-    ///         open, the owner can mint entitlement out of nothing, which is
-    ///         exactly the power `buyPremium` exists to prevent. Call this the
-    ///         moment the import is verified.
+    /// @notice Seal migration in THIS implementation. While it is open the owner
+    ///         can mint entitlement out of nothing, which is exactly the power
+    ///         `buyPremium` exists to prevent — so seal the moment the import is
+    ///         verified.
+    /// @dev    Not irreversible in an absolute sense: this is a UUPS proxy, so
+    ///         the owner can always upgrade to an implementation that resets the
+    ///         flag or reintroduces a mint path. Sealing removes the capability
+    ///         from the current ABI; the owner's upgrade right remains the
+    ///         underlying trust assumption, as it does for every other invariant
+    ///         here.
     function closeMigration() external onlyOwner {
         require(!migrationClosed, "Already closed");
         migrationClosed = true;

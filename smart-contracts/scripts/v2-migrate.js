@@ -7,9 +7,19 @@
 // Preconditions it ENFORCES (refuses to run otherwise):
 //   - snapshot totals are internally consistent (sum == accountedMcgp)
 //   - snapshot has no pendingSettle (in-flight debits are not migratable)
-//   - V1 is paused, so the snapshot cannot go stale mid-migration
+//   - V1 is paused AND its accountedMcgp still matches the snapshot, re-checked
+//     again after the final batch and before sealing
 //   - V2 holds enough MCGP to back the imported total
 //   - migration is not already sealed
+//
+// PAUSING THE SOURCE IS NOT A FREEZE. On the V1 swap, `withdrawPremiumToWallet`
+// is the one exit WITHOUT `whenNotPaused`, so a bought-premium holder can still
+// pull real MCGP out of a paused contract. Migration COPIES balances and never
+// zeroes the source, so between snapshot and seal a holder can withdraw on the
+// source and keep the imported balance on the target — spending the same
+// entitlement twice. The equality re-check below is what catches that; it is a
+// detector, not a prevention. A future migration should either use a source
+// whose every exit is pause-gated, or zero the source ledger before sealing.
 //
 // Usage:
 //   SNAPSHOT=snapshots/v1-premium-146-77022657.json \
@@ -208,6 +218,21 @@ async function main() {
     throw new Error("accountedMcgp delta != imported total — investigate before sealing");
   }
   if (bad > 0) throw new Error(`${bad} holder(s) do not match the snapshot`);
+
+  // Re-assert against the SOURCE, not just the snapshot. The pre-flight check
+  // ran before the batches; a holder withdrawing from V1 mid-migration (which
+  // the pause does not prevent) would otherwise be imported at a stale balance
+  // and sealed in permanently, with the verification above still reporting a
+  // clean match because it only ever compares to the snapshot.
+  const v1AccountedNow = await v1.accountedMcgp();
+  if (v1AccountedNow !== BigInt(snap.totals.accountedMcgp)) {
+    throw new Error(
+      `SOURCE LEDGER MOVED during migration: V1 accountedMcgp is now ${v1AccountedNow}, ` +
+        `snapshot had ${snap.totals.accountedMcgp}. Do NOT seal — re-snapshot and reconcile ` +
+        `the difference before continuing.`,
+    );
+  }
+  console.log(`source unchanged: V1 accountedMcgp still ${v1AccountedNow}`);
   if (heldAfter < owedAfter) throw new Error("V2 is UNDERBACKED after migration");
   console.log(`\nALL ${snap.holders.length} HOLDERS MATCH.`);
 
