@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
@@ -44,6 +45,64 @@ type diditWebhookPayload struct {
 	VendorData  string `json:"vendor_data"`
 }
 
+// kycUnavailableMessage is what the client sees for every server-side failure in
+// the session flow. The diagnosis goes to the log instead: a customer can act on
+// neither our configuration nor Didit's uptime, and our vendor's name is not
+// theirs to debug.
+const kycUnavailableMessage = "Identity verification is temporarily unavailable. Please try again shortly."
+
+// failKYCSession records why a session could not be created and returns the
+// generic message. Every branch here is an operator problem, so the log line is
+// the only place the cause is ever reported — none of them are user error.
+func failKYCSession(c *gin.Context, code int, detail string) {
+	log.Printf("[KYC] session failed: %s", detail)
+	c.JSON(code, gin.H{"success": false, "message": kycUnavailableMessage})
+}
+
+// diditStatusResubmitted is the one non-terminal status that needs the user to
+// come back and redo a step (Didit also emails them).
+const diditStatusResubmitted = "Resubmitted"
+
+// resumableDiditStatuses are the non-terminal states a user can still pick the
+// same hosted session back up from. "In Review" is excluded — Didit is looking
+// at it and there is nothing for the user to do.
+var resumableDiditStatuses = map[string]bool{
+	"":                     true, // created, no status event yet
+	"Not Started":          true,
+	"In Progress":          true,
+	diditStatusResubmitted: true,
+}
+
+// latestSessionState returns the most recent Didit status and hosted-session URL
+// recorded for sessionID. Metadata is filtered in Go rather than with `->>` so
+// this works on both Postgres and the SQLite used by the tests.
+func latestSessionState(userID uuid.UUID, sessionID string) (status, url string) {
+	if sessionID == "" {
+		return "", ""
+	}
+	var logs []models.VerificationLog
+	if err := config.DB.Select("metadata").Where("user_id = ?", userID).
+		Order("created_at DESC").Limit(100).Find(&logs).Error; err != nil {
+		return "", ""
+	}
+	for _, l := range logs {
+		var m map[string]string
+		if json.Unmarshal(l.Metadata, &m) != nil || m["session_id"] != sessionID {
+			continue
+		}
+		if status == "" {
+			status = m["status"]
+		}
+		if url == "" {
+			url = m["session_url"]
+		}
+		if status != "" && url != "" {
+			break
+		}
+	}
+	return status, url
+}
+
 // CreateKYCSession creates a Didit verification session for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -62,9 +121,27 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	baseURL := strings.TrimRight(h.Config.DiditBaseURL, "/")
 
 	if apiKey == "" || workflowID == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"success": false,
-			"message": "KYC verification is not configured",
+		failKYCSession(c, http.StatusServiceUnavailable,
+			"DIDIT_API_KEY or DIDIT_WORKFLOW_ID is unset")
+		return
+	}
+
+	// Hand back the session already in flight instead of minting a new one: a
+	// fresh session abandons any resubmission Didit asked for, is billed again,
+	// and orphans the old session's events as stale (see the staleSession guard
+	// in KYCWebhook). Kept behind the config check so a dormant integration
+	// still reports itself as dormant.
+	if status, url := latestSessionState(user.ID, user.DiditSessionID); url != "" && resumableDiditStatuses[status] {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Resuming verification session",
+			"data": gin.H{
+				"sessionId":  user.DiditSessionID,
+				"sessionUrl": url,
+				"resumed":    true,
+				"inquiryId":  user.DiditSessionID,
+				"inquiryUrl": url,
+			},
 		})
 		return
 	}
@@ -79,13 +156,15 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to marshal session payload: %v", err))
 		return
 	}
 
 	req, err := http.NewRequest("POST", baseURL+"/session/", bytes.NewReader(body))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to build Didit request: %v", err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -93,36 +172,38 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 
 	resp, err := diditHTTPClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("Didit request failed: %v", err))
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to read Didit response: %v", err))
 		return
 	}
 
 	var diditResp diditSessionCreateResponse
 	if err := json.Unmarshal(respBody, &diditResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to decode Didit response: %v", err))
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		log.Printf("[KYC] Didit API error: status=%d body=%s", resp.StatusCode, string(respBody))
-		msg := "Didit returned an error"
-		if diditResp.Detail != "" {
-			msg = diditResp.Detail
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": msg})
+		// diditResp.Detail is Didit's own wording for operators; it is logged
+		// with the body rather than forwarded to the user.
+		failKYCSession(c, http.StatusBadGateway,
+			fmt.Sprintf("Didit API error: status=%d detail=%q body=%s",
+				resp.StatusCode, diditResp.Detail, string(respBody)))
 		return
 	}
 
 	if diditResp.SessionID == "" || diditResp.URL == "" {
-		log.Printf("[KYC] Didit response missing session fields: %s", string(respBody))
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Didit returned an incomplete session"})
+		failKYCSession(c, http.StatusBadGateway,
+			fmt.Sprintf("Didit response missing session fields: %s", string(respBody)))
 		return
 	}
 
@@ -130,13 +211,16 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		"didit_session_id":    diditResp.SessionID,
 		"verification_status": models.VerificationStatusInReview,
 	}).Error; err != nil {
-		log.Printf("[KYC] failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to save session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err))
 		return
 	}
 
+	// session_url is what lets a later call resume this session rather than
+	// start a paid replacement.
 	metadata, _ := json.Marshal(map[string]string{
-		"session_id": diditResp.SessionID,
+		"session_id":  diditResp.SessionID,
+		"session_url": diditResp.URL,
 	})
 	if err := config.DB.Create(&models.VerificationLog{
 		UserID:   user.ID,
@@ -380,12 +464,20 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 	var latestLog models.VerificationLog
 	config.DB.Where("user_id = ?", user.ID).Order("created_at DESC").First(&latestLog)
 
+	// Several Didit statuses collapse into in_review, but they mean opposite
+	// things to the user: "In Review" is wait, "Resubmitted" is act. Surface the
+	// raw status so the client can tell them apart.
+	diditStatus, sessionURL := latestSessionState(user.ID, user.DiditSessionID)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"verificationStatus": user.VerificationStatus,
 			"verificationNotes":  user.VerificationNotes,
 			"diditSessionId":     user.DiditSessionID,
+			"diditStatus":        diditStatus,
+			"sessionUrl":         sessionURL,
+			"actionRequired":     diditStatus == diditStatusResubmitted,
 			"lastAction":         latestLog.Action,
 			"lastActionAt":       latestLog.CreatedAt,
 		},
