@@ -523,3 +523,68 @@ func TestGetKYCStatusSurfacesResubmitted(t *testing.T) {
 		t.Fatalf("expected the resumable session URL, got %q", resp.Data.SessionURL)
 	}
 }
+
+// Every server-side failure in the session flow is an operator problem, and the
+// app puts response.message straight into an alert — so the user gets one
+// generic line and the cause goes to the log, not to them.
+func TestCreateKYCSessionHidesOperatorDetailFromUser(t *testing.T) {
+	cases := []struct {
+		name   string
+		config *config.Config
+		didit  func(w http.ResponseWriter, r *http.Request)
+		want   int
+	}{
+		{
+			name:   "unconfigured",
+			config: &config.Config{},
+			want:   http.StatusServiceUnavailable,
+		},
+		{
+			name:   "didit rejects the request",
+			config: &config.Config{DiditAPIKey: "key", DiditWorkflowID: "wf"},
+			didit: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				fmt.Fprint(w, `{"detail":"Invalid API key for application 123"}`)
+			},
+			want: http.StatusBadGateway,
+		},
+		{
+			name:   "didit returns an incomplete session",
+			config: &config.Config{DiditAPIKey: "key", DiditWorkflowID: "wf"},
+			didit: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, `{"session_id":"","url":""}`)
+			},
+			want: http.StatusBadGateway,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupKYCTestDB(t, true)
+			user := createKYCTestUser(t, db, models.VerificationStatusPending)
+
+			cfg := *tc.config
+			if tc.didit != nil {
+				srv := httptest.NewServer(http.HandlerFunc(tc.didit))
+				defer srv.Close()
+				cfg.DiditBaseURL = srv.URL
+			}
+
+			w := createKYCSessionFor(&Handlers{Config: &cfg}, user)
+
+			if w.Code != tc.want {
+				t.Fatalf("expected %d, got %d: %s", tc.want, w.Code, w.Body.String())
+			}
+			var resp struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("bad response: %v", err)
+			}
+			if resp.Message != kycUnavailableMessage {
+				t.Fatalf("user-facing message leaked detail: %q", resp.Message)
+			}
+		})
+	}
+}

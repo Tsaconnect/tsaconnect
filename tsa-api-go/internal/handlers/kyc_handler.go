@@ -45,6 +45,20 @@ type diditWebhookPayload struct {
 	VendorData  string `json:"vendor_data"`
 }
 
+// kycUnavailableMessage is what the client sees for every server-side failure in
+// the session flow. The diagnosis goes to the log instead: a customer can act on
+// neither our configuration nor Didit's uptime, and our vendor's name is not
+// theirs to debug.
+const kycUnavailableMessage = "Identity verification is temporarily unavailable. Please try again shortly."
+
+// failKYCSession records why a session could not be created and returns the
+// generic message. Every branch here is an operator problem, so the log line is
+// the only place the cause is ever reported — none of them are user error.
+func failKYCSession(c *gin.Context, code int, detail string) {
+	log.Printf("[KYC] session failed: %s", detail)
+	c.JSON(code, gin.H{"success": false, "message": kycUnavailableMessage})
+}
+
 // diditStatusResubmitted is the one non-terminal status that needs the user to
 // come back and redo a step (Didit also emails them).
 const diditStatusResubmitted = "Resubmitted"
@@ -107,10 +121,8 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	baseURL := strings.TrimRight(h.Config.DiditBaseURL, "/")
 
 	if apiKey == "" || workflowID == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"success": false,
-			"message": "KYC verification is not configured",
-		})
+		failKYCSession(c, http.StatusServiceUnavailable,
+			"DIDIT_API_KEY or DIDIT_WORKFLOW_ID is unset")
 		return
 	}
 
@@ -144,13 +156,15 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to marshal session payload: %v", err))
 		return
 	}
 
 	req, err := http.NewRequest("POST", baseURL+"/session/", bytes.NewReader(body))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to create session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to build Didit request: %v", err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -158,36 +172,38 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 
 	resp, err := diditHTTPClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to reach Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("Didit request failed: %v", err))
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to read Didit response: %v", err))
 		return
 	}
 
 	var diditResp diditSessionCreateResponse
 	if err := json.Unmarshal(respBody, &diditResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid response from Didit"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to decode Didit response: %v", err))
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		log.Printf("[KYC] Didit API error: status=%d body=%s", resp.StatusCode, string(respBody))
-		msg := "Didit returned an error"
-		if diditResp.Detail != "" {
-			msg = diditResp.Detail
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": msg})
+		// diditResp.Detail is Didit's own wording for operators; it is logged
+		// with the body rather than forwarded to the user.
+		failKYCSession(c, http.StatusBadGateway,
+			fmt.Sprintf("Didit API error: status=%d detail=%q body=%s",
+				resp.StatusCode, diditResp.Detail, string(respBody)))
 		return
 	}
 
 	if diditResp.SessionID == "" || diditResp.URL == "" {
-		log.Printf("[KYC] Didit response missing session fields: %s", string(respBody))
-		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Didit returned an incomplete session"})
+		failKYCSession(c, http.StatusBadGateway,
+			fmt.Sprintf("Didit response missing session fields: %s", string(respBody)))
 		return
 	}
 
@@ -195,8 +211,8 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		"didit_session_id":    diditResp.SessionID,
 		"verification_status": models.VerificationStatusInReview,
 	}).Error; err != nil {
-		log.Printf("[KYC] failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to save session"})
+		failKYCSession(c, http.StatusInternalServerError,
+			fmt.Sprintf("failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err))
 		return
 	}
 
