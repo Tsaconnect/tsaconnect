@@ -14,7 +14,14 @@ import api from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { Text, Button, IconButton, Icon } from "@/components/ui";
 
-type KYCState = "not_started" | "loading" | "webview_active" | "in_progress" | "verified" | "rejected";
+type KYCState =
+  | "not_started"
+  | "loading"
+  | "webview_active"
+  | "in_progress"
+  | "action_required"
+  | "verified"
+  | "rejected";
 
 export default function KYCScreen() {
   const { colors, spacing, radius } = useTheme();
@@ -26,14 +33,16 @@ export default function KYCScreen() {
     try {
       const response = await api.getKYCStatus();
       if (response.success && response.data) {
-        const { verificationStatus } = response.data;
+        const { verificationStatus, actionRequired } = response.data;
         if (verificationStatus === "verified") {
           setState("verified");
         } else if (verificationStatus === "rejected") {
           setState("rejected");
           setNotes(response.data.verificationNotes || "Verification failed. Please try again.");
         } else if (verificationStatus === "in_review") {
-          setState("in_progress");
+          // in_review covers both "Didit is reviewing" and "Didit sent a step
+          // back for resubmission" — only the latter needs the user to act.
+          setState(actionRequired ? "action_required" : "in_progress");
         } else {
           setState("not_started");
         }
@@ -105,8 +114,11 @@ export default function KYCScreen() {
       url.includes("status=in%20review") ||
       url.includes("status=in+review");
     if (finished) {
+      // Ask the API what the session actually ended as — hard-coding
+      // "in progress" hides a resubmission request behind a wait screen.
       setSessionUrl(null);
-      setState("in_progress");
+      setState("loading");
+      checkStatus();
     }
   };
 
@@ -233,6 +245,27 @@ export default function KYCScreen() {
           subtitle="Your identity has been successfully verified."
         >
           <Button title="Go Back" onPress={() => router.back()} fullWidth />
+        </StatusPanel>
+      </SafeAreaView>
+    );
+  }
+
+  if (state === "action_required") {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <Header />
+        <StatusPanel
+          icon="upload"
+          iconColor={colors.warning}
+          iconBg={colors.warningBg}
+          title="One More Step"
+          subtitle="Your documents need another look — usually a clearer photo. Continue where you left off to resubmit."
+        >
+          <View style={{ width: "100%", gap: spacing.md }}>
+            <Button title="Resubmit Documents" onPress={startVerification} fullWidth />
+            <Button title="Refresh Status" variant="secondary" onPress={checkStatus} fullWidth />
+            <Button title="Go Back" variant="ghost" onPress={() => router.back()} fullWidth />
+          </View>
         </StatusPanel>
       </SafeAreaView>
     );

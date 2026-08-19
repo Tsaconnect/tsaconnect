@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
@@ -44,6 +45,50 @@ type diditWebhookPayload struct {
 	VendorData  string `json:"vendor_data"`
 }
 
+// diditStatusResubmitted is the one non-terminal status that needs the user to
+// come back and redo a step (Didit also emails them).
+const diditStatusResubmitted = "Resubmitted"
+
+// resumableDiditStatuses are the non-terminal states a user can still pick the
+// same hosted session back up from. "In Review" is excluded — Didit is looking
+// at it and there is nothing for the user to do.
+var resumableDiditStatuses = map[string]bool{
+	"":                     true, // created, no status event yet
+	"Not Started":          true,
+	"In Progress":          true,
+	diditStatusResubmitted: true,
+}
+
+// latestSessionState returns the most recent Didit status and hosted-session URL
+// recorded for sessionID. Metadata is filtered in Go rather than with `->>` so
+// this works on both Postgres and the SQLite used by the tests.
+func latestSessionState(userID uuid.UUID, sessionID string) (status, url string) {
+	if sessionID == "" {
+		return "", ""
+	}
+	var logs []models.VerificationLog
+	if err := config.DB.Select("metadata").Where("user_id = ?", userID).
+		Order("created_at DESC").Limit(100).Find(&logs).Error; err != nil {
+		return "", ""
+	}
+	for _, l := range logs {
+		var m map[string]string
+		if json.Unmarshal(l.Metadata, &m) != nil || m["session_id"] != sessionID {
+			continue
+		}
+		if status == "" {
+			status = m["status"]
+		}
+		if url == "" {
+			url = m["session_url"]
+		}
+		if status != "" && url != "" {
+			break
+		}
+	}
+	return status, url
+}
+
 // CreateKYCSession creates a Didit verification session for the authenticated user.
 func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -65,6 +110,26 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"success": false,
 			"message": "KYC verification is not configured",
+		})
+		return
+	}
+
+	// Hand back the session already in flight instead of minting a new one: a
+	// fresh session abandons any resubmission Didit asked for, is billed again,
+	// and orphans the old session's events as stale (see the staleSession guard
+	// in KYCWebhook). Kept behind the config check so a dormant integration
+	// still reports itself as dormant.
+	if status, url := latestSessionState(user.ID, user.DiditSessionID); url != "" && resumableDiditStatuses[status] {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Resuming verification session",
+			"data": gin.H{
+				"sessionId":  user.DiditSessionID,
+				"sessionUrl": url,
+				"resumed":    true,
+				"inquiryId":  user.DiditSessionID,
+				"inquiryUrl": url,
+			},
 		})
 		return
 	}
@@ -135,8 +200,11 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
+	// session_url is what lets a later call resume this session rather than
+	// start a paid replacement.
 	metadata, _ := json.Marshal(map[string]string{
-		"session_id": diditResp.SessionID,
+		"session_id":  diditResp.SessionID,
+		"session_url": diditResp.URL,
 	})
 	if err := config.DB.Create(&models.VerificationLog{
 		UserID:   user.ID,
@@ -380,12 +448,20 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 	var latestLog models.VerificationLog
 	config.DB.Where("user_id = ?", user.ID).Order("created_at DESC").First(&latestLog)
 
+	// Several Didit statuses collapse into in_review, but they mean opposite
+	// things to the user: "In Review" is wait, "Resubmitted" is act. Surface the
+	// raw status so the client can tell them apart.
+	diditStatus, sessionURL := latestSessionState(user.ID, user.DiditSessionID)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"verificationStatus": user.VerificationStatus,
 			"verificationNotes":  user.VerificationNotes,
 			"diditSessionId":     user.DiditSessionID,
+			"diditStatus":        diditStatus,
+			"sessionUrl":         sessionURL,
+			"actionRequired":     diditStatus == diditStatusResubmitted,
 			"lastAction":         latestLog.Action,
 			"lastActionAt":       latestLog.CreatedAt,
 		},

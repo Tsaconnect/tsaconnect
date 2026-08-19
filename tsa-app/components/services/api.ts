@@ -630,6 +630,9 @@ class APIService {
   async createKYCSession(): Promise<ApiResponse<{
     sessionId: string;
     sessionUrl: string;
+    // True when the API handed back a session already in flight rather than
+    // starting (and billing for) a new one.
+    resumed?: boolean;
     inquiryId?: string;
     inquiryUrl?: string;
   }>> {
@@ -641,6 +644,7 @@ class APIService {
     return this.handleResponse<{
       sessionId: string;
       sessionUrl: string;
+      resumed?: boolean;
       inquiryId?: string;
       inquiryUrl?: string;
     }>(response);
@@ -651,6 +655,11 @@ class APIService {
     verificationStatus: string;
     verificationNotes: string;
     diditSessionId: string;
+    // Raw Didit status behind in_review — "In Review" means wait, "Resubmitted"
+    // means the user has to redo a step.
+    diditStatus: string;
+    sessionUrl: string;
+    actionRequired: boolean;
     lastAction: string;
     lastActionAt: string;
   }>> {
@@ -663,6 +672,9 @@ class APIService {
       verificationStatus: string;
       verificationNotes: string;
       diditSessionId: string;
+      diditStatus: string;
+      sessionUrl: string;
+      actionRequired: boolean;
       lastAction: string;
       lastActionAt: string;
     }>(response);

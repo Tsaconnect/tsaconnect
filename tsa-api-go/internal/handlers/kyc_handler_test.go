@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/datatypes"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -376,5 +377,149 @@ func TestKYCWebhookReturns500WhenLogWriteFails(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 so Didit retries, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// logWithMetadata inserts a verification log carrying the given metadata keys,
+// mirroring what CreateKYCSession and KYCWebhook write.
+func logWithMetadata(t *testing.T, db *gorm.DB, userID uuid.UUID, at time.Time, meta map[string]string) {
+	t.Helper()
+	raw, _ := json.Marshal(meta)
+	if err := db.Create(&models.VerificationLog{
+		UserID:    userID,
+		Action:    models.VerificationActionDiditInitiated,
+		Status:    models.VerificationLogStatusInReview,
+		Metadata:  datatypes.JSON(raw),
+		CreatedAt: at,
+		UpdatedAt: at,
+	}).Error; err != nil {
+		t.Fatalf("failed to write verification log: %v", err)
+	}
+}
+
+func createKYCSessionFor(h *Handlers, user *models.User) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+	c.Request, _ = http.NewRequest("POST", "/api/kyc/session", nil)
+	h.CreateKYCSession(c)
+	return w
+}
+
+// Pressing "continue" mid-session must reuse the hosted session, not mint a new
+// one: a replacement abandons any resubmission Didit asked for and is billed again.
+func TestCreateKYCSessionResumesInFlightSession(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	user.DiditSessionID = "sess-live"
+	db.Save(user)
+
+	logWithMetadata(t, db, user.ID, time.Now().Add(-time.Hour), map[string]string{
+		"session_id": "sess-live", "session_url": "https://verify.didit.me/live",
+	})
+	logWithMetadata(t, db, user.ID, time.Now(), map[string]string{
+		"session_id": "sess-live", "status": "Resubmitted",
+	})
+
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Didit was called; the in-flight session should have been resumed")
+	}))
+	defer didit.Close()
+
+	h := &Handlers{Config: &config.Config{
+		DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL,
+	}}
+	w := createKYCSessionFor(h, user)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			SessionURL string `json:"sessionUrl"`
+			Resumed    bool   `json:"resumed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	if resp.Data.SessionURL != "https://verify.didit.me/live" || !resp.Data.Resumed {
+		t.Fatalf("expected the stored session URL to be resumed, got %+v", resp.Data)
+	}
+}
+
+// "In Review" means Didit is deciding — there is nothing to resume, so a user
+// asking to verify again gets a fresh session.
+func TestCreateKYCSessionStartsFreshWhenNotResumable(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	user.DiditSessionID = "sess-old"
+	db.Save(user)
+
+	logWithMetadata(t, db, user.ID, time.Now().Add(-time.Hour), map[string]string{
+		"session_id": "sess-old", "session_url": "https://verify.didit.me/old",
+	})
+	logWithMetadata(t, db, user.ID, time.Now(), map[string]string{
+		"session_id": "sess-old", "status": "In Review",
+	})
+
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"session_id":"sess-new","url":"https://verify.didit.me/new","status":"Not Started"}`)
+	}))
+	defer didit.Close()
+
+	h := &Handlers{Config: &config.Config{
+		DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL,
+	}}
+	w := createKYCSessionFor(h, user)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := reloadUser(t, db, user.ID).DiditSessionID; got != "sess-new" {
+		t.Fatalf("expected a new session to be persisted, got %q", got)
+	}
+}
+
+// in_review covers both "we are reviewing" and "we need something from you";
+// the client can only tell them apart if the raw Didit status is surfaced.
+func TestGetKYCStatusSurfacesResubmitted(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	user.DiditSessionID = "sess-live"
+	db.Save(user)
+
+	logWithMetadata(t, db, user.ID, time.Now().Add(-time.Hour), map[string]string{
+		"session_id": "sess-live", "session_url": "https://verify.didit.me/live",
+	})
+	logWithMetadata(t, db, user.ID, time.Now(), map[string]string{
+		"session_id": "sess-live", "status": "Resubmitted",
+	})
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+	c.Request, _ = http.NewRequest("GET", "/api/kyc/status", nil)
+
+	(&Handlers{Config: &config.Config{}}).GetKYCStatus(c)
+
+	var resp struct {
+		Data struct {
+			DiditStatus    string `json:"diditStatus"`
+			SessionURL     string `json:"sessionUrl"`
+			ActionRequired bool   `json:"actionRequired"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	if resp.Data.DiditStatus != "Resubmitted" || !resp.Data.ActionRequired {
+		t.Fatalf("expected Resubmitted to be surfaced as action-required, got %+v", resp.Data)
+	}
+	if resp.Data.SessionURL != "https://verify.didit.me/live" {
+		t.Fatalf("expected the resumable session URL, got %q", resp.Data.SessionURL)
 	}
 }
