@@ -266,6 +266,13 @@ func (h *Handlers) KYCWebhook(c *gin.Context) {
 		return
 	} else if !verifyDiditWebhook(bodyBytes, c.GetHeader("X-Timestamp"),
 		c.GetHeader("X-Signature"), c.GetHeader("X-Signature-Simple"), secret) {
+		// 82 consecutive rejections in Aug 2026 produced no log line at all,
+		// which is how a dead KYC funnel went unnoticed for 16 days. Record
+		// enough to separate a secret mismatch from a missing or stale header,
+		// without ever logging the payload.
+		log.Printf("[KYC] webhook rejected: invalid signature (timestamp=%q raw_sig=%t simple_sig=%t body_bytes=%d) — check DIDIT_WEBHOOK_SECRET matches the sending destination's signing key",
+			c.GetHeader("X-Timestamp"), c.GetHeader("X-Signature") != "",
+			c.GetHeader("X-Signature-Simple") != "", len(bodyBytes))
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid signature"})
 		return
 	}
