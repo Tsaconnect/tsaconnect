@@ -122,3 +122,23 @@ export const payBillOrder = (orderId: string) =>
 export const getBillOrder = (id: string) => req<BillOrder>('GET', `/bills/orders/${id}`);
 
 export const listBillOrders = () => req<BillOrder[]>('GET', '/bills/orders');
+
+export interface BillReport {
+  id: string;
+  orderId: string;
+  userId: string;
+  reason: string;
+  status: 'open' | 'resolved' | 'rejected';
+  resolution?: string;
+  resolvedAt?: string;
+  createdAt: string;
+}
+
+// File a complaint against one of your own paid orders. One report per order —
+// a second attempt returns a 409 with a clear message.
+export const reportBillOrder = (orderId: string, reason: string) =>
+  req<BillReport>('POST', `/bills/orders/${orderId}/report`, { reason });
+
+// The caller's report on this order; 404s (success:false) when none exists.
+export const getBillOrderReport = (orderId: string) =>
+  req<BillReport>('GET', `/bills/orders/${orderId}/report`);

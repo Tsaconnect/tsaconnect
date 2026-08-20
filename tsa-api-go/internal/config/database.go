@@ -126,6 +126,8 @@ func AutoMigrate() error {
 		// Utility bills v2 — what was bought (ClubKonnect vend); the MCGP money
 		// leg lives in BillPayment, keyed by order ID.
 		&models.BillOrder{},
+		// User complaints about bill orders, reviewed by admins. One per order.
+		&models.BillReport{},
 		&models.ITRate{},
 		// Spec 1 — permanent per-user static VA for IT bank-transfer buys.
 		&models.FiatVirtualAccount{},

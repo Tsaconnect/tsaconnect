@@ -12,8 +12,9 @@ import React, { useCallback, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { router } from 'expo-router';
 import { useTheme } from '@/theme';
-import { Badge, Card, Divider, Icon, Spinner, Text } from '@/components/ui';
+import { Badge, Card, Divider, Icon, PressableScale, Spinner, Text } from '@/components/ui';
 import { listBillOrders, type BillOrder } from '@/services/billsApi';
 
 const CATEGORY_LABEL: Record<string, string> = {
@@ -154,7 +155,8 @@ export default function BillOrders() {
           const label = CATEGORY_LABEL[o.category] ?? 'Bill';
           const target = o.customerId || o.phoneNumber;
           return (
-            <Card key={o.id}>
+            <PressableScale key={o.id} onPress={() => router.push(`/bills/order/${o.id}` as any)}>
+              <Card>
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md }}>
                 <View style={{ flex: 1 }}>
                   <Text variant="body" weight="700" style={{ color: colors.textPrimary }}>
@@ -228,7 +230,8 @@ export default function BillOrders() {
                   </Text>
                 </>
               ) : null}
-            </Card>
+              </Card>
+            </PressableScale>
           );
         })}
       </ScrollView>

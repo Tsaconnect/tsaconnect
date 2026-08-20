@@ -17,10 +17,13 @@ import (
 
 // fakeBillSvc implements billService in-memory.
 type fakeBillSvc struct {
-	quoteIn  *services.BillQuoteInput
+	quoteIn   *services.BillQuoteInput
 	payWallet string
-	order    models.BillOrder
-	err      error
+	order     models.BillOrder
+	report    models.BillReport
+	reportIn  *fakeBillReportIn
+	resolveIn *fakeBillResolveIn
+	err       error
 }
 
 func (f *fakeBillSvc) Quote(_ context.Context, in services.BillQuoteInput) (*services.BillQuoteResult, error) {
@@ -55,6 +58,42 @@ func (f *fakeBillSvc) GetOrder(context.Context, uuid.UUID, uuid.UUID) (*models.B
 func (f *fakeBillSvc) ListOrders(context.Context, uuid.UUID, int) ([]models.BillOrder, error) {
 	return []models.BillOrder{f.order}, f.err
 }
+func (f *fakeBillSvc) ReportOrder(_ context.Context, userID, orderID uuid.UUID, reason string) (*models.BillReport, error) {
+	f.reportIn = &fakeBillReportIn{userID: userID, orderID: orderID, reason: reason}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &f.report, nil
+}
+func (f *fakeBillSvc) GetOrderReport(context.Context, uuid.UUID, uuid.UUID) (*models.BillReport, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &f.report, nil
+}
+func (f *fakeBillSvc) ListReportsAdmin(context.Context, string, int, int) ([]services.BillReportAdminRow, int64, error) {
+	if f.err != nil {
+		return nil, 0, f.err
+	}
+	return []services.BillReportAdminRow{{Report: f.report, Order: &f.order}}, 1, nil
+}
+func (f *fakeBillSvc) ResolveReport(_ context.Context, adminID, reportID uuid.UUID, status, resolution string) (*models.BillReport, error) {
+	f.resolveIn = &fakeBillResolveIn{adminID: adminID, reportID: reportID, status: status, resolution: resolution}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &f.report, nil
+}
+
+type fakeBillReportIn struct {
+	userID, orderID uuid.UUID
+	reason          string
+}
+
+type fakeBillResolveIn struct {
+	adminID, reportID  uuid.UUID
+	status, resolution string
+}
 
 func billTestRouter(svc billService, user *models.User) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -73,6 +112,11 @@ func billTestRouter(svc billService, user *models.User) *gin.Engine {
 	g.GET("/orders", h.ListOrders)
 	g.GET("/orders/:id", h.GetOrder)
 	g.POST("/orders/:id/pay", h.Pay)
+	g.POST("/orders/:id/report", h.ReportOrder)
+	g.GET("/orders/:id/report", h.GetOrderReport)
+	a := r.Group("/admin/bills", inject)
+	a.GET("/reports", h.ListReportsAdmin)
+	a.POST("/reports/:id/resolve", h.ResolveReportAdmin)
 	return r
 }
 
@@ -120,6 +164,9 @@ func TestBillHandlerAuthRequired(t *testing.T) {
 		{http.MethodPost, "/bills/orders/" + uuid.NewString() + "/pay"},
 		{http.MethodGet, "/bills/orders"},
 		{http.MethodGet, "/bills/orders/" + uuid.NewString()},
+		{http.MethodPost, "/bills/orders/" + uuid.NewString() + "/report"},
+		{http.MethodGet, "/bills/orders/" + uuid.NewString() + "/report"},
+		{http.MethodPost, "/admin/bills/reports/" + uuid.NewString() + "/resolve"},
 	} {
 		w, _ := billDo(t, r, tc.method, tc.path, gin.H{})
 		if w.Code != http.StatusUnauthorized {
@@ -190,5 +237,67 @@ func TestBillHandlerCatalog(t *testing.T) {
 	w, _ = billDo(t, r, http.MethodGet, "/bills/catalog/data/01/plans", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("plans: %d", w.Code)
+	}
+}
+
+func TestBillHandlerReportOrder(t *testing.T) {
+	reportID := uuid.New()
+	svc := &fakeBillSvc{report: models.BillReport{ID: reportID, Status: models.BillReportStatusOpen}}
+	user := billTestUser()
+	r := billTestRouter(svc, user)
+	orderID := uuid.New()
+
+	w, out := billDo(t, r, http.MethodPost, "/bills/orders/"+orderID.String()+"/report",
+		gin.H{"reason": "no airtime received"})
+	if w.Code != http.StatusCreated || out["success"] != true {
+		t.Fatalf("report: %d %s", w.Code, w.Body.String())
+	}
+	if svc.reportIn == nil || svc.reportIn.userID != user.ID ||
+		svc.reportIn.orderID != orderID || svc.reportIn.reason != "no airtime received" {
+		t.Fatalf("input not threaded: %+v", svc.reportIn)
+	}
+}
+
+func TestBillHandlerReportConflictMapped(t *testing.T) {
+	svc := &fakeBillSvc{err: services.ErrBillAlreadyReported}
+	r := billTestRouter(svc, billTestUser())
+	w, out := billDo(t, r, http.MethodPost, "/bills/orders/"+uuid.NewString()+"/report",
+		gin.H{"reason": "x"})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("code %d, want 409", w.Code)
+	}
+	if out["message"] != services.ErrBillAlreadyReported.Error() {
+		t.Fatalf("message %q not passed through", out["message"])
+	}
+}
+
+func TestBillHandlerResolveReport(t *testing.T) {
+	svc := &fakeBillSvc{report: models.BillReport{ID: uuid.New(), Status: models.BillReportStatusResolved}}
+	admin := billTestUser()
+	r := billTestRouter(svc, admin)
+	reportID := uuid.New()
+
+	w, out := billDo(t, r, http.MethodPost, "/admin/bills/reports/"+reportID.String()+"/resolve",
+		gin.H{"status": "resolved", "resolution": "refunded"})
+	if w.Code != http.StatusOK || out["success"] != true {
+		t.Fatalf("resolve: %d %s", w.Code, w.Body.String())
+	}
+	if svc.resolveIn == nil || svc.resolveIn.adminID != admin.ID ||
+		svc.resolveIn.reportID != reportID || svc.resolveIn.status != "resolved" ||
+		svc.resolveIn.resolution != "refunded" {
+		t.Fatalf("input not threaded: %+v", svc.resolveIn)
+	}
+}
+
+func TestBillHandlerListReportsAdmin(t *testing.T) {
+	svc := &fakeBillSvc{report: models.BillReport{ID: uuid.New()}}
+	r := billTestRouter(svc, billTestUser())
+	w, out := billDo(t, r, http.MethodGet, "/admin/bills/reports?status=open", nil)
+	if w.Code != http.StatusOK || out["success"] != true {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	data, _ := out["data"].(map[string]any)
+	if data == nil || data["total"] != float64(1) {
+		t.Fatalf("payload: %v", out["data"])
 	}
 }
