@@ -23,6 +23,7 @@ export default function BillsLayout() {
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ title: 'Pay Bills' }} />
       <Stack.Screen name="orders" options={{ title: 'Bill History' }} />
+      <Stack.Screen name="order/[id]" options={{ title: 'Bill Details' }} />
       <Stack.Screen name="[category]" options={{ title: 'Pay Bill' }} />
     </Stack>
   );

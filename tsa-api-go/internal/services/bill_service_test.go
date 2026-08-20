@@ -218,6 +218,14 @@ func newBillServiceRig(t *testing.T) *billRig {
 			debit_ref TEXT UNIQUE, status TEXT, tx_hash TEXT, resolve_tx_hash TEXT,
 			failure_reason TEXT, created_at DATETIME, updated_at DATETIME
 		)`,
+		`CREATE TABLE bill_reports (
+			id TEXT PRIMARY KEY, order_id TEXT UNIQUE, user_id TEXT, reason TEXT,
+			status TEXT, resolved_by TEXT, resolution TEXT, resolved_at DATETIME,
+			created_at DATETIME, updated_at DATETIME
+		)`,
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT
+		)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("ddl: %v", err)

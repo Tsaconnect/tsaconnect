@@ -930,6 +930,17 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			bills.GET("/orders", bh.ListOrders)
 			bills.GET("/orders/:id", bh.GetOrder)
 			bills.POST("/orders/:id/pay", billWriteLimit, bh.Pay)
+			bills.POST("/orders/:id/report", billWriteLimit, bh.ReportOrder)
+			bills.GET("/orders/:id/report", bh.GetOrderReport)
+		}
+
+		// Admin review of user-reported bill orders. Inside the same gate:
+		// reports can only exist where the bill stack is wired.
+		adminBills := api.Group("/admin/bills")
+		adminBills.Use(adminAuth, middleware.RequireP2PAdmin())
+		{
+			adminBills.GET("/reports", bh.ListReportsAdmin)
+			adminBills.POST("/reports/:id/resolve", bh.ResolveReportAdmin)
 		}
 	} else {
 		log.Printf("bill routes dormant: CLUBKONNECT_USER_ID/CLUBKONNECT_API_KEY or MCGP operator not set")
