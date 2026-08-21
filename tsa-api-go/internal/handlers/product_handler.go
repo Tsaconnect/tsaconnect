@@ -375,6 +375,18 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 		return
 	}
 
+	// A non-active listing is not public. Its owner and admins can still open it
+	// (the merchant needs to see why it was suspended), but to everyone else it
+	// does not exist — 404 rather than 403, so the endpoint does not confirm that
+	// a hidden listing is there.
+	if !product.IsVisibleToPublic() {
+		viewer := getUserFromContext(c)
+		if viewer == nil || (viewer.ID != product.UserID && !isAdminUser(viewer)) {
+			utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
+			return
+		}
+	}
+
 	// Increment views
 	config.DB.Model(&product).Update("views", product.Views+1)
 	product.Views++
@@ -446,19 +458,29 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 
 	// Shipping rates
 	if v := c.PostForm("shippingResidential"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_residential"] = f }
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			updates["shipping_residential"] = f
+		}
 	}
 	if v := c.PostForm("shippingSameCity"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_city"] = f }
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			updates["shipping_same_city"] = f
+		}
 	}
 	if v := c.PostForm("shippingSameState"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_state"] = f }
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			updates["shipping_same_state"] = f
+		}
 	}
 	if v := c.PostForm("shippingSameCountry"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_same_country"] = f }
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			updates["shipping_same_country"] = f
+		}
 	}
 	if v := c.PostForm("shippingInternational"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil { updates["shipping_international"] = f }
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			updates["shipping_international"] = f
+		}
 	}
 
 	// Parse attributes
@@ -676,11 +698,24 @@ func (h *Handlers) UpdateStatus(c *gin.Context) {
 		return
 	}
 
-	validStatuses := map[string]bool{
-		"active": true, "inactive": true, "sold_out": true, "pending_review": true,
-	}
-	if !validStatuses[body.Status] {
+	// `suspended` is admin-only — see models.MerchantSettableStatuses.
+	if !models.MerchantSettableStatuses[body.Status] {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid status")
+		return
+	}
+
+	var product models.Product
+	if err := config.DB.Where("id = ? AND user_id = ?", productID, user.ID).First(&product).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
+		return
+	}
+
+	// Rejecting `suspended` as an input is only half the guard: without this a
+	// merchant would lift their own suspension by setting the status back to
+	// active, which would make suspension meaningless.
+	if product.Status == models.ProductStatusSuspended {
+		utils.ErrorResponse(c, http.StatusForbidden,
+			"This listing has been suspended by an administrator and cannot be changed")
 		return
 	}
 
@@ -976,11 +1011,13 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 		query = query.Where("type = ?", productType)
 	}
 
-	validStatuses := map[string]bool{"active": true, "inactive": true, "sold_out": true, "pending_review": true}
-	if validStatuses[status] {
+	// The status param is caller-supplied on a public endpoint, so it is limited
+	// to publicly listable statuses. Anything else — including `suspended`, which
+	// would leak a moderation decision — falls back to active.
+	if models.PublicListableStatuses[status] {
 		query = query.Where("status = ?", status)
 	} else {
-		query = query.Where("status = ?", "active")
+		query = models.VisibleToPublic(query)
 	}
 
 	if minPriceStr != "" {
@@ -1078,10 +1115,12 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	if productType != "" && (productType == "Product" || productType == "Service") {
 		statsQuery = statsQuery.Where("type = ?", productType)
 	}
-	if validStatuses[status] {
+	// Mirrors the listing query above so the stats cannot describe a different
+	// set of products than the page shows.
+	if models.PublicListableStatuses[status] {
 		statsQuery = statsQuery.Where("status = ?", status)
 	} else {
-		statsQuery = statsQuery.Where("status = ?", "active")
+		statsQuery = models.VisibleToPublic(statsQuery)
 	}
 	if minPriceStr != "" {
 		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
@@ -1181,7 +1220,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 	}
 
 	// Get products
-	query := config.DB.Where("category_id IN ? AND status = ?", categoryIDs, "active")
+	query := models.VisibleToPublic(config.DB.Where("category_id IN ?", categoryIDs))
 	if typeFilter == models.ProductTypeProduct || typeFilter == models.ProductTypeService {
 		query = query.Where("type = ?", typeFilter)
 	}
@@ -1261,7 +1300,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	sortParam := c.DefaultQuery("sort", "recent")
 	search := c.Query("search")
 
-	query := config.DB.Model(&models.Product{}).Where("status = ?", "active")
+	query := models.VisibleToPublic(config.DB.Model(&models.Product{}))
 
 	// Category filter
 	if category != "" {
@@ -1339,7 +1378,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	populateSellerVerified(products)
 
 	// Get featured products (same filters but featured only, limit 5)
-	featuredQuery := config.DB.Model(&models.Product{}).Where("status = ? AND is_featured = ?", "active", true)
+	featuredQuery := models.VisibleToPublic(config.DB.Model(&models.Product{})).Where("is_featured = ?", true)
 	if category != "" {
 		if catOID, err := uuid.Parse(category); err == nil {
 			featuredQuery = featuredQuery.Where("category_id = ?", catOID)
@@ -1382,7 +1421,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 // updateCategoryProductCount updates the productCount field for a category.
 func updateCategoryProductCount(categoryID uuid.UUID) {
 	var count int64
-	if err := config.DB.Model(&models.Product{}).Where("category_id = ? AND status = ?", categoryID, "active").Count(&count).Error; err != nil {
+	if err := models.VisibleToPublic(config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID)).Count(&count).Error; err != nil {
 		log.Printf("Error counting products for category %s: %v", categoryID.String(), err)
 		return
 	}

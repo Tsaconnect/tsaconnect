@@ -729,6 +729,16 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
+			// Re-checked at order time, not just at add-to-cart: a listing can be
+			// suspended or deleted while it sits in someone's cart, and that must
+			// stop the purchase rather than escrow funds against a pulled listing.
+			if !product.IsVisibleToPublic() {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest,
+					fmt.Sprintf("%s is no longer available for purchase", product.Name))
+				return
+			}
+
 			// Listing kind: a service skips stock + shipping. The three service
 			// types (contact/order/booking) branch on the category's ServiceType.
 			isService := product.Type == models.ProductTypeService
@@ -1067,6 +1077,12 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	if product.Type != models.ProductTypeService {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusBadRequest, "Not a service listing")
+		return
+	}
+	// Same guard as the cart path: a suspended or deleted service cannot be booked.
+	if !product.IsVisibleToPublic() {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "This service is no longer available")
 		return
 	}
 
