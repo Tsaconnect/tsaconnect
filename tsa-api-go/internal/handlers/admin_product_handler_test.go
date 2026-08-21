@@ -616,6 +616,10 @@ func TestAdminGetProductFindsSoftDeleted(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin cannot open a deleted product to restore it: %d", w.Code)
 	}
+	product, _ := decodeData(t, w)["product"].(map[string]interface{})
+	if product["isDeleted"] != true {
+		t.Fatalf("product not flagged as deleted: %v", product["isDeleted"])
+	}
 }
 
 // --- Regressions from code review ------------------------------------------

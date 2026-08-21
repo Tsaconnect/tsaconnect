@@ -29,14 +29,25 @@ func isAdminUser(u *models.User) bool {
 	return u != nil && (u.Role == models.RoleAdmin || u.Role == models.RoleSuperAdmin)
 }
 
-// adminProductScope returns a query over products including soft-deleted rows
-// when includeDeleted is set. Admins are the only callers allowed to see them.
-func adminProductScope(includeDeleted bool) *gorm.DB {
-	q := config.DB.Model(&models.Product{})
-	if includeDeleted {
-		q = q.Unscoped()
+// requireAdmin returns the acting admin, writing the error response itself when
+// the caller is not one. The routes are already adminAuth-gated; this keeps the
+// handlers safe on their own so a route-registration slip cannot expose them.
+func requireAdmin(c *gin.Context) (*models.User, bool) {
+	admin := getUserFromContext(c)
+	if !isAdminUser(admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+		return nil, false
 	}
-	return q
+	return admin, true
+}
+
+// refreshCategoryCount is the nil-tolerant form of updateCategoryProductCount —
+// a listing need not belong to a category. Every moderation action changes
+// whether the listing counts toward its category, so all of them call it.
+func refreshCategoryCount(categoryID *uuid.UUID) {
+	if categoryID != nil {
+		updateCategoryProductCount(*categoryID)
+	}
 }
 
 // requireModeratableProduct loads the product named by :id, including
@@ -62,8 +73,7 @@ func requireModeratableProduct(c *gin.Context) (*models.Product, bool) {
 // hard-filters status = 'active', so inactive and pending_review listings were
 // invisible to admins and the console's status filter did nothing.
 func (h *Handlers) AdminListProducts(c *gin.Context) {
-	if !isAdminUser(getUserFromContext(c)) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	if _, ok := requireAdmin(c); !ok {
 		return
 	}
 
@@ -76,8 +86,12 @@ func (h *Handlers) AdminListProducts(c *gin.Context) {
 		limit = 20
 	}
 
-	includeDeleted := c.Query("includeDeleted") == "true"
-	query := adminProductScope(includeDeleted)
+	query := config.DB.Model(&models.Product{})
+	if c.Query("includeDeleted") == "true" {
+		// Widens the page to deleted AND live rows; MarkDeletionFlags below tells
+		// them apart for the console.
+		query = query.Unscoped()
+	}
 
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
@@ -139,8 +153,7 @@ type adminSeller struct {
 // AdminGetProduct handles GET /api/admin/products/:id — full detail, including
 // soft-deleted products so an admin can review one before restoring it.
 func (h *Handlers) AdminGetProduct(c *gin.Context) {
-	if !isAdminUser(getUserFromContext(c)) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	if _, ok := requireAdmin(c); !ok {
 		return
 	}
 
@@ -149,7 +162,7 @@ func (h *Handlers) AdminGetProduct(c *gin.Context) {
 		return
 	}
 
-	product.IsDeleted = product.DeletedAt.Valid
+	product.MarkDeletionFlag()
 
 	var seller adminSeller
 	config.DB.Model(&models.User{}).
@@ -163,12 +176,11 @@ func (h *Handlers) AdminGetProduct(c *gin.Context) {
 			Select("name").Where("id = ?", *product.SuspendedBy).Scan(&suspendedByName)
 	}
 
-	// The model hides DeletedAt from clients (it is a gorm internal), so the
-	// admin console gets an explicit flag instead.
+	// Deletion state travels on the product itself (product.isDeleted); only the
+	// timestamp needs adding, since gorm.DeletedAt does not serialize usefully.
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", gin.H{
 		"product":         product,
 		"seller":          seller,
-		"isDeleted":       product.DeletedAt.Valid,
 		"deletedAt":       nullableTime(product.DeletedAt),
 		"suspendedByName": suspendedByName,
 	})
@@ -186,9 +198,8 @@ func nullableTime(d gorm.DeletedAt) *time.Time {
 // A reason is mandatory: the merchant is shown it in their listings, and
 // without one a suspension is indistinguishable from a listing that broke.
 func (h *Handlers) SuspendProduct(c *gin.Context) {
-	admin := getUserFromContext(c)
-	if !isAdminUser(admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	admin, ok := requireAdmin(c)
+	if !ok {
 		return
 	}
 
@@ -230,9 +241,7 @@ func (h *Handlers) SuspendProduct(c *gin.Context) {
 	}
 
 	// A suspended listing must stop counting toward its category.
-	if product.CategoryID != nil {
-		updateCategoryProductCount(*product.CategoryID)
-	}
+	refreshCategoryCount(product.CategoryID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Product suspended successfully", gin.H{
 		"id":               product.ID,
@@ -247,9 +256,7 @@ func (h *Handlers) SuspendProduct(c *gin.Context) {
 // It restores SuspendedFromStatus rather than defaulting to active: a listing
 // the merchant had paused before the suspension must come back paused.
 func (h *Handlers) UnsuspendProduct(c *gin.Context) {
-	admin := getUserFromContext(c)
-	if !isAdminUser(admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	if _, ok := requireAdmin(c); !ok {
 		return
 	}
 
@@ -280,9 +287,7 @@ func (h *Handlers) UnsuspendProduct(c *gin.Context) {
 		return
 	}
 
-	if product.CategoryID != nil {
-		updateCategoryProductCount(*product.CategoryID)
-	}
+	refreshCategoryCount(product.CategoryID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Product unsuspended successfully", gin.H{
 		"id":     product.ID,
@@ -296,9 +301,7 @@ func (h *Handlers) UnsuspendProduct(c *gin.Context) {
 // table, because orders reference product_id and a restore has to bring the
 // listing back intact.
 func (h *Handlers) AdminDeleteProduct(c *gin.Context) {
-	admin := getUserFromContext(c)
-	if !isAdminUser(admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	if _, ok := requireAdmin(c); !ok {
 		return
 	}
 
@@ -316,9 +319,7 @@ func (h *Handlers) AdminDeleteProduct(c *gin.Context) {
 		return
 	}
 
-	if product.CategoryID != nil {
-		updateCategoryProductCount(*product.CategoryID)
-	}
+	refreshCategoryCount(product.CategoryID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Product deleted successfully", gin.H{"id": product.ID})
 }
@@ -326,9 +327,7 @@ func (h *Handlers) AdminDeleteProduct(c *gin.Context) {
 // RestoreProduct handles POST /api/admin/products/:id/restore — undoes a soft
 // delete, leaving the listing's status untouched.
 func (h *Handlers) RestoreProduct(c *gin.Context) {
-	admin := getUserFromContext(c)
-	if !isAdminUser(admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+	if _, ok := requireAdmin(c); !ok {
 		return
 	}
 
@@ -348,9 +347,7 @@ func (h *Handlers) RestoreProduct(c *gin.Context) {
 		return
 	}
 
-	if product.CategoryID != nil {
-		updateCategoryProductCount(*product.CategoryID)
-	}
+	refreshCategoryCount(product.CategoryID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Product restored successfully", gin.H{
 		"id":     product.ID,

@@ -185,10 +185,15 @@ func (p *Product) IsVisibleToPublic() bool {
 	return p.Status == ProductStatusActive
 }
 
-// MarkDeletionFlags populates the serializable IsDeleted field from DeletedAt.
+// MarkDeletionFlag populates the serializable IsDeleted field from DeletedAt.
 // Only admin queries run .Unscoped(), so only they need to call this.
+func (p *Product) MarkDeletionFlag() {
+	p.IsDeleted = p.DeletedAt.Valid
+}
+
+// MarkDeletionFlags applies MarkDeletionFlag across a page of listings.
 func MarkDeletionFlags(products []Product) {
 	for i := range products {
-		products[i].IsDeleted = products[i].DeletedAt.Valid
+		products[i].MarkDeletionFlag()
 	}
 }
