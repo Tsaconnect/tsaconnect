@@ -341,6 +341,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		productGroup.PATCH("/:id/status", auth, h.UpdateStatus)
 	}
 
+	// Admin product moderation. Separate from /products, which stays owner-scoped:
+	// widening those handlers to admins would put moderation and the merchant's
+	// own edit path on the same query.
+	adminProductGroup := api.Group("/admin/products")
+	adminProductGroup.Use(adminAuth)
+	{
+		adminProductGroup.GET("", h.AdminListProducts)
+		adminProductGroup.GET("/:id", h.AdminGetProduct)
+		adminProductGroup.POST("/:id/suspend", h.SuspendProduct)
+		adminProductGroup.POST("/:id/unsuspend", h.UnsuspendProduct)
+		adminProductGroup.DELETE("/:id", h.AdminDeleteProduct)
+		adminProductGroup.POST("/:id/restore", h.RestoreProduct)
+	}
+
 	// Deposit routes (admin)
 	depositGroup := api.Group("/deposits")
 	depositGroup.Use(adminAuth)

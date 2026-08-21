@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // ProductImage represents an image associated with a product.
@@ -37,10 +38,10 @@ type ProductDimensions struct {
 
 // ProductMetadata holds additional product metadata.
 type ProductMetadata struct {
-	SKU        string            `json:"sku,omitempty"`
-	Weight     float64           `json:"weight,omitempty"`
+	SKU        string             `json:"sku,omitempty"`
+	Weight     float64            `json:"weight,omitempty"`
 	Dimensions *ProductDimensions `json:"dimensions,omitempty"`
-	Tags       []string          `json:"tags,omitempty"`
+	Tags       []string           `json:"tags,omitempty"`
 }
 
 // Product represents a product or service listing.
@@ -65,19 +66,39 @@ type Product struct {
 	Views        int            `json:"views"`
 	Sales        int            `json:"sales"`
 	Rating       datatypes.JSON `gorm:"type:jsonb" json:"rating"`
-	Metadata              datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	Metadata     datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
 	// ShippingResidential is the "same residential area/street" tier of a
 	// merchant-set distance fee. For products it is unused (0). For order/booking
 	// services it holds the residential-tier delivery/booking fee — the one tier
 	// PR #61 hard-coded to free. Defaults 0 → still free unless the merchant sets it.
-	ShippingResidential   float64        `gorm:"default:0" json:"shippingResidential"`
-	ShippingSameCity      float64        `gorm:"default:0" json:"shippingSameCity"`
-	ShippingSameState     float64        `gorm:"default:0" json:"shippingSameState"`
-	ShippingSameCountry   float64        `gorm:"default:0" json:"shippingSameCountry"`
-	ShippingInternational float64        `gorm:"default:0" json:"shippingInternational"`
-	SellerVerified        bool           `gorm:"-" json:"sellerVerified"`
-	CreatedAt             time.Time      `json:"createdAt"`
-	UpdatedAt             time.Time      `json:"updatedAt"`
+	ShippingResidential   float64 `gorm:"default:0" json:"shippingResidential"`
+	ShippingSameCity      float64 `gorm:"default:0" json:"shippingSameCity"`
+	ShippingSameState     float64 `gorm:"default:0" json:"shippingSameState"`
+	ShippingSameCountry   float64 `gorm:"default:0" json:"shippingSameCountry"`
+	ShippingInternational float64 `gorm:"default:0" json:"shippingInternational"`
+	SellerVerified        bool    `gorm:"-" json:"sellerVerified"`
+
+	// Admin moderation. Suspension is admin-only: a merchant can neither set nor
+	// clear it (see UpdateStatus), which is what distinguishes it from the
+	// merchant-controlled `inactive`.
+	SuspensionReason string     `json:"suspensionReason,omitempty"`
+	SuspendedAt      *time.Time `json:"suspendedAt,omitempty"`
+	SuspendedBy      *uuid.UUID `gorm:"type:uuid" json:"-"`
+	// SuspendedFromStatus is the status to return to on unsuspend, so lifting a
+	// suspension on a listing the merchant had paused does not silently publish it.
+	SuspendedFromStatus string `json:"-"`
+
+	// DeletedAt makes admin deletion reversible and keeps order history intact.
+	// GORM excludes soft-deleted rows from every query automatically; admin
+	// queries opt back in with .Unscoped().
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+	// IsDeleted is the serializable form of DeletedAt (which marshals as a gorm
+	// struct, not a bool). Only admin listings can contain a deleted row, so
+	// everywhere else this is simply false.
+	IsDeleted bool `gorm:"-" json:"isDeleted"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.
@@ -91,6 +112,7 @@ const (
 	ProductStatusInactive      = "inactive"
 	ProductStatusSoldOut       = "sold_out"
 	ProductStatusPendingReview = "pending_review"
+	ProductStatusSuspended     = "suspended"
 	DefaultProductStatus       = ProductStatusActive
 
 	ProductTypeProduct = "Product"
@@ -126,4 +148,52 @@ func (p *Product) GetAttributes() []ProductAttribute {
 func (p *Product) SetAttributes(attrs []ProductAttribute) {
 	data, _ := json.Marshal(attrs)
 	p.Attributes = data
+}
+
+// MerchantSettableStatuses are the statuses a merchant may set on their own
+// listing. `suspended` is deliberately absent — it is an admin action, and
+// letting a merchant write it (or write over it) would make suspension
+// meaningless.
+var MerchantSettableStatuses = map[string]bool{
+	ProductStatusActive:        true,
+	ProductStatusInactive:      true,
+	ProductStatusSoldOut:       true,
+	ProductStatusPendingReview: true,
+}
+
+// PublicListableStatuses are the statuses an unauthenticated caller may ask for
+// via a `status` query param. Only `active` is public: the others expose
+// listings their owners have not published, and `suspended` would leak
+// moderation decisions.
+var PublicListableStatuses = map[string]bool{
+	ProductStatusActive: true,
+}
+
+// VisibleToPublic narrows a product query to listings buyers are allowed to see.
+// Every public-facing product query goes through this so the rule cannot drift
+// between the marketplace, category and featured queries.
+//
+// Soft deletion is NOT handled here — gorm.DeletedAt already excludes deleted
+// rows from every query, including ones this scope never touches.
+func VisibleToPublic(q *gorm.DB) *gorm.DB {
+	return q.Where("status = ?", ProductStatusActive)
+}
+
+// IsVisibleToPublic reports whether a single loaded product may be shown to a
+// buyer. The query-level counterpart is VisibleToPublic.
+func (p *Product) IsVisibleToPublic() bool {
+	return p.Status == ProductStatusActive
+}
+
+// MarkDeletionFlag populates the serializable IsDeleted field from DeletedAt.
+// Only admin queries run .Unscoped(), so only they need to call this.
+func (p *Product) MarkDeletionFlag() {
+	p.IsDeleted = p.DeletedAt.Valid
+}
+
+// MarkDeletionFlags applies MarkDeletionFlag across a page of listings.
+func MarkDeletionFlags(products []Product) {
+	for i := range products {
+		products[i].MarkDeletionFlag()
+	}
 }

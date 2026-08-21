@@ -105,6 +105,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_same_state REAL DEFAULT 0,
 			shipping_same_country REAL DEFAULT 0,
 			shipping_international REAL DEFAULT 0,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT,
+			deleted_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
@@ -1648,5 +1653,93 @@ func TestGenerateOrderID_Deterministic(t *testing.T) {
 	result3 := services.GenerateOrderID(id2)
 	if result1 == result3 {
 		t.Error("expected different order IDs for different UUIDs")
+	}
+}
+
+// A listing can be suspended or deleted while it sits in a buyer's cart. The
+// order path re-checks visibility so funds are never escrowed against a pulled
+// listing — add-to-cart's check alone is not enough.
+func TestCreateOrderFromCart_RejectsUnavailableListing(t *testing.T) {
+	cases := []struct {
+		name string
+		pull func(db *gorm.DB, productID uuid.UUID)
+	}{
+		{"suspended", func(db *gorm.DB, id uuid.UUID) {
+			db.Model(&models.Product{}).Where("id = ?", id).
+				Update("status", models.ProductStatusSuspended)
+		}},
+		{"soft deleted", func(db *gorm.DB, id uuid.UUID) {
+			db.Delete(&models.Product{}, "id = ?", id)
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupCheckoutTestDB(t)
+			ch := setupCheckoutHandler(t)
+
+			buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+
+			product := createTestProduct(t, db, seller.ID, 10.0)
+			items := []models.CartItem{{
+				ID: uuid.New(), Product: product.ID, Seller: seller.ID,
+				Quantity: 1, Price: 10.0, AddedAt: time.Now(),
+			}}
+			createTestCart(t, db, buyer.ID, items)
+
+			// Pulled after the item was already in the cart.
+			tc.pull(db, product.ID)
+
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("user", buyer)
+			body, _ := json.Marshal(map[string]interface{}{"token": "USDC"})
+			c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			ch.CreateOrderFromCart(c)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for a %s listing, got %d: %s", tc.name, w.Code, w.Body.String())
+			}
+			var orders int64
+			db.Model(&models.Order{}).Count(&orders)
+			if orders != 0 {
+				t.Fatalf("an order was created for a %s listing", tc.name)
+			}
+		})
+	}
+}
+
+// Soft delete exists so order history survives. enrichOrdersWithPreview used a
+// plain query, so GORM filtered the deleted product out and every past order of
+// it serialized `product: null` — losing its name, price and image.
+func TestOrderPreviewSurvivesProductDeletion(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 42.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusCompleted, "USDC")
+
+	if err := db.Delete(&models.Product{}, "id = ?", product.ID).Error; err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	enriched := enrichOrdersWithPreview([]models.Order{*order})
+	if len(enriched) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(enriched))
+	}
+	if enriched[0].Product == nil {
+		t.Fatal("order lost its product preview after the product was deleted")
+	}
+	if enriched[0].Product.Name != product.Name {
+		t.Fatalf("product name = %q, want %q", enriched[0].Product.Name, product.Name)
+	}
+	if enriched[0].Product.Price != 42.0 {
+		t.Fatalf("product price = %v, want 42", enriched[0].Product.Price)
 	}
 }

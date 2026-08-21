@@ -154,6 +154,14 @@ const MyAdvertsScreen = () => {
   const renderItem = ({ item }: { item: any }) => {
     const imageUri = getFirstImage(item.images);
     const isRejected = item?.status === 'Rejected';
+    // Admin suspension. The listing stays in the seller's own list (so they can
+    // see why it was pulled) but is hidden from every buyer, and only an admin
+    // can lift it — editing or re-activating it here would be rejected by the API.
+    const isSuspended = item?.status === 'suspended';
+    const isBlocked = isRejected || isSuspended;
+    const blockedReason = isSuspended
+      ? item?.suspensionReason || 'Please contact admin for details'
+      : item?.rejectionReason || 'Please contact admin for details';
     const formattedDate = (() => {
       const d = new Date(item?.createdAt);
       return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
@@ -201,18 +209,18 @@ const MyAdvertsScreen = () => {
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm }}>
             {item?.status && (
               <Badge
-                label={item.status}
+                label={isSuspended ? 'Suspended' : item.status}
                 size="sm"
-                color={isRejected ? colors.danger : colors.textSecondary}
-                background={isRejected ? colors.dangerBg : colors.surfaceAlt}
+                color={isBlocked ? colors.danger : colors.textSecondary}
+                background={isBlocked ? colors.dangerBg : colors.surfaceAlt}
               />
             )}
             {item?.type && <Badge label={item.type} size="sm" />}
           </View>
 
-          {isRejected && (
+          {isBlocked && (
             <Text variant="caption" color="danger" style={{ marginTop: spacing.xs, fontStyle: 'italic' }}>
-              Reason: {item.rejectionReason || "Please contact admin for details"}
+              Reason: {blockedReason}
             </Text>
           )}
 
@@ -228,7 +236,8 @@ const MyAdvertsScreen = () => {
             <IconButton
               icon="edit"
               accessibilityLabel="Edit product"
-              color={colors.accent}
+              disabled={isSuspended}
+              color={isSuspended ? colors.textMuted : colors.accent}
               onPress={() =>
                 router.push({
                   pathname: `/profile/edit-advert`,
