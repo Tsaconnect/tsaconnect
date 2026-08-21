@@ -1713,3 +1713,33 @@ func TestCreateOrderFromCart_RejectsUnavailableListing(t *testing.T) {
 		})
 	}
 }
+
+// Soft delete exists so order history survives. enrichOrdersWithPreview used a
+// plain query, so GORM filtered the deleted product out and every past order of
+// it serialized `product: null` — losing its name, price and image.
+func TestOrderPreviewSurvivesProductDeletion(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 42.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusCompleted, "USDC")
+
+	if err := db.Delete(&models.Product{}, "id = ?", product.ID).Error; err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	enriched := enrichOrdersWithPreview([]models.Order{*order})
+	if len(enriched) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(enriched))
+	}
+	if enriched[0].Product == nil {
+		t.Fatal("order lost its product preview after the product was deleted")
+	}
+	if enriched[0].Product.Name != product.Name {
+		t.Fatalf("product name = %q, want %q", enriched[0].Product.Name, product.Name)
+	}
+	if enriched[0].Product.Price != 42.0 {
+		t.Fatalf("product price = %v, want 42", enriched[0].Product.Price)
+	}
+}

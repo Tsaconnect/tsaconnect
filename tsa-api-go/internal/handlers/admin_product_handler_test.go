@@ -617,3 +617,109 @@ func TestAdminGetProductFindsSoftDeleted(t *testing.T) {
 		t.Fatalf("admin cannot open a deleted product to restore it: %d", w.Code)
 	}
 }
+
+// --- Regressions from code review ------------------------------------------
+
+// Adding gorm.DeletedAt turned the merchant's own delete into a soft delete, but
+// it was still destroying the Cloudinary images first — so an admin could
+// "restore" a listing whose images were permanently gone.
+func TestMerchantDeleteIsSoftAndKeepsImages(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	owner := seedUser(t, db, models.RoleMerchant)
+	p := seedProduct(t, db, owner.ID, models.ProductStatusActive)
+	p.SetImages([]models.ProductImage{{ID: uuid.New(), URL: "https://cdn/x.jpg", PublicID: "products/x"}})
+	db.Save(p)
+
+	c, w := modCtx(t, http.MethodDelete, "", p.ID.String(), owner)
+	h.DeleteProduct(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	got := reload(t, db, p.ID)
+	if !got.DeletedAt.Valid {
+		t.Fatal("merchant delete did not soft-delete the row")
+	}
+	if len(got.GetImages()) != 1 {
+		t.Fatal("images dropped, so an admin restore would return a product with dead image URLs")
+	}
+}
+
+// Deleting a suspended listing would hide it from the admin's default view while
+// the moderation decision is still open.
+func TestMerchantCannotDeleteSuspendedProduct(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	admin := seedUser(t, db, models.RoleAdmin)
+	owner := seedUser(t, db, models.RoleMerchant)
+	p := seedProduct(t, db, owner.ID, models.ProductStatusActive)
+
+	c, _ := modCtx(t, http.MethodPost, `{"reason":"policy"}`, p.ID.String(), admin)
+	h.SuspendProduct(c)
+
+	c2, w2 := modCtx(t, http.MethodDelete, "", p.ID.String(), owner)
+	h.DeleteProduct(c2)
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (%s)", w2.Code, w2.Body.String())
+	}
+	if reload(t, db, p.ID).DeletedAt.Valid {
+		t.Fatal("merchant deleted a suspended listing out of the admin's view")
+	}
+}
+
+// includeDeleted widens the query to deleted AND live rows, so every row must
+// say which it is. Without the flag the console offered Restore on live
+// products, which the API rejects with 400.
+func TestAdminListFlagsDeletedRowsIndividually(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	admin := seedUser(t, db, models.RoleAdmin)
+	owner := seedUser(t, db, models.RoleMerchant)
+	live := seedProduct(t, db, owner.ID, models.ProductStatusActive)
+	gone := seedProduct(t, db, owner.ID, models.ProductStatusActive)
+	db.Delete(&models.Product{}, "id = ?", gone.ID)
+
+	c, w := modQueryCtx(t, "includeDeleted=true", admin)
+	h.AdminListProducts(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	flags := map[string]bool{}
+	data := decodeData(t, w)
+	list, _ := data["products"].([]interface{})
+	for _, item := range list {
+		m, _ := item.(map[string]interface{})
+		flags[m["id"].(string)], _ = m["isDeleted"].(bool)
+	}
+
+	if len(list) != 2 {
+		t.Fatalf("expected both rows, got %d", len(list))
+	}
+	if flags[gone.ID.String()] != true {
+		t.Error("deleted row not flagged isDeleted")
+	}
+	if flags[live.ID.String()] != false {
+		t.Error("live row flagged as deleted — console would offer Restore on it")
+	}
+}
+
+func TestAdminReadsRequireAdminRole(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	outsider := seedUser(t, db, models.RoleUser)
+	p := seedProduct(t, db, uuid.New(), models.ProductStatusActive)
+
+	c, w := modQueryCtx(t, "", outsider)
+	h.AdminListProducts(c)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("AdminListProducts: expected 403, got %d", w.Code)
+	}
+
+	c2, w2 := modCtx(t, http.MethodGet, "", p.ID.String(), outsider)
+	h.AdminGetProduct(c2)
+	if w2.Code != http.StatusForbidden {
+		t.Errorf("AdminGetProduct: expected 403, got %d", w2.Code)
+	}
+}

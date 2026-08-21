@@ -62,6 +62,11 @@ func requireModeratableProduct(c *gin.Context) (*models.Product, bool) {
 // hard-filters status = 'active', so inactive and pending_review listings were
 // invisible to admins and the console's status filter did nothing.
 func (h *Handlers) AdminListProducts(c *gin.Context) {
+	if !isAdminUser(getUserFromContext(c)) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+		return
+	}
+
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	if page < 1 {
@@ -99,6 +104,9 @@ func (h *Handlers) AdminListProducts(c *gin.Context) {
 		return
 	}
 	populateSellerVerified(products)
+	// includeDeleted widens the query to deleted AND live rows, so each row has
+	// to say which it is — otherwise the console offers Restore on a live listing.
+	models.MarkDeletionFlags(products)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 	utils.SuccessResponse(c, http.StatusOK, "Products fetched successfully", gin.H{
@@ -131,10 +139,17 @@ type adminSeller struct {
 // AdminGetProduct handles GET /api/admin/products/:id — full detail, including
 // soft-deleted products so an admin can review one before restoring it.
 func (h *Handlers) AdminGetProduct(c *gin.Context) {
+	if !isAdminUser(getUserFromContext(c)) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Admin access required")
+		return
+	}
+
 	product, ok := requireModeratableProduct(c)
 	if !ok {
 		return
 	}
+
+	product.IsDeleted = product.DeletedAt.Valid
 
 	var seller adminSeller
 	config.DB.Model(&models.User{}).

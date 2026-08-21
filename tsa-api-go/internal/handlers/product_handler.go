@@ -620,15 +620,20 @@ func (h *Handlers) DeleteProduct(c *gin.Context) {
 		return
 	}
 
-	// Delete images from Cloudinary
-	for _, img := range product.GetImages() {
-		if img.PublicID != "" {
-			_ = middleware.DeleteFromCloudinary(h.Config, img.PublicID)
-		}
+	// Deleting a suspended listing would drop it out of the admin's default view
+	// while the moderation decision is still open — the same escape route that
+	// UpdateStatus closes.
+	if product.Status == models.ProductStatusSuspended {
+		utils.ErrorResponse(c, http.StatusForbidden,
+			"This listing has been suspended by an administrator and cannot be deleted")
+		return
 	}
 
 	categoryID := product.CategoryID
 
+	// Soft delete (models.Product carries gorm.DeletedAt). The Cloudinary images
+	// are deliberately kept: an admin can restore this row, and past orders still
+	// render the product's thumbnail from it.
 	if err := config.DB.Delete(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to delete product")
 		return

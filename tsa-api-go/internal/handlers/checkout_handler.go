@@ -2394,7 +2394,10 @@ func enrichOrdersWithPreview(orders []models.Order) []orderPreview {
 
 	var products []models.Product
 	if len(productIDs) > 0 {
-		_ = config.DB.Where("id IN ?", toSlice(productIDs)).Find(&products).Error
+		// Unscoped: an order's product may since have been deleted, and the order
+		// still has to render its name, price and image. Keeping order history
+		// readable is the whole reason deletion is soft.
+		_ = config.DB.Unscoped().Where("id IN ?", toSlice(productIDs)).Find(&products).Error
 	}
 	productByID := make(map[uuid.UUID]*productPreview, len(products))
 	for i := range products {

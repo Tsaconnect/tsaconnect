@@ -92,6 +92,10 @@ type Product struct {
 	// GORM excludes soft-deleted rows from every query automatically; admin
 	// queries opt back in with .Unscoped().
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+	// IsDeleted is the serializable form of DeletedAt (which marshals as a gorm
+	// struct, not a bool). Only admin listings can contain a deleted row, so
+	// everywhere else this is simply false.
+	IsDeleted bool `gorm:"-" json:"isDeleted"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -179,4 +183,12 @@ func VisibleToPublic(q *gorm.DB) *gorm.DB {
 // buyer. The query-level counterpart is VisibleToPublic.
 func (p *Product) IsVisibleToPublic() bool {
 	return p.Status == ProductStatusActive
+}
+
+// MarkDeletionFlags populates the serializable IsDeleted field from DeletedAt.
+// Only admin queries run .Unscoped(), so only they need to call this.
+func MarkDeletionFlags(products []Product) {
+	for i := range products {
+		products[i].IsDeleted = products[i].DeletedAt.Valid
+	}
 }
