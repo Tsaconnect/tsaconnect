@@ -124,8 +124,12 @@ func newRelayRig(t *testing.T, relayEnabled bool) *relayRig {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.Exec(`CREATE TABLE users (
-		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT
-	)`).Error; err != nil {
+		id TEXT PRIMARY KEY, username TEXT, name TEXT, wallet_address TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
+		)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
 	}
 

@@ -50,8 +50,12 @@ func setupFeeWalletTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
-		username TEXT
-	)`).Error; err != nil {
+		username TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
+		)`).Error; err != nil {
 		t.Fatalf("ddl users: %v", err)
 	}
 	return db

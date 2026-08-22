@@ -729,10 +729,18 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 				return
 			}
 
-			// Re-checked at order time, not just at add-to-cart: a listing can be
-			// suspended or deleted while it sits in someone's cart, and that must
-			// stop the purchase rather than escrow funds against a pulled listing.
-			if !product.IsVisibleToPublic() {
+			// Re-checked at order time, not just at add-to-cart: the listing or its
+			// seller can be suspended while it sits in someone's cart, and that
+			// must stop the purchase rather than escrow funds against a listing
+			// nobody can fulfil.
+			var listingSeller models.User
+			if err := tx.First(&listingSeller, "id = ?", product.UserID).Error; err != nil {
+				tx.Rollback()
+				utils.ErrorResponse(c, http.StatusBadRequest,
+					fmt.Sprintf("%s is no longer available for purchase", product.Name))
+				return
+			}
+			if !product.IsVisibleToPublic(&listingSeller) {
 				tx.Rollback()
 				utils.ErrorResponse(c, http.StatusBadRequest,
 					fmt.Sprintf("%s is no longer available for purchase", product.Name))
@@ -1079,17 +1087,18 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Not a service listing")
 		return
 	}
-	// Same guard as the cart path: a suspended or deleted service cannot be booked.
-	if !product.IsVisibleToPublic() {
-		tx.Rollback()
-		utils.ErrorResponse(c, http.StatusBadRequest, "This service is no longer available")
-		return
-	}
-
 	var seller models.User
 	if err := tx.First(&seller, "id = ?", product.UserID).Error; err != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusBadRequest, "Seller not found")
+		return
+	}
+
+	// Same guard as the cart path: a suspended or deleted service — or one whose
+	// provider's account is suspended — cannot be booked.
+	if !product.IsVisibleToPublic(&seller) {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, "This service is no longer available")
 		return
 	}
 

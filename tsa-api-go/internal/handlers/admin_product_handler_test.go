@@ -98,6 +98,19 @@ func setupProductModerationDB(t *testing.T) *gorm.DB {
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			submitted_for_verification_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT,
+			created_at DATETIME,
+			updated_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS orders (
+			id TEXT PRIMARY KEY,
+			buyer_id TEXT NOT NULL,
+			seller_id TEXT NOT NULL,
+			product_id TEXT NOT NULL,
+			status TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,

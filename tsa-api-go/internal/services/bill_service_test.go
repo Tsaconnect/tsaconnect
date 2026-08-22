@@ -224,7 +224,11 @@ func newBillServiceRig(t *testing.T) *billRig {
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE users (
-			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT
+			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
 		)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
