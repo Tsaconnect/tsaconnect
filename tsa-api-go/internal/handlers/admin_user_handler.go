@@ -56,6 +56,23 @@ func countInFlightOrders(userID uuid.UUID) int64 {
 	return n
 }
 
+// refreshCategoryCountsForSeller recounts every category the user has listings
+// in. category.product_count counts only publicly visible listings, and
+// suspending or reactivating an account changes which of theirs are visible —
+// without this the counts stay wrong until some unrelated product in the same
+// category happens to be edited.
+func refreshCategoryCountsForSeller(userID uuid.UUID) {
+	var categoryIDs []uuid.UUID
+	if err := config.DB.Model(&models.Product{}).
+		Where("user_id = ? AND category_id IS NOT NULL", userID).
+		Distinct().Pluck("category_id", &categoryIDs).Error; err != nil {
+		return
+	}
+	for _, id := range categoryIDs {
+		updateCategoryProductCount(id)
+	}
+}
+
 // userStats are the counts the console shows alongside the profile.
 type userStats struct {
 	Products       int64 `json:"products"`
@@ -163,6 +180,9 @@ func (h *Handlers) SuspendUser(c *gin.Context) {
 		return
 	}
 
+	// Their listings just left the public catalogue.
+	refreshCategoryCountsForSeller(user.ID)
+
 	utils.SuccessResponse(c, http.StatusOK, "Account suspended successfully", gin.H{
 		"id":             user.ID,
 		"accountStatus":  models.AccountStatusSuspended,
@@ -202,6 +222,9 @@ func (h *Handlers) UnsuspendUser(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to reactivate account")
 		return
 	}
+
+	// ...and now they are back.
+	refreshCategoryCountsForSeller(user.ID)
 
 	utils.SuccessResponse(c, http.StatusOK, "Account reactivated successfully", gin.H{
 		"id":            user.ID,

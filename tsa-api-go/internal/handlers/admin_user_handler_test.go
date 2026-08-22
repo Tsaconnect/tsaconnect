@@ -294,3 +294,105 @@ func TestAdminUserEndpointsRequireAdmin(t *testing.T) {
 	}
 	_ = config.DB
 }
+
+// --- Regressions from code review ------------------------------------------
+
+// category.product_count counts only publicly visible listings, so suspending a
+// seller has to trigger a recount. Without this the count stayed too high until
+// some unrelated product in the same category happened to be edited.
+func TestSuspendingSellerRefreshesCategoryCounts(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	admin := seedUser(t, db, models.RoleAdmin)
+	seller := seedUser(t, db, models.RoleMerchant)
+
+	categoryID := uuid.New()
+	if err := db.Exec(
+		`INSERT INTO categories (id, title, product_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		categoryID.String(), "Electronics", 0, time.Now(), time.Now(),
+	).Error; err != nil {
+		t.Fatalf("seed category: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		p := seedProduct(t, db, seller.ID, models.ProductStatusActive)
+		db.Model(&models.Product{}).Where("id = ?", p.ID).Update("category_id", categoryID)
+	}
+	updateCategoryProductCount(categoryID)
+
+	countNow := func() int {
+		var n int
+		db.Raw(`SELECT product_count FROM categories WHERE id = ?`, categoryID.String()).Scan(&n)
+		return n
+	}
+	if countNow() != 3 {
+		t.Fatalf("baseline count = %d, want 3", countNow())
+	}
+
+	c, _ := modCtx(t, http.MethodPost, `{"reason":"fraud"}`, seller.ID.String(), admin)
+	h.SuspendUser(c)
+	if got := countNow(); got != 0 {
+		t.Errorf("after suspension count = %d, want 0 — their listings left the catalogue", got)
+	}
+
+	c2, _ := modCtx(t, http.MethodPost, `{}`, seller.ID.String(), admin)
+	h.UnsuspendUser(c2)
+	if got := countNow(); got != 3 {
+		t.Errorf("after reactivation count = %d, want 3", got)
+	}
+}
+
+// The public category page shows a count beside the listing itself; the two
+// must agree about suspended sellers.
+func TestPublicCategoryCountExcludesSuspendedSellers(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	admin := seedUser(t, db, models.RoleAdmin)
+	seller := seedUser(t, db, models.RoleMerchant)
+
+	categoryID := uuid.New()
+	if err := db.Exec(
+		`INSERT INTO categories (id, title, product_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		categoryID.String(), "Electronics", 0, time.Now(), time.Now(),
+	).Error; err != nil {
+		t.Fatalf("seed category: %v", err)
+	}
+	p := seedProduct(t, db, seller.ID, models.ProductStatusActive)
+	db.Model(&models.Product{}).Where("id = ?", p.ID).Update("category_id", categoryID)
+
+	var visible int64
+	models.VisibleToPublic(config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID)).
+		Count(&visible)
+	if visible != 1 {
+		t.Fatalf("baseline visible = %d, want 1", visible)
+	}
+
+	c, _ := modCtx(t, http.MethodPost, `{"reason":"fraud"}`, seller.ID.String(), admin)
+	h.SuspendUser(c)
+
+	models.VisibleToPublic(config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID)).
+		Count(&visible)
+	if visible != 0 {
+		t.Fatalf("public count = %d, want 0 — it must match what the listing shows", visible)
+	}
+}
+
+// GetProductByID loads the seller for the visibility check, so the verification
+// flag must come from that row rather than a second query for the same user.
+func TestGetProductByIDReportsSellerVerified(t *testing.T) {
+	db := setupProductModerationDB(t)
+	h := &Handlers{}
+	seller := seedUser(t, db, models.RoleMerchant)
+	db.Model(&models.User{}).Where("id = ?", seller.ID).
+		Update("verification_status", models.VerificationStatusVerified)
+	p := seedProduct(t, db, seller.ID, models.ProductStatusActive)
+
+	c, w := modCtx(t, http.MethodGet, "", p.ID.String(), nil)
+	h.GetProductByID(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"sellerVerified":true`)) {
+		t.Fatalf("sellerVerified not reported: %s", w.Body.String())
+	}
+}

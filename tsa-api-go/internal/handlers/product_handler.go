@@ -397,10 +397,9 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 	config.DB.Model(&product).Update("views", product.Views+1)
 	product.Views++
 
-	// Populate seller verification status
-	single := []models.Product{product}
-	populateSellerVerified(single)
-	product = single[0]
+	// The seller was already loaded for the visibility check above, so set the
+	// flag from it rather than making populateSellerVerified re-query the row.
+	product.SellerVerified = seller.VerificationStatus == models.VerificationStatusVerified
 
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", product)
 }
