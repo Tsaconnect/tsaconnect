@@ -355,6 +355,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminProductGroup.POST("/:id/restore", h.RestoreProduct)
 	}
 
+	// Admin account moderation. AccountStatus was already enforced by
+	// middleware.Auth on every request; these are the endpoints that set it.
+	adminUserGroup := api.Group("/admin/users")
+	adminUserGroup.Use(adminAuth)
+	{
+		adminUserGroup.GET("/:id", h.AdminGetUser)
+		adminUserGroup.POST("/:id/suspend", h.SuspendUser)
+		adminUserGroup.POST("/:id/unsuspend", h.UnsuspendUser)
+	}
+
 	// Deposit routes (admin)
 	depositGroup := api.Group("/deposits")
 	depositGroup.Use(adminAuth)

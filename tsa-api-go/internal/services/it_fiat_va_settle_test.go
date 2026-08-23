@@ -31,8 +31,12 @@ func newVATestService(t *testing.T) (*ITService, *models.User, *models.FiatVirtu
 		name TEXT,
 		email TEXT,
 		phone_number TEXT,
-		wallet_address TEXT
-	)`).Error; err != nil {
+		wallet_address TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
+		)`).Error; err != nil {
 		t.Fatalf("create users: %v", err)
 	}
 	if _, err := s.SetRate(context.Background(), uuid.New(), 20000, 0); err != nil {

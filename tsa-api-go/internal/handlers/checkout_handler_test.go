@@ -67,7 +67,11 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 				deleted_at DATETIME,
 				submitted_for_verification_at DATETIME,
 				created_at DATETIME,
-			updated_at DATETIME
+			updated_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
 		)`,
 	}
 	for _, s := range baseSqls {
@@ -1741,5 +1745,48 @@ func TestOrderPreviewSurvivesProductDeletion(t *testing.T) {
 	}
 	if enriched[0].Product.Price != 42.0 {
 		t.Fatalf("product price = %v, want 42", enriched[0].Product.Price)
+	}
+}
+
+// A seller can be suspended while their listing sits in a buyer's cart. The
+// order path re-checks the SELLER too, not just the listing: a suspended seller
+// is locked out of shipping and confirming, so escrowing against them would
+// strand the buyer's funds.
+func TestCreateOrderFromCart_RejectsSuspendedSeller(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, "0x0000000000000000000000000000000000000002")
+
+	product := createTestProduct(t, db, seller.ID, 10.0)
+	items := []models.CartItem{{
+		ID: uuid.New(), Product: product.ID, Seller: seller.ID,
+		Quantity: 1, Price: 10.0, AddedAt: time.Now(),
+	}}
+	createTestCart(t, db, buyer.ID, items)
+
+	// Suspended after the item was already in the cart. The listing stays active.
+	db.Model(&models.User{}).Where("id = ?", seller.ID).
+		Update("account_status", models.AccountStatusSuspended)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	body, _ := json.Marshal(map[string]interface{}{"token": "USDC"})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	ch.CreateOrderFromCart(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a suspended seller, got %d: %s", w.Code, w.Body.String())
+	}
+	var orders int64
+	db.Model(&models.Order{}).Count(&orders)
+	if orders != 0 {
+		t.Fatal("an order was escrowed against a suspended seller")
 	}
 }

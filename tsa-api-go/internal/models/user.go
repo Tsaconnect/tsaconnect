@@ -34,16 +34,27 @@ type User struct {
 	DiditSessionID     string         `json:"diditSessionId,omitempty"`
 	VerificationStatus string         `gorm:"default:'pending'" json:"verificationStatus"`
 	VerificationNotes  string         `json:"verificationNotes,omitempty"`
-	AccountStatus      string         `gorm:"default:'active'" json:"accountStatus"`
-	LastLogin          *time.Time     `json:"lastLogin,omitempty"`
-	LoginAttempts      int            `gorm:"default:0" json:"loginAttempts"`
-	LockUntil          *time.Time     `json:"lockUntil,omitempty"`
-	WalletAddress      string         `json:"walletAddress,omitempty"`
-	SeedPhraseBackedUp bool           `gorm:"default:false" json:"seedPhraseBackedUp"`
-	MuteNotifications  bool           `gorm:"default:false" json:"muteNotifications"`
-	MuteEmail          bool           `gorm:"default:false" json:"muteEmail"`
-	TPBalance          float64        `gorm:"default:0" json:"tpBalance"`
-	CashbackBalance    float64        `gorm:"default:0" json:"cashbackBalance"`
+	// AccountStatus gates every authenticated request: the auth middleware
+	// re-reads the user per request and rejects anything but "active", so a
+	// change here takes effect immediately. Indexed because public product
+	// queries filter listings by their seller's status.
+	AccountStatus string `gorm:"default:'active';index" json:"accountStatus"`
+	// Admin moderation of the account itself, mirroring the product fields.
+	SuspensionReason string     `json:"suspensionReason,omitempty"`
+	SuspendedAt      *time.Time `json:"suspendedAt,omitempty"`
+	SuspendedBy      *uuid.UUID `gorm:"type:uuid" json:"-"`
+	// SuspendedFromStatus is the status to restore on reactivation, so lifting a
+	// suspension cannot silently reactivate an account that was already inactive.
+	SuspendedFromStatus string     `json:"-"`
+	LastLogin           *time.Time `json:"lastLogin,omitempty"`
+	LoginAttempts       int        `gorm:"default:0" json:"loginAttempts"`
+	LockUntil           *time.Time `json:"lockUntil,omitempty"`
+	WalletAddress       string     `json:"walletAddress,omitempty"`
+	SeedPhraseBackedUp  bool       `gorm:"default:false" json:"seedPhraseBackedUp"`
+	MuteNotifications   bool       `gorm:"default:false" json:"muteNotifications"`
+	MuteEmail           bool       `gorm:"default:false" json:"muteEmail"`
+	TPBalance           float64    `gorm:"default:0" json:"tpBalance"`
+	CashbackBalance     float64    `gorm:"default:0" json:"cashbackBalance"`
 
 	// LastSettledGlobalIndex is the user's checkpoint into the global-pool
 	// cumulative index (models.GlobalTPPool.PerUserIndexScaled, same scaled-int
@@ -170,4 +181,18 @@ func (u User) MarshalJSON() ([]byte, error) {
 		userAlias:      userAlias(u),
 		ProfilePicture: pic,
 	})
+}
+
+// SuspendableAccountStatuses are the statuses an account may be restored to when
+// a suspension is lifted. "deleted" is absent on purpose: reactivating a deleted
+// account is account-restoration, which has its own flow.
+var SuspendableAccountStatuses = map[string]bool{
+	AccountStatusActive:   true,
+	AccountStatusInactive: true,
+}
+
+// IsActive reports whether the account may authenticate and whether its listings
+// are shown to buyers.
+func (u *User) IsActive() bool {
+	return u.AccountStatus == AccountStatusActive
 }

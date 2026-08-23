@@ -118,7 +118,10 @@ func (h *Handlers) GetCategoryByID(c *gin.Context) {
 
 	// Get product count
 	var productCount int64
-	config.DB.Model(&models.Product{}).Where("category_id = ? AND status = ?", categoryID, "active").Count(&productCount)
+	// Shared scope, not an inline status filter: this count sits on a public page
+	// beside the listing itself, and the two must agree about suspended sellers.
+	models.VisibleToPublic(config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID)).
+		Count(&productCount)
 
 	utils.SuccessResponse(c, http.StatusOK, "Category fetched successfully", gin.H{
 		"id":             category.ID,

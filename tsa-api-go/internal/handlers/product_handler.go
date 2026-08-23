@@ -375,11 +375,17 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 		return
 	}
 
-	// A non-active listing is not public. Its owner and admins can still open it
-	// (the merchant needs to see why it was suspended), but to everyone else it
-	// does not exist — 404 rather than 403, so the endpoint does not confirm that
-	// a hidden listing is there.
-	if !product.IsVisibleToPublic() {
+	// A non-active listing is not public, and neither is one whose seller's
+	// account is suspended. Its owner and admins can still open it (the merchant
+	// needs to see why it was suspended), but to everyone else it does not exist
+	// — 404 rather than 403, so the endpoint does not confirm that a hidden
+	// listing is there.
+	var seller models.User
+	if err := config.DB.First(&seller, "id = ?", product.UserID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
+		return
+	}
+	if !product.IsVisibleToPublic(&seller) {
 		viewer := getUserFromContext(c)
 		if viewer == nil || (viewer.ID != product.UserID && !isAdminUser(viewer)) {
 			utils.ErrorResponse(c, http.StatusNotFound, "Product not found")
@@ -391,10 +397,9 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 	config.DB.Model(&product).Update("views", product.Views+1)
 	product.Views++
 
-	// Populate seller verification status
-	single := []models.Product{product}
-	populateSellerVerified(single)
-	product = single[0]
+	// The seller was already loaded for the visibility check above, so set the
+	// flag from it rather than making populateSellerVerified re-query the row.
+	product.SellerVerified = seller.VerificationStatus == models.VerificationStatusVerified
 
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", product)
 }

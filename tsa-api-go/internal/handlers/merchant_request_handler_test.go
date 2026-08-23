@@ -55,7 +55,11 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			last_settled_global_index INTEGER,
 			email_verified INTEGER DEFAULT 0,
 			deleted_at DATETIME, submitted_for_verification_at DATETIME,
-			created_at DATETIME, updated_at DATETIME
+			created_at DATETIME, updated_at DATETIME,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS merchant_requests (
 			id TEXT PRIMARY KEY,

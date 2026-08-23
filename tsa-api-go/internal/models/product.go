@@ -173,16 +173,33 @@ var PublicListableStatuses = map[string]bool{
 // Every public-facing product query goes through this so the rule cannot drift
 // between the marketplace, category and featured queries.
 //
+// Two conditions, not one:
+//   - the listing itself is active, and
+//   - its seller's account is active.
+//
+// The second is why suspending an account hides that seller's listings without
+// writing anything to their products: a suspended seller cannot log in to ship
+// or confirm delivery, so leaving their listings buyable would take money into
+// escrow that nobody can fulfil. Reactivating restores them with no unwind step.
+//
+// Expressed as a subquery rather than a join so callers can keep composing
+// Where clauses without worrying about ambiguous column names.
+//
 // Soft deletion is NOT handled here — gorm.DeletedAt already excludes deleted
 // rows from every query, including ones this scope never touches.
 func VisibleToPublic(q *gorm.DB) *gorm.DB {
-	return q.Where("status = ?", ProductStatusActive)
+	return q.Where("status = ?", ProductStatusActive).
+		Where("user_id IN (SELECT id FROM users WHERE account_status = ?)", AccountStatusActive)
 }
 
 // IsVisibleToPublic reports whether a single loaded product may be shown to a
-// buyer. The query-level counterpart is VisibleToPublic.
-func (p *Product) IsVisibleToPublic() bool {
-	return p.Status == ProductStatusActive
+// buyer, given its seller. The query-level counterpart is VisibleToPublic, and
+// the two must agree — both check the listing AND the seller's account.
+//
+// seller may be nil when the caller has not loaded it, which is treated as not
+// visible: a listing whose seller cannot be found is not one to show a buyer.
+func (p *Product) IsVisibleToPublic(seller *User) bool {
+	return p.Status == ProductStatusActive && seller != nil && seller.IsActive()
 }
 
 // MarkDeletionFlag populates the serializable IsDeleted field from DeletedAt.

@@ -334,7 +334,12 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			reviewed_by TEXT, reviewed_at DATETIME, review_note TEXT,
 			created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS users (
-			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT)`,
+			id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT,
+			suspension_reason TEXT,
+			suspended_at DATETIME,
+			suspended_by TEXT,
+			suspended_from_status TEXT
+		)`,
 	}
 	for _, s := range stmts {
 		if err := db.Exec(s).Error; err != nil {
