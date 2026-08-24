@@ -78,7 +78,7 @@ type ITService struct {
 	// feeQuoter prices the fee deducted from each leg; fees carves what the
 	// platform keeps into system / cashback / TP. See it_fees.go.
 	feeQuoter ITFeeQuoter
-	fees      *FeeDistributionService
+	fees      ITFeeSink
 
 	// rateQuoter is the live FX quote source for multi-currency withdrawal
 	// previews (Flutterwave). Optional — nil surfaces ErrITQuoteUnavailable.
@@ -434,8 +434,8 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 		"fee_ngn_kobo":       intent.FeeNgnKobo,
 		"net_ngn_kobo":       intent.NetNgnKobo,
 		"platform_kept_kobo": intent.PlatformKeptKobo,
-		"status":         models.ITStatusPendingPayment,
-		"failure_reason": "",
+		"status":             models.ITStatusPendingPayment,
+		"failure_reason":     "",
 	}).Error; err != nil {
 		return nil, err
 	}
