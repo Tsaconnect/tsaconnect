@@ -87,6 +87,12 @@ const (
 	degradedCacheTTL   = 60 * time.Second    // any Bybit failure → retry quickly
 	maxStaleServeAge   = 6 * time.Hour       // refuse to serve cache older than this
 	bybitRequestTimeout = 15 * time.Second
+
+	// minQualifyingBybitAds is the depth floor per side of the book. Set to 5 so
+	// the median-of-top-5 below actually has five samples to work with — below
+	// that the "median absorbs outliers" property degrades, and at n=1 it is
+	// gone entirely. A side thinner than this is treated as no feed at all.
+	minQualifyingBybitAds = 5
 )
 
 // P2PService fetches exchange rates from Bybit P2P and Open Exchange Rates.
@@ -524,6 +530,23 @@ func (ps *P2PService) fetchBybitRate(currency string) (P2PRate, error) {
 		return P2PRate{}, fmt.Errorf("bybit %s sell side: %w", currency, err)
 	}
 
+	// Crossed book: bids sitting above asks. The existing decision (see the doc
+	// comment above) is to serve it rather than fall back to OER, and that is
+	// left intact — a slightly inverted live rate really is a better quote than
+	// an official mid-market substitute.
+	//
+	// It is logged because it is a liquidity SIGNAL, not an arithmetic bug: it
+	// cannot persist in a liquid market, so a currency crossing regularly is one
+	// whose depth floor is about to start biting. Observed on GHS at
+	// 11.79/11.80 during the rate-source spike. IT reads only MidRate, so the
+	// crossing does not invert TSA's own spread — that comes from
+	// SellDiscountBps — but it does mean the feed contributes no spread of its
+	// own for this currency.
+	if buyPrice < sellPrice {
+		log.Printf("[P2PService] crossed book for %s: ask=%.4f < bid=%.4f — thin liquidity, serving mid anyway (p2p_crossed_book_total=1)",
+			currency, buyPrice, sellPrice)
+	}
+
 	mid := roundRate((buyPrice + sellPrice) / 2)
 	meta := currencyMeta(currency)
 
@@ -600,8 +623,24 @@ func (ps *P2PService) fetchBybitSide(currency, side, amount string) (float64, er
 	}
 
 	prices := filterBybitItems(raw.Result.Items)
-	if len(prices) == 0 {
-		return 0, fmt.Errorf("no qualifying ads (returned=%d)", len(raw.Result.Items))
+	// Depth floor. Zero qualifying ads was always an error, but ONE was not —
+	// median() over a single-element slice is just that ad's price, so a lone
+	// qualifying ad could set the platform-wide rate for this currency for a
+	// full cache TTL. That is an attack surface priced at one ad: post an
+	// outlier, transact against a rate you set, remove it.
+	//
+	// The median-of-5 below was designed for NGN, whose book is deep enough
+	// that this never came up ("Median of top 5 absorbs single-ad outliers") —
+	// it absorbs nothing at n=1. Thinner books (GHS and any currency added
+	// later) need the floor stated rather than assumed.
+	//
+	// Falling through as an error is deliberate: fetchAndCache already treats a
+	// Bybit failure as "keep the OER row, mark the currency Stale", and IT's
+	// transactional stale guard then refuses to price. Too-thin therefore
+	// degrades exactly like unreachable, which is the behaviour we want.
+	if len(prices) < minQualifyingBybitAds {
+		return 0, fmt.Errorf("insufficient depth: %d qualifying ads (need %d, returned=%d)",
+			len(prices), minQualifyingBybitAds, len(raw.Result.Items))
 	}
 
 	// Bybit returns ads best-price-first; filterBybitItems preserves that order.

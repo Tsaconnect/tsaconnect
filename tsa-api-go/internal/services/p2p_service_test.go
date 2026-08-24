@@ -545,7 +545,17 @@ func TestGetAllRates_BybitNoQualifyingAdsFallsBackToOER(t *testing.T) {
 
 func TestFetchBybitRate_HandlesControlChars(t *testing.T) {
 	// Inject a control char into a JSON response to verify sanitization.
-	rawJSON := `{"ret_code":0,"ret_msg":"OK","result":{"count":1,"items":[{"price":"1600","priceType":0,"finishNum":100,"recentExecuteRate":95,"remark":"hi` + "\x01" + `bye"}]}}`
+	//
+	// Carries minQualifyingBybitAds identically-priced ads rather than one: the
+	// depth floor now rejects a thinner side outright, and this test's subject
+	// is control-char sanitisation, not depth. Same price on every ad keeps the
+	// median assertion below unchanged.
+	item := `{"price":"1600","priceType":0,"finishNum":100,"recentExecuteRate":95,"remark":"hi` + "\x01" + `bye"}`
+	items := item
+	for i := 1; i < minQualifyingBybitAds; i++ {
+		items += "," + item
+	}
+	rawJSON := `{"ret_code":0,"ret_msg":"OK","result":{"count":5,"items":[` + items + `]}}`
 
 	svc := newTestP2PServiceWithBybit(&mockTransport{
 		bybitResponse: func(side string) (int, any) { return 200, rawJSON },
@@ -931,5 +941,82 @@ func TestApplyFloatAnchors(t *testing.T) {
 	}
 	if out["CAD"].FloatAnchor {
 		t.Fatal("expected CAD to NOT be float-anchor eligible")
+	}
+}
+
+// ── Depth floor (rate-source hardening) ──────────────────────
+
+// TestFetchBybitRate_RejectsThinBook pins the depth floor. Before it, ZERO
+// qualifying ads errored but ONE was accepted, and median() over a single
+// element is simply that ad's price — so one qualifying ad could set the
+// platform-wide rate for a currency for a full cache TTL. That is an attack
+// priced at a single ad. NGN's book was always deep enough to mask it; thinner
+// currencies are not.
+func TestFetchBybitRate_RejectsThinBook(t *testing.T) {
+	prices := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, "1600")
+		}
+		return out
+	}
+
+	cases := []struct {
+		name      string
+		ads       int
+		wantPrice bool
+	}{
+		{"single ad cannot set the rate", 1, false},
+		{"still one short of the floor", minQualifyingBybitAds - 1, false},
+		{"exactly at the floor", minQualifyingBybitAds, true},
+		{"comfortably above", minQualifyingBybitAds + 3, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			svc := newTestP2PServiceWithBybit(&mockTransport{
+				bybitResponse: func(side string) (int, any) {
+					return 200, bybitSuccessBody(prices(c.ads)...)
+				},
+			}, "NGN")
+
+			_, err := svc.fetchBybitRate("NGN")
+			if c.wantPrice && err != nil {
+				t.Fatalf("%d ads: unexpected error %v", c.ads, err)
+			}
+			if !c.wantPrice && err == nil {
+				t.Fatalf("%d ads: expected refusal, got a priced rate — a book this "+
+					"thin must degrade to stale, not set the platform rate", c.ads)
+			}
+		})
+	}
+}
+
+// TestFetchBybitRate_ThinBookDegradesToStale confirms the floor reuses the
+// existing failure path rather than inventing a second one: a too-thin side is
+// indistinguishable from an unreachable Bybit, so the currency keeps its OER
+// row and is marked Stale — which IT's transactional guard then refuses to
+// price against.
+func TestFetchBybitRate_ThinBookDegradesToStale(t *testing.T) {
+	svc := newTestP2PServiceWithBybit(&mockTransport{
+		oerResponse: func() (int, any) { return 200, oerSuccessBody() },
+		bybitResponse: func(side string) (int, any) {
+			return 200, bybitSuccessBody("1600") // one ad — under the floor
+		},
+	}, "NGN")
+
+	rates, err := svc.GetAllRates()
+	if err != nil {
+		t.Fatalf("GetAllRates: %v", err)
+	}
+	ngn, ok := rates["NGN"]
+	if !ok {
+		t.Fatal("NGN row missing — a thin Bybit book must fall back to OER, not drop the currency")
+	}
+	if !ngn.Stale {
+		t.Error("NGN must be marked Stale when its Bybit book is under the depth floor")
+	}
+	if ngn.Source == SourceBybit {
+		t.Errorf("source = %v, want the OER fallback — a sub-floor book must not be served as a market rate", ngn.Source)
 	}
 }
