@@ -99,10 +99,16 @@ func (s *PMService) reserveNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) 
 //	WHERE id = ?
 //	  AND CAST(reserved_ngn AS NUMERIC) >= CAST(? AS NUMERIC)
 func (s *PMService) ConsumeNGN(ctx context.Context, pmID uuid.UUID, amountNGN string) error {
+	return s.consumeNGNOn(s.db.WithContext(ctx), pmID, amountNGN)
+}
+
+// consumeNGNOn is the shared conditional UPDATE, so the per-currency ledger can
+// run it inside its own transaction alongside the pm_balances mirror.
+func (s *PMService) consumeNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) error {
 	if err := validateNGNAmount(amountNGN); err != nil {
 		return err
 	}
-	res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+	res := db.Model(&models.PaymentMerchant{}).
 		Where(
 			"id = ? AND CAST(reserved_ngn AS NUMERIC) >= CAST(? AS NUMERIC)",
 			pmID, amountNGN,
@@ -175,10 +181,15 @@ func (s *PMService) releaseNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) 
 //	SET available_ngn = CAST(available_ngn AS NUMERIC) + CAST(? AS NUMERIC)
 //	WHERE id = ?
 func (s *PMService) CreditNGN(ctx context.Context, pmID uuid.UUID, amountNGN string) error {
+	return s.creditNGNOn(s.db.WithContext(ctx), pmID, amountNGN)
+}
+
+// creditNGNOn is the shared UPDATE — see consumeNGNOn.
+func (s *PMService) creditNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) error {
 	if err := validateNGNAmount(amountNGN); err != nil {
 		return err
 	}
-	res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+	res := db.Model(&models.PaymentMerchant{}).
 		Where("id = ?", pmID).
 		Update("available_ngn", gorm.Expr("CAST(available_ngn AS NUMERIC) + CAST(? AS NUMERIC)", amountNGN))
 	if res.Error != nil {
@@ -201,10 +212,15 @@ func (s *PMService) CreditNGN(ctx context.Context, pmID uuid.UUID, amountNGN str
 //	WHERE id = ?
 //	  AND (CAST(available_ngn AS NUMERIC) - CAST(reserved_ngn AS NUMERIC)) >= CAST(? AS NUMERIC)
 func (s *PMService) WithdrawNGN(ctx context.Context, pmID uuid.UUID, amountNGN string) (bool, error) {
+	return s.withdrawNGNOn(s.db.WithContext(ctx), pmID, amountNGN)
+}
+
+// withdrawNGNOn is the shared conditional UPDATE — see consumeNGNOn.
+func (s *PMService) withdrawNGNOn(db *gorm.DB, pmID uuid.UUID, amountNGN string) (bool, error) {
 	if err := validateNGNAmount(amountNGN); err != nil {
 		return false, err
 	}
-	res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+	res := db.Model(&models.PaymentMerchant{}).
 		Where(
 			"id = ? AND (CAST(available_ngn AS NUMERIC) - CAST(reserved_ngn AS NUMERIC)) >= CAST(? AS NUMERIC)",
 			pmID, amountNGN,
