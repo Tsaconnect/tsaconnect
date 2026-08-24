@@ -252,6 +252,17 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 		if cErr != nil {
 			return fmt.Errorf("it payout: bad intent amount: %w", cErr)
 		}
+		// NOTE: QuoteWithdrawal hardcodes NGN as the quote's SOURCE currency
+		// (it_quote.go). That is correct only while every sell is denominated in
+		// naira, which is true today. A sell raised in another currency would be
+		// converted using an NGN→dest rate — the same class of bug as valuing a
+		// cedi fee at the naira rate. Guard it here rather than let it become
+		// silently wrong when sells gain a currency.
+		if !strings.EqualFold(sourceCurrency, "NGN") {
+			return fmt.Errorf("it payout: cannot convert %s→%s: the FX quote is NGN-sourced; "+
+				"QuoteWithdrawal must take a source currency before non-NGN sells can pay out cross-currency",
+				sourceCurrency, destCurrency)
+		}
 		destMajor, _, qErr := s.QuoteWithdrawal(ctx, sourceMajor, destCurrency)
 		if qErr != nil {
 			// Refusing beats guessing. The debit has already happened, so this

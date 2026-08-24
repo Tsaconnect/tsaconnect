@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -550,11 +551,22 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	// a same-currency payout compares directly; a cross-currency one is
 	// compared against the SOURCE floor, since that is the balance actually
 	// debited and the figure this check has in hand.
+	// The registry is the authority on whether a currency may move money at all.
+	// The catalog governs what we OFFER as a product; without this check the two
+	// could drift — a destination could sit in the catalog while its registry row
+	// says PayoutEnabled=false, and nothing would stop the payout.
+	if dest := strings.ToUpper(strings.TrimSpace(bank.DestinationCurrency)); dest != "" && s.currencies != nil {
+		if _, cErr := s.currencies.RequirePayout(dest); cErr != nil {
+			return nil, cErr
+		}
+	}
+
 	// Sells are denominated in NGN today (the valuation currency); when a sell
 	// can be raised in another currency this is where it comes from.
 	intentCurrency := "NGN"
 	if minMinor, label := s.minPayoutMinorFor(intentCurrency); minMinor > 0 && fees.Net.Cmp(big.NewInt(minMinor)) < 0 {
-		return nil, fmt.Errorf("minimum payout is %s%d after fees — sell a little more", minorLabel(label), minMinor/100)
+		return nil, fmt.Errorf("minimum payout is %s%s after fees — sell a little more",
+			minorLabel(label), minorToMajor(minMinor, s.exponentFor(label)))
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
@@ -780,4 +792,38 @@ func minorLabel(currency string) string {
 	default:
 		return strings.ToUpper(strings.TrimSpace(currency)) + " "
 	}
+}
+
+// exponentFor returns a currency's minor-unit decimal count, defaulting to 2.
+//
+// The registry carries this precisely so amounts are not rendered with a
+// hardcoded /100. Every currency enabled today is 2-decimal, so the default is
+// currently always right — but writing the division inline is how the
+// assumption gets re-embedded after the field was added to remove it.
+func (s *ITService) exponentFor(currency string) int {
+	if s.currencies == nil {
+		return 2
+	}
+	row, err := s.currencies.Get(currency)
+	if err != nil || row.Exponent < 0 {
+		return 2
+	}
+	return row.Exponent
+}
+
+// minorToMajor renders a minor-unit amount in major units for display.
+func minorToMajor(minor int64, exponent int) string {
+	if exponent <= 0 {
+		return strconv.FormatInt(minor, 10)
+	}
+	div := int64(1)
+	for i := 0; i < exponent; i++ {
+		div *= 10
+	}
+	whole := minor / div
+	frac := minor % div
+	if frac == 0 {
+		return strconv.FormatInt(whole, 10)
+	}
+	return fmt.Sprintf("%d.%0*d", whole, exponent, frac)
 }
