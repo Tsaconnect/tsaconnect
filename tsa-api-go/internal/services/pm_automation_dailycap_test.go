@@ -21,9 +21,12 @@ func seedActivePMWithDailyCap(t *testing.T, db *gorm.DB, inboundAcct string, per
 		Status:               models.PaymentMerchantStatusActive,
 		InboundAccountNumber: inboundAcct,
 		InboundBank:          "Nomba",
-		NombaWalletID:        "wallet-" + inboundAcct,
-		PerTradeCapUSD:       perTradeCapUSD,
-		DailyCapUSD:          dailyCapUSD,
+		// NombaAccountRef is the only inbound match key (accountRef-only model);
+		// see seedActivePM in pm_automation_buy_test.go.
+		NombaAccountRef: "ref-" + inboundAcct,
+		NombaWalletID:   "wallet-" + inboundAcct,
+		PerTradeCapUSD:  perTradeCapUSD,
+		DailyCapUSD:     dailyCapUSD,
 	}
 	if err := db.Create(pm).Error; err != nil {
 		t.Fatalf("seed PM with daily cap: %v", err)
@@ -131,6 +134,7 @@ func TestHandleInbound_OverDailyCap_NoRelease(t *testing.T) {
 
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -173,6 +177,7 @@ func TestHandleInbound_WithinDailyCap_Releases(t *testing.T) {
 
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",

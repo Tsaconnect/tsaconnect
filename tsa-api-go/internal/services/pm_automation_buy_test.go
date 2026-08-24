@@ -163,10 +163,13 @@ func seedActivePM(t *testing.T, db *gorm.DB, inboundAcct string, perTradeCapUSD 
 		Status:               models.PaymentMerchantStatusActive,
 		InboundAccountNumber: inboundAcct,
 		InboundBank:          "Nomba",
-		// Derive a unique non-blank wallet id from the inbound acct so the buy
-		// flow (now keyed by walletId) can resolve this PM.
-		NombaWalletID:  "wallet-" + inboundAcct,
-		PerTradeCapUSD: perTradeCapUSD,
+		// Derive unique non-blank ids from the inbound acct. NombaAccountRef is
+		// the ONLY inbound match key under the VA-only model (resolveInboundPM);
+		// the walletId fallback was removed in 17f761f. NombaWalletID is still
+		// seeded so tests that assert walletId is *ignored* have a value to pass.
+		NombaAccountRef: "ref-" + inboundAcct,
+		NombaWalletID:   "wallet-" + inboundAcct,
+		PerTradeCapUSD:  perTradeCapUSD,
 	}
 	if err := db.Create(pm).Error; err != nil {
 		t.Fatalf("seed PM: %v", err)
@@ -262,6 +265,7 @@ func TestHandleInbound_HappyPath(t *testing.T) {
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -307,6 +311,7 @@ func TestHandleInbound_KeysByWalletId(t *testing.T) {
 	// Match by walletId, with DestinationAccount deliberately blank.
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -412,44 +417,11 @@ func TestHandleInbound_MatchesByAccountRef(t *testing.T) {
 	}
 }
 
-// TestHandleInbound_WalletIDFallbackStillWorks verifies the single-TSA-parent
-// path keeps working unchanged: an inbound with an empty AccountRef but a known
-// WalletID resolves the PM via the walletId fallback and releases.
-func TestHandleInbound_WalletIDFallbackStillWorks(t *testing.T) {
-	db := setupTradeDB(t)
-	createPaymentMerchantsTable(t, db)
-	svc, esc, _ := newService(t, db)
-
-	pm := seedActivePM(t, db, "1234567890", 0) // sets NombaWalletID = "wallet-1234567890"
-	ad := seedPMSellAd(t, db, pm.ID, uuid.New())
-	buyerID := uuid.New()
-	trade := seedBuyTradeOnAd(t, db, ad, buyerID, "1500.00")
-	setReleasedEvent(esc, trade)
-
-	auto, signer := newPMAutomationService(t, db, esc, svc, nameMap(map[uuid.UUID]string{
-		buyerID: "JOHN DOE",
-	}))
-
-	// Empty AccountRef → falls back to walletId resolution (unchanged TSA path).
-	if err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:            "settled",
-		AccountRef:        "",
-		WalletID:          pm.NombaWalletID,
-		SenderAccountName: "JOHN DOE",
-		AmountNGN:         "1500.00",
-		EventID:           "evt_fallback_1",
-	}); err != nil {
-		t.Fatalf("HandleInbound (walletId fallback): %v", err)
-	}
-	var released models.P2PTrade
-	db.First(&released, "id = ?", trade.ID)
-	if released.Status != models.P2PTradeStatusReleased {
-		t.Fatalf("status = %q, want released (walletId fallback)", released.Status)
-	}
-	if len(signer.calls) != 1 {
-		t.Fatalf("signer called %d times, want 1", len(signer.calls))
-	}
-}
+// TestHandleInbound_WalletIDFallbackStillWorks was removed: it asserted that an
+// empty AccountRef falls back to walletId resolution, a path deliberately
+// deleted in 17f761f (accountRef-only). The inverted contract — an empty
+// AccountRef is a no-op — is covered by TestHandleInbound_EmptyAccountRef_IsIgnored
+// in pm_automation_inbound_test.go, so re-adding it here would only duplicate it.
 
 func TestHandleInbound_PendingStatus_NoOp(t *testing.T) {
 	db := setupTradeDB(t)
@@ -468,6 +440,7 @@ func TestHandleInbound_PendingStatus_NoOp(t *testing.T) {
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "pending",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -504,6 +477,7 @@ func TestHandleInbound_NameMismatch_NoOp(t *testing.T) {
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JANE SMITH",
 		AmountNGN:         "1500.00",
@@ -543,6 +517,7 @@ func TestHandleInbound_Ambiguous_NoOp(t *testing.T) {
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -595,6 +570,7 @@ func TestHandleInbound_UnparseableTokenAmount_NoRelease(t *testing.T) {
 
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",

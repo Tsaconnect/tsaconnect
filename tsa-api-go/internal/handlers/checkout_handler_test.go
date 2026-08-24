@@ -321,6 +321,19 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 			"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
 			"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
 		},
+		// BlockchainService.TokenAddress resolves via Networks["mainnet"], NOT the
+		// top-level TokenAddresses map above (which predates multi-network config).
+		// Without this, every token lookup returns "" and handlers fail with
+		// "Token X not configured" before reaching the behaviour under test.
+		Networks: map[string]config.NetworkConfig{
+			"mainnet": {
+				Chains: map[string]config.ChainConfig{},
+				TokenAddresses: map[string]string{
+					"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
+					"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
+				},
+			},
+		},
 	}
 	// Create a blockchain service with no real clients (avoids RPC connections)
 	bs := services.NewBlockchainService(cfg)
@@ -471,10 +484,15 @@ func TestDetectShippingZone_StateSuffixNormalization(t *testing.T) {
 
 // ---------- Fee calculation tests ----------
 
+// The platform fee is no longer a hardcoded 10%: calculateFeeForFeature reads
+// the global fee_config row for models.FeatureProductMerchant, documented as the
+// 2% product_merchant rate. These expectations are pinned to that rate on
+// purpose — if the configured rate changes, these tests SHOULD fail, because
+// that is a deliberate product decision and not an incidental refactor.
 func TestCalculatePlatformFee_USDC(t *testing.T) {
 	productAmount := big.NewInt(10000000) // 10 USDC (6 decimals)
 	fee := CalculatePlatformFee(productAmount, "USDC")
-	expected := big.NewInt(1000000) // 10% = 1 USDC
+	expected := big.NewInt(200000) // 2% = 0.2 USDC
 	if fee.Cmp(expected) != 0 {
 		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
 	}
@@ -492,8 +510,8 @@ func TestCalculatePlatformFee_WeiMath(t *testing.T) {
 	// 15.5 USDC = 15500000 (6 decimals)
 	productAmount := big.NewInt(15500000)
 	fee := CalculatePlatformFee(productAmount, "USDT")
-	// 10% of 15500000 = 1550000
-	expected := big.NewInt(1550000)
+	// 2% of 15500000 = 310000 (product_merchant rate; see note above)
+	expected := big.NewInt(310000)
 	if fee.Cmp(expected) != 0 {
 		t.Errorf("expected fee %s, got %s", expected.String(), fee.String())
 	}
@@ -992,7 +1010,17 @@ func TestAdminResolveDispute_RequiresRefundRequestedStatus(t *testing.T) {
 
 // ---------- Prepare escrow tests ----------
 
-func TestPrepareEscrow_Returns503WhenNoClient(t *testing.T) {
+// TestPrepareApprove_Returns503WhenNoClient pins the "no blockchain client →
+// 503" guard on the endpoint that still has one.
+//
+// This test previously targeted PrepareEscrow, which no longer touches
+// BlockchainService: it delegates to EscrowService.PrepareCreateOrder, which
+// builds calldata offline and needs no RPC. So PrepareEscrow now legitimately
+// returns 200 without a client, and the assertion was failing against a guard
+// that had moved rather than a regression. PrepareApprove still needs a client
+// (nonce + gas estimation for the ERC-20 approve), so the guard — and this
+// coverage — belongs there.
+func TestPrepareApprove_Returns503WhenNoClient(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
 
@@ -1011,7 +1039,7 @@ func TestPrepareEscrow_Returns503WhenNoClient(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
 	c.Request, _ = http.NewRequest("POST", "/", nil)
 
-	ch.PrepareEscrow(c)
+	ch.PrepareApprove(c)
 
 	// Without a blockchain client, should return 503 Service Unavailable
 	if w.Code != http.StatusServiceUnavailable {

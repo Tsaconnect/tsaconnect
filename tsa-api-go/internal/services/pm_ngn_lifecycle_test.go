@@ -67,6 +67,7 @@ func TestHandleInbound_SettledCreditsLedger(t *testing.T) {
 
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "1500.00",
@@ -95,6 +96,7 @@ func TestHandleInbound_UnmatchedTopUpStillCredits(t *testing.T) {
 
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
+		AccountRef:        pm.NombaAccountRef,
 		WalletID:          pm.NombaWalletID,
 		SenderAccountName: "NOBODY",
 		AmountNGN:         "2500.00",
@@ -125,10 +127,11 @@ func TestHandleInbound_NonSettled_NoCredit(t *testing.T) {
 	auto, _ := newPMAutomationService(t, db, esc, svc, nameMap(nil))
 
 	if err := auto.HandleInbound(context.Background(), InboundPayment{
-		Status:    "pending",
-		WalletID:  pm.NombaWalletID,
-		AmountNGN: "999.00",
-		EventID:   "evt_pending",
+		Status:     "pending",
+		AccountRef: pm.NombaAccountRef,
+		WalletID:   pm.NombaWalletID,
+		AmountNGN:  "999.00",
+		EventID:    "evt_pending",
 	}); err != nil {
 		t.Fatalf("HandleInbound: %v", err)
 	}
