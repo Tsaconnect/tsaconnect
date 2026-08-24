@@ -312,6 +312,18 @@ func (h *P2PHandler) ListNigerianBanks(c *gin.Context) {
 	// at construction can only ever serve one. Omitted ⇒ the configured default
 	// (NG), so existing callers are unaffected.
 	country := strings.ToUpper(strings.TrimSpace(c.Query("country")))
+	// Bound the shape before forwarding it to the provider. This is user input
+	// reaching an outbound API call, and while url.Values encodes it (so there
+	// is no injection), an unbounded string still lets a caller drive arbitrary
+	// upstream requests. ISO-3166-1 alpha-2 is the only thing the endpoint
+	// means, so anything else is a client bug worth reporting as one.
+	if country != "" && !isISO2Country(country) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "country must be a two-letter ISO country code",
+		})
+		return
+	}
 
 	var (
 		banks []services.NombaBank
@@ -1758,4 +1770,19 @@ func parseUUIDList(in []string) ([]uuid.UUID, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// isISO2Country reports whether s is two ASCII letters. Shape only — the
+// provider is the authority on which countries it actually serves, and
+// duplicating that list here would just drift.
+func isISO2Country(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for _, r := range s {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
 }
