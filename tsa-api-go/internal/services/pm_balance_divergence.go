@@ -40,9 +40,18 @@ func (d PMBalanceDivergence) String() string {
 // Comparison is numeric, not string equality: "1500" and "1500.00" are the same
 // balance, and numeric(38,2) round-trips can legitimately differ in formatting.
 func CheckPMBalanceDivergence(ctx context.Context, db *gorm.DB) ([]PMBalanceDivergence, error) {
+	// Bounded deliberately: this runs on a ticker, and an unbounded scan of two
+	// tables is a slow leak rather than an obvious failure. PM counts are small
+	// (corporate merchants, not users), so the cap is far above any real total —
+	// it exists so the job degrades loudly instead of silently getting heavier.
+	const maxPMScan = 5000
 	var pms []models.PaymentMerchant
-	if err := db.WithContext(ctx).Find(&pms).Error; err != nil {
+	if err := db.WithContext(ctx).Limit(maxPMScan + 1).Find(&pms).Error; err != nil {
 		return nil, err
+	}
+	if len(pms) > maxPMScan {
+		return nil, fmt.Errorf("pm balance divergence: more than %d payment merchants; "+
+			"this check needs pagination before it can be trusted", maxPMScan)
 	}
 
 	var rows []models.PMBalance
@@ -77,6 +86,20 @@ func CheckPMBalanceDivergence(ctx context.Context, db *gorm.DB) ([]PMBalanceDive
 				Reason:          "amount mismatch",
 			})
 		}
+	}
+	return out, nil
+}
+
+// DescribePMBalanceDivergence is CheckPMBalanceDivergence rendered as strings,
+// so the jobs package can drive it without importing this package's types.
+func DescribePMBalanceDivergence(ctx context.Context, db *gorm.DB) ([]string, error) {
+	found, err := CheckPMBalanceDivergence(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(found))
+	for _, d := range found {
+		out = append(out, d.String())
 	}
 	return out, nil
 }

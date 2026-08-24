@@ -243,20 +243,6 @@ func (s *PMService) WithdrawIn(ctx context.Context, pmID uuid.UUID, currency, am
 	return ok, err
 }
 
-// BalanceIn returns a PM's balance in one currency. A missing row reports zeroes
-// rather than an error: "no balance in this currency" and "a zero balance" are
-// the same thing to every caller.
-func (s *PMService) BalanceIn(ctx context.Context, pmID uuid.UUID, currency string) (models.PMBalance, error) {
-	var row models.PMBalance
-	err := s.db.WithContext(ctx).
-		Where("pm_id = ? AND currency = ?", pmID, normaliseCurrency(currency)).
-		First(&row).Error
-	if err == gorm.ErrRecordNotFound {
-		return models.PMBalance{PMID: pmID, Currency: normaliseCurrency(currency), Available: "0", Reserved: "0"}, nil
-	}
-	return row, err
-}
-
 // ── internals ────────────────────────────────────────────────────────────────
 
 // inTx runs fn inside a transaction, unless db is already one — in which case it

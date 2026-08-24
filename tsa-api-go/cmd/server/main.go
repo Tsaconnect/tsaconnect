@@ -328,6 +328,12 @@ func main() {
 	if billService != nil {
 		scheduler.Register(jobs.NewBillReconciler(billService, time.Minute))
 		scheduler.Register(jobs.NewBillFloatMonitor(clubkonnect, cfg.BillsFloatAlertNgn, 10*time.Minute))
+		// Dual-write drift watch. The legacy NGN columns and pm_balances are
+		// written together; this is the only thing that would notice if they
+		// stopped agreeing, and it must read clean before the legacy columns are
+		// ever dropped. Read-only.
+		scheduler.Register(jobs.NewPMBalanceDivergenceMonitor(
+			config.DB, services.DescribePMBalanceDivergence, 10*time.Minute))
 	}
 
 	// Fee/TP overhaul v2 — SP5 payout-computation engine. Turns accrued TP +
