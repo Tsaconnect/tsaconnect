@@ -45,6 +45,11 @@ func AutoMigrate() error {
 	}
 
 	if err := DB.AutoMigrate(
+		// Currency registry — the sole validation authority for any currency
+		// reaching a money path. Rows are seeded per-row (never overwritten) by
+		// services.NewCurrencyRegistry at boot, so operator-tuned payout floors
+		// survive a deploy.
+		&models.Currency{},
 		&models.User{},
 		&models.Asset{},
 		&models.Product{},
