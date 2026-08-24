@@ -230,3 +230,91 @@ func TestQuoteITFees_EmptyPayoutCurrencyMeansNaira(t *testing.T) {
 		t.Fatalf("platformKept = %s kobo, want 2750 — blank must mean NGN", blank.PlatformKept)
 	}
 }
+
+// ─── Fee valuation across currencies ─────────────────────────────────────────
+
+// TestSettleITFee_ValuesFeeInTheIntentsOwnCurrency is the regression test for a
+// ~100x mis-valuation.
+//
+// settleITFee converts the platform-kept fee to USD to carve cashback and
+// TradePoints. It used to read the NGN/USD rate unconditionally, so a cedi
+// intent had pesewas (~12/USD) divided by the naira rate (~1400/USD) — the
+// carve came out ~117x too small and Ghanaian users would have earned
+// near-zero rewards, silently and with nothing in the ledger looking wrong.
+// Inverted, it mints ~100x the TradePoints, which is real distributed value.
+//
+// The assertion is that equal USD value produces equal FeeUSD regardless of the
+// currency it was denominated in. Note this is only testable because the FX
+// stub resolves per currency: a stub returning one rate for every code would
+// pass with the bug present.
+func TestSettleITFee_ValuesFeeInTheIntentsOwnCurrency(t *testing.T) {
+	const (
+		ngnPerUsd = 1400.0
+		ghsPerUsd = 14.0 // exactly 100x cheaper, so equal USD value is easy to state
+	)
+
+	// $1.00 of platform-kept fee, expressed in each currency's minor units.
+	keptNGN := "140000" // ₦1,400.00 = $1
+	keptGHS := "1400"   // ₵14.00    = $1
+
+	run := func(t *testing.T, currency, kept string) float64 {
+		t.Helper()
+		s := newITTestService(t)
+		s.fx = stubFx{ngn: ngnPerUsd, rates: map[string]float64{
+			"NGN": ngnPerUsd,
+			"GHS": ghsPerUsd,
+		}}
+		fees := &recordingFeeSink{}
+		s.fees = fees
+
+		s.settleITFee(context.Background(), &models.ITIntent{
+			ID: uuid.New(), UserID: uuid.New(),
+			Currency:         currency,
+			PlatformKeptKobo: kept,
+		})
+		if len(fees.events) != 1 {
+			t.Fatalf("%s: expected 1 fee event, got %d", currency, len(fees.events))
+		}
+		return fees.events[0].FeeUSD
+	}
+
+	usdFromNGN := run(t, "NGN", keptNGN)
+	usdFromGHS := run(t, "GHS", keptGHS)
+
+	if usdFromNGN <= 0 {
+		t.Fatalf("NGN fee valued at %v, want positive", usdFromNGN)
+	}
+	if diff := usdFromNGN - usdFromGHS; diff > 0.0001 || diff < -0.0001 {
+		t.Errorf("same USD value carved differently by currency: NGN→$%v, GHS→$%v.\n"+
+			"A GHS intent must be valued at the GHS rate; using the naira rate "+
+			"understates it ~100x and near-zeroes Ghanaian cashback and TP.",
+			usdFromNGN, usdFromGHS)
+	}
+}
+
+// TestSettleITFee_SkipsWhenCurrencyUnpriceable confirms an unresolvable rate
+// skips the carve rather than booking a wrong one. The fee itself is already
+// retained; what must not happen is minting rewards against a made-up value.
+func TestSettleITFee_SkipsWhenCurrencyUnpriceable(t *testing.T) {
+	s := newITTestService(t)
+	s.fx = stubFx{ngn: 1400, rates: map[string]float64{"NGN": 1400}} // no GHS
+	fees := &recordingFeeSink{}
+	s.fees = fees
+
+	s.settleITFee(context.Background(), &models.ITIntent{
+		ID: uuid.New(), UserID: uuid.New(),
+		Currency:         "GHS",
+		PlatformKeptKobo: "1400",
+	})
+
+	if len(fees.events) != 0 {
+		t.Errorf("carved a fee for an unpriceable currency: %+v — a wrong USD value "+
+			"mints wrong TradePoints, which is distributed value that cannot be recalled",
+			fees.events)
+	}
+}
+
+// recordingFeeSink captures carve events instead of distributing them.
+type recordingFeeSink struct{ events []FeeEvent }
+
+func (r *recordingFeeSink) EnqueueFeeSettled(e FeeEvent) { r.events = append(r.events, e) }

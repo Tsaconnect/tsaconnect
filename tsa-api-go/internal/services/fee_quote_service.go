@@ -445,7 +445,12 @@ func (q *flutterwaveFeeQuoter) QuoteProviderFee(ctx context.Context, flow FeeFlo
 	defer cancel()
 	// v4 /fees is collection-vocabulary; bank_transfer is our rail for both
 	// directions. A method the endpoint won't price just falls back.
-	fees, err := q.client.GetFees(ctx, major, currency, "bank_transfer", "", "NG")
+	// Country must match the currency's own rail. It was hardcoded "NG", which
+	// asked Flutterwave to price a cedi transfer as if it were a Nigerian one —
+	// a combination that does not exist, so the quote either came back wrong or
+	// failed and silently fell through to the fallback percentage. The user was
+	// then charged a number derived from the wrong market.
+	fees, err := q.client.GetFees(ctx, major, currency, "bank_transfer", "", payoutCountryFor(currency))
 	if err != nil || len(fees) == 0 {
 		return nil, false
 	}

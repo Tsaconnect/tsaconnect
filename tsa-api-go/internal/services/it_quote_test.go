@@ -9,12 +9,26 @@ import (
 )
 
 // allowQuoteCurrency temporarily adds a currency to the FX-quote allowlist so
-// dormant quote-math tests can still exercise QuoteWithdrawal while the
-// product catalog is NGN-only (SupportedWithdrawalQuoteCurrencies is empty).
+// quote-math tests can exercise QuoteWithdrawal for a currency the product
+// catalog may not offer.
+//
+// Cleanup RESTORES the prior state rather than deleting. The delete was safe
+// only while the catalog was NGN-only and the allowlist was therefore empty:
+// once a currency is genuinely in the catalog, an unconditional delete removes
+// it permanently from a package-level map, so every later test in the package
+// sees a corrupted allowlist. That failure is order-dependent — the test passes
+// in isolation and fails in a full run — which is the worst way to find it.
 func allowQuoteCurrency(t *testing.T, currency string) {
 	t.Helper()
+	prev, existed := SupportedWithdrawalQuoteCurrencies[currency]
 	SupportedWithdrawalQuoteCurrencies[currency] = true
-	t.Cleanup(func() { delete(SupportedWithdrawalQuoteCurrencies, currency) })
+	t.Cleanup(func() {
+		if existed {
+			SupportedWithdrawalQuoteCurrencies[currency] = prev
+			return
+		}
+		delete(SupportedWithdrawalQuoteCurrencies, currency)
+	})
 }
 
 // TestQuoteWithdrawal pins the direction-robust derivation (see it_quote.go):
@@ -113,9 +127,12 @@ func TestQuoteWithdrawal_ZeroAmounts(t *testing.T) {
 
 // TestQuoteWithdrawal_UnsupportedCurrency confirms QuoteWithdrawal rejects a
 // destination currency outside the allowlist BEFORE ever calling Flutterwave
-// (no wasted live probe). With the NGN-only product catalog the allowlist is
-// empty, so every foreign currency is rejected — including previously offered
-// African corridors.
+// (no wasted live probe).
+//
+// The currencies here are ones the catalog does NOT offer. USD and GHS moved
+// out of this list when they became catalog entries — the behaviour under test
+// is the gate, not any particular currency, so it has to be exercised with
+// something still outside it.
 func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 	var tokenCalls, rateCalls int32
 	mux := http.NewServeMux()
@@ -136,7 +153,7 @@ func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 	svc := NewITService(nil, nil, nil)
 	svc.SetRateQuoter(c)
 
-	for _, currency := range []string{"USD", "GHS", "XOF"} {
+	for _, currency := range []string{"KES", "ZAR", "XOF"} {
 		if _, _, err := svc.QuoteWithdrawal(context.Background(), 15000, currency); err != ErrUnsupportedWithdrawalCurrency {
 			t.Fatalf("%s: err = %v, want ErrUnsupportedWithdrawalCurrency", currency, err)
 		}

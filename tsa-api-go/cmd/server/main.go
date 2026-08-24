@@ -180,6 +180,11 @@ func main() {
 
 	// Exchange-rate service (OER + Bybit P2P hybrid). Constructed early because IT
 	// pricing (below) converts MCGP's USD price to Naira against this feed.
+	// Currency registry — the sole validation authority for any currency
+	// reaching a money path, and the source of per-currency payout floors.
+	// Seeds missing rows without overwriting operator-tuned values.
+	currencyRegistry := services.NewCurrencyRegistry(config.DB)
+
 	p2pService := services.NewP2PService(
 		cfg.OpenExchangeRatesAppID,
 		cfg.SupportedCurrencies,
@@ -213,6 +218,7 @@ func main() {
 				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
+				itService.SetCurrencyRegistry(currencyRegistry)
 				itHandler = handlers.NewITHandler(config.DB, itService)
 				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
 			}

@@ -189,14 +189,22 @@ func (s *ITService) settleITFee(ctx context.Context, intent *models.ITIntent) {
 	if !ok || kept.Sign() <= 0 {
 		return
 	}
-	// kobo → USD via the same NGN/USD rate the intent was priced with. A stale
-	// or missing rate means we cannot value the fee, so we skip the carve
-	// rather than book a wrong one; the fee itself is already retained.
-	_, _, fx, err := s.EffectiveKoboRates(ctx)
-	if err != nil || fx.NgnPerUsd <= 0 {
+	// Minor units → USD at the rate for the INTENT'S OWN currency.
+	//
+	// This previously used EffectiveKoboRates, which returns the NGN/USD rate
+	// unconditionally. For a cedi intent that divided pesewas (~12/USD) by the
+	// naira rate (~1400/USD), understating the fee's USD value by roughly 100x
+	// — so cashback and TradePoints for Ghanaian users would have been
+	// near-zero, silently. Inverted, it would mint ~100x the TP, which is real
+	// distributed value.
+	//
+	// A stale or missing rate means we cannot value the fee, so the carve is
+	// skipped rather than booked wrong; the fee itself is already retained.
+	rate, ok := s.ratePerUsdFor(ctx, models.ITIntentCurrency(intent))
+	if !ok {
 		return
 	}
-	feeUSD := koboToUSD(kept, fx.NgnPerUsd)
+	feeUSD := koboToUSD(kept, rate)
 	if feeUSD <= 0 {
 		return
 	}
@@ -227,4 +235,52 @@ func koboToUSD(kobo *big.Int, ngnPerUsd float64) float64 {
 // SetFeeDistributor wires the fee engine that carves IT fees into system,
 // cashback and TP. Optional — without it fees are still withheld, they just
 // don't fund cashback/TP (and the omission is visible in the tracker).
-func (s *ITService) SetFeeDistributor(f *FeeDistributionService) { s.fees = f }
+// ITFeeSink is the narrow seam over FeeDistributionService this package needs —
+// matching ITFeeQuoter and FxProvider, so the fee-valuation path is testable
+// without standing up the whole distribution engine. *FeeDistributionService
+// satisfies it as-is.
+type ITFeeSink interface {
+	EnqueueFeeSettled(FeeEvent)
+}
+
+// SetFeeDistributor wires the carve destination. A nil distributor is valid and
+// simply skips the carve.
+func (s *ITService) SetFeeDistributor(f *FeeDistributionService) {
+	if f == nil {
+		s.fees = nil
+		return
+	}
+	s.fees = f
+}
+
+// ratePerUsdFor resolves minor-units-per-USD for a currency.
+//
+// It prefers the multi-currency FxRateProvider. The FxProvider actually held by
+// ITService is the narrow NGN-only interface, but the production implementation
+// (p2pFxProvider) satisfies both, so a type assertion gets the richer view
+// without threading a second dependency through every construction site.
+//
+// The NGN fallback exists for a provider that implements only the narrow
+// interface, and is deliberately restricted to NGN: returning the naira rate
+// for any other currency is precisely the ~100x bug this function was written
+// to remove, so an unrecognised currency reports "cannot value" instead.
+func (s *ITService) ratePerUsdFor(ctx context.Context, currency string) (float64, bool) {
+	if s.fx == nil {
+		return 0, false
+	}
+	if multi, ok := s.fx.(FxRateProvider); ok {
+		rate, _, err := multi.RatePerUsd(ctx, currency)
+		if err != nil || rate <= 0 {
+			return 0, false
+		}
+		return rate, true
+	}
+	if !strings.EqualFold(strings.TrimSpace(currency), "NGN") {
+		return 0, false
+	}
+	rate, _, err := s.fx.NgnPerUsd(ctx)
+	if err != nil || rate <= 0 {
+		return 0, false
+	}
+	return rate, true
+}

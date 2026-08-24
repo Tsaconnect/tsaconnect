@@ -196,3 +196,34 @@ func TestCurrencyRegistryNilDBFailsClosed(t *testing.T) {
 		t.Errorf("nil-db Get(NGN) = %v, want ErrUnknownCurrency", err)
 	}
 }
+
+// TestRegistryGatesPayout_NotJustTheCatalog pins that the registry is consulted
+// as an authority, not merely as a source of floors.
+//
+// Two lists govern a payout currency: the withdrawal catalog (what we OFFER as
+// a product) and the registry (whether the currency may move money at all).
+// They can drift — disabling a currency in the registry while it is still in the
+// catalog is exactly how an operator would expect to switch it off in a hurry.
+// If only the catalog is checked, that switch does nothing.
+func TestRegistryGatesPayout_NotJustTheCatalog(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	reg := NewCurrencyRegistry(db)
+
+	if _, err := reg.RequirePayout("GHS"); err != nil {
+		t.Fatalf("GHS should be payable when enabled: %v", err)
+	}
+
+	// Operator switches GHS off without touching the product catalog.
+	if err := db.Model(&models.Currency{}).Where("code = ?", "GHS").
+		Update("payout_enabled", false).Error; err != nil {
+		t.Fatalf("disable GHS: %v", err)
+	}
+	if err := reg.Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if _, err := reg.RequirePayout("GHS"); !errors.Is(err, ErrCurrencyNotPayable) {
+		t.Errorf("RequirePayout(GHS) = %v, want ErrCurrencyNotPayable — disabling a currency "+
+			"in the registry must stop payouts even while it remains in the catalog", err)
+	}
+}

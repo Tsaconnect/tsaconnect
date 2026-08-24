@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // BankDirectory is the app-facing seam for the bank dropdown + NUBAN name
@@ -38,8 +39,12 @@ func (d nombaBankDirectory) Resolve(ctx context.Context, bankCode, accountNumber
 // ─── Flutterwave adapter ───────────────────────────────────────────────────
 
 type flutterwaveBankDirectory struct {
-	c       *FlutterwaveClient
-	country string // ISO-2, "NG" today
+	c *FlutterwaveClient
+	// country is the DEFAULT ISO-2 used when a caller names no country. The
+	// per-country lookup goes through ListBanksIn, because a payout to a
+	// Ghanaian account needs Ghanaian bank codes and a directory pinned at
+	// construction can only ever serve one market.
+	country string
 }
 
 // NewFlutterwaveBankDirectory wraps a FlutterwaveClient for the given country;
@@ -55,7 +60,17 @@ func NewFlutterwaveBankDirectory(c *FlutterwaveClient, country string) BankDirec
 }
 
 func (d flutterwaveBankDirectory) ListBanks(ctx context.Context) ([]NombaBank, error) {
-	banks, err := d.c.ListBanks(ctx, d.country)
+	return d.ListBanksIn(ctx, d.country)
+}
+
+// ListBanksIn returns the bank directory for a specific country, falling back
+// to the configured default when country is empty.
+func (d flutterwaveBankDirectory) ListBanksIn(ctx context.Context, country string) ([]NombaBank, error) {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if country == "" {
+		country = d.country
+	}
+	banks, err := d.c.ListBanks(ctx, country)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +82,18 @@ func (d flutterwaveBankDirectory) ListBanks(ctx context.Context) ([]NombaBank, e
 }
 
 func (d flutterwaveBankDirectory) Resolve(ctx context.Context, bankCode, accountNumber string) (NombaLookupResult, error) {
-	name, err := d.c.ResolveAccount(ctx, "NGN", bankCode, accountNumber)
+	return d.ResolveIn(ctx, "NGN", bankCode, accountNumber)
+}
+
+// ResolveIn verifies an account against a specific currency's rail. Account
+// resolution is currency-scoped at the provider: a Ghanaian account number
+// cannot be verified against the naira rail.
+func (d flutterwaveBankDirectory) ResolveIn(ctx context.Context, currency, bankCode, accountNumber string) (NombaLookupResult, error) {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if currency == "" {
+		currency = "NGN"
+	}
+	name, err := d.c.ResolveAccount(ctx, currency, bankCode, accountNumber)
 	if err != nil {
 		// Map the FW sentinel onto the Nomba one the handler layer keys 404s on.
 		if errors.Is(err, ErrFWAccountNotFound) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -234,13 +235,52 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if err != nil {
 		return fmt.Errorf("it payout: bad intent amount: %w", err)
 	}
-	// AmountNGN is always our locked NGN amount — for a cross-currency/mobile
-	// rail the gateway converts via DestinationCurrency; for legacy NGN bank
-	// (DestinationCurrency empty) it pays it out as-is. See FlutterwaveGateway.
+	// PayoutRequest.Amount is what the RECIPIENT receives, denominated in the
+	// destination currency — the gateway sends applies_to=destination_currency
+	// on every transfer. So a cross-currency payout has to be converted HERE;
+	// passing the source-currency figure through would send a naira number as
+	// cedis, off by roughly 100x.
+	sourceCurrency := models.ITIntentCurrency(intent)
+	destCurrency := strings.ToUpper(strings.TrimSpace(intent.DestinationCurrency))
+	if destCurrency == "" {
+		destCurrency = sourceCurrency
+	}
+
+	payoutAmount := naira
+	if !strings.EqualFold(destCurrency, sourceCurrency) {
+		sourceMajor, cErr := koboToNairaFloat(net.String())
+		if cErr != nil {
+			return fmt.Errorf("it payout: bad intent amount: %w", cErr)
+		}
+		// NOTE: QuoteWithdrawal hardcodes NGN as the quote's SOURCE currency
+		// (it_quote.go). That is correct only while every sell is denominated in
+		// naira, which is true today. A sell raised in another currency would be
+		// converted using an NGN→dest rate — the same class of bug as valuing a
+		// cedi fee at the naira rate. Guard it here rather than let it become
+		// silently wrong when sells gain a currency.
+		if !strings.EqualFold(sourceCurrency, "NGN") {
+			return fmt.Errorf("it payout: cannot convert %s→%s: the FX quote is NGN-sourced; "+
+				"QuoteWithdrawal must take a source currency before non-NGN sells can pay out cross-currency",
+				sourceCurrency, destCurrency)
+		}
+		destMajor, _, qErr := s.QuoteWithdrawal(ctx, sourceMajor, destCurrency)
+		if qErr != nil {
+			// Refusing beats guessing. The debit has already happened, so this
+			// strands the premium until the operator retries — but paying out an
+			// unconverted figure would send the wrong amount irrecoverably.
+			return fmt.Errorf("it payout: cannot convert %s→%s: %w", sourceCurrency, destCurrency, qErr)
+		}
+		payoutAmount = strconv.FormatFloat(destMajor, 'f', 2, 64)
+	}
+
 	payoutID, err := s.payout.InitiatePayout(ctx, PayoutRequest{
-		BankCode:            intent.BankCode,
-		AccountNumber:       intent.AccountNumber,
-		AccountName:         intent.AccountName,
+		BankCode:      intent.BankCode,
+		AccountNumber: intent.AccountNumber,
+		AccountName:   intent.AccountName,
+		// Both are set during the transition: Amount/SourceCurrency is what the
+		// gateway reads, AmountNGN keeps unmigrated consumers working.
+		Amount:              payoutAmount,
+		SourceCurrency:      sourceCurrency,
 		AmountNGN:           naira,
 		Reference:           itPayoutRef(intent.ID),
 		SenderName:          "TSA Connect",

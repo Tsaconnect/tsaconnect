@@ -78,6 +78,16 @@ func (s *ITService) ActivateFiatVA(ctx context.Context, user *models.User, idTyp
 	if strings.TrimSpace(user.WalletAddress) == "" {
 		return nil, ErrITVAWalletRequired
 	}
+	// A virtual account is a COLLECTION account, so provisioning one in a
+	// currency we cannot collect in creates an account nobody can usefully pay
+	// into. The registry is the authority on that — USD, EUR and GBP have no
+	// virtual-account product at the provider and can never be deposit
+	// currencies, so this is a permanent distinction rather than a staging one.
+	if s.currencies != nil {
+		if _, err := s.currencies.RequireDeposit(itDepositCurrency); err != nil {
+			return nil, err
+		}
+	}
 	idType = strings.ToUpper(strings.TrimSpace(idType))
 	idNumber = strings.TrimSpace(idNumber)
 	if idType != "BVN" && idType != "NIN" {

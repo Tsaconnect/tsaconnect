@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +79,9 @@ type ITService struct {
 	// feeQuoter prices the fee deducted from each leg; fees carves what the
 	// platform keeps into system / cashback / TP. See it_fees.go.
 	feeQuoter ITFeeQuoter
-	fees      *FeeDistributionService
+	fees      ITFeeSink
+	// currencies supplies per-currency payout floors; nil ⇒ NGN floor only.
+	currencies *CurrencyRegistry
 
 	// rateQuoter is the live FX quote source for multi-currency withdrawal
 	// previews (Flutterwave). Optional — nil surfaces ErrITQuoteUnavailable.
@@ -111,12 +114,46 @@ func (s *ITService) SetMinSellNgnKobo(kobo int64) {
 	}
 }
 
-// minSellKobo returns the effective minimum sell payout in kobo.
+// minSellKobo returns the effective minimum sell payout in kobo (NGN).
 func (s *ITService) minSellKobo() int64 {
 	if s.minSellNgnKobo > 0 {
 		return s.minSellNgnKobo
 	}
 	return defaultMinSellNgnKobo
+}
+
+// SetCurrencyRegistry wires per-currency payout floors. Optional: without it,
+// the NGN floor applies to every currency, which is the pre-multi-currency
+// behaviour.
+func (s *ITService) SetCurrencyRegistry(r *CurrencyRegistry) { s.currencies = r }
+
+// minPayoutMinorFor returns the floor for a payout currency, in that currency's
+// minor units, and a human label for the refusal message.
+//
+// The floor exists because a payout below the provider's limit fails AFTER the
+// on-chain debit, stranding the user's premium — so it has to be enforced up
+// front, and it has to be the right number. Flutterwave's limits are per
+// currency: ₦100 says nothing about the cedi minimum, and applying the naira
+// figure to cedis would reject roughly 100x too much.
+//
+// A currency with no configured floor is NOT gated. That is deliberate: an
+// unconfigured floor means "not yet confirmed with the provider", and inventing
+// one would reject legitimate payouts. The provider still rejects a genuinely
+// too-small transfer — the cost is that it does so after the debit, which is
+// the situation for every currency today anyway.
+func (s *ITService) minPayoutMinorFor(currency string) (int64, string) {
+	cur := strings.ToUpper(strings.TrimSpace(currency))
+	if cur == "" || cur == "NGN" {
+		return s.minSellKobo(), "NGN"
+	}
+	if s.currencies == nil {
+		return 0, cur
+	}
+	row, err := s.currencies.Get(cur)
+	if err != nil {
+		return 0, cur
+	}
+	return row.MinPayoutMinor, cur
 }
 
 // IsConfigured reports whether IT can operate (swap + operator signer present).
@@ -434,8 +471,8 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 		"fee_ngn_kobo":       intent.FeeNgnKobo,
 		"net_ngn_kobo":       intent.NetNgnKobo,
 		"platform_kept_kobo": intent.PlatformKeptKobo,
-		"status":         models.ITStatusPendingPayment,
-		"failure_reason": "",
+		"status":             models.ITStatusPendingPayment,
+		"failure_reason":     "",
 	}).Error; err != nil {
 		return nil, err
 	}
@@ -505,12 +542,31 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	if err != nil {
 		return nil, err
 	}
-	// Enforce the minimum payout BEFORE the on-chain debit: a sell whose NGN
-	// falls under Flutterwave's ₦100 floor would debit the user's premium and
-	// then fail the payout, stranding it. Reject up front so nothing moves.
-	// The floor is on the NET — that is the amount handed to the gateway.
-	if minKobo := s.minSellKobo(); fees.Net.Cmp(big.NewInt(minKobo)) < 0 {
-		return nil, fmt.Errorf("minimum payout is ₦%d after fees — sell a little more", minKobo/100)
+	// Enforce the minimum payout BEFORE the on-chain debit: a sell that falls
+	// under the provider's floor would debit the user's premium and then fail
+	// the payout, stranding it. Reject up front so nothing moves. The floor is
+	// on the NET — that is the amount handed to the gateway.
+	//
+	// The floor is per currency. The valuation is in the intent's currency, so
+	// a same-currency payout compares directly; a cross-currency one is
+	// compared against the SOURCE floor, since that is the balance actually
+	// debited and the figure this check has in hand.
+	// The registry is the authority on whether a currency may move money at all.
+	// The catalog governs what we OFFER as a product; without this check the two
+	// could drift — a destination could sit in the catalog while its registry row
+	// says PayoutEnabled=false, and nothing would stop the payout.
+	if dest := strings.ToUpper(strings.TrimSpace(bank.DestinationCurrency)); dest != "" && s.currencies != nil {
+		if _, cErr := s.currencies.RequirePayout(dest); cErr != nil {
+			return nil, cErr
+		}
+	}
+
+	// Sells are denominated in NGN today (the valuation currency); when a sell
+	// can be raised in another currency this is where it comes from.
+	intentCurrency := "NGN"
+	if minMinor, label := s.minPayoutMinorFor(intentCurrency); minMinor > 0 && fees.Net.Cmp(big.NewInt(minMinor)) < 0 {
+		return nil, fmt.Errorf("minimum payout is %s%s after fees — sell a little more",
+			minorLabel(label), minorToMajor(minMinor, s.exponentFor(label)))
 	}
 	intent := &models.ITIntent{
 		ID:            uuid.New(),
@@ -717,4 +773,57 @@ func truncateReason(reason string) string {
 	}
 	// Cut on a rune boundary so the stored value stays valid UTF-8.
 	return strings.ToValidUTF8(reason[:maxFailureReason], "")
+}
+
+// minorLabel renders a currency's symbol for a user-facing minimum, falling back
+// to the code itself. Display only — never used to select behaviour.
+func minorLabel(currency string) string {
+	switch strings.ToUpper(strings.TrimSpace(currency)) {
+	case "NGN":
+		return "\u20a6"
+	case "GHS":
+		return "\u20b5"
+	case "USD":
+		return "$"
+	case "EUR":
+		return "\u20ac"
+	case "GBP":
+		return "\u00a3"
+	default:
+		return strings.ToUpper(strings.TrimSpace(currency)) + " "
+	}
+}
+
+// exponentFor returns a currency's minor-unit decimal count, defaulting to 2.
+//
+// The registry carries this precisely so amounts are not rendered with a
+// hardcoded /100. Every currency enabled today is 2-decimal, so the default is
+// currently always right — but writing the division inline is how the
+// assumption gets re-embedded after the field was added to remove it.
+func (s *ITService) exponentFor(currency string) int {
+	if s.currencies == nil {
+		return 2
+	}
+	row, err := s.currencies.Get(currency)
+	if err != nil || row.Exponent < 0 {
+		return 2
+	}
+	return row.Exponent
+}
+
+// minorToMajor renders a minor-unit amount in major units for display.
+func minorToMajor(minor int64, exponent int) string {
+	if exponent <= 0 {
+		return strconv.FormatInt(minor, 10)
+	}
+	div := int64(1)
+	for i := 0; i < exponent; i++ {
+		div *= 10
+	}
+	whole := minor / div
+	frac := minor % div
+	if frac == 0 {
+		return strconv.FormatInt(whole, 10)
+	}
+	return fmt.Sprintf("%d.%0*d", whole, exponent, frac)
 }
