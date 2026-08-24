@@ -45,8 +45,15 @@ func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uui
 		return "", fmt.Errorf("pm_withdrawal: PM %s has no settlement bank configured; cannot withdraw", pmID)
 	}
 
+	// Settlement withdrawals are naira-only today: the destination is the PM's
+	// settlement bank, and SettlementBankCode/SettlementAccountNumber carry no
+	// currency of their own. Named rather than passed as a literal so the place
+	// that must change when a PM can settle in a second currency is obvious —
+	// the debit below and the gateway payout must always agree on it.
+	const withdrawalCurrency = "NGN"
+
 	// 2. Atomically debit the free balance (available - reserved >= amount).
-	ok, err := s.pm.WithdrawNGN(ctx, pmID, amount)
+	ok, err := s.pm.WithdrawIn(ctx, pmID, withdrawalCurrency, amount)
 	if err != nil {
 		return "", fmt.Errorf("pm_withdrawal: debit PM %s: %w", pmID, err)
 	}
@@ -72,7 +79,7 @@ func (s *PMAutomationService) WithdrawToSettlement(ctx context.Context, pmID uui
 	if err != nil {
 		// Gateway failed AFTER the balance was debited — compensate by crediting
 		// back the same amount so available_ngn returns to its pre-call value.
-		if cErr := s.pm.CreditNGN(ctx, pmID, amount); cErr != nil {
+		if cErr := s.pm.CreditIn(ctx, pmID, withdrawalCurrency, amount); cErr != nil {
 			// Log and wrap both errors; the balance drift is critical — it will be
 			// caught by the NGN reconciler (task §6) but surface both errors so
 			// ops can investigate immediately.

@@ -150,6 +150,25 @@ func createPaymentMerchantsTable(t *testing.T, db *gorm.DB) {
 	)`).Error; err != nil {
 		t.Fatalf("create payment_merchants: %v", err)
 	}
+
+	// Per-currency balances. Every ledger operation now writes both this and the
+	// legacy columns in one transaction, so omitting it here would roll back the
+	// legacy write too — the dual-write working as intended, but confusing to
+	// debug. The CHECK mirrors chk_pm_balances_ledger in config/database.go.
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS pm_balances (
+		pm_id      TEXT NOT NULL,
+		currency   TEXT NOT NULL,
+		available  TEXT NOT NULL DEFAULT '0',
+		reserved   TEXT NOT NULL DEFAULT '0',
+		created_at DATETIME,
+		updated_at DATETIME,
+		PRIMARY KEY (pm_id, currency),
+		CHECK (CAST(available AS NUMERIC) >= 0
+		   AND CAST(reserved  AS NUMERIC) >= 0
+		   AND CAST(reserved  AS NUMERIC) <= CAST(available AS NUMERIC))
+	)`).Error; err != nil {
+		t.Fatalf("create pm_balances: %v", err)
+	}
 }
 
 // seedActivePM inserts an active PaymentMerchant bound to the given inbound

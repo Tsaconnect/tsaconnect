@@ -206,7 +206,13 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 	//     once-per-event), so no extra idempotency guard is needed here: a given
 	//     EventID is dispatched at most once, so the ledger credit fires exactly
 	//     once per settled inbound.
-	if err := s.pm.CreditNGN(ctx, pm.ID, p.AmountNGN); err != nil {
+	// Credit the currency the money actually arrived in. InboundPayment.Currency
+	// is empty for legacy Nomba payloads, which were always naira.
+	inboundCurrency := p.Currency
+	if strings.TrimSpace(inboundCurrency) == "" {
+		inboundCurrency = "NGN"
+	}
+	if err := s.pm.CreditIn(ctx, pm.ID, inboundCurrency, p.AmountNGN); err != nil {
 		// A bad/unparseable amount fails the credit but must not abort the
 		// webhook — failing causes 5xx + retries that never recover. Log and
 		// continue (consistent with unknown-walletId → no-op above). A genuine
@@ -676,7 +682,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// guarded (reserved >= amount); a missing/short reservation surfaces as an
 		// error rather than silently releasing crypto against an unbacked ledger.
 		if pm != nil {
-			if err := s.pm.ConsumeNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+			if err := s.pm.ConsumeIn(ctx, pm.ID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 				if errors.Is(err, ErrNGNAlreadySettled) {
 					// Retry-tolerant: a re-dispatched success event (its first
 					// dispatch consumed the reservation but its release failed
@@ -698,7 +704,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// operator sees it, and WARN-log for alerting. Leave the trade in
 		// pending_payment so the timeout watchdog refunds the deposit on expiry.
 		if pm != nil {
-			if err := s.pm.ReleaseNGN(ctx, pm.ID, trade.FiatAmount); err != nil {
+			if err := s.pm.ReleaseIn(ctx, pm.ID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 				return fmt.Errorf("release PM ledger on payout failure (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
 			}
 		}
