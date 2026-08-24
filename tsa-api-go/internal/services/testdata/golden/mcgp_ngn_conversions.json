@@ -1,0 +1,50 @@
+[
+  {
+    "ngnKobo": "10000",
+    "rateKobo": "2757",
+    "mcgpWei": "3627130939426913311",
+    "backToNgnKobo": "9999"
+  },
+  {
+    "ngnKobo": "13785",
+    "rateKobo": "2757",
+    "mcgpWei": "5000000000000000000",
+    "backToNgnKobo": "13785"
+  },
+  {
+    "ngnKobo": "13786",
+    "rateKobo": "2757",
+    "mcgpWei": "5000362713093942691",
+    "backToNgnKobo": "13785"
+  },
+  {
+    "ngnKobo": "1",
+    "rateKobo": "2757",
+    "mcgpWei": "362713093942691",
+    "backToNgnKobo": "0"
+  },
+  {
+    "ngnKobo": "999999",
+    "rateKobo": "2757",
+    "mcgpWei": "362712731229597388465",
+    "backToNgnKobo": "999998"
+  },
+  {
+    "ngnKobo": "10000",
+    "rateKobo": "1",
+    "mcgpWei": "10000000000000000000000",
+    "backToNgnKobo": "10000"
+  },
+  {
+    "ngnKobo": "10000",
+    "rateKobo": "100000",
+    "mcgpWei": "100000000000000000",
+    "backToNgnKobo": "10000"
+  },
+  {
+    "ngnKobo": "123456",
+    "rateKobo": "7919",
+    "mcgpWei": "15589847202929662836",
+    "backToNgnKobo": "123455"
+  }
+]

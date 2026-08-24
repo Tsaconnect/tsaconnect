@@ -1,0 +1,62 @@
+[
+  {
+    "grossKobo": "9999",
+    "feeKobo": "761",
+    "netKobo": "9238",
+    "platformKeptKobo": "548"
+  },
+  {
+    "grossKobo": "10000",
+    "feeKobo": "766",
+    "netKobo": "9234",
+    "platformKeptKobo": "550"
+  },
+  {
+    "grossKobo": "10001",
+    "feeKobo": "766",
+    "netKobo": "9235",
+    "platformKeptKobo": "550"
+  },
+  {
+    "grossKobo": "13785",
+    "feeKobo": "1053",
+    "netKobo": "12732",
+    "platformKeptKobo": "757"
+  },
+  {
+    "grossKobo": "13787",
+    "feeKobo": "1053",
+    "netKobo": "12734",
+    "platformKeptKobo": "757"
+  },
+  {
+    "grossKobo": "50000",
+    "feeKobo": "3830",
+    "netKobo": "46170",
+    "platformKeptKobo": "2750"
+  },
+  {
+    "grossKobo": "99999",
+    "feeKobo": "7655",
+    "netKobo": "92344",
+    "platformKeptKobo": "5498"
+  },
+  {
+    "grossKobo": "100000",
+    "feeKobo": "7660",
+    "netKobo": "92340",
+    "platformKeptKobo": "5500"
+  },
+  {
+    "grossKobo": "333333",
+    "feeKobo": "25530",
+    "netKobo": "307803",
+    "platformKeptKobo": "18332"
+  },
+  {
+    "grossKobo": "1000000",
+    "feeKobo": "76600",
+    "netKobo": "923400",
+    "platformKeptKobo": "55000"
+  }
+]

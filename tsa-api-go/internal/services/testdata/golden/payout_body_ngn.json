@@ -1,0 +1,23 @@
+{
+  "action": "instant",
+  "narration": "TSA Connect",
+  "payment_instruction": {
+    "amount": {
+      "applies_to": "destination_currency",
+      "value": 1500
+    },
+    "destination_currency": "NGN",
+    "recipient": {
+      "bank": {
+        "account_number": "0690000031",
+        "code": "044"
+      },
+      "name": {
+        "full": "Ada Obi"
+      }
+    },
+    "source_currency": "NGN"
+  },
+  "reference": "trade-ref-123456",
+  "type": "bank"
+}

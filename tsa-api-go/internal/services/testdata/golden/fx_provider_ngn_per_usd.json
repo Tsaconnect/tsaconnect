@@ -1,0 +1,26 @@
+[
+  {
+    "name": "fresh",
+    "ngnPerUsd": 1388.72,
+    "stale": false,
+    "err": ""
+  },
+  {
+    "name": "row_marked_stale",
+    "ngnPerUsd": 1400,
+    "stale": true,
+    "err": ""
+  },
+  {
+    "name": "ngn_absent",
+    "ngnPerUsd": 0,
+    "stale": false,
+    "err": "NGN rate unavailable"
+  },
+  {
+    "name": "ngn_zero_rate",
+    "ngnPerUsd": 0,
+    "stale": false,
+    "err": "NGN rate unavailable"
+  }
+]
