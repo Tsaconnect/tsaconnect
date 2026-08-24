@@ -320,6 +320,20 @@ func AutoMigrate() error {
 			SELECT 1 FROM pm_balances b WHERE b.pm_id = pm.id AND b.currency = 'NGN'
 		)`)
 
+	// IT intents gain a currency + minor-unit columns. Backfill marks every
+	// existing intent NGN and copies each kobo column into its minor twin —
+	// identical values, since minor units ARE kobo for naira. Guarded on
+	// currency being unset so it runs once and never rewrites a row that a
+	// later release has denominated in something else.
+	DB.Exec(`UPDATE it_intents SET
+			currency            = 'NGN',
+			amount_minor        = ngn_kobo,
+			rate_minor          = rate_kobo,
+			fee_minor           = fee_ngn_kobo,
+			net_minor           = net_ngn_kobo,
+			platform_kept_minor = platform_kept_kobo
+		WHERE currency IS NULL OR currency = ''`)
+
 	// NGN ledger integrity: available_ngn and reserved_ngn must be non-negative,
 	// and reserved_ngn must never exceed available_ngn. The DROP+ADD pattern
 	// (like other constraints above) keeps repeat boots idempotent.

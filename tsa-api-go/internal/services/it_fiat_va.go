@@ -281,7 +281,11 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 				UserID:        va.UserID,
 				WalletAddress: wallet,
 				Direction:     models.ITDirectionBuy,
-				PMID:          pmID,
+				// The VA's own currency, never a default: this parked intent is
+				// repriced later by an operator, and inheriting NGN here would
+				// have it repriced at the naira rate.
+				Currency: va.Currency,
+				PMID:     pmID,
 			}
 		} else if pendErr != nil {
 			return pendErr
@@ -339,6 +343,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		WalletAddress: wallet,
 		Direction:     models.ITDirectionBuy,
 		Status:        models.ITStatusPendingPayment,
+		Currency:      va.Currency,
 		NgnKobo:       paidKobo.String(),
 		RateKobo:      buyRate.String(),
 		McgpAmount:    mcgp.String(),
