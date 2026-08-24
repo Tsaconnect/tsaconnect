@@ -1525,7 +1525,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		// ErrInsufficientPMLiquidity (no trade row, no crypto-capacity change
 		// leak). nil pm (non-PM ad, or PM dormant) → skip.
 		if ad.PMID != nil && s.pm != nil {
-			ok, rerr := s.pm.ReserveNGNTx(tx, *ad.PMID, trade.FiatAmount)
+			ok, rerr := s.pm.ReserveInTx(tx, *ad.PMID, trade.FiatCurrency, trade.FiatAmount)
 			if rerr != nil {
 				return rerr
 			}
@@ -2087,7 +2087,7 @@ func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *go
 	if row.PMID == nil {
 		return nil // not a PM ad — nothing reserved
 	}
-	if err := s.pm.ReleaseNGNTx(tx, *row.PMID, trade.FiatAmount); err != nil {
+	if err := s.pm.ReleaseInTx(tx, *row.PMID, trade.FiatCurrency, trade.FiatAmount); err != nil {
 		return err
 	}
 	// Set the marker so a redundant later release (e.g. reconciler re-running on a

@@ -702,3 +702,68 @@ func TestHandlePayoutStatus_Success_Retry_NotWedged(t *testing.T) {
 		t.Errorf("reserved_ngn = %q, want 0", reserved)
 	}
 }
+
+// ─── Currency confusion at the reserve call site (regression) ─────────────────
+
+// TestOpenTrade_ForeignCurrencyAdCannotDrawNairaBalance is the regression test
+// for a bug that was live in production before the ledger gained a currency
+// dimension.
+//
+// P2PAd.FiatCurrency and P2PTrade.FiatCurrency have always existed and are
+// NOT NULL, ad creation accepts any currency, and no guard restricted PM ads to
+// naira — yet the reserve call site passed trade.FiatAmount to an NGN-only
+// ledger operation with no currency at all. A PM posting a GHS ad therefore
+// reserved cedi amounts against the naira column: roughly a 100x under-reserve,
+// letting the PM oversell naira liquidity that WithdrawToSettlement could then
+// pay out. It was latent only because no non-NGN PM ad had been posted.
+//
+// The assertion is deliberately the sharp one: a PM holding ONLY naira must not
+// be able to fund a cedi trade. Asserting the positive case (a GHS ad funded by
+// a GHS balance) would pass even if the call site still ignored currency.
+func TestOpenTrade_ForeignCurrencyAdCannotDrawNairaBalance(t *testing.T) {
+	svc, _, _, _, adID, _, db := buyAdFixture(t)
+	createPaymentMerchantsTable(t, db)
+
+	// PM is well funded — in naira.
+	pmID := markAdAsPMWithBalance(t, db, adID, "5000000.00")
+	if err := db.Create(&models.PMBalance{
+		PMID: pmID, Currency: "NGN", Available: "5000000.00", Reserved: "0",
+	}).Error; err != nil {
+		t.Fatalf("seed NGN balance: %v", err)
+	}
+
+	// The ad — and so the trade opened against it — is priced in cedis.
+	if err := db.Model(&models.P2PAd{}).Where("id = ?", adID).
+		Update("fiat_currency", "GHS").Error; err != nil {
+		t.Fatalf("set ad currency: %v", err)
+	}
+
+	svc.SetPMService(NewPMService(db))
+
+	userID := uuid.New()
+	userPm := seedPaymentMethod(t, db, userID, "GHS")
+
+	_, _, err := svc.OpenTrade(context.Background(), adID, userID,
+		"0x000000000000000000000000000000000000beef",
+		OpenTradeParams{
+			TokenAmount:         "50000000",
+			PaymentMethodID:     userPm,
+			PayoutAccountNumber: "0123456789",
+			PayoutBank:          "058",
+			PayoutAccountName:   "JOHN DOE",
+		})
+	if !errors.Is(err, ErrInsufficientPMLiquidity) {
+		t.Fatalf("a cedi trade was funded from a naira balance (err = %v). The reserve call "+
+			"site must pass trade.FiatCurrency, not default to NGN — otherwise ₵X reserves X "+
+			"naira, a ~100x under-reserve.", err)
+	}
+
+	// And the naira balance must be untouched — not even briefly reserved.
+	avail, reserved := ngnBalances(t, NewPMService(db), pmID)
+	if reserved != "0" && reserved != "0.00" {
+		t.Errorf("reserved_ngn = %q, want 0 — a failed GHS reserve must not touch naira", reserved)
+	}
+	if avail != "5000000.00" && avail != "5000000" {
+		t.Errorf("available_ngn = %q, want 5000000.00 (unchanged)", avail)
+	}
+}

@@ -675,13 +675,27 @@ func Load() *Config {
 	currenciesStr := getEnv("SUPPORTED_CURRENCIES", "*")
 	cfg.SupportedCurrencies = splitAndTrim(currenciesStr, ",")
 
-	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real market rates
-	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN")
+	// Bybit P2P routing — only currencies with deep P2P liquidity reflect real
+	// market rates. GHS joins NGN here: Bybit has quoted a GHS book since 2022
+	// and a live probe found it comfortably past the depth floor, so pricing it
+	// off the parallel market rather than OER's official cedi rate avoids a
+	// systematic margin error on every Ghanaian trade.
+	bybitCurrenciesStr := getEnv("BYBIT_P2P_CURRENCIES", "NGN,GHS")
 	cfg.BybitP2PCurrencies = splitAndTrim(bybitCurrenciesStr, ",")
 
-	// Bybit probe amounts — "CUR:AMT,CUR:AMT". NGN→5000 (~$3) by default.
-	// Add others as new currencies are routed through Bybit.
-	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000"))
+	// Bybit probe amounts — "CUR:AMT,CUR:AMT", each roughly a $3–5 retail ticket.
+	// NGN→5000, GHS→50 (~$4 at ~12 GHS/USD).
+	cfg.BybitProbeAmounts = parseProbeAmounts(getEnv("BYBIT_PROBE_AMOUNTS", "NGN:5000,GHS:50"))
+
+	// A Bybit-routed currency with no probe amount is a silent mispricing, not a
+	// missing nicety: fetchBybitSide omits the amount filter entirely when the
+	// probe is absent, which reads the merchant tier of the book instead of the
+	// retail tier. Worse, parseProbeAmounts skips malformed entries silently, so
+	// a typo in BYBIT_PROBE_AMOUNTS looks identical to a correct config. Drop
+	// the currency from the anchored set rather than price it off the wrong tier.
+	if kept := keepProbedCurrencies(cfg.BybitP2PCurrencies, cfg.BybitProbeAmounts); len(kept) != len(cfg.BybitP2PCurrencies) {
+		cfg.BybitP2PCurrencies = kept
+	}
 
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
@@ -1144,6 +1158,34 @@ func (c *Config) ResolveFiatProvider() string {
 // missing a colon or with empty key/value are skipped silently — better
 // than failing boot over a typo, since the caller treats absence as
 // "no amount filter for this currency".
+// keepProbedCurrencies returns the subset of currencies that have a usable
+// probe amount, logging (loudly) any it drops.
+//
+// The pairing between BYBIT_P2P_CURRENCIES and BYBIT_PROBE_AMOUNTS is easy to
+// break and impossible to notice: a missing or typo'd probe makes
+// fetchBybitSide skip the amount filter, silently reading a different tier of
+// the order book than every other anchored currency. Failing the boot would be
+// worse — one bad env var should not take the service down — so the currency
+// simply stops being treated as anchored and falls back to OER, which is the
+// same posture as any other unanchored currency.
+func keepProbedCurrencies(currencies []string, probes map[string]string) []string {
+	kept := make([]string, 0, len(currencies))
+	for _, c := range currencies {
+		code := strings.ToUpper(strings.TrimSpace(c))
+		if code == "" {
+			continue
+		}
+		if strings.TrimSpace(probes[code]) == "" {
+			log.Printf("[config] ALERT bybit_probe_missing_total=1 %s is in BYBIT_P2P_CURRENCIES "+
+				"but has no BYBIT_PROBE_AMOUNTS entry — dropping it from the anchored set "+
+				"(it would otherwise be priced off the merchant tier, not the retail tier)", code)
+			continue
+		}
+		kept = append(kept, code)
+	}
+	return kept
+}
+
 func parseProbeAmounts(s string) map[string]string {
 	out := map[string]string{}
 	for _, part := range splitAndTrim(s, ",") {

@@ -45,6 +45,15 @@ func AutoMigrate() error {
 	}
 
 	if err := DB.AutoMigrate(
+		// Currency registry — the sole validation authority for any currency
+		// reaching a money path. Rows are seeded per-row (never overwritten) by
+		// services.NewCurrencyRegistry at boot, so operator-tuned payout floors
+		// survive a deploy.
+		&models.Currency{},
+		// Per-currency PM fiat balances. Supersedes payment_merchants'
+		// available_ngn/reserved_ngn, which can only express one implicit NGN
+		// balance; both are written until the legacy columns are dropped.
+		&models.PMBalance{},
 		&models.User{},
 		&models.Asset{},
 		&models.Product{},
@@ -284,6 +293,46 @@ func AutoMigrate() error {
 	// others above) so an inbound accountRef resolves to exactly one PM.
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_nomba_account_ref
 	    ON payment_merchants (nomba_account_ref) WHERE nomba_account_ref <> ''`)
+
+	// Per-currency PM balances carry the SAME integrity guarantee as the NGN
+	// columns they replace. Porting this is not optional: it is the last line of
+	// defence under every ledger operation, and without it the multi-currency
+	// table would silently hold a weaker invariant than the single-currency one
+	// it supersedes — a regression that would only surface as a negative or
+	// over-reserved balance in production.
+	DB.Exec(`ALTER TABLE pm_balances
+		DROP CONSTRAINT IF EXISTS chk_pm_balances_ledger`)
+	DB.Exec(`ALTER TABLE pm_balances
+		ADD CONSTRAINT chk_pm_balances_ledger CHECK (
+			CAST(available AS NUMERIC) >= 0 AND
+			CAST(reserved AS NUMERIC) >= 0 AND
+			CAST(reserved AS NUMERIC) <= CAST(available AS NUMERIC)
+		)`)
+
+	// One-time backfill: every existing PM gets an NGN row mirroring its legacy
+	// columns. Guarded on absence rather than on an empty table so a PM created
+	// between deploys is still picked up. Dual-write (pm_ngn_ledger.go) keeps
+	// the two representations in step until the legacy columns are dropped.
+	DB.Exec(`INSERT INTO pm_balances (pm_id, currency, available, reserved, created_at, updated_at)
+		SELECT id, 'NGN', available_ngn, reserved_ngn, NOW(), NOW()
+		FROM payment_merchants pm
+		WHERE NOT EXISTS (
+			SELECT 1 FROM pm_balances b WHERE b.pm_id = pm.id AND b.currency = 'NGN'
+		)`)
+
+	// IT intents gain a currency + minor-unit columns. Backfill marks every
+	// existing intent NGN and copies each kobo column into its minor twin —
+	// identical values, since minor units ARE kobo for naira. Guarded on
+	// currency being unset so it runs once and never rewrites a row that a
+	// later release has denominated in something else.
+	DB.Exec(`UPDATE it_intents SET
+			currency            = 'NGN',
+			amount_minor        = ngn_kobo,
+			rate_minor          = rate_kobo,
+			fee_minor           = fee_ngn_kobo,
+			net_minor           = net_ngn_kobo,
+			platform_kept_minor = platform_kept_kobo
+		WHERE currency IS NULL OR currency = ''`)
 
 	// NGN ledger integrity: available_ngn and reserved_ngn must be non-negative,
 	// and reserved_ngn must never exceed available_ngn. The DROP+ADD pattern
