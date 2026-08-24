@@ -107,8 +107,13 @@ func TestFlutterwaveGateway_CrossCurrencyBank(t *testing.T) {
 		t.Fatalf("destination_currency = %v, want KES", pi["destination_currency"])
 	}
 	amt := pi["amount"].(map[string]any)
-	if amt["applies_to"] != "source_currency" {
-		t.Fatalf("applies_to = %v, want source_currency", amt["applies_to"])
+	// applies_to is now destination_currency on EVERY transfer: `value` is what
+	// the recipient receives. It was source_currency for cross-currency, which
+	// double-charged the user — our fee engine already withholds a provider-fee
+	// passthrough and disburses the net, and sending that net as the SOURCE
+	// amount let Flutterwave take its own fee out of it again.
+	if amt["applies_to"] != "destination_currency" {
+		t.Fatalf("applies_to = %v, want destination_currency", amt["applies_to"])
 	}
 	rec := pi["recipient"].(map[string]any)
 	bank, ok := rec["bank"].(map[string]any)
@@ -148,8 +153,13 @@ func TestFlutterwaveGateway_MobileMoney(t *testing.T) {
 		t.Fatalf("currencies wrong: %+v", pi)
 	}
 	amt := pi["amount"].(map[string]any)
-	if amt["applies_to"] != "source_currency" {
-		t.Fatalf("applies_to = %v, want source_currency", amt["applies_to"])
+	// applies_to is now destination_currency on EVERY transfer: `value` is what
+	// the recipient receives. It was source_currency for cross-currency, which
+	// double-charged the user — our fee engine already withholds a provider-fee
+	// passthrough and disburses the net, and sending that net as the SOURCE
+	// amount let Flutterwave take its own fee out of it again.
+	if amt["applies_to"] != "destination_currency" {
+		t.Fatalf("applies_to = %v, want destination_currency", amt["applies_to"])
 	}
 	rec := pi["recipient"].(map[string]any)
 	mm, ok := rec["mobile_money"].(map[string]any)
@@ -194,8 +204,13 @@ func TestFlutterwaveGateway_MixedCaseInputsNormalized(t *testing.T) {
 		t.Fatalf("destination_currency = %v, want GHS", pi["destination_currency"])
 	}
 	amt := pi["amount"].(map[string]any)
-	if amt["applies_to"] != "source_currency" {
-		t.Fatalf("applies_to = %v, want source_currency", amt["applies_to"])
+	// applies_to is now destination_currency on EVERY transfer: `value` is what
+	// the recipient receives. It was source_currency for cross-currency, which
+	// double-charged the user — our fee engine already withholds a provider-fee
+	// passthrough and disburses the net, and sending that net as the SOURCE
+	// amount let Flutterwave take its own fee out of it again.
+	if amt["applies_to"] != "destination_currency" {
+		t.Fatalf("applies_to = %v, want destination_currency", amt["applies_to"])
 	}
 	rec := pi["recipient"].(map[string]any)
 	mm, ok := rec["mobile_money"].(map[string]any)
@@ -241,16 +256,21 @@ func TestFlutterwaveGateway_LowercaseNGNAppliesTo(t *testing.T) {
 
 // ── Source currency + fee incidence ──────────────────────────────────────────
 
-// TestFlutterwaveGateway_AppliesToFollowsSourceVsDestination pins that fee
-// incidence is decided by comparing the two currencies, not by testing for
-// naira.
+// TestFlutterwaveGateway_AlwaysPaysDestinationAmount pins that `value` is what
+// the RECIPIENT receives on every transfer, whatever the source balance.
 //
-// Those coincided while every payout was funded from an NGN balance. Once a
-// payout can draw a cedi balance they diverge, and a GHS→GHS transfer must get
-// the same exact-amount treatment NGN→NGN gets — the recipient receives exactly
-// `value`. A naira literal would silently deny it that, quietly making every
-// same-currency Ghanaian payout arrive short by the fee.
-func TestFlutterwaveGateway_AppliesToFollowsSourceVsDestination(t *testing.T) {
+// Cross-currency previously sent source_currency, which charged the user the
+// provider fee twice: our fee engine already withholds a passthrough line and
+// disburses the net, and sending that net as the source amount let Flutterwave
+// deduct its own fee from it again before converting. The user then received
+// less than the figure they were quoted.
+//
+// Flutterwave's own on/off-ramp blueprint uses destination_currency for every
+// transfer including its cross-currency conversions, so this is the documented
+// shape. The cost is that TSA absorbs rate movement between quote and
+// execution — a bounded, seconds-long exposure, traded for never telling a user
+// an amount that then arrives short.
+func TestFlutterwaveGateway_AlwaysPaysDestinationAmount(t *testing.T) {
 	cases := []struct {
 		name       string
 		source     string
@@ -261,8 +281,8 @@ func TestFlutterwaveGateway_AppliesToFollowsSourceVsDestination(t *testing.T) {
 		{"legacy: unset source defaults to NGN", "", "NGN", "NGN", "destination_currency"},
 		{"same currency NGN", "NGN", "NGN", "NGN", "destination_currency"},
 		{"same currency GHS", "GHS", "GHS", "GHS", "destination_currency"},
-		{"cross-currency from NGN", "NGN", "GBP", "NGN", "source_currency"},
-		{"cross-currency from GHS", "GHS", "NGN", "GHS", "source_currency"},
+		{"cross-currency from NGN", "NGN", "GBP", "NGN", "destination_currency"},
+		{"cross-currency from GHS", "GHS", "NGN", "GHS", "destination_currency"},
 		{"case-insensitive match is still same-currency", "ghs", "GHS", "GHS", "destination_currency"},
 	}
 

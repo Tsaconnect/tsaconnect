@@ -141,6 +141,12 @@ func TestSellPayoutRequest_MobileMoneyRail(t *testing.T) {
 	s := newITTestService(t)
 	gw := &fakeNombaGateway{payoutID: "pay_mobile_1"}
 	s.SetPayoutGateway(gw)
+	// A cross-currency payout must be converted before it is sent, so the quote
+	// source has to be wired. KES is not a catalog currency, so the allowlist
+	// needs it too — this test predates the catalog and exercises rail-field
+	// mapping rather than product availability.
+	allowQuoteCurrency(t, "KES")
+	s.SetRateQuoter(stubRateQuoter{ngnPerDestUnit: 15})
 	intent := &models.ITIntent{
 		ID: uuid.New(), UserID: uuid.New(), Direction: models.ITDirectionSell,
 		Status: models.ITStatusDebited, McgpAmount: "1000000000000000000",
@@ -165,10 +171,19 @@ func TestSellPayoutRequest_MobileMoneyRail(t *testing.T) {
 	if req.BankCode != "" || req.AccountNumber != "" {
 		t.Fatalf("mobile-money payout must not carry legacy bank fields: %+v", req)
 	}
-	// AmountNGN is always our locked NGN amount — the gateway converts via
-	// DestinationCurrency; we never send a foreign-currency amount ourselves.
+	// AmountNGN keeps carrying our locked source amount for unmigrated readers.
 	if req.AmountNGN != "1500.00" {
 		t.Fatalf("AmountNGN = %q, want 1500.00", req.AmountNGN)
+	}
+	// Amount is what the RECIPIENT gets, in the destination currency: ₦1500 at
+	// the stubbed 15 NGN/KES probe = 100 KES. Sending the naira figure here
+	// would pay out 1500 KES — the exact ~100x error the conversion exists to
+	// prevent, and irrecoverable once the transfer lands.
+	if req.Amount != "100.00" {
+		t.Fatalf("Amount = %q, want 100.00 (₦1500 converted to KES)", req.Amount)
+	}
+	if req.SourceCurrency != "NGN" {
+		t.Fatalf("SourceCurrency = %q, want NGN (the balance drawn from)", req.SourceCurrency)
 	}
 	if intent.PayoutID != "pay_mobile_1" {
 		t.Fatalf("intent.PayoutID = %q, want pay_mobile_1", intent.PayoutID)
@@ -290,5 +305,84 @@ func TestSellPayoutGuard_LegacyBankMissingFieldsRejected(t *testing.T) {
 	}
 	if err := s.AutoPayout(context.Background(), intent); err == nil {
 		t.Fatal("expected error for legacy sell with no bank destination")
+	}
+}
+
+// stubRateQuoter returns a fixed NGN-per-destination-unit rate, shaped like
+// Flutterwave's destination-amount-probed /transfers/rates response so
+// QuoteWithdrawal's derivation runs unchanged.
+type stubRateQuoter struct{ ngnPerDestUnit float64 }
+
+func (q stubRateQuoter) QuoteRate(_ context.Context, sourceCurrency, destCurrency string, destAmount float64) (FWRate, error) {
+	return FWRate{
+		Rate:        q.ngnPerDestUnit,
+		Source:      FWMoney{Currency: sourceCurrency, Amount: q.ngnPerDestUnit * destAmount},
+		Destination: FWMoney{Currency: destCurrency, Amount: destAmount},
+	}, nil
+}
+
+// TestSellPayout_CrossCurrencyRefusesWithoutQuote pins that an unavailable FX
+// quote blocks the payout rather than sending the unconverted figure.
+//
+// The failure mode this guards is silent and irrecoverable: PayoutRequest.Amount
+// is what the recipient RECEIVES, so passing the source-currency number through
+// would pay ₦1500 as ₵1500 — roughly 100x — and a completed transfer cannot be
+// clawed back. Refusing strands the premium until an operator retries, which is
+// recoverable. Between an unrecoverable overpayment and a recoverable stall, the
+// stall is correct.
+func TestSellPayout_CrossCurrencyRefusesWithoutQuote(t *testing.T) {
+	s := newITTestService(t)
+	gw := &fakeNombaGateway{payoutID: "pay_should_not_happen"}
+	s.SetPayoutGateway(gw)
+	allowQuoteCurrency(t, "KES")
+	// No rate quoter wired — QuoteWithdrawal cannot price the conversion.
+
+	intent := &models.ITIntent{
+		ID: uuid.New(), UserID: uuid.New(), Direction: models.ITDirectionSell,
+		Status: models.ITStatusDebited, McgpAmount: "1000000000000000000",
+		Currency: "NGN", NgnKobo: "150000", RateKobo: "1500",
+		DestinationCurrency: "KES", RailType: "bank",
+		BankCode: "044", AccountNumber: "0690000031", AccountName: "Ada Obi",
+	}
+	if err := s.db.Create(intent).Error; err != nil {
+		t.Fatalf("seed intent: %v", err)
+	}
+
+	if err := s.AutoPayout(context.Background(), intent); err == nil {
+		t.Fatal("AutoPayout succeeded without an FX quote — it must refuse rather than " +
+			"send the unconverted source amount as the destination amount")
+	}
+	if len(gw.calls) != 0 {
+		t.Fatalf("gateway was called %d time(s) despite an unpriceable conversion: %+v", len(gw.calls), gw.calls)
+	}
+}
+
+// TestSellPayout_SameCurrencyNeedsNoQuote confirms the conversion is skipped
+// when source and destination match, so the naira path keeps working with no FX
+// source wired at all.
+func TestSellPayout_SameCurrencyNeedsNoQuote(t *testing.T) {
+	s := newITTestService(t)
+	gw := &fakeNombaGateway{payoutID: "pay_ngn_1"}
+	s.SetPayoutGateway(gw)
+	// Deliberately no rate quoter.
+
+	intent := &models.ITIntent{
+		ID: uuid.New(), UserID: uuid.New(), Direction: models.ITDirectionSell,
+		Status: models.ITStatusDebited, McgpAmount: "1000000000000000000",
+		Currency: "NGN", NgnKobo: "150000", RateKobo: "1500",
+		RailType: "bank", BankCode: "044", AccountNumber: "0690000031", AccountName: "Ada Obi",
+	}
+	if err := s.db.Create(intent).Error; err != nil {
+		t.Fatalf("seed intent: %v", err)
+	}
+
+	if err := s.AutoPayout(context.Background(), intent); err != nil {
+		t.Fatalf("AutoPayout: %v", err)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("expected 1 payout call, got %d", len(gw.calls))
+	}
+	if got := gw.calls[0].Amount; got != "1500.00" {
+		t.Fatalf("Amount = %q, want 1500.00 unconverted", got)
 	}
 }

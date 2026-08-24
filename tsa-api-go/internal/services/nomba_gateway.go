@@ -24,16 +24,17 @@ type PayoutRequest struct {
 	// Deprecated: use Amount with SourceCurrency.
 	AmountNGN string // decimal string, e.g. "1500.00"
 
-	// Amount is the value to send, denominated in SourceCurrency.
+	// Amount is what the RECIPIENT receives, denominated in DestinationCurrency
+	// (empty destination ⇒ NGN). The gateway sends applies_to=destination_currency
+	// on every transfer, so the provider debits our source balance with whatever
+	// that costs and bills its fee separately.
 	//
-	// The distinction from DestinationCurrency matters for cross-currency
-	// payouts: because those specify applies_to="source_currency", this is what
-	// LEAVES our balance, and the recipient gets whatever it converts to. Get
-	// the denomination wrong and the amount is not merely inaccurate — a cedi
-	// figure sent as naira is off by ~100x.
+	// Callers converting from another currency must therefore convert BEFORE
+	// setting this. Getting the denomination wrong is not a rounding error — a
+	// naira figure sent as cedis is off by roughly 100x.
 	Amount string
-	// SourceCurrency is the currency Amount is expressed in — the balance the
-	// payout draws from. Empty means NGN.
+	// SourceCurrency is the balance the payout draws FROM. Empty means NGN.
+	// It does not describe Amount; see above.
 	SourceCurrency string
 	Reference     string // our trade reference (idempotency)
 	AccountName   string // recipient account name (used by live gateway)

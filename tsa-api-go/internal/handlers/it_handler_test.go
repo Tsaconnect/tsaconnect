@@ -155,7 +155,7 @@ func TestSell_UnsupportedDestination_Returns400NoIntent(t *testing.T) {
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
 
 	cases := []map[string]any{
-		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "USD", "railType": "bank",
+		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "KES", "railType": "bank",
 			"bankCode": "044", "accountNumber": "0123456789"},
 		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "GHS", "railType": "mobile_money",
 			"mobileNetwork": "wave", "mobileCountry": "GH", "mobileMsisdn": "233241234567"},
@@ -274,6 +274,11 @@ func TestSell_BadBankFields_StillRejected(t *testing.T) {
 // GHS bank withdrawal is rejected at the catalog gate (400) before NUBAN or
 // chain logic runs. When multi-currency sell is re-enabled, restore a
 // NUBAN-scope regression for non-NGN account formats.
+// Renamed in spirit: the catalog now offers five bank rails, so the gate is
+// tested with a currency that is still absent from it. What is being pinned is
+// the gate itself — Sell must refuse any destination the catalog does not list,
+// so the app can never offer a rail the payout would fail on AFTER the
+// on-chain debit.
 func TestSell_NonNGNBank_RejectedByCatalog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, db := newITTestHandler(t)
@@ -281,7 +286,7 @@ func TestSell_NonNGNBank_RejectedByCatalog(t *testing.T) {
 
 	w := doITSell(h, user, map[string]any{
 		"mcgpAmount":          "1000000000000000000",
-		"destinationCurrency": "GHS",
+		"destinationCurrency": "KES",
 		"railType":            "bank",
 		"bankCode":            "044",
 		"accountNumber":       "1234567",
