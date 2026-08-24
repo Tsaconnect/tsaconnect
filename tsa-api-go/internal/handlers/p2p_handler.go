@@ -307,7 +307,31 @@ func (h *P2PHandler) ListNigerianBanks(c *gin.Context) {
 		})
 		return
 	}
-	banks, err := h.banks.ListBanks(c.Request.Context())
+	// ?country=GH selects another market's directory. A payout to a Ghanaian
+	// account needs Ghanaian bank codes, and a directory pinned to one country
+	// at construction can only ever serve one. Omitted ⇒ the configured default
+	// (NG), so existing callers are unaffected.
+	country := strings.ToUpper(strings.TrimSpace(c.Query("country")))
+
+	var (
+		banks []services.NombaBank
+		err   error
+	)
+	if country != "" {
+		scoped, ok := h.banks.(interface {
+			ListBanksIn(ctx context.Context, country string) ([]services.NombaBank, error)
+		})
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Bank directory for other countries is unavailable",
+			})
+			return
+		}
+		banks, err = scoped.ListBanksIn(c.Request.Context(), country)
+	} else {
+		banks, err = h.banks.ListBanks(c.Request.Context())
+	}
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": err.Error()})
 		return
@@ -582,12 +606,12 @@ type createAdRequest struct {
 	// for float-rate ads. The service-layer validator enforces this; we
 	// can't use `binding:"required"` here because Gin would reject float
 	// requests before the service sees them.
-	Rate             string   `json:"rate"`
-	RateType         string   `json:"rateType"`
-	FloatOffsetBps   *int     `json:"floatOffsetBps"`
-	FloatAnchor      string   `json:"floatAnchor"`
-	MinLimit         string   `json:"minLimit"`
-	MaxLimit         string   `json:"maxLimit"`
+	Rate           string `json:"rate"`
+	RateType       string `json:"rateType"`
+	FloatOffsetBps *int   `json:"floatOffsetBps"`
+	FloatAnchor    string `json:"floatAnchor"`
+	MinLimit       string `json:"minLimit"`
+	MaxLimit       string `json:"maxLimit"`
 	// Optional at the binding layer: PM ads settle via the merchant's Nomba VA
 	// and need no manual method. The service requires >=1 for non-PM ads.
 	PaymentMethodIDs []string `json:"paymentMethodIds" binding:"omitempty"`
