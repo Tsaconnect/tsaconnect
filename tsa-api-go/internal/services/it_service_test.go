@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,13 +17,38 @@ import (
 
 // stubFx is a fixed NGN/USD source for tests; fields are set directly on the
 // service (s.fx) to simulate stale or unavailable feeds.
+//
+// It also satisfies FxRateProvider, but PER CURRENCY rather than by returning
+// the same number for every code. That distinction is the whole point: a stub
+// that ignores its currency argument cannot fail on the bug worth catching —
+// an amount denominated in one currency converted at another's rate. With
+// NGN≈1400 and GHS≈12 that is a ~100x error, and a single-rate stub would let
+// it pass every test.
 type stubFx struct {
 	ngn   float64
 	stale bool
 	err   error
+	// rates optionally overrides per currency. When nil, only NGN resolves —
+	// so a test that reaches for a second currency without saying what it is
+	// worth fails loudly instead of silently reusing the naira rate.
+	rates map[string]float64
 }
 
 func (f stubFx) NgnPerUsd(context.Context) (float64, bool, error) { return f.ngn, f.stale, f.err }
+
+func (f stubFx) RatePerUsd(_ context.Context, currency string) (float64, bool, error) {
+	if f.err != nil {
+		return 0, f.stale, f.err
+	}
+	code := strings.ToUpper(strings.TrimSpace(currency))
+	if r, ok := f.rates[code]; ok {
+		return r, f.stale, nil
+	}
+	if code == "NGN" {
+		return f.ngn, f.stale, nil
+	}
+	return 0, false, fmt.Errorf("%w: stubFx has no rate for %s", ErrNoMarketAnchor, code)
+}
 
 func newITTestService(t *testing.T) *ITService {
 	t.Helper()

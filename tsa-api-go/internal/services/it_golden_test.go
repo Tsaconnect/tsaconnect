@@ -233,16 +233,22 @@ func TestGoldenFxProviderNgnPerUsd(t *testing.T) {
 
 	rows := []fxCase{
 		run("fresh", build(map[string]P2PRate{
-			"NGN": {Currency: "NGN", MidRate: 1_388.72},
+			"NGN": {Currency: "NGN", MidRate: 1_388.72, FloatAnchor: true},
 		}, 0)),
 		run("row_marked_stale", build(map[string]P2PRate{
-			"NGN": {Currency: "NGN", MidRate: 1_400, Stale: true},
+			"NGN": {Currency: "NGN", MidRate: 1_400, FloatAnchor: true, Stale: true},
 		}, 0)),
 		run("ngn_absent", build(map[string]P2PRate{
 			"USD": {Currency: "USD", MidRate: 1},
 		}, 0)),
 		run("ngn_zero_rate", build(map[string]P2PRate{
-			"NGN": {Currency: "NGN", MidRate: 0},
+			"NGN": {Currency: "NGN", MidRate: 0, FloatAnchor: true},
+		}, 0)),
+		// A currency carrying an OFFICIAL rate with no market behind it must be
+		// refused, not served. Pricing a trade off the official rate where a
+		// parallel market exists is a systematic error, not a rounding one.
+		run("unanchored_official_rate_is_refused", build(map[string]P2PRate{
+			"NGN": {Currency: "NGN", MidRate: 1_550, FloatAnchor: false},
 		}, 0)),
 	}
 
