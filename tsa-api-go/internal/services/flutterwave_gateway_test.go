@@ -238,3 +238,83 @@ func TestFlutterwaveGateway_LowercaseNGNAppliesTo(t *testing.T) {
 		t.Fatalf("applies_to = %v, want destination_currency", amt["applies_to"])
 	}
 }
+
+// ── Source currency + fee incidence ──────────────────────────────────────────
+
+// TestFlutterwaveGateway_AppliesToFollowsSourceVsDestination pins that fee
+// incidence is decided by comparing the two currencies, not by testing for
+// naira.
+//
+// Those coincided while every payout was funded from an NGN balance. Once a
+// payout can draw a cedi balance they diverge, and a GHS→GHS transfer must get
+// the same exact-amount treatment NGN→NGN gets — the recipient receives exactly
+// `value`. A naira literal would silently deny it that, quietly making every
+// same-currency Ghanaian payout arrive short by the fee.
+func TestFlutterwaveGateway_AppliesToFollowsSourceVsDestination(t *testing.T) {
+	cases := []struct {
+		name       string
+		source     string
+		dest       string
+		wantSource string
+		wantApply  string
+	}{
+		{"legacy: unset source defaults to NGN", "", "NGN", "NGN", "destination_currency"},
+		{"same currency NGN", "NGN", "NGN", "NGN", "destination_currency"},
+		{"same currency GHS", "GHS", "GHS", "GHS", "destination_currency"},
+		{"cross-currency from NGN", "NGN", "GBP", "NGN", "source_currency"},
+		{"cross-currency from GHS", "GHS", "NGN", "GHS", "source_currency"},
+		{"case-insensitive match is still same-currency", "ghs", "GHS", "GHS", "destination_currency"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g, gotBody := fwCaptureTransferServer(t)
+
+			if _, err := g.InitiatePayout(context.Background(), PayoutRequest{
+				BankCode:            "044",
+				AccountNumber:       "0690000031",
+				Amount:              "1500.00",
+				SourceCurrency:      c.source,
+				DestinationCurrency: c.dest,
+				Reference:           "trade-ref-" + c.name,
+				AccountName:         "Ada Obi",
+			}); err != nil {
+				t.Fatalf("payout: %v", err)
+			}
+
+			pi := (*gotBody)["payment_instruction"].(map[string]any)
+			if pi["source_currency"] != c.wantSource {
+				t.Errorf("source_currency = %v, want %v", pi["source_currency"], c.wantSource)
+			}
+			amt := pi["amount"].(map[string]any)
+			if amt["applies_to"] != c.wantApply {
+				t.Errorf("applies_to = %v, want %v — %s", amt["applies_to"], c.wantApply, c.name)
+			}
+		})
+	}
+}
+
+// TestFlutterwaveGateway_LegacyAmountNGNStillHonoured confirms the additive
+// change did not strand callers that have not migrated to Amount.
+func TestFlutterwaveGateway_LegacyAmountNGNStillHonoured(t *testing.T) {
+	g, gotBody := fwCaptureTransferServer(t)
+
+	if _, err := g.InitiatePayout(context.Background(), PayoutRequest{
+		BankCode:      "044",
+		AccountNumber: "0690000031",
+		AmountNGN:     "1500.00", // legacy field only
+		Reference:     "trade-ref-legacy",
+		AccountName:   "Ada Obi",
+	}); err != nil {
+		t.Fatalf("payout: %v", err)
+	}
+
+	pi := (*gotBody)["payment_instruction"].(map[string]any)
+	amt := pi["amount"].(map[string]any)
+	if amt["value"] != 1500.0 {
+		t.Errorf("value = %v, want 1500 from the legacy AmountNGN field", amt["value"])
+	}
+	if pi["source_currency"] != "NGN" {
+		t.Errorf("source_currency = %v, want NGN", pi["source_currency"])
+	}
+}

@@ -31,9 +31,15 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	if !g.client.IsEnabled() {
 		return "", ErrFlutterwaveDisabled
 	}
-	amount, err := strconv.ParseFloat(strings.TrimSpace(req.AmountNGN), 64)
+	// Prefer the explicit Amount/SourceCurrency pair; fall back to the legacy
+	// naira-only field so callers that have not migrated keep working unchanged.
+	rawAmount := strings.TrimSpace(req.Amount)
+	if rawAmount == "" {
+		rawAmount = strings.TrimSpace(req.AmountNGN)
+	}
+	amount, err := strconv.ParseFloat(rawAmount, 64)
 	if err != nil || amount <= 0 {
-		return "", fmt.Errorf("flutterwave payout: invalid amount %q", req.AmountNGN)
+		return "", fmt.Errorf("flutterwave payout: invalid amount %q", rawAmount)
 	}
 	narration := g.senderName
 	if narration == "" {
@@ -51,19 +57,29 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 	}
 	rail = strings.ToLower(strings.TrimSpace(rail))
 
-	// applies_to governs fee incidence. For NGN→NGN payouts (source ==
+	srcCur := strings.ToUpper(strings.TrimSpace(req.SourceCurrency))
+	if srcCur == "" {
+		srcCur = "NGN"
+	}
+
+	// applies_to governs fee incidence. For same-currency payouts (source ==
 	// destination) we must keep the legacy behavior: the recipient gets
 	// exactly `value`, fees come out of our source balance separately —
-	// that's "destination_currency". For cross-currency payouts we hold
-	// NGN and send a known NGN amount for FW to convert, so fees must be
-	// taken from the source side — "source_currency".
+	// that's "destination_currency". For cross-currency payouts we hold the
+	// source currency and send a known amount of it for FW to convert, so fees
+	// must be taken from the source side — "source_currency".
+	//
+	// The test is source-vs-destination, not a naira literal. Those coincided
+	// while every payout was funded from naira; once a payout can draw a cedi
+	// balance, a GHS→GHS transfer must get the exact-amount treatment that
+	// NGN→NGN gets, and comparing against "NGN" would silently deny it.
 	appliesTo := "source_currency"
-	if strings.EqualFold(destCur, "NGN") {
+	if strings.EqualFold(destCur, srcCur) {
 		appliesTo = "destination_currency"
 	}
 
 	pi := FWPaymentInstruction{
-		SourceCurrency:      "NGN",
+		SourceCurrency:      srcCur,
 		DestinationCurrency: destCur,
 		Amount:              FWAmount{Value: amount, AppliesTo: appliesTo},
 	}
