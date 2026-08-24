@@ -35,10 +35,10 @@ type FxRateProvider interface {
 // Instant Transfer prices MCGP against the same NGN/USD value other P2P assets
 // quote against. It uses the display mid rate and propagates staleness; when the
 // feed is beyond its serve-age ceiling GetSnapshot errors and IT prices block.
+// The returned value also satisfies FxRateProvider — callers needing the
+// multi-currency view type-assert it rather than constructing a second adapter
+// over the same service, so there is only ever one way to build this.
 func NewP2PFxProvider(p2p *P2PService) FxProvider { return p2pFxProvider{p2p: p2p} }
-
-// NewP2PFxRateProvider is the multi-currency view of the same adapter.
-func NewP2PFxRateProvider(p2p *P2PService) FxRateProvider { return p2pFxProvider{p2p: p2p} }
 
 type p2pFxProvider struct{ p2p *P2PService }
 

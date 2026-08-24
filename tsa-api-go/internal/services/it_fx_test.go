@@ -16,7 +16,10 @@ func fxSnapshot(t *testing.T, rates map[string]P2PRate) FxRateProvider {
 		cachedAt:  time.Now(),
 		expiresAt: time.Now().Add(time.Hour),
 	})
-	return NewP2PFxRateProvider(svc)
+	// The narrow constructor's result also satisfies FxRateProvider — that
+	// dual-satisfaction is what lets IT take the richer view without a second
+	// adapter, so the assertion belongs in the test too.
+	return NewP2PFxProvider(svc).(FxRateProvider)
 }
 
 // TestRatePerUsd_ResolvesPerCurrency pins that the currency argument is actually
@@ -76,7 +79,7 @@ func TestRatePerUsd_NgnPerUsdDelegates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NgnPerUsd: %v", err)
 	}
-	multi, _, err := NewP2PFxRateProvider(svc).RatePerUsd(context.Background(), "NGN")
+	multi, _, err := NewP2PFxProvider(svc).(FxRateProvider).RatePerUsd(context.Background(), "NGN")
 	if err != nil {
 		t.Fatalf("RatePerUsd: %v", err)
 	}
