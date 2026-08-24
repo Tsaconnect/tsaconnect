@@ -68,10 +68,17 @@ func TestHandleInbound_UnknownAccountRef_MustNotFallThroughToTSA(t *testing.T) {
 	}
 }
 
-// TestHandleInbound_EmptyAccountRef_StillResolvesViaWalletID verifies the
-// single-TSA-parent path (FIX 1 positive case): when AccountRef is empty, the
-// existing walletId path still resolves the PM and releases as before.
-func TestHandleInbound_EmptyAccountRef_StillResolvesViaWalletID(t *testing.T) {
+// TestHandleInbound_EmptyAccountRef_IsIgnored pins the VA-only inbound contract:
+// accountRef is the ONLY match key. An inbound with an empty AccountRef is a
+// no-op even when its WalletID matches a known PM.
+//
+// This test previously asserted the opposite (a walletId fallback), which was
+// deliberately removed in 17f761f "remove legacy TSA seed PM + walletId inbound
+// fallback (accountRef-only)". The test was not updated with the code, so it
+// failed on main while describing a contract that no longer exists. Releasing
+// crypto against a walletId-only inbound is exactly the mis-attribution that
+// commit set out to close — so the assertion is inverted, not the code.
+func TestHandleInbound_EmptyAccountRef_IsIgnored(t *testing.T) {
 	db := setupTradeDB(t)
 	createPaymentMerchantsTable(t, db)
 	svc, esc, _ := newService(t, db)
@@ -86,25 +93,25 @@ func TestHandleInbound_EmptyAccountRef_StillResolvesViaWalletID(t *testing.T) {
 		buyerID: "JOHN DOE",
 	}))
 
-	// Empty AccountRef → walletId path active → TSA PM resolved → release.
+	// Empty AccountRef → no corporate PM match → no-op, full stop.
 	err := auto.HandleInbound(context.Background(), InboundPayment{
 		Status:            "settled",
-		AccountRef:        "", // empty → walletId path
-		WalletID:          tsaPM.NombaWalletID,
+		AccountRef:        "",
+		WalletID:          tsaPM.NombaWalletID, // known, but must NOT resolve
 		SenderAccountName: "JOHN DOE",
 		AmountNGN:         "2000.00",
-		EventID:           "evt_empty_ref_walletid",
+		EventID:           "evt_empty_ref_ignored",
 	})
 	if err != nil {
-		t.Fatalf("HandleInbound (empty accountRef, walletId path): %v", err)
+		t.Fatalf("HandleInbound (empty accountRef): want nil (no-op), got %v", err)
 	}
-	if len(signer.calls) != 1 {
-		t.Fatalf("signer called %d times, want 1 (empty accountRef + walletId should release)", len(signer.calls))
+	if len(signer.calls) != 0 {
+		t.Fatalf("signer called %d times, want 0 — an empty accountRef must never release", len(signer.calls))
 	}
-	var released models.P2PTrade
-	db.First(&released, "id = ?", trade.ID)
-	if released.Status != models.P2PTradeStatusReleased {
-		t.Errorf("trade status = %q, want released (empty accountRef walletId path)", released.Status)
+	var untouched models.P2PTrade
+	db.First(&untouched, "id = ?", trade.ID)
+	if untouched.Status != models.P2PTradeStatusPendingPayment {
+		t.Errorf("trade status = %q, want pending_payment (empty accountRef must no-op)", untouched.Status)
 	}
 }
 
@@ -131,6 +138,7 @@ func TestHandleInbound_BadAmountNGN_SkipsCredit(t *testing.T) {
 		t.Run(badAmount, func(t *testing.T) {
 			err := auto.HandleInbound(context.Background(), InboundPayment{
 				Status:            "settled",
+				AccountRef:        pm.NombaAccountRef,
 				WalletID:          pm.NombaWalletID,
 				SenderAccountName: "JOHN DOE",
 				AmountNGN:         badAmount,
