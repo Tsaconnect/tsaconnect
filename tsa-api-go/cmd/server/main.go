@@ -957,6 +957,14 @@ func main() {
 	// Create router with default middleware (logger and recovery)
 	router := gin.Default()
 
+	// nginx is the only proxy in front of this service and it always overwrites
+	// X-Forwarded-For (see deploy/nginx-tsa-api-site.conf). Without this, Gin trusts
+	// every peer and a client can choose the IP attributed to it — which drives the
+	// per-IP rate limiter and the auth/IT-agreement audit logs.
+	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		log.Fatalf("failed to set trusted proxies: %v", err)
+	}
+
 	// Apply global middleware
 	router.Use(middleware.CORS(cfg))
 	router.Use(middleware.SecurityHeaders())
