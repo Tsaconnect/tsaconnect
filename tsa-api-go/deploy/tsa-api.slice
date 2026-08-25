@@ -1,0 +1,12 @@
+# Install to /etc/systemd/system/tsa-api.slice
+#
+# This PROTECTS the service; it does not cap it. An earlier revision set MemoryMax
+# here believing it stopped a deploy-time `go build` from OOMing the API — but the
+# compiler runs outside this slice, so capping the API made it the FIRST victim of
+# memory pressure rather than the last.
+#
+# MemoryLow gives the API reclaim protection: the kernel reclaims from other cgroups
+# before this one. Set MemoryMax only from a measured RSS baseline, never a guess.
+[Slice]
+MemoryLow=512M
+CPUWeight=200

@@ -1,0 +1,54 @@
+# Install to /etc/systemd/system/tsa-api.service
+[Unit]
+Description=TSA Connect API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as tsa, which owns NOTHING. tsa-deploy owns /srv/tsa-api. If this service
+# is compromised it must not be able to write a binary into releases/, repoint
+# current, or read the database dumps.
+User=tsa
+Group=tsa
+WorkingDirectory=/srv/tsa-api/current
+EnvironmentFile=/srv/tsa-api/shared/env
+Environment=PORT=8081
+ExecStart=/srv/tsa-api/current/tsa-api
+
+# The binary handles SIGTERM with a 10s graceful drain (cmd/server/main.go).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+# Without explicit limits, RestartSec=5 against the 10s/5 default never trips the
+# rate limiter, so a bad config crash-loops forever and fills the journal.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+Slice=tsa-api.slice
+
+# The service writes nothing to disk — verified: no os.Create/os.WriteFile/os.MkdirAll/
+# os.OpenFile outside tests. So it gets NO ReadWritePaths.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
