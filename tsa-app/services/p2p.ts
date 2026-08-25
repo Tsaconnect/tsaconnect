@@ -361,6 +361,14 @@ export const banksApi = {
   list: () => request<NgBank[]>('GET', '/p2p/banks'),
 
   /**
+   * Bank directory for a specific country (ISO-3166-1 alpha-2, e.g. "GH").
+   * A payout to a Ghanaian account needs Ghanaian bank codes; the default
+   * directory only ever returns Nigerian ones.
+   */
+  listIn: (country: string) =>
+    request<NgBank[]>('GET', `/p2p/banks?country=${encodeURIComponent(country)}`),
+
+  /**
    * NUBAN name enquiry. Resolves the account holder name for a 10-digit
    * account number at the given bank. Returns a 404-shaped error
    * (`status === 404`) when the account does not exist at that bank — UI

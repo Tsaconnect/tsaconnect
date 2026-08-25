@@ -29,11 +29,15 @@
 //                   after it is no longer the owner (skip: unset)
 //   FORWARDER       trusted forwarder to set (skip: unset)
 //   NEW_OWNER       ownership transfer target (skip: unset)
+//   PROXY           swap proxy to act on (default: live 0x0240cF8b…87e4)
 //   EXECUTE=1       broadcast instead of dry-running
 //   CONFIRM_OWNER   must equal NEW_OWNER exactly — the typo guard
 const { ethers } = require("hardhat");
 
-const PROXY = "0x5e19b7288E624921128742e6305372a0C980D6CE";
+// PROXY defaults to the LIVE commissioned swap. The old 0x5e19… deploy is
+// PM-owned and abandoned; pointing this script at it by default would print a
+// plan nobody holds the key to execute.
+const PROXY = process.env.PROXY || "0x0240cF8bF1fC2636DA3a8d2a123439E78C2287e4";
 
 const ABI = [
   "function owner() view returns (address)",

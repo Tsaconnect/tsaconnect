@@ -36,8 +36,9 @@ import {
   itSell,
   IT_AGREEMENT_REQUIRED,
   type ITFeeQuote,
+  getWithdrawDestinations,
 } from '@/services/itApi';
-import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
+import { getBanksForCountry, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import { mcgpAmountToNgn } from '@/utils/sellQuote';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { RAILS } from '@/constants/rails';
@@ -45,14 +46,34 @@ import { RAILS } from '@/constants/rails';
 type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
 
 // Product-available options only (more currencies/rails/countries later).
-const CURRENCY_OPTIONS: PickerItem[] = [
-  { id: 'NGN', label: 'NGN · Nigerian Naira', icon: 'wallet' },
-];
+// Payout destinations come from GET /it/withdraw/destinations, never a literal
+// list. That endpoint is the same source Sell validates against, so anything
+// rendered here is guaranteed to be accepted — a hardcoded option could offer a
+// rail the API would reject, and the user would only find out after committing.
+const CURRENCY_META: Record<string, { label: string; country: string; digits: number }> = {
+  NGN: { label: 'NGN · Nigerian Naira', country: 'NG', digits: 10 },
+  GHS: { label: 'GHS · Ghanaian Cedi', country: 'GH', digits: 13 },
+  USD: { label: 'USD · US Dollar', country: 'US', digits: 12 },
+  EUR: { label: 'EUR · Euro', country: '', digits: 34 },
+  GBP: { label: 'GBP · Pound Sterling', country: 'GB', digits: 8 },
+};
+
+function currencyLabelFor(code: string): string {
+  return CURRENCY_META[code]?.label ?? code;
+}
+function countryFor(code: string): string {
+  return CURRENCY_META[code]?.country ?? '';
+}
+// Account-number length differs by market: NUBAN is exactly 10, Ghanaian and
+// IBAN-style numbers are longer and variable. Used as an upper bound plus a
+// "long enough to be real" floor rather than an exact match, so a valid foreign
+// account is never rejected for not looking Nigerian.
+function accountDigitsFor(code: string): number {
+  return CURRENCY_META[code]?.digits ?? 34;
+}
+
 const METHOD_OPTIONS: PickerItem[] = [
   { id: 'bank', label: 'Bank transfer', icon: 'bank' },
-];
-const COUNTRY_OPTIONS: PickerItem[] = [
-  { id: 'NG', label: 'Nigeria', icon: 'location' },
 ];
 
 function feeDisplay(line?: { display?: string } | null): string {
@@ -84,11 +105,13 @@ export default function ITSell() {
   const [resolveError, setResolveError] = useState<null | 'not_found' | 'unavailable'>(null);
 
   const [payoutCurrency, setPayoutCurrency] = useState('NGN');
-  const [transferMethod, setTransferMethod] = useState('bank');
+  const [transferMethod, setTransferMethod] = useState<'bank' | 'mobile_money'>('bank');
   const [country, setCountry] = useState('NG');
   const [showCurrencyPicker, setShowCurrencyPicker] = useState(false);
+  const [currencyOptions, setCurrencyOptions] = useState<PickerItem[]>([
+    { id: 'NGN', label: currencyLabelFor('NGN'), icon: 'wallet' },
+  ]);
   const [showMethodPicker, setShowMethodPicker] = useState(false);
-  const [showCountryPicker, setShowCountryPicker] = useState(false);
 
   // Frozen snapshot for the Review screen — set when leaving the form so a
   // late fee response can't pair with a different amount the user edited.
@@ -112,12 +135,40 @@ export default function ITSell() {
     })();
   }, []);
 
+  // Payout destinations, straight from the catalog Sell validates against.
+  // On failure we keep the NGN-only default rather than showing nothing: a
+  // Nigerian user can still cash out, which is the overwhelmingly common case.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Nigeria-only for now (locked country). getNigerianBanks prefers
-      // GET /p2p/banks — Flutterwave ListBanks(NG) when FW is the directory.
-      const list = await getNigerianBanks();
+      const res = await getWithdrawDestinations();
+      if (cancelled || !res.success || !res.data?.destinations?.length) return;
+      const banksOnly = res.data.destinations.filter((d) => d.rail === 'bank');
+      if (banksOnly.length === 0) return;
+      setCurrencyOptions(
+        banksOnly.map((d) => ({
+          id: d.currency,
+          label: currencyLabelFor(d.currency),
+          icon: 'wallet' as const,
+        }))
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Bank list follows the selected currency's country. Re-runs on change and
+  // clears the previous selection — a Nigerian bank code is meaningless on a
+  // Ghanaian rail, and silently keeping it would fail at payout.
+  useEffect(() => {
+    let cancelled = false;
+    setBanksLoading(true);
+    setBank(null);
+    setAccountNumber('');
+    setAccountName('');
+    (async () => {
+      const list = await getBanksForCountry(countryFor(payoutCurrency));
       if (!cancelled) {
         setBanks(list);
         setBanksLoading(false);
@@ -126,13 +177,16 @@ export default function ITSell() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [payoutCurrency]);
 
   // Debounced account-name lookup. Fires when a bank is selected and the
   // account number is a full 10-digit NUBAN — validates the number and
   // auto-fills the holder name. On provider outage the user can type the name.
   useEffect(() => {
-    if (!bank || accountNumber.length !== 10) {
+    // Name enquiry is NUBAN-specific — the provider resolves Nigerian account
+    // numbers only. For other rails the user types the holder name, which is
+    // why bankReady does not require `resolved`.
+    if (payoutCurrency !== 'NGN' || !bank || accountNumber.length !== 10) {
       setResolving(false);
       setResolved(false);
       setResolveError(null);
@@ -159,7 +213,7 @@ export default function ITSell() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [bank, accountNumber]);
+  }, [bank, accountNumber, payoutCurrency]);
 
   const bankItems: PickerItem[] = banks.map((b) => ({
     id: b.code,
@@ -168,16 +222,17 @@ export default function ITSell() {
   }));
 
   const currencyLabel =
-    CURRENCY_OPTIONS.find((o) => o.id === payoutCurrency)?.label ?? payoutCurrency;
+    currencyOptions.find((o) => o.id === payoutCurrency)?.label ?? currencyLabelFor(payoutCurrency);
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === transferMethod)?.label ?? transferMethod;
-  const countryLabel =
-    COUNTRY_OPTIONS.find((o) => o.id === country)?.label ?? country;
+  const countryLabel = country || '—';
 
   const ngnPayout = mcgpAmountToNgn(amount, sellRateKobo);
+  const acctDigits = accountDigitsFor(payoutCurrency);
   const bankReady =
     !!bank?.code &&
-    accountNumber.trim().length === 10 &&
+    accountNumber.trim().length >= Math.min(8, acctDigits) &&
+    accountNumber.trim().length <= acctDigits &&
     accountName.trim().length >= 2 &&
     !resolving &&
     resolveError !== 'not_found';
@@ -264,8 +319,8 @@ export default function ITSell() {
     }
 
     const r = await itSell(wei.toString(), {
-      destinationCurrency: 'NGN',
-      railType: 'bank',
+      destinationCurrency: payoutCurrency,
+      railType: transferMethod,
       bankCode: reviewBankCode,
       accountNumber: reviewAccountNumber,
       accountName: reviewAccountName,
@@ -473,12 +528,11 @@ export default function ITSell() {
           leftIcon="bank"
           onPress={() => setShowMethodPicker(true)}
         />
-        <SelectRow
-          label="Country / region"
-          value={countryLabel}
-          leftIcon="location"
-          onPress={() => setShowCountryPicker(true)}
-        />
+        {/* Country is DERIVED from the payout currency rather than chosen.
+            Two independent pickers can disagree, and a currency/country
+            mismatch is only discovered by the provider at payout — after the
+            on-chain debit. Read-only keeps them impossible to desync. */}
+        <SummaryRow label="Country / region" value={countryLabel} />
 
         <SelectRow
           label="Bank"
@@ -581,10 +635,11 @@ export default function ITSell() {
         visible={showCurrencyPicker}
         onClose={() => setShowCurrencyPicker(false)}
         title="Payout currency"
-        items={CURRENCY_OPTIONS}
+        items={currencyOptions}
         selectedId={payoutCurrency}
         onSelect={(item) => {
           setPayoutCurrency(item.id);
+          setCountry(countryFor(item.id));
           setShowCurrencyPicker(false);
         }}
       />
@@ -595,19 +650,8 @@ export default function ITSell() {
         items={METHOD_OPTIONS}
         selectedId={transferMethod}
         onSelect={(item) => {
-          setTransferMethod(item.id);
+          setTransferMethod(item.id as 'bank' | 'mobile_money');
           setShowMethodPicker(false);
-        }}
-      />
-      <PickerSheet
-        visible={showCountryPicker}
-        onClose={() => setShowCountryPicker(false)}
-        title="Country / region"
-        items={COUNTRY_OPTIONS}
-        selectedId={country}
-        onSelect={(item) => {
-          setCountry(item.id);
-          setShowCountryPicker(false);
         }}
       />
       <PickerSheet
