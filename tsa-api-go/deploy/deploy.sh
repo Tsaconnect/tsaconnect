@@ -6,7 +6,15 @@
 #
 # Usage: deploy.sh [<git-ref>] [--force]
 set -Eeuo pipefail
-umask 077
+# 022, NOT 077. The release tree must be readable and executable by the SERVICE
+# user (tsa), which is a different account from the deploy user. Under umask 077
+# `go build` produces a 0700 binary that tsa-api.service cannot exec, and the
+# service never starts — verified on a rehearsal host.
+#
+# Nothing secret is written by this script: shared/env is provisioned once at 0600
+# with an ACL for tsa, and the database dumps are written by tsa-api-backup.service,
+# which carries its own UMask=0077.
+umask 022
 
 ROOT=/srv/tsa-api
 REPO=$ROOT/repo
@@ -97,6 +105,9 @@ log "building $SHORT"
   || fail "build failed — live service untouched"
 
 [ -x "$REL/tsa-api" ] || fail "build produced no binary"
+# Explicit, so a future umask change cannot silently make the binary unexecutable
+# by the service user again.
+chmod 755 "$REL/tsa-api"
 
 # ── back up, then migrate ────────────────────────────────────────────────
 log "backing up the database"

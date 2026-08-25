@@ -6,7 +6,9 @@
 #
 # Usage: rollback.sh [--list] [<release-dir>]
 set -Eeuo pipefail
-umask 077
+# 022 for the same reason as deploy.sh: this script touches the release tree,
+# which the service user must be able to read and execute.
+umask 022
 
 ROOT=/srv/tsa-api
 RELEASES=$ROOT/releases
