@@ -4,7 +4,18 @@
 set -Eeuo pipefail
 
 TARGET_FILE=/srv/tsa-api/.release-target
-[ -r "$TARGET_FILE" ] || { echo "missing $TARGET_FILE" >&2; exit 1; }
+# Distinguish the two failures: during an incident "missing" and "unreadable" point
+# at completely different causes (a deploy that never got here, vs a permissions
+# mismatch between the deploy user and this unit's User=).
+if [ ! -e "$TARGET_FILE" ]; then
+  echo "missing $TARGET_FILE — deploy.sh did not reach the migrate step" >&2
+  exit 1
+fi
+if [ ! -r "$TARGET_FILE" ]; then
+  echo "$TARGET_FILE exists but is not readable by $(id -un) — check its mode" >&2
+  ls -la "$TARGET_FILE" >&2
+  exit 1
+fi
 REL=$(cat "$TARGET_FILE")
 
 case "$REL" in
