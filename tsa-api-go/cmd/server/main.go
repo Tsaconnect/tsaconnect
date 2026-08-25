@@ -963,18 +963,7 @@ func main() {
 	router.Use(middleware.RequestLogger())
 
 	// Override health check with DB status
-	router.GET("/health", func(c *gin.Context) {
-		dbStatus := "connected"
-		if err := sqlDB.Ping(); err != nil {
-			dbStatus = "disconnected"
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":   "ok",
-			"message":  "TSA API is running",
-			"database": dbStatus,
-		})
-	})
+	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
 
 	// Setup all routes
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler)
