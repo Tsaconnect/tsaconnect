@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"math/big"
 	"net/http"
@@ -59,6 +60,10 @@ func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwC
 }
 
 func main() {
+	migrateFlag := flag.Bool("migrate", false,
+		"run database migrations and exit; used by the deploy between build and restart")
+	flag.Parse()
+
 	// Load .env file (ignore error if file doesn't exist)
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
@@ -101,9 +106,22 @@ func main() {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
 
-	// Auto-migrate database tables
-	if err := config.AutoMigrate(); err != nil {
-		log.Fatalf("Failed to auto-migrate database: %v", err)
+	// Schema migration runs once per deploy, not once per process — several
+	// processes share this database during a cutover and would race on DDL locks.
+	switch resolveMigrateMode(*migrateFlag, os.Getenv("MIGRATE_ON_BOOT")) {
+	case migrateOnly:
+		if err := config.AutoMigrate(); err != nil {
+			log.Fatalf("Failed to auto-migrate database: %v", err)
+		}
+		log.Println("[migrate] schema migration complete")
+		return
+	case migrateOnBoot:
+		log.Println("[migrate] MIGRATE_ON_BOOT set — migrating during boot (development path)")
+		if err := config.AutoMigrate(); err != nil {
+			log.Fatalf("Failed to auto-migrate database: %v", err)
+		}
+	case migrateSkip:
+		log.Println("[migrate] skipped at boot; deploy runs `-migrate` (set MIGRATE_ON_BOOT=true for local dev)")
 	}
 
 	// Initialize the unified fee-rate config (seeds defaults if the table is

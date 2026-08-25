@@ -101,6 +101,9 @@ Required (set in `.env`):
 - `PORT` - Server port (defaults to `5000`)
 - `ENV` - `development` or `production`
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
+- `MIGRATE_ON_BOOT` - run schema migration during boot. Leave unset wherever a deploy
+  script exists: the deploy runs `tsa-api -migrate` once, before starting the service,
+  so processes never race on DDL. Set `true` for local development.
 
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
