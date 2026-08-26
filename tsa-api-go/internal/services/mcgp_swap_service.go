@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -27,6 +28,27 @@ type MCGPSwapService struct {
 	address  string
 	cfg      *config.Config
 	operator ReleaseSigner // signs+broadcasts the IT operator ops; nil = IT dormant
+
+	// signMu serialises build+sign+broadcast for the operator EOA.
+	//
+	// buildUnsignedTx reads the nonce with PendingNonceAt, which reflects only
+	// what the node has already seen. Two concurrent callers receive the same
+	// value while the first transaction is still un-mined, sign different
+	// payloads with it, and the node silently drops one — after which the caller
+	// burns a 60s WaitForReceipt on a transaction that will never exist. The
+	// scheduler runs one goroutine per job (bill-reconciler settles, pm-recovery
+	// credits) alongside the HTTP request path, all sharing this one signer, so
+	// this races in production today.
+	//
+	// Holding the lock across the read is what fixes it: the nonce is read only
+	// after the previous broadcast has returned.
+	//
+	// Deliberately NOT an in-process nonce counter. A counter advances even when
+	// buildUnsignedTx fails at EstimateGas — a duplicate debitRef ("Debit exists")
+	// and an over-draw both revert there, routinely — and one burned nonce leaves
+	// every later transaction queued at the node forever, each reporting a tx hash
+	// that never mines. PendingNonceAt self-heals from a gap; a counter does not.
+	signMu sync.Mutex
 }
 
 // NewMCGPSwapService returns a service bound to cfg.MCGPSwapBAddress on the
@@ -366,6 +388,12 @@ func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte
 	if s.operator == nil {
 		return "", fmt.Errorf("IT operator signer not configured")
 	}
+
+	// The nonce read inside buildUnsignedTx and the broadcast must not interleave
+	// with another caller's — see signMu.
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+
 	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 	if err != nil {
 		return "", err
