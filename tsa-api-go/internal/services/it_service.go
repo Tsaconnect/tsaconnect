@@ -24,7 +24,7 @@ var (
 	ErrITNoRate        = errors.New("IT rate not set")
 	ErrITNoPM          = errors.New("Instant Transfer is unavailable: no payment account configured")
 	ErrITBadState      = errors.New("invalid IT intent state")
-	ErrITInsufficient  = errors.New("insufficient credited premium")
+	ErrITInsufficient  = errors.New("insufficient spendable premium")
 	ErrITFxUnavailable = errors.New("Instant Transfer pricing is temporarily unavailable")
 )
 
@@ -518,11 +518,14 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 	if inflight > 0 {
 		return nil, fmt.Errorf("you have a sale already in progress; finish it first")
 	}
-	credited, err := s.swap.PremiumCredited(walletAddr)
+	// Spendable MCGP is spendable everywhere — IT sell, stores, bills — so the
+	// sell may draw on the USDC-bought bucket once credited is exhausted, the
+	// same way spend()/bills already do. The contract drains credited first.
+	spendable, err := s.swap.PremiumBalance(walletAddr)
 	if err != nil {
 		return nil, err
 	}
-	if credited.Cmp(amount) < 0 {
+	if spendable.Cmp(amount) < 0 {
 		return nil, ErrITInsufficient
 	}
 	_, sellRate, fx, err := s.EffectiveKoboRates(ctx)
@@ -587,7 +590,10 @@ func (s *ITService) CreateSellIntent(ctx context.Context, userID uuid.UUID, wall
 		return nil, err
 	}
 
-	txHash, err := s.swap.OperatorDebitPremium(ctx, walletAddr, amount, debitRef)
+	// maxFromBought = amount: the whole sell may come from bought premium when
+	// the user holds no credited premium. The contract records the bought draw
+	// per debitRef, so a reversal restores each bucket exactly.
+	txHash, err := s.swap.OperatorDebitSpendable(ctx, walletAddr, amount, amount, debitRef)
 	if err != nil {
 		_ = s.setStatus(ctx, intent, models.ITStatusFailed, "debit broadcast: "+err.Error())
 		return nil, err
@@ -616,7 +622,7 @@ func (s *ITService) SettleSell(ctx context.Context, intentID uuid.UUID, walletAd
 	return s.resolveSell(ctx, intentID, walletAddr, true)
 }
 
-// ReverseSell restores the user's credited premium after a failed NGN payout.
+// ReverseSell restores the user's premium (each bucket exactly) after a failed NGN payout.
 func (s *ITService) ReverseSell(ctx context.Context, intentID uuid.UUID, walletAddr string) (*models.ITIntent, error) {
 	return s.resolveSell(ctx, intentID, walletAddr, false)
 }
