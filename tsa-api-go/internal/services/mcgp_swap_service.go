@@ -23,8 +23,20 @@ import (
 //
 // Dormant-by-default: when MCGP_SWAP_B_ADDRESS is unset, IsConfigured() is false
 // and the routes are not registered.
+// chainTxBuilder is the slice of *blockchain.EVMClient that buildUnsignedTx
+// needs. An interface so a test can observe when the nonce is read — the whole
+// point of signMu is that the read happens inside it, and a fake signer alone
+// cannot see that.
+type chainTxBuilder interface {
+	GetNonce(address string) (uint64, error)
+	SuggestGasPrice() (*big.Int, error)
+	EstimateGas(msg ethereum.CallMsg) (uint64, error)
+	ChainID() *big.Int
+}
+
 type MCGPSwapService struct {
 	client   *blockchain.EVMClient
+	chain    chainTxBuilder // == client in production; nil when there is no client
 	address  string
 	cfg      *config.Config
 	operator ReleaseSigner // signs+broadcasts the IT operator ops; nil = IT dormant
@@ -36,9 +48,12 @@ type MCGPSwapService struct {
 	// value while the first transaction is still un-mined, sign different
 	// payloads with it, and the node silently drops one — after which the caller
 	// burns a 60s WaitForReceipt on a transaction that will never exist. The
-	// scheduler runs one goroutine per job (bill-reconciler settles, pm-recovery
-	// credits) alongside the HTTP request path, all sharing this one signer, so
-	// this races in production today.
+	// scheduler's bill-reconciler settles and reverses on this key while the HTTP
+	// request path debits on it, so this races in production today.
+	//
+	// NOTE: this lock covers this service's signer only. The PM release key has
+	// the same unguarded race via P2PTradeService.AutoRelease, on a different
+	// EOA, and is NOT fixed here.
 	//
 	// Holding the lock across the read is what fixes it: the nonce is read only
 	// after the previous broadcast has returned.
@@ -58,7 +73,14 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 	if cfg != nil {
 		addr = cfg.MCGPSwapBAddress
 	}
-	return &MCGPSwapService{client: client, address: addr, cfg: cfg}
+	svc := &MCGPSwapService{client: client, address: addr, cfg: cfg}
+	// Guard against storing a typed-nil in the interface: a nil *EVMClient
+	// assigned to chainTxBuilder would compare non-nil and defeat the
+	// no-client short-circuit in buildUnsignedTx.
+	if client != nil {
+		svc.chain = client
+	}
+	return svc
 }
 
 // SetOperatorSigner wires the operator EOA signer used for the IT/NGN path
@@ -91,7 +113,7 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 	if s.address == "" {
 		return nil, fmt.Errorf("MCGP swap contract address is empty")
 	}
-	if s.client == nil {
+	if s.chain == nil {
 		if s.cfg != nil && s.cfg.Env == "production" {
 			return nil, fmt.Errorf("blockchain client not available")
 		}
@@ -102,15 +124,15 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 	fromAddr := common.HexToAddress(from)
 	contractAddr := common.HexToAddress(s.address)
 
-	nonce, err := s.client.GetNonce(from)
+	nonce, err := s.chain.GetNonce(from)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
-	gasPrice, err := s.client.SuggestGasPrice()
+	gasPrice, err := s.chain.SuggestGasPrice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
-	gasLimit, err := s.client.EstimateGas(ethereum.CallMsg{From: fromAddr, To: &contractAddr, Data: callData})
+	gasLimit, err := s.chain.EstimateGas(ethereum.CallMsg{From: fromAddr, To: &contractAddr, Data: callData})
 	if err != nil {
 		return nil, fmt.Errorf("gas estimation failed (transaction would likely revert): %w", err)
 	}
@@ -122,7 +144,7 @@ func (s *MCGPSwapService) buildUnsignedTx(from string, callData []byte) ([]byte,
 		To:       s.address,
 		Value:    "0",
 		Data:     common.Bytes2Hex(callData),
-		ChainID:  s.client.ChainID().String(),
+		ChainID:  s.chain.ChainID().String(),
 	}
 	return json.Marshal(tx)
 }
