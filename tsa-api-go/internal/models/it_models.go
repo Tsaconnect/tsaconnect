@@ -8,8 +8,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM, routed
-// through Contract B's spend-only premiumCredited bucket.
+// IT (Instant Transfer) — buy/sell MCGP with Naira via the company PM. Buys
+// credit Contract B's premiumCredited bucket; sells debit spendable premium
+// (credited first, then bought).
 
 // IT intent directions + statuses.
 const (

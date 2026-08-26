@@ -131,7 +131,7 @@ func (h *ITHandler) GetBalance(c *gin.Context) {
 	legacy, _ := swap.LegacyRemaining(user.WalletAddress)
 	utils.SuccessResponse(c, http.StatusOK, "Balance", gin.H{
 		"premiumBought":   bigOrZero(bought),   // self-exitable (USDC-bought)
-		"premiumCredited": bigOrZero(credited), // IT/NGN, spend-only
+		"premiumCredited": bigOrZero(credited), // IT/NGN-credited
 		"pendingSettle":   bigOrZero(pending),  // in-flight NGN sell
 		"legacyRemaining": bigOrZero(legacy),
 	})
@@ -347,7 +347,7 @@ type itSellReq struct {
 	MobileMsisdn        string `json:"mobileMsisdn"`
 }
 
-// POST /api/it/sell — debit credited premium (on-chain) and open the NGN payout.
+// POST /api/it/sell — debit spendable premium (credited first, then bought) and open the NGN payout.
 func (h *ITHandler) Sell(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {

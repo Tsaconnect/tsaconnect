@@ -87,7 +87,7 @@ export default function ITSell() {
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
-  const [credited, setCredited] = useState('0'); // wei
+  const [spendable, setSpendable] = useState('0'); // wei, bought + credited
   const [sellRateKobo, setSellRateKobo] = useState('0');
   const [receiveLabel, setReceiveLabel] = useState('');
   const [ngnOutValue, setNgnOutValue] = useState<number | null>(null);
@@ -130,7 +130,11 @@ export default function ITSell() {
   useEffect(() => {
     (async () => {
       const [b, r] = await Promise.all([getITBalance(), getITRate()]);
-      if (b.success && b.data) setCredited(b.data.premiumCredited);
+      // Spendable MCGP is spendable everywhere: IT sell draws on credited
+      // first, then USDC-bought, exactly like stores and bills.
+      if (b.success && b.data) {
+        setSpendable((BigInt(b.data.premiumBought || '0') + BigInt(b.data.premiumCredited || '0')).toString());
+      }
       if (r.success && r.data) setSellRateKobo(r.data.sellRateKobo);
     })();
   }, []);
@@ -251,8 +255,8 @@ export default function ITSell() {
       setError('Invalid amount');
       return;
     }
-    if (wei > BigInt(credited || '0')) {
-      setError('More than your spendable (credited) balance');
+    if (wei > BigInt(spendable || '0')) {
+      setError('More than your spendable balance');
       return;
     }
     if (resolveError === 'not_found') {
@@ -495,14 +499,14 @@ export default function ITSell() {
         <Card>
           <SummaryCard>
             <SummaryRow
-              label="Spendable (credited)"
-              value={`${Number(ethers.formatUnits(credited || '0', 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} MCGP`}
+              label="Spendable MCGP"
+              value={`${Number(ethers.formatUnits(spendable || '0', 18)).toLocaleString(undefined, { maximumFractionDigits: 4 })} MCGP`}
             />
           </SummaryCard>
         </Card>
 
         <Text variant="bodySm" style={{ color: colors.textMuted }}>
-          Sell credited MCGP for Naira. More payout currencies will open later.
+          Sell spendable MCGP for Naira. More payout currencies will open later.
         </Text>
 
         <AmountInput

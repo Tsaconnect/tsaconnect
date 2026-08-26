@@ -299,8 +299,8 @@ func TestCompanyPM_AlwaysConfiguredNoFallback(t *testing.T) {
 
 // ─── Sell: destination currency + rail (Task 2.4) ──────────────────────────
 //
-// CreateSellIntent's happy path calls the live chain (PremiumCredited, then
-// OperatorDebitPremium/VerifyOperatorEvent) before it ever persists the
+// CreateSellIntent's happy path calls the live chain (PremiumBalance, then
+// OperatorDebitSpendable/VerifyOperatorEvent) before it ever persists the
 // intent, and nothing in this package mocks that client (client=nil errors
 // "blockchain client not available" — true of every IT sell path today, not
 // new to this task). So the mapping CreateSellIntent uses to build the

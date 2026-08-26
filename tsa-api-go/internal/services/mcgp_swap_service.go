@@ -442,12 +442,11 @@ func (s *MCGPSwapService) OperatorDebitPremium(ctx context.Context, user string,
 }
 
 // OperatorDebitSpendable begins a debit that may draw on the user's BOUGHT
-// premium, up to maxFromBought.
+// premium, up to maxFromBought. The contract drains credited first.
 //
-// Use this only where spending self-exitable value is intended — paying a utility
-// bill from "spendable MCGP". IT sell must keep using OperatorDebitPremium, which
-// the contract confines to the credited bucket, so a bug here cannot quietly sell
-// a user's bought premium for Naira at the wrong exit rate.
+// Product rule: spendable MCGP is spendable everywhere — bills and IT sell
+// both use this. OperatorDebitPremium remains for callers that must be
+// confined to the credited bucket.
 func (s *MCGPSwapService) OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error) {
 	data, err := s.pack("debitSpendable", common.HexToAddress(user), amount, maxFromBought, debitRef)
 	if err != nil {
