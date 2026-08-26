@@ -1,0 +1,22 @@
+# Install to /etc/systemd/system/tsa-api-backup.service
+#
+# pgenv holds PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE rather than a URL, so pg_dump
+# takes NO connection argument. A connection string on the command line lands in
+# /proc/<pid>/cmdline, which is world-readable by default; /proc/<pid>/environ is not.
+[Unit]
+Description=TSA Connect API — pre-migration database backup (oneshot)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=tsa-deploy
+Group=tsa-deploy
+EnvironmentFile=/srv/tsa-api/shared/pgenv
+ExecStart=/srv/tsa-api/bin/backup.sh
+TimeoutStartSec=1800
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/tsa-api/shared/backups
+ProtectHome=true

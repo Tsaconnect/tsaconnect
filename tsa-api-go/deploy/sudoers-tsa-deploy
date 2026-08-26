@@ -1,0 +1,18 @@
+# Install to /etc/sudoers.d/tsa-deploy, mode 0440, root:root
+# Validate BEFORE installing:  visudo -cf deploy/sudoers-tsa-deploy
+#
+# sudo matches argv literally, so the deploy scripts must invoke these with exactly
+# the absolute paths and unit names written here.
+#
+# Deliberately narrow: specific units, specific verbs. No systemd-run (it would run
+# arbitrary commands as root), no daemon-reload, no wildcards.
+Cmnd_Alias TSA_DEPLOY_SVC = /usr/bin/systemctl restart tsa-api.service, \
+                            /usr/bin/systemctl start tsa-api.service, \
+                            /usr/bin/systemctl is-enabled tsa-api.service, \
+                            /usr/bin/systemctl stop tsa-api.service, \
+                            /usr/bin/systemctl start tsa-api-migrate.service, \
+                            /usr/bin/systemctl start tsa-api-backup.service, \
+                            /usr/bin/systemctl reload nginx.service, \
+                            /usr/sbin/nginx -t
+
+tsa-deploy ALL=(root) NOPASSWD: TSA_DEPLOY_SVC

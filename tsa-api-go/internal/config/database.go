@@ -32,18 +32,6 @@ func AutoMigrate() error {
 	// keep chain_id = NULL (the legacy global), so this is a safe backfill.
 	DB.Exec("DROP INDEX IF EXISTS idx_fee_config_feature_token")
 
-	// IT rates moved from Naira columns (buy_rate_kobo / sell_rate_kobo) to an
-	// admin-set USD price + sell-discount, with Naira derived live from FX. The
-	// legacy row carries no USD value and the new columns are NOT NULL, so drop
-	// the legacy table and let AutoMigrate recreate it; the admin re-sets the
-	// price after deploy (no data migration — dev feature). Guarded on the legacy
-	// column so this runs once and never wipes a USD-priced row on later boots.
-	if DB.Migrator().HasTable("it_rates") && DB.Migrator().HasColumn(&models.ITRate{}, "buy_rate_kobo") {
-		if err := DB.Migrator().DropTable("it_rates"); err != nil {
-			return err
-		}
-	}
-
 	if err := DB.AutoMigrate(
 		// Currency registry — the sole validation authority for any currency
 		// reaching a money path. Rows are seeded per-row (never overwritten) by

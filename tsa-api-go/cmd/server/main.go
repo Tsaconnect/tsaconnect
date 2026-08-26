@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"math/big"
 	"net/http"
@@ -59,6 +60,10 @@ func pmProvisioner(cfg *config.Config, fwClient *services.FlutterwaveClient, fwC
 }
 
 func main() {
+	migrateFlag := flag.Bool("migrate", false,
+		"run database migrations and exit; used by the deploy between build and restart")
+	flag.Parse()
+
 	// Load .env file (ignore error if file doesn't exist)
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
@@ -101,9 +106,22 @@ func main() {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
 
-	// Auto-migrate database tables
-	if err := config.AutoMigrate(); err != nil {
-		log.Fatalf("Failed to auto-migrate database: %v", err)
+	// Schema migration runs once per deploy, not once per process — several
+	// processes share this database during a cutover and would race on DDL locks.
+	switch resolveMigrateMode(*migrateFlag, os.Getenv("MIGRATE_ON_BOOT")) {
+	case migrateOnly:
+		if err := config.AutoMigrate(); err != nil {
+			log.Fatalf("Failed to auto-migrate database: %v", err)
+		}
+		log.Println("[migrate] schema migration complete")
+		return
+	case migrateOnBoot:
+		log.Println("[migrate] MIGRATE_ON_BOOT set — migrating during boot (development path)")
+		if err := config.AutoMigrate(); err != nil {
+			log.Fatalf("Failed to auto-migrate database: %v", err)
+		}
+	case migrateSkip:
+		log.Println("[migrate] skipped at boot; deploy runs `-migrate` (set MIGRATE_ON_BOOT=true for local dev)")
 	}
 
 	// Initialize the unified fee-rate config (seeds defaults if the table is
@@ -939,24 +957,21 @@ func main() {
 	// Create router with default middleware (logger and recovery)
 	router := gin.Default()
 
+	// nginx is the only proxy in front of this service and it always overwrites
+	// X-Forwarded-For (see deploy/nginx-tsa-api-site.conf). Without this, Gin trusts
+	// every peer and a client can choose the IP attributed to it — which drives the
+	// per-IP rate limiter and the auth/IT-agreement audit logs.
+	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		log.Fatalf("failed to set trusted proxies: %v", err)
+	}
+
 	// Apply global middleware
 	router.Use(middleware.CORS(cfg))
 	router.Use(middleware.SecurityHeaders())
 	router.Use(middleware.RequestLogger())
 
 	// Override health check with DB status
-	router.GET("/health", func(c *gin.Context) {
-		dbStatus := "connected"
-		if err := sqlDB.Ping(); err != nil {
-			dbStatus = "disconnected"
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":   "ok",
-			"message":  "TSA API is running",
-			"database": dbStatus,
-		})
-	})
+	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
 
 	// Setup all routes
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler)
