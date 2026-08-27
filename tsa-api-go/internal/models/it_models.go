@@ -197,6 +197,14 @@ type ITIntent struct {
 	// conversion. Conversion is asynchronous, so the intent waits in
 	// `converting` on this id until the transfer settles.
 	ConversionID string `gorm:"size:64;index" json:"conversionId,omitempty"`
+	// ConversionAttempts counts how many times a conversion has been
+	// initiated for this intent. Flutterwave's transfer reference doubles as
+	// an idempotency key, so a retry after a FAILED conversion must use a
+	// fresh reference or GetTransfer would keep returning the same stale
+	// FAILED transfer forever — this is folded into that reference. 0 is the
+	// correct value for every historical row (unlike Asset, this needs no
+	// separate "treat empty as X" reader function).
+	ConversionAttempts int `gorm:"default:0" json:"conversionAttempts,omitempty"`
 
 	// Dynamic virtual-account details issued for this buy intent (Flutterwave
 	// collections); shown to the buyer as the pay-into account.

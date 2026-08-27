@@ -345,6 +345,28 @@ func (s *ITService) SetStableConverter(c stableConverter, merchantID string) {
 // normally supplies it via SetStableConverter).
 func (s *ITService) SetStableTransfers(r stableTransferReader) { s.stableTransfers = r }
 
+// itConversionRef builds the provider transfer reference for a stablecoin→fiat
+// conversion.
+//
+// The reference doubles as Flutterwave's idempotency key (flutterwave_client.go),
+// which is exactly what a network-level retry needs — but it is exactly what
+// breaks a DELIBERATE retry after FinalizeConversion drops a FAILED conversion
+// back to deposit_confirmed: reusing the same reference would make Flutterwave
+// hand back the same stale FAILED transfer forever, and the self-heal path
+// could never actually heal. Folding ConversionAttempts into the reference
+// keeps it stable within one attempt (so redelivered ticks still hit the same
+// transfer) while making a genuinely new attempt mint a genuinely new one.
+//
+// Mirrors itPayoutRef's length accounting: Flutterwave rejects references
+// outside 6–42 chars. "IT-CONV-" (8) + the hyphen-less UUID (32) leaves 2
+// spare chars, enough for "-N" up to a single-digit attempt count — a
+// conversion failing and retrying ten times without operator intervention
+// would itself be the incident to investigate, so this budget is not expected
+// to bind in practice.
+func itConversionRef(intentID uuid.UUID, attempts int) string {
+	return fmt.Sprintf("IT-CONV-%s-%d", strings.ReplaceAll(intentID.String(), "-", ""), attempts)
+}
+
 // ConvertAndQueuePayout converts the user's credited stablecoin to fiat and
 // hands the intent to the existing payout path.
 //
@@ -425,7 +447,7 @@ func (s *ITService) ConvertAndQueuePayout(ctx context.Context, intentID uuid.UUI
 		s.stableMerchantID,
 		asset, currency,
 		FWAmount{Value: StableFromBaseUnits(received), AppliesTo: "source_currency"},
-		"IT-CONV-"+strings.ReplaceAll(intent.ID.String(), "-", ""),
+		itConversionRef(intent.ID, intent.ConversionAttempts),
 	)
 	if err != nil {
 		// Release the claim so the next tick retries rather than stranding it.
@@ -483,10 +505,16 @@ func (s *ITService) FinalizeConversion(ctx context.Context, intentID uuid.UUID) 
 		return s.db.WithContext(ctx).Model(intent).
 			Update("status", models.ITStatusDebited).Error
 	case "FAILED":
+		// Bump the attempt counter alongside the reset so the NEXT
+		// ConvertAndQueuePayout call mints a fresh reference (itConversionRef)
+		// instead of reusing the one that just resolved to this FAILED
+		// transfer — otherwise the retry would hit Flutterwave's idempotency
+		// key, get the same stale FAILED transfer back, and loop forever.
 		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-			"status":         models.ITStatusDepositConfirmed,
-			"failure_reason": "conversion failed: " + tr.ID,
-			"conversion_id":  "",
+			"status":              models.ITStatusDepositConfirmed,
+			"failure_reason":      "conversion failed: " + tr.ID,
+			"conversion_id":       "",
+			"conversion_attempts": intent.ConversionAttempts + 1,
 		}).Error
 	default:
 		return fmt.Errorf("%w: conversion %s is %s", ErrStableConversionPending, tr.ID, tr.Status)

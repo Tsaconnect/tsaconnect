@@ -24,15 +24,15 @@ type stubConverter struct {
 	transfer  FWTransfer
 	convErr   error
 	balErr    error
-	converted []struct{ src, dst string }
+	converted []struct{ src, dst, ref string }
 }
 
 func (s *stubConverter) FetchBalances(_ context.Context) ([]FWBalance, error) {
 	return s.balances, s.balErr
 }
 
-func (s *stubConverter) ConvertBalance(_ context.Context, _, src, dst string, _ FWAmount, _ string) (FWTransfer, error) {
-	s.converted = append(s.converted, struct{ src, dst string }{src, dst})
+func (s *stubConverter) ConvertBalance(_ context.Context, _, src, dst string, _ FWAmount, ref string) (FWTransfer, error) {
+	s.converted = append(s.converted, struct{ src, dst, ref string }{src, dst, ref})
 	return s.transfer, s.convErr
 }
 
@@ -223,5 +223,75 @@ func TestConvertAndQueuePayout_RefusesAnUnconfirmedIntent(t *testing.T) {
 
 	if err := s.ConvertAndQueuePayout(context.Background(), intent.ID); err == nil {
 		t.Fatal("converted for an intent whose deposit was never confirmed")
+	}
+}
+
+func TestConvertAndQueuePayout_RetryAfterFailedConversionUsesANewReference(t *testing.T) {
+	// The transfer reference doubles as Flutterwave's idempotency key. If a
+	// retry after a FAILED conversion reused the same reference, Flutterwave
+	// would hand back the same stale FAILED transfer forever and the
+	// self-heal path (FinalizeConversion's FAILED branch dropping back to
+	// deposit_confirmed) could never actually heal anything.
+	s := newStableSellDBService(t)
+	conv := &stubConverter{
+		balances: []FWBalance{{Currency: "USDC", AvailableBalance: 150}},
+		transfer: FWTransfer{ID: "trf_1", Status: "NEW"},
+	}
+	s.SetStableConverter(conv, "mrc_test")
+	s.SetStableTransfers(&stubTransfers{tr: FWTransfer{ID: "trf_1", Status: "FAILED"}})
+	intent := confirmedSellIntent(t, s)
+
+	if err := s.ConvertAndQueuePayout(context.Background(), intent.ID); err != nil {
+		t.Fatalf("first convert: %v", err)
+	}
+	if err := s.FinalizeConversion(context.Background(), intent.ID); err != nil {
+		t.Fatalf("finalize (failed): %v", err)
+	}
+	if err := s.ConvertAndQueuePayout(context.Background(), intent.ID); err != nil {
+		t.Fatalf("retry convert: %v", err)
+	}
+
+	if len(conv.converted) != 2 {
+		t.Fatalf("conversions = %d, want 2", len(conv.converted))
+	}
+	if conv.converted[0].ref == conv.converted[1].ref {
+		t.Fatalf("retry reused reference %q — Flutterwave would return the same stale FAILED transfer forever", conv.converted[0].ref)
+	}
+}
+
+func TestConvertAndQueuePayout_WaitsWhenTheAssetHasNoBalanceLineAtAll(t *testing.T) {
+	// Verified against a sandbox probe: GET /wallets/balances can return 26
+	// fiat currencies and no USDC/USDT line at all — not a zero-value line,
+	// no line whatsoever. This must fail exactly like the ordinary
+	// not-yet-credited wait: ErrStableCreditNotVisible, no conversion.
+	s := newStableSellDBService(t)
+	conv := &stubConverter{balances: []FWBalance{
+		{Currency: "NGN", AvailableBalance: 100000},
+		{Currency: "USD", AvailableBalance: 500},
+	}}
+	s.SetStableConverter(conv, "mrc_test")
+	intent := confirmedSellIntent(t, s)
+
+	err := s.ConvertAndQueuePayout(context.Background(), intent.ID)
+	if !errors.Is(err, ErrStableCreditNotVisible) {
+		t.Fatalf("err = %v, want ErrStableCreditNotVisible", err)
+	}
+	if len(conv.converted) != 0 {
+		t.Fatal("converted with no balance line for the asset at all")
+	}
+}
+
+func TestConvertAndQueuePayout_WaitsOnACompletelyEmptyBalancesResponse(t *testing.T) {
+	s := newStableSellDBService(t)
+	conv := &stubConverter{balances: []FWBalance{}}
+	s.SetStableConverter(conv, "mrc_test")
+	intent := confirmedSellIntent(t, s)
+
+	err := s.ConvertAndQueuePayout(context.Background(), intent.ID)
+	if !errors.Is(err, ErrStableCreditNotVisible) {
+		t.Fatalf("err = %v, want ErrStableCreditNotVisible", err)
+	}
+	if len(conv.converted) != 0 {
+		t.Fatal("converted on a completely empty balances response")
 	}
 }
