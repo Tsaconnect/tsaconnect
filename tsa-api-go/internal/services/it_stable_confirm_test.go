@@ -62,6 +62,16 @@ func TestReportStableDeposit_IsIdempotent(t *testing.T) {
 	if err := s.ReportStableDeposit(context.Background(), intent.ID, "0xsource"); err != nil {
 		t.Fatalf("second report: %v", err)
 	}
+	// A no-op error return isn't proof of anything by itself — an
+	// implementation that silently reset the hash or status on re-entry would
+	// also return nil here. Re-fetch and check the row itself didn't move.
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.DepositTxHash != "0xsource" {
+		t.Fatalf("depositTxHash changed on re-report: %q", got.DepositTxHash)
+	}
+	if got.Status != models.ITStatusDepositReported {
+		t.Fatalf("status changed on re-report: %q, want %q", got.Status, models.ITStatusDepositReported)
+	}
 }
 
 func TestConfirmStableDeposit_UsesTheVerifiedAmountNotTheQuotedOne(t *testing.T) {
@@ -173,8 +183,17 @@ func TestConfirmStableDeposit_IsIdempotent(t *testing.T) {
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
 		t.Fatalf("second confirm must be a no-op, got: %v", err)
 	}
+	// Re-fetch after the SECOND call and check every field the confirm writes
+	// — not just that it returned nil. A no-op error alone doesn't prove the
+	// row wasn't reset and re-written on re-entry.
 	got, _ := s.GetIntent(context.Background(), intent.ID)
 	if got.ReceivedAmount != "99884217" {
 		t.Fatalf("receivedAmount changed on re-confirm: %q", got.ReceivedAmount)
+	}
+	if got.SettledTxHash != "0xdest" {
+		t.Fatalf("settledTxHash changed on re-confirm: %q", got.SettledTxHash)
+	}
+	if got.Status != models.ITStatusDepositConfirmed {
+		t.Fatalf("status changed on re-confirm: %q, want %q", got.Status, models.ITStatusDepositConfirmed)
 	}
 }

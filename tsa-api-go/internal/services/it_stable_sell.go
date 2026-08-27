@@ -156,10 +156,35 @@ func (s *ITService) ReportStableDeposit(ctx context.Context, intentID uuid.UUID,
 	if intent.Status != models.ITStatusPendingDeposit && intent.Status != models.ITStatusDepositReported {
 		return ErrITBadState
 	}
-	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"deposit_tx_hash": srcTxHash,
-		"status":          models.ITStatusDepositReported,
-	}).Error
+
+	// Guard the write with the status this read just observed: a concurrent
+	// report (the app retrying while a redelivered webhook lands at the same
+	// moment) can otherwise both pass the checks above and both write. The
+	// predicate makes only one of them actually move the row — the loser's
+	// write affects zero rows instead of racing the winner's.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ?", intent.ID, intent.Status).
+		Updates(map[string]any{
+			"deposit_tx_hash": srcTxHash,
+			"status":          models.ITStatusDepositReported,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Lost the race. If the winner landed the row exactly where this call
+		// was trying to land it, that is a success from the caller's point of
+		// view — same idempotent contract as the early-return above.
+		reloaded, rErr := s.getIntent(ctx, intentID)
+		if rErr != nil {
+			return rErr
+		}
+		if reloaded.DepositTxHash == srcTxHash && reloaded.Status == models.ITStatusDepositReported {
+			return nil
+		}
+		return ErrITBadState
+	}
+	return nil
 }
 
 // ConfirmStableDeposit proves the user's funds reached Flutterwave and prices
@@ -242,12 +267,44 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 		return fmt.Errorf("it stable: received amount %s leaves nothing to pay out", received)
 	}
 
-	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"settled_tx_hash": status.DestTxHash,
-		"received_amount": received.String(),
-		"net_ngn_kobo":    net.String(),
-		"status":          models.ITStatusDepositConfirmed,
-	}).Error
+	// Re-guard the write with a status predicate rather than claiming into an
+	// in-progress state up front: the verification work above (LiFi + chain
+	// RPC) has to run before we know `received`/`net`, so there is nothing
+	// meaningful to claim into before then without adding a new intermediate
+	// status. A concurrent confirm (webhook + poller landing together) can
+	// still both do that work, but verification is deterministic, so they'd
+	// compute the same figures — this predicate is what stops them from both
+	// COMMITTING, which is what matters: it keeps the deposit_reported →
+	// deposit_confirmed transition single-writer, so ConvertAndQueuePayout's
+	// own claim() (it_stable_sell.go) never sees a double-fired trigger.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ?", intent.ID, models.ITStatusDepositReported).
+		Updates(map[string]any{
+			"settled_tx_hash": status.DestTxHash,
+			"received_amount": received.String(),
+			"net_ngn_kobo":    net.String(),
+			"status":          models.ITStatusDepositConfirmed,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Lost the race to a concurrent confirm. Re-check rather than surface
+		// a spurious failure: if the winner already advanced the intent past
+		// deposit_reported, this call is the same idempotent no-op the
+		// early-return at the top of this method already grants.
+		reloaded, rErr := s.getIntent(ctx, intentID)
+		if rErr != nil {
+			return rErr
+		}
+		switch reloaded.Status {
+		case models.ITStatusDepositConfirmed, models.ITStatusConverting, models.ITStatusDebited, models.ITStatusSettled:
+			return nil
+		default:
+			return ErrITBadState
+		}
+	}
+	return nil
 }
 
 // ErrStableCreditNotVisible means the funds are proven on-chain but Flutterwave
