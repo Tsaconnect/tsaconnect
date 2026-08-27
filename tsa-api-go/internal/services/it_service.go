@@ -94,6 +94,12 @@ type ITService struct {
 	// See it_quote.go.
 	quoteCacheMu sync.Mutex
 	quoteCache   map[string]quoteCacheEntry
+
+	// stableSpreadBps and stableRateLockTTL price brokered stablecoin trades.
+	// See it_stable_quote.go.
+	stableSpreadBps   int64
+	stableRateLockTTL time.Duration
+	stableRateTolBps  int64
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
