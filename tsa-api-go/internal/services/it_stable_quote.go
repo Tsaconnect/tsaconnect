@@ -59,11 +59,12 @@ type StableSellQuote struct {
 // NOTHING rather than guess, mirroring how CreateBuyIntent refuses to lock a
 // quote against stale FX.
 func (s *ITService) checkRatePlausible(ctx context.Context, fiatPerUnit *big.Rat, currency string) error {
-	// ratePerUsdFor already encapsulates the FxProvider/FxRateProvider
-	// type-assert and its NGN fallback — reuse it rather than duplicating that
-	// logic. `ok == false` means no independent opinion is available, in which
-	// case there is nothing to assert and quoting proceeds.
-	perUSD, ok := s.ratePerUsdFor(ctx, currency)
+	// stablePlausibilityRateFor, not ratePerUsdFor: the guard must refuse to
+	// act on a rate it cannot trust, so a stale independent feed has to
+	// collapse to "no opinion" here. `ok == false` means no independent
+	// opinion is available, in which case there is nothing to assert and
+	// quoting proceeds.
+	perUSD, ok := s.stablePlausibilityRateFor(ctx, currency)
 	if !ok || perUSD <= 0 {
 		return nil
 	}
@@ -79,6 +80,39 @@ func (s *ITService) checkRatePlausible(ctx context.Context, fiatPerUnit *big.Rat
 			ErrStableRateImplausible, fiatPerUnit.FloatString(4), currency, perUSD)
 	}
 	return nil
+}
+
+// stablePlausibilityRateFor resolves an independent fiat-per-USD rate for the
+// plausibility guard, honouring staleness.
+//
+// This deliberately duplicates ratePerUsdFor's FxProvider/FxRateProvider
+// type-assert and NGN fallback rather than reusing it. The two call sites have
+// opposite requirements: it_fees.go's fee pricing wants a best-effort answer
+// even from a stale feed (ratePerUsdFor discards the stale flag on purpose),
+// while this guard exists specifically to REFUSE to act on a rate it cannot
+// trust — so here a stale feed must collapse to "no opinion" (skip the check)
+// rather than being treated as ground truth. Making ratePerUsdFor itself
+// fail-closed on stale would silently change live fee pricing as a side
+// effect, so that function is left untouched.
+func (s *ITService) stablePlausibilityRateFor(ctx context.Context, currency string) (float64, bool) {
+	if s.fx == nil {
+		return 0, false
+	}
+	if multi, ok := s.fx.(FxRateProvider); ok {
+		rate, stale, err := multi.RatePerUsd(ctx, currency)
+		if err != nil || stale || rate <= 0 {
+			return 0, false
+		}
+		return rate, true
+	}
+	if !strings.EqualFold(strings.TrimSpace(currency), "NGN") {
+		return 0, false
+	}
+	rate, stale, err := s.fx.NgnPerUsd(ctx)
+	if err != nil || stale || rate <= 0 {
+		return 0, false
+	}
+	return rate, true
 }
 
 // SetStableRateToleranceBps sets how far the provider rate may stray from the
@@ -202,6 +236,23 @@ func (s *ITService) applyStableSellFees(ctx context.Context, q *StableSellQuote)
 	if err != nil {
 		return fmt.Errorf("it stable quote: %w", err)
 	}
+	// The platform fee on stablecoin flows is a flat USD amount
+	// (config.PlatformStableUSD) that FeeQuoteService folds into Currency via
+	// FxMinorPerUSD — required for any non-USD currency, else Quote returns
+	// ErrFeeQuoteNeedFx (see fee_quote_service.go). Resolved the same
+	// best-effort way GetQuote's handler does for the same field: ok==false
+	// (fx unavailable) leaves it nil and the fee engine's own ErrFeeQuoteNeedFx
+	// surfaces naturally — this is fee pricing, not the price-safety guard, so
+	// ratePerUsdFor's best-effort-on-stale behaviour is correct here, not
+	// stablePlausibilityRateFor's fail-on-stale.
+	var fxMinorPerUSD *big.Int
+	if !strings.EqualFold(strings.TrimSpace(q.Currency), "USD") {
+		if usdRate, ok := s.ratePerUsdFor(ctx, q.Currency); ok {
+			if minor, mErr := MinorPerUSDFromRate(usdRate); mErr == nil {
+				fxMinorPerUSD = minor
+			}
+		}
+	}
 	fees, err := s.feeQuoter.Quote(ctx, FeeQuoteInput{
 		Flow:            FeeFlowWithdraw,
 		Asset:           FeeAsset(q.Asset),
@@ -209,6 +260,7 @@ func (s *ITService) applyStableSellFees(ctx context.Context, q *StableSellQuote)
 		Amount:          amountMajor,
 		Currency:        q.Currency,
 		PaymentCurrency: q.Currency,
+		FxMinorPerUSD:   fxMinorPerUSD,
 	})
 	if err != nil {
 		return fmt.Errorf("it stable quote: %w", err)

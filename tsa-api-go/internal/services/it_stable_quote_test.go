@@ -146,17 +146,39 @@ func TestQuoteStableSell_AcceptsARateNearTheIndependentFeed(t *testing.T) {
 }
 
 func TestQuoteStableSell_SkipsThePlausibilityCheckWhenTheFeedIsStale(t *testing.T) {
-	// The guard must not become a second outage surface: if the checker itself
-	// is unavailable, quoting proceeds on the provider rate.
+	// The guard must not become a second outage surface: if the independent
+	// feed is stale, quoting proceeds on the provider rate rather than
+	// treating a stale number as ground truth. The provider rate here
+	// (₦5,000/USDC) sits well outside ±25% of the stubbed ₦1,500/USD feed —
+	// this is diagnostic: if staleness were not honoured, the rate would be
+	// (wrongly) rejected as implausible. See the non-stale counterpart below,
+	// which asserts the identical rate IS rejected once the feed is fresh.
 	q := &stubStableRateQuoter{rate: FWRate{
 		Source:      FWMoney{Currency: "USDC", Amount: 1},
-		Destination: FWMoney{Currency: "NGN", Amount: 1650.25},
+		Destination: FWMoney{Currency: "NGN", Amount: 5000},
 	}}
 	s := newStableSellTestService(t, q)
 	s.fx = stubFx{ngn: 1500, stale: true}
 
 	if _, err := s.QuoteStableSell(context.Background(), "USDC", "100", "NGN"); err != nil {
 		t.Fatalf("stale independent feed blocked a quote: %v", err)
+	}
+}
+
+func TestQuoteStableSell_RejectsTheSameRateWhenTheFeedIsFresh(t *testing.T) {
+	// Brackets the test above: the identical implausible rate, against the
+	// SAME feed value but fresh, must be rejected — proving staleness (not
+	// some other difference) is what changed the outcome there.
+	q := &stubStableRateQuoter{rate: FWRate{
+		Source:      FWMoney{Currency: "USDC", Amount: 1},
+		Destination: FWMoney{Currency: "NGN", Amount: 5000},
+	}}
+	s := newStableSellTestService(t, q)
+	s.fx = stubFx{ngn: 1500}
+
+	_, err := s.QuoteStableSell(context.Background(), "USDC", "100", "NGN")
+	if !errors.Is(err, ErrStableRateImplausible) {
+		t.Fatalf("err = %v, want ErrStableRateImplausible", err)
 	}
 }
 
@@ -240,6 +262,14 @@ func TestQuoteStableSell_AsksTheFeeEngineForAStablecoinWithdrawal(t *testing.T) 
 
 	if _, err := s.QuoteStableSell(context.Background(), "USDC", "100", "NGN"); err != nil {
 		t.Fatalf("QuoteStableSell: %v", err)
+	}
+	// Amount must be the MAJOR-unit decimal string ("162467.11"), not
+	// SpreadMinor's raw minor-unit string ("16246711") — the latter is the
+	// 100x denomination bug applyStableSellFees exists to avoid; this
+	// assertion makes a regression fail the test instead of only being
+	// caught by reading the code.
+	if fq.got.Amount != "162467.11" {
+		t.Errorf("amount = %q, want \"162467.11\"", fq.got.Amount)
 	}
 	if fq.got.Flow != FeeFlowWithdraw {
 		t.Errorf("flow = %v, want withdraw", fq.got.Flow)
