@@ -125,3 +125,126 @@ func (s *ITService) CreateStableSellIntent(
 		AmountDisplay:   fmt.Sprintf("%.6f", StableFromBaseUnits(q.AssetAmount)),
 	}, nil
 }
+
+// SetStableVerifier wires the two independent sources used to confirm that a
+// user's sell deposit reached Flutterwave: LiFi to FIND the destination
+// transaction, and an on-chain verifier to PROVE it moved the funds.
+// tokenAddrs maps asset symbol → the token contract on the deposit chain.
+func (s *ITService) SetStableVerifier(lifi *LiFiStatusClient, chain ERC20TransferVerifier, tokenAddrs map[string]string) {
+	s.stableLiFi = lifi
+	s.stableChain = chain
+	s.stableTokens = tokenAddrs
+}
+
+// ReportStableDeposit records the source transaction the user broadcast.
+//
+// Idempotent: the app may retry, and a repeat report of the same hash is a
+// no-op rather than a state reset.
+func (s *ITService) ReportStableDeposit(ctx context.Context, intentID uuid.UUID, srcTxHash string) error {
+	srcTxHash = strings.TrimSpace(srcTxHash)
+	if srcTxHash == "" {
+		return errors.New("it stable: empty deposit transaction hash")
+	}
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.DepositTxHash == srcTxHash && intent.Status != models.ITStatusPendingDeposit {
+		return nil // already reported
+	}
+	if intent.Status != models.ITStatusPendingDeposit && intent.Status != models.ITStatusDepositReported {
+		return ErrITBadState
+	}
+	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"deposit_tx_hash": srcTxHash,
+		"status":          models.ITStatusDepositReported,
+	}).Error
+}
+
+// ConfirmStableDeposit proves the user's funds reached Flutterwave and prices
+// the payout from what actually arrived.
+//
+// Two independent sources must agree before anything advances. LiFi resolves
+// the source transaction to a destination transaction; the chain receipt then
+// proves that transaction credited Flutterwave's address with the right token.
+// A provider's claim alone never moves money.
+//
+// The payout is computed at the LOCKED rate on the RECEIVED amount. Both halves
+// matter: the rate is locked because the user has already irreversibly
+// broadcast and cannot walk away from a reprice, and the amount is the received
+// one because a bridge delivers less than it was given — quoting the payout off
+// the original amount would disburse money the platform never received.
+func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Status == models.ITStatusDepositConfirmed ||
+		intent.Status == models.ITStatusConverting ||
+		intent.Status == models.ITStatusDebited ||
+		intent.Status == models.ITStatusSettled {
+		return nil // already confirmed; webhooks and ticks both redeliver
+	}
+	if intent.Status != models.ITStatusDepositReported {
+		return ErrITBadState
+	}
+	if s.stableLiFi == nil || s.stableChain == nil {
+		return errors.New("it stable: deposit verification is not configured")
+	}
+
+	status, err := s.stableLiFi.Status(ctx, intent.DepositTxHash)
+	if err != nil {
+		return err
+	}
+	switch status.Status {
+	case LiFiStatusDone:
+	case LiFiStatusFailed:
+		return fmt.Errorf("%w: %s", ErrLiFiFailed, intent.DepositTxHash)
+	default:
+		return fmt.Errorf("%w: %s", ErrLiFiPending, intent.DepositTxHash)
+	}
+
+	asset := models.ITIntentAsset(intent)
+	token := s.stableTokens[asset]
+	if token == "" {
+		return fmt.Errorf("it stable: no token address configured for %s", asset)
+	}
+	fwAddr, err := s.stableDepositAddress(stableDepositChain)
+	if err != nil {
+		return err
+	}
+
+	received, err := s.stableChain.VerifyTransfer(ctx, status.DestTxHash, token, fwAddr)
+	if err != nil {
+		return fmt.Errorf("it stable: could not verify %s on-chain: %w", status.DestTxHash, err)
+	}
+	if received.Sign() <= 0 {
+		return fmt.Errorf("%w: zero credited", ErrTransferNotFound)
+	}
+
+	// Scale the quoted net by how much actually arrived.
+	//
+	// Scaling rather than recomputing from the locked rate is deliberate: the
+	// quoted net already has the itemised fee line deducted, and recomputing
+	// rate × received would silently hand that fee back. Scaling keeps every
+	// component of the quote proportional to what the user actually delivered.
+	quoted, ok := new(big.Int).SetString(intent.AssetAmount, 10)
+	if !ok || quoted.Sign() <= 0 {
+		return errors.New("it stable: intent has no usable quoted amount")
+	}
+	quotedNet, ok := new(big.Int).SetString(intent.NetNgnKobo, 10)
+	if !ok || quotedNet.Sign() <= 0 {
+		return errors.New("it stable: intent has no usable quoted net")
+	}
+	net := new(big.Int).Quo(new(big.Int).Mul(quotedNet, received), quoted)
+	if net.Sign() <= 0 {
+		return fmt.Errorf("it stable: received amount %s leaves nothing to pay out", received)
+	}
+
+	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"settled_tx_hash": status.DestTxHash,
+		"received_amount": received.String(),
+		"net_ngn_kobo":    net.String(),
+		"status":          models.ITStatusDepositConfirmed,
+	}).Error
+}

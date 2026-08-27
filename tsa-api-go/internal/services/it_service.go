@@ -104,6 +104,11 @@ type ITService struct {
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.
 	stableDepositAddrs map[string]string
+
+	// Stablecoin sell deposit verification. See it_stable_sell.go.
+	stableLiFi   *LiFiStatusClient
+	stableChain  ERC20TransferVerifier
+	stableTokens map[string]string // asset symbol → token contract on the deposit chain
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
