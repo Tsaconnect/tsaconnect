@@ -520,3 +520,39 @@ func (s *ITService) FinalizeConversion(ctx context.Context, intentID uuid.UUID) 
 		return fmt.Errorf("%w: conversion %s is %s", ErrStableConversionPending, tr.ID, tr.Status)
 	}
 }
+
+// PendingStableSells lists brokered sell intents that can still advance:
+// those whose deposit was reported but not yet confirmed, those confirmed
+// but not yet converted, and those converting but not yet settled.
+func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed, converting []uuid.UUID, err error) {
+	type row struct {
+		ID     uuid.UUID
+		Status string
+	}
+	var rows []row
+	err = s.db.WithContext(ctx).
+		Model(&models.ITIntent{}).
+		Select("id", "status").
+		Where("direction = ?", models.ITDirectionSell).
+		Where("asset IN ?", []string{models.ITAssetUSDC, models.ITAssetUSDT}).
+		Where("status IN ?", []string{
+			models.ITStatusDepositReported,
+			models.ITStatusDepositConfirmed,
+			models.ITStatusConverting,
+		}).
+		Find(&rows).Error
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, r := range rows {
+		switch r.Status {
+		case models.ITStatusDepositReported:
+			reported = append(reported, r.ID)
+		case models.ITStatusDepositConfirmed:
+			confirmed = append(confirmed, r.ID)
+		case models.ITStatusConverting:
+			converting = append(converting, r.ID)
+		}
+	}
+	return reported, confirmed, converting, nil
+}
