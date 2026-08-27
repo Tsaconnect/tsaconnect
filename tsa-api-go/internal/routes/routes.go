@@ -905,6 +905,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			it.POST("/sell", ith.Sell)
 			it.GET("/intents", ith.ListIntents)
 			it.GET("/intents/:id", ith.GetIntent)
+			it.POST("/stable/quote", ith.PostStableQuote)
+			it.POST("/stable/sell", ith.PostStableSell)
+			it.POST("/stable/sell/:id/deposit", ith.PostStableDeposit)
 		}
 		adminIT := api.Group("/it/admin")
 		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())
