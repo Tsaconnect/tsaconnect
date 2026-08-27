@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -247,4 +248,190 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 		"net_ngn_kobo":    net.String(),
 		"status":          models.ITStatusDepositConfirmed,
 	}).Error
+}
+
+// ErrStableCreditNotVisible means the funds are proven on-chain but Flutterwave
+// has not yet credited them. This is a wait, not a failure — the next tick
+// retries.
+var ErrStableCreditNotVisible = errors.New("it stable: Flutterwave has not credited the deposit yet")
+
+// ErrStableConversionPending means the stablecoin→fiat conversion has been
+// accepted but has not settled. A wait, not a failure — the next tick retries.
+var ErrStableConversionPending = errors.New("it stable: conversion has not settled yet")
+
+// stableConverter is the slice of the Flutterwave client this path needs.
+type stableConverter interface {
+	FetchBalances(ctx context.Context) ([]FWBalance, error)
+	ConvertBalance(ctx context.Context, merchantID, sourceCurrency, destCurrency string, amount FWAmount, reference string) (FWTransfer, error)
+}
+
+// stableTransferReader reads back a transfer's settled status. Conversion is
+// asynchronous — accepted as NEW, settled later — so this is what tells us the
+// fiat has actually been credited.
+type stableTransferReader interface {
+	GetTransfer(ctx context.Context, id string) (FWTransfer, error)
+}
+
+// SetStableConverter wires the Flutterwave client used to turn a credited
+// stablecoin balance into fiat.
+func (s *ITService) SetStableConverter(c stableConverter, merchantID string) {
+	s.stableConverter = c
+	s.stableMerchantID = merchantID
+	// The Flutterwave client satisfies both interfaces; keep them separate so
+	// tests can stub the settled-status read independently.
+	if tr, ok := c.(stableTransferReader); ok {
+		s.stableTransfers = tr
+	}
+}
+
+// SetStableTransfers overrides the settled-status reader (tests; the client
+// normally supplies it via SetStableConverter).
+func (s *ITService) SetStableTransfers(r stableTransferReader) { s.stableTransfers = r }
+
+// ConvertAndQueuePayout converts the user's credited stablecoin to fiat and
+// hands the intent to the existing payout path.
+//
+// The balance check is the brokerage guarantee in code: money moves only once
+// Flutterwave shows it actually holds the user's funds. On-chain arrival proves
+// the funds left the user, not that the provider credited them, and converting
+// on the strength of the former would spend a balance that belongs to someone
+// else's trade.
+//
+// The intent lands on the EXISTING `debited` status, which is what AutoPayout
+// and ResolvePayoutFromWebhook already understand — the entire payout and
+// settlement half of this feature is code that already exists and is unchanged.
+func (s *ITService) ConvertAndQueuePayout(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	switch intent.Status {
+	case models.ITStatusConverting, models.ITStatusDebited, models.ITStatusSettled, models.ITStatusReversed:
+		return nil // conversion already initiated or done; ticks redeliver
+	case models.ITStatusDepositConfirmed:
+	default:
+		return ErrITBadState
+	}
+	if s.stableConverter == nil {
+		return errors.New("it stable: no Flutterwave converter configured")
+	}
+
+	received, ok := new(big.Int).SetString(intent.ReceivedAmount, 10)
+	if !ok || received.Sign() <= 0 {
+		return errors.New("it stable: intent has no verified received amount")
+	}
+	asset := models.ITIntentAsset(intent)
+	currency := models.ITIntentCurrency(intent)
+
+	balances, err := s.stableConverter.FetchBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("it stable: %w", err)
+	}
+	var available float64
+	found := false
+	for _, b := range balances {
+		if strings.EqualFold(b.Currency, asset) {
+			available = b.AvailableBalance
+			found = true
+			break
+		}
+	}
+	needed := StableFromBaseUnits(received)
+	if !found {
+		// Flutterwave's balances response is not surfacing a line for this
+		// asset at all — distinct from the ordinary "not credited yet" wait,
+		// because it can mean the provider integration itself is missing the
+		// asset rather than the deposit simply being in flight. Both cases
+		// fail the same way (ErrStableCreditNotVisible, retried by the next
+		// tick) — this log only makes the two distinguishable operationally.
+		log.Printf("[IT] it_stable_balance_line_missing asset=%s intent=%s", asset, intent.ID)
+	} else if available < needed {
+		log.Printf("[IT] it_stable_credit_not_visible asset=%s intent=%s available=%v needed=%v", asset, intent.ID, available, needed)
+	}
+	if available < needed {
+		return fmt.Errorf("%w: %s available=%v needed=%v",
+			ErrStableCreditNotVisible, asset, available, needed)
+	}
+
+	// Claim the intent before spending, so two concurrent ticks cannot both
+	// convert. A double conversion moves real money twice.
+	claimed, err := s.claim(ctx, intent.ID, []string{models.ITStatusDepositConfirmed}, models.ITStatusConverting)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+
+	tr, err := s.stableConverter.ConvertBalance(
+		ctx,
+		s.stableMerchantID,
+		asset, currency,
+		FWAmount{Value: StableFromBaseUnits(received), AppliesTo: "source_currency"},
+		"IT-CONV-"+strings.ReplaceAll(intent.ID.String(), "-", ""),
+	)
+	if err != nil {
+		// Release the claim so the next tick retries rather than stranding it.
+		_ = s.db.WithContext(ctx).Model(intent).
+			Update("status", models.ITStatusDepositConfirmed).Error
+		return fmt.Errorf("it stable: conversion failed: %w", err)
+	}
+
+	// Stop at `converting` — NOT `debited`.
+	//
+	// ConvertBalance returns as soon as Flutterwave ACCEPTS the conversion
+	// (status NEW); the fiat is credited later. `debited` is what makes
+	// AutoPayout fire, so advancing here would disburse fiat that does not
+	// exist yet. FinalizeConversion promotes the intent once the conversion's
+	// own transfer actually reaches SUCCESSFUL.
+	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"conversion_id": tr.ID,
+		"status":        models.ITStatusConverting,
+	}).Error
+}
+
+// FinalizeConversion promotes a converting intent to `debited` once
+// Flutterwave reports the stablecoin→fiat conversion actually settled.
+//
+// This is the gate that keeps the brokerage honest at its last hop: the payout
+// path may not run until the fiat the payout spends has genuinely been
+// credited. A FAILED conversion drops the intent back to deposit_confirmed so
+// the next tick retries — the user's stablecoin is still at Flutterwave, so
+// retrying is safe and is the correct response to a transient provider failure.
+func (s *ITService) FinalizeConversion(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	switch intent.Status {
+	case models.ITStatusDebited, models.ITStatusSettled, models.ITStatusReversed:
+		return nil
+	case models.ITStatusConverting:
+	default:
+		return ErrITBadState
+	}
+	if intent.ConversionID == "" {
+		return errors.New("it stable: converting intent has no conversion id")
+	}
+	if s.stableTransfers == nil {
+		return errors.New("it stable: no transfer reader configured")
+	}
+
+	tr, err := s.stableTransfers.GetTransfer(ctx, intent.ConversionID)
+	if err != nil {
+		return fmt.Errorf("it stable: %w", err)
+	}
+	switch strings.ToUpper(tr.Status) {
+	case "SUCCESSFUL":
+		return s.db.WithContext(ctx).Model(intent).
+			Update("status", models.ITStatusDebited).Error
+	case "FAILED":
+		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+			"status":         models.ITStatusDepositConfirmed,
+			"failure_reason": "conversion failed: " + tr.ID,
+			"conversion_id":  "",
+		}).Error
+	default:
+		return fmt.Errorf("%w: conversion %s is %s", ErrStableConversionPending, tr.ID, tr.Status)
+	}
 }

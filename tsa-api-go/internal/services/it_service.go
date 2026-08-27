@@ -109,6 +109,11 @@ type ITService struct {
 	stableLiFi   *LiFiStatusClient
 	stableChain  ERC20TransferVerifier
 	stableTokens map[string]string // asset symbol → token contract on the deposit chain
+
+	// Stablecoin→fiat conversion at Flutterwave. See it_stable_sell.go.
+	stableConverter  stableConverter
+	stableTransfers  stableTransferReader
+	stableMerchantID string
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {

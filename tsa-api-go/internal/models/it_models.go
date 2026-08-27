@@ -193,6 +193,10 @@ type ITIntent struct {
 	// PayoutID is the fiat provider's transfer id for the sell payout leg; the
 	// transfer.disburse webhook closes the intent against it.
 	PayoutID string `gorm:"size:64;index" json:"payoutId,omitempty"`
+	// ConversionID is the Flutterwave transfer id of the stablecoin→fiat
+	// conversion. Conversion is asynchronous, so the intent waits in
+	// `converting` on this id until the transfer settles.
+	ConversionID string `gorm:"size:64;index" json:"conversionId,omitempty"`
 
 	// Dynamic virtual-account details issued for this buy intent (Flutterwave
 	// collections); shown to the buyer as the pay-into account.
