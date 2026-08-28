@@ -203,6 +203,11 @@ type FeeQuote struct {
 type FeeQuoteService struct {
 	cfg      config.FeeQuoteConfig
 	provider ProviderFeeQuoter
+
+	// brokeredStable routes USDC/USDT flows through the Flutterwave ramp, where
+	// the company margin is a RATE spread rather than bps legs. See
+	// docs/superpowers/specs/2026-08-27-stablecoin-fiat-ramp-design.md §6.1.
+	brokeredStable bool
 }
 
 // NewFeeQuoteService builds the calculator. provider may be nil — every quote
@@ -216,6 +221,12 @@ func NewFeeQuoteService(cfg config.FeeQuoteConfig, provider ProviderFeeQuoter) *
 	}
 	return &FeeQuoteService{cfg: cfg, provider: provider}
 }
+
+// SetBrokeredStableFlows switches USDC/USDT pricing to the brokered model, in
+// which the company takes a rate spread and charges no swap or routing bps.
+// MCGP is unaffected — the platform is its counterparty and those legs are
+// costs it genuinely bears.
+func (s *FeeQuoteService) SetBrokeredStableFlows(on bool) { s.brokeredStable = on }
 
 // Quote computes the itemized fee breakdown for one prospective deposit or
 // withdrawal.
@@ -364,6 +375,16 @@ func (s *FeeQuoteService) platformBps(payCurrency string) int64 {
 //	stable deposit           conversion                  (default 2%)
 //	MCGP deposit             none
 func (s *FeeQuoteService) swapLegs(flow FeeFlow, asset FeeAsset, chain string) (int64, []string) {
+	// Brokered stablecoin WITHDRAWALS carry no bps legs: the margin is the rate
+	// spread, and the user pays the bridge directly out of what arrives.
+	//
+	// Scoped to the withdraw flow, not to the asset. The deposit direction is
+	// the buy side — Phase B, not implemented — and its conversion leg below is
+	// a real charge the brokered sell ramp says nothing about. Zeroing it here
+	// would silently discount a quote already exposed on GET /api/it/quote.
+	if s.brokeredStable && flow == FeeFlowWithdraw && asset.IsStable() {
+		return 0, nil
+	}
 	switch {
 	case flow == FeeFlowWithdraw && asset == FeeAssetMCGP:
 		return s.cfg.McgpSwapBps + s.cfg.LifiRouteBps, []string{"mcgpSwap", "lifiRoute"}

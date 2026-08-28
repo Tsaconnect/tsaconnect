@@ -603,6 +603,43 @@ func main() {
 		log.Printf("[it] withdrawal FX quote + per-user fiat VA activate wired (Flutterwave)")
 	}
 
+	// Brokered stablecoin ramp (design doc 2026-08-27-stablecoin-fiat-ramp).
+	// A user sends USDC/USDT straight to Flutterwave's own Polygon address —
+	// the platform is never in the custody path — and once the deposit is
+	// proven on-chain and credited, Flutterwave converts it to fiat and the
+	// existing IT payout path settles it. Dormant unless the Polygon deposit
+	// address AND our merchant id are both configured — a missing credential
+	// must leave the rest of IT bootable, matching how every other optional
+	// integration in this service degrades (Nomba, Didit KYC, LiFi).
+	stableRampEnabled := false
+	if itService != nil && fwClient != nil && cfg.FWStableDepositAddressPolygon != "" && cfg.FlutterwaveMerchantID != "" {
+		polygonClient := blockchainService.ClientForChain("polygon")
+		if polygonClient == nil {
+			log.Printf("[it stable] dormant — no Polygon RPC client configured")
+		} else {
+			itService.SetStableSpreadBps(cfg.StableSpreadBps)
+			itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
+			itService.SetStableDepositAddress("POLYGON", cfg.FWStableDepositAddressPolygon)
+			itService.SetStableConverter(fwClient, cfg.FlutterwaveMerchantID)
+			itService.SetStableVerifier(
+				// li.quest/v1 is LiFi's public API base — same default the
+				// AllSwap handler uses (handlers/swap_lifi_handler.go).
+				services.NewLiFiStatusClient("https://li.quest/v1", cfg.LiFiAPIKey),
+				services.NewLogTransferVerifier(polygonClient.Client),
+				map[string]string{
+					models.ITAssetUSDC: cfg.Networks["mainnet"].TokenAddresses["polygon:USDC"],
+					models.ITAssetUSDT: cfg.Networks["mainnet"].TokenAddresses["polygon:USDT"],
+				},
+			)
+			itService.SetStableOverDeliveryToleranceBps(cfg.StableOverDeliveryTolBps)
+			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
+			stableRampEnabled = true
+			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps)", cfg.StableSpreadBps)
+		}
+	} else {
+		log.Printf("[it stable] dormant — set FW_STABLE_DEPOSIT_ADDRESS_POLYGON and FLUTTERWAVE_MERCHANT_ID to enable")
+	}
+
 	// Resolve the company customer that parents all FW virtual accounts. Uses
 	// FLUTTERWAVE_CUSTOMER_ID when set, else mints one lazily and persists it
 	// (per environment) so operators needn't find it in the dashboard.
@@ -634,6 +671,14 @@ func main() {
 		log.Printf("[fee-quote] provider fees live via Flutterwave GetFees")
 	}
 	feeQuoteService := services.NewFeeQuoteService(cfg.FeeQuote, feeQuoteQuoter)
+	// Brokered stablecoin flows (the ramp wired above) already charge their
+	// entire margin as the 1.55% spread baked into QuoteStableSell — the
+	// swap/routing bps legs must NOT also apply, or the user is double-billed.
+	//
+	// Gated on the ramp actually being live. Where it is dormant no trade is
+	// ever priced by the spread, so dropping the bps legs would hand out an
+	// unearned discount on a deployment this feature is switched off for.
+	feeQuoteService.SetBrokeredStableFlows(stableRampEnabled)
 	feeQuoteHandler := handlers.NewFeeQuoteHandler(
 		feeQuoteService,
 		services.NewP2PFxProvider(p2pService),

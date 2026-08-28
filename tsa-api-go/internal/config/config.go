@@ -433,6 +433,26 @@ type Config struct {
 	FlutterwaveCompanyEmail string
 	FlutterwaveCompanyPhone string
 
+	// StableSpreadBps is the company margin on brokered stablecoin trades, in
+	// basis points. It REPLACES the swap/routing bps legs for these flows
+	// rather than stacking on them, and it is the buffer that absorbs FX drift
+	// inside the rate-lock window and provider-fee estimation error.
+	StableSpreadBps int64
+	// StableRateLockTTL bounds how long a quoted rate is honoured. The lock is
+	// ours, not Flutterwave's — /transfers/rates carries no expiry.
+	StableRateLockTTL time.Duration
+	// StableOverDeliveryTolBps bounds how far a sell deposit may exceed the
+	// amount it was quoted for and still be paid out automatically. Beyond it
+	// the intent is parked for an operator rather than paid: the payout scales
+	// with what actually arrived, and an unbounded ratio would let a small
+	// quote claim an arbitrarily large deposit.
+	StableOverDeliveryTolBps int64
+	// FWStableDepositAddressPolygon is Flutterwave's own Polygon address that
+	// user sell deposits are routed to. Flutterwave exposes it on the dashboard
+	// only, so it is fetched once by hand and configured here. The platform
+	// never holds an address in this flow.
+	FWStableDepositAddressPolygon string
+
 	// FeeQuote — deposit/withdrawal fee-quote engine (PM fee spec, batch 11).
 	// Quote-only: powers GET /api/it/quote so the app can show the itemized
 	// fee breakdown before confirm. NOT wired into money movement yet (that
@@ -735,6 +755,12 @@ func Load() *Config {
 	cfg.FlutterwaveCompanyName = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_NAME", "TSA Connect"))
 	cfg.FlutterwaveCompanyEmail = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_EMAIL", "payments@mcgpchain.com"))
 	cfg.FlutterwaveCompanyPhone = strings.TrimSpace(getEnv("FLUTTERWAVE_COMPANY_PHONE", ""))
+
+	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
+	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
+	cfg.StableRateLockTTL = time.Duration(getEnvInt64("IT_STABLE_RATE_LOCK_SECONDS", 900)) * time.Second
+	cfg.StableOverDeliveryTolBps = getEnvInt64("IT_STABLE_OVER_DELIVERY_TOL_BPS", 200)
+	cfg.FWStableDepositAddressPolygon = strings.TrimSpace(getEnv("FW_STABLE_DEPOSIT_ADDRESS_POLYGON", ""))
 
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values
 	// are PM-UNRESOLVED and intentionally config-first so flipping them is an

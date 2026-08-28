@@ -530,3 +530,97 @@ func TestFeeQuote_RejectsUnknownPaymentCurrency(t *testing.T) {
 		t.Fatalf("err = %v, want ErrFeeQuoteBadCurrency", err)
 	}
 }
+
+func TestSwapLegs_BrokeredStablecoinFlowsChargeNoBps(t *testing.T) {
+	// On a brokered ramp the company margin is the RATE spread, and the user
+	// pays the bridge directly out of what arrives. Charging the swap/routing
+	// bps as well would bill the same cost twice.
+	s := newBrokeredFeeService(t, true)
+
+	for _, asset := range []FeeAsset{FeeAssetUSDC, FeeAssetUSDT} {
+		for _, chain := range []string{"polygon", "ethereum", ""} {
+			bps, legs := s.swapLegs(FeeFlowWithdraw, asset, chain)
+			if bps != 0 {
+				t.Errorf("withdraw %s on %q: bps = %d, want 0", asset, chain, bps)
+			}
+			if len(legs) != 0 {
+				t.Errorf("withdraw %s on %q: legs = %v, want none", asset, chain, legs)
+			}
+		}
+		// The DEPOSIT direction keeps its conversion leg. This assertion was
+		// inverted when it was written: the flag describes the sell ramp, and
+		// the deposit side is the unimplemented buy direction whose 2%
+		// conversion charge is already quoted on GET /api/it/quote. Pinned
+		// separately in TestSwapLegs_BrokeredFlagDoesNotTouchTheDepositLeg.
+		bps, legs := s.swapLegs(FeeFlowDeposit, asset, "polygon")
+		if bps != s.cfg.StableDepositConvBps || len(legs) != 1 {
+			t.Errorf("deposit %s: bps=%d legs=%v, want the conversion leg intact", asset, bps, legs)
+		}
+	}
+}
+
+func TestSwapLegs_MCGPIsUnaffectedByTheBrokeredFlag(t *testing.T) {
+	// MCGP is NOT brokered — we are its counterparty, and its swap + routing
+	// legs are real costs we bear. The flag must not touch them.
+	s := newBrokeredFeeService(t, true)
+
+	bps, legs := s.swapLegs(FeeFlowWithdraw, FeeAssetMCGP, "polygon")
+	if bps == 0 {
+		t.Fatal("MCGP withdraw lost its swap legs")
+	}
+	if len(legs) != 2 {
+		t.Fatalf("MCGP withdraw legs = %v, want mcgpSwap + lifiRoute", legs)
+	}
+}
+
+func TestSwapLegs_DefaultBehaviourIsUnchanged(t *testing.T) {
+	// Without the flag the existing pricing must be byte-for-byte what it was.
+	s := newBrokeredFeeService(t, false)
+
+	bps, legs := s.swapLegs(FeeFlowWithdraw, FeeAssetUSDC, "polygon")
+	if len(legs) != 1 || legs[0] != "lifiRoute" {
+		t.Fatalf("legs = %v, want [lifiRoute]", legs)
+	}
+	if bps == 0 {
+		t.Fatal("bps = 0, want the configured lifiRoute bps")
+	}
+}
+
+// newBrokeredFeeService builds a FeeQuoteService with the brokered flag set.
+// feeTestConfig (above) is the fixture the existing fee-quote tests already
+// use — its McgpSwapBps (200) and LifiRouteBps (300) are both non-zero, so
+// the assertions above are not vacuous.
+func newBrokeredFeeService(t *testing.T, brokered bool) *FeeQuoteService {
+	t.Helper()
+	s := NewFeeQuoteService(feeTestConfig(), nil)
+	s.SetBrokeredStableFlows(brokered)
+	return s
+}
+
+func TestSwapLegs_BrokeredFlagDoesNotTouchTheDepositLeg(t *testing.T) {
+	// The brokered flag describes the SELL ramp — a stablecoin withdrawal whose
+	// margin is the rate spread. The deposit direction is the buy side (Phase
+	// B, not implemented) and its conversion leg is a real, separate charge
+	// already exposed on GET /api/it/quote. Zeroing it because the asset
+	// happens to be stable discounts a quote nobody decided to discount.
+	s := newBrokeredFeeService(t, true)
+
+	bps, legs := s.swapLegs(FeeFlowDeposit, FeeAssetUSDC, feeChainPolygon)
+	if len(legs) != 1 || legs[0] != "conversion" {
+		t.Fatalf("legs = %v, want [conversion]", legs)
+	}
+	if bps != feeTestConfig().StableDepositConvBps {
+		t.Fatalf("bps = %d, want the configured StableDepositConvBps %d", bps, feeTestConfig().StableDepositConvBps)
+	}
+}
+
+func TestSwapLegs_BrokeredFlagStillZeroesTheWithdrawLeg(t *testing.T) {
+	// The narrowing must not undo what the flag is for: a brokered stablecoin
+	// WITHDRAWAL carries no bps legs, or the user is billed the spread twice.
+	s := newBrokeredFeeService(t, true)
+
+	bps, legs := s.swapLegs(FeeFlowWithdraw, FeeAssetUSDC, feeChainPolygon)
+	if bps != 0 || len(legs) != 0 {
+		t.Fatalf("brokered stablecoin withdraw = %d bps %v, want 0 and no legs", bps, legs)
+	}
+}

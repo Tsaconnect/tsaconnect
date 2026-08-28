@@ -94,6 +94,29 @@ type ITService struct {
 	// See it_quote.go.
 	quoteCacheMu sync.Mutex
 	quoteCache   map[string]quoteCacheEntry
+
+	// stableSpreadBps and stableRateLockTTL price brokered stablecoin trades.
+	// See it_stable_quote.go.
+	stableSpreadBps   int64
+	stableRateLockTTL time.Duration
+	stableRateTolBps  int64
+	// stableOverDeliverBps bounds how far a deposit may exceed the quoted
+	// amount before it is parked for an operator. See it_stable_sell.go.
+	stableOverDeliverBps int64
+
+	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
+	// never ours. Sell deposits go straight from the user to the provider.
+	stableDepositAddrs map[string]string
+
+	// Stablecoin sell deposit verification. See it_stable_sell.go.
+	stableLiFi   *LiFiStatusClient
+	stableChain  ERC20TransferVerifier
+	stableTokens map[string]string // asset symbol → token contract on the deposit chain
+
+	// Stablecoin→fiat conversion at Flutterwave. See it_stable_sell.go.
+	stableConverter  stableConverter
+	stableTransfers  stableTransferReader
+	stableMerchantID string
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {

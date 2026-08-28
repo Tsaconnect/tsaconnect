@@ -30,6 +30,32 @@ const (
 	ITStatusAwaitingRate = "awaiting_rate"
 )
 
+const (
+	ITAssetMCGP = "MCGP"
+	ITAssetUSDC = "USDC"
+	ITAssetUSDT = "USDT"
+)
+
+const (
+	// Stablecoin sell states. The chain ends at the EXISTING debited → settled
+	// pair so AutoPayout and ResolvePayoutFromWebhook are reused unchanged.
+	ITStatusPendingDeposit   = "pending_deposit"   // awaiting the user's on-chain send
+	ITStatusDepositReported  = "deposit_reported"  // user reported a source tx hash
+	ITStatusDepositConfirmed = "deposit_confirmed" // LiFi DONE + verified on Polygon
+	ITStatusConverting       = "converting"        // FW stablecoin→fiat conversion in flight
+)
+
+// ITIntentAsset reads an intent's asset, treating rows written before the
+// column existed as MCGP. Like ITIntentCurrency, this fallback is scoped to
+// historical rows and lives in exactly one place so it cannot quietly become
+// the general default — the column itself has NO default.
+func ITIntentAsset(i *ITIntent) string {
+	if i == nil || i.Asset == "" {
+		return ITAssetMCGP
+	}
+	return i.Asset
+}
+
 // ITIntent is one IT buy or sell. Amounts are base-unit decimal strings (MCGP
 // 18dp wei; NGN in kobo). The rate is locked at creation.
 type ITIntent struct {
@@ -45,6 +71,17 @@ type ITIntent struct {
 	WalletAddress string `gorm:"size:42" json:"walletAddress"`
 
 	McgpAmount string `gorm:"type:numeric(78,0);not null" json:"mcgpAmount"` // wei
+
+	// Asset selects which leg runs: MCGP moves company inventory on-chain,
+	// USDC/USDT are brokered through Flutterwave and never held by us.
+	//
+	// Deliberately has NO column default — see ITIntentAsset.
+	Asset string `gorm:"size:8;index" json:"asset"`
+
+	// AssetAmount is the asset leg in its own base units (6 decimals for both
+	// stablecoins). For MCGP intents it mirrors McgpAmount via BeforeSave;
+	// McgpAmount stays authoritative until it is dropped.
+	AssetAmount string `gorm:"type:numeric(78,0)" json:"assetAmount,omitempty"`
 
 	// Currency is the fiat leg's ISO 4217 code. Validated against the currency
 	// registry — never against display metadata.
@@ -111,6 +148,41 @@ type ITIntent struct {
 	TxHash        string `gorm:"size:66" json:"txHash,omitempty"`
 	FailureReason string `gorm:"size:256" json:"failureReason,omitempty"`
 
+	// ── Stablecoin ramp (brokered through Flutterwave; we custody nothing) ──
+	// SourceChain is where the user's stablecoin starts; the funds are always
+	// routed to Flutterwave's Polygon address, never to an address of ours.
+	SourceChain string `gorm:"size:16" json:"sourceChain,omitempty"`
+	// DestChain / DestAddress are the buy-side delivery target (Phase B).
+	// DestAddress is 64 wide because Solana base58 runs to 44 characters —
+	// WalletAddress is size:42 and cannot hold one.
+	DestChain   string `gorm:"size:16" json:"destChain,omitempty"`
+	DestAddress string `gorm:"size:64" json:"destAddress,omitempty"`
+
+	// DepositTxHash is the SOURCE-chain transaction the user broadcast, as
+	// reported by the app. SettledTxHash is the Polygon transaction that
+	// actually delivered to Flutterwave — resolved from LiFi and then verified
+	// independently on-chain, which is what makes it authoritative. Both are
+	// the on-chain fact that a transfer happened, NOT proof of who sent it
+	// (Flutterwave exposes one shared merchant address), so each is further
+	// constrained to fund at most one intent by the partial indexes
+	// uq_it_intents_deposit_tx_hash / uq_it_intents_settled_tx_hash
+	// (config/database.go) rather than a struct tag, because both columns are
+	// empty for buy intents and for sells that have not reported yet.
+	DepositTxHash string `gorm:"size:120;index" json:"depositTxHash,omitempty"`
+	SettledTxHash string `gorm:"size:66;index" json:"settledTxHash,omitempty"`
+	// ReceivedAmount is what actually arrived, in asset base units. The payout
+	// is computed from THIS, never from the quoted gross — quoting the payout
+	// would pay out more than was received whenever a bridge or provider fee
+	// came in above estimate.
+	ReceivedAmount string `gorm:"type:numeric(78,0)" json:"receivedAmount,omitempty"`
+
+	// LockedRate is fiat minor units per one whole asset unit, locked at intent
+	// creation. RateExpiresAt bounds the lock; Repriced records that the lock
+	// lapsed and a live rate was used instead.
+	LockedRate    string     `gorm:"type:numeric(38,0)" json:"lockedRate,omitempty"`
+	RateExpiresAt *time.Time `json:"rateExpiresAt,omitempty"`
+	Repriced      bool       `gorm:"default:false" json:"repriced,omitempty"`
+
 	// Sell payout destination (captured at sell creation for auto-payout; empty
 	// on legacy manual-payout intents).
 	BankCode      string `gorm:"size:16" json:"bankCode,omitempty"`
@@ -127,6 +199,18 @@ type ITIntent struct {
 	// PayoutID is the fiat provider's transfer id for the sell payout leg; the
 	// transfer.disburse webhook closes the intent against it.
 	PayoutID string `gorm:"size:64;index" json:"payoutId,omitempty"`
+	// ConversionID is the Flutterwave transfer id of the stablecoin→fiat
+	// conversion. Conversion is asynchronous, so the intent waits in
+	// `converting` on this id until the transfer settles.
+	ConversionID string `gorm:"size:64;index" json:"conversionId,omitempty"`
+	// ConversionAttempts counts how many times a conversion has been
+	// initiated for this intent. Flutterwave's transfer reference doubles as
+	// an idempotency key, so a retry after a FAILED conversion must use a
+	// fresh reference or GetTransfer would keep returning the same stale
+	// FAILED transfer forever — this is folded into that reference. 0 is the
+	// correct value for every historical row (unlike Asset, this needs no
+	// separate "treat empty as X" reader function).
+	ConversionAttempts int `gorm:"default:0" json:"conversionAttempts,omitempty"`
 
 	// Dynamic virtual-account details issued for this buy intent (Flutterwave
 	// collections); shown to the buyer as the pay-into account.
@@ -163,6 +247,13 @@ func (i *ITIntent) BeforeSave(tx *gorm.DB) error {
 	i.FeeMinor = i.FeeNgnKobo
 	i.NetMinor = i.NetNgnKobo
 	i.PlatformKeptMinor = i.PlatformKeptKobo
+
+	// MCGP intents keep McgpAmount authoritative and mirror it into the general
+	// AssetAmount column. Stablecoin intents write AssetAmount directly and have
+	// no McgpAmount — mirroring unconditionally would zero their amount.
+	if ITIntentAsset(i) == ITAssetMCGP && i.McgpAmount != "" {
+		i.AssetAmount = i.McgpAmount
+	}
 	return nil
 }
 

@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -663,6 +665,178 @@ func (h *ITHandler) AcceptAgreement(c *gin.Context) {
 		"version":  services.ITAgreementVersion,
 		"accepted": true,
 	})
+}
+
+// ──────────────────────────── stablecoin sell (brokered) ──────────────────
+
+type stableQuoteRequest struct {
+	Asset    string `json:"asset" binding:"required"`
+	Amount   string `json:"amount" binding:"required"`
+	Currency string `json:"currency" binding:"required"`
+}
+
+type stableSellRequest struct {
+	stableQuoteRequest
+	SourceChain string `json:"sourceChain" binding:"required"`
+	Bank        struct {
+		Code                string `json:"code"`
+		Number              string `json:"number"`
+		Name                string `json:"name"`
+		DestinationCurrency string `json:"destinationCurrency"`
+		RailType            string `json:"railType"`
+		MobileNetwork       string `json:"mobileNetwork"`
+		MobileCountry       string `json:"mobileCountry"`
+		MobileMsisdn        string `json:"mobileMsisdn"`
+	} `json:"bank"`
+}
+
+type stableDepositRequest struct {
+	TxHash string `json:"txHash" binding:"required"`
+}
+
+// POST /api/it/stable/quote — prices a brokered stablecoin sell.
+func (h *ITHandler) PostStableQuote(c *gin.Context) {
+	var req stableQuoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	q, err := h.it.QuoteStableSell(c.Request.Context(), req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		return
+	}
+	// Spread AND fee are both itemised: the spread replaces only the
+	// swap/routing bps legs, so the fee line is a separate charge the user is
+	// entitled to see — collapsing them would hide the platform fee inside
+	// what looks like pure FX margin.
+	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
+		"asset":       q.Asset,
+		"currency":    q.Currency,
+		"amount":      fmt.Sprintf("%.6f", services.StableFromBaseUnits(q.AssetAmount)),
+		"gross":       q.GrossMinor.String(),
+		"afterSpread": q.SpreadMinor.String(),
+		"fee":         q.FeeMinor.String(),
+		"net":         q.NetMinor.String(),
+		"rate":        q.RatePerUnitMinor.String(),
+		"expiresAt":   q.ExpiresAt,
+	})
+}
+
+// POST /api/it/stable/sell — creates the sell and returns where to send the funds.
+func (h *ITHandler) PostStableSell(c *gin.Context) {
+	var req stableSellRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	// The same trade gate ActivateVA/Buy/Sell use. This ramp routes real user
+	// funds to a third party under the CBN VASP pilot, so it is squarely a
+	// trade and must not be reachable without the accepted agreement.
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
+	ctx := c.Request.Context()
+	q, err := h.it.QuoteStableSell(ctx, req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		return
+	}
+	bank := &services.ITSellBank{
+		Code: req.Bank.Code, Number: req.Bank.Number, Name: req.Bank.Name,
+		DestinationCurrency: req.Bank.DestinationCurrency,
+		RailType:            req.Bank.RailType,
+		MobileNetwork:       req.Bank.MobileNetwork,
+		MobileCountry:       req.Bank.MobileCountry,
+		MobileMsisdn:        req.Bank.MobileMsisdn,
+	}
+	intent, deposit, err := h.it.CreateStableSellIntent(ctx, user.ID, q, req.SourceChain, bank)
+	if err != nil {
+		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Sell created", gin.H{"intent": intent, "deposit": deposit})
+}
+
+// POST /api/it/stable/sell/:id/deposit — records the transaction the user broadcast.
+func (h *ITHandler) PostStableDeposit(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
+		return
+	}
+	var req stableDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.it.ReportStableDeposit(c.Request.Context(), user.ID, id, req.TxHash); err != nil {
+		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
+}
+
+// GetStuckStableSells lists brokered sells that have not advanced.
+//
+// The platform holds no float, so a stall never costs it money — but it does
+// leave a user's funds parked at a hop they cannot see. The transaction
+// hashes on each row are the operator's leverage against a provider that has
+// not credited the funds.
+func (h *ITHandler) GetStuckStableSells(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckStableSells(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
+// stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
+// is a 400; a missing provider or unconfigured deposit address is a 503,
+// because the request was fine and the platform was not.
+func stableStatusFor(err error) int {
+	switch {
+	case errors.Is(err, services.ErrStableNotAnAsset),
+		errors.Is(err, services.ErrStablePrecision),
+		errors.Is(err, services.ErrStableBelowMinimum),
+		errors.Is(err, services.ErrStableQuoteExpired),
+		errors.Is(err, services.ErrStableNoDestination),
+		errors.Is(err, services.ErrStableFeeExceedsProceeds),
+		errors.Is(err, services.ErrStableRateImplausible),
+		errors.Is(err, services.ErrBadDeliveryAddress),
+		errors.Is(err, services.ErrUnsupportedStableChain),
+		// Both mapped to 400 (not 404/409): a 404 here would tell a probing
+		// caller "this id doesn't exist" vs "it exists but isn't yours" by
+		// process of elimination against ErrStableDepositAlreadyClaimed's
+		// code, and a 409 on the claimed case would confirm the hash is
+		// live/valid to someone who doesn't own it. Same status, same shape
+		// as every other client-fixable input error.
+		errors.Is(err, services.ErrStableIntentNotFound),
+		errors.Is(err, services.ErrStableDepositAlreadyClaimed):
+		return http.StatusBadRequest
+	case errors.Is(err, services.ErrStableQuoteUnavailable),
+		errors.Is(err, services.ErrStableNoDepositAddress):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // requireITAgreement is the shared trade gate for ActivateVA/Buy/Sell. It writes
