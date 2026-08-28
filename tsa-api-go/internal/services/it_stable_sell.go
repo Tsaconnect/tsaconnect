@@ -598,3 +598,58 @@ func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed
 	}
 	return reported, confirmed, converting, nil
 }
+
+// StuckStableSell is a brokered sell that has not advanced, with the evidence
+// an operator needs to resolve it.
+type StuckStableSell struct {
+	IntentID       uuid.UUID `json:"intentId"`
+	UserID         uuid.UUID `json:"userId"`
+	Status         string    `json:"status"`
+	Asset          string    `json:"asset"`
+	DepositTxHash  string    `json:"depositTxHash,omitempty"`
+	SettledTxHash  string    `json:"settledTxHash,omitempty"`
+	ReceivedAmount string    `json:"receivedAmount,omitempty"`
+	StuckSince     time.Time `json:"stuckSince"`
+}
+
+// ListStuckStableSells reports sells that have sat in a non-terminal state
+// longer than olderThan.
+//
+// A brokered ramp holds no float, so a stall never costs the platform money —
+// but it does leave a user's funds parked at a hop they cannot see. The
+// transaction hashes are the point of this list: on-chain proof is what
+// resolves a deposit a provider has not credited.
+func (s *ITService) ListStuckStableSells(ctx context.Context, olderThan time.Duration) ([]StuckStableSell, error) {
+	cutoff := time.Now().Add(-olderThan)
+	var intents []models.ITIntent
+	err := s.db.WithContext(ctx).
+		Where("direction = ?", models.ITDirectionSell).
+		Where("asset IN ?", []string{models.ITAssetUSDC, models.ITAssetUSDT}).
+		Where("status IN ?", []string{
+			models.ITStatusPendingDeposit,
+			models.ITStatusDepositReported,
+			models.ITStatusDepositConfirmed,
+			models.ITStatusConverting,
+		}).
+		Where("updated_at < ?", cutoff).
+		Order("updated_at asc").
+		Find(&intents).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StuckStableSell, 0, len(intents))
+	for i := range intents {
+		in := &intents[i]
+		out = append(out, StuckStableSell{
+			IntentID:       in.ID,
+			UserID:         in.UserID,
+			Status:         in.Status,
+			Asset:          models.ITIntentAsset(in),
+			DepositTxHash:  in.DepositTxHash,
+			SettledTxHash:  in.SettledTxHash,
+			ReceivedAmount: in.ReceivedAmount,
+			StuckSince:     in.UpdatedAt,
+		})
+	}
+	return out, nil
+}

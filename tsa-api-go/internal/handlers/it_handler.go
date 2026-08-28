@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -778,6 +779,27 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
+}
+
+// GetStuckStableSells lists brokered sells that have not advanced.
+//
+// The platform holds no float, so a stall never costs it money — but it does
+// leave a user's funds parked at a hop they cannot see. The transaction
+// hashes on each row are the operator's leverage against a provider that has
+// not credited the funds.
+func (h *ITHandler) GetStuckStableSells(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckStableSells(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
 }
 
 // stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
