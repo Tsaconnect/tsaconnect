@@ -16,6 +16,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,53 @@ func newStableTestRouter(t *testing.T) (*gin.Engine, *services.ITService) {
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		c.Set("user", user)
+		c.Next()
+	})
+	g := r.Group("/api/it")
+	g.POST("/stable/quote", h.PostStableQuote)
+	g.POST("/stable/sell", h.PostStableSell)
+	g.POST("/stable/sell/:id/deposit", h.PostStableDeposit)
+
+	return r, it
+}
+
+// newStableTestRouterMultiUser is a variant of newStableTestRouter that picks
+// the caller from an "X-Test-User" header instead of always injecting the
+// same fixed user — needed to exercise the deposit endpoint's ownership
+// check (the IDOR fix) and the unauthenticated path at the actual HTTP
+// wiring, not just the service layer. "A" (the default) and "B" are two
+// distinct users; "none" leaves no user in context at all.
+func newStableTestRouterMultiUser(t *testing.T) (*gin.Engine, *services.ITService) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&models.ITIntent{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	it := services.NewITService(db, nil, stubITFx{})
+	it.SetRateQuoter(stubStableQuoter{})
+	it.SetStableSpreadBps(155)
+	it.SetStableRateLockTTL(15 * time.Minute)
+
+	h := NewITHandler(db, it)
+	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
+	userB := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETB"}
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		switch c.GetHeader("X-Test-User") {
+		case "B":
+			c.Set("user", userB)
+		case "none":
+			// deliberately leave no user in context
+		default:
+			c.Set("user", userA)
+		}
 		c.Next()
 	})
 	g := r.Group("/api/it")
@@ -140,5 +188,124 @@ func TestPostStableDeposit_RejectsAMalformedIntentID(t *testing.T) {
 	w := doStableJSON(t, r, http.MethodPost, "/api/it/stable/sell/not-a-uuid/deposit", `{"txHash":"0xabc"}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// decodeStableResponse unwraps the standard {"success","message","data"}
+// envelope (utils.SuccessResponse) into a raw data map, for tests that need
+// to inspect individual response fields and their concrete JSON types.
+func decodeStableResponse(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var out struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, body)
+	}
+	return out.Data
+}
+
+func TestPostStableQuote_ResponseCarriesEveryItemisedMoneyFieldAsAString(t *testing.T) {
+	// The two properties that matter most for this endpoint: nothing about the
+	// charge is hidden (spread and fee are itemised separately — collapsing
+	// them would bury a charge the user is entitled to see), and every money
+	// value crosses the wire as a JSON string so large minor-unit amounts
+	// survive JS clients intact. Neither was covered by any existing test —
+	// none of them decoded the response body at all.
+	r, _ := newStableTestRouter(t)
+	w := doStableJSON(t, r, http.MethodPost, "/api/it/stable/quote",
+		`{"asset":"USDC","amount":"100","currency":"NGN"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	data := decodeStableResponse(t, w.Body.Bytes())
+
+	for _, field := range []string{"gross", "afterSpread", "fee", "net", "rate", "expiresAt"} {
+		if _, ok := data[field]; !ok {
+			t.Fatalf("response is missing %q: %v", field, data)
+		}
+	}
+
+	// This must fail if any of these fields is emitted as a raw JSON number
+	// (e.g. via an unconverted float64 in the handler) rather than a string —
+	// exactly the regression this test exists to catch.
+	for _, field := range []string{"amount", "gross", "afterSpread", "fee", "net", "rate"} {
+		v, ok := data[field].(string)
+		if !ok {
+			t.Fatalf("field %q = %T(%v), want string", field, data[field], data[field])
+		}
+		if v == "" {
+			t.Fatalf("field %q is an empty string", field)
+		}
+	}
+}
+
+func TestPostStableDeposit_RequiresAuthentication(t *testing.T) {
+	r, _ := newStableTestRouterMultiUser(t)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/it/stable/sell/00000000-0000-0000-0000-000000000000/deposit",
+		bytes.NewReader([]byte(`{"txHash":"0xabc"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User", "none")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostStableDeposit_RejectsAnotherUsersIntent(t *testing.T) {
+	// The IDOR, end to end through the actual route wiring: user B must not
+	// be able to attach a deposit report to user A's sell intent, and A's
+	// intent must be left completely untouched by the attempt.
+	r, svc := newStableTestRouterMultiUser(t)
+	svc.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
+
+	sellReq := httptest.NewRequest(http.MethodPost, "/api/it/stable/sell",
+		bytes.NewReader([]byte(`{"asset":"USDC","amount":"100","currency":"NGN","sourceChain":"BSC",
+		  "bank":{"code":"044","number":"0690000031","name":"Ada Okafor"}}`)))
+	sellReq.Header.Set("Content-Type", "application/json")
+	sellReq.Header.Set("X-Test-User", "A")
+	sellW := httptest.NewRecorder()
+	r.ServeHTTP(sellW, sellReq)
+	if sellW.Code != http.StatusOK {
+		t.Fatalf("sell status = %d body=%s", sellW.Code, sellW.Body.String())
+	}
+	sellData := decodeStableResponse(t, sellW.Body.Bytes())
+	intentField, ok := sellData["intent"].(map[string]any)
+	if !ok {
+		t.Fatalf("sell response carries no intent object: %v", sellData)
+	}
+	victimID, _ := intentField["id"].(string)
+	if victimID == "" {
+		t.Fatalf("sell response intent has no id: %v", intentField)
+	}
+
+	depositReq := httptest.NewRequest(http.MethodPost,
+		"/api/it/stable/sell/"+victimID+"/deposit",
+		bytes.NewReader([]byte(`{"txHash":"0xattacker"}`)))
+	depositReq.Header.Set("Content-Type", "application/json")
+	depositReq.Header.Set("X-Test-User", "B")
+	depositW := httptest.NewRecorder()
+	r.ServeHTTP(depositW, depositReq)
+
+	if depositW.Code == http.StatusOK {
+		t.Fatalf("cross-user deposit report succeeded: %s", depositW.Body.String())
+	}
+
+	victimUUID, err := uuid.Parse(victimID)
+	if err != nil {
+		t.Fatalf("parse victim id: %v", err)
+	}
+	got, err := svc.GetIntent(context.Background(), victimUUID)
+	if err != nil {
+		t.Fatalf("reload victim intent: %v", err)
+	}
+	if got.DepositTxHash != "" {
+		t.Fatalf("victim depositTxHash = %q, want empty", got.DepositTxHash)
+	}
+	if got.Status != models.ITStatusPendingDeposit {
+		t.Fatalf("victim status = %q, want %q", got.Status, models.ITStatusPendingDeposit)
 	}
 }

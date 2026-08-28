@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -711,7 +712,7 @@ func (h *ITHandler) PostStableQuote(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
 		"asset":       q.Asset,
 		"currency":    q.Currency,
-		"amount":      services.StableFromBaseUnits(q.AssetAmount),
+		"amount":      fmt.Sprintf("%.6f", services.StableFromBaseUnits(q.AssetAmount)),
 		"gross":       q.GrossMinor.String(),
 		"afterSpread": q.SpreadMinor.String(),
 		"fee":         q.FeeMinor.String(),
@@ -757,6 +758,11 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 
 // POST /api/it/stable/sell/:id/deposit — records the transaction the user broadcast.
 func (h *ITHandler) PostStableDeposit(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
@@ -767,7 +773,7 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.it.ReportStableDeposit(c.Request.Context(), id, req.TxHash); err != nil {
+	if err := h.it.ReportStableDeposit(c.Request.Context(), user.ID, id, req.TxHash); err != nil {
 		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
 		return
 	}
@@ -787,7 +793,15 @@ func stableStatusFor(err error) int {
 		errors.Is(err, services.ErrStableFeeExceedsProceeds),
 		errors.Is(err, services.ErrStableRateImplausible),
 		errors.Is(err, services.ErrBadDeliveryAddress),
-		errors.Is(err, services.ErrUnsupportedStableChain):
+		errors.Is(err, services.ErrUnsupportedStableChain),
+		// Both mapped to 400 (not 404/409): a 404 here would tell a probing
+		// caller "this id doesn't exist" vs "it exists but isn't yours" by
+		// process of elimination against ErrStableDepositAlreadyClaimed's
+		// code, and a 409 on the claimed case would confirm the hash is
+		// live/valid to someone who doesn't own it. Same status, same shape
+		// as every other client-fixable input error.
+		errors.Is(err, services.ErrStableIntentNotFound),
+		errors.Is(err, services.ErrStableDepositAlreadyClaimed):
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrStableQuoteUnavailable),
 		errors.Is(err, services.ErrStableNoDepositAddress):

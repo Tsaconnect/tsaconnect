@@ -11,12 +11,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 var (
 	ErrStableNoDepositAddress = errors.New("it stable: no Flutterwave deposit address configured")
 	ErrStableQuoteExpired     = errors.New("it stable: quote has expired")
 	ErrStableNoDestination    = errors.New("it stable: a payout destination is required")
+	// ErrStableIntentNotFound covers both "no such intent" and "this intent
+	// belongs to someone else" — deliberately the same error and message for
+	// both, so a caller probing IDs cannot distinguish a missing intent from
+	// one they don't own.
+	ErrStableIntentNotFound = errors.New("it stable: sell intent not found")
+	// ErrStableDepositAlreadyClaimed means this on-chain deposit transaction is
+	// already attached to a (possibly different) intent. The chain proves a
+	// transfer happened, not who sent it — Flutterwave exposes one shared
+	// merchant address — so a deposit hash may fund at most one intent.
+	ErrStableDepositAlreadyClaimed = errors.New("it stable: this deposit has already been reported against a sell")
 )
 
 // stableDepositChain is where every sell deposit is routed. Flutterwave accepts
@@ -137,16 +148,44 @@ func (s *ITService) SetStableVerifier(lifi *LiFiStatusClient, chain ERC20Transfe
 	s.stableTokens = tokenAddrs
 }
 
+// getIntentForUser fetches an intent scoped to its owner. It returns
+// ErrStableIntentNotFound both when the id doesn't exist at all and when it
+// belongs to a different user — the two cases must be indistinguishable to
+// the caller, or the endpoint becomes an oracle for "does this intent id
+// belong to someone" (IDOR).
+func (s *ITService) getIntentForUser(ctx context.Context, userID, intentID uuid.UUID) (*models.ITIntent, error) {
+	var i models.ITIntent
+	err := s.db.WithContext(ctx).First(&i, "id = ? AND user_id = ?", intentID, userID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrStableIntentNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &i, nil
+}
+
 // ReportStableDeposit records the source transaction the user broadcast.
+//
+// Scoped to userID — the caller must own the intent, otherwise
+// ErrStableIntentNotFound (never leaking that a differently-owned intent
+// exists). This is the ownership check that stops one user attaching their
+// deposit report to someone else's sell intent (IDOR).
 //
 // Idempotent: the app may retry, and a repeat report of the same hash is a
 // no-op rather than a state reset.
-func (s *ITService) ReportStableDeposit(ctx context.Context, intentID uuid.UUID, srcTxHash string) error {
+//
+// A given on-chain deposit tx can fund at most one intent — enforced by the
+// DB's partial unique index on deposit_tx_hash (config/database.go), because
+// the chain only proves a transfer happened, not who sent it (Flutterwave's
+// deposit address is shared across every user). A collision surfaces as
+// ErrStableDepositAlreadyClaimed rather than a raw DB error.
+func (s *ITService) ReportStableDeposit(ctx context.Context, userID, intentID uuid.UUID, srcTxHash string) error {
 	srcTxHash = strings.TrimSpace(srcTxHash)
 	if srcTxHash == "" {
 		return errors.New("it stable: empty deposit transaction hash")
 	}
-	intent, err := s.getIntent(ctx, intentID)
+	intent, err := s.getIntentForUser(ctx, userID, intentID)
 	if err != nil {
 		return err
 	}
@@ -169,13 +208,16 @@ func (s *ITService) ReportStableDeposit(ctx context.Context, intentID uuid.UUID,
 			"status":          models.ITStatusDepositReported,
 		})
 	if res.Error != nil {
+		if isUniqueViolation(res.Error) {
+			return ErrStableDepositAlreadyClaimed
+		}
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
 		// Lost the race. If the winner landed the row exactly where this call
 		// was trying to land it, that is a success from the caller's point of
 		// view — same idempotent contract as the early-return above.
-		reloaded, rErr := s.getIntent(ctx, intentID)
+		reloaded, rErr := s.getIntentForUser(ctx, userID, intentID)
 		if rErr != nil {
 			return rErr
 		}

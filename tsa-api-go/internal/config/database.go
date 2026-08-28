@@ -351,6 +351,19 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_payment_ref
 	    ON it_intents (payment_ref) WHERE payment_ref <> ''`)
 
+	// IT stablecoin-sell deposits: the on-chain fact that a transfer landed at
+	// Flutterwave's shared merchant address proves the transfer happened, NOT
+	// which user sent it — the chain is public and the address is the same for
+	// everyone. Without this, the SAME deposit tx could be attached to multiple
+	// intents and each would verify successfully. One deposit funds at most one
+	// intent. Partial over non-blank hashes, since both columns are empty for
+	// buy intents and for sells that have not reported/confirmed yet.
+	// Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_deposit_tx_hash
+	    ON it_intents (deposit_tx_hash) WHERE deposit_tx_hash <> ''`)
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_settled_tx_hash
+	    ON it_intents (settled_tx_hash) WHERE settled_tx_hash <> ''`)
+
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
 	// flow. All other Service categories default to 'contact' (the AutoMigrate

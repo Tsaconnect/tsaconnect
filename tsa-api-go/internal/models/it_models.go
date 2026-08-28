@@ -161,7 +161,13 @@ type ITIntent struct {
 	// DepositTxHash is the SOURCE-chain transaction the user broadcast, as
 	// reported by the app. SettledTxHash is the Polygon transaction that
 	// actually delivered to Flutterwave — resolved from LiFi and then verified
-	// independently on-chain, which is what makes it authoritative.
+	// independently on-chain, which is what makes it authoritative. Both are
+	// the on-chain fact that a transfer happened, NOT proof of who sent it
+	// (Flutterwave exposes one shared merchant address), so each is further
+	// constrained to fund at most one intent by the partial indexes
+	// uq_it_intents_deposit_tx_hash / uq_it_intents_settled_tx_hash
+	// (config/database.go) rather than a struct tag, because both columns are
+	// empty for buy intents and for sells that have not reported yet.
 	DepositTxHash string `gorm:"size:120;index" json:"depositTxHash,omitempty"`
 	SettledTxHash string `gorm:"size:66;index" json:"settledTxHash,omitempty"`
 	// ReceivedAmount is what actually arrived, in asset base units. The payout

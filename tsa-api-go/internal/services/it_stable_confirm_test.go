@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestReportStableDeposit_RecordsTheHashAndAdvances(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	if err := s.ReportStableDeposit(context.Background(), intent.ID, "0xsource"); err != nil {
+	if err := s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource"); err != nil {
 		t.Fatalf("ReportStableDeposit: %v", err)
 	}
 	got, _ := s.GetIntent(context.Background(), intent.ID)
@@ -56,10 +57,10 @@ func TestReportStableDeposit_IsIdempotent(t *testing.T) {
 	s.SetStableDepositAddress("POLYGON", testFWAddr)
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
 
-	if err := s.ReportStableDeposit(context.Background(), intent.ID, "0xsource"); err != nil {
+	if err := s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource"); err != nil {
 		t.Fatalf("first report: %v", err)
 	}
-	if err := s.ReportStableDeposit(context.Background(), intent.ID, "0xsource"); err != nil {
+	if err := s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource"); err != nil {
 		t.Fatalf("second report: %v", err)
 	}
 	// A no-op error return isn't proof of anything by itself — an
@@ -71,6 +72,110 @@ func TestReportStableDeposit_IsIdempotent(t *testing.T) {
 	}
 	if got.Status != models.ITStatusDepositReported {
 		t.Fatalf("status changed on re-report: %q, want %q", got.Status, models.ITStatusDepositReported)
+	}
+}
+
+func TestReportStableDeposit_RejectsAnotherUsersIntent(t *testing.T) {
+	// IDOR: a caller must not be able to attach a deposit report to a sell
+	// intent they don't own, even though intent ids are UUIDs and therefore
+	// unguessable in practice — the endpoint must not rely on that alone.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	victim, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	attacker := uuid.New()
+
+	err = s.ReportStableDeposit(context.Background(), attacker, victim.ID, "0xattacker")
+	if !errors.Is(err, ErrStableIntentNotFound) {
+		t.Fatalf("err = %v, want ErrStableIntentNotFound", err)
+	}
+
+	// The victim's intent must be left completely unchanged by the attempt.
+	got, gErr := s.GetIntent(context.Background(), victim.ID)
+	if gErr != nil {
+		t.Fatalf("reload victim: %v", gErr)
+	}
+	if got.DepositTxHash != "" {
+		t.Fatalf("victim depositTxHash = %q, want empty", got.DepositTxHash)
+	}
+	if got.Status != models.ITStatusPendingDeposit {
+		t.Fatalf("victim status = %q, want %q", got.Status, models.ITStatusPendingDeposit)
+	}
+}
+
+func TestReportStableDeposit_OwnerStillSucceeds(t *testing.T) {
+	// The ownership scoping added to fix the IDOR must not break the
+	// legitimate path: the actual owner reporting against their own intent
+	// still works.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	owner := uuid.New()
+	intent, _, err := s.CreateStableSellIntent(context.Background(), owner, testSellQuote(), "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := s.ReportStableDeposit(context.Background(), owner, intent.ID, "0xowner"); err != nil {
+		t.Fatalf("owner report: %v", err)
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.DepositTxHash != "0xowner" {
+		t.Errorf("depositTxHash = %q", got.DepositTxHash)
+	}
+	if got.Status != models.ITStatusDepositReported {
+		t.Errorf("status = %q, want %q", got.Status, models.ITStatusDepositReported)
+	}
+}
+
+func TestReportStableDeposit_RejectsADepositAlreadyClaimedByAnotherIntent(t *testing.T) {
+	// The same on-chain deposit tx must not be able to fund two intents — the
+	// chain proves a transfer happened, not who sent it, since Flutterwave's
+	// deposit address is shared across every user. Enforced by the DB's
+	// partial unique index on deposit_tx_hash (config/database.go); this test
+	// creates that same index directly because the sqlite test DB is built
+	// with AutoMigrate rather than by running the Postgres-only migration in
+	// database.go.
+	s := newStableSellDBService(t)
+	if err := s.db.Exec(`CREATE UNIQUE INDEX uq_it_intents_deposit_tx_hash
+	    ON it_intents (deposit_tx_hash) WHERE deposit_tx_hash <> ''`).Error; err != nil {
+		t.Fatalf("create unique index: %v", err)
+	}
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+
+	first, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	second, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	const sharedHash = "0xshared"
+	if err := s.ReportStableDeposit(context.Background(), first.UserID, first.ID, sharedHash); err != nil {
+		t.Fatalf("first report: %v", err)
+	}
+
+	// The second attempt must fail cleanly — not a 500-worthy raw DB error,
+	// and definitely not a panic — and must be recognizable by the caller.
+	err = s.ReportStableDeposit(context.Background(), second.UserID, second.ID, sharedHash)
+	if !errors.Is(err, ErrStableDepositAlreadyClaimed) {
+		t.Fatalf("second report err = %v, want ErrStableDepositAlreadyClaimed", err)
+	}
+
+	// The second intent must be left in its original state, not partially
+	// written by the rejected attempt.
+	got, gErr := s.GetIntent(context.Background(), second.ID)
+	if gErr != nil {
+		t.Fatalf("reload second: %v", gErr)
+	}
+	if got.DepositTxHash != "" {
+		t.Fatalf("second intent depositTxHash = %q, want empty", got.DepositTxHash)
+	}
+	if got.Status != models.ITStatusPendingDeposit {
+		t.Fatalf("second intent status = %q, want %q", got.Status, models.ITStatusPendingDeposit)
 	}
 }
 
@@ -86,7 +191,7 @@ func TestConfirmStableDeposit_UsesTheVerifiedAmountNotTheQuotedOne(t *testing.T)
 		map[string]string{"USDC": testToken},
 	)
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
-	_ = s.ReportStableDeposit(context.Background(), intent.ID, "0xsource")
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
 
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
 		t.Fatalf("ConfirmStableDeposit: %v", err)
@@ -115,7 +220,7 @@ func TestConfirmStableDeposit_ScalesTheNetByWhatActuallyArrived(t *testing.T) {
 		map[string]string{"USDC": testToken},
 	)
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
-	_ = s.ReportStableDeposit(context.Background(), intent.ID, "0xsource")
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
 	_ = s.ConfirmStableDeposit(context.Background(), intent.ID)
 
 	got, _ := s.GetIntent(context.Background(), intent.ID)
@@ -137,7 +242,7 @@ func TestConfirmStableDeposit_StaysPutWhileTheBridgeIsPending(t *testing.T) {
 	s.SetStableDepositAddress("POLYGON", testFWAddr)
 	s.SetStableVerifier(newStubLiFi(t, "PENDING", "", ""), &stubVerifier{}, map[string]string{"USDC": testToken})
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
-	_ = s.ReportStableDeposit(context.Background(), intent.ID, "0xsource")
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
 
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err == nil {
 		t.Fatal("a pending bridge was treated as confirmed")
@@ -159,7 +264,7 @@ func TestConfirmStableDeposit_RefusesWhenTheChainDisagreesWithLiFi(t *testing.T)
 		map[string]string{"USDC": testToken},
 	)
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
-	_ = s.ReportStableDeposit(context.Background(), intent.ID, "0xsource")
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
 
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err == nil {
 		t.Fatal("unverifiable deposit confirmed")
@@ -175,7 +280,7 @@ func TestConfirmStableDeposit_IsIdempotent(t *testing.T) {
 		map[string]string{"USDC": testToken},
 	)
 	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
-	_ = s.ReportStableDeposit(context.Background(), intent.ID, "0xsource")
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
 
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
 		t.Fatalf("first confirm: %v", err)

@@ -48,7 +48,7 @@ func confirmedSellIntent(t *testing.T, s *ITService) *models.ITIntent {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.ReportStableDeposit(context.Background(), intent.ID, "0xsource"); err != nil {
+	if err := s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource"); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
