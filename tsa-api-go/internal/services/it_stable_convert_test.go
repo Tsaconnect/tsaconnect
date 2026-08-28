@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -278,6 +279,103 @@ func TestConvertAndQueuePayout_WaitsWhenTheAssetHasNoBalanceLineAtAll(t *testing
 	}
 	if len(conv.converted) != 0 {
 		t.Fatal("converted with no balance line for the asset at all")
+	}
+}
+
+func TestItConversionRef_StaysWithinFlutterwavesLengthLimitsWellPastTheOldCliff(t *testing.T) {
+	// Flutterwave rejects references outside 6-42 chars. The old "IT-CONV-"
+	// prefix left only 2 spare chars and broke at attempt 10; this is the
+	// regression guard for that cliff, checked well past it.
+	id := uuid.New()
+	for _, attempts := range []int{0, 9, 10, 99, 9999} {
+		ref := itConversionRef(id, attempts)
+		if n := len(ref); n < 6 || n > 42 {
+			t.Fatalf("attempts=%d: len(ref)=%d (%q), want 6..42", attempts, n, ref)
+		}
+	}
+}
+
+func TestItConversionRef_DifferentAttemptsProduceDifferentReferences(t *testing.T) {
+	id := uuid.New()
+	a := itConversionRef(id, 1)
+	b := itConversionRef(id, 2)
+	if a == b {
+		t.Fatalf("itConversionRef(1) == itConversionRef(2) == %q — retries would collide", a)
+	}
+}
+
+func TestConvertAndQueuePayout_RefusesAndMakesNoProviderCallsOnceAttemptsAreExhausted(t *testing.T) {
+	s := newStableSellDBService(t)
+	conv := &stubConverter{
+		balances: []FWBalance{{Currency: "USDC", AvailableBalance: 150}},
+		transfer: FWTransfer{ID: "trf_1", Status: "NEW"},
+	}
+	s.SetStableConverter(conv, "mrc_test")
+	intent := confirmedSellIntent(t, s)
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Update("conversion_attempts", maxStableConversionAttempts).Error; err != nil {
+		t.Fatalf("seed conversion_attempts: %v", err)
+	}
+
+	err := s.ConvertAndQueuePayout(context.Background(), intent.ID)
+	if !errors.Is(err, ErrStableConversionExhausted) {
+		t.Fatalf("err = %v, want ErrStableConversionExhausted", err)
+	}
+	if len(conv.converted) != 0 {
+		t.Fatalf("converted = %d, want 0 — an exhausted intent must make zero provider calls", len(conv.converted))
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.Status != models.ITStatusDepositConfirmed {
+		t.Fatalf("status = %q, want deposit_confirmed — an exhausted intent must not become terminal or ListStuckStableSells would stop surfacing it", got.Status)
+	}
+}
+
+func TestConvertAndQueuePayout_ExhaustedIntentStillAppearsInListStuckStableSells(t *testing.T) {
+	s := newStableSellDBService(t)
+	s.SetStableConverter(&stubConverter{}, "mrc_test")
+	intent := confirmedSellIntent(t, s)
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Update("conversion_attempts", maxStableConversionAttempts).Error; err != nil {
+		t.Fatalf("seed conversion_attempts: %v", err)
+	}
+	backdateIntent(t, s, intent.ID, time.Now().Add(-2*time.Hour))
+
+	got, err := s.ListStuckStableSells(context.Background(), 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ListStuckStableSells: %v", err)
+	}
+	var found *StuckStableSell
+	for i := range got {
+		if got[i].IntentID == intent.ID {
+			found = &got[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("an exhausted intent did not appear in ListStuckStableSells")
+	}
+	if found.ConversionAttempts != maxStableConversionAttempts {
+		t.Fatalf("conversionAttempts = %d, want %d", found.ConversionAttempts, maxStableConversionAttempts)
+	}
+}
+
+func TestConvertAndQueuePayout_OrdinaryRetryBelowTheCapStillConverts(t *testing.T) {
+	s := newStableSellDBService(t)
+	conv := &stubConverter{
+		balances: []FWBalance{{Currency: "USDC", AvailableBalance: 150}},
+		transfer: FWTransfer{ID: "trf_1", Status: "NEW"},
+	}
+	s.SetStableConverter(conv, "mrc_test")
+	intent := confirmedSellIntent(t, s)
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Update("conversion_attempts", maxStableConversionAttempts-1).Error; err != nil {
+		t.Fatalf("seed conversion_attempts: %v", err)
+	}
+
+	if err := s.ConvertAndQueuePayout(context.Background(), intent.ID); err != nil {
+		t.Fatalf("ConvertAndQueuePayout: %v", err)
+	}
+	if len(conv.converted) != 1 {
+		t.Fatalf("converted = %d, want 1 — one attempt below the cap must still convert", len(conv.converted))
 	}
 }
 

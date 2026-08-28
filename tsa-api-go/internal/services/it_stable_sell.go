@@ -503,14 +503,33 @@ func (s *ITService) SetStableTransfers(r stableTransferReader) { s.stableTransfe
 // transfer) while making a genuinely new attempt mint a genuinely new one.
 //
 // Mirrors itPayoutRef's length accounting: Flutterwave rejects references
-// outside 6–42 chars. "IT-CONV-" (8) + the hyphen-less UUID (32) leaves 2
-// spare chars, enough for "-N" up to a single-digit attempt count — a
-// conversion failing and retrying ten times without operator intervention
-// would itself be the incident to investigate, so this budget is not expected
-// to bind in practice.
+// outside 6–42 chars. "ITC-" (4) + the hyphen-less UUID (32) = 36, leaving 6
+// spare chars — "-" plus up to 5 digits, i.e. attempt counts through 99999.
+// maxStableConversionAttempts caps attempts well before that budget could
+// ever bind — a prior "IT-CONV-" prefix left only 2 spare chars and rejected
+// references outright at attempt 10; this prefix exists so the cap is the
+// only limit that matters.
 func itConversionRef(intentID uuid.UUID, attempts int) string {
-	return fmt.Sprintf("IT-CONV-%s-%d", strings.ReplaceAll(intentID.String(), "-", ""), attempts)
+	return fmt.Sprintf("ITC-%s-%d", strings.ReplaceAll(intentID.String(), "-", ""), attempts)
 }
+
+// maxStableConversionAttempts caps how many times ConvertAndQueuePayout will
+// retry a stablecoin→fiat conversion for one intent. Without a cap,
+// FinalizeConversion's FAILED branch bumps ConversionAttempts forever and the
+// intent oscillates between converting and deposit_confirmed indefinitely,
+// burning provider calls with no terminal state and no operator alert.
+const maxStableConversionAttempts = 10
+
+// ErrStableConversionExhausted means a stablecoin sell's conversion has
+// failed maxStableConversionAttempts times. ConvertAndQueuePayout refuses to
+// call the provider again once this is hit.
+//
+// The intent is deliberately left in deposit_confirmed rather than moved to a
+// terminal status: ListStuckStableSells filters to non-terminal statuses, so
+// marking it terminal would hide the very intent an operator most needs to
+// see, right when it needs seeing. It stays in the stuck list — the watcher
+// just stops burning provider calls on it.
+var ErrStableConversionExhausted = errors.New("it stable: conversion attempts exhausted; needs operator review")
 
 // ConvertAndQueuePayout converts the user's credited stablecoin to fiat and
 // hands the intent to the existing payout path.
@@ -536,6 +555,15 @@ func (s *ITService) ConvertAndQueuePayout(ctx context.Context, intentID uuid.UUI
 	default:
 		return ErrITBadState
 	}
+
+	// Refuse before touching the provider at all — no balance check, no
+	// claim, no conversion call — once this intent has already burned
+	// maxStableConversionAttempts. See ErrStableConversionExhausted.
+	if intent.ConversionAttempts >= maxStableConversionAttempts {
+		log.Printf("[IT] it_stable_conversion_exhausted intent=%s attempts=%d", intent.ID, intent.ConversionAttempts)
+		return fmt.Errorf("%w: intent=%s attempts=%d", ErrStableConversionExhausted, intent.ID, intent.ConversionAttempts)
+	}
+
 	if s.stableConverter == nil {
 		return errors.New("it stable: no Flutterwave converter configured")
 	}
@@ -754,7 +782,11 @@ type StuckStableSell struct {
 	DepositTxHash  string    `json:"depositTxHash,omitempty"`
 	SettledTxHash  string    `json:"settledTxHash,omitempty"`
 	ReceivedAmount string    `json:"receivedAmount,omitempty"`
-	StuckSince     time.Time `json:"stuckSince"`
+	// ConversionAttempts lets an operator see "this has retried N times"
+	// directly rather than inferring it — a count, not money, so a plain int
+	// is correct here (contrast the *Kobo/*Minor string fields above).
+	ConversionAttempts int       `json:"conversionAttempts"`
+	StuckSince         time.Time `json:"stuckSince"`
 }
 
 // ListStuckStableSells reports sells that have sat in a non-terminal state
@@ -791,14 +823,15 @@ func (s *ITService) ListStuckStableSells(ctx context.Context, olderThan time.Dur
 	for i := range intents {
 		in := &intents[i]
 		out = append(out, StuckStableSell{
-			IntentID:       in.ID,
-			UserID:         in.UserID,
-			Status:         in.Status,
-			Asset:          models.ITIntentAsset(in),
-			DepositTxHash:  in.DepositTxHash,
-			SettledTxHash:  in.SettledTxHash,
-			ReceivedAmount: in.ReceivedAmount,
-			StuckSince:     in.UpdatedAt,
+			IntentID:           in.ID,
+			UserID:             in.UserID,
+			Status:             in.Status,
+			Asset:              models.ITIntentAsset(in),
+			DepositTxHash:      in.DepositTxHash,
+			SettledTxHash:      in.SettledTxHash,
+			ReceivedAmount:     in.ReceivedAmount,
+			ConversionAttempts: in.ConversionAttempts,
+			StuckSince:         in.UpdatedAt,
 		})
 	}
 	return out, nil
