@@ -375,9 +375,14 @@ func (s *FeeQuoteService) platformBps(payCurrency string) int64 {
 //	stable deposit           conversion                  (default 2%)
 //	MCGP deposit             none
 func (s *FeeQuoteService) swapLegs(flow FeeFlow, asset FeeAsset, chain string) (int64, []string) {
-	// Brokered stablecoin flows carry no bps legs: the margin is the rate
+	// Brokered stablecoin WITHDRAWALS carry no bps legs: the margin is the rate
 	// spread, and the user pays the bridge directly out of what arrives.
-	if s.brokeredStable && asset.IsStable() {
+	//
+	// Scoped to the withdraw flow, not to the asset. The deposit direction is
+	// the buy side — Phase B, not implemented — and its conversion leg below is
+	// a real charge the brokered sell ramp says nothing about. Zeroing it here
+	// would silently discount a quote already exposed on GET /api/it/quote.
+	if s.brokeredStable && flow == FeeFlowWithdraw && asset.IsStable() {
 		return 0, nil
 	}
 	switch {

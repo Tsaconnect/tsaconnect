@@ -611,6 +611,7 @@ func main() {
 	// address AND our merchant id are both configured — a missing credential
 	// must leave the rest of IT bootable, matching how every other optional
 	// integration in this service degrades (Nomba, Didit KYC, LiFi).
+	stableRampEnabled := false
 	if itService != nil && fwClient != nil && cfg.FWStableDepositAddressPolygon != "" && cfg.FlutterwaveMerchantID != "" {
 		polygonClient := blockchainService.ClientForChain("polygon")
 		if polygonClient == nil {
@@ -630,7 +631,9 @@ func main() {
 					models.ITAssetUSDT: cfg.Networks["mainnet"].TokenAddresses["polygon:USDT"],
 				},
 			)
+			itService.SetStableOverDeliveryToleranceBps(cfg.StableOverDeliveryTolBps)
 			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
+			stableRampEnabled = true
 			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps)", cfg.StableSpreadBps)
 		}
 	} else {
@@ -671,7 +674,11 @@ func main() {
 	// Brokered stablecoin flows (the ramp wired above) already charge their
 	// entire margin as the 1.55% spread baked into QuoteStableSell — the
 	// swap/routing bps legs must NOT also apply, or the user is double-billed.
-	feeQuoteService.SetBrokeredStableFlows(true)
+	//
+	// Gated on the ramp actually being live. Where it is dormant no trade is
+	// ever priced by the spread, so dropping the bps legs would hand out an
+	// unearned discount on a deployment this feature is switched off for.
+	feeQuoteService.SetBrokeredStableFlows(stableRampEnabled)
 	feeQuoteHandler := handlers.NewFeeQuoteHandler(
 		feeQuoteService,
 		services.NewP2PFxProvider(p2pService),

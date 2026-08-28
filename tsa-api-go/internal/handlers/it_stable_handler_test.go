@@ -55,7 +55,7 @@ func newStableTestRouter(t *testing.T) (*gin.Engine, *services.ITService) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -66,6 +66,11 @@ func newStableTestRouter(t *testing.T) (*gin.Engine, *services.ITService) {
 
 	h := NewITHandler(db, it)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
+	// PostStableSell sits behind the same IT trade gate as Buy/Sell, so the
+	// fixture user has to have accepted — the same thing newITTestRig does.
+	if err := it.AcceptITAgreement(context.Background(), user.ID, "", ""); err != nil {
+		t.Fatalf("accept agreement: %v", err)
+	}
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -94,7 +99,7 @@ func newStableTestRouterMultiUser(t *testing.T) (*gin.Engine, *services.ITServic
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.ITIntent{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.ITAgreementAcceptance{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -106,12 +111,22 @@ func newStableTestRouterMultiUser(t *testing.T) (*gin.Engine, *services.ITServic
 	h := NewITHandler(db, it)
 	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
 	userB := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETB"}
+	// Both accept: this fixture exercises ownership, not the trade gate.
+	// "C" (below) is deliberately left unaccepted to cover the gate itself.
+	for _, u := range []*models.User{userA, userB} {
+		if err := it.AcceptITAgreement(context.Background(), u.ID, "", ""); err != nil {
+			t.Fatalf("accept agreement: %v", err)
+		}
+	}
+	userC := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETC"}
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
 		switch c.GetHeader("X-Test-User") {
 		case "B":
 			c.Set("user", userB)
+		case "C":
+			c.Set("user", userC) // has NOT accepted the IT agreement
 		case "none":
 			// deliberately leave no user in context
 		default:
@@ -307,5 +322,31 @@ func TestPostStableDeposit_RejectsAnotherUsersIntent(t *testing.T) {
 	}
 	if got.Status != models.ITStatusPendingDeposit {
 		t.Fatalf("victim status = %q, want %q", got.Status, models.ITStatusPendingDeposit)
+	}
+}
+
+func TestPostStableSell_RequiresTheITAgreement(t *testing.T) {
+	// The brokered ramp routes real user funds to a third party under the CBN
+	// VASP pilot. It must sit behind the same trade gate ActivateVA/Buy/Sell
+	// use — user C has never accepted, so the sell must be refused before any
+	// intent is created.
+	r, svc := newStableTestRouterMultiUser(t)
+	svc.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/it/stable/sell",
+		bytes.NewReader([]byte(`{"asset":"USDC","amount":"100","currency":"NGN","sourceChain":"BSC",
+		  "bank":{"code":"044","number":"0690000031","name":"Ada Okafor"}}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User", "C")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", w.Code, w.Body.String())
+	}
+	// The app keys off this machine code to show the agreement — the same
+	// contract the other three gated endpoints already have.
+	if !containsJSONString(w.Body.Bytes(), "it_agreement_required") {
+		t.Fatalf("response carries no it_agreement_required code: %s", w.Body.String())
 	}
 }

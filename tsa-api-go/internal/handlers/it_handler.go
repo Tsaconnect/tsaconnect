@@ -735,6 +735,12 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
+	// The same trade gate ActivateVA/Buy/Sell use. This ramp routes real user
+	// funds to a third party under the CBN VASP pilot, so it is squarely a
+	// trade and must not be reachable without the accepted agreement.
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
 	ctx := c.Request.Context()
 	q, err := h.it.QuoteStableSell(ctx, req.Asset, req.Amount, req.Currency)
 	if err != nil {

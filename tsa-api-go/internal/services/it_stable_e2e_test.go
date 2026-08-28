@@ -43,6 +43,8 @@ func TestStableSell_EndToEnd(t *testing.T) {
 	// FinalizeConversion is what learns it settled. Wire that read
 	// independently, as SetStableConverter's doc comment says tests should.
 	s.SetStableTransfers(&stubTransfers{tr: FWTransfer{ID: "trf_1", Status: "SUCCESSFUL"}})
+	gw := &fakeNombaGateway{payoutID: "pay_stable_1"}
+	s.SetPayoutGateway(gw)
 
 	ctx := context.Background()
 
@@ -78,9 +80,46 @@ func TestStableSell_EndToEnd(t *testing.T) {
 		t.Fatalf("finalize: %v", err)
 	}
 
+	// `debited` is NOT the finish line — it is where the fiat exists and has
+	// not yet left for the user. Asserting the status alone is what let this
+	// ship with no payout wired at all, so drive the last hop and assert the
+	// gateway was actually asked for money.
+	//
+	// Reached the way production reaches it: the watcher's debited bucket. If
+	// PendingStableSells stops returning these, this test fails here rather
+	// than silently exercising a path nothing calls.
+	_, _, _, debited, pErr := s.PendingStableSells(ctx)
+	if pErr != nil {
+		t.Fatalf("PendingStableSells: %v", pErr)
+	}
+	if len(debited) != 1 || debited[0] != intent.ID {
+		t.Fatalf("settled sell is not in the watcher's payout bucket: %v", debited)
+	}
+	if err := s.PayoutStableSell(ctx, intent.ID); err != nil {
+		t.Fatalf("payout: %v", err)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("payout gateway received %d requests, want exactly 1 — the user was never paid", len(gw.calls))
+	}
+	if gw.calls[0].AccountNumber != testSellBank().Number {
+		t.Fatalf("payout went to %q, want the user's account", gw.calls[0].AccountNumber)
+	}
+
 	got, _ := s.GetIntent(ctx, intent.ID)
 	if got.Status != models.ITStatusDebited {
-		t.Fatalf("status = %q, want debited (AutoPayout-ready)", got.Status)
+		t.Fatalf("status = %q, want debited", got.Status)
+	}
+	if got.PayoutID != "pay_stable_1" {
+		t.Fatalf("payoutId = %q, want the gateway's id recorded on the intent", got.PayoutID)
+	}
+
+	// Re-running the watcher step must not pay twice. This is what makes the
+	// polling model safe: a redelivered tick is free.
+	if err := s.PayoutStableSell(ctx, intent.ID); err != nil {
+		t.Fatalf("second payout call: %v", err)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("payout fired %d times — a redelivered tick paid the user twice", len(gw.calls))
 	}
 
 	// The payout follows the RECEIVED amount, not the 100 USDC quoted. A
@@ -96,5 +135,14 @@ func TestStableSell_EndToEnd(t *testing.T) {
 	}
 	if got.NetNgnKobo == q.NetMinor.String() {
 		t.Fatal("payout matched the QUOTED net — the bridge shortfall was absorbed by the platform")
+	}
+	// And the money that actually left follows that same received-scaled net,
+	// not the quote.
+	wantMajor, err := koboToNairaString(want.String())
+	if err != nil {
+		t.Fatalf("koboToNairaString: %v", err)
+	}
+	if gw.calls[0].Amount != wantMajor {
+		t.Fatalf("payout amount = %q, want %q (the received-scaled net)", gw.calls[0].Amount, wantMajor)
 	}
 }

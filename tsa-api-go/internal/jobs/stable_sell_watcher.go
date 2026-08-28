@@ -11,11 +11,13 @@ import (
 // stableSellDriver is the slice of ITService this watcher needs.
 type stableSellDriver interface {
 	// PendingStableSells returns intents awaiting confirmation, awaiting
-	// conversion, and awaiting conversion SETTLEMENT, in that order.
-	PendingStableSells(ctx context.Context) (reported, confirmed, converting []uuid.UUID, err error)
+	// conversion, awaiting conversion SETTLEMENT, and awaiting PAYOUT, in that
+	// order.
+	PendingStableSells(ctx context.Context) (reported, confirmed, converting, debited []uuid.UUID, err error)
 	ConfirmStableDeposit(ctx context.Context, id uuid.UUID) error
 	ConvertAndQueuePayout(ctx context.Context, id uuid.UUID) error
 	FinalizeConversion(ctx context.Context, id uuid.UUID) error
+	PayoutStableSell(ctx context.Context, id uuid.UUID) error
 }
 
 // StableSellWatcher drives the brokered stablecoin sell state machine.
@@ -43,7 +45,7 @@ func (w *StableSellWatcher) Name() string            { return "it-stable-sell-wa
 func (w *StableSellWatcher) Interval() time.Duration { return w.interval }
 
 func (w *StableSellWatcher) Run(ctx context.Context) error {
-	reported, confirmed, converting, err := w.driver.PendingStableSells(ctx)
+	reported, confirmed, converting, debited, err := w.driver.PendingStableSells(ctx)
 	if err != nil {
 		return err
 	}
@@ -66,6 +68,17 @@ func (w *StableSellWatcher) Run(ctx context.Context) error {
 	for _, id := range converting {
 		if err := w.driver.FinalizeConversion(ctx, id); err != nil {
 			log.Printf("[it-stable-sell-watcher] finalize intent=%s: %v", id, err)
+		}
+	}
+	// The last hop. A settled conversion leaves the user's fiat sitting in the
+	// platform's own Flutterwave balance; nothing else in the service pays a
+	// brokered sell out (CreateSellIntent's inline AutoPayout is the MCGP path
+	// only), so without this step every stablecoin sell ends converted and
+	// unpaid. Re-running is free — AutoPayout short-circuits once a payout has
+	// been requested — so a dropped call heals on the next tick.
+	for _, id := range debited {
+		if err := w.driver.PayoutStableSell(ctx, id); err != nil {
+			log.Printf("[it-stable-sell-watcher] payout intent=%s: %v", id, err)
 		}
 	}
 	return nil

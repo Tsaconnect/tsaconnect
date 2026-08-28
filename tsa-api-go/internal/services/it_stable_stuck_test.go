@@ -80,3 +80,33 @@ func backdateIntent(t *testing.T, s *ITService, id uuid.UUID, at time.Time) {
 		t.Fatalf("backdate: %v", err)
 	}
 }
+
+func TestListStuckStableSells_SurfacesASellStalledAtDebited(t *testing.T) {
+	// `debited` is where the fiat exists but has not reached the user's bank.
+	// It is the state every brokered sell passed through with no payout wired,
+	// and it was invisible to this list — the one tool built to catch stalls
+	// could not see the only stall that mattered.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	userID := uuid.New()
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), userID, testSellQuote(), "POLYGON", testSellBank())
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Update("status", models.ITStatusDebited).Error; err != nil {
+		t.Fatalf("seed debited: %v", err)
+	}
+	backdateIntent(t, s, intent.ID, time.Now().Add(-2*time.Hour))
+
+	got, err := s.ListStuckStableSells(context.Background(), 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ListStuckStableSells: %v", err)
+	}
+	found := false
+	for _, r := range got {
+		if r.IntentID == intent.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a sell stalled at debited is not reported as stuck: %v", got)
+	}
+}

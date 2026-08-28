@@ -100,6 +100,9 @@ type ITService struct {
 	stableSpreadBps   int64
 	stableRateLockTTL time.Duration
 	stableRateTolBps  int64
+	// stableOverDeliverBps bounds how far a deposit may exceed the quoted
+	// amount before it is parked for an operator. See it_stable_sell.go.
+	stableOverDeliverBps int64
 
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.

@@ -28,7 +28,36 @@ var (
 	// transfer happened, not who sent it — Flutterwave exposes one shared
 	// merchant address — so a deposit hash may fund at most one intent.
 	ErrStableDepositAlreadyClaimed = errors.New("it stable: this deposit has already been reported against a sell")
+	// ErrStableOverDelivered means far more arrived than the intent quoted.
+	// Not the trade the user was priced for, so it is parked for an operator
+	// rather than paid out — see the ceiling in ConfirmStableDeposit.
+	ErrStableOverDelivered = errors.New("it stable: deposit exceeds the quoted amount by more than the allowed tolerance")
 )
+
+// defaultStableOverDeliveryTolBps is how far above the quoted amount a deposit
+// may land and still be paid out automatically. Deliberately tight: a bridge
+// or a provider never delivers MORE than it was given, so any material excess
+// is a mis-sized report rather than ordinary slippage. 200 bps leaves room for
+// a rounding artefact without leaving room for an attributed windfall.
+const defaultStableOverDeliveryTolBps = 200
+
+// SetStableOverDeliveryToleranceBps bounds how far a deposit may exceed the
+// quoted amount. Non-positive restores the default.
+func (s *ITService) SetStableOverDeliveryToleranceBps(bps int64) { s.stableOverDeliverBps = bps }
+
+// stableOverDeliveryCeiling is the largest received amount that may still be
+// paid out against a quote of `quoted`, or nil when there is no usable quote.
+func (s *ITService) stableOverDeliveryCeiling(quoted *big.Int) *big.Int {
+	if quoted == nil || quoted.Sign() <= 0 {
+		return nil
+	}
+	bps := s.stableOverDeliverBps
+	if bps <= 0 {
+		bps = defaultStableOverDeliveryTolBps
+	}
+	c := new(big.Int).Mul(quoted, big.NewInt(10000+bps))
+	return c.Quo(c, big.NewInt(10000))
+}
 
 // stableDepositChain is where every sell deposit is routed. Flutterwave accepts
 // inbound stablecoins on Polygon and Ethereum only; Polygon is the cheaper and
@@ -102,19 +131,44 @@ func (s *ITService) CreateStableSellIntent(
 
 	expires := q.ExpiresAt
 	intent := &models.ITIntent{
-		ID:            uuid.New(),
-		UserID:        userID,
-		Direction:     models.ITDirectionSell,
-		Status:        models.ITStatusPendingDeposit,
-		Asset:         q.Asset,
-		AssetAmount:   q.AssetAmount.String(),
-		Currency:      q.Currency,
-		SourceChain:   strings.ToUpper(strings.TrimSpace(sourceChain)),
-		NgnKobo:       q.GrossMinor.String(),
-		NetNgnKobo:    q.NetMinor.String(),
-		RateKobo:      q.RatePerUnitMinor.String(),
-		LockedRate:    q.RatePerUnitMinor.String(),
-		RateExpiresAt: &expires,
+		ID:          uuid.New(),
+		UserID:      userID,
+		Direction:   models.ITDirectionSell,
+		Status:      models.ITStatusPendingDeposit,
+		Asset:       q.Asset,
+		AssetAmount: q.AssetAmount.String(),
+		Currency:    q.Currency,
+		SourceChain: strings.ToUpper(strings.TrimSpace(sourceChain)),
+
+		// Every numeric column must carry a value, not "". PostgreSQL rejects
+		// `''::numeric` outright (SQLSTATE 22P02) and GORM sends any field
+		// without a column `default:` tag in the INSERT whether or not it was
+		// set — so an unset numeric string is an empty string on the wire and
+		// the whole INSERT fails. SQLite's type affinity accepts it silently,
+		// which is why the test fixtures never saw this. The values below are
+		// the correct ones, not filler:
+		//
+		//	McgpAmount       a stablecoin sell has no MCGP leg at all
+		//	FeeNgnKobo       the fee genuinely deducted by the quote — writing
+		//	                 "0" here would make the ledger understate what the
+		//	                 user was charged
+		//	PlatformKeptKobo the platform's margin on a brokered trade is the
+		//	                 rate spread realised inside Flutterwave's own
+		//	                 balances, never a carve out of this intent
+		//	ReceivedAmount   not known until the deposit is verified on-chain;
+		//	                 ConfirmStableDeposit overwrites it
+		//
+		// BeforeSave mirrors the *Kobo columns into their *Minor twins, so
+		// setting these three also fills FeeMinor/NetMinor/PlatformKeptMinor.
+		McgpAmount:       "0",
+		NgnKobo:          q.GrossMinor.String(),
+		NetNgnKobo:       q.NetMinor.String(),
+		FeeNgnKobo:       stableMinorOrZero(q.FeeMinor),
+		PlatformKeptKobo: "0",
+		ReceivedAmount:   "0",
+		RateKobo:         q.RatePerUnitMinor.String(),
+		LockedRate:       q.RatePerUnitMinor.String(),
+		RateExpiresAt:    &expires,
 
 		BankCode:            strings.TrimSpace(bank.Code),
 		AccountNumber:       strings.TrimSpace(bank.Number),
@@ -136,6 +190,16 @@ func (s *ITService) CreateStableSellIntent(
 		AmountBaseUnits: q.AssetAmount,
 		AmountDisplay:   fmt.Sprintf("%.6f", StableFromBaseUnits(q.AssetAmount)),
 	}, nil
+}
+
+// stableMinorOrZero renders a minor-unit figure for a numeric column, mapping
+// a nil (fee engine dormant, or a test fixture that carries no fee line) to
+// "0" rather than "" — see the numeric-column note in CreateStableSellIntent.
+func stableMinorOrZero(v *big.Int) string {
+	if v == nil {
+		return "0"
+	}
+	return v.String()
 }
 
 // SetStableVerifier wires the two independent sources used to confirm that a
@@ -256,20 +320,36 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 	if intent.Status != models.ITStatusDepositReported {
 		return ErrITBadState
 	}
-	if s.stableLiFi == nil || s.stableChain == nil {
+	if s.stableChain == nil {
 		return errors.New("it stable: deposit verification is not configured")
 	}
 
-	status, err := s.stableLiFi.Status(ctx, intent.DepositTxHash)
-	if err != nil {
-		return err
-	}
-	switch status.Status {
-	case LiFiStatusDone:
-	case LiFiStatusFailed:
-		return fmt.Errorf("%w: %s", ErrLiFiFailed, intent.DepositTxHash)
-	default:
-		return fmt.Errorf("%w: %s", ErrLiFiPending, intent.DepositTxHash)
+	// Resolve the SETTLED (Polygon) transaction that actually delivered.
+	//
+	// A user already on Polygon does exactly what StableDepositInstructions
+	// tells them: a plain ERC-20 transfer to Flutterwave's address. LiFi never
+	// routed that transaction and has nothing to say about it — asking would
+	// return a non-2xx and pin the intent in deposit_reported forever with the
+	// funds already at Flutterwave. For a same-chain send the source tx IS the
+	// settled tx, and the on-chain receipt below is the authority either way;
+	// LiFi is only ever the LOOKUP for a cross-chain hop, never the proof.
+	settledTx := strings.TrimSpace(intent.DepositTxHash)
+	if !strings.EqualFold(strings.TrimSpace(intent.SourceChain), stableDepositChain) {
+		if s.stableLiFi == nil {
+			return errors.New("it stable: deposit verification is not configured")
+		}
+		status, err := s.stableLiFi.Status(ctx, intent.DepositTxHash)
+		if err != nil {
+			return err
+		}
+		switch status.Status {
+		case LiFiStatusDone:
+		case LiFiStatusFailed:
+			return fmt.Errorf("%w: %s", ErrLiFiFailed, intent.DepositTxHash)
+		default:
+			return fmt.Errorf("%w: %s", ErrLiFiPending, intent.DepositTxHash)
+		}
+		settledTx = status.DestTxHash
 	}
 
 	asset := models.ITIntentAsset(intent)
@@ -282,9 +362,9 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 		return err
 	}
 
-	received, err := s.stableChain.VerifyTransfer(ctx, status.DestTxHash, token, fwAddr)
+	received, err := s.stableChain.VerifyTransfer(ctx, settledTx, token, fwAddr)
 	if err != nil {
-		return fmt.Errorf("it stable: could not verify %s on-chain: %w", status.DestTxHash, err)
+		return fmt.Errorf("it stable: could not verify %s on-chain: %w", settledTx, err)
 	}
 	if received.Sign() <= 0 {
 		return fmt.Errorf("%w: zero credited", ErrTransferNotFound)
@@ -304,6 +384,29 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 	if !ok || quotedNet.Sign() <= 0 {
 		return errors.New("it stable: intent has no usable quoted net")
 	}
+
+	// Bound the scaling ABOVE. Scaling down is the case this design cares
+	// about — a bridge delivers less than it was given — but the ratio is
+	// symmetric and nothing else constrains the other direction.
+	//
+	// Two things go wrong without a ceiling. The rate lock's drift exposure was
+	// sized against the quoted amount, and it scales linearly with the
+	// over-delivery. Worse, creating an intent escrows nothing, so an unbounded
+	// ratio removes the cost ceiling on the known deposit-attribution risk: a
+	// 10 USDC quote could otherwise claim a 50,000 USDC deposit and be paid on
+	// all of it at the attacker's own locked rate.
+	//
+	// Fail CLOSED rather than capping the payout at the quoted amount — a cap
+	// would keep the excess, which is the platform taking a user's money. The
+	// intent stays in deposit_reported, which ListStuckStableSells surfaces, so
+	// an operator resolves it against the on-chain evidence by hand. Nothing is
+	// lost: the funds are provably at Flutterwave either way.
+	if over := s.stableOverDeliveryCeiling(quoted); over != nil && received.Cmp(over) > 0 {
+		log.Printf("[IT] it_stable_over_delivery intent=%s quoted=%s received=%s ceiling=%s",
+			intent.ID, quoted, received, over)
+		return fmt.Errorf("%w: quoted %s, received %s", ErrStableOverDelivered, quoted, received)
+	}
+
 	net := new(big.Int).Quo(new(big.Int).Mul(quotedNet, received), quoted)
 	if net.Sign() <= 0 {
 		return fmt.Errorf("it stable: received amount %s leaves nothing to pay out", received)
@@ -322,7 +425,7 @@ func (s *ITService) ConfirmStableDeposit(ctx context.Context, intentID uuid.UUID
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("id = ? AND status = ?", intent.ID, models.ITStatusDepositReported).
 		Updates(map[string]any{
-			"settled_tx_hash": status.DestTxHash,
+			"settled_tx_hash": settledTx,
 			"received_amount": received.String(),
 			"net_ngn_kobo":    net.String(),
 			"status":          models.ITStatusDepositConfirmed,
@@ -565,8 +668,15 @@ func (s *ITService) FinalizeConversion(ctx context.Context, intentID uuid.UUID) 
 
 // PendingStableSells lists brokered sell intents that can still advance:
 // those whose deposit was reported but not yet confirmed, those confirmed
-// but not yet converted, and those converting but not yet settled.
-func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed, converting []uuid.UUID, err error) {
+// but not yet converted, those converting but not yet settled, and those whose
+// fiat is credited and now await the payout.
+//
+// `debited` is a bucket here and not a terminal state: for a brokered sell it
+// is where the fiat exists but has not yet left for the user's bank. Nothing
+// else in the service scans for it — CreateSellIntent's AutoPayout call is
+// inline on the MCGP path only — so without this bucket every stablecoin sell
+// stops one hop short of the user's money.
+func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed, converting, debited []uuid.UUID, err error) {
 	type row struct {
 		ID     uuid.UUID
 		Status string
@@ -576,15 +686,18 @@ func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed
 		Model(&models.ITIntent{}).
 		Select("id", "status").
 		Where("direction = ?", models.ITDirectionSell).
+		// Scoped to the stablecoin assets so this never sweeps up an MCGP sell,
+		// whose `debited` intents CreateSellIntent has already paid out inline.
 		Where("asset IN ?", []string{models.ITAssetUSDC, models.ITAssetUSDT}).
 		Where("status IN ?", []string{
 			models.ITStatusDepositReported,
 			models.ITStatusDepositConfirmed,
 			models.ITStatusConverting,
+			models.ITStatusDebited,
 		}).
 		Find(&rows).Error
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	for _, r := range rows {
 		switch r.Status {
@@ -594,9 +707,41 @@ func (s *ITService) PendingStableSells(ctx context.Context) (reported, confirmed
 			confirmed = append(confirmed, r.ID)
 		case models.ITStatusConverting:
 			converting = append(converting, r.ID)
+		case models.ITStatusDebited:
+			debited = append(debited, r.ID)
 		}
 	}
-	return reported, confirmed, converting, nil
+	return reported, confirmed, converting, debited, nil
+}
+
+// PayoutStableSell fires the fiat payout for a brokered sell whose conversion
+// has settled.
+//
+// This is the last hop, and it is driven by the watcher rather than called
+// inline from FinalizeConversion on purpose: AutoPayout short-circuits on a
+// non-empty PayoutID, so re-running it is free, which makes a dropped call
+// self-heal on the next tick instead of stranding a user's converted fiat in
+// the platform's own balance. It also matches the polling model every other
+// step of this ramp uses.
+//
+// Guarded exactly as CreateSellIntent's inline call is: no gateway or no
+// destination means the operator settles manually (legacy path), which is not
+// a failure of this intent.
+func (s *ITService) PayoutStableSell(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Direction != models.ITDirectionSell || intent.Status != models.ITStatusDebited {
+		return ErrITBadState
+	}
+	if intent.PayoutID != "" {
+		return nil
+	}
+	if s.payout == nil || !sellIntentHasPayoutDestination(intent) {
+		return nil
+	}
+	return s.AutoPayout(ctx, intent)
 }
 
 // StuckStableSell is a brokered sell that has not advanced, with the evidence
@@ -630,6 +775,11 @@ func (s *ITService) ListStuckStableSells(ctx context.Context, olderThan time.Dur
 			models.ITStatusDepositReported,
 			models.ITStatusDepositConfirmed,
 			models.ITStatusConverting,
+			// `debited` is non-terminal for a brokered sell: the fiat exists
+			// but has not reached the user's bank. A sell that sits here past
+			// the threshold is one whose payout never fired, which is exactly
+			// the stall an operator most needs to see.
+			models.ITStatusDebited,
 		}).
 		Where("updated_at < ?", cutoff).
 		Order("updated_at asc").

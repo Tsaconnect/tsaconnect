@@ -15,14 +15,21 @@ type fakeDriver struct {
 	converted  []uuid.UUID
 	converting []uuid.UUID
 	finalized  []uuid.UUID
+	debited    []uuid.UUID
+	paidOut    []uuid.UUID
 
 	confirmErr  error
 	convertErr  error
 	finalizeErr error
+	payoutErr   error
 }
 
-func (f *fakeDriver) PendingStableSells(context.Context) ([]uuid.UUID, []uuid.UUID, []uuid.UUID, error) {
-	return f.reported, f.confirmed, f.converting, nil
+func (f *fakeDriver) PendingStableSells(context.Context) ([]uuid.UUID, []uuid.UUID, []uuid.UUID, []uuid.UUID, error) {
+	return f.reported, f.confirmed, f.converting, f.debited, nil
+}
+func (f *fakeDriver) PayoutStableSell(_ context.Context, id uuid.UUID) error {
+	f.paidOut = append(f.paidOut, id)
+	return f.payoutErr
 }
 func (f *fakeDriver) FinalizeConversion(_ context.Context, id uuid.UUID) error {
 	f.finalized = append(f.finalized, id)
@@ -81,6 +88,20 @@ func TestStableSellWatcher_FinalizesSettledConversions(t *testing.T) {
 	}
 	if len(f.finalized) == 0 || f.finalized[0] != id {
 		t.Fatalf("converting intent was not finalized: %v", f.finalized)
+	}
+}
+
+func TestStableSellWatcher_PaysOutSettledSells(t *testing.T) {
+	// The last hop, and the one that was missing: a settled conversion leaves
+	// the user's fiat in the platform's own balance. Without this bucket every
+	// brokered sell ends converted and unpaid.
+	id := uuid.New()
+	f := &fakeDriver{debited: []uuid.UUID{id}}
+	if err := NewStableSellWatcher(f, time.Minute).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(f.paidOut) == 0 || f.paidOut[0] != id {
+		t.Fatalf("debited intent was never paid out: %v", f.paidOut)
 	}
 }
 

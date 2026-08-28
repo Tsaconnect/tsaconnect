@@ -302,3 +302,154 @@ func TestConfirmStableDeposit_IsIdempotent(t *testing.T) {
 		t.Fatalf("status changed on re-confirm: %q, want %q", got.Status, models.ITStatusDepositConfirmed)
 	}
 }
+
+// failingLiFi is a LiFi client pointed at a server that always 500s — the
+// shape a same-chain deposit really hits, since LiFi never routed the
+// transaction and has nothing to return for it.
+func failingLiFi(t *testing.T) *LiFiStatusClient {
+	t.Helper()
+	srv := lifiServer(t, 500, `{"message":"not found"}`)
+	t.Cleanup(srv.Close)
+	return NewLiFiStatusClient(srv.URL, "")
+}
+
+func TestConfirmStableDeposit_SameChainSkipsLiFiEntirely(t *testing.T) {
+	// A user already on Polygon does exactly what the deposit instructions say
+	// — a plain ERC-20 transfer — so LiFi has no record of it. Routing that
+	// through LiFi pins the intent in deposit_reported forever while the funds
+	// sit at Flutterwave. The source tx IS the settled tx here, and the
+	// on-chain receipt is the authority.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	s.SetStableVerifier(
+		failingLiFi(t),
+		&stubVerifier{amount: big.NewInt(100000000)},
+		map[string]string{"USDC": testToken},
+	)
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xpolygonsend")
+
+	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
+		t.Fatalf("same-chain confirm: %v", err)
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.Status != models.ITStatusDepositConfirmed {
+		t.Fatalf("status = %q, want %q", got.Status, models.ITStatusDepositConfirmed)
+	}
+	// The settled hash is the one the user broadcast — there is no second
+	// transaction on a same-chain send.
+	if got.SettledTxHash != "0xpolygonsend" {
+		t.Fatalf("settledTxHash = %q, want the source hash", got.SettledTxHash)
+	}
+	if got.ReceivedAmount != "100000000" {
+		t.Fatalf("receivedAmount = %q", got.ReceivedAmount)
+	}
+}
+
+func TestConfirmStableDeposit_CrossChainStillRequiresLiFi(t *testing.T) {
+	// The same-chain shortcut must not become a general bypass: a BSC-sourced
+	// deposit still has to be resolved to its Polygon destination transaction.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	s.SetStableVerifier(
+		failingLiFi(t),
+		&stubVerifier{amount: big.NewInt(100000000)},
+		map[string]string{"USDC": testToken},
+	)
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xbscsend")
+
+	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err == nil {
+		t.Fatal("a cross-chain deposit confirmed without resolving the destination transaction")
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.Status != models.ITStatusDepositReported {
+		t.Fatalf("status advanced to %q with no LiFi resolution", got.Status)
+	}
+}
+
+func TestConfirmStableDeposit_AcceptsOverDeliveryWithinTolerance(t *testing.T) {
+	// A trivial excess is ordinary rounding, not an attack. It must still pay
+	// out, scaled up in proportion, exactly as a shortfall scales down.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	// 100 USDC quoted; 100.5 arrived = 50 bps over, inside the 200 bps default.
+	const received = 100500000
+	s.SetStableVerifier(
+		newStubLiFi(t, "DONE", "0xdest", "100500000"),
+		&stubVerifier{amount: big.NewInt(received)},
+		map[string]string{"USDC": testToken},
+	)
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
+
+	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
+		t.Fatalf("within-tolerance over-delivery was rejected: %v", err)
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	want := new(big.Int).Quo(
+		new(big.Int).Mul(big.NewInt(16246711), big.NewInt(received)),
+		big.NewInt(100000000),
+	)
+	if got.NetNgnKobo != want.String() {
+		t.Fatalf("net = %q, want %s", got.NetNgnKobo, want)
+	}
+}
+
+func TestConfirmStableDeposit_ParksAnOverDeliveryBeyondTolerance(t *testing.T) {
+	// The adversarial case. Creating an intent escrows nothing, so an unbounded
+	// received/quoted ratio lets a small quote claim an arbitrarily large
+	// deposit. Fail CLOSED: no payout is priced, and the intent stays where
+	// ListStuckStableSells can surface it for an operator.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	// 100 USDC quoted, 50,000 USDC delivered.
+	s.SetStableVerifier(
+		newStubLiFi(t, "DONE", "0xdest", "50000000000"),
+		&stubVerifier{amount: big.NewInt(50000000000)},
+		map[string]string{"USDC": testToken},
+	)
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
+
+	err := s.ConfirmStableDeposit(context.Background(), intent.ID)
+	if !errors.Is(err, ErrStableOverDelivered) {
+		t.Fatalf("err = %v, want ErrStableOverDelivered", err)
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.Status != models.ITStatusDepositReported {
+		t.Fatalf("status = %q, want it parked at deposit_reported", got.Status)
+	}
+	// Critically: no payout figure was written from the oversized deposit.
+	if got.ReceivedAmount != "0" {
+		t.Fatalf("receivedAmount = %q — the oversized deposit was recorded anyway", got.ReceivedAmount)
+	}
+	if got.NetNgnKobo != "16246711" {
+		t.Fatalf("net = %q — it was repriced off the oversized deposit", got.NetNgnKobo)
+	}
+}
+
+func TestConfirmStableDeposit_ShortfallStillPaysOut(t *testing.T) {
+	// The ceiling must not disturb the case it sits opposite: under-delivery
+	// still scales down and settles.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	s.SetStableVerifier(
+		newStubLiFi(t, "DONE", "0xdest", "50000000"),
+		&stubVerifier{amount: big.NewInt(50000000)}, // half of what was quoted
+		map[string]string{"USDC": testToken},
+	)
+	intent, _, _ := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
+	_ = s.ReportStableDeposit(context.Background(), intent.UserID, intent.ID, "0xsource")
+
+	if err := s.ConfirmStableDeposit(context.Background(), intent.ID); err != nil {
+		t.Fatalf("a shortfall was rejected: %v", err)
+	}
+	got, _ := s.GetIntent(context.Background(), intent.ID)
+	if got.Status != models.ITStatusDepositConfirmed {
+		t.Fatalf("status = %q", got.Status)
+	}
+	if got.ReceivedAmount != "50000000" {
+		t.Fatalf("receivedAmount = %q", got.ReceivedAmount)
+	}
+}

@@ -441,6 +441,12 @@ type Config struct {
 	// StableRateLockTTL bounds how long a quoted rate is honoured. The lock is
 	// ours, not Flutterwave's — /transfers/rates carries no expiry.
 	StableRateLockTTL time.Duration
+	// StableOverDeliveryTolBps bounds how far a sell deposit may exceed the
+	// amount it was quoted for and still be paid out automatically. Beyond it
+	// the intent is parked for an operator rather than paid: the payout scales
+	// with what actually arrived, and an unbounded ratio would let a small
+	// quote claim an arbitrarily large deposit.
+	StableOverDeliveryTolBps int64
 	// FWStableDepositAddressPolygon is Flutterwave's own Polygon address that
 	// user sell deposits are routed to. Flutterwave exposes it on the dashboard
 	// only, so it is fetched once by hand and configured here. The platform
@@ -753,6 +759,7 @@ func Load() *Config {
 	// Stablecoin ⇄ fiat ramp (brokered through Flutterwave; no float is held).
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
 	cfg.StableRateLockTTL = time.Duration(getEnvInt64("IT_STABLE_RATE_LOCK_SECONDS", 900)) * time.Second
+	cfg.StableOverDeliveryTolBps = getEnvInt64("IT_STABLE_OVER_DELIVERY_TOL_BPS", 200)
 	cfg.FWStableDepositAddressPolygon = strings.TrimSpace(getEnv("FW_STABLE_DEPOSIT_ADDRESS_POLYGON", ""))
 
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values

@@ -547,9 +547,14 @@ func TestSwapLegs_BrokeredStablecoinFlowsChargeNoBps(t *testing.T) {
 				t.Errorf("withdraw %s on %q: legs = %v, want none", asset, chain, legs)
 			}
 		}
+		// The DEPOSIT direction keeps its conversion leg. This assertion was
+		// inverted when it was written: the flag describes the sell ramp, and
+		// the deposit side is the unimplemented buy direction whose 2%
+		// conversion charge is already quoted on GET /api/it/quote. Pinned
+		// separately in TestSwapLegs_BrokeredFlagDoesNotTouchTheDepositLeg.
 		bps, legs := s.swapLegs(FeeFlowDeposit, asset, "polygon")
-		if bps != 0 || len(legs) != 0 {
-			t.Errorf("deposit %s: bps=%d legs=%v, want 0 and none", asset, bps, legs)
+		if bps != s.cfg.StableDepositConvBps || len(legs) != 1 {
+			t.Errorf("deposit %s: bps=%d legs=%v, want the conversion leg intact", asset, bps, legs)
 		}
 	}
 }
@@ -590,4 +595,32 @@ func newBrokeredFeeService(t *testing.T, brokered bool) *FeeQuoteService {
 	s := NewFeeQuoteService(feeTestConfig(), nil)
 	s.SetBrokeredStableFlows(brokered)
 	return s
+}
+
+func TestSwapLegs_BrokeredFlagDoesNotTouchTheDepositLeg(t *testing.T) {
+	// The brokered flag describes the SELL ramp — a stablecoin withdrawal whose
+	// margin is the rate spread. The deposit direction is the buy side (Phase
+	// B, not implemented) and its conversion leg is a real, separate charge
+	// already exposed on GET /api/it/quote. Zeroing it because the asset
+	// happens to be stable discounts a quote nobody decided to discount.
+	s := newBrokeredFeeService(t, true)
+
+	bps, legs := s.swapLegs(FeeFlowDeposit, FeeAssetUSDC, feeChainPolygon)
+	if len(legs) != 1 || legs[0] != "conversion" {
+		t.Fatalf("legs = %v, want [conversion]", legs)
+	}
+	if bps != feeTestConfig().StableDepositConvBps {
+		t.Fatalf("bps = %d, want the configured StableDepositConvBps %d", bps, feeTestConfig().StableDepositConvBps)
+	}
+}
+
+func TestSwapLegs_BrokeredFlagStillZeroesTheWithdrawLeg(t *testing.T) {
+	// The narrowing must not undo what the flag is for: a brokered stablecoin
+	// WITHDRAWAL carries no bps legs, or the user is billed the spread twice.
+	s := newBrokeredFeeService(t, true)
+
+	bps, legs := s.swapLegs(FeeFlowWithdraw, FeeAssetUSDC, feeChainPolygon)
+	if bps != 0 || len(legs) != 0 {
+		t.Fatalf("brokered stablecoin withdraw = %d bps %v, want 0 and no legs", bps, legs)
+	}
 }
