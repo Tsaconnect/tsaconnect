@@ -34,8 +34,19 @@ for a in "$@"; do
   esac
 done
 
-log()  { printf '\n=== %s\n' "$*"; }
-fail() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
+# Every step also goes to journald tagged `tsa-deploy`, so who deployed what, when,
+# and whether it failed survives the terminal:  journalctl -t tsa-deploy
+#
+# SUDO_USER, not id -un: this runs as tsa-deploy via `sudo -u tsa-deploy`, so id -un
+# is always "tsa-deploy" and would record nothing. SUDO_USER is the real person.
+#
+# `|| true` and no preflight check for logger: an audit-log failure must never be
+# the thing that aborts a deploy.
+audit() { logger -t tsa-deploy -- "${SUDO_USER:-$(id -un)}: $*" 2>/dev/null || true; }
+log()  { printf '\n=== %s\n' "$*"; audit "$*"; }
+fail() { printf '\nFAILED: %s\n' "$*" >&2; audit "FAILED: $*"; exit 1; }
+
+audit "deploy requested: ref=$REF force=$FORCE"
 
 # ── serialise ────────────────────────────────────────────────────────────
 # Two concurrent deploys would run `-migrate` simultaneously — the exact DDL race

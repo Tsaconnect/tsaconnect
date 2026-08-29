@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Operator shortcut for the deploy tooling. Install to /usr/local/bin/tsactl.
+#
+#   tsactl status                    what is running (no privilege needed)
+#   tsactl deploy [<ref>] [--force]  build and ship a ref (default origin/main)
+#   tsactl rollback [--list] [<dir>] previous release; never rebuilds
+#   tsactl logs [-f|-n N]            journal for the API service
+#   tsactl audit [-n N]              who deployed what, and when
+#   tsactl update                    pull the deploy scripts themselves
+#
+set -Eeuo pipefail
+
+ROOT=/srv/tsa-api
+REPO=$ROOT/repo
+D=$REPO/tsa-api-go/deploy
+
+# -H matters: without it HOME can stay /root, and both the Go build cache and the
+# SSH deploy-key lookup fail with permission errors.
+#
+# Deliberately NOT setuid, and tsactl is NOT in sudoers. deploy and rollback still
+# go through your own `sudo`, so the audit trail records a real person rather than
+# "whoever could run the wrapper".
+AS_DEPLOY=(sudo -u tsa-deploy -H)
+
+die() { printf 'tsactl: %s\n' "$*" >&2; exit 1; }
+
+# The clone is only ever FETCHED by deploy.sh, never checked out again, so these
+# scripts can legitimately be missing on a box provisioned before they existed.
+# Say that, rather than "no such file or directory".
+require() {
+  [ -x "$D/$1" ] || die "$D/$1 not found — the deploy checkout predates it. Run: tsactl update"
+}
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+case "${1:-}" in
+  status)
+    shift; require status.sh; exec "$D/status.sh" "$@" ;;
+  deploy)
+    shift; require deploy.sh;   exec "${AS_DEPLOY[@]}" "$D/deploy.sh" "$@" ;;
+  rollback)
+    shift; require rollback.sh; exec "${AS_DEPLOY[@]}" "$D/rollback.sh" "$@" ;;
+  logs)
+    shift
+    # if/fi, not `[ ] && set --`: under set -e a false test as the last simple
+    # command of an && list would exit the script.
+    if [ $# -eq 0 ]; then set -- -n 100; fi
+    exec journalctl -u tsa-api.service "$@" ;;
+  audit)
+    shift
+    if [ $# -eq 0 ]; then set -- -n 100; fi
+    exec journalctl -t tsa-deploy "$@" ;;
+  update)
+    # --ff-only: the deploy tooling must never be silently merged or rebased on a
+    # production box. If this refuses, look at the box by hand.
+    exec "${AS_DEPLOY[@]}" git -C "$REPO" pull --ff-only ;;
+  ''|-h|--help|help) usage ;;
+  *) die "unknown command: $1 (try: tsactl --help)" ;;
+esac
