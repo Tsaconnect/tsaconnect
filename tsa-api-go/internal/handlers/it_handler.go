@@ -832,7 +832,8 @@ func stableStatusFor(err error) int {
 		errors.Is(err, services.ErrStableDepositAlreadyClaimed):
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrStableQuoteUnavailable),
-		errors.Is(err, services.ErrStableNoDepositAddress):
+		errors.Is(err, services.ErrStableNoDepositAddress),
+		errors.Is(err, services.ErrStableNoTokenAddress):
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
@@ -859,7 +860,8 @@ func stableCodeFor(err error) string {
 		return "stable_below_minimum"
 	case errors.Is(err, services.ErrStableNotAnAsset):
 		return "stable_not_an_asset"
-	case errors.Is(err, services.ErrStableNoDepositAddress):
+	case errors.Is(err, services.ErrStableNoDepositAddress),
+		errors.Is(err, services.ErrStableNoTokenAddress):
 		return "stable_not_configured"
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"

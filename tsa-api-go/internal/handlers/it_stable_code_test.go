@@ -36,6 +36,7 @@ func TestStableCodeFor_MapsEachSentinelToItsSnakeCaseCode(t *testing.T) {
 		{"below minimum", services.ErrStableBelowMinimum, "stable_below_minimum"},
 		{"not an asset", services.ErrStableNotAnAsset, "stable_not_an_asset"},
 		{"no deposit address", services.ErrStableNoDepositAddress, "stable_not_configured"},
+		{"no token address", services.ErrStableNoTokenAddress, "stable_not_configured"},
 		{"fee exceeds proceeds", services.ErrStableFeeExceedsProceeds, "stable_fee_exceeds_proceeds"},
 		// Wrapped errors must still match via errors.Is, same as stableStatusFor.
 		{"wrapped already claimed", fmtErrorf(services.ErrStableDepositAlreadyClaimed), "stable_deposit_already_claimed"},
@@ -92,6 +93,7 @@ func newStableCodeTestFixture(t *testing.T) *gin.Engine {
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
 	it.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
+	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
 	h := NewITHandler(db, it)
 	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
@@ -169,5 +171,40 @@ func TestPostStableDeposit_AlreadyClaimed_ResponseCarriesTheMachineCode(t *testi
 	}
 	if !containsJSONString(second.Body.Bytes(), `"code":"stable_deposit_already_claimed"`) {
 		t.Fatalf("response carries no stable_deposit_already_claimed code: %s", second.Body.String())
+	}
+}
+
+// TestStableStatusFor_NoTokenAddressIs503 pins ErrStableNoTokenAddress to the
+// same class as ErrStableNoDepositAddress: the request was fine, the platform
+// is not configured for it, so this is a 503 rather than a 400.
+func TestStableStatusFor_NoTokenAddressIs503(t *testing.T) {
+	if got := stableStatusFor(services.ErrStableNoTokenAddress); got != http.StatusServiceUnavailable {
+		t.Fatalf("stableStatusFor(ErrStableNoTokenAddress) = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
+// TestPostStableSell_NoTokenAddressConfigured_Returns503WithStableNotConfigured
+// exercises the full handler path (not just the mapping functions in
+// isolation): with a Flutterwave deposit address wired but no token contract
+// for the asset, PostStableSell must refuse — never returning an intent with
+// an unresolvable deposit instruction — and surface the same machine code the
+// app already handles for a missing deposit address.
+func TestPostStableSell_NoTokenAddressConfigured_Returns503WithStableNotConfigured(t *testing.T) {
+	r := newStableCodeTestFixture(t)
+
+	// The fixture wires only "USDC" — a USDT sell has no configured token.
+	const sellBody = `{"asset":"USDT","amount":"100","currency":"NGN","sourceChain":"BSC",
+	  "bank":{"code":"044","number":"0690000031","name":"Ada Okafor"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/it/stable/sell", bytes.NewReader([]byte(sellBody)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User", "A")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if !containsJSONString(w.Body.Bytes(), `"code":"stable_not_configured"`) {
+		t.Fatalf("response carries no stable_not_configured code: %s", w.Body.String())
 	}
 }

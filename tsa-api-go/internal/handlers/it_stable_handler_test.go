@@ -63,6 +63,10 @@ func newStableTestRouter(t *testing.T) (*gin.Engine, *services.ITService) {
 	it.SetRateQuoter(stubStableQuoter{})
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
+	// CreateStableSellIntent fails closed without a configured token contract
+	// for the asset (see services.ErrStableNoTokenAddress) — wire one so the
+	// PostStableSell tests exercise the create path, not that refusal.
+	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
 	h := NewITHandler(db, it)
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
@@ -107,6 +111,10 @@ func newStableTestRouterMultiUser(t *testing.T) (*gin.Engine, *services.ITServic
 	it.SetRateQuoter(stubStableQuoter{})
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
+	// CreateStableSellIntent fails closed without a configured token contract
+	// for the asset (see services.ErrStableNoTokenAddress) — wire one so the
+	// PostStableSell tests exercise the create path, not that refusal.
+	it.SetStableVerifier(nil, nil, map[string]string{"USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"})
 
 	h := NewITHandler(db, it)
 	userA := &models.User{ID: uuid.New(), WalletAddress: "0xWALLETA"}
