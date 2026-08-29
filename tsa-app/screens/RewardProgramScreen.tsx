@@ -17,7 +17,6 @@ import {
   Card,
   Icon,
   PressableScale,
-  ScreenHeader,
   Spinner,
   Text,
 } from '@/components/ui';
@@ -176,7 +175,6 @@ const RewardProgramScreen = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Reward" fallbackRoute="/home" />
       {loading ? (
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <Spinner label="Loading rewards…" />

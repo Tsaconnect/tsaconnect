@@ -14,6 +14,7 @@ import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { OtpInput } from 'react-native-otp-entry';
 import { router } from 'expo-router';
+import { goBack } from '@/utils/back';
 import api from '../services/api';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { useTheme } from '@/theme';
@@ -119,7 +120,7 @@ const Verify = ({ email, onSkip, onSuccess, showSkip = true }: VerifyProps) => {
       >
         <IconButton
           icon="chevronLeft"
-          onPress={() => router.back()}
+          onPress={() => goBack('/login')}
           accessibilityLabel="Go back"
           style={{ marginStart: -spacing.sm }}
         />

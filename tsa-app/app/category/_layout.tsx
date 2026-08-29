@@ -1,5 +1,5 @@
 import { Stack } from "expo-router";
-import { useDefaultScreenOptions } from "../../constants/navigation";
+import { useDefaultScreenOptions } from "@/constants/navigation";
 
 const CategoryLayout = () => {
   const screenOptions = useDefaultScreenOptions();

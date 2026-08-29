@@ -14,6 +14,7 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ScreenHeader } from '@/components/ui';
 import { useTheme } from '@/theme';
+import { HOME_TAB } from '@/constants/routes';
 import ProfileScreen from '../../components/profile/profile';
 
 const Profile = () => {
@@ -21,7 +22,7 @@ const Profile = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Profile" />
+      <ScreenHeader title="Profile" fallbackRoute={HOME_TAB} />
       <View style={{ flex: 1 }}>
         <ProfileScreen />
       </View>

@@ -89,7 +89,7 @@ const OnboardingRewardForm = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <ScreenHeader title="Onboarding form" />
+      <ScreenHeader title="Onboarding form" fallbackRoute="/reward" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={{ flex: 1 }}

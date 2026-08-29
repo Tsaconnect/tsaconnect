@@ -9,6 +9,7 @@ import React, { useState, useRef } from 'react';
 import { View, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import { HOME_TAB } from '@/constants/routes';
 import { setPin as savePin, setBiometricEnabled, isBiometricAvailable, getBiometricType } from '@/services/localAuth';
 import { useTheme } from '@/theme';
 import { Text, Button, Icon, PressableScale, ScreenHeader } from '@/components/ui';
@@ -124,7 +125,7 @@ const PinSetupScreen = () => {
   if (step === 'biometric') {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <ScreenHeader />
+        <ScreenHeader fallbackRoute={HOME_TAB} />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.lg }}>
           {iconCircle('shield', colors.accent, colors.accentMuted)}
           <Text variant="title1" weight="700" align="center" style={{ marginBottom: spacing.sm }}>
@@ -151,6 +152,7 @@ const PinSetupScreen = () => {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScreenHeader
+        fallbackRoute={HOME_TAB}
         onBack={
           isConfirm
             ? () => {

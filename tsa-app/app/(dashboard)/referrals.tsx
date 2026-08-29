@@ -12,7 +12,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { View, FlatList, Alert, RefreshControl, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import { router } from 'expo-router';
 import api from '../../components/services/api';
 import { useTheme } from '@/theme';
 import {
@@ -24,7 +23,6 @@ import {
   Card,
   Divider,
   EmptyState,
-  IconButton,
   Spinner,
   Text,
 } from '@/components/ui';
@@ -186,18 +184,6 @@ const ReferralsScreen: React.FC = () => {
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] }}
         ListHeaderComponent={
           <View>
-            {/* Header */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
-              <IconButton
-                icon="chevronLeft"
-                onPress={() => router.back()}
-                accessibilityLabel="Go back"
-                style={{ marginLeft: -spacing.md }}
-              />
-              <Text variant="title1" weight="700">
-                My Referrals
-              </Text>
-            </View>
 
             {/* Summary stats */}
             <View style={{ flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg }}>

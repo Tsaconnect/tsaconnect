@@ -27,7 +27,6 @@ import {
   Divider,
   EmptyState,
   Icon,
-  IconButton,
   PressableScale,
   Spinner,
   Surface,
@@ -181,18 +180,6 @@ const CashbackScreen: React.FC = () => {
           />
         }
       >
-        {/* Header */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
-          <IconButton
-            icon="chevronLeft"
-            onPress={() => router.back()}
-            accessibilityLabel="Go back"
-            style={{ marginLeft: -spacing.sm }}
-          />
-          <Text variant="title2" weight="700">
-            Cashback
-          </Text>
-        </View>
 
         {/* ── Hero: total cashback ── */}
         <AccentCard padding="xl">

@@ -1,24 +1,11 @@
 // app/(dashboard)/(tabs)/(marketplace)/digital.tsx
 //
-// Marketplace — digital products tab. Thin wrapper that renders the shared
-// MarketplaceScreen. Migrated onto the TSA Signature design system: the legacy
-// constants `COLORS` import and hardcoded white background are replaced with
-// theme tokens via useTheme(), so light/dark both come free. The wrapped
-// MarketplaceScreen (data fetching, state, navigation) is rendered verbatim.
-import { StyleSheet, View } from "react-native";
-import React from "react";
-import { useTheme } from "@/theme";
-import MarketplaceScreen from "@/screens/marketplace";
+// LEGACY ALIAS — see products.tsx. `/digital` also rendered a second copy of
+// MarketplaceScreen with no filter applied, so it was indistinguishable from the
+// tab root. Redirects there instead of duplicating it.
+import { Redirect } from 'expo-router';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 
-const DigitalScreen = () => {
-  const { colors } = useTheme();
-  return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
-      <MarketplaceScreen />
-    </View>
-  );
-};
-
-export default DigitalScreen;
-
-export const styles = StyleSheet.create({});
+export default function Digital() {
+  return <Redirect href={MARKETPLACE_TAB} />;
+}

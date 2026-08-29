@@ -1,32 +1,14 @@
 // Stack layout for the legal documents (Privacy Policy, Terms of Service).
-// Header chrome mirrors app/wallet/_layout.tsx so the section reads as part of
-// the same app. Titles come from each screen's own <Stack.Screen> so the
-// document title and the header can never drift apart.
+// Reached from the signup form's consent links, i.e. from a completely
+// different group — without the shared headerLeft these are a dead end in the
+// middle of onboarding. Titles come from each screen's own <Stack.Screen> so
+// the document title and the header can never drift apart.
 import React from 'react';
 import { Stack } from 'expo-router';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
 
 const LegalLayout = () => {
-  const { colors, type } = useTheme();
-
-  const screenOptions: NativeStackNavigationOptions = {
-    headerTitleAlign: 'center',
-    headerTintColor: colors.accent,
-    headerTitleStyle: {
-      fontSize: type.title3.fontSize,
-      fontFamily: fontFamily['600'],
-      color: colors.textPrimary,
-    },
-    headerStyle: {
-      backgroundColor: colors.surface,
-    },
-    headerShadowVisible: false,
-    contentStyle: {
-      backgroundColor: colors.background,
-    },
-  };
-
+  const screenOptions = useDefaultScreenOptions();
   return <Stack screenOptions={screenOptions} />;
 };
 

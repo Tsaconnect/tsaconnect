@@ -1,24 +1,15 @@
 import React from 'react';
 import { Stack } from 'expo-router';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
+import { SERVICES_TAB } from '@/constants/routes';
 
 // Utility bill payments — airtime/data/electricity/cable-TV/betting/exam
-// e-PINs, paid with spendable MCGP.
+// e-PINs, paid with spendable MCGP. Entered from the Services hub, so `index`
+// is a pushed destination rather than a stack root the user arrived at
+// gradually; the shared headerLeft is what gives it a back chevron.
 export default function BillsLayout() {
-  const { colors, type } = useTheme();
-  const screenOptions: NativeStackNavigationOptions = {
-    headerTitleAlign: 'center',
-    headerTintColor: colors.accent,
-    headerTitleStyle: {
-      fontSize: type.title3.fontSize,
-      fontFamily: fontFamily['600'],
-      color: colors.textPrimary,
-    },
-    headerStyle: { backgroundColor: colors.surface },
-    headerShadowVisible: false,
-    contentStyle: { backgroundColor: colors.background },
-  };
+  const screenOptions = useDefaultScreenOptions({ backFallback: SERVICES_TAB });
+
   return (
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ title: 'Pay Bills' }} />

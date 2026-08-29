@@ -99,17 +99,6 @@ export default function SellerCatalogueScreen() {
     }
   }, [router]);
 
-  const handleBackPress = useCallback(() => {
-    if (router.canGoBack()) {
-      router.back();
-    } else {
-      // Nothing to pop back to (deep link). MARKETPLACE_TAB is the tab root
-      // itself — '/products' would land a second copy of the same screen on
-      // top of it, so back from here would go nowhere useful.
-      router.replace(MARKETPLACE_TAB);
-    }
-  }, [router]);
-
   const showCall =
     !!sellerData?.phoneNumber &&
     sellerData.phoneNumber !== 'N/A' &&

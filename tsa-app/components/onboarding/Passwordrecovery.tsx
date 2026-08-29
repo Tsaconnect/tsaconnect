@@ -8,6 +8,7 @@ import React, { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import { goBack } from '@/utils/back';
 import api from '../services/api';
 import { useTheme } from '@/theme';
 import {
@@ -55,7 +56,7 @@ export default function PasswordRecovery() {
       <View style={{ paddingHorizontal: spacing.sm, paddingTop: spacing.xs }}>
         <IconButton
           icon="chevronLeft"
-          onPress={() => router.back()}
+          onPress={() => goBack('/login')}
           color={colors.accent}
           accessibilityLabel="Go back"
         />

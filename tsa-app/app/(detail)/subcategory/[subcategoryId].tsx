@@ -6,7 +6,7 @@
 // the debounced SearchBar-driven search/filtering, sort state, role/service
 // gating, the SellerCard rendering, and every navigation route + param are
 // preserved verbatim — this is a visual / structural migration only.
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, FlatList, RefreshControl, Image } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -89,21 +89,6 @@ export default function SubcategorySellersScreen() {
     type: isService ? 'Service' : 'Product',
   });
 
-  const baseHeaderOptions = useMemo(
-    () => ({
-      headerShown: true,
-      headerBackTitle: 'Back',
-      headerTintColor: colors.accent,
-      headerStyle: { backgroundColor: colors.surface },
-      headerTitleStyle: {
-        fontWeight: '600' as const,
-        color: colors.textPrimary,
-        fontSize: 16,
-      },
-    }),
-    [colors.accent, colors.surface, colors.textPrimary]
-  );
-
   const handleSearch = useCallback((query: string) => {
     setSearchQuery(query);
   }, []);
@@ -144,14 +129,6 @@ export default function SubcategorySellersScreen() {
     },
     [router, isService]
   );
-
-  const handleBackPress = useCallback(() => {
-    if (router.canGoBack()) {
-      router.back();
-    } else {
-      router.push('/digital');
-    }
-  }, [router]);
 
   const renderHeader = useCallback(
     () => (
@@ -298,10 +275,7 @@ export default function SubcategorySellersScreen() {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
         <Stack.Screen
-          options={{
-            ...baseHeaderOptions,
-            title: subcategoryName || categoryTitle || 'Loading...',
-          }}
+          options={{ title: subcategoryName || categoryTitle || 'Loading...' }}
         />
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
           <Spinner size="large" />
@@ -318,10 +292,7 @@ export default function SubcategorySellersScreen() {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
         <Stack.Screen
-          options={{
-            ...baseHeaderOptions,
-            title: subcategoryName || categoryTitle || 'Error',
-          }}
+          options={{ title: subcategoryName || categoryTitle || 'Error' }}
         />
         <View style={{ flex: 1, justifyContent: 'center' }}>
           <ErrorState
@@ -341,17 +312,8 @@ export default function SubcategorySellersScreen() {
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top', 'left', 'right']}>
       <Stack.Screen
         options={{
-          ...baseHeaderOptions,
+          // Back comes from the group layout's shared headerLeft.
           title: subcategoryName || categoryTitle || (isService ? 'Services' : 'Products'),
-          headerLeft: () => (
-            <IconButton
-              icon="chevronLeft"
-              accessibilityLabel="Go back"
-              color={colors.accent}
-              size={24}
-              onPress={handleBackPress}
-            />
-          ),
           headerRight: () => (
             <IconButton
               icon="refresh"

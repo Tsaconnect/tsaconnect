@@ -21,3 +21,13 @@ import type { Href } from 'expo-router';
  *  the exact failure this whole change exists to fix. This way tsc checks the
  *  literal against the generated route union AND keeps its narrow type. */
 export const MARKETPLACE_TAB = '/(dashboard)/(tabs)/(marketplace)' satisfies Href;
+
+/** The Home tab's root screen. */
+export const HOME_TAB = '/home' satisfies Href;
+
+/** The Services tab's root screen. The (services) group has no `index`, so this
+ *  file-named route IS the tab root and is addressable without group segments. */
+export const SERVICES_TAB = '/serviceshome' satisfies Href;
+
+/** The Wallet tab's root screen (the tab is registered as `tokenization`). */
+export const WALLET_TAB = '/tokenization' satisfies Href;

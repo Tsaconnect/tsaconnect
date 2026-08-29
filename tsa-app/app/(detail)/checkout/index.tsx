@@ -42,8 +42,9 @@ import { signAndBroadcast } from '@/services/transaction';
 import { decodeServiceNotes } from '@/components/services/serviceCart';
 import LocationPicker from '@/components/common/LocationPicker';
 import { getActiveWallet } from '@/services/wallet';
-import { useKycVerification } from '../../../../../hooks/useKycVerification';
+import { useKycVerification } from '@/hooks/useKycVerification';
 import { useTheme } from '@/theme';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 import {
   AccentCard,
   AmountText,
@@ -533,7 +534,7 @@ const CheckoutScreen = () => {
             icon="cart"
             title="Your cart is empty"
             actionLabel="Start Shopping"
-            onAction={() => router.replace('/digital')}
+            onAction={() => router.replace(MARKETPLACE_TAB)}
           />
         </View>
       </SafeAreaView>
