@@ -35,8 +35,17 @@ const CATEGORY_TABS: { key: OtcCategory; label: string }[] = [
 
 /** Row avatar edge; the column header reserves the same width to stay aligned. */
 const AVATAR = 36;
-/** Trade-column width, shared by the rows and the header so they line up. */
-const TRADE_COL = 124;
+/**
+ * Fixed column widths, shared by the rows and the header so they line up.
+ *
+ * Name is FIXED rather than flexed: the pair is the row's identity and must
+ * never truncate. Two equal flex columns gave it 72dp on a 360dp screen, and
+ * "MCGP/USDC" at 16pt bold needs ~88dp — it rendered as "MCGP/U…". The asset
+ * class takes the remainder instead, since a class code is short and is the
+ * safer thing to squeeze.
+ */
+const NAME_COL = 104;
+const TRADE_COL = 104;
 
 const TradePill = ({
   side, enabled, onPress,
@@ -54,7 +63,7 @@ const TradePill = ({
         borderRadius: radius.md,
         backgroundColor: side === 'buy' ? colors.success : colors.danger,
         alignItems: 'center',
-        minWidth: 54,
+        minWidth: 48,
         // Dimmed, not removed: the button stays pressable so the tap can
         // explain why it is closed.
         opacity: enabled ? 1 : 0.4,
@@ -112,7 +121,7 @@ const ListingRow = ({
         </View>
       )}
 
-      <View style={{ flex: 1 }}>
+      <View style={{ width: NAME_COL }}>
         <Text variant="bodyMed" weight="700" numberOfLines={1}>
           {listing.pair}
         </Text>
@@ -131,7 +140,7 @@ const ListingRow = ({
         )}
       </View>
 
-      <View style={{ width: TRADE_COL, flexDirection: 'row', gap: spacing.sm, justifyContent: 'flex-end' }}>
+      <View style={{ width: TRADE_COL, flexDirection: 'row', gap: spacing.xs, justifyContent: 'flex-end' }}>
         <TradePill side="buy" enabled={listing.buyEnabled} onPress={() => onTrade('buy')} />
         <TradePill side="sell" enabled={listing.sellEnabled} onPress={() => onTrade('sell')} />
       </View>
@@ -152,7 +161,7 @@ const ColumnHeader = () => {
       }}
     >
       <View style={{ width: AVATAR }} />
-      <Text variant="overline" color="textMuted" style={{ flex: 1 }}>Name</Text>
+      <Text variant="overline" color="textMuted" style={{ width: NAME_COL }}>Name</Text>
       <Text variant="overline" color="textMuted" style={{ flex: 1 }}>Asset Class</Text>
       <Text variant="overline" color="textMuted" style={{ width: TRADE_COL, textAlign: 'right' }}>
         Trade
