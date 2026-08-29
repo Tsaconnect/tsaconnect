@@ -12,6 +12,8 @@
   shared/pgenv                0600, PG* vars for pg_dump only
   shared/backups/             0700, pre-migration dumps
   .release-target             release the migrate oneshot should act on
+
+/usr/local/bin/tsactl         operator shortcut; wraps the scripts below
 ```
 
 **Two users.** `tsa-deploy` owns everything above and runs deploys. `tsa` runs the
@@ -57,6 +59,11 @@ sudo chmod 600 /srv/tsa-api/shared/pgenv
 sudo install -m 755 -o tsa-deploy -g tsa-deploy \
     /srv/tsa-api/repo/tsa-api-go/deploy/bin/*.sh /srv/tsa-api/bin/
 
+# The operator shortcut. Root-owned and 755: it is on everyone's PATH, and it
+# escalates via each operator's own sudo, so it must not be writable by tsa-deploy.
+sudo install -m 755 -o root -g root \
+    /srv/tsa-api/repo/tsa-api-go/deploy/tsactl /usr/local/bin/tsactl
+
 D=/srv/tsa-api/repo/tsa-api-go/deploy
 sudo install -m 644 $D/tsa-api.service         /etc/systemd/system/
 sudo install -m 644 $D/tsa-api.slice           /etc/systemd/system/
@@ -89,18 +96,44 @@ systemd-analyze security tsa-api.service
 ## Deploying
 
 ```bash
-sudo -u tsa-deploy -H /srv/tsa-api/repo/tsa-api-go/deploy/deploy.sh          # latest main
-sudo -u tsa-deploy -H /srv/tsa-api/repo/tsa-api-go/deploy/deploy.sh <sha>    # a specific commit
+tsactl status                 # always start here: what is actually running
+tsactl deploy                 # latest origin/main
+tsactl deploy <sha>           # a specific commit
+tsactl deploy <ref> --force   # off-main ref, or redeploy the running sha
+tsactl logs -f                # tail the service
+tsactl audit                  # who deployed what, and when
+```
+
+`tsactl` is a thin wrapper, not a privilege grant: it is not setuid and not in
+sudoers, so `deploy` and `rollback` still run through your own `sudo` and the audit
+trail names a real person. The long form still works and is what the wrapper runs:
+
+```bash
+sudo -u tsa-deploy -H /srv/tsa-api/repo/tsa-api-go/deploy/deploy.sh <sha>
 ```
 
 `-H` matters: without it `HOME` may stay `/root`, and both the Go build cache and the
 SSH key lookup fail with permission errors.
 
+### Keeping the tooling itself current
+
+`deploy.sh` only ever **fetches** `repo/` — it builds in per-release worktrees and
+never checks the clone out again. So the scripts in `repo/` stay frozen at whatever
+was cloned until someone pulls:
+
+```bash
+tsactl update      # sudo -u tsa-deploy -H git -C /srv/tsa-api/repo pull --ff-only
+```
+
+`tsactl status` prints a `tooling` line and flags the drift when the checkout is
+behind `origin/main`. This bites after any change to the deploy scripts themselves.
+
 ## Rolling back
 
 ```bash
-sudo -u tsa-deploy -H /srv/tsa-api/repo/tsa-api-go/deploy/rollback.sh --list
-sudo -u tsa-deploy -H /srv/tsa-api/repo/tsa-api-go/deploy/rollback.sh
+tsactl rollback --list        # releases with a usable binary
+tsactl rollback               # the newest one that is not current
+tsactl rollback <release-dir> # a specific one
 ```
 
 Rollback re-points a symlink and restarts. It does not rebuild, so it works when the
@@ -129,12 +162,39 @@ mechanism. Restoring it discards every write since it was taken. Continuous arch
 ## What is running right now
 
 ```bash
+tsactl status
+```
+
+Needs no privilege and takes no lock, so it is safe to run mid-deploy and from any
+account. Exits non-zero when the service is down, unhealthy, or serving a commit
+other than the one `current` points at — so it also works as a monitoring probe.
+
+The raw form, if the tooling is not installed:
+
+```bash
 readlink /srv/tsa-api/current
 curl -s http://127.0.0.1:8081/health | jq .commit
 ```
 
 Trust the second one. The symlink says what *should* be running; the health endpoint
-says what *is*.
+says what *is*. `tsactl status` compares them for you and shouts when they disagree —
+that mismatch means a restart silently did nothing and the old release is still
+serving.
+
+## The audit trail
+
+`deploy.sh` and `rollback.sh` mirror every step to journald under the `tsa-deploy`
+tag, attributed to `SUDO_USER` rather than the service account:
+
+```bash
+tsactl audit                            # last 100 entries
+journalctl -t tsa-deploy --since -7d    # the same thing, unwrapped
+```
+
+Failures are recorded too — a refused deploy is as interesting afterwards as a
+successful one. Logging is strictly best-effort (`|| true`, and `logger` is not a
+preflight dependency): an audit-log failure must never be the thing that aborts a
+deploy.
 
 ## One-off migrations
 

@@ -15,6 +15,10 @@ RELEASES=$ROOT/releases
 PORT=8081
 SYSTEMCTL=/usr/bin/systemctl
 
+# Same journald trail as deploy.sh — a rollback is the single most important event
+# to be able to reconstruct afterwards:  journalctl -t tsa-deploy
+audit() { logger -t tsa-deploy -- "${SUDO_USER:-$(id -un)}: $*" 2>/dev/null || true; }
+
 CURRENT=""
 [ -L "$ROOT/current" ] && CURRENT=$(readlink "$ROOT/current")
 
@@ -67,16 +71,20 @@ data-losing restore.
 WARN
 
 printf 'rolling back\n  from %s\n  to   %s\n' "${CURRENT:-none}" "$TARGET"
+audit "ROLLBACK from ${CURRENT:-none} to $TARGET"
 TMPLINK=$ROOT/.current.$$
 rm -f "$TMPLINK"
 ln -sfn "$TARGET" "$TMPLINK"
 mv -T "$TMPLINK" "$ROOT/current"
-sudo -n "$SYSTEMCTL" restart tsa-api.service || { echo "restart failed" >&2; exit 1; }
+sudo -n "$SYSTEMCTL" restart tsa-api.service || {
+  echo "restart failed" >&2; audit "FAILED: rollback restart to $TARGET"; exit 1
+}
 
 SECONDS=0
 while [ "$SECONDS" -lt 60 ]; do
   if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     echo "healthy after ${SECONDS}s — rolled back to $TARGET"
+    audit "rolled back to $TARGET, healthy after ${SECONDS}s"
     exit 0
   fi
   sleep 1
@@ -85,4 +93,5 @@ done
 # Deliberately does NOT roll itself forward again. If the previous release is also
 # unhealthy the problem is not the release, and further flipping hides that.
 echo "WARNING: still unhealthy ${SECONDS}s after rollback to $TARGET — investigate now" >&2
+audit "FAILED: still unhealthy ${SECONDS}s after rollback to $TARGET"
 exit 1
