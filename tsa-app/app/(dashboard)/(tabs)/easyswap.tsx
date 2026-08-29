@@ -1,7 +1,8 @@
 // app/(dashboard)/(tabs)/easyswap.tsx
 //
 // Easyswap — token swap entry. Hosts three sub-views (OTC / Spot Trade / All
-// Swap) behind a tab selector. Restyled onto the TSA Signature design system
+// Swap) behind a tab selector. The OTC pane is a listing CATALOGUE; picking a
+// row's Buy/Sell pushes the trade form at /otc-trade. Restyled onto the TSA Signature design system
 // (theme tokens + @/components/ui primitives): the legacy numbered-pill tab bar
 // is now a SegmentedControl and the "Coming Soon" placeholder is rebuilt on
 // EmptyState + Badge. The swap quote/amount/token-selection/submit flows live
@@ -10,7 +11,7 @@ import React, { useState, useEffect } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
-import SwapScreen from '@/screens/swap';
+import OtcListingList from '@/components/otc/OtcListingList';
 import AllSwapScreen from '@/screens/all-swap';
 import SpotList from '@/components/spot/SpotList';
 import { useTheme } from '@/theme';
@@ -48,7 +49,7 @@ const EasySwap = () => {
         />
       </View>
 
-      {activeTab === 'swap' && <SwapScreen />}
+      {activeTab === 'swap' && <OtcListingList />}
       {activeTab === 'spot' && <SpotList />}
       {activeTab === 'allswap' && <AllSwapScreen />}
     </SafeAreaView>

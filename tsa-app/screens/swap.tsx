@@ -7,16 +7,22 @@
 // (USDC blue, USDT green, MCGP gold) come from the TOKENS data config, not ad-hoc
 // styling, so they're preserved as token identity.
 //
-// OTC listing controls (admin-set, /api/otc/settings, fail OPEN): Direct |
-// Presale sub-tabs (Presale is a coming-soon placeholder), per-direction
-// buy/sell pause (Review button dimmed + press blocked with a toast), and an
-// asset-class chip next to the pair title when set.
+// This is the OTC desk's TRADE FORM. The catalogue that leads here — the
+// Direct/Presale sub-tabs, the listing rows, the admin's logo and asset class —
+// lives in components/otc/OtcListingList; this screen is pushed once the user
+// has picked a row and a side, so it opens on `side` and no longer owns the
+// pair-selection chrome.
+//
+// It still re-checks the admin pause (/api/otc/settings, fail OPEN) rather than
+// trusting the list: the route is addressable, so a deep link can reach the
+// form directly. A paused direction dims Review and explains itself in the
+// same sheet the list uses.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, TextInput, ScrollView, KeyboardAvoidingView, Platform, FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS } from '@/constants/chains';
 import { signTransaction, withRpcFallback, getActiveWallet } from '@/services/wallet';
@@ -26,11 +32,11 @@ import {
 } from '@/services/walletApi';
 import { useTheme } from '@/theme';
 import {
-  Text, Badge, Button, Card, EmptyState, Icon, PressableScale, SegmentedControl, Sheet, Spinner,
-  useToast,
+  Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
   ScreenHeader,
 } from '@/components/ui';
 import { mapSubmitError } from '@/services/swapErrors';
+import { OtcClosedSheet } from '@/components/otc/OtcClosedSheet';
 
 // ── Token config (extend this list as new tokens are added) ──
 interface TokenInfo {
@@ -56,15 +62,6 @@ const SWAP_PAIRS: Array<{ from: string; to: string; label: string }> = [
 ];
 
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
-
-// OTC sub-tabs. Direct hosts the live MCGP/USDC desk; Presale is empty until
-// presale listings exist.
-type OtcTab = 'direct' | 'presale';
-
-const OTC_TABS: { key: OtcTab; label: string }[] = [
-  { key: 'direct', label: 'Direct' },
-  { key: 'presale', label: 'Presale' },
-];
 
 function toWei(amount: string, d: number): bigint {
   try {
@@ -183,16 +180,21 @@ const TokenPicker = ({
   );
 };
 
-// ── Main Screen ──
-const SwapScreen = () => {
-  const { colors, spacing, radius, fonts } = useTheme();
-  const toast = useToast();
+export interface SwapScreenProps {
+  /** Which way the user chose to trade in the listing. Buying MCGP pays USDC. */
+  initialSide?: 'buy' | 'sell';
+}
 
-  const [otcTab, setOtcTab] = useState<OtcTab>('direct');
+// ── Main Screen ──
+const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
+  const { colors, spacing, radius, fonts } = useTheme();
+
   // null until loaded — treated as everything-enabled (fail OPEN).
   const [otcSettings, setOtcSettings] = useState<OtcSettings | null>(null);
-  const [fromSymbol, setFromSymbol] = useState('USDC');
-  const [toSymbol, setToSymbol] = useState('MCGP');
+  // `direction` is derived from which side is being paid, so the side the user
+  // picked is expressed by seeding the pair rather than by a separate flag.
+  const [fromSymbol, setFromSymbol] = useState(initialSide === 'sell' ? 'MCGP' : 'USDC');
+  const [toSymbol, setToSymbol] = useState(initialSide === 'sell' ? 'USDC' : 'MCGP');
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loadingBal, setLoadingBal] = useState(true);
@@ -204,6 +206,8 @@ const SwapScreen = () => {
   const [txHash, setTxHash] = useState('');
   const [status, setStatus] = useState('');
   const [pickerFor, setPickerFor] = useState<'from' | 'to' | null>(null);
+  // Set when a paused direction's Review is pressed — drives the closed notice.
+  const [closedSide, setClosedSide] = useState<'buy' | 'sell' | null>(null);
   // Prepared swap (fetched on Review so the confirm screen can show real gas).
   const [prepared, setPrepared] = useState<Awaited<ReturnType<typeof prepareSwap>>['data'] | null>(null);
   // Wallet the prepared txs' nonces belong to — sign/submit must reuse it.
@@ -351,11 +355,11 @@ const SwapScreen = () => {
     ? otcSettings?.buyEnabled === false
     : otcSettings?.sellEnabled === false;
 
-  // Review press while paused: no navigation, just a toast. The button stays
-  // pressable (dimmed via style) so the tap can explain itself.
+  // Review press while paused: no navigation, just the explanation. The button
+  // stays pressable (dimmed via style) so the tap can explain itself.
   const onReviewPress = () => {
     if (directionPaused) {
-      toast.info(direction === 'buy' ? 'Buying is temporarily paused' : 'Selling is temporarily paused');
+      setClosedSide(direction);
       return;
     }
     goToConfirm();
@@ -598,26 +602,6 @@ const SwapScreen = () => {
     </SafeAreaView>
   );
 
-  // ── Presale sub-tab: coming-soon placeholder (no listings yet) ──
-  if (otcTab === 'presale') return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <View style={{ paddingHorizontal: spacing.xl, paddingTop: spacing.xl }}>
-        <SegmentedControl
-          segments={OTC_TABS}
-          value={otcTab}
-          onChange={(k) => setOtcTab(k as OtcTab)}
-        />
-      </View>
-      <View style={{ flex: 1, justifyContent: 'center' }}>
-        <EmptyState
-          icon="clock"
-          title="No active-presale"
-          subtitle="Presale listings will appear here once they go live."
-        />
-      </View>
-    </SafeAreaView>
-  );
-
   // ── Form ──
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -627,31 +611,10 @@ const SwapScreen = () => {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Direct | Presale sub-tabs */}
-          <View style={{ marginBottom: spacing.lg }}>
-            <SegmentedControl
-              segments={OTC_TABS}
-              value={otcTab}
-              onChange={(k) => setOtcTab(k as OtcTab)}
-            />
-          </View>
-
-          {/* Header */}
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
-            <View>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                <Text variant="title1" weight="700">Swap</Text>
-                {otcSettings?.assetClass ? (
-                  <Badge
-                    label={otcSettings.assetClass}
-                    size="sm"
-                    color={colors.accent}
-                    background={colors.accentMuted}
-                  />
-                ) : null}
-              </View>
-              <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>OTC Marketplace</Text>
-            </View>
+          {/* Title and asset class live on the native header and the listing row
+              respectively; the live rate is the only chrome this form owns. */}
+          <Stack.Screen options={{ title: direction === 'buy' ? 'Buy MCGP' : 'Sell MCGP' }} />
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
             {rateDisplay ? (
               <View
                 style={{
@@ -808,7 +771,7 @@ const SwapScreen = () => {
           ) : null}
 
           {/* Action — while the active direction is admin-paused the button is
-              dimmed but stays pressable so the tap can toast the reason. */}
+              dimmed but stays pressable so the tap can explain the reason. */}
           <Button
             title={preparing ? 'Calculating fees…' : 'Review Swap'}
             onPress={onReviewPress}
@@ -833,6 +796,7 @@ const SwapScreen = () => {
           onSelect={selectTo}
           onClose={() => setPickerFor(null)}
         />
+        <OtcClosedSheet side={closedSide} onClose={() => setClosedSide(null)} />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

@@ -44,6 +44,10 @@ export default function DetailLayout() {
           which a native header cannot express. */}
       <Stack.Screen name="checkout/index" options={{ headerShown: false }} />
 
+      {/* The OTC desk's trade form. The catalogue that leads here is the
+          Easyswap tab's OTC pane, so back returns to the listing. */}
+      <Stack.Screen name="otc-trade" options={{ title: 'OTC Trade' }} />
+
       {/* Wallet actions reachable from Home and from the Wallet tab's sheets. */}
       <Stack.Screen name="fund" options={{ title: 'Receive' }} />
       <Stack.Screen name="send" options={{ title: 'Send' }} />
