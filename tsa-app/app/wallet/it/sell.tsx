@@ -5,7 +5,7 @@
 // Flow: form → Review (fee quote) → AuthorizationModal PIN → itSell.
 // Bank list comes from GET /p2p/banks (Flutterwave-backed when FW is the
 // directory provider) via getNigerianBanks — Nigeria only for now.
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -19,9 +19,7 @@ import {
   Card,
   Divider,
   Icon,
-  Input,
   PickerSheet,
-  PressableScale,
   SelectRow,
   Spinner,
   SummaryCard,
@@ -38,7 +36,7 @@ import {
   type ITFeeQuote,
   getWithdrawDestinations,
 } from '@/services/itApi';
-import { getBanksForCountry, resolveAccountName, type NgBank } from '@/services/ngBanks';
+import { BankDestination, type BankDestinationValue } from '@/components/it/BankDestination';
 import { mcgpAmountToNgn } from '@/utils/sellQuote';
 import { ngnToUsd, shouldShowNgnSecondary } from '@/utils/currencyDisplay';
 import { RAILS } from '@/constants/rails';
@@ -64,14 +62,6 @@ function currencyLabelFor(code: string): string {
 function countryFor(code: string): string {
   return CURRENCY_META[code]?.country ?? '';
 }
-// Account-number length differs by market: NUBAN is exactly 10, Ghanaian and
-// IBAN-style numbers are longer and variable. Used as an upper bound plus a
-// "long enough to be real" floor rather than an exact match, so a valid foreign
-// account is never rejected for not looking Nigerian.
-function accountDigitsFor(code: string): number {
-  return CURRENCY_META[code]?.digits ?? 34;
-}
-
 const METHOD_OPTIONS: PickerItem[] = [
   { id: 'bank', label: 'Bank transfer', icon: 'bank' },
 ];
@@ -92,17 +82,21 @@ export default function ITSell() {
   const [receiveLabel, setReceiveLabel] = useState('');
   const [ngnOutValue, setNgnOutValue] = useState<number | null>(null);
 
-  const [banks, setBanks] = useState<NgBank[]>([]);
-  const [banksLoading, setBanksLoading] = useState(true);
-  const [showBankPicker, setShowBankPicker] = useState(false);
-  const [bank, setBank] = useState<NgBank | null>(null);
-  const [accountNumber, setAccountNumber] = useState('');
-  const [accountName, setAccountName] = useState('');
-  // NUBAN name enquiry — validates the account number against the selected
-  // bank (GET /p2p/banks/resolve → Flutterwave account-resolve when FW is live).
-  const [resolving, setResolving] = useState(false);
-  const [resolved, setResolved] = useState(false);
-  const [resolveError, setResolveError] = useState<null | 'not_found' | 'unavailable'>(null);
+  const [dest, setDest] = useState<BankDestinationValue>({
+    bankCode: '',
+    bankName: '',
+    accountNumber: '',
+    accountName: '',
+    ready: false,
+  });
+  // BankDestination's onChange must be referentially stable (see its own
+  // doc) — wrapped instead of passing setDest directly so we can also clear
+  // the stale form error on any bank/account edit, matching every other
+  // field's onChangeText below.
+  const handleDestChange = useCallback((next: BankDestinationValue) => {
+    setDest(next);
+    setError('');
+  }, []);
 
   const [payoutCurrency, setPayoutCurrency] = useState('NGN');
   const [transferMethod, setTransferMethod] = useState<'bank' | 'mobile_money'>('bank');
@@ -162,69 +156,6 @@ export default function ITSell() {
     };
   }, []);
 
-  // Bank list follows the selected currency's country. Re-runs on change and
-  // clears the previous selection — a Nigerian bank code is meaningless on a
-  // Ghanaian rail, and silently keeping it would fail at payout.
-  useEffect(() => {
-    let cancelled = false;
-    setBanksLoading(true);
-    setBank(null);
-    setAccountNumber('');
-    setAccountName('');
-    (async () => {
-      const list = await getBanksForCountry(countryFor(payoutCurrency));
-      if (!cancelled) {
-        setBanks(list);
-        setBanksLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [payoutCurrency]);
-
-  // Debounced account-name lookup. Fires when a bank is selected and the
-  // account number is a full 10-digit NUBAN — validates the number and
-  // auto-fills the holder name. On provider outage the user can type the name.
-  useEffect(() => {
-    // Name enquiry is NUBAN-specific — the provider resolves Nigerian account
-    // numbers only. For other rails the user types the holder name, which is
-    // why bankReady does not require `resolved`.
-    if (payoutCurrency !== 'NGN' || !bank || accountNumber.length !== 10) {
-      setResolving(false);
-      setResolved(false);
-      setResolveError(null);
-      return;
-    }
-    let cancelled = false;
-    setResolving(true);
-    setResolved(false);
-    setResolveError(null);
-    const timer = setTimeout(async () => {
-      const res = await resolveAccountName(bank.code, accountNumber);
-      if (cancelled) return;
-      setResolving(false);
-      if (res.ok) {
-        setAccountName(res.accountName);
-        setResolved(true);
-        setError('');
-      } else {
-        setAccountName('');
-        setResolveError(res.reason);
-      }
-    }, 400);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [bank, accountNumber, payoutCurrency]);
-
-  const bankItems: PickerItem[] = banks.map((b) => ({
-    id: b.code,
-    label: b.name,
-    icon: 'bank' as const,
-  }));
-
   const currencyLabel =
     currencyOptions.find((o) => o.id === payoutCurrency)?.label ?? currencyLabelFor(payoutCurrency);
   const methodLabel =
@@ -232,14 +163,6 @@ export default function ITSell() {
   const countryLabel = country || '—';
 
   const ngnPayout = mcgpAmountToNgn(amount, sellRateKobo);
-  const acctDigits = accountDigitsFor(payoutCurrency);
-  const bankReady =
-    !!bank?.code &&
-    accountNumber.trim().length >= Math.min(8, acctDigits) &&
-    accountNumber.trim().length <= acctDigits &&
-    accountName.trim().length >= 2 &&
-    !resolving &&
-    resolveError !== 'not_found';
 
   const goReview = async () => {
     setError('');
@@ -259,11 +182,7 @@ export default function ITSell() {
       setError('More than your spendable balance');
       return;
     }
-    if (resolveError === 'not_found') {
-      setError('Account number does not match the selected bank');
-      return;
-    }
-    if (!bankReady || !bank) {
+    if (!dest.ready) {
       setError('Select a bank and enter a valid account number');
       return;
     }
@@ -277,10 +196,10 @@ export default function ITSell() {
     // with a different amount).
     const snapAmount = amount;
     const snapNgn = ngnPayout;
-    const snapBankCode = bank.code.trim();
-    const snapBankName = bank.name.trim();
-    const snapAccountNumber = accountNumber.trim();
-    const snapAccountName = accountName.trim();
+    const snapBankCode = dest.bankCode.trim();
+    const snapBankName = dest.bankName.trim();
+    const snapAccountNumber = dest.accountNumber.trim();
+    const snapAccountName = dest.accountName.trim();
     setReviewAmount(snapAmount);
     setReviewNgnGross(snapNgn);
     setReviewBankCode(snapBankCode);
@@ -538,69 +457,7 @@ export default function ITSell() {
             on-chain debit. Read-only keeps them impossible to desync. */}
         <SummaryRow label="Country / region" value={countryLabel} />
 
-        <SelectRow
-          label="Bank"
-          placeholder={banksLoading ? 'Loading banks…' : 'Select bank'}
-          value={bank?.name}
-          leftIcon="bank"
-          disabled={banksLoading && banks.length === 0}
-          onPress={() => setShowBankPicker(true)}
-        />
-        <Input
-          label="Account number"
-          placeholder="10-digit NUBAN"
-          keyboardType="number-pad"
-          maxLength={10}
-          value={accountNumber}
-          onChangeText={(v) => {
-            setAccountNumber(v.replace(/\D/g, '').slice(0, 10));
-            setError('');
-          }}
-        />
-        <Input
-          label="Account holder name"
-          placeholder={
-            bank && accountNumber.length === 10
-              ? 'Looking up account…'
-              : 'Auto-fills when account number is valid'
-          }
-          autoCapitalize="words"
-          value={accountName}
-          onChangeText={(v) => {
-            setAccountName(v);
-            if (resolved) setResolved(false);
-            setError('');
-          }}
-          editable={!resolving && !resolved}
-          error={
-            resolveError === 'not_found'
-              ? 'We couldn’t find this account at the selected bank. Check the digits or bank.'
-              : undefined
-          }
-          helper={
-            resolveError === 'unavailable'
-              ? 'Account verification is offline. You can type the name manually.'
-              : resolved
-                ? 'Account verified'
-                : undefined
-          }
-          rightAdornment={
-            resolving ? (
-              <Spinner size="small" />
-            ) : resolved ? (
-              <PressableScale
-                onPress={() => {
-                  setResolved(false);
-                  setAccountName('');
-                }}
-                hitSlop={10}
-                accessibilityLabel="Clear and edit name"
-              >
-                <Icon name="checkCircle" size={20} color={colors.success} />
-              </PressableScale>
-            ) : undefined
-          }
-        />
+        <BankDestination currency={payoutCurrency} value={dest} onChange={handleDestChange} />
 
         {error ? (
           <Text variant="bodySm" style={{ color: colors.danger }}>{error}</Text>
@@ -615,7 +472,7 @@ export default function ITSell() {
           </Text>
         ) : null}
 
-        <Button title="Review" onPress={goReview} disabled={!amount || !bankReady} />
+        <Button title="Review" onPress={goReview} disabled={!amount || !dest.ready} />
 
         <View
           style={{
@@ -656,24 +513,6 @@ export default function ITSell() {
         onSelect={(item) => {
           setTransferMethod(item.id as 'bank' | 'mobile_money');
           setShowMethodPicker(false);
-        }}
-      />
-      <PickerSheet
-        visible={showBankPicker}
-        onClose={() => setShowBankPicker(false)}
-        title="Select bank"
-        items={bankItems}
-        loading={banksLoading && banks.length === 0}
-        selectedId={bank?.code}
-        emptyText="No banks available right now."
-        onSelect={(item) => {
-          const b = banks.find((x) => x.code === item.id) ?? null;
-          setBank(b);
-          setShowBankPicker(false);
-          setAccountName('');
-          setResolved(false);
-          setResolveError(null);
-          setError('');
         }}
       />
     </SafeAreaView>
