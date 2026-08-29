@@ -10,10 +10,10 @@ import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
-import { Button, Card, Divider, Icon, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import { Button, Card, Divider, Icon, Input, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
 import { getITIntent, reportStableDeposit, IT_STABLE_DEPOSIT_CLAIMED, type ITIntent } from '@/services/itApi';
 import { formatTokenAmount } from '@/services/p2p';
-import { isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
+import { formatKobo, isLikelyTxHash, isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -108,6 +108,13 @@ export default function ITIntentDetail() {
   const [pendingHash, setPendingHash] = useState<string | null>(null);
   const [hashChecked, setHashChecked] = useState(false);
   const [addressCopied, setAddressCopied] = useState(false);
+  // Manual recovery: a hash the user pastes in themselves. A bridged sell has
+  // no other route back — sell-stable.tsx's history lookup only sees Polygon,
+  // and the app told the user to report the transfer against this order.
+  const [manualHash, setManualHash] = useState('');
+  const [manualHashError, setManualHashError] = useState<string | null>(null);
+  const [manualHashDone, setManualHashDone] = useState(false);
+  const [reportingManual, setReportingManual] = useState(false);
   // Guards the deposit-report retry to ONE attempt per screen open (see the
   // effect below) — not a ref to `intent` itself, which changes identity on
   // every poll tick.
@@ -207,6 +214,48 @@ export default function ITIntentDetail() {
     })();
   }, [id, intent]);
 
+  // …and "screen open" means FOCUS, not mount. Without this the guard survives
+  // navigating away and back, so a retry that failed on a dead network is only
+  // re-attempted after the screen is torn down entirely. Its own effect with
+  // empty deps: hanging the reset off the MCGP focus effect above would fire
+  // its cleanup whenever `isStableAsset` flips on first load.
+  useFocusEffect(
+    useCallback(
+      () => () => {
+        retriedForId.current = null;
+      },
+      []
+    )
+  );
+
+  // Report a hand-entered hash against this intent, then reload so the status
+  // and hops move. ReportStableDeposit is idempotent per (intent, hash), so a
+  // hash the backend already knows returns early rather than double-counting;
+  // an already-claimed one is a support case and says so.
+  const submitManualHash = useCallback(async () => {
+    if (!id || reportingManual) return;
+    const hash = manualHash.trim();
+    if (!isLikelyTxHash(hash)) {
+      setManualHashError('That does not look like a transaction hash (0x…, 66 characters).');
+      return;
+    }
+    setManualHashError(null);
+    setReportingManual(true);
+    const r = await reportStableDeposit(id, hash);
+    setReportingManual(false);
+    if (r.success) {
+      setManualHashDone(true);
+      setManualHash('');
+      load();
+      return;
+    }
+    setManualHashError(
+      r.code === IT_STABLE_DEPOSIT_CLAIMED
+        ? 'Another order has already claimed this transaction. Contact support — do not send again.'
+        : r.message || "We couldn't record that transaction. Try again."
+    );
+  }, [id, load, manualHash, reportingManual]);
+
   const handleCopyDepositAddress = useCallback(async () => {
     if (!intent?.depositAddress) return;
     await Clipboard.setStringAsync(intent.depositAddress);
@@ -235,9 +284,22 @@ export default function ITIntentDetail() {
   const isBuy = intent.direction === 'buy';
   const title = isBuy ? 'Buy' : 'Sell';
 
-  // Resume applies only when nothing was ever sent: status is still
-  // pending_deposit AND the AsyncStorage check above (not merely "hasn't run
-  // yet") found no stored hash.
+  const bridgedSource = !!intent.sourceChain && intent.sourceChain.toUpperCase() !== 'POLYGON';
+  // The payout is `received / quoted`, and a bridge delivers less than it was
+  // given. The backend rewrites net_ngn_kobo to the ACTUAL figure when the
+  // deposit is confirmed; until then a bridged sell's net is still the quote,
+  // so call it what it is rather than letting the user read it as settled.
+  const netIsEstimate =
+    isStableAsset &&
+    bridgedSource &&
+    (intent.status === 'pending_deposit' || intent.status === 'deposit_reported');
+
+  // The resume affordance shows when the status is still pending_deposit and
+  // no unreported hash is sitting in storage. That is NOT the same as "nothing
+  // was sent" — the write can have failed, the read can have failed, storage
+  // can have been cleared, and a bridged send is in flight for minutes — so
+  // the copy below offers the option without asserting that the funds stayed
+  // put.
   const showResume = isStableAsset && hashChecked && !pendingHash && intent.status === 'pending_deposit';
   // Only a Polygon-source intent can be resumed with a plain "send to this
   // address" — depositAddress is the LiFi bridge's *destination*, and a
@@ -269,7 +331,20 @@ export default function ITIntentDetail() {
               <>
                 <SummaryRow label="You sell" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
                 <Divider spacing="xs" />
-                <SummaryRow label="You receive" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+                {/* NET, never `ngnKobo`. `ngnKobo` is documented server-side as
+                    "the GROSS valuation" (it_models.go:114-126) — before spread
+                    and fee — and is NEVER updated afterwards, while
+                    net_ngn_kobo is rewritten on confirmation to the actual
+                    `quotedNet × received / quoted` payout (it_stable_sell.go:
+                    455-465). Reading the gross here would show a user who was
+                    paid ₦148,200 "You receive ₦155,000" beside a green "Paid to
+                    your bank" — on the screen they open to check they were paid.
+                    Fall back net → netMinor → gross so the figure degrades to
+                    the same order the sell screens use. */}
+                <SummaryRow
+                  label={netIsEstimate ? 'You receive (estimate)' : 'You receive'}
+                  value={formatKobo(intent.netNgnKobo ?? intent.netMinor ?? intent.ngnKobo)}
+                />
               </>
             ) : isBuy ? (
               <>
@@ -287,7 +362,7 @@ export default function ITIntentDetail() {
             <Divider spacing="xs" />
             <SummaryRow
               label="Rate"
-              value={isStableAsset ? `₦${fmtRate(intent.rateKobo)} / ${intent.asset}` : `₦${fmtRate(intent.rateKobo)} / MCGP`}
+              value={isStableAsset ? `${formatKobo(intent.rateKobo)} / ${intent.asset}` : `₦${fmtRate(intent.rateKobo)} / MCGP`}
             />
             <Divider spacing="xs" />
             <SummaryRow label="Created" value={shortDate(intent.createdAt)} />
@@ -356,11 +431,12 @@ export default function ITIntentDetail() {
           canResumeDirect ? (
             <Card>
               <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
-                Nothing sent yet
+                Haven&apos;t sent yet?
               </Text>
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
                 Send exactly {fmtAsset(intent.assetAmount)} {intent.asset} on Polygon to this address
-                to continue this order.
+                to continue this order. If you have already sent, do not send again — report it
+                below instead.
               </Text>
               <View
                 style={{
@@ -388,11 +464,19 @@ export default function ITIntentDetail() {
           ) : (
             <Card>
               <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
-                Nothing sent yet
+                Haven&apos;t sent yet?
               </Text>
+              {/* NOT "this is a harmless, unused record". The app cannot know
+                  that: the hash write can have failed, the read can have
+                  failed, storage can have been cleared, and a bridged transfer
+                  sits in flight for minutes while this order stays at
+                  pending_deposit. A user with funds mid-bridge who reads
+                  "unused record" starts a second sell — two sends, one intent
+                  each, and an orphan deposit to reconcile by hand. */}
               <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-                This order was never completed — it's a harmless, unused record. Start a new sell to
-                continue.
+                If you have not sent anything yet, you can start a new sell. If you have already
+                sent, do not send again — report your transaction below, or contact support with
+                the hash.
               </Text>
               <Button
                 title="Start again"
@@ -401,6 +485,48 @@ export default function ITIntentDetail() {
               />
             </Card>
           )
+        ) : null}
+
+        {/* Manual recovery. Offered whenever the deposit has not been recorded
+            yet — a lost hash is the one failure this flow cannot undo for the
+            user, and on a bridged sell there is no history lookup to fall back
+            on. Report is idempotent per (intent, hash). */}
+        {isStableAsset && !isTerminalStableStatus(intent.status) && !intent.depositTxHash ? (
+          <Card>
+            <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
+              Already sent it?
+            </Text>
+            {manualHashDone ? (
+              <Text variant="bodySm" style={{ color: colors.success }}>
+                Thanks — we have your transaction and are checking for it now.
+              </Text>
+            ) : (
+              <>
+                <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
+                  Paste the transaction hash from your wallet and we will match it to this order.
+                </Text>
+                <Input
+                  value={manualHash}
+                  onChangeText={(v) => {
+                    setManualHash(v);
+                    setManualHashError(null);
+                  }}
+                  placeholder="0x…"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  error={manualHashError ?? undefined}
+                  containerStyle={{ marginBottom: spacing.md }}
+                />
+                <Button
+                  title="Report this transaction"
+                  variant="secondary"
+                  loading={reportingManual}
+                  disabled={!manualHash.trim()}
+                  onPress={submitManualHash}
+                />
+              </>
+            )}
+          </Card>
         ) : null}
       </ScrollView>
     </SafeAreaView>

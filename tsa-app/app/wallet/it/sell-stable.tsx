@@ -29,6 +29,7 @@ import {
   CountdownBar,
   Divider,
   Icon,
+  Input,
   PickerSheet,
   SelectRow,
   Spinner,
@@ -54,6 +55,7 @@ import {
 } from '@/services/walletApi';
 import { mapSubmitError } from '@/services/swapErrors';
 import {
+  IT_AGREEMENT_REQUIRED,
   IT_STABLE_DEPOSIT_CLAIMED,
   createStableSell,
   makeIdempotencyKey,
@@ -68,8 +70,13 @@ import {
   STABLE_MIN_SEND,
   belowMinimum,
   estimateArrival,
+  exceedsBalance,
   exceedsStablePrecision,
+  formatKobo,
   formatSendVsArrive,
+  isLikelyTxHash,
+  subtractKobo,
+  truncateToStableDecimals,
 } from '@/utils/stableSellQuote';
 
 // 'claimed' and 'reportFailed' are BOTH post-broadcast: the user's stablecoin
@@ -124,48 +131,9 @@ const DEST_CHAIN_ID = 137;
 const OVER_DELIVERY_NOTE =
   'If noticeably more than this arrives (over 2%), we hold the payout for a quick manual review instead of paying out automatically.';
 
-// The quote's money fields are minor-unit integer STRINGS and must stay that
-// way — Number(kobo) on a large payout silently loses precision, and this is
-// display-only formatting, so it is pure string math.
-function formatKobo(kobo: string | null | undefined): string {
-  if (!kobo) return '—';
-  const negative = kobo.trim().startsWith('-');
-  const digits = kobo.replace(/\D/g, '');
-  if (!digits) return '—';
-  const padded = digits.padStart(3, '0');
-  const naira = padded.slice(0, -2).replace(/^0+(?=\d)/, '');
-  const minor = padded.slice(-2);
-  const grouped = naira.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${negative ? '-' : ''}₦${grouped}.${minor}`;
-}
-
-/**
- * Trim a major-unit asset amount to the precision the backend accepts.
- *
- * TRUNCATES, never rounds. `ethers.formatUnits` renders the balance at the
- * SOURCE token's decimals, and BSC's USDT/USDC are genuinely 18 — so the Max
- * button would otherwise fill in 18 fractional digits, `exceedsStablePrecision`
- * would reject the app's own value, and the one-tap path would fail on exactly
- * the chain this flow most has to get right. Rounding up instead of truncating
- * would push Max past the real balance and fail the send on-chain.
- *
- * String math, not `toFixed` — a float round-trip is what this guards against.
- */
-function truncateToStableDecimals(major: string): string {
-  const [whole, frac = ''] = major.split('.');
-  const kept = frac.slice(0, STABLE_MAX_DECIMALS).replace(/0+$/, '');
-  return kept ? `${whole}.${kept}` : whole;
-}
-
-/** gross − afterSpread, as a kobo string. Both are integers on the wire. */
-function subtractKobo(a: string | null, b: string | null): string | null {
-  if (!a || !b) return null;
-  try {
-    return (BigInt(a) - BigInt(b)).toString();
-  } catch {
-    return null;
-  }
-}
+// `formatKobo`, `truncateToStableDecimals` and `subtractKobo` live in
+// utils/stableSellQuote.ts: they are pure money functions, and this repo can
+// only unit-test them there.
 
 // Composing a quote either succeeds with BOTH halves, or fails with a message
 // the user can act on. There is deliberately no third outcome: every failure
@@ -272,6 +240,14 @@ export default function ITSellStable() {
   const [broadcastHash, setBroadcastHash] = useState<string | null>(null);
   const [recoverySends, setRecoverySends] = useState<Transaction[] | null>(null);
   const [recoveryLoading, setRecoveryLoading] = useState(false);
+  // A history lookup that FAILED, kept apart from one that returned nothing.
+  // "We couldn't check" and "you sent nothing" are different sentences, and on
+  // this screen the second one is what produces a second send.
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  // The hash a stranded user pastes in themselves. The only recovery a bridged
+  // sell has: getTransactionHistory only sees the DESTINATION chain.
+  const [manualHash, setManualHash] = useState('');
+  const [manualHashError, setManualHashError] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
   // The active EVM address, resolved the way all-swap.tsx does — there is no
   // useWalletAddress hook in this repo. Everything downstream (the balance
@@ -392,6 +368,14 @@ export default function ITSellStable() {
   // guards and the same failure messages without one of them racing the other's
   // setState.
   const composeQuote = useCallback(async (): Promise<QuoteOutcome> => {
+    // DEST_CHAIN_ID is a literal, but `getChain('polygon')` is network-aware —
+    // it resolves to Amoy (80002) on a testnet build. Rather than silently
+    // pricing a route to mainnet 137 and preparing a same-chain send on it,
+    // fail here, before anything is quoted. Mainnet-only today; this is the
+    // guard that keeps it that way loudly.
+    if (getChain('polygon').chainId !== DEST_CHAIN_ID) {
+      return { ok: false, message: 'Selling stablecoins is not available on this network.' };
+    }
     if (exceedsStablePrecision(amount)) {
       // A guaranteed 400 from StableToBaseUnits — say why rather than letting
       // it come back as a generic failure after a round trip.
@@ -469,6 +453,18 @@ export default function ITSellStable() {
       // LiFi answered but gave us nothing usable. Block rather than quote the
       // typed amount — see estimateArrival's contract.
       return { ok: false, message: 'Could not price this route — try another chain' };
+    }
+
+    // The floor is Flutterwave's OUTBOUND minimum, so it applies to what
+    // ARRIVES, not to what is sent. Checking the typed amount alone lets a
+    // bridged 10.00 pass here, deliver 9.88, and be rejected for conversion
+    // with the funds already at Flutterwave and nothing app-side able to undo
+    // it. Same rule as the fiat quote: price and gate against the arrival.
+    if (belowMinimum(asset, arrivalMajor)) {
+      return {
+        ok: false,
+        message: `After bridge fees less than ${STABLE_MIN_SEND[asset]} ${asset} would arrive — send a little more`,
+      };
     }
 
     const q = await quoteStableSell({ asset, amount: arrivalMajor, currency: 'NGN' });
@@ -563,8 +559,10 @@ export default function ITSellStable() {
     }
     // An UNKNOWN balance skips this comparison rather than failing it: the
     // chain rejects an over-send anyway, and a transient RPC blip must not
-    // become an unexplained locked form.
-    if (balance !== null && Number(amount) > Number(balance)) {
+    // become an unexplained locked form. exceedsBalance compares as strings —
+    // an 18-decimal balance through a float can disagree at the last digit,
+    // which on a Max send is exactly where it matters.
+    if (balance !== null && exceedsBalance(amount, balance)) {
       setQuoteError(`More than your ${asset} balance on ${chainLabel}`);
       return;
     }
@@ -587,6 +585,14 @@ export default function ITSellStable() {
   // re-enter review through the same snapshot path, so the new figure is SHOWN
   // (with a fresh key) rather than swapped in silently.
   const refreshExpiredQuote = useCallback(async () => {
+    // NOT while a create is in flight or the PIN modal is open. The countdown
+    // keeps ticking through both (the modal renders inside this branch, so
+    // `screen` is still 'review'), and a refresh that resolves after the create
+    // would overwrite the review card with a figure the created intent was
+    // NOT priced at — the user authorizes against N2 on screen and is paid N1.
+    // Skipping is strictly safer: the server re-quotes at create time anyway,
+    // and the reprice comparison in confirmSell is what protects the user.
+    if (creating || showAuth) return;
     if (!sourceToken) {
       setQuoteError(`Couldn't load ${asset} on ${chainLabel}. Check your connection and try again.`);
       setScreen('form');
@@ -604,7 +610,7 @@ export default function ITSellStable() {
     setArrival(outcome.arrival);
     setQuote(outcome.quote);
     enterReview(outcome.arrival, outcome.quote, sourceToken, dest);
-  }, [asset, chainLabel, composeQuote, dest, enterReview, sourceToken]);
+  }, [asset, chainLabel, composeQuote, creating, dest, enterReview, showAuth, sourceToken]);
 
   // ── create ───────────────────────────────────────────────────────────────
   //
@@ -632,6 +638,16 @@ export default function ITSellStable() {
         bank: { code: reviewBankCode, number: reviewAccountNumber, name: reviewAccountName },
         idempotencyKey: reviewIdempotencyKey,
       });
+
+      // PostStableSell is gated on the trading agreement (it_handler.go:741)
+      // but PostStableQuote is not, so the whole form and the quote work right
+      // up to here. Generic handling would return the user to the form with
+      // "accept the trading agreement" and no way to do so — the hub owns that
+      // gate, so send them there, exactly as sell.tsx and buy.tsx do.
+      if (res.code === IT_AGREEMENT_REQUIRED) {
+        router.replace('/wallet/it');
+        return;
+      }
 
       // Guard BEFORE the first dereference. A failed create is
       // {success:false, data: undefined}, so reading res.data.intent would be a
@@ -723,6 +739,14 @@ export default function ITSellStable() {
         // fail the same way, and it is not a generic error.
         if (res.code === IT_STABLE_DEPOSIT_CLAIMED) return { ok: false, claimed: true, message: res.message };
         lastMessage = res.message;
+        // A 4xx is the server's considered answer, not a blip — replaying it
+        // twice more only delays the recovery screen the user needs. 408 and
+        // 429 are the exceptions: both explicitly mean "try again".
+        // (`status` is absent when the request never reached the server, which
+        // is precisely the case worth retrying.)
+        if (res.status && res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+          break;
+        }
       }
       return { ok: false, claimed: false, message: lastMessage };
     },
@@ -867,6 +891,24 @@ export default function ITSellStable() {
         // tokenAddress and amount come from the create response, never from a
         // symbol lookup — Polygon carries both native USDC and bridged USDC.e and
         // the backend confirms against exactly one of them.
+
+        // The balance, the Max button and the over-balance guard all read the
+        // LiFi-resolved source token; the transfer sends the backend's. On
+        // Polygon those are the same chain, so they must be the same contract —
+        // native USDC and bridged USDC.e both live here. If they disagree the
+        // user has been shown a balance for a token they are not about to send,
+        // so stop before any gas is spent rather than hope they agree.
+        if (
+          reviewSourceTokenAddress &&
+          reviewSourceTokenAddress.toLowerCase() !== sell.depositTokenAddress.toLowerCase()
+        ) {
+          setError(
+            `This order expects a different ${asset} contract than the one your balance was read from. Do not send — contact support.`
+          );
+          setScreen('error');
+          return;
+        }
+
         setSigningStatus(`Sending ${sell.depositAmount} ${asset}…`);
         // From here a throw can no longer prove nothing was broadcast.
         reachedSend = true;
@@ -1010,12 +1052,22 @@ export default function ITSellStable() {
   const findMyTransaction = useCallback(async () => {
     if (!created) return;
     setRecoveryLoading(true);
+    setRecoveryError(null);
     const res = await getTransactionHistory(1, 10, DEST_CHAIN_ID);
+    setRecoveryLoading(false);
+    // A failed call is NOT an empty history. Rendering "no transfer found" for
+    // a network error tells someone whose money did move that it did not —
+    // which is the exact input that produces a second send. Leave
+    // recoverySends null so the button stays offered and the lookup is
+    // retryable.
+    if (!res.success) {
+      setRecoveryError(res.message || "Couldn't check your history — try again.");
+      return;
+    }
     const to = created.depositAddress.toLowerCase();
     setRecoverySends(
       (res.data?.transactions ?? []).filter((t) => t.txHash && t.toAddress?.toLowerCase() === to)
     );
-    setRecoveryLoading(false);
   }, [created]);
 
   const reportHash = useCallback(
@@ -1031,6 +1083,25 @@ export default function ITSellStable() {
       }
     },
     [persistAndReport, reporting]
+  );
+
+  // Report a hash the user pasted in. The bridged path has no history lookup
+  // (getTransactionHistory only sees Polygon), so without this a bridged sell
+  // whose broadcast response was lost has nowhere in the app to be recovered —
+  // while the error screen tells the user to report it against the order.
+  const reportManualHash = useCallback(
+    (intentId: string) => {
+      const hash = manualHash.trim();
+      if (!isLikelyTxHash(hash)) {
+        setManualHashError('That does not look like a transaction hash (0x…, 66 characters).');
+        return;
+      }
+      setManualHashError(null);
+      // reportStableDeposit is idempotent per (intent, hash), so re-reporting
+      // an already-known hash is safe.
+      reportHash(intentId, hash);
+    },
+    [manualHash, reportHash]
   );
 
   const chainItems: PickerItem[] = chainOptions.map((key) => {
@@ -1166,15 +1237,26 @@ export default function ITSellStable() {
               </Text>
               {reviewChainKey === 'polygon' ? (
                 recoverySends === null ? (
-                  <Button
-                    title="Find my transaction"
-                    variant="secondary"
-                    loading={recoveryLoading}
-                    onPress={findMyTransaction}
-                  />
+                  <>
+                    <Button
+                      title={recoveryError ? 'Try again' : 'Find my transaction'}
+                      variant="secondary"
+                      loading={recoveryLoading}
+                      onPress={findMyTransaction}
+                    />
+                    {/* A lookup that FAILED says so. "No transfer found" here
+                        would tell someone whose funds did move that they did
+                        not — the one sentence that produces a second send. */}
+                    {recoveryError ? (
+                      <Text variant="caption" style={{ color: colors.danger, textAlign: 'center' }}>
+                        Couldn&apos;t check your history — this does not mean nothing was sent.
+                      </Text>
+                    ) : null}
+                  </>
                 ) : recoverySends.length === 0 ? (
                   <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
                     No transfer to this order&apos;s deposit address in your recent Polygon history.
+                    If your wallet shows one, paste its hash below.
                   </Text>
                 ) : (
                   <View style={{ alignSelf: 'stretch', gap: spacing.xs }}>
@@ -1191,6 +1273,34 @@ export default function ITSellStable() {
                   </View>
                 )
               ) : null}
+
+              {/* Every chain, not just Polygon. getTransactionHistory only
+                  sees the DESTINATION chain, so a bridged send has no lookup
+                  at all — and without this the instruction above ("report it
+                  against this order") is one the app cannot honour. */}
+              <View style={{ alignSelf: 'stretch', gap: spacing.xs }}>
+                <Input
+                  label="Already sent it? Paste your transaction hash"
+                  value={manualHash}
+                  onChangeText={(v) => {
+                    setManualHash(v);
+                    setManualHashError(null);
+                  }}
+                  placeholder="0x…"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  error={manualHashError ?? undefined}
+                  helper={`From your wallet's history on ${getChain(reviewChainKey).name}.`}
+                />
+                <Button
+                  title="Report this transaction"
+                  variant="secondary"
+                  loading={reporting}
+                  disabled={!manualHash.trim()}
+                  onPress={() => reportManualHash(recoveryIntentId)}
+                />
+              </View>
+
               <Button
                 title="Open this order"
                 variant="secondary"
@@ -1200,7 +1310,13 @@ export default function ITSellStable() {
           ) : null}
 
           <View style={{ height: spacing.lg }} />
-          <Button title="Back" variant="ghost" onPress={() => setScreen('form')} />
+          {/* No Back while a send may be in flight: it returns to the form
+              with the intent still open, and a fresh quote + confirm from
+              there mints a SECOND intent and a second send. "Open this order"
+              above is the way out of this screen. */}
+          {recoveryIntentId && created ? null : (
+            <Button title="Back" variant="ghost" onPress={() => setScreen('form')} />
+          )}
         </ScrollView>
       </SafeAreaView>
     );

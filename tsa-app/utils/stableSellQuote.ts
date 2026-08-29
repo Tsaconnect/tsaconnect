@@ -111,6 +111,98 @@ export function estimateArrival(
   return formatTokenAmount(lifiToAmountBase, destDecimals, destDecimals);
 }
 
+// ─── display + comparison helpers ─────────────────────────────────────────
+//
+// These three were authored inside sell-stable.tsx, where this repo cannot
+// test them (no @testing-library/react-native, and they are not exported).
+// They are pure money functions and one of them — truncateToStableDecimals —
+// already needed a fix round, so they live here with their siblings.
+
+/**
+ * A minor-unit integer STRING rendered as ₦x,xxx.yy.
+ *
+ * Pure string math on purpose: `Number(kobo)` on a large payout silently loses
+ * precision, and money crosses the wire as an integer string precisely so it
+ * never becomes a float. This is the display edge — the only place a kobo
+ * string is allowed to stop being a string.
+ */
+export function formatKobo(kobo: string | null | undefined): string {
+  if (!kobo) return '—';
+  const negative = kobo.trim().startsWith('-');
+  const digits = kobo.replace(/\D/g, '');
+  if (!digits) return '—';
+  const padded = digits.padStart(3, '0');
+  const naira = padded.slice(0, -2).replace(/^0+(?=\d)/, '');
+  const minor = padded.slice(-2);
+  const grouped = naira.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${negative ? '-' : ''}₦${grouped}.${minor}`;
+}
+
+/** gross − afterSpread, as a kobo string. Both are integers on the wire. */
+export function subtractKobo(a: string | null | undefined, b: string | null | undefined): string | null {
+  if (!a || !b) return null;
+  try {
+    return (BigInt(a) - BigInt(b)).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Trim a major-unit asset amount to the precision the backend accepts.
+ *
+ * TRUNCATES, never rounds. `ethers.formatUnits` renders the balance at the
+ * SOURCE token's decimals, and BSC's USDT/USDC are genuinely 18 — so the Max
+ * button would otherwise fill in 18 fractional digits, `exceedsStablePrecision`
+ * would reject the app's own value, and the one-tap path would fail on exactly
+ * the chain this flow most has to get right. Rounding up instead of truncating
+ * would push Max past the real balance and fail the send on-chain.
+ *
+ * String math, not `toFixed` — a float round-trip is what this guards against.
+ */
+export function truncateToStableDecimals(major: string): string {
+  const [whole, frac = ''] = major.split('.');
+  const kept = frac.slice(0, STABLE_MAX_DECIMALS).replace(/0+$/, '');
+  return kept ? `${whole}.${kept}` : whole;
+}
+
+/**
+ * True when the typed amount is strictly greater than the balance.
+ *
+ * String comparison rather than `Number(a) > Number(b)`: an 18-decimal balance
+ * round-tripped through a float can compare wrong at the last digit, which on
+ * a Max send is exactly where it matters.
+ *
+ * Returns FALSE when either side is not a plain decimal. An unparseable
+ * balance must skip the guard, never fail it — the chain rejects an over-send
+ * anyway, and a locked form with no explanation is the worse failure.
+ */
+export function exceedsBalance(amountMajor: string, balanceMajor: string): boolean {
+  const a = amountMajor.trim();
+  const b = balanceMajor.trim();
+  if (!DECIMAL_RE.test(a) || !DECIMAL_RE.test(b)) return false;
+  const [aWhole, aFrac = ''] = a.split('.');
+  const [bWhole, bFrac = ''] = b.split('.');
+  const width = Math.max(aFrac.length, bFrac.length);
+  try {
+    return BigInt(aWhole + aFrac.padEnd(width, '0')) > BigInt(bWhole + bFrac.padEnd(width, '0'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Shape check for a transaction hash the user pasted in by hand.
+ *
+ * The manual-recovery paths report a hash against an intent, and reporting the
+ * wrong string wastes the one attempt a stranded user has. An EVM hash is
+ * exactly 32 bytes hex; anything else is a paste error, not a transfer.
+ * Whether the hash is really THEIRS is the backend's call, not this one's.
+ */
+export function isLikelyTxHash(hash: string): boolean {
+  return /^0x[0-9a-fA-F]{64}$/.test(hash.trim());
+}
+
 /** A "you send X · about Y arrives" line, or null when they are equal. */
 export function formatSendVsArrive(sentMajor: string, arriveMajor: string): string | null {
   if (Number(sentMajor) === Number(arriveMajor)) return null;

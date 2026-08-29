@@ -19,9 +19,14 @@ import {
   POLYGON_STABLE_DECIMALS,
   ErrArrivalUnpriceable,
   belowMinimum,
+  exceedsBalance,
   exceedsStablePrecision,
   estimateArrival,
+  formatKobo,
   formatSendVsArrive,
+  isLikelyTxHash,
+  subtractKobo,
+  truncateToStableDecimals,
   STABLE_SELL_STATUSES,
   statusToHops,
   isTerminalStableStatus,
@@ -77,6 +82,119 @@ describe('exceedsStablePrecision', () => {
     // rather than an unexplained failure at the quote.
     expect(exceedsStablePrecision('10.1234567')).toBe(true);
     expect(exceedsStablePrecision('0.0000001')).toBe(true);
+  });
+});
+
+describe('belowMinimum applied to the ARRIVAL', () => {
+  it('catches a bridged send that clears the floor but lands under it', () => {
+    // The floor is Flutterwave's OUTBOUND minimum, so it governs what ARRIVES.
+    // 10.00 sent from BSC clears it; 9.88 delivered does not, and by then the
+    // funds are at Flutterwave and nothing app-side can undo the send. The
+    // screen composes the quote against the arrival for exactly this reason —
+    // the floor has to follow the same rule.
+    const arrival = estimateArrival('10', '9880000', POLYGON_STABLE_DECIMALS);
+    expect(arrival).toBe('9.88');
+    expect(belowMinimum('USDC', '10')).toBe(false);
+    expect(belowMinimum('USDC', arrival)).toBe(true);
+  });
+});
+
+describe('formatKobo', () => {
+  it('renders a minor-unit integer string without ever touching a float', () => {
+    expect(formatKobo('15500000')).toBe('₦155,000.00');
+    expect(formatKobo('14820055')).toBe('₦148,200.55');
+    expect(formatKobo('5')).toBe('₦0.05');
+    expect(formatKobo('-2500')).toBe('-₦25.00');
+  });
+
+  it('keeps full precision on a payout Number() would round', () => {
+    // 9007199254740993 kobo is Number.MAX_SAFE_INTEGER + 2: `Number(kobo)/100`
+    // loses the last digit here. String math does not, which is the whole
+    // reason money stays a string until this function.
+    expect(formatKobo('9007199254740993')).toBe('₦90,071,992,547,409.93');
+  });
+
+  it('shows a dash rather than ₦0.00 for a missing figure', () => {
+    // An absent field is not zero naira. Rendering "₦0.00" for one would tell
+    // a user their payout is nothing.
+    expect(formatKobo(undefined)).toBe('—');
+    expect(formatKobo(null)).toBe('—');
+    expect(formatKobo('')).toBe('—');
+  });
+});
+
+describe('subtractKobo', () => {
+  it('subtracts as integers', () => {
+    expect(subtractKobo('15500000', '15100000')).toBe('400000');
+  });
+
+  it('returns null rather than a wrong number when either side is missing', () => {
+    expect(subtractKobo(null, '1')).toBeNull();
+    expect(subtractKobo('1', undefined)).toBeNull();
+    expect(subtractKobo('abc', '1')).toBeNull();
+  });
+});
+
+describe('truncateToStableDecimals', () => {
+  it('truncates an 18-decimal balance to what the backend accepts', () => {
+    // BSC's USDT/USDC really are 18 decimals, so Max would otherwise fill in a
+    // value the app's own precision guard rejects.
+    expect(truncateToStableDecimals('12.345678901234567890')).toBe('12.345678');
+    expect(exceedsStablePrecision(truncateToStableDecimals('12.345678901234567890'))).toBe(false);
+  });
+
+  it('never rounds UP past the real balance', () => {
+    // Rounding would push Max above what the wallet holds and fail the send
+    // on-chain, after gas.
+    expect(truncateToStableDecimals('12.3456789')).toBe('12.345678');
+  });
+
+  it('drops a trailing-zero fraction entirely', () => {
+    expect(truncateToStableDecimals('12.000000000')).toBe('12');
+    expect(truncateToStableDecimals('12')).toBe('12');
+  });
+});
+
+describe('exceedsBalance', () => {
+  it('compares as strings, not floats', () => {
+    expect(exceedsBalance('10.5', '10.4')).toBe(true);
+    expect(exceedsBalance('10.4', '10.5')).toBe(false);
+    expect(exceedsBalance('10', '10')).toBe(false);
+    // Different fractional widths must line up before comparing.
+    expect(exceedsBalance('10.1', '10.05')).toBe(true);
+    expect(exceedsBalance('9.999999999999999999', '10')).toBe(false);
+  });
+
+  it('does not trip on the last digit of an 18-decimal balance', () => {
+    // Number('1234.567890123456789') === Number('1234.5678901234567891'):
+    // a float comparison here calls a valid Max send an over-send.
+    const balance = '1234.567890123456789';
+    expect(exceedsBalance(balance, balance)).toBe(false);
+    expect(exceedsBalance('1234.567890123456790', balance)).toBe(true);
+  });
+
+  it('SKIPS the guard rather than failing it on unparseable input', () => {
+    // An unknown or malformed balance must not become a locked form with no
+    // explanation — the chain rejects an over-send anyway.
+    expect(exceedsBalance('10', 'unknown')).toBe(false);
+    expect(exceedsBalance('1e1', '5')).toBe(false);
+    expect(exceedsBalance('', '5')).toBe(false);
+  });
+});
+
+describe('isLikelyTxHash', () => {
+  it('accepts a 32-byte hex hash in either case', () => {
+    expect(isLikelyTxHash(`0x${'a'.repeat(64)}`)).toBe(true);
+    expect(isLikelyTxHash(`0x${'A1b2'.repeat(16)}`)).toBe(true);
+    expect(isLikelyTxHash(` 0x${'0'.repeat(64)} `)).toBe(true);
+  });
+
+  it('rejects a paste error before it is reported against an intent', () => {
+    expect(isLikelyTxHash('')).toBe(false);
+    expect(isLikelyTxHash('0xdeadbeef')).toBe(false); // truncated
+    expect(isLikelyTxHash('a'.repeat(64))).toBe(false); // no 0x
+    expect(isLikelyTxHash(`0x${'z'.repeat(64)}`)).toBe(false); // not hex
+    expect(isLikelyTxHash(`0x${'a'.repeat(65)}`)).toBe(false); // too long
   });
 });
 

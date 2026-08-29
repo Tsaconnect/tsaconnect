@@ -88,6 +88,26 @@ describe('stablecoin sell transport', () => {
     expect(second).toBe('fixed-key-1');
   });
 
+  it('defaults currency to NGN even when the caller passes it explicitly undefined', async () => {
+    // `currency` is binding:"required" server-side (it_handler.go:675). The
+    // spread order is load-bearing: `{ currency: 'NGN', ...body }` lets an
+    // explicit `currency: undefined` in body override the default back to
+    // undefined, JSON.stringify drops the key, and the server 400s. This locks
+    // the `...body, currency: body.currency ?? 'NGN'` ordering that fixed it.
+    (global.fetch as jest.Mock).mockResolvedValue(okJson({ net: '1' }));
+    await quoteStableSell({ asset: 'USDC', amount: '100', currency: undefined });
+    expect(JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body).currency).toBe('NGN');
+
+    await createStableSell({
+      asset: 'USDC',
+      amount: '100',
+      currency: undefined,
+      sourceChain: 'BSC',
+      bank: { code: '044', number: '0690000031', name: 'Ada Okafor' },
+    });
+    expect(JSON.parse((global.fetch as jest.Mock).mock.calls[1][1].body).currency).toBe('NGN');
+  });
+
   it('surfaces the HTTP status so callers can tell 400 from 503', async () => {
     // A 400 is the user's to fix; a 503 is worth retrying. Without the status
     // the screen cannot tell them apart.
