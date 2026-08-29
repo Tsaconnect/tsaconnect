@@ -756,13 +756,22 @@ export default function ITSellStable() {
 
       setSigningStatus('Confirming your deposit…');
       const outcome = await reportWithRetry(intentId, txHash);
-      if (outcome.ok) {
+
+      // Clear the stored hash on both TERMINAL outcomes — reported, and
+      // claimed. Only a report that might still succeed later is worth keeping,
+      // and a claimed hash never will: Task 8 retries any stored hash on a
+      // non-terminal intent, so leaving it would retry, forever, a call that can
+      // only return `claimed` again. The hash stays on screen either way.
+      if (outcome.ok || outcome.claimed) {
         try {
           await AsyncStorage.removeItem(pendingTxKey(intentId));
         } catch {
-          // A stale key is harmless: re-reporting the same (intent, hash)
-          // returns early server-side.
+          // A stale key is harmless on the success path: re-reporting the same
+          // (intent, hash) returns early server-side.
         }
+      }
+
+      if (outcome.ok) {
         router.replace(`/wallet/it/intent/${intentId}`);
         return;
       }
@@ -821,141 +830,164 @@ export default function ITSellStable() {
     setSigningStatus('Checking your wallet…');
     setScreen('signing');
 
-    // ADVISORY, not a gate: ensureGas returns TRUE when the RPC read fails, so
-    // an RPC blip does not block a send the chain would have accepted. It
-    // catches the common "wallet holds zero native token" case and nothing
-    // else — a swap can still die for gas after an approval has already cost
-    // the user a transaction. Back to review, where funding the wallet and
-    // confirming again replays the same create (same key → same intent).
-    const gasOk = await ensureGas(reviewChainKey, walletAddress, alertFn);
-    if (!gasOk) {
-      setScreen('review'); // alertFn already wrote the message
-      return;
-    }
-
-    if (!(await assertActiveWallet())) {
-      setScreen('error');
-      return;
-    }
-
-    let txHash: string;
-    if (reviewChainKey === 'polygon') {
-      // No bridge: a plain ERC-20 transfer to Flutterwave's address. The
-      // backend's same-chain branch skips the LiFi status lookup entirely.
-      //
-      // tokenAddress and amount come from the create response, never from a
-      // symbol lookup — Polygon carries both native USDC and bridged USDC.e and
-      // the backend confirms against exactly one of them.
-      setSigningStatus(`Sending ${sell.depositAmount} ${asset}…`);
-      const sent = await sendPreparedTransaction({
-        prepare: () =>
-          prepareSendTransaction(asset, sell.depositAddress, sell.depositAmount, DEST_CHAIN_ID, {
-            tokenAddress: sell.depositTokenAddress,
-            decimals: POLYGON_STABLE_DECIMALS,
-            fromAddress: walletAddress,
-          }),
-        sign: (tx) =>
-          signTransaction(
-            {
-              type: 0, // legacy transaction format, as in wallet/send.tsx
-              to: tx.to,
-              data: tx.data,
-              value: tx.value,
-              gasLimit: tx.gasLimit,
-              gasPrice: tx.gasPrice,
-              nonce: tx.nonce,
-              chainId: tx.chainId,
-            },
-            walletAddress
-          ),
-        submit: (signed) =>
-          submitTransaction(
-            signed,
-            'send',
-            asset,
-            sell.depositAddress,
-            sell.depositAmount,
-            DEST_CHAIN_ID,
-            walletAddress
-          ),
-      });
-      // sendPreparedTransaction resolves ApiResponse<{txHash}>, NOT a string:
-      // assigning it straight through would persist and report "[object
-      // Object]" and lose the real hash on the primary route.
-      if (!sent.success || !sent.data?.txHash) {
-        // We have NO HASH TO PERSIST — which is not the same as "nothing was
-        // broadcast", and must not be treated as if it were. submitTransaction
-        // returns {success:false} on any network error, including a timeout
-        // reading the response after the backend already broadcast the raw
-        // transaction; it also returns the result as-is when the backend
-        // succeeded but no hash could be extracted. Both land here, so this
-        // branch is reachable with the user's funds already in flight.
-        setError(mapSubmitError(sent.message));
-        setRecoveryIntentId(sell.intentId);
-        setScreen('error');
-        return;
-      }
-      txHash = sent.data.txHash;
-    } else {
-      // Cross-chain. Only NOW is the destination contract known, which is why
-      // the EXECUTION quote is built here rather than reusing the pricing quote
-      // from the form: both the toAddress and the toToken are the backend's own
-      // values.
-      setSigningStatus('Building your route…');
-      let fromAmountBase: string;
-      try {
-        fromAmountBase = parseTokenAmount(reviewAmount, reviewSourceDecimals);
-      } catch {
-        setError('Could not read the amount for this route. Start the sell again.');
-        setScreen('error');
-        return;
-      }
-      let execQuote;
-      try {
-        execQuote = await getLiFiQuote({
-          fromChain: getChain(reviewChainKey).chainId,
-          toChain: DEST_CHAIN_ID,
-          fromToken: reviewSourceTokenAddress,
-          toToken: sell.depositTokenAddress,
-          fromAmount: fromAmountBase,
-          fromAddress: walletAddress,
-          toAddress: sell.depositAddress,
-        });
-      } catch {
-        // Nothing signed, nothing broadcast — this one really is a clean fail.
-        setError(`No route from ${getChain(reviewChainKey).name} right now — try again shortly.`);
-        setScreen('error');
+    // EVERYTHING below is inside a try/catch, because the 'signing' screen is a
+    // bare spinner with no error and no Back button, and AuthorizationModal
+    // invokes onAuthorized fire-and-forget (it is typed `() => void`). An
+    // unhandled rejection would therefore leave the user on an infinite
+    // "Sending 100 USDC…" spinner, escapable only by force-quitting.
+    //
+    // The throwers are real: signTransaction rejects on "No private key stored
+    // for wallet X", an address/key mismatch or a keychain denial, and
+    // sendPreparedTransaction does NOT catch its own `sign` callback;
+    // getActiveWallet can reject the same way.
+    let reachedSend = false;
+    try {
+      // ADVISORY, not a gate: ensureGas returns TRUE when the RPC read fails, so
+      // an RPC blip does not block a send the chain would have accepted. It
+      // catches the common "wallet holds zero native token" case and nothing
+      // else — a swap can still die for gas after an approval has already cost
+      // the user a transaction. Back to review, where funding the wallet and
+      // confirming again replays the same create (same key → same intent).
+      const gasOk = await ensureGas(reviewChainKey, walletAddress, alertFn);
+      if (!gasOk) {
+        setScreen('review'); // alertFn already wrote the message
         return;
       }
 
-      // Re-assert immediately before the two signatures.
       if (!(await assertActiveWallet())) {
         setScreen('error');
         return;
       }
 
-      try {
-        txHash = await executeLiFiSwap({
-          quote: execQuote,
-          fromSymbol: asset,
-          fromDecimals: reviewSourceDecimals,
-          fromAmount: reviewAmount,
-          walletAddress,
-          fromChainId: getChain(reviewChainKey).chainId,
-          onStage: setSigningStatus,
+      let txHash: string;
+      if (reviewChainKey === 'polygon') {
+        // No bridge: a plain ERC-20 transfer to Flutterwave's address. The
+        // backend's same-chain branch skips the LiFi status lookup entirely.
+        //
+        // tokenAddress and amount come from the create response, never from a
+        // symbol lookup — Polygon carries both native USDC and bridged USDC.e and
+        // the backend confirms against exactly one of them.
+        setSigningStatus(`Sending ${sell.depositAmount} ${asset}…`);
+        // From here a throw can no longer prove nothing was broadcast.
+        reachedSend = true;
+        const sent = await sendPreparedTransaction({
+          prepare: () =>
+            prepareSendTransaction(asset, sell.depositAddress, sell.depositAmount, DEST_CHAIN_ID, {
+              tokenAddress: sell.depositTokenAddress,
+              decimals: POLYGON_STABLE_DECIMALS,
+              fromAddress: walletAddress,
+            }),
+          sign: (tx) =>
+            signTransaction(
+              {
+                type: 0, // legacy transaction format, as in wallet/send.tsx
+                to: tx.to,
+                data: tx.data,
+                value: tx.value,
+                gasLimit: tx.gasLimit,
+                gasPrice: tx.gasPrice,
+                nonce: tx.nonce,
+                chainId: tx.chainId,
+              },
+              walletAddress
+            ),
+          submit: (signed) =>
+            submitTransaction(
+              signed,
+              'send',
+              asset,
+              sell.depositAddress,
+              sell.depositAmount,
+              DEST_CHAIN_ID,
+              walletAddress
+            ),
         });
-      } catch (e: any) {
-        // executeLiFiSwap throws with a user-facing message. The swap submit
-        // can throw on a network error AFTER the backend broadcast, so this is
-        // treated as recoverable rather than as proof nothing moved.
-        setError(e?.message || `Could not send your ${asset}.`);
-        setRecoveryIntentId(sell.intentId);
-        setScreen('error');
-        return;
-      }
-    }
+        // sendPreparedTransaction resolves ApiResponse<{txHash}>, NOT a string:
+        // assigning it straight through would persist and report "[object
+        // Object]" and lose the real hash on the primary route.
+        if (!sent.success || !sent.data?.txHash) {
+          // We have NO HASH TO PERSIST — which is not the same as "nothing was
+          // broadcast", and must not be treated as if it were. submitTransaction
+          // returns {success:false} on any network error, including a timeout
+          // reading the response after the backend already broadcast the raw
+          // transaction; it also returns the result as-is when the backend
+          // succeeded but no hash could be extracted. Both land here, so this
+          // branch is reachable with the user's funds already in flight.
+          setError(mapSubmitError(sent.message));
+          setRecoveryIntentId(sell.intentId);
+          setScreen('error');
+          return;
+        }
+        txHash = sent.data.txHash;
+      } else {
+        // Cross-chain. Only NOW is the destination contract known, which is why
+        // the EXECUTION quote is built here rather than reusing the pricing quote
+        // from the form: both the toAddress and the toToken are the backend's own
+        // values.
+        setSigningStatus('Building your route…');
+        let fromAmountBase: string;
+        try {
+          fromAmountBase = parseTokenAmount(reviewAmount, reviewSourceDecimals);
+        } catch {
+          setError('Could not read the amount for this route. Start the sell again.');
+          setScreen('error');
+          return;
+        }
+        let execQuote;
+        try {
+          execQuote = await getLiFiQuote({
+            fromChain: getChain(reviewChainKey).chainId,
+            toChain: DEST_CHAIN_ID,
+            fromToken: reviewSourceTokenAddress,
+            toToken: sell.depositTokenAddress,
+            fromAmount: fromAmountBase,
+            fromAddress: walletAddress,
+            toAddress: sell.depositAddress,
+          });
+        } catch {
+          // Nothing signed, nothing broadcast — this one really is a clean fail.
+          setError(`No route from ${getChain(reviewChainKey).name} right now — try again shortly.`);
+          setScreen('error');
+          return;
+        }
 
-    await persistAndReport(sell.intentId, txHash);
+        // Re-assert immediately before the two signatures.
+        if (!(await assertActiveWallet())) {
+          setScreen('error');
+          return;
+        }
+
+        reachedSend = true;
+        try {
+          txHash = await executeLiFiSwap({
+            quote: execQuote,
+            fromSymbol: asset,
+            fromDecimals: reviewSourceDecimals,
+            fromAmount: reviewAmount,
+            walletAddress,
+            fromChainId: getChain(reviewChainKey).chainId,
+            onStage: setSigningStatus,
+          });
+        } catch (e: any) {
+          // executeLiFiSwap throws with a user-facing message. The swap submit
+          // can throw on a network error AFTER the backend broadcast, so this is
+          // treated as recoverable rather than as proof nothing moved.
+          setError(e?.message || `Could not send your ${asset}.`);
+          setRecoveryIntentId(sell.intentId);
+          setScreen('error');
+          return;
+        }
+      }
+
+      await persistAndReport(sell.intentId, txHash);
+    } catch (e: any) {
+      console.error('[it-sell] signing failed', e);
+      setError(e?.message || 'Something went wrong while sending. Check your wallet, then try again.');
+      // Past the submit call we cannot prove nothing was broadcast, so keep the
+      // recovery route open rather than presenting a clean failure.
+      if (reachedSend) setRecoveryIntentId(sell.intentId);
+      setScreen('error');
+    }
   }, [
     alertFn,
     assertActiveWallet,
