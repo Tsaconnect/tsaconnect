@@ -50,6 +50,7 @@ import {
 } from '@/services/itApi';
 import {
   POLYGON_STABLE_DECIMALS,
+  STABLE_MAX_DECIMALS,
   STABLE_MIN_SEND,
   belowMinimum,
   estimateArrival,
@@ -93,6 +94,24 @@ function formatKobo(kobo: string | null | undefined): string {
   return `${negative ? '-' : ''}₦${grouped}.${minor}`;
 }
 
+/**
+ * Trim a major-unit asset amount to the precision the backend accepts.
+ *
+ * TRUNCATES, never rounds. `ethers.formatUnits` renders the balance at the
+ * SOURCE token's decimals, and BSC's USDT/USDC are genuinely 18 — so the Max
+ * button would otherwise fill in 18 fractional digits, `exceedsStablePrecision`
+ * would reject the app's own value, and the one-tap path would fail on exactly
+ * the chain this flow most has to get right. Rounding up instead of truncating
+ * would push Max past the real balance and fail the send on-chain.
+ *
+ * String math, not `toFixed` — a float round-trip is what this guards against.
+ */
+function truncateToStableDecimals(major: string): string {
+  const [whole, frac = ''] = major.split('.');
+  const kept = frac.slice(0, STABLE_MAX_DECIMALS).replace(/0+$/, '');
+  return kept ? `${whole}.${kept}` : whole;
+}
+
 /** gross − afterSpread, as a kobo string. Both are integers on the wire. */
 function subtractKobo(a: string | null, b: string | null): string | null {
   if (!a || !b) return null;
@@ -127,6 +146,14 @@ export default function ITSellStable() {
   const [sourceToken, setSourceToken] = useState<LiFiToken | null>(null);
   const [tokenLoading, setTokenLoading] = useState(false);
   const [balance, setBalance] = useState<string | null>(null); // null = UNKNOWN, not zero
+  // An unreadable balance gets its OWN surface, deliberately not `quoteError`.
+  // The read only throws after every RPC times out — many seconds, well past the
+  // 500ms debounce and the quote round-trip — so it can land AFTER a successful
+  // quote has cleared `quoteError`. Writing it there would leave a valid payout
+  // on screen beside a red line, with Review enabled but refusing to open on
+  // every press. An unknown balance must SKIP the balance guard, never gate the
+  // form; this string is advisory and is rendered under the amount field.
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [chainBalances, setChainBalances] = useState<Record<string, string>>({});
   // Discovery either ran or it did not. Without this flag a chain missing from
   // the map is indistinguishable from a chain holding zero, and showing "0" for
@@ -244,6 +271,7 @@ export default function ITSellStable() {
     setTokenLoading(true);
     setSourceToken(null);
     setBalance(null);
+    setBalanceError(null);
     (async () => {
       // The spot-trade.tsx resolver: the single-token lookup accepts a SYMBOL
       // and returns a tiny payload; the full per-chain list is multi-MB and
@@ -283,10 +311,12 @@ export default function ITSellStable() {
         const raw = await readErc20BalanceOf(token.address, walletAddress, chainKey);
         if (cancelled) return;
         setBalance(ethers.formatUnits(raw, token.decimals));
+        setBalanceError(null);
       } catch {
         if (cancelled) return;
         setBalance(null);
-        setQuoteError(`Couldn't read your ${asset} balance on ${chainLabel}. Try again shortly.`);
+        // NOT setQuoteError: this must not block a quote that already succeeded.
+        setBalanceError(`Couldn't read your ${asset} balance on ${chainLabel}. Sending is still fine — the chain checks it.`);
       }
     })();
     return () => {
@@ -734,13 +764,18 @@ export default function ITSellStable() {
           }}
           symbol={asset}
           symbolPosition="suffix"
-          onMax={balance ? () => setAmount(balance) : undefined}
+          onMax={balance ? () => setAmount(truncateToStableDecimals(balance)) : undefined}
           helper={
             tokenLoading
               ? `Loading ${asset} on ${chainLabel}…`
-              : balance === null
-                ? `Balance on ${chainLabel} unavailable`
-                : `Balance: ${Number(balance).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${asset}`
+              : balanceError
+                ? balanceError
+                : balance === null
+                  ? `Balance on ${chainLabel} unavailable`
+                  : // Truncated the same way Max is, so the figure shown and the
+                    // figure Max fills in are the same number — toLocaleString
+                    // would otherwise round the 7th digit up and disagree with it.
+                    `Balance: ${Number(truncateToStableDecimals(balance)).toLocaleString(undefined, { maximumFractionDigits: STABLE_MAX_DECIMALS })} ${asset}`
           }
         />
 
