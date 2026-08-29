@@ -158,6 +158,13 @@ type ITIntent struct {
 	DestChain   string `gorm:"size:16" json:"destChain,omitempty"`
 	DestAddress string `gorm:"size:64" json:"destAddress,omitempty"`
 
+	// DepositAddress is FLUTTERWAVE'S deposit address the user was quoted at
+	// intent creation (see CreateStableSellIntent). Persisted — not just
+	// returned once — so a user who closes the app before sending funds can
+	// re-open the intent (GET /it/intents/:id) and see where to send them
+	// without minting a second intent for the same deposit.
+	DepositAddress string `gorm:"size:64" json:"depositAddress,omitempty"`
+
 	// DepositTxHash is the SOURCE-chain transaction the user broadcast, as
 	// reported by the app. SettledTxHash is the Polygon transaction that
 	// actually delivered to Flutterwave — resolved from LiFi and then verified

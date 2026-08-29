@@ -69,6 +69,35 @@ func TestCreateStableSellIntent_PointsTheUserAtFlutterwaveNotUs(t *testing.T) {
 	}
 }
 
+func TestCreateStableSellIntent_PersistsTheDepositAddress(t *testing.T) {
+	// An abandoned sell must be resumable without minting a second intent —
+	// GET /it/intents/:id has to be able to show the user where to send their
+	// funds again, which means the address has to survive a DB round trip,
+	// not just live on the CreateStableSellIntent return value.
+	const fwAddr = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", fwAddr)
+
+	intent, instr, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "BSC", testSellBank())
+	if err != nil {
+		t.Fatalf("CreateStableSellIntent: %v", err)
+	}
+	if intent.DepositAddress != fwAddr {
+		t.Fatalf("intent.DepositAddress = %q, want %q", intent.DepositAddress, fwAddr)
+	}
+	if intent.DepositAddress != instr.Address {
+		t.Fatalf("intent.DepositAddress (%q) diverges from the returned instructions (%q)", intent.DepositAddress, instr.Address)
+	}
+
+	got, err := s.GetIntent(context.Background(), intent.ID)
+	if err != nil {
+		t.Fatalf("GetIntent: %v", err)
+	}
+	if got.DepositAddress != fwAddr {
+		t.Fatalf("re-read from DB: DepositAddress = %q, want %q", got.DepositAddress, fwAddr)
+	}
+}
+
 func TestCreateStableSellIntent_PersistsTheLockedQuote(t *testing.T) {
 	s := newStableSellDBService(t)
 	s.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")

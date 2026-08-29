@@ -890,24 +890,30 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// Registered only when IT is configured (operator signer present); admin
 	// endpoints (rate, approve credit, settle/reverse) gated to P2P admins.
 	if ith != nil {
+		// Idempotency is applied to the write paths so retries are safe — a
+		// stablecoin sell intent is a claim on a deposit, so a retried
+		// create must not mint a second one. Follows the same wiring as the
+		// P2P group above.
+		itIdem := middleware.Idempotency(config.DB)
+
 		it := api.Group("/it")
 		it.Use(auth)
 		{
 			it.GET("/rate", ith.GetRate)
 			it.GET("/agreement", ith.GetAgreement)
-			it.POST("/agreement/accept", ith.AcceptAgreement)
+			it.POST("/agreement/accept", itIdem, ith.AcceptAgreement)
 			it.GET("/withdraw/quote", ith.QuoteWithdrawal)
 			it.GET("/withdraw/destinations", ith.WithdrawalDestinations)
 			it.GET("/balance", ith.GetBalance)
 			it.GET("/va", ith.GetVA)
-			it.POST("/va/activate", ith.ActivateVA)
-			it.POST("/buy", ith.Buy)
-			it.POST("/sell", ith.Sell)
+			it.POST("/va/activate", itIdem, ith.ActivateVA)
+			it.POST("/buy", itIdem, ith.Buy)
+			it.POST("/sell", itIdem, ith.Sell)
 			it.GET("/intents", ith.ListIntents)
 			it.GET("/intents/:id", ith.GetIntent)
 			it.POST("/stable/quote", ith.PostStableQuote)
-			it.POST("/stable/sell", ith.PostStableSell)
-			it.POST("/stable/sell/:id/deposit", ith.PostStableDeposit)
+			it.POST("/stable/sell", itIdem, ith.PostStableSell)
+			it.POST("/stable/sell/:id/deposit", itIdem, ith.PostStableDeposit)
 		}
 		adminIT := api.Group("/it/admin")
 		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())

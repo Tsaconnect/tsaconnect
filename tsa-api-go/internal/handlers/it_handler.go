@@ -703,7 +703,7 @@ func (h *ITHandler) PostStableQuote(c *gin.Context) {
 	}
 	q, err := h.it.QuoteStableSell(c.Request.Context(), req.Asset, req.Amount, req.Currency)
 	if err != nil {
-		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
 	// Spread AND fee are both itemised: the spread replaces only the
@@ -744,7 +744,7 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 	ctx := c.Request.Context()
 	q, err := h.it.QuoteStableSell(ctx, req.Asset, req.Amount, req.Currency)
 	if err != nil {
-		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
 	bank := &services.ITSellBank{
@@ -757,7 +757,7 @@ func (h *ITHandler) PostStableSell(c *gin.Context) {
 	}
 	intent, deposit, err := h.it.CreateStableSellIntent(ctx, user.ID, q, req.SourceChain, bank)
 	if err != nil {
-		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Sell created", gin.H{"intent": intent, "deposit": deposit})
@@ -781,7 +781,7 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 		return
 	}
 	if err := h.it.ReportStableDeposit(c.Request.Context(), user.ID, id, req.TxHash); err != nil {
-		utils.ErrorResponse(c, stableStatusFor(err), err.Error())
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
@@ -836,6 +836,35 @@ func stableStatusFor(err error) int {
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+// stableCodeFor maps a ramp error to a stable, snake_case machine code so the
+// app can branch on WHY a request failed instead of matching message strings.
+// ErrStableDepositAlreadyClaimed is the one that matters most: it means the
+// user's deposit was claimed by someone else's intent, and the app must show
+// that prominently rather than as a generic error. Returns "" for anything
+// unmapped — callers should treat that as "no specific code, use the message".
+func stableCodeFor(err error) string {
+	switch {
+	case errors.Is(err, services.ErrStableDepositAlreadyClaimed):
+		return "stable_deposit_already_claimed"
+	case errors.Is(err, services.ErrStableIntentNotFound):
+		return "stable_intent_not_found"
+	case errors.Is(err, services.ErrStableQuoteExpired):
+		return "stable_quote_expired"
+	case errors.Is(err, services.ErrStableRateImplausible):
+		return "stable_rate_implausible"
+	case errors.Is(err, services.ErrStableBelowMinimum):
+		return "stable_below_minimum"
+	case errors.Is(err, services.ErrStableNotAnAsset):
+		return "stable_not_an_asset"
+	case errors.Is(err, services.ErrStableNoDepositAddress):
+		return "stable_not_configured"
+	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
+		return "stable_fee_exceeds_proceeds"
+	default:
+		return ""
 	}
 }
 
