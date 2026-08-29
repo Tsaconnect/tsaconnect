@@ -22,6 +22,9 @@ import {
   exceedsStablePrecision,
   estimateArrival,
   formatSendVsArrive,
+  STABLE_SELL_STATUSES,
+  statusToHops,
+  isTerminalStableStatus,
 } from '../stableSellQuote';
 
 describe('belowMinimum', () => {
@@ -132,5 +135,89 @@ describe('formatSendVsArrive', () => {
 
   it('describes the shortfall when a bridge takes a cut', () => {
     expect(formatSendVsArrive('100', '99.884217')).toBe('You send 100 · about 99.884217 arrives');
+  });
+});
+
+describe('statusToHops', () => {
+  it('maps every status the backend can emit', () => {
+    // The guard that matters: the backend added four statuses in one branch.
+    // If a fifth arrives and nothing maps it, this fails here rather than
+    // rendering an empty progress screen to someone whose money is in flight.
+    //
+    // `length > 0` and "labels are non-empty" are NOT enough: the unknown
+    // fallback returns all four hops with their labels, all `pending`, so an
+    // unmapped status would sail through. Assert something only a MAPPED
+    // status can satisfy — at least one hop is not `pending`. True for all
+    // nine below (settled is all-done; reversed/failed/cancelled carry a
+    // `failed`; the rest carry an `active`) and false for a tenth nobody
+    // mapped.
+    for (const status of STABLE_SELL_STATUSES) {
+      const hops = statusToHops(status);
+      expect(hops.length).toBeGreaterThan(0);
+      expect(hops.every((h) => h.label.length > 0)).toBe(true);
+      expect(hops.some((h) => h.state !== 'pending')).toBe(true);
+    }
+  });
+
+  it('advances the active hop as the sell progresses', () => {
+    const reported = statusToHops('deposit_reported');
+    expect(reported.find((h) => h.key === 'sent')?.state).toBe('done');
+    expect(reported.find((h) => h.key === 'arrived')?.state).toBe('active');
+
+    const converting = statusToHops('converting');
+    expect(converting.find((h) => h.key === 'arrived')?.state).toBe('done');
+    expect(converting.find((h) => h.key === 'converted')?.state).toBe('active');
+  });
+
+  it('marks every hop done when settled', () => {
+    expect(statusToHops('settled').every((h) => h.state === 'done')).toBe(true);
+  });
+
+  it('fails the PAYOUT hop on a reversal, not the wallet transfer', () => {
+    // `reversed` means the funds DID send, DID arrive and WERE converted — the
+    // payout is what failed. Marking hop 0 failed would tell a user their
+    // wallet transfer failed when it succeeded and their money is sitting at
+    // Flutterwave. Assert WHICH hop failed, not merely that one did.
+    const hops = statusToHops('reversed');
+    expect(hops.find((h) => h.key === 'sent')?.state).toBe('done');
+    expect(hops.find((h) => h.key === 'arrived')?.state).toBe('done');
+    expect(hops.find((h) => h.key === 'converted')?.state).toBe('done');
+    expect(hops.find((h) => h.key === 'paid')?.state).toBe('failed');
+  });
+
+  it('fails the FIRST hop when the sell was cancelled before anything moved', () => {
+    // cancelled/failed can occur before a deposit ever lands, so nothing may
+    // be claimed as done. Assert WHICH hop failed — `every(h => h.state !==
+    // 'done')` is the same too-weak shape this suite already rejected for
+    // `reversed`, and passes against an all-`pending` implementation that
+    // shows no failure at all.
+    const hops = statusToHops('cancelled');
+    expect(hops[0].state).toBe('failed');
+    expect(hops.every((h) => h.state !== 'done')).toBe(true);
+  });
+
+  it('never claims progress for an unknown status', () => {
+    // Fail visibly-neutral, not falsely-complete. Assert the exact fallback
+    // shape: `!== 'done'` alone also passes an implementation that returns
+    // `active` for every hop, which reads as four things happening at once.
+    const hops = statusToHops('something_new');
+    expect(hops.every((h) => h.state === 'pending')).toBe(true);
+  });
+});
+
+describe('isTerminalStableStatus', () => {
+  it('stops polling only on terminal states', () => {
+    expect(isTerminalStableStatus('settled')).toBe(true);
+    expect(isTerminalStableStatus('reversed')).toBe(true);
+    expect(isTerminalStableStatus('failed')).toBe(true);
+    expect(isTerminalStableStatus('cancelled')).toBe(true);
+
+    expect(isTerminalStableStatus('pending_deposit')).toBe(false);
+    expect(isTerminalStableStatus('deposit_reported')).toBe(false);
+    expect(isTerminalStableStatus('deposit_confirmed')).toBe(false);
+    expect(isTerminalStableStatus('converting')).toBe(false);
+    // `debited` means the payout is in flight but the money has NOT reached
+    // the user's bank — polling must continue.
+    expect(isTerminalStableStatus('debited')).toBe(false);
   });
 });

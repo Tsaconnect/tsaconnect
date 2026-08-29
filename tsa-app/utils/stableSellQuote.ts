@@ -116,3 +116,84 @@ export function formatSendVsArrive(sentMajor: string, arriveMajor: string): stri
   if (Number(sentMajor) === Number(arriveMajor)) return null;
   return `You send ${sentMajor} · about ${arriveMajor} arrives`;
 }
+
+export type HopState = 'done' | 'active' | 'pending' | 'failed';
+export type Hop = { key: string; label: string; state: HopState };
+
+/**
+ * Every status the backend's stablecoin sell can be in.
+ *
+ * Mirrors the ITStatus* constants in internal/models/it_models.go. Kept as an
+ * explicit list so the "every status maps to hops" test can enumerate it.
+ */
+export const STABLE_SELL_STATUSES = [
+  'pending_deposit',
+  'deposit_reported',
+  'deposit_confirmed',
+  'converting',
+  'debited',
+  'settled',
+  'reversed',
+  // `failed` and `cancelled` are very likely UNREACHABLE for a stablecoin
+  // sell: they are set only on the MCGP paths (it_service.go:373, 436, 441,
+  // 621, 625; it_fiat_va.go:220), and the stable chain deliberately ends at
+  // the `debited → settled` pair (it_models.go:39-41). They are listed and
+  // mapped anyway because they are terminal, cheap to map, and shared with
+  // MCGP on the same intent row — but do not read this list as evidence that
+  // a stable sell can reach them.
+  'failed',
+  'cancelled',
+] as const;
+
+const TERMINAL = new Set(['settled', 'reversed', 'failed', 'cancelled']);
+
+/** Terminal states stop the progress screen's polling. */
+export function isTerminalStableStatus(status: string): boolean {
+  return TERMINAL.has(status);
+}
+
+// Ordered hops the user sees. `debited` is deliberately its own hop: the fiat
+// exists but has not reached the bank, and that gap is the one users ask about.
+const HOPS: { key: string; label: string }[] = [
+  { key: 'sent', label: 'Sent from your wallet' },
+  { key: 'arrived', label: 'Arrived at Flutterwave' },
+  { key: 'converted', label: 'Converted to ₦' },
+  { key: 'paid', label: 'Paid to your bank' },
+];
+
+// How far along each status is: the index of the hop currently in flight.
+const PROGRESS: Record<string, number> = {
+  pending_deposit: 0,
+  deposit_reported: 1,
+  deposit_confirmed: 2,
+  converting: 2,
+  debited: 3,
+  settled: 4,
+};
+
+export function statusToHops(status: string): Hop[] {
+  // `reversed` is NOT a generic failure: it means the deposit arrived and was
+  // converted, and only the bank payout failed. Telling that user their wallet
+  // transfer failed would be flatly untrue while their money sits at
+  // Flutterwave. cancelled/failed can occur before anything moved, so those
+  // claim nothing.
+  if (status === 'reversed') {
+    return HOPS.map((h) => ({
+      ...h,
+      state: h.key === 'paid' ? ('failed' as HopState) : ('done' as HopState),
+    }));
+  }
+  if (status === 'failed' || status === 'cancelled') {
+    return HOPS.map((h, i) => ({ ...h, state: i === 0 ? 'failed' : 'pending' }));
+  }
+  const reached = PROGRESS[status];
+  if (reached === undefined) {
+    // Unknown status: claim nothing. Better a blank-looking screen than a
+    // false "paid" for someone whose money is still in flight.
+    return HOPS.map((h) => ({ ...h, state: 'pending' }));
+  }
+  return HOPS.map((h, i) => ({
+    ...h,
+    state: i < reached ? 'done' : i === reached ? 'active' : 'pending',
+  }));
+}
