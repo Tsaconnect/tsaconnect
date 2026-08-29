@@ -125,8 +125,9 @@ was cloned until someone pulls:
 tsactl update      # sudo -u tsa-deploy -H git -C /srv/tsa-api/repo pull --ff-only
 ```
 
-`tsactl status` prints a `tooling` line and flags the drift when the checkout is
-behind `origin/main`. This bites after any change to the deploy scripts themselves.
+`tsactl status` always prints a `tooling` line, and exits non-zero when the checkout
+is behind `origin/main`. This bites after any change to the deploy scripts themselves —
+including the change that added this section.
 
 ## Rolling back
 

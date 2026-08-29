@@ -74,17 +74,49 @@ fi
 # deploy.sh only ever FETCHES $REPO; it builds in worktrees and never checks the
 # clone out again. So the scripts on this box stay frozen at clone time until
 # someone pulls. Surfacing it here is the only thing that makes that visible.
-# 2>/dev/null: git refuses a repo owned by another user (safe.directory) — degrade
-# to silence rather than erroring out of a read-only status command.
-HEAD_SHA=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)
-MAIN_SHA=$(git -C "$REPO" rev-parse --short origin/main 2>/dev/null || true)
-if [ -n "$HEAD_SHA" ]; then
-  if [ -n "$MAIN_SHA" ] && [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
-    row tooling "${Y}checkout $HEAD_SHA, origin/main $MAIN_SHA — scripts are stale${Z}"
-    row '' "run: git -C $REPO pull --ff-only"
-  else
-    row tooling "$HEAD_SHA"
+#
+# Read the refs off disk rather than shelling out to git. git refuses a repo owned
+# by another user (safe.directory), which is precisely this repo: the clone belongs
+# to tsa-deploy while status is run by root or by a human. That refusal cannot be
+# waived per-invocation — safe.directory has been protected-config-only since git
+# 2.38 and is ignored from `-c`. An earlier revision called git and sent stderr to
+# /dev/null, which made this entire row disappear on the first real run.
+GITDIR=$REPO/.git
+
+# Loose ref first, then packed-refs. A freshly cloned origin/main is packed; one
+# updated by a later fetch is loose. Both occur on a live box.
+resolve_ref() {
+  if [ -r "$GITDIR/$1" ]; then
+    cut -c1-7 <"$GITDIR/$1"
+  elif [ -r "$GITDIR/packed-refs" ]; then
+    awk -v r="$1" '$2 == r { print substr($1, 1, 7); exit }' "$GITDIR/packed-refs"
   fi
+}
+
+head_sha() {
+  [ -r "$GITDIR/HEAD" ] || return 0
+  local h; h=$(cut -c1-64 <"$GITDIR/HEAD")
+  case "$h" in
+    'ref: '*) resolve_ref "${h#ref: }" ;;
+    *)        printf '%s' "${h:0:7}" ;;   # detached HEAD
+  esac
+}
+
+HEAD_SHA=$(head_sha || true)
+MAIN_SHA=$(resolve_ref refs/remotes/origin/main || true)
+
+# Always prints a row. "No tooling line" must never again be a possible output —
+# a silently absent warning is worse than no warning at all.
+if [ -z "$HEAD_SHA" ]; then
+  row tooling "${Y}cannot read $GITDIR — deploy checkout missing or unreadable${Z}"
+elif [ -z "$MAIN_SHA" ]; then
+  row tooling "$HEAD_SHA ${Y}(no origin/main ref — cannot check for drift)${Z}"
+elif [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
+  row tooling "${Y}checkout $HEAD_SHA, origin/main $MAIN_SHA — scripts are stale${Z}"
+  row '' "run: tsactl update"
+  RC=1
+else
+  row tooling "$HEAD_SHA"
 fi
 
 # ── releases ─────────────────────────────────────────────────────────────
