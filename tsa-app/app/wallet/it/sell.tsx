@@ -48,12 +48,12 @@ type Screen = 'form' | 'review' | 'submitting' | 'done' | 'error';
 // list. That endpoint is the same source Sell validates against, so anything
 // rendered here is guaranteed to be accepted — a hardcoded option could offer a
 // rail the API would reject, and the user would only find out after committing.
-const CURRENCY_META: Record<string, { label: string; country: string; digits: number }> = {
-  NGN: { label: 'NGN · Nigerian Naira', country: 'NG', digits: 10 },
-  GHS: { label: 'GHS · Ghanaian Cedi', country: 'GH', digits: 13 },
-  USD: { label: 'USD · US Dollar', country: 'US', digits: 12 },
-  EUR: { label: 'EUR · Euro', country: '', digits: 34 },
-  GBP: { label: 'GBP · Pound Sterling', country: 'GB', digits: 8 },
+const CURRENCY_META: Record<string, { label: string; country: string }> = {
+  NGN: { label: 'NGN · Nigerian Naira', country: 'NG' },
+  GHS: { label: 'GHS · Ghanaian Cedi', country: 'GH' },
+  USD: { label: 'USD · US Dollar', country: 'US' },
+  EUR: { label: 'EUR · Euro', country: '' },
+  GBP: { label: 'GBP · Pound Sterling', country: 'GB' },
 };
 
 function currencyLabelFor(code: string): string {
