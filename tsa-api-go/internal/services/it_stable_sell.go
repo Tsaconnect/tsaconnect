@@ -140,6 +140,11 @@ func (s *ITService) CreateStableSellIntent(
 		Currency:    q.Currency,
 		SourceChain: strings.ToUpper(strings.TrimSpace(sourceChain)),
 
+		// Persisted so an abandoned sell is resumable via GET /it/intents/:id
+		// without minting a second intent for the same deposit — see the
+		// field doc on models.ITIntent.DepositAddress.
+		DepositAddress: addr,
+
 		// Every numeric column must carry a value, not "". PostgreSQL rejects
 		// `''::numeric` outright (SQLSTATE 22P02) and GORM sends any field
 		// without a column `default:` tag in the INSERT whether or not it was

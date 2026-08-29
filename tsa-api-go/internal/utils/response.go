@@ -21,6 +21,17 @@ func ErrorResponse(c *gin.Context, status int, message string) {
 	})
 }
 
+// ErrorResponseWithCode sends a standard JSON error response plus a stable,
+// snake_case machine code so a client can branch on WHY a request failed
+// without matching human-readable message strings.
+func ErrorResponseWithCode(c *gin.Context, status int, message string, code string) {
+	c.JSON(status, gin.H{
+		"success": false,
+		"message": message,
+		"code":    code,
+	})
+}
+
 // ValidationErrorResponse sends a validation error response with field-level errors.
 func ValidationErrorResponse(c *gin.Context, errors interface{}) {
 	c.JSON(422, gin.H{
