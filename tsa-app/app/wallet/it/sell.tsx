@@ -66,6 +66,14 @@ const METHOD_OPTIONS: PickerItem[] = [
   { id: 'bank', label: 'Bank transfer', icon: 'bank' },
 ];
 
+// Stablecoins navigate away to the dedicated sell-stable screen rather than
+// being rendered here, so this form only ever needs to hold the MCGP asset.
+const ASSET_OPTIONS: PickerItem[] = [
+  { id: 'MCGP', label: 'MCGP', icon: 'wallet' },
+  { id: 'USDC', label: 'USDC', icon: 'wallet' },
+  { id: 'USDT', label: 'USDT', icon: 'wallet' },
+];
+
 function feeDisplay(line?: { display?: string } | null): string {
   const d = line?.display?.trim();
   return d && d.length > 0 ? d : '—';
@@ -75,6 +83,10 @@ export default function ITSell() {
   const { colors, spacing, radius } = useTheme();
   const { currency: displayCurrency, formatPrice, allRates } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
+  // The picker's selection. MCGP is the only value this screen ever holds;
+  // the stablecoins navigate away rather than being rendered here.
+  const [asset, setAsset] = useState<'MCGP'>('MCGP');
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
   const [spendable, setSpendable] = useState('0'); // wei, bought + credited
@@ -164,6 +176,14 @@ export default function ITSell() {
 
   const ngnPayout = mcgpAmountToNgn(amount, sellRateKobo);
 
+  const onAssetChange = (next: string) => {
+    if (next === 'USDC' || next === 'USDT') {
+      router.push({ pathname: '/wallet/it/sell-stable', params: { asset: next } });
+      return;
+    }
+    setAsset('MCGP');
+  };
+
   const goReview = async () => {
     setError('');
     const amt = Number(amount);
@@ -213,7 +233,7 @@ export default function ITSell() {
 
     const res = await getITFeeQuote({
       flow: 'withdraw',
-      asset: 'MCGP',
+      asset,
       amount: snapNgn.toFixed(2),
       currency: 'NGN',
     });
@@ -428,6 +448,13 @@ export default function ITSell() {
           Sell spendable MCGP for Naira. More payout currencies will open later.
         </Text>
 
+        <SelectRow
+          label="Asset"
+          value={asset}
+          leftIcon="wallet"
+          onPress={() => setShowAssetPicker(true)}
+        />
+
         <AmountInput
           label="Amount of MCGP to sell"
           value={amount}
@@ -492,6 +519,17 @@ export default function ITSell() {
         </View>
       </ScrollView>
 
+      <PickerSheet
+        visible={showAssetPicker}
+        onClose={() => setShowAssetPicker(false)}
+        title="Asset"
+        items={ASSET_OPTIONS}
+        selectedId={asset}
+        onSelect={(item) => {
+          setShowAssetPicker(false);
+          onAssetChange(item.id);
+        }}
+      />
       <PickerSheet
         visible={showCurrencyPicker}
         onClose={() => setShowCurrencyPicker(false)}
