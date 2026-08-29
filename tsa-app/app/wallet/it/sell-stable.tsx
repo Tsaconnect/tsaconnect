@@ -12,11 +12,13 @@
 // make the final figure always shrink — a bait-and-switch. `estimateArrival`
 // turns LiFi's estimated destination amount into the number we price.
 //
-// Flow: form → review → (Task 7) signing. This file owns `form` and `review`
-// plus the review SNAPSHOT the signing step reads.
+// Flow: form → review → create → authorize → sign → broadcast → report → the
+// order screen. This file owns every step up to the hand-off, plus the review
+// SNAPSHOT the signing step reads.
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ethers } from 'ethers';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -39,12 +41,24 @@ import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { BankDestination, type BankDestinationValue } from '@/components/it/BankDestination';
 import { DEFAULT_TOKENS, getChain, type ChainKey } from '@/constants/chains';
 import { getLiFiQuote, getLiFiToken, getLiFiTokens, type LiFiToken } from '@/services/lifi';
+import { executeLiFiSwap } from '@/services/lifiFlow';
 import { parseTokenAmount } from '@/services/p2p';
-import { getActiveWallet, readErc20BalanceOf } from '@/services/wallet';
-import { getDiscoveredTokens } from '@/services/walletApi';
+import { ensureGas, getActiveWallet, readErc20BalanceOf, signTransaction } from '@/services/wallet';
 import {
+  getDiscoveredTokens,
+  getTransactionHistory,
+  prepareSendTransaction,
+  sendPreparedTransaction,
+  submitTransaction,
+  type Transaction,
+} from '@/services/walletApi';
+import { mapSubmitError } from '@/services/swapErrors';
+import {
+  IT_STABLE_DEPOSIT_CLAIMED,
+  createStableSell,
   makeIdempotencyKey,
   quoteStableSell,
+  reportStableDeposit,
   type StableAsset,
   type StableQuote,
 } from '@/services/itApi';
@@ -58,7 +72,38 @@ import {
   formatSendVsArrive,
 } from '@/utils/stableSellQuote';
 
-type Screen = 'form' | 'review' | 'signing' | 'error';
+// 'claimed' and 'reportFailed' are BOTH post-broadcast: the user's stablecoin
+// is already on its way to Flutterwave on either. They are separate screens
+// because the recovery differs — one is a support case, the other retries.
+type Screen = 'form' | 'review' | 'signing' | 'error' | 'claimed' | 'reportFailed';
+
+/** Everything the send needs, taken from the create response and NOWHERE else. */
+type CreatedSell = {
+  intentId: string;
+  /** Flutterwave's Polygon address. */
+  depositAddress: string;
+  /** The exact ERC-20 contract ConfirmStableDeposit verifies the arrival
+   *  against. Polygon carries both native USDC and bridged USDC.e, so this is
+   *  never resolved app-side. */
+  depositTokenAddress: string;
+  /** The figure the backend reconciles the arrival against ("%.6f"). */
+  depositAmount: string;
+};
+
+/**
+ * Where a broadcast hash lives until the backend has acknowledged it.
+ *
+ * Keyed by intent so a second sell cannot overwrite the first one's hash, and
+ * so the order screen can find it by id alone.
+ */
+const pendingTxKey = (intentId: string) => `it_stable_pending_tx_${intentId}`;
+
+// Backoff between report attempts. `req` mints a fresh Idempotency-Key per
+// call, so the middleware dedups nothing here — what makes the retry safe is
+// ReportStableDeposit itself returning early for the same (intent, hash).
+const REPORT_BACKOFF_MS = [0, 1000, 3000];
+
+const shortHash = (h: string) => (h.length > 16 ? `${h.slice(0, 10)}…${h.slice(-6)}` : h);
 
 const EMPTY_DEST: BankDestinationValue = {
   bankCode: '',
@@ -202,16 +247,32 @@ export default function ITSellStable() {
   const [reviewAccountName, setReviewAccountName] = useState('');
   const [reviewIdempotencyKey, setReviewIdempotencyKey] = useState('');
   // Non-null when the server re-quoted to a different net at create time; drives
-  // the "the rate moved" banner below. Task 7 Step 1 sets it.
+  // the "the rate moved" banner below.
   const [repricedTo, setRepricedTo] = useState<string | null>(null);
+  // The figure the banner says the payout moved FROM. Held separately because
+  // accepting a reprice overwrites reviewNetKobo with the new net (the next
+  // create is compared against it), so reviewNetKobo can no longer play the
+  // "was" role — it would read "now ₦X (was ₦X)".
+  const [repricedFrom, setRepricedFrom] = useState<string | null>(null);
 
-  // --- signing (filled in by Task 7) ---------------------------------------
+  // --- signing --------------------------------------------------------------
   const [showAuth, setShowAuth] = useState(false);
   const [signingStatus, setSigningStatus] = useState<string | null>(null);
-  // Set when a Polygon submit returned no hash: we cannot prove nothing was
+  const [creating, setCreating] = useState(false);
+  // The created intent, held between create and the signature. Nothing about
+  // the send is re-derived after this point.
+  const [created, setCreated] = useState<CreatedSell | null>(null);
+  // Set when a send failed with no hash in hand: we cannot prove nothing was
   // broadcast, so the error screen offers a recovery route rather than a dead
-  // end. Task 7 Step 4.
-  const [recoveryHint, setRecoveryHint] = useState<string | null>(null);
+  // end. Holds the intent id the recovery reports against.
+  const [recoveryIntentId, setRecoveryIntentId] = useState<string | null>(null);
+  // The broadcast hash, held for display on every post-broadcast screen. This
+  // is a COPY for the UI — the authoritative one is in AsyncStorage, written
+  // before the first report attempt.
+  const [broadcastHash, setBroadcastHash] = useState<string | null>(null);
+  const [recoverySends, setRecoverySends] = useState<Transaction[] | null>(null);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [reporting, setReporting] = useState(false);
   // The active EVM address, resolved the way all-swap.tsx does — there is no
   // useWalletAddress hook in this repo. Everything downstream (the balance
   // read, the LiFi quote, the signature pin) is against THIS address.
@@ -481,6 +542,9 @@ export default function ITSellStable() {
       // confirms again.
       setReviewIdempotencyKey(makeIdempotencyKey());
       setRepricedTo(null); // clear any prior reprice banner
+      setRepricedFrom(null);
+      // A fresh snapshot invalidates any intent created from the previous one.
+      setCreated(null);
       setError(null);
       setScreen('review');
     },
@@ -542,15 +606,400 @@ export default function ITSellStable() {
     enterReview(outcome.arrival, outcome.quote, sourceToken, dest);
   }, [asset, chainLabel, composeQuote, dest, enterReview, sourceToken]);
 
-  // Filled in by Task 7 — the modal needs something to bind to. Failing loudly
-  // beats a confirm button that silently does nothing.
+  // ── create ───────────────────────────────────────────────────────────────
+  //
+  // Create MUST come first and MUST come before the PIN prompt: the deposit
+  // address AND the deposit token contract both come out of this response, and
+  // the app may hardcode neither.
+  const confirmSell = useCallback(async () => {
+    if (creating) return;
+    setError(null);
+    setCreated(null); // any intent from a previous confirm is superseded
+    setCreating(true);
+    try {
+      // One key per CONFIRMED REVIEW SNAPSHOT, minted in enterReview(). A
+      // network retry of this create must not mint a second intent — every
+      // intent is a claim on a deposit — but the key must also change when the
+      // order changes, or the middleware 409s the replay.
+      //
+      // reviewBank*/reviewChainKey, never the live fields: the snapshot exists
+      // precisely so create cannot pair a stale quote with edited inputs.
+      const res = await createStableSell({
+        asset,
+        amount: reviewArrival,
+        currency: 'NGN',
+        sourceChain: reviewChainKey.toUpperCase(),
+        bank: { code: reviewBankCode, number: reviewAccountNumber, name: reviewAccountName },
+        idempotencyKey: reviewIdempotencyKey,
+      });
+
+      // Guard BEFORE the first dereference. A failed create is
+      // {success:false, data: undefined}, so reading res.data.intent would be a
+      // TypeError on a money screen. Nothing has been broadcast yet, so failing
+      // back to the form here is genuinely safe.
+      if (
+        !res.success ||
+        !res.data?.intent?.id ||
+        !res.data?.deposit?.address ||
+        !res.data?.deposit?.tokenAddress ||
+        !res.data?.deposit?.amount
+      ) {
+        setError(res.message || 'Could not start this sell');
+        setScreen('form');
+        return;
+      }
+
+      // The server RE-QUOTES on create (PostStableSell calls QuoteStableSell
+      // again), so the intent is priced against a possibly-moved rate — not the
+      // one the user is looking at. Authorizing against a stale figure is the
+      // one place money is actually committed, so compare BEFORE the PIN.
+      //
+      // Both sides must be present for the comparison to mean anything:
+      // netNgnKobo is optional on ITIntent and reviewNetKobo is only set by
+      // enterReview(). A missing figure would silently invert `a !== b` into
+      // "always reprice" or "never reprice", and neither silent mode is
+      // acceptable here — so treat it as an error rather than as agreement.
+      const createdNet = res.data.intent.netNgnKobo;
+      if (!createdNet || !reviewNetKobo) {
+        setError('Could not confirm your payout figure. Start the sell again.');
+        setScreen('form');
+        return;
+      }
+      if (createdNet !== reviewNetKobo) {
+        // Re-present rather than proceed. Re-minting the key is MANDATORY: the
+        // middleware caches 2xx per key, so confirming again with the same key
+        // would replay the original create verbatim — same intent, same net —
+        // and this comparison would fail identically forever, wedging the user
+        // on the confirm button.
+        setRepricedFrom(reviewNetKobo);
+        setRepricedTo(createdNet);
+        setReviewNetKobo(createdNet);
+        setReviewIdempotencyKey(makeIdempotencyKey());
+        setScreen('review');
+        return;
+      }
+
+      setCreated({
+        intentId: res.data.intent.id,
+        depositAddress: res.data.deposit.address,
+        depositTokenAddress: res.data.deposit.tokenAddress,
+        depositAmount: res.data.deposit.amount,
+      });
+      setShowAuth(true);
+    } finally {
+      setCreating(false);
+    }
+  }, [
+    asset,
+    creating,
+    reviewAccountName,
+    reviewAccountNumber,
+    reviewArrival,
+    reviewBankCode,
+    reviewChainKey,
+    reviewIdempotencyKey,
+    reviewNetKobo,
+  ]);
+
+  // ── report ───────────────────────────────────────────────────────────────
+
+  /**
+   * Report the deposit, retrying transient failures.
+   *
+   * What makes this safe is the SERVER, not the middleware: `req` mints a fresh
+   * Idempotency-Key per call, so the middleware sees three unrelated requests.
+   * ReportStableDeposit is idempotent for the same (intent, hash) — an already
+   * reported hash returns early. Passing a fixed key here to "make it
+   * idempotent" would cache a transient 5xx's absence and buy nothing.
+   */
+  const reportWithRetry = useCallback(
+    async (intentId: string, txHash: string): Promise<{ ok: boolean; claimed: boolean; message?: string }> => {
+      let lastMessage: string | undefined;
+      for (const delay of REPORT_BACKOFF_MS) {
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        const res = await reportStableDeposit(intentId, txHash);
+        if (res.success) return { ok: true, claimed: false };
+        // Someone else's intent already owns this hash. Retrying can only ever
+        // fail the same way, and it is not a generic error.
+        if (res.code === IT_STABLE_DEPOSIT_CLAIMED) return { ok: false, claimed: true, message: res.message };
+        lastMessage = res.message;
+      }
+      return { ok: false, claimed: false, message: lastMessage };
+    },
+    []
+  );
+
+  /**
+   * Persist the hash, THEN report it, THEN hand off to the order screen.
+   *
+   * The one genuinely dangerous failure in this flow is: broadcast succeeded,
+   * reporting failed. The funds are in flight to Flutterwave and the backend
+   * does not know which intent they belong to. So the hash goes to storage
+   * before the network call is attempted, and is never discarded on any path
+   * out of here — not on a failed report, not on a claimed deposit.
+   *
+   * The window between the broadcast returning and the write landing is not
+   * closed, and no app-side write can close it. It is small; the recovery
+   * screen and the backend's own /wallet/submit-tx record are the fallback when
+   * it loses.
+   */
+  const persistAndReport = useCallback(
+    async (intentId: string, txHash: string) => {
+      setBroadcastHash(txHash);
+      try {
+        await AsyncStorage.setItem(pendingTxKey(intentId), txHash);
+      } catch (e) {
+        // A storage failure must not swallow the hash: reporting is still the
+        // fastest route to the backend, and every screen below shows it.
+        console.error('[it-sell] could not persist pending deposit hash', e);
+      }
+
+      setSigningStatus('Confirming your deposit…');
+      const outcome = await reportWithRetry(intentId, txHash);
+      if (outcome.ok) {
+        try {
+          await AsyncStorage.removeItem(pendingTxKey(intentId));
+        } catch {
+          // A stale key is harmless: re-reporting the same (intent, hash)
+          // returns early server-side.
+        }
+        router.replace(`/wallet/it/intent/${intentId}`);
+        return;
+      }
+
+      if (outcome.claimed) {
+        setError('This transaction has already been reported. Contact support.');
+        setScreen('claimed');
+        return;
+      }
+      setError(outcome.message || 'We could not tell our servers about your transfer.');
+      setScreen('reportFailed');
+    },
+    [reportWithRetry]
+  );
+
+  // ── sign + broadcast ─────────────────────────────────────────────────────
+
+  // ensureGas fires its own Alert.alert when onAlert is omitted; with a handler
+  // the message lands in this screen's single error surface instead of a
+  // competing system dialog. Callers must NOT also call setError.
+  const alertFn = useCallback((title: string, message: string) => {
+    setError(message ? `${title}. ${message}` : title);
+  }, []);
+
+  // signLiFiTransaction always signs with the ACTIVE wallet and takes no
+  // expected address, so a wallet switch mid-flow would sign with the wrong key
+  // and send someone else's funds. We quoted and created against ONE address —
+  // refuse rather than sign.
+  //
+  // A function, not an inline block, because the LiFi path signs TWICE with a
+  // receipt wait between them that can run for minutes: it is re-asserted
+  // immediately before executeLiFiSwap. The Polygon path is unaffected —
+  // signTransaction takes walletAddress explicitly — but is pinned anyway.
+  const assertActiveWallet = useCallback(async () => {
+    const active = await getActiveWallet();
+    if (!active || !walletAddress || active.toLowerCase() !== walletAddress.toLowerCase()) {
+      setError('Your active wallet changed. Start the sell again.');
+      return false;
+    }
+    return true;
+  }, [walletAddress]);
+
   const runSigning = useCallback(async () => {
     setShowAuth(false);
-    setSigningStatus(null);
-    setRecoveryHint(null);
-    setError('Signing is not available yet on this build.');
-    setScreen('error');
-  }, []);
+    const sell = created;
+    if (!sell) {
+      // Nothing to sign against — the create was superseded or never landed.
+      setError('That sell is no longer ready. Confirm again to restart it.');
+      setScreen('review');
+      return;
+    }
+    setError(null);
+    setRecoveryIntentId(null);
+    setBroadcastHash(null);
+    setRecoverySends(null);
+    setSigningStatus('Checking your wallet…');
+    setScreen('signing');
+
+    // ADVISORY, not a gate: ensureGas returns TRUE when the RPC read fails, so
+    // an RPC blip does not block a send the chain would have accepted. It
+    // catches the common "wallet holds zero native token" case and nothing
+    // else — a swap can still die for gas after an approval has already cost
+    // the user a transaction. Back to review, where funding the wallet and
+    // confirming again replays the same create (same key → same intent).
+    const gasOk = await ensureGas(reviewChainKey, walletAddress, alertFn);
+    if (!gasOk) {
+      setScreen('review'); // alertFn already wrote the message
+      return;
+    }
+
+    if (!(await assertActiveWallet())) {
+      setScreen('error');
+      return;
+    }
+
+    let txHash: string;
+    if (reviewChainKey === 'polygon') {
+      // No bridge: a plain ERC-20 transfer to Flutterwave's address. The
+      // backend's same-chain branch skips the LiFi status lookup entirely.
+      //
+      // tokenAddress and amount come from the create response, never from a
+      // symbol lookup — Polygon carries both native USDC and bridged USDC.e and
+      // the backend confirms against exactly one of them.
+      setSigningStatus(`Sending ${sell.depositAmount} ${asset}…`);
+      const sent = await sendPreparedTransaction({
+        prepare: () =>
+          prepareSendTransaction(asset, sell.depositAddress, sell.depositAmount, DEST_CHAIN_ID, {
+            tokenAddress: sell.depositTokenAddress,
+            decimals: POLYGON_STABLE_DECIMALS,
+            fromAddress: walletAddress,
+          }),
+        sign: (tx) =>
+          signTransaction(
+            {
+              type: 0, // legacy transaction format, as in wallet/send.tsx
+              to: tx.to,
+              data: tx.data,
+              value: tx.value,
+              gasLimit: tx.gasLimit,
+              gasPrice: tx.gasPrice,
+              nonce: tx.nonce,
+              chainId: tx.chainId,
+            },
+            walletAddress
+          ),
+        submit: (signed) =>
+          submitTransaction(
+            signed,
+            'send',
+            asset,
+            sell.depositAddress,
+            sell.depositAmount,
+            DEST_CHAIN_ID,
+            walletAddress
+          ),
+      });
+      // sendPreparedTransaction resolves ApiResponse<{txHash}>, NOT a string:
+      // assigning it straight through would persist and report "[object
+      // Object]" and lose the real hash on the primary route.
+      if (!sent.success || !sent.data?.txHash) {
+        // We have NO HASH TO PERSIST — which is not the same as "nothing was
+        // broadcast", and must not be treated as if it were. submitTransaction
+        // returns {success:false} on any network error, including a timeout
+        // reading the response after the backend already broadcast the raw
+        // transaction; it also returns the result as-is when the backend
+        // succeeded but no hash could be extracted. Both land here, so this
+        // branch is reachable with the user's funds already in flight.
+        setError(mapSubmitError(sent.message));
+        setRecoveryIntentId(sell.intentId);
+        setScreen('error');
+        return;
+      }
+      txHash = sent.data.txHash;
+    } else {
+      // Cross-chain. Only NOW is the destination contract known, which is why
+      // the EXECUTION quote is built here rather than reusing the pricing quote
+      // from the form: both the toAddress and the toToken are the backend's own
+      // values.
+      setSigningStatus('Building your route…');
+      let fromAmountBase: string;
+      try {
+        fromAmountBase = parseTokenAmount(reviewAmount, reviewSourceDecimals);
+      } catch {
+        setError('Could not read the amount for this route. Start the sell again.');
+        setScreen('error');
+        return;
+      }
+      let execQuote;
+      try {
+        execQuote = await getLiFiQuote({
+          fromChain: getChain(reviewChainKey).chainId,
+          toChain: DEST_CHAIN_ID,
+          fromToken: reviewSourceTokenAddress,
+          toToken: sell.depositTokenAddress,
+          fromAmount: fromAmountBase,
+          fromAddress: walletAddress,
+          toAddress: sell.depositAddress,
+        });
+      } catch {
+        // Nothing signed, nothing broadcast — this one really is a clean fail.
+        setError(`No route from ${getChain(reviewChainKey).name} right now — try again shortly.`);
+        setScreen('error');
+        return;
+      }
+
+      // Re-assert immediately before the two signatures.
+      if (!(await assertActiveWallet())) {
+        setScreen('error');
+        return;
+      }
+
+      try {
+        txHash = await executeLiFiSwap({
+          quote: execQuote,
+          fromSymbol: asset,
+          fromDecimals: reviewSourceDecimals,
+          fromAmount: reviewAmount,
+          walletAddress,
+          fromChainId: getChain(reviewChainKey).chainId,
+          onStage: setSigningStatus,
+        });
+      } catch (e: any) {
+        // executeLiFiSwap throws with a user-facing message. The swap submit
+        // can throw on a network error AFTER the backend broadcast, so this is
+        // treated as recoverable rather than as proof nothing moved.
+        setError(e?.message || `Could not send your ${asset}.`);
+        setRecoveryIntentId(sell.intentId);
+        setScreen('error');
+        return;
+      }
+    }
+
+    await persistAndReport(sell.intentId, txHash);
+  }, [
+    alertFn,
+    assertActiveWallet,
+    asset,
+    created,
+    persistAndReport,
+    reviewAmount,
+    reviewChainKey,
+    reviewSourceDecimals,
+    reviewSourceTokenAddress,
+    walletAddress,
+  ]);
+
+  // ── recovery ─────────────────────────────────────────────────────────────
+
+  // The backend records every broadcast at /wallet/submit-tx, so a send that
+  // failed on the RESPONSE is still visible in the user's history. Only
+  // transfers to THIS intent's deposit address are offered: reporting any other
+  // hash would attach an unrelated transfer to the sell.
+  const findMyTransaction = useCallback(async () => {
+    if (!created) return;
+    setRecoveryLoading(true);
+    const res = await getTransactionHistory(1, 10, DEST_CHAIN_ID);
+    const to = created.depositAddress.toLowerCase();
+    setRecoverySends(
+      (res.data?.transactions ?? []).filter((t) => t.txHash && t.toAddress?.toLowerCase() === to)
+    );
+    setRecoveryLoading(false);
+  }, [created]);
+
+  const reportHash = useCallback(
+    async (intentId: string, txHash: string) => {
+      if (reporting) return;
+      setReporting(true);
+      setError(null);
+      setScreen('signing');
+      try {
+        await persistAndReport(intentId, txHash);
+      } finally {
+        setReporting(false);
+      }
+    },
+    [persistAndReport, reporting]
+  );
 
   const chainItems: PickerItem[] = chainOptions.map((key) => {
     const held = chainBalances[key] ?? (chainBalancesLoaded ? '0' : undefined);
@@ -585,25 +1034,142 @@ export default function ITSellStable() {
     );
   }
 
-  if (screen === 'error') {
+  // Someone else's intent already owns this hash. This is the front-running
+  // case surfacing — a real adversarial situation the backend cannot fully
+  // prevent — so it gets its own screen rather than reading as a generic
+  // failure. The stored hash is deliberately NOT cleared.
+  if (screen === 'claimed') {
     return (
       <SafeAreaView
         style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: colors.background }}
       >
-        <Icon name="closeCircle" size={64} color={colors.danger} />
-        <Text variant="title3" weight="700" style={{ marginTop: spacing.lg, color: colors.textPrimary }}>
-          Sell failed
+        <Icon name="warning" size={64} color={colors.warning} />
+        <Text variant="title3" weight="700" style={{ marginTop: spacing.lg, color: colors.textPrimary, textAlign: 'center' }}>
+          This transaction has already been reported
         </Text>
-        <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.danger, textAlign: 'center' }}>
-          {error}
+        <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}>
+          Your {asset} was sent, but another order has already claimed this transaction. Contact
+          support with the reference below — do not send again.
         </Text>
-        {recoveryHint ? (
-          <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}>
-            {recoveryHint}
+        {broadcastHash ? (
+          <Text variant="caption" numeric style={{ marginTop: spacing.lg, color: colors.textPrimary, textAlign: 'center' }}>
+            {broadcastHash}
           </Text>
         ) : null}
         <View style={{ height: spacing.xl }} />
-        <Button title="Back" variant="secondary" onPress={() => setScreen('form')} />
+        {created ? (
+          <Button
+            title="Open this order"
+            onPress={() => router.replace(`/wallet/it/intent/${created.intentId}`)}
+          />
+        ) : null}
+      </SafeAreaView>
+    );
+  }
+
+  // Broadcast succeeded, reporting did not. The hash is in storage and on
+  // screen; it is never discarded.
+  if (screen === 'reportFailed') {
+    return (
+      <SafeAreaView
+        style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xl, backgroundColor: colors.background }}
+      >
+        <Icon name="warning" size={64} color={colors.warning} />
+        <Text variant="title3" weight="700" style={{ marginTop: spacing.lg, color: colors.textPrimary, textAlign: 'center' }}>
+          Your {asset} is on its way
+        </Text>
+        <Text variant="bodySm" style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}>
+          We could not reach our servers to confirm it. Your transaction reference is saved — retry
+          now, or open the order and retry there.
+        </Text>
+        {error ? (
+          <Text variant="caption" style={{ marginTop: spacing.sm, color: colors.danger, textAlign: 'center' }}>
+            {error}
+          </Text>
+        ) : null}
+        {broadcastHash ? (
+          <Text variant="caption" numeric style={{ marginTop: spacing.lg, color: colors.textPrimary, textAlign: 'center' }}>
+            {broadcastHash}
+          </Text>
+        ) : null}
+        <View style={{ height: spacing.xl }} />
+        {created && broadcastHash ? (
+          <Button
+            title="Retry"
+            loading={reporting}
+            onPress={() => reportHash(created.intentId, broadcastHash)}
+          />
+        ) : null}
+        <View style={{ height: spacing.sm }} />
+        {created ? (
+          <Button
+            title="Open this order"
+            variant="secondary"
+            onPress={() => router.replace(`/wallet/it/intent/${created.intentId}`)}
+          />
+        ) : null}
+      </SafeAreaView>
+    );
+  }
+
+  if (screen === 'error') {
+    return (
+      <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
+        <ScrollView contentContainerStyle={{ padding: spacing.xl, alignItems: 'center', gap: spacing.sm }}>
+          <Icon name="closeCircle" size={64} color={colors.danger} />
+          <Text variant="title3" weight="700" style={{ color: colors.textPrimary }}>
+            Sell failed
+          </Text>
+          <Text variant="bodySm" style={{ color: colors.danger, textAlign: 'center' }}>
+            {error}
+          </Text>
+
+          {/* We could not read a hash — which is NOT proof nothing was
+              broadcast. Offer the recovery route rather than a dead end. */}
+          {recoveryIntentId && created ? (
+            <>
+              <Text variant="bodySm" style={{ marginTop: spacing.md, color: colors.textSecondary, textAlign: 'center' }}>
+                If your wallet shows the transfer went through, report it against this order rather
+                than sending again.
+              </Text>
+              {reviewChainKey === 'polygon' ? (
+                recoverySends === null ? (
+                  <Button
+                    title="Find my transaction"
+                    variant="secondary"
+                    loading={recoveryLoading}
+                    onPress={findMyTransaction}
+                  />
+                ) : recoverySends.length === 0 ? (
+                  <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+                    No transfer to this order&apos;s deposit address in your recent Polygon history.
+                  </Text>
+                ) : (
+                  <View style={{ alignSelf: 'stretch', gap: spacing.xs }}>
+                    {recoverySends.map((t) => (
+                      <SelectRow
+                        key={t.txHash}
+                        label={`${t.amount} ${t.tokenSymbol}`}
+                        value={shortHash(t.txHash)}
+                        leftIcon="wallet"
+                        disabled={reporting}
+                        onPress={() => reportHash(recoveryIntentId, t.txHash)}
+                      />
+                    ))}
+                  </View>
+                )
+              ) : null}
+              <Button
+                title="Open this order"
+                variant="secondary"
+                onPress={() => router.replace(`/wallet/it/intent/${recoveryIntentId}`)}
+              />
+            </>
+          ) : null}
+
+          <View style={{ height: spacing.lg }} />
+          <Button title="Back" variant="ghost" onPress={() => setScreen('form')} />
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -631,8 +1197,8 @@ export default function ITSellStable() {
             >
               <Icon name="warning" size={16} color={colors.warning} />
               <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-                The rate moved. Your payout is now {formatKobo(repricedTo)} (was {formatKobo(reviewNetKobo)}).
-                Confirm to accept.
+                The rate moved. Your payout is now {formatKobo(repricedTo)} (was{' '}
+                {formatKobo(repricedFrom)}). Confirm to accept.
               </Text>
             </View>
           ) : null}
@@ -711,10 +1277,18 @@ export default function ITSellStable() {
             </Text>
           ) : null}
 
-          <Button title="Confirm sell" onPress={() => setShowAuth(true)} disabled={quoting} />
+          {/* Create runs HERE, before the PIN: the reprice check has to happen
+              while the user can still walk away from a moved figure. */}
+          <Button
+            title="Confirm sell"
+            onPress={confirmSell}
+            loading={creating}
+            disabled={quoting || creating}
+          />
           <Button
             title="Back"
             variant="ghost"
+            disabled={creating}
             onPress={() => {
               setShowAuth(false);
               setError(null);
