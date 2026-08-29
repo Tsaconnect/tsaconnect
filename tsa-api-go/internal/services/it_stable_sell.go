@@ -32,6 +32,11 @@ var (
 	// Not the trade the user was priced for, so it is parked for an operator
 	// rather than paid out — see the ceiling in ConfirmStableDeposit.
 	ErrStableOverDelivered = errors.New("it stable: deposit exceeds the quoted amount by more than the allowed tolerance")
+	// ErrStableNoTokenAddress means no token contract is configured for the
+	// asset being sold. CreateStableSellIntent must fail closed on this rather
+	// than hand out an instruction set with an empty tokenAddress — see the
+	// field doc on StableDepositInstructions.TokenAddress.
+	ErrStableNoTokenAddress = errors.New("it stable: no token address configured for asset")
 )
 
 // defaultStableOverDeliveryTolBps is how far above the quoted amount a deposit
@@ -73,9 +78,16 @@ var stableDepositChain = strings.ToUpper(feeChainPolygon)
 // goes straight from their wallet to the provider, so the platform is never in
 // the custody path.
 type StableDepositInstructions struct {
-	Chain           string   `json:"chain"`
-	Address         string   `json:"address"`
-	Asset           string   `json:"asset"`
+	Chain   string `json:"chain"`
+	Address string `json:"address"`
+	Asset   string `json:"asset"`
+	// TokenAddress is the exact ERC-20 contract ConfirmStableDeposit will
+	// verify the transfer against (s.stableTokens[asset]) — never left for the
+	// app to resolve itself. Polygon carries two live USDC contracts (native
+	// and bridged USDC.e); an app-side symbol lookup can silently pick the
+	// wrong one, and a deposit sent to it will never match on-chain, leaving
+	// the user's funds parked at Flutterwave with nothing to reconcile against.
+	TokenAddress    string   `json:"tokenAddress"`
 	AmountBaseUnits *big.Int `json:"-"`
 	AmountDisplay   string   `json:"amount"`
 }
@@ -184,6 +196,20 @@ func (s *ITService) CreateStableSellIntent(
 		MobileCountry:       strings.TrimSpace(bank.MobileCountry),
 		MobileMsisdn:        strings.TrimSpace(bank.MobileMsisdn),
 	}
+
+	// Resolve the SAME token contract ConfirmStableDeposit will verify the
+	// arrival against — mirroring its lookup exactly, asset-key normalisation
+	// included, so the app is handed the one contract that can ever confirm.
+	// Fail closed rather than create the intent: handing out a deposit
+	// instruction with no contract is worse than refusing the sell, and a
+	// caller who never sees the intent ID cannot mistake this for "reported,
+	// pending" (see ErrStableNoTokenAddress).
+	asset := models.ITIntentAsset(intent)
+	token := s.stableTokens[asset]
+	if token == "" {
+		return nil, nil, fmt.Errorf("%w: %s", ErrStableNoTokenAddress, asset)
+	}
+
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		return nil, nil, err
 	}
@@ -192,6 +218,7 @@ func (s *ITService) CreateStableSellIntent(
 		Chain:           stableDepositChain,
 		Address:         addr,
 		Asset:           q.Asset,
+		TokenAddress:    token,
 		AmountBaseUnits: q.AssetAmount,
 		AmountDisplay:   fmt.Sprintf("%.6f", StableFromBaseUnits(q.AssetAmount)),
 	}, nil

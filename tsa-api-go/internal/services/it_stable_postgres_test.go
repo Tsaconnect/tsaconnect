@@ -87,6 +87,10 @@ func newStablePostgresService(t *testing.T) *ITService {
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	s.SetStableSpreadBps(155)
 	s.SetStableRateLockTTL(15 * time.Minute)
+	// CreateStableSellIntent fails closed without a configured token contract
+	// (see ErrStableNoTokenAddress) — wire one so this fixture exercises the
+	// write path, not the refusal.
+	s.SetStableVerifier(nil, nil, map[string]string{"USDC": testToken, "USDT": testToken})
 	return s
 }
 

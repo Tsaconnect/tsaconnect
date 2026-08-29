@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -34,6 +35,13 @@ func testSellBank() *ITSellBank {
 // the exact kobo figures asserted here and in the confirm/e2e tests are
 // spread-only. Fee behaviour is covered separately, in the quote tests, where a
 // stubFeeQuoter is wired explicitly.
+//
+// Wires a default USDC/USDT token address (via SetStableVerifier, with no
+// LiFi/chain verifier — the many callers here never confirm a deposit) so
+// CreateStableSellIntent's fail-closed token-address check does not reject
+// every test that doesn't care about verification. A test that DOES care
+// calls SetStableVerifier again with its own map before creating the intent,
+// which simply overwrites this default.
 func newStableSellDBService(t *testing.T) *ITService {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -46,6 +54,7 @@ func newStableSellDBService(t *testing.T) *ITService {
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	s.SetStableSpreadBps(155)
 	s.SetStableRateLockTTL(15 * time.Minute)
+	s.SetStableVerifier(nil, nil, map[string]string{"USDC": testToken, "USDT": testToken})
 	return s
 }
 
@@ -176,6 +185,61 @@ func TestCreateStableSellIntent_RefusesWithoutAPayoutDestination(t *testing.T) {
 	s.SetStableDepositAddress("POLYGON", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
 	if _, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", nil); err == nil {
 		t.Fatal("intent created with no payout destination")
+	}
+}
+
+func TestCreateStableSellIntent_ReturnsTheConfiguredTokenAddress(t *testing.T) {
+	// The app must be handed the EXACT contract ConfirmStableDeposit will
+	// verify the transfer against (s.stableTokens[asset]) — never left to
+	// resolve it independently, which is exactly the fund-loss path Polygon's
+	// native-vs-bridged USDC pair opens up.
+	const usdcToken = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+	const usdtToken = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	s.SetStableVerifier(nil, nil, map[string]string{"USDC": usdcToken, "USDT": usdtToken})
+
+	usdc := testSellQuote()
+	_, instr, err := s.CreateStableSellIntent(context.Background(), uuid.New(), usdc, "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("CreateStableSellIntent (USDC): %v", err)
+	}
+	if instr.TokenAddress != usdcToken {
+		t.Fatalf("USDC tokenAddress = %q, want %q", instr.TokenAddress, usdcToken)
+	}
+
+	usdt := testSellQuote()
+	usdt.Asset = "USDT"
+	_, instr, err = s.CreateStableSellIntent(context.Background(), uuid.New(), usdt, "POLYGON", testSellBank())
+	if err != nil {
+		t.Fatalf("CreateStableSellIntent (USDT): %v", err)
+	}
+	if instr.TokenAddress != usdtToken {
+		t.Fatalf("USDT tokenAddress = %q, want %q", instr.TokenAddress, usdtToken)
+	}
+}
+
+func TestCreateStableSellIntent_RefusesWithoutATokenAddress(t *testing.T) {
+	// Handing out a deposit instruction with an empty tokenAddress is worse
+	// than refusing the sell outright — the user could send to the wrong
+	// contract with no automated way back. Must fail BEFORE the intent row is
+	// created, not after.
+	s := newStableSellDBService(t)
+	s.SetStableDepositAddress("POLYGON", testFWAddr)
+	// Wire USDT only — USDC is unconfigured, so a USDC sell must be refused.
+	s.SetStableVerifier(nil, nil, map[string]string{"USDT": testToken})
+
+	_, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), testSellQuote(), "POLYGON", testSellBank())
+	if !errors.Is(err, ErrStableNoTokenAddress) {
+		t.Fatalf("err = %v, want ErrStableNoTokenAddress", err)
+	}
+
+	var n int64
+	if err := s.db.WithContext(context.Background()).Model(&models.ITIntent{}).Count(&n).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("intents table has %d rows, want 0 — refused sell must not create an intent", n)
 	}
 }
 
