@@ -59,6 +59,15 @@ func (s *ITService) HasStableBuy() bool {
 // Keys are upper-cased on the way out: every chain-key producer in this repo is
 // lowercase ("polygon", "solana") while deliveryMatrix keys are uppercase, so a
 // case-sensitive lookup silently finds nothing.
+//
+// wallet_addresses rows are gated against deliveryMatrix — the same
+// single source of truth DeliverableChains uses — and cannot overwrite a
+// chain already set from users.wallet_address. Today RegisterNonEVMAddress
+// only ever writes non-EVM chain_keys (it gates on ChainRegistry.ForKey), so
+// this is latent, not live: but that endpoint is public and user-controlled,
+// and without the gate a future EVM entry in the chain registry would let a
+// client silently override the server-held EVM address with one it typed in
+// a request body.
 func (s *ITService) userDeliveryAddresses(ctx context.Context, userID uuid.UUID) (map[string]string, error) {
 	out := make(map[string]string, 4)
 
@@ -83,9 +92,17 @@ func (s *ITService) userDeliveryAddresses(ctx context.Context, userID uuid.UUID)
 	}
 	for _, r := range rows {
 		key := strings.ToUpper(strings.TrimSpace(r.ChainKey))
-		if addr := strings.TrimSpace(r.Address); addr != "" && key != "" {
-			out[key] = addr
+		addr := strings.TrimSpace(r.Address)
+		if addr == "" || key == "" {
+			continue
 		}
+		if _, deliverable := deliveryMatrix[key]; !deliverable {
+			continue // not a chain we deliver to at all
+		}
+		if _, fromEVM := out[key]; fromEVM {
+			continue // users.wallet_address already served this chain; never overwrite it
+		}
+		out[key] = addr
 	}
 
 	if len(out) == 0 {

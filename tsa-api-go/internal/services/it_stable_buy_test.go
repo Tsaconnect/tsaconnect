@@ -268,6 +268,39 @@ func TestUserDeliveryAddress_ReadsEachSource(t *testing.T) {
 	}
 }
 
+// TestUserDeliveryAddress_WalletAddressesRowCannotOverrideEVM proves a
+// wallet_addresses row cannot redirect delivery for an EVM chain. Today
+// RegisterNonEVMAddress only ever writes non-EVM chain_keys, so a "polygon"
+// row is not something the live system produces — but the endpoint is
+// public and user-controlled, and userDeliveryAddresses must not trust it
+// blindly: a chain already served by users.wallet_address (the server-held
+// source) must win over anything found in wallet_addresses.
+func TestUserDeliveryAddress_WalletAddressesRowCannotOverrideEVM(t *testing.T) {
+	db := newStableBuyDeliveryTestDB(t)
+	userID := uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address)
+		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?)`,
+		userID.String(), testBuyEVM).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	const attackerAddr = "0x9999999999999999999999999999999999999999"
+	if err := db.Create(&models.WalletAddress{
+		UserID: userID, WalletID: testBuyEVM, ChainKey: "polygon", Family: "evm", Address: attackerAddr,
+	}).Error; err != nil {
+		t.Fatalf("seed polygon address: %v", err)
+	}
+
+	s := NewITService(db, nil, stubFx{ngn: 1500})
+
+	got, err := s.UserDeliveryAddress(context.Background(), userID, "POLYGON")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != testBuyEVM {
+		t.Fatalf("POLYGON address = %q, want the users.wallet_address value %q (wallet_addresses row must not override it)", got, testBuyEVM)
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
