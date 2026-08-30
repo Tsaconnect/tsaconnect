@@ -1,25 +1,14 @@
 import React from 'react';
 import { Stack } from 'expo-router';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
+import { WALLET_TAB } from '@/constants/routes';
 
 // Nested stack for the MCGP (Swap Contract B) feature: a balance hub plus the
-// buy / sell / pay flows. Mirrors app/wallet/_layout.tsx styling.
+// buy / sell / pay flows. `index` is itself a destination — the wallet's asset
+// list links straight to it — so it relies on the shared headerLeft for its back
+// chevron; native-stack would draw none at index 0.
 export default function McgpLayout() {
-  const { colors, type } = useTheme();
-
-  const screenOptions: NativeStackNavigationOptions = {
-    headerTitleAlign: 'center',
-    headerTintColor: colors.accent,
-    headerTitleStyle: {
-      fontSize: type.title3.fontSize,
-      fontFamily: fontFamily['600'],
-      color: colors.textPrimary,
-    },
-    headerStyle: { backgroundColor: colors.surface },
-    headerShadowVisible: false,
-    contentStyle: { backgroundColor: colors.background },
-  };
+  const screenOptions = useDefaultScreenOptions({ backFallback: WALLET_TAB });
 
   return (
     <Stack screenOptions={screenOptions}>

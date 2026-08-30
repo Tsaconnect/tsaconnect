@@ -1,39 +1,25 @@
 // app/merchants/_layout.tsx
 //
 // Stack layout for the Merchant section (dashboard, inventory, orders, P2P
-// buy/sell, digital assets, profile, merchant application). Migrated onto the
-// TSA Signature design system: header chrome (background / tint / title color /
-// font) is now sourced from useTheme() tokens instead of implicit/legacy
-// styling, so it tracks light & dark automatically. Screen registrations,
-// names, order, and titles are preserved verbatim. Headers stay hidden at this
-// level (`headerShown: false`) exactly as before — each merchant screen renders
-// its own chrome — but the themed options are in place for any screen that opts
-// a header back on.
+// buy/sell, digital assets, profile, merchant application).
+//
+// Headers used to be hidden here on the theory that "each merchant screen
+// renders its own chrome". Five of the thirteen rendered none at all
+// (dashboard, inventory, buy-usdt, digital, profile) and the other eight
+// hand-rolled a chevron row, each slightly different. Since `merchants/` is a
+// ROOT-level group it has neither the tab bar nor the drawer to fall back on,
+// so those five were complete dead ends on iOS.
+//
+// The titles below already existed; showing the header is what makes them do
+// any work. The screens' own big page headings stay — they read as content, and
+// the header supplies the back chevron they were all missing.
 import React from 'react';
 import { Stack } from 'expo-router';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
+import { HOME_TAB } from '@/constants/routes';
 
 export default function MerchantLayout() {
-    const { colors, type } = useTheme();
-
-    const screenOptions: NativeStackNavigationOptions = {
-        headerShown: false,
-        headerTitleAlign: 'center',
-        headerTintColor: colors.accent,
-        headerTitleStyle: {
-            fontSize: type.title3.fontSize,
-            fontFamily: fontFamily['600'],
-            color: colors.textPrimary,
-        },
-        headerStyle: {
-            backgroundColor: colors.surface,
-        },
-        headerShadowVisible: false,
-        contentStyle: {
-            backgroundColor: colors.background,
-        },
-    };
+    const screenOptions = useDefaultScreenOptions({ backFallback: HOME_TAB });
 
     return (
         <Stack screenOptions={screenOptions}>
@@ -82,13 +68,13 @@ export default function MerchantLayout() {
             <Stack.Screen
                 name="sell-usdt/index"
                 options={{
-                    title: 'Payment Merchant: Sell USDT',
+                    title: 'Sell USDT',
                 }}
             />
             <Stack.Screen
                 name="buy-usdt/index"
                 options={{
-                    title: 'Payment Merchant: Buy USDT/USDC',
+                    title: 'Buy Crypto',
                 }}
             />
             <Stack.Screen
@@ -113,7 +99,6 @@ export default function MerchantLayout() {
                 name="activate-pm"
                 options={{
                     title: 'Activate Payment Merchant',
-                    headerShown: true,
                 }}
             />
         </Stack>

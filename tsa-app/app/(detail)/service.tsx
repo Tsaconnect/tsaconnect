@@ -9,9 +9,9 @@
 // migration only.
 import React, { useEffect, useState } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
-import HeaderSearch from "../../../../components/marketplace/header";
-import ProductListCard from "../../../../components/accessories/ProductListCard";
-import { api, Category } from "../../../../components/services/api";
+import HeaderSearch from "@/components/marketplace/header";
+import ProductListCard from "@/components/accessories/ProductListCard";
+import { api, Category } from "@/components/services/api";
 import { useTheme } from "@/theme";
 
 const Services = () => {

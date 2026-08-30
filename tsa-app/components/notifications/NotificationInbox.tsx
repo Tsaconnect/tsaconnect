@@ -20,6 +20,7 @@ import { useNotifications } from '../../contexts/NotificationContext';
 import { routeForNotification } from '../../hooks/notificationRouting';
 import api from '@/components/services/api';
 import { useTheme } from '@/theme';
+import { HOME_TAB } from '@/constants/routes';
 import {
   AccentCard,
   Button,
@@ -197,7 +198,7 @@ const NotificationInbox: React.FC = () => {
   if (loading) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <ScreenHeader title="Notifications" />
+        <ScreenHeader title="Notifications" fallbackRoute={HOME_TAB} />
         <View style={{ padding: spacing.lg }}>
           <SkeletonGroup shape="tradeRow" count={6} />
         </View>
@@ -209,6 +210,7 @@ const NotificationInbox: React.FC = () => {
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <ScreenHeader
         title="Notifications"
+        fallbackRoute={HOME_TAB}
         right={
           mergedNotifications.length > 0 ? (
             <Button

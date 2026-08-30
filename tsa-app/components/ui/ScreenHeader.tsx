@@ -1,19 +1,19 @@
 // components/ui/ScreenHeader.tsx
 //
-// The one back-header for screens that hide the native Stack header
+// The back-header for screens that hide the native Stack header
 // (headerShown: false). Before this, back was hand-rolled nine different ways —
 // icon-only vs icon+"Back" label, chevron at size 20/22/24, accent vs
 // textPrimary tint, and assorted negative margins to optically align. Use this
 // instead of a new inline header row.
 //
-// The chevron is tinted `accent` to match the native headers' headerTintColor,
-// so both tiers read the same. Back is canGoBack()-guarded — several screens are
-// reachable as a deep link's first route, where an unguarded router.back() is a
-// no-op and traps the user.
+// It renders the same IconButton as HeaderBackButton (the native headers'
+// headerLeft) and routes through the same goBack() action, so a screen reads
+// identically whether its chrome is native or hand-drawn.
 import React from 'react';
 import { View, ViewStyle } from 'react-native';
-import { router, type Href } from 'expo-router';
+import { type Href } from 'expo-router';
 import { useTheme } from '@/theme';
+import { goBack, hasHistory } from '@/utils/back';
 import { IconButton } from './IconButton';
 import { Text } from './Text';
 
@@ -21,11 +21,16 @@ export interface ScreenHeaderProps {
   title?: string;
   /** 'center' pairs the title with a spacer so it stays optically centred. */
   align?: 'center' | 'left';
-  /** Overrides the default router.back() — use for intra-screen step-back. */
+  /** Overrides the default back action — use for intra-screen step-back. */
   onBack?: () => void;
-  /** Where to go when there is nothing to pop back to. Typed so a bad route
-   *  literal is a compile error — this is exactly where /reward vs /rewards
-   *  would otherwise slip through. */
+  /**
+   * Where to land when there is no history to pop — a cold start from a deep
+   * link or a push notification. Required, and it should name the SECTION this
+   * screen belongs to: defaulting every screen to Home is what produced the
+   * "back takes me to main" reports. Typed so a bad route literal is a compile
+   * error — this is exactly where /reward vs /rewards would otherwise slip
+   * through. Not needed when `onBack` is supplied, since that never pops.
+   */
   fallbackRoute?: Href;
   /** Trailing slot (actions). Reserves the spacer when centred. */
   right?: React.ReactNode;
@@ -39,17 +44,21 @@ export const ScreenHeader: React.FC<ScreenHeaderProps> = ({
   title,
   align = 'center',
   onBack,
-  fallbackRoute = '/home',
+  fallbackRoute,
   right,
   showBack = true,
   style,
 }) => {
   const { colors, spacing } = useTheme();
 
+  // A chevron with nowhere to go is worse than no chevron: it reads as a broken
+  // button. Cold-started screens (notification taps, deep links) with no
+  // declared fallback get the spacer instead.
+  const canBack = showBack && (!!onBack || !!fallbackRoute || hasHistory());
+
   const handleBack = () => {
     if (onBack) return onBack();
-    if (router.canGoBack()) router.back();
-    else router.replace(fallbackRoute);
+    goBack(fallbackRoute ?? '/home');
   };
 
   return (
@@ -65,7 +74,7 @@ export const ScreenHeader: React.FC<ScreenHeaderProps> = ({
         style,
       ]}
     >
-      {showBack ? (
+      {canBack ? (
         <IconButton
           icon="chevronLeft"
           onPress={handleBack}

@@ -12,7 +12,7 @@ import { WebView } from "react-native-webview";
 import { useFocusEffect } from "@react-navigation/native";
 import api from "../../components/services/api";
 import { useTheme } from "@/theme";
-import { Text, Button, IconButton, Icon } from "@/components/ui";
+import { Text, Button, Icon, ScreenHeader } from "@/components/ui";
 
 type KYCState =
   | "not_started"
@@ -122,28 +122,10 @@ export default function KYCScreen() {
     }
   };
 
+  // Reachable cold from the Didit deep link (/kyc/callback redirects here), so
+  // back needs a real destination rather than a no-op pop.
   const Header = () => (
-    <View
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        paddingHorizontal: spacing.lg,
-        paddingVertical: spacing.sm,
-        borderBottomWidth: 1,
-        borderBottomColor: colors.hairline,
-      }}
-    >
-      <IconButton
-        icon="chevronLeft"
-        accessibilityLabel="Go back"
-        onPress={() => router.back()}
-      />
-      <Text variant="title3" weight="700">
-        KYC Verification
-      </Text>
-      <View style={{ width: 44 }} />
-    </View>
+    <ScreenHeader title="KYC Verification" fallbackRoute="/profile" />
   );
 
   // Reusable centered status panel: hero icon ring + title + subtitle + actions.

@@ -19,6 +19,8 @@ import {
   Dimensions,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { goBack } from '@/utils/back';
+import { MARKETPLACE_TAB } from '@/constants/routes';
 import api, { Product } from '@/components/services/api';
 import { cartService } from '@/components/services/cart';
 import { useAuth } from '@/AuthContext/AuthContext';
@@ -325,7 +327,7 @@ export default function ProductDetailsScreen() {
   if (loading) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Stack.Screen options={{ headerShown: false }} />
+        <Stack.Screen options={{ title: 'Product Details' }} />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <Spinner size="large" label="Loading product…" />
         </View>
@@ -337,16 +339,7 @@ export default function ProductDetailsScreen() {
   if (error || !product) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Stack.Screen
-          options={{
-            headerShown: true,
-            headerTitle: 'Product Details',
-            headerBackTitle: 'Back',
-            headerTintColor: colors.accent,
-            headerStyle: { backgroundColor: colors.surface },
-            headerShadowVisible: false,
-          }}
-        />
+        <Stack.Screen options={{ title: 'Product Details' }} />
         <View style={{ flex: 1, justifyContent: 'center' }}>
           <EmptyState
             icon="cart"
@@ -359,7 +352,7 @@ export default function ProductDetailsScreen() {
             onAction={loadProduct}
           />
           <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
-            <PressableScale onPress={() => router.back()} hitSlop={8} style={{ paddingVertical: spacing.md }}>
+            <PressableScale onPress={() => goBack(MARKETPLACE_TAB)} hitSlop={8} style={{ paddingVertical: spacing.md }}>
               <Text variant="bodySm" color="textSecondary">
                 Go Back
               </Text>
@@ -380,12 +373,7 @@ export default function ProductDetailsScreen() {
           that this is the screen's only header, it has to name the screen. */}
       <Stack.Screen
         options={{
-          headerShown: true,
-          headerTitle: product.name || 'Product Details',
-          headerBackTitle: 'Back',
-          headerTintColor: colors.accent,
-          headerStyle: { backgroundColor: colors.surface },
-          headerShadowVisible: false,
+          title: product.name || 'Product Details',
           headerRight: headerCartButton,
         }}
       />

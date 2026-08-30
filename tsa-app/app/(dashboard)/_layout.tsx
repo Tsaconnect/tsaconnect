@@ -441,27 +441,6 @@ const Layout = () => {
             drawerActiveTintColor: colors.accent,
           }}
         />
-        <Drawer.Screen
-          name="orderdetail"
-          options={{
-            title: "Order Detail",
-            drawerItemStyle: { display: "none" },
-          }}
-        />
-        <Drawer.Screen
-          name="kyc"
-          options={{
-            title: "KYC Verification",
-            drawerItemStyle: { display: "none" },
-          }}
-        />
-        <Drawer.Screen
-          name="add-category"
-          options={{
-            title: "Add Category",
-            drawerItemStyle: { display: "none" },
-          }}
-        />
       </Drawer>
     </>
   );

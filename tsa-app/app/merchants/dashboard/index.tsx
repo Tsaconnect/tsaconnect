@@ -135,11 +135,10 @@ export default function MerchantDashboard() {
     if (item.kind === 'header') {
       return (
         <View>
+          {/* "Merchant Dashboard" is the header title now — this is the
+              greeting, not a second heading. */}
           <View style={{ marginBottom: spacing.lg }}>
-            <Text variant="title1" weight="700">
-              Dashboard
-            </Text>
-            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            <Text variant="title2" weight="700">
               Welcome back, {merchantName}
             </Text>
           </View>

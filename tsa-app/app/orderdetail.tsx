@@ -1,4 +1,4 @@
-// app/(dashboard)/orderdetail.tsx
+// app/orderdetail.tsx
 //
 // Order detail — the marketplace buyer's view of a single escrow order, with the
 // full status-gated action set (confirm receipt, request refund, request cancel,
@@ -6,7 +6,12 @@
 // (@/theme + @/components/ui). ALL data fetching (getOrderById), the
 // prepare→sign+broadcast→submit confirm flow, refund / cancel-request / dispute /
 // cancel-order calls, status/dispute gating, money formatting (formatTokenAmount)
-// and navigation are preserved verbatim — this is a visual/structural restyle only.
+// and navigation are preserved verbatim.
+//
+// Lives at the ROOT, not in (dashboard): it is only ever pushed (from the order
+// list and from ordering-requests), and a Drawer screen's header is a hamburger,
+// never a back chevron — which is why this file used to draw a second header of
+// its own underneath the drawer's. The root Stack titles it now.
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
@@ -16,7 +21,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import {
@@ -39,7 +44,6 @@ import {
   Button,
   Card,
   Icon,
-  IconButton,
   PressableScale,
   Sheet,
   Spinner,
@@ -260,33 +264,9 @@ const OrderDetailScreen = () => {
     Alert.alert('Copied', 'Copied to clipboard');
   };
 
-  const Header = () => (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        paddingHorizontal: spacing.lg,
-        paddingVertical: spacing.md,
-      }}
-    >
-      <IconButton
-        icon="chevronLeft"
-        variant="surface"
-        accessibilityLabel="Go back"
-        onPress={() => router.back()}
-      />
-      <Text variant="title3" weight="700">
-        Order Detail
-      </Text>
-      <View style={{ width: 44 }} />
-    </View>
-  );
-
   if (loading) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Header />
         <View style={{ flex: 1, justifyContent: 'center' }}>
           <Spinner size="large" label="Loading order…" />
         </View>
@@ -297,7 +277,6 @@ const OrderDetailScreen = () => {
   if (error || !order) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Header />
         <View style={{ flex: 1, justifyContent: 'center' }}>
           <ErrorBody message={error || 'Order not found'} onRetry={fetchOrder} />
         </View>
@@ -315,8 +294,6 @@ const OrderDetailScreen = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <Header />
-
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing['4xl'] }}

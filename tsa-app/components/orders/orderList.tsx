@@ -98,7 +98,7 @@ const OrderList = () => {
     const statusColor = STATUS_COLORS[item.status] || STATUS_COLORS.cancelled;
     return (
       <PressableScale
-        onPress={() => router.push(`/(dashboard)/orderdetail?id=${item.id}`)}
+        onPress={() => router.push(`/orderdetail?id=${item.id}`)}
         style={{ marginBottom: spacing.md }}
       >
         <AccentCard padding="lg">

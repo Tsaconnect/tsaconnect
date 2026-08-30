@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Stack, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
-import { useTheme, fontFamily } from '@/theme';
+import { useTheme } from '@/theme';
+import { useDefaultScreenOptions } from '@/constants/navigation';
+import { WALLET_TAB } from '@/constants/routes';
 import { Spinner } from '@/components/ui';
 import ITAgreementGate from '@/components/it/ITAgreementGate';
 import { getITAgreement } from '@/services/itApi';
@@ -23,7 +24,7 @@ export const unstable_settings = { initialRouteName: 'index' };
 // the hub would let a user fill in an entire buy form before the backend —
 // which enforces the same agreement on every trade — rejected it at submit.
 export default function ITLayout() {
-  const { colors, type } = useTheme();
+  const { colors } = useTheme();
   // null = still checking; false = must accept before any IT screen renders.
   const [agreed, setAgreed] = useState<boolean | null>(null);
 
@@ -39,18 +40,7 @@ export default function ITLayout() {
     check();
   }, [check]);
 
-  const screenOptions: NativeStackNavigationOptions = {
-    headerTitleAlign: 'center',
-    headerTintColor: colors.accent,
-    headerTitleStyle: {
-      fontSize: type.title3.fontSize,
-      fontFamily: fontFamily['600'],
-      color: colors.textPrimary,
-    },
-    headerStyle: { backgroundColor: colors.surface },
-    headerShadowVisible: false,
-    contentStyle: { backgroundColor: colors.background },
-  };
+  const screenOptions = useDefaultScreenOptions({ backFallback: WALLET_TAB });
 
   if (agreed === null) {
     return (

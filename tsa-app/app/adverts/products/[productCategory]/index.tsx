@@ -8,7 +8,7 @@
 // navigation routes + params are unchanged — this is a visual / structural
 // migration only.
 import api from '@/components/services/api';
-import { router, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState, useCallback } from 'react';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
@@ -489,41 +489,22 @@ const CategoryProductsScreen = () => {
 
     return (
         <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-            {/* Header */}
-            <View
-                style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: spacing.sm,
-                    paddingHorizontal: spacing.lg,
-                    paddingVertical: spacing.sm,
-                    borderBottomWidth: 1,
-                    borderBottomColor: colors.hairline,
+            {/* Title, back and the filter action all live in the native header
+                now — app/adverts/_layout.tsx used to render an unstyled default
+                header ON TOP of this row. */}
+            <Stack.Screen
+                options={{
+                    title: categoryDetails?.name || productCategory || 'Products',
+                    headerRight: () => (
+                        <IconButton
+                            icon="filter"
+                            accessibilityLabel="Open filters"
+                            color={colors.accent}
+                            onPress={() => setShowFilters(true)}
+                        />
+                    ),
                 }}
-            >
-                <IconButton
-                    icon="chevronLeft"
-                    accessibilityLabel="Go back"
-                    onPress={() => router.back()}
-                />
-
-                <View style={{ flex: 1 }}>
-                    <Text variant="title3" weight="700" numberOfLines={1}>
-                        {categoryDetails?.name || productCategory || 'Products'}
-                    </Text>
-                    {pagination.totalProducts > 0 && (
-                        <Text variant="caption" color="textSecondary">
-                            {pagination.totalProducts} products
-                        </Text>
-                    )}
-                </View>
-
-                <IconButton
-                    icon="filter"
-                    accessibilityLabel="Open filters"
-                    onPress={() => setShowFilters(true)}
-                />
-            </View>
+            />
 
             {/* Search Bar */}
             <View style={{ paddingHorizontal: spacing.lg, paddingVertical: spacing.md }}>

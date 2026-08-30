@@ -35,7 +35,6 @@ import {
   EmptyState,
   ErrorState,
   Icon,
-  IconButton,
   Spinner,
   SummaryRow,
   Text,
@@ -551,17 +550,6 @@ const RewardsScreen: React.FC = () => {
   if (loadError || !summary) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg }}>
-          <IconButton
-            icon="chevronLeft"
-            onPress={() => router.back()}
-            accessibilityLabel="Go back"
-            style={{ marginLeft: -spacing.sm }}
-          />
-          <Text variant="title2" weight="700">
-            Rewards
-          </Text>
-        </View>
         <View style={{ flex: 1, justifyContent: 'center', padding: spacing.lg }}>
           <ErrorState
             title="Couldn't load rewards"
@@ -593,18 +581,6 @@ const RewardsScreen: React.FC = () => {
           />
         }
       >
-        {/* Header */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg }}>
-          <IconButton
-            icon="chevronLeft"
-            onPress={() => router.back()}
-            accessibilityLabel="Go back"
-            style={{ marginLeft: -spacing.sm }}
-          />
-          <Text variant="title2" weight="700">
-            Rewards & TP Levels
-          </Text>
-        </View>
 
         {/* ── Hero ── */}
         <AccentCard padding="xl">

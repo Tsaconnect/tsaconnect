@@ -10,6 +10,7 @@ import { NotificationProvider } from '../contexts/NotificationContext';
 import { CurrencyProvider } from '../contexts/CurrencyContext';
 import { CartProvider } from '../contexts/CartContext';
 import { ThemeProvider, ThemedStatusBar, useAppFonts } from "@/theme";
+import { useDefaultScreenOptions } from "@/constants/navigation";
 import { ToastProvider } from "@/components/ui";
 import { usePushRegistration } from "../hooks/usePushRegistration";
 
@@ -22,6 +23,27 @@ function PushRegistrar() {
 
 // Hold the native splash until the Inter family is ready (design-system fonts).
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// The root Stack, split out so it can read the theme — useDefaultScreenOptions()
+// calls useTheme(), which only resolves inside <ThemeProvider>.
+//
+// Headers are off by default here: nearly every child is an auth screen or a
+// route GROUP that draws its own. The leaf screens below are the exceptions —
+// they are pushed from inside the tabs and the drawer, so they need a header
+// with a back chevron of their own. `orderdetail` and `add-category` used to be
+// Drawer screens, where the only control was a hamburger and the screen drew a
+// second header underneath it.
+function AppStack() {
+  const headerOptions = useDefaultScreenOptions();
+  return (
+    <Stack screenOptions={{ ...headerOptions, headerShown: false }}>
+      <Stack.Screen name="index" options={{ headerShown: false }} />
+      <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
+      <Stack.Screen name="orderdetail" options={{ headerShown: true, title: 'Order Detail' }} />
+      <Stack.Screen name="add-category" options={{ headerShown: true, title: 'Add Category' }} />
+    </Stack>
+  );
+}
 
 const RootLayout = () => {
   const [fontsLoaded] = useAppFonts();
@@ -72,10 +94,7 @@ const RootLayout = () => {
                 <ToastProvider>
                   <ThemedStatusBar />
                   <PushRegistrar />
-                  <Stack screenOptions={{ headerShown: false }}>
-                    <Stack.Screen name="index" options={{ headerShown: false }} />
-                    <Stack.Screen name="activity" options={{ headerShown: true, title: 'Activity' }} />
-                  </Stack>
+                  <AppStack />
                 </ToastProvider>
               </CartProvider>
             </CurrencyProvider>
