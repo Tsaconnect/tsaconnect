@@ -66,11 +66,23 @@ the sell side.
 
 Three rules make a wrong delivery structurally hard rather than merely unlikely:
 
-- **The address is never typed.** It is the user's own wallet address, read from
-  `Wallet.Addresses`. There is no field in which to make a typo and no paste to get wrong.
-- **A chain is offered only if the user holds an address on it.** `Wallet.Addresses` is a jsonb
-  map and a Solana address exists only if the wallet derived one. A chain the user cannot
+- **The address is never typed.** It is the user's own wallet address, read from the database.
+  There is no field in which to make a typo and no paste to get wrong.
+- **A chain is offered only if the user holds an address on it.** A chain the user cannot
   receive on never appears in the picker, so funds cannot be sent somewhere they cannot see.
+
+  The addresses come from **two** sources, not one (corrected 2026-08-30 — an earlier draft of
+  this spec named `Wallet.Addresses`, which is a **dead column**: `models.WalletAddrEntry`
+  occurs exactly once in the repo, its own declaration, and nothing has written it since the
+  Node/Mongo API was retired):
+
+  | Chain | Source |
+  |---|---|
+  | Ethereum, Polygon, Base | `users.wallet_address` — one EVM address serves all three |
+  | Solana | `wallet_addresses` where `chain_key = 'solana'` |
+
+  Every chain-key producer in the repo is **lowercase** while `deliveryMatrix` keys are
+  uppercase, so the lookup must normalise case or it silently finds nothing.
 - **Asset and chain are validated together.** `SupportsDelivery(chain, asset)` rejects
   Base+USDT before an intent is created; the UI hides USDT when Base is selected.
 
@@ -289,4 +301,5 @@ that up, and should be designed with that stated rather than inherited.
 | **`type:"crypto"` delivery has never been exercised** | The request shape exists in `DirectTransfer` but no transfer has been made on any chain. A gate before launch, per chain. |
 | **Conversion has never reached SUCCESSFUL** | Inherited from Phase A. The sandbox does not settle wallet conversions at all; only a production canary closes it. |
 | **`ProviderFallbackBps` uncalibrated** | `/fees` is 501 in sandbox; the only real datapoint is 1% flat at one amount tier. |
-| **Solana delivery depends on wallet coverage** | Users without a derived Solana address are simply not offered Solana. Needs confirming against real wallet data. |
+| **Solana delivery depends on wallet coverage** | Users without a row in `wallet_addresses` for `solana` are simply not offered Solana. Needs confirming against real wallet data — Solana addresses are written only by `RegisterNonEVMAddress`, so coverage may be thin. |
+| **EVM delivery depends on `users.wallet_address`** | A user who never completed wallet registration has no EVM address and can be offered no chain at all. The buy endpoint must fail clearly rather than opaquely. |

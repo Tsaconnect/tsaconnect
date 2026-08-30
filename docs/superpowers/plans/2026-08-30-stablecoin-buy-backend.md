@@ -295,7 +295,8 @@ git commit -m "feat(it): gate stablecoin buy delivery on chain, asset and user a
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `internal/services/stable_spread_test.go`:
+Append to `internal/services/stable_spread_test.go`. The file currently imports only
+`math/big` and `testing`; these tests use `errors.Is`, so add `"errors"` to its import block.
 
 ```go
 func TestDeriveBuyFiatPerUnit(t *testing.T) {
@@ -661,6 +662,11 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 	}
 
 	// Effective per-unit price the user is getting, in fiat minor units.
+	//
+	// SetFrac64(10000, 10000-spread) divides by zero if the spread is ever
+	// configured to 10000 bps. Unreachable today (the minimum check fires
+	// first), but add a guard to SetStableSpreadBps rejecting >= 10000 rather
+	// than leaving a latent panic on a money path.
 	perUnit := new(big.Rat).Mul(fiatPerUnit, new(big.Rat).SetInt64(100))
 	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000, 10000-s.stableSpreadBps))
 	ratePerUnit := new(big.Int).Quo(perUnit.Num(), perUnit.Denom())
@@ -734,7 +740,10 @@ func testBuyQuote() *StableBuyQuote {
 		FiatMinor:        big.NewInt(16502500),
 		GrossAssetUnits:  big.NewInt(100_000_000),
 		AssetUnits:       big.NewInt(98_450_000),
-		RatePerUnitMinor: big.NewInt(167600),
+		// 167623 = floor(165025 * 10000 / 9845) — what QuoteStableBuy actually
+		// produces for this fixture. A rounder-looking number here invites a
+		// "why doesn't this match?" detour during Task 6.
+		RatePerUnitMinor: big.NewInt(167623),
 		ExpiresAt:        time.Now().Add(15 * time.Minute),
 	}
 }
@@ -759,6 +768,12 @@ func newStableBuyDBService(t *testing.T) (*ITService, uuid.UUID) {
 	}
 	s := NewITService(db, nil, stubFx{ngn: 1500})
 	s.SetStableSpreadBps(155)
+	// A rate quoter is REQUIRED, not incidental: settleStableBuyFromCharge
+	// (Task 6) prices at the live rate when money lands, so without one every
+	// settlement test would park the intent in awaiting_rate and look like an
+	// implementation bug rather than a fixture gap. buyRateQuoter is defined in
+	// it_stable_buy_quote_test.go (Task 4) — same package, do not redefine it.
+	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
 	return s, userID
 }
 
@@ -915,7 +930,10 @@ func (s *ITService) CreateStableBuyIntent(
 
 	var va models.FiatVirtualAccount
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND currency = ?", userID, q.Currency).
+		// Status filter matters: handing out an inactive VA's details tells the
+		// user to pay into an account that will not credit them.
+		Where("user_id = ? AND currency = ? AND status = ?",
+			userID, q.Currency, models.FiatVAStatusActive).
 		First(&va).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil, ErrStableBuyNoVA
@@ -934,6 +952,18 @@ func (s *ITService) CreateStableBuyIntent(
 	if open > 0 {
 		return nil, nil, ErrStableBuyAlreadyOpen
 	}
+	// NOTE: this Count-then-Create is not atomic. Two concurrent requests can
+	// both see zero and both insert. Add the backing partial unique index in
+	// internal/config/database.go alongside the existing uq_it_intents_* ones:
+	//
+	//	CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_stable_buy
+	//	  ON it_intents (user_id)
+	//	  WHERE direction = 'buy' AND status = 'pending_payment'
+	//	    AND asset IN ('USDC','USDT');
+	//
+	// and translate its violation below to ErrStableBuyAlreadyOpen, so the race
+	// loses at the database rather than producing a second claimable intent.
+	// SQLite has no such index, which is why the check above stays as well.
 
 	intent := &models.ITIntent{
 		ID:          uuid.New(),
@@ -960,12 +990,17 @@ func (s *ITService) CreateStableBuyIntent(
 		AmountMinor:    q.FiatMinor.String(),
 		RateKobo:       q.RatePerUnitMinor.String(),
 		RateMinor:      q.RatePerUnitMinor.String(),
-		McgpAmount:     "0",
-		FeeNgnKobo:     "0",
-		NetNgnKobo:     q.FiatMinor.String(),
-		FeeMinor:       "0",
-		NetMinor:       q.FiatMinor.String(),
-		ReceivedAmount: "0",
+		McgpAmount: "0",
+		FeeNgnKobo: "0",
+		NetNgnKobo: q.FiatMinor.String(),
+		// PlatformKeptKobo has no `default:` tag, so GORM puts it in the INSERT
+		// as '' and BeforeSave mirrors that into PlatformKeptMinor. Postgres
+		// rejects ''::numeric (SQLSTATE 22P02). This is the EXACT defect the
+		// sell leg hit — it sets the same field explicitly at
+		// it_stable_sell.go:191. SQLite's type affinity hides it, so the test
+		// suite stays green while production INSERTs fail.
+		PlatformKeptKobo: "0",
+		ReceivedAmount:   "0",
 	}
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		return nil, nil, err
@@ -987,10 +1022,46 @@ Field names on `models.ITIntent` and `models.FiatVirtualAccount` must be checked
 Run: `go test ./internal/services/ -run TestCreateStableBuyIntent -count=1 -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add the PostgreSQL-backed insert test**
+
+Every other test in this package runs on SQLite, whose type affinity accepts `''` into a
+numeric column. PostgreSQL rejects it (SQLSTATE 22P02), and GORM puts every field without a
+column `default:` tag into the INSERT whether it was set or not. That combination made this
+exact class of defect invisible on the sell leg — `CreateStableSellIntent` could not insert a
+row in production while the suite stayed green. `internal/services/it_stable_postgres_test.go`
+exists as the counterweight; extend it for buy.
+
+Read that file first and reuse its existing connection/migration helpers and its
+skip-when-`DATABASE_URL`-is-absent guard rather than inventing new ones. Add a test that calls
+`CreateStableBuyIntent` against a real PostgreSQL with a seeded user and `fiat_virtual_accounts`
+row, and fails if the INSERT errors:
+
+```go
+func TestCreateStableBuyIntent_InsertsOnPostgres(t *testing.T) {
+	// The sell leg shipped a broken INSERT because PlatformKeptKobo was left
+	// unset and GORM sent '' for it. The buy literal has the same shape and the
+	// same exposure — this is the only test in the package that can see it.
+	...
+	intent, pay, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("INSERT failed on PostgreSQL: %v", err)
+	}
+	if intent.ID == uuid.Nil || pay.AccountNumber == "" {
+		t.Fatal("intent or pay-into details not populated")
+	}
+}
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `go test ./internal/services/ -run "TestCreateStableBuyIntent" -count=1`
+Expected: PASS. The PostgreSQL test skips without `DATABASE_URL`; run it at least once with a
+real database before considering this task done — that is the entire point of it.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add internal/services/it_stable_buy.go internal/services/it_stable_buy_test.go
+git add internal/services/it_stable_buy.go internal/services/it_stable_buy_test.go internal/services/it_stable_postgres_test.go
 git commit -m "feat(it): open a stablecoin buy against the user's standing VA"
 ```
 
@@ -1013,9 +1084,11 @@ every "paid after the quote expired" state. Carrying the creation-time amount
 forward would be a lock in all but name.
 
 Money that has landed cannot be rejected, so a pricing failure parks the intent in
-the existing `ITStatusAwaitingRate` rather than erroring: that status already means
-"money is here and we could not price it, an operator must decide", and the MCGP
-buy uses it the same way.
+a stablecoin-specific `ITStatusBuyAwaitingRate` rather than erroring. It means "money is here
+and we could not price it, an operator must decide". It is deliberately NOT the MCGP flow's
+`awaiting_rate`: that status is already wired to `RepriceAndCreditAwaitingRate`, which would
+credit MCGP from company supply and re-open the intent. Task 6a adds the constant and the
+matching recovery.
 
 **This is the fork.** Getting it wrong either misroutes a user's money or silently changes today's live MCGP behaviour.
 
@@ -1098,8 +1171,12 @@ func TestSettleStableBuyFromCharge_PricesAtTheLiveRateNotTheQuote(t *testing.T) 
 	// moved after the user tapped Buy they get the live rate — carrying the
 	// quoted asset amount forward would be a rate lock by another name.
 	s, userID := newStableBuyDBService(t)
-	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
-	s.SetStableSpreadBps(155)
+	// Widen the plausibility band for THIS test only. The fixture's fx feed is
+	// 1500 and the default band is ±25%, so the doubled rate below would be
+	// refused as implausible — the guard working correctly, but it would mask
+	// what this test is actually about. The guard has its own test at the
+	// default band (TestQuoteStableBuy_RejectsImplausibleRate).
+	s.SetStableRateToleranceBps(12500)
 	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
 
 	// The rate doubles before the money arrives: the same naira must now buy
@@ -1135,8 +1212,8 @@ func TestSettleStableBuyFromCharge_ParksWhenItCannotPrice(t *testing.T) {
 	}
 	var got models.ITIntent
 	s.db.First(&got, "id = ?", intent.ID)
-	if got.Status != models.ITStatusAwaitingRate {
-		t.Fatalf("status = %q, want awaiting_rate", got.Status)
+	if got.Status != models.ITStatusBuyAwaitingRate {
+		t.Fatalf("status = %q, want buy_awaiting_rate", got.Status)
 	}
 	if got.ReceivedAmount != "16502500" {
 		t.Fatalf("received = %q, want what landed recorded even when unpriced", got.ReceivedAmount)
@@ -1147,8 +1224,6 @@ func TestSettleStableBuyFromCharge_ParksWhenUnderpaidBelowTheFloor(t *testing.T)
 	// Below Flutterwave's outbound floor the delivery would be refused with the
 	// user's naira already taken, so park instead of advancing.
 	s, userID := newStableBuyDBService(t)
-	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
-	s.SetStableSpreadBps(155)
 	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
 
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_dust", "165025"); err != nil {
@@ -1156,8 +1231,8 @@ func TestSettleStableBuyFromCharge_ParksWhenUnderpaidBelowTheFloor(t *testing.T)
 	}
 	var got models.ITIntent
 	s.db.First(&got, "id = ?", intent.ID)
-	if got.Status != models.ITStatusAwaitingRate {
-		t.Fatalf("status = %q, want awaiting_rate (parked)", got.Status)
+	if got.Status != models.ITStatusBuyAwaitingRate {
+		t.Fatalf("status = %q, want buy_awaiting_rate (parked)", got.Status)
 	}
 }
 
@@ -1239,10 +1314,29 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	// concurrent webhooks cannot both move the same intent. Only the amount is
 	// written here — the price is struck below, once the intent is ours.
 	amountMinor = strings.TrimSpace(amountMinor)
-	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+
+	// Pick ONE intent, then claim it by id. A bulk Updates over the whole
+	// predicate would write the same payment_ref to every matching row if the
+	// one-open-purchase check ever raced and let two through — and payment_ref
+	// carries a partial UNIQUE index (config/database.go), so that INSERT-time
+	// race would become a permanent webhook error instead of a claimed charge.
+	var candidate models.ITIntent
+	err = s.db.WithContext(ctx).
 		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
 			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
 			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
+		Order("created_at ASC").
+		First(&candidate).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil // no open stablecoin buy — fall through to MCGP
+	} else if err != nil {
+		return false, err
+	}
+
+	// The status in the WHERE is the concurrency guard: two webhooks racing on
+	// the same intent, only one wins and the loser sees RowsAffected == 0.
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ?", candidate.ID, models.ITStatusPendingPayment).
 		Updates(map[string]any{
 			"status":          models.ITStatusPaymentReceived,
 			"payment_ref":     chargeID,
@@ -1252,12 +1346,11 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, res.Error
 	}
 	if res.RowsAffected == 0 {
-		return false, nil // no open stablecoin buy — fall through to MCGP
+		return false, nil
 	}
 
 	var intent models.ITIntent
-	if err := s.db.WithContext(ctx).
-		First(&intent, "payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).Error; err != nil {
+	if err := s.db.WithContext(ctx).First(&intent, "id = ?", candidate.ID).Error; err != nil {
 		return false, err
 	}
 
@@ -1272,9 +1365,15 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		// forever. Park for an operator with the reason recorded. Covers an
 		// unusable rate and an underpayment below the provider floor alike:
 		// both mean "money landed, a human must decide".
+		//
+		// The park status is ITStatusBuyAwaitingRate, NOT the MCGP flow's
+		// awaiting_rate. Sharing that status would expose the intent to
+		// RepriceAndCreditAwaitingRate, which credits MCGP from company supply
+		// and then sets status back to pending_payment — re-opening the intent
+		// so the next incoming charge could claim it. See Task 6a.
 		log.Printf("[it stable buy] ALARM charge=%s landed but could not be priced: %v", chargeID, err)
 		if uErr := s.db.WithContext(ctx).Model(&intent).Updates(map[string]any{
-			"status":         models.ITStatusAwaitingRate,
+			"status":         models.ITStatusBuyAwaitingRate,
 			"failure_reason": "could not price at settlement: " + err.Error(),
 		}).Error; uErr != nil {
 			return false, uErr
@@ -1299,18 +1398,71 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 
 - [ ] **Step 4: Wire the fork into `AutoCreditFromVA`**
 
-In `internal/services/it_fiat_va.go`, immediately after the VA has resolved to a user (after the `resolveFiatVA` call and the `va.UserID` lookup succeeds) and **before** any MCGP pricing or crediting:
+Three separate edits to `internal/services/it_fiat_va.go`. All three are load-bearing; the
+first two were found by review after the plan was drafted.
+
+**(a) The fork itself — placement matters.** Insert immediately after the `First(&user, …)`
+lookup succeeds and **BEFORE** the `user.WalletAddress == ""` guard that follows it. A
+stablecoin buy is delivered by Flutterwave to a chain address; it needs no on-chain MCGP
+credit and therefore no `users.wallet_address`. Placing the fork after that guard would strand
+the money of any buyer who never registered an EVM wallet, behind an error the webhook
+re-drives forever.
+
+**`amountNGN` is a NAIRA DECIMAL STRING, not kobo.** The existing MCGP path converts it at
+`it_fiat_va.go:259` with `nairaToKobo`. `settleStableBuyFromCharge` parses MINOR units, so
+passing it through raw makes `SetString("165025.00", 10)` fail — every buy would park — and
+`received_amount` is `numeric(78,0)`, so Postgres would silently round the value 100× too small.
+Convert at the boundary:
 
 ```go
 	// Fork: a stablecoin purchase awaiting payment claims this charge. If the
 	// user has none, fall through to the MCGP credit path below, unchanged.
-	claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, amountNGN)
+	//
+	// amountNGN is a naira decimal string ("165025.00"), NOT kobo — the MCGP
+	// path below converts it the same way at :259. settleStableBuyFromCharge
+	// takes minor units, so the conversion happens HERE, at the boundary.
+	paidMinor, err := nairaToKobo(amountNGN)
+	if err != nil {
+		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
+	}
+	claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
 	if err != nil {
 		return fmt.Errorf("it va credit: stable buy: %w", err)
 	}
 	if claimed {
 		return nil
 	}
+```
+
+**(b) Teach the idempotency switch about stablecoin buys.** `AutoCreditFromVA`'s existing
+idempotency block (`it_fiat_va.go:200-241`) runs BEFORE `resolveFiatVA`, and therefore before
+the fork. A redelivered charge that funded a stablecoin buy matches on
+`payment_ref + direction = buy`, finds a status the switch does not list, falls to `default:`,
+logs an ALARM and RETURNS AN ERROR — so Flutterwave re-drives it forever, including for a
+purchase that has fully settled. Add before the `default:` case:
+
+```go
+		case models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds,
+			models.ITStatusConverting, models.ITStatusDelivering,
+			models.ITStatusBuyAwaitingRate:
+			// A stablecoin buy already claimed this charge. The buy watcher owns
+			// it from here; the webhook's job is done.
+			return nil
+```
+
+`ITStatusSettled` is deliberately NOT added here — it is already reachable by MCGP sells and
+adding it would change existing behaviour beyond this feature. A settled stablecoin buy is
+caught by the `ITStatusCredited` case only if it were MCGP, so add `ITStatusSettled` to the new
+case list as well **only** after confirming no MCGP path relies on it hitting `default:`.
+
+**(c) Scope the MCGP open-intent query to MCGP.** `it_fiat_va.go:279-284` selects the user's
+open buy intent with no asset filter, so any path reaching the MCGP branch while a stablecoin
+intent sits in `pending_payment` would overwrite `mcgp_amount`/`rate_kobo` on a USDC intent and
+credit MCGP against it. Make the fork's correctness structural rather than order-dependent:
+
+```go
+		Where("user_id = ? AND direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?)",
+			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP)
 ```
 
 - [ ] **Step 5: Run tests**
@@ -1323,6 +1475,220 @@ Expected: PASS, including every existing `AutoCreditFromVA` test — if any MCGP
 ```bash
 git add internal/services/it_stable_buy_settle.go internal/services/it_stable_buy_settle_test.go internal/services/it_fiat_va.go
 git commit -m "feat(it): route an incoming charge to an open stablecoin buy"
+```
+
+---
+
+### Task 6a: Close the parked-intent hazards
+
+**Files:**
+- Modify: `internal/services/it_service.go` (guard `RepriceAndCreditAwaitingRate`)
+- Modify: `internal/services/it_stable_buy_settle.go`
+- Modify: `internal/handlers/it_handler.go`, `internal/routes/routes.go`
+- Test: `internal/services/it_stable_buy_settle_test.go`
+
+**Interfaces:**
+- Consumes: `settleStableBuyFromCharge` (Task 6), `IsStableAsset`, `models.ITIntentAsset`
+- Produces: `models.ITStatusBuyAwaitingRate`
+- Produces: `func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error)`
+
+Task 6 parks a stablecoin buy in `awaiting_rate` when money lands that cannot be priced.
+That status is shared with the MCGP buy flow, and this task closes the two hazards that
+sharing creates. **Do this immediately after Task 6 — before any stablecoin buy can reach
+`awaiting_rate` in a deployed build.**
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `internal/services/it_stable_buy_settle_test.go`:
+
+```go
+func TestRepriceAndCreditAwaitingRate_RefusesStablecoinBuys(t *testing.T) {
+	// A parked stablecoin buy has Direction=buy AND Status=awaiting_rate, so it
+	// satisfies the MCGP recovery's guard. Without an asset check an operator
+	// recovering it would credit MCGP from COMPANY SUPPLY — wrong asset to the
+	// user, company funds spent, and the stablecoin purchase still unfulfilled.
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	s.db.Model(intent).Update("status", models.ITStatusBuyAwaitingRate)
+
+	_, err := s.RepriceAndCreditAwaitingRate(context.Background(), intent.ID)
+	if !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState — the MCGP path must refuse a stablecoin intent", err)
+	}
+}
+
+func TestRepriceParkedStableBuy_ResumesAParkedPurchase(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusBuyAwaitingRate,
+		"received_amount": "16502500",
+	})
+
+	got, err := s.RepriceParkedStableBuy(context.Background(), intent.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status != models.ITStatusPaymentReceived {
+		t.Fatalf("status = %q, want payment_received so the watcher picks it up", got.Status)
+	}
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want the freshly priced figure", got.AssetAmount)
+	}
+}
+
+func TestRepriceParkedStableBuy_RefusesNonParkedOrNonStable(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+
+	// Still pending_payment — nothing has landed, so there is nothing to reprice.
+	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState", err)
+	}
+}
+
+func TestSettleStableBuyFromCharge_RedeliveryCompletesUnfinishedPricing(t *testing.T) {
+	// A crash between claiming the charge and pricing it would otherwise leave
+	// the creation-time amount in place — the rate lock the design removed,
+	// reappearing in a crash window. Redelivery must finish the job.
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+
+	// Simulate the crash: claimed, but never priced.
+	s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusPaymentReceived,
+		"payment_ref":     "chg_crash",
+		"received_amount": "16502500",
+		"repriced":        false,
+	})
+
+	claimed, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_crash", "16502500")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claimed {
+		t.Fatal("redelivery did not claim the charge")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if !got.Repriced {
+		t.Fatal("redelivery left the intent unpriced")
+	}
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want the priced figure", got.AssetAmount)
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./internal/services/ -run "TestRepriceAndCreditAwaitingRate_RefusesStablecoinBuys|TestRepriceParkedStableBuy|TestSettleStableBuyFromCharge_Redelivery" -count=1`
+Expected: FAIL — `undefined: RepriceParkedStableBuy`, and the MCGP guard test fails because the function currently accepts the intent.
+
+- [ ] **Step 3: Add the distinct park status, and guard the MCGP recovery anyway**
+
+Two independent defences, because either alone leaves a hole.
+
+**(a) A distinct status.** In `internal/models/it_models.go`, beside the other buy statuses:
+
+```go
+	// ITStatusBuyAwaitingRate parks a STABLECOIN buy whose money landed but
+	// could not be priced. Deliberately NOT the MCGP flow's awaiting_rate:
+	// RepriceAndCreditAwaitingRate is already wired to that status and would
+	// credit MCGP from company supply, then set the intent back to
+	// pending_payment — re-opening it for the next incoming charge to claim.
+	ITStatusBuyAwaitingRate = "buy_awaiting_rate"
+```
+
+**(b) The guard, as defence in depth.** In `internal/services/it_service.go`, in
+`RepriceAndCreditAwaitingRate`, extend the existing state guard so it can never
+act on a non-MCGP intent even if a future asset lands in that status:
+
+```go
+	// Asset check, not just direction+status: crediting a non-MCGP buy here
+	// would issue MCGP from company supply for a purchase made in something
+	// else. Stablecoin buys have their own recovery, RepriceParkedStableBuy.
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusAwaitingRate ||
+		models.ITIntentAsset(intent) != models.ITAssetMCGP {
+		return nil, ErrITBadState
+	}
+```
+
+- [ ] **Step 4: Add the stablecoin recovery and the redelivery completion**
+
+Append to `internal/services/it_stable_buy_settle.go`:
+
+```go
+// RepriceParkedStableBuy is the operator recovery for a stablecoin buy parked
+// as `buy_awaiting_rate` — money landed that could not be priced at the time.
+//
+// It reprices the naira that actually arrived at the CURRENT live rate and
+// returns the intent to payment_received, where the watcher picks it up again.
+// The watcher deliberately never does this by itself: the intent parked because
+// something was wrong, and resuming it is a human's call.
+func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusBuyAwaitingRate ||
+		!IsStableAsset(intent.Asset) {
+		return nil, ErrITBadState
+	}
+	if err := s.priceStableBuy(ctx, intent); err != nil {
+		return nil, err
+	}
+	return s.getIntent(ctx, intentID)
+}
+
+// priceStableBuy prices a claimed buy on what actually arrived and moves it to
+// payment_received. Shared by first settlement, by redelivery completing an
+// interrupted settlement, and by the operator recovery above.
+func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent) error {
+	q, err := s.QuoteStableBuy(ctx, intent.Asset, intent.ReceivedAmount, intent.Currency)
+	if err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"status":       models.ITStatusPaymentReceived,
+		"asset_amount": q.AssetUnits.String(),
+		"locked_rate":  q.RatePerUnitMinor.String(),
+		"rate_minor":   q.RatePerUnitMinor.String(),
+		"rate_kobo":    q.RatePerUnitMinor.String(),
+		"repriced":     true,
+	}).Error
+}
+```
+
+Then rework `settleStableBuyFromCharge` so pricing is resumable:
+
+- On the early return for an already-seen `payment_ref`: if the intent is a stablecoin buy
+  and `!intent.Repriced` and its status is `payment_received`, call `priceStableBuy` before
+  returning. A crash between the claim and the pricing is otherwise invisible to every
+  later redelivery.
+- On the first-claim path: replace the inline pricing `Updates` with `priceStableBuy`, and
+  keep the existing park-on-error behaviour when it returns an error.
+
+- [ ] **Step 5: Expose the recovery**
+
+Add a handler mirroring the MCGP one at `internal/handlers/it_handler.go:529`, and register:
+
+```go
+			adminIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `go build ./... && go test ./internal/services/ ./internal/handlers/ -count=1`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add internal/services/it_service.go internal/services/it_stable_buy_settle.go internal/services/it_stable_buy_settle_test.go internal/handlers/it_handler.go internal/routes/routes.go
+git commit -m "fix(it): stop parked stablecoin buys reaching the MCGP recovery"
 ```
 
 ---
@@ -1650,12 +2016,14 @@ import (
 )
 
 type stubDeliverer struct {
-	got FWDirectTransferRequest
-	id  string
-	err error
+	got   FWDirectTransferRequest
+	id    string
+	err   error
+	calls int // asserted directly: checking only the DB would pass even if we sent twice
 }
 
 func (d *stubDeliverer) DirectTransfer(_ context.Context, req FWDirectTransferRequest) (FWTransfer, error) {
+	d.calls++
 	d.got = req
 	if d.err != nil {
 		return FWTransfer{}, d.err
@@ -1722,10 +2090,40 @@ func TestDeliverStableBuy_IsIdempotent(t *testing.T) {
 	if err := s.DeliverStableBuy(context.Background(), intent.ID); err != nil {
 		t.Fatalf("second: %v", err)
 	}
+	// Assert the STUB, not just the DB: a DB-only check passes even if the
+	// second DirectTransfer fired and its result was simply not written.
+	if d.calls != 1 {
+		t.Fatalf("DirectTransfer called %d times, want 1 — the user was paid twice", d.calls)
+	}
 	var got models.ITIntent
 	s.db.First(&got, "id = ?", intent.ID)
 	if got.DeliveryID != "trf_deliver_2" {
 		t.Fatalf("delivery id = %q, want the first transfer", got.DeliveryID)
+	}
+}
+
+func TestDeliverStableBuy_RefusesWithoutTheStablecoinInHand(t *testing.T) {
+	// The conversion executes at its own rate minus an uncalibrated fee, so the
+	// balance can come in under the preview-derived AssetAmount. Sending anyway
+	// means a rejected transfer and a stuck intent.
+	s, intent := deliveringIntent(t)
+	s.SetStableConverter(&stubConverter{
+		balances: []FWBalance{{Currency: "USDC", AvailableBalance: 1}}, // need ~98.45
+	}, "merchant_1")
+	d := &stubDeliverer{id: "trf_should_not_send"}
+	s.SetStableDeliverer(d)
+
+	err := s.DeliverStableBuy(context.Background(), intent.ID)
+	if !errors.Is(err, ErrStableCreditNotVisible) {
+		t.Fatalf("err = %v, want ErrStableCreditNotVisible", err)
+	}
+	if d.calls != 0 {
+		t.Fatalf("sent %d transfers against an insufficient balance, want 0", d.calls)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.DeliveryAttempts != 0 {
+		t.Fatal("burned a delivery attempt on a wait condition")
 	}
 }
 
@@ -1789,6 +2187,13 @@ const maxStableDeliveryAttempts = 10
 // operator. The stablecoin is in our Flutterwave balance — stuck, not lost.
 var ErrStableDeliveryExhausted = errors.New("it stable buy: delivery attempts exhausted; needs operator review")
 
+// ErrStableDeliveryPending means the outbound transfer has not reached a
+// terminal state yet. Distinct from ErrStableConversionPending so an operator
+// reading the watcher's log can tell which leg is waiting — the watcher polls
+// every 30s, so a misleading sentinel here would be the noisiest line in the
+// log and would point at the wrong hop.
+var ErrStableDeliveryPending = errors.New("it stable buy: delivery has not settled yet")
+
 // stableDeliverer is the slice of the Flutterwave client used to pay a user
 // their stablecoin.
 type stableDeliverer interface {
@@ -1844,6 +2249,43 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 	}
 	amountMajor, _ := new(big.Rat).SetFrac(units,
 		new(big.Int).Exp(big.NewInt(10), big.NewInt(StableAssetDecimals), nil)).Float64()
+
+	// Prove we hold the stablecoin before spending it — the same gate
+	// ConvertStableBuy applies to the naira, and for the same reason. This is
+	// the step that actually moves crypto out, so skipping it here would be
+	// the one place the never-advance-before-funds-are-present invariant is
+	// dropped.
+	//
+	// AssetAmount came from the /transfers/rates PREVIEW at settlement;
+	// ConvertBalance later executes at its own rate minus a conversion fee the
+	// spec itself calls uncalibrated. If execution lands worse than the preview
+	// by more than the spread, this would ask Flutterwave to send stablecoin we
+	// do not hold: rejected transfer, delivery_attempts burning to the cap, and
+	// a permanently stuck intent.
+	if s.stableConverter == nil {
+		return errors.New("it stable buy: no balance reader configured")
+	}
+	balances, err := s.stableConverter.FetchBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("it stable buy: %w", err)
+	}
+	var available float64
+	found := false
+	for _, b := range balances {
+		if strings.EqualFold(b.Currency, intent.Asset) {
+			available, found = b.AvailableBalance, true
+			break
+		}
+	}
+	if !found {
+		log.Printf("[IT] it_stable_balance_line_missing asset=%s intent=%s", intent.Asset, intent.ID)
+	}
+	if !found || available < amountMajor {
+		// ErrStableCreditNotVisible, so the watcher treats it as a wait rather
+		// than a failure and does NOT burn a delivery attempt.
+		return fmt.Errorf("%w: %s available=%v needed=%v",
+			ErrStableCreditNotVisible, intent.Asset, available, amountMajor)
+	}
 
 	ref := itBuyDeliveryRef(intent.ID, intent.DeliveryAttempts)
 	tr, err := s.stableDeliverer.DirectTransfer(ctx, FWDirectTransferRequest{
@@ -1905,7 +2347,7 @@ func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID)
 			"delivery_attempts": intent.DeliveryAttempts + 1,
 		}).Error
 	default:
-		return fmt.Errorf("%w: delivery %s is %s", ErrStableConversionPending, tr.ID, tr.Status)
+		return fmt.Errorf("%w: delivery %s is %s", ErrStableDeliveryPending, tr.ID, tr.Status)
 	}
 }
 ```
@@ -2363,32 +2805,49 @@ var ErrStableBuyNoWallet = errors.New("it stable buy: user has no wallet")
 
 // userDeliveryAddresses maps CHAIN -> the user's own address.
 //
-// External and inactive entries are excluded deliberately. An imported
-// watch-only address is one the user may not hold the keys for, and delivery
-// is irreversible — so it must never be a payout target, even though it sits
-// in the same list.
+// TWO sources, not one. An earlier draft read models.Wallet.Addresses; that is
+// a DEAD COLUMN — models.WalletAddrEntry occurs exactly once in this repo (its
+// own declaration) and nothing has written it since the Node/Mongo API was
+// retired. Reading it returns an empty map for every user, which would make
+// every buy fail with "no address on this chain".
+//
+//	ETHEREUM / POLYGON / BASE -> users.wallet_address (one EVM address serves all)
+//	SOLANA                    -> wallet_addresses where chain_key = 'solana'
+//
+// Keys are upper-cased on the way out: every chain-key producer in this repo is
+// lowercase ("polygon", "solana") while deliveryMatrix keys are uppercase, so a
+// case-sensitive lookup silently finds nothing.
 func (s *ITService) userDeliveryAddresses(ctx context.Context, userID uuid.UUID) (map[string]string, error) {
-	var w models.Wallet
-	if err := s.db.WithContext(ctx).First(&w, "user_id = ?", userID).Error; err != nil {
+	out := make(map[string]string, 4)
+
+	var user models.User
+	if err := s.db.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrStableBuyNoWallet
 		}
 		return nil, err
 	}
-	var entries []models.WalletAddrEntry
-	if len(w.Addresses) > 0 {
-		if err := json.Unmarshal(w.Addresses, &entries); err != nil {
-			return nil, fmt.Errorf("it stable buy: decode wallet addresses: %w", err)
+	if evm := strings.TrimSpace(user.WalletAddress); evm != "" {
+		for _, chain := range []string{"ETHEREUM", "POLYGON", "BASE"} {
+			out[chain] = evm
 		}
 	}
-	out := make(map[string]string, len(entries))
-	for _, e := range entries {
-		if e.IsExternal || !e.IsActive {
-			continue
+
+	var rows []models.WalletAddress
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		key := strings.ToUpper(strings.TrimSpace(r.ChainKey))
+		if addr := strings.TrimSpace(r.Address); addr != "" && key != "" {
+			out[key] = addr
 		}
-		if addr := strings.TrimSpace(e.Address); addr != "" {
-			out[strings.ToUpper(strings.TrimSpace(e.Blockchain))] = addr
-		}
+	}
+
+	if len(out) == 0 {
+		return nil, ErrStableBuyNoWallet
 	}
 	return out, nil
 }
@@ -2425,8 +2884,14 @@ func (s *ITService) DeliverableChainsForUser(ctx context.Context, userID uuid.UU
 }
 ```
 
-Add `"encoding/json"` to the file's imports, and map `ErrStableBuyNoWallet` in
-`stableCodeFor` (`"stable_buy_no_wallet"`) and in `stableStatusFor`'s 400 group.
+Map `ErrStableBuyNoWallet` in `stableCodeFor` (`"stable_buy_no_wallet"`) and in
+`stableStatusFor`'s 400 group. No `encoding/json` import is needed — neither source is jsonb.
+
+Add a test proving BOTH sources are read: seed a `users.wallet_address` and a
+`wallet_addresses` row with `chain_key = "solana"` (lowercase, as the real producer writes it),
+then assert `DeliverableChainsForUser` returns Ethereum, Polygon, Base AND Solana for USDC, and
+that Base is absent for USDT. A test that seeds only one source would not have caught the dead
+column this replaces.
 
 - [ ] **Step 5: Register the routes**
 
@@ -2513,11 +2978,14 @@ func TestListStuckStableBuys_IncludesEveryNonTerminalState(t *testing.T) {
 		// Parked by settleStableBuyFromCharge when the money landed but could
 		// not be priced. This is the state that MOST needs an operator, so it
 		// must never be missing from the stuck list.
-		models.ITStatusAwaitingRate,
+		models.ITStatusBuyAwaitingRate,
 	} {
 		i, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+		// ONE Updates call. A second write without updated_at makes GORM stamp
+		// it to now, pushing every row back inside the cutoff so the query
+		// returns nothing. The status change alone frees the pending_payment
+		// slot — no payment_ref write is needed.
 		s.db.Model(i).Updates(map[string]any{"status": st, "updated_at": time.Now().Add(-2 * time.Hour)})
-		s.db.Model(i).Update("payment_ref", string(st)) // free the pending_payment slot
 	}
 	got, err := s.ListStuckStableBuys(context.Background(), time.Hour)
 	if err != nil {
@@ -2572,7 +3040,7 @@ func (s *ITService) ListStuckStableBuys(ctx context.Context, olderThan time.Dura
 				// Money landed but unpriced — parked for a human. The watcher
 				// deliberately does NOT auto-advance these, so the stuck list
 				// is the only way anyone learns they exist.
-				models.ITStatusAwaitingRate,
+				models.ITStatusBuyAwaitingRate,
 			},
 			time.Now().Add(-olderThan)).
 		Scan(&out).Error
