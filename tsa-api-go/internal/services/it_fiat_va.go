@@ -211,6 +211,12 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		case models.ITStatusPendingPayment, models.ITStatusFailed:
 			_, err = s.approveBuyCreditWithRef(ctx, existing.ID, "", &chargeRef)
 			return err
+		case models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds,
+			models.ITStatusConverting, models.ITStatusDelivering,
+			models.ITStatusBuyAwaitingRate:
+			// A stablecoin buy already claimed this charge. The buy watcher owns
+			// it from here; the webhook's job is done.
+			return nil
 		case models.ITStatusCancelled:
 			// The order was superseded in the window between our reading it and
 			// claiming it. The money is real and is this user's — detach the charge
@@ -250,6 +256,30 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if err := s.db.WithContext(ctx).First(&user, "id = ?", va.UserID).Error; err != nil {
 		return fmt.Errorf("it va credit: user: %w", err)
 	}
+
+	// Fork: a stablecoin purchase awaiting payment claims this charge. If the
+	// user has none, fall through to the MCGP credit path below, unchanged.
+	//
+	// amountNGN is a naira decimal string ("165025.00"), NOT kobo — the MCGP
+	// path below converts it the same way at :259. settleStableBuyFromCharge
+	// takes minor units, so the conversion happens HERE, at the boundary.
+	//
+	// This must run BEFORE the wallet guard below: a stablecoin buy is
+	// delivered by Flutterwave to a chain address, not an on-chain MCGP
+	// credit, so it needs no users.wallet_address. Putting the fork after that
+	// guard would strand the money of any buyer who never registered one.
+	paidMinor, err := nairaToKobo(amountNGN)
+	if err != nil {
+		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
+	}
+	claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
+	if err != nil {
+		return fmt.Errorf("it va credit: stable buy: %w", err)
+	}
+	if claimed {
+		return nil
+	}
+
 	wallet := strings.TrimSpace(user.WalletAddress)
 	if wallet == "" {
 		log.Printf("[it va] ALARM credit with no wallet user=%s charge=%s — parking", va.UserID, chargeID)
@@ -276,10 +306,15 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 
 	// Prefer the user's open buy order so the hub "Awaiting transfer" row
 	// progresses to credited instead of leaving an orphan pending + a new intent.
+	//
+	// Scoped to MCGP (or the pre-Asset-column legacy rows): the fork above
+	// already claims a stablecoin buy before this point, but scoping here too
+	// makes correctness structural rather than order-dependent — nothing on
+	// this path can overwrite mcgp_amount/rate_kobo on a USDC/USDT intent.
 	var pending models.ITIntent
 	pendErr := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ?",
-			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment).
+		Where("user_id = ? AND direction = ? AND status = ? AND (asset IS NULL OR asset = '' OR asset = ?)",
+			va.UserID, models.ITDirectionBuy, models.ITStatusPendingPayment, models.ITAssetMCGP).
 		Order("created_at DESC").
 		First(&pending).Error
 

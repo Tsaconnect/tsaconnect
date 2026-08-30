@@ -52,6 +52,12 @@ const (
 	ITStatusPaymentReceived = "payment_received" // charge matched to this intent
 	ITStatusAwaitingFunds   = "awaiting_funds"   // naira not yet spendable at FW
 	ITStatusDelivering      = "delivering"       // crypto transfer accepted, not settled
+	// ITStatusBuyAwaitingRate parks a STABLECOIN buy whose money landed but
+	// could not be priced. Deliberately NOT the MCGP flow's awaiting_rate:
+	// RepriceAndCreditAwaitingRate is already wired to that status and would
+	// credit MCGP from company supply, then set the intent back to
+	// pending_payment — re-opening it for the next incoming charge to claim.
+	ITStatusBuyAwaitingRate = "buy_awaiting_rate"
 )
 
 // ITIntentAsset reads an intent's asset, treating rows written before the
