@@ -514,3 +514,45 @@ func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID)
 		return fmt.Errorf("%w: delivery %s is %s", ErrStableDeliveryPending, tr.ID, tr.Status)
 	}
 }
+
+// PendingStableBuys lists brokered buy intents that can still advance.
+//
+// ITStatusBuyAwaitingRate is deliberately excluded: it is a park set only when
+// the money landed but could not be priced, and only an operator
+// (RepriceParkedStableBuy) may resume it — auto-advancing it here would defeat
+// the park. ITStatusCancelled is terminal and likewise excluded.
+func (s *ITService) PendingStableBuys(ctx context.Context) (received, awaiting, converting, delivering []uuid.UUID, err error) {
+	type row struct {
+		ID     uuid.UUID
+		Status string
+	}
+	var rows []row
+	err = s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Select("id", "status").
+		Where("direction = ? AND asset IN ? AND status IN ?",
+			models.ITDirectionBuy,
+			[]string{models.ITAssetUSDC, models.ITAssetUSDT},
+			[]string{
+				models.ITStatusPaymentReceived,
+				models.ITStatusAwaitingFunds,
+				models.ITStatusConverting,
+				models.ITStatusDelivering,
+			}).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	for _, r := range rows {
+		switch r.Status {
+		case models.ITStatusPaymentReceived:
+			received = append(received, r.ID)
+		case models.ITStatusAwaitingFunds:
+			awaiting = append(awaiting, r.ID)
+		case models.ITStatusConverting:
+			converting = append(converting, r.ID)
+		case models.ITStatusDelivering:
+			delivering = append(delivering, r.ID)
+		}
+	}
+	return received, awaiting, converting, delivering, nil
+}

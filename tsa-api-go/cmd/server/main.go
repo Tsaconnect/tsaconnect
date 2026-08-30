@@ -642,6 +642,8 @@ func main() {
 					err, services.DefaultStableMinSellMajor)
 			}
 			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
+			itService.SetStableDeliverer(fwClient)
+			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second))
 			stableRampEnabled = true
 			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps min=%s)",
 				cfg.StableSpreadBps, cfg.StableMinSell)
