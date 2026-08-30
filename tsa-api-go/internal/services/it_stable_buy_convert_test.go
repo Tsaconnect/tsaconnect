@@ -126,3 +126,115 @@ func TestFinalizeBuyConversion_OnlySuccessfulAdvances(t *testing.T) {
 		})
 	}
 }
+
+// C1 regression. The claim and the price used to be two writes with an HTTP
+// round-trip between them, so anything that interrupted that window — a
+// rolling deploy, a panic, a cancelled context — left the intent at
+// payment_received with Repriced == false, still carrying the asset_amount it
+// was quoted at CREATION. The watcher runs every 30s and got there before the
+// webhook redelivery that was supposed to finish the job, converting the real
+// received_amount while delivering the stale figure.
+//
+// This drives the whole machine — convert, finalize, deliver — and asserts on
+// what actually reached Flutterwave's outbound transfer, because a DB-only
+// check would pass on an intent that was repriced but delivered from a stale
+// in-memory amount.
+func TestStableBuy_UnpricedClaimIsNeverDeliveredOnCreationTimeTerms(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Quoted 98.45 USDC at creation.
+	if intent.AssetAmount != "98450000" {
+		t.Fatalf("fixture drift: creation-time asset amount = %q, want 98450000", intent.AssetAmount)
+	}
+
+	// The interrupted claim: the charge landed and was recorded, but pricing
+	// never ran. Only HALF the quoted naira actually arrived, so the honest
+	// delivery is ~49.225 USDC — the creation-time 98.45 would be paid for out
+	// of the pooled merchant balance, i.e. another user's stablecoin.
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusPaymentReceived,
+		"payment_ref":     "chg_unpriced",
+		"received_amount": "8251250",
+		"repriced":        false,
+	}).Error; err != nil {
+		t.Fatalf("simulate interrupted claim: %v", err)
+	}
+
+	conv := &stubConverter{
+		balances: []FWBalance{
+			{Currency: "NGN", AvailableBalance: 200000},
+			// Comfortably enough for EITHER figure, so the balance gate is not
+			// what makes this test pass — the reprice is.
+			{Currency: "USDC", AvailableBalance: 1000},
+		},
+		transfer: FWTransfer{ID: "trf_unpriced", Status: "NEW"},
+	}
+	s.SetStableConverter(conv, "merchant_1")
+	s.SetStableTransfers(&stubTransfers{tr: FWTransfer{ID: "trf_unpriced", Status: "SUCCESSFUL"}})
+	d := &stubDeliverer{id: "trf_unpriced_out"}
+	s.SetStableDeliverer(d)
+
+	ctx := context.Background()
+	if err := s.ConvertStableBuy(ctx, intent.ID); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if !got.Repriced {
+		t.Fatal("converted an intent that was never priced")
+	}
+	if got.AssetAmount == "98450000" {
+		t.Fatal("delivery still carries the creation-time asset amount; the rate lock is back")
+	}
+	if got.AssetAmount != "49225000" {
+		t.Fatalf("asset amount = %q, want 49225000 — priced on what actually landed", got.AssetAmount)
+	}
+
+	if err := s.FinalizeBuyConversion(ctx, intent.ID); err != nil {
+		t.Fatalf("finalize conversion: %v", err)
+	}
+	if err := s.DeliverStableBuy(ctx, intent.ID); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got, want := d.got.PaymentInstruction.Amount.Value, 49.225; got != want {
+		t.Fatalf("sent %v USDC, want %v — the outbound transfer used the stale amount", got, want)
+	}
+}
+
+// C2 regression. priceStableBuy's write is status-guarded, so a price that
+// lands after a watcher tick has already spent the naira cannot drag the
+// intent backwards out of `converting` — which is what made the next tick
+// re-enter ConvertStableBuy and convert a second time with the same reference.
+func TestPriceStableBuy_WillNotDragAnIntentBackwardsOutOfConverting(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// The watcher won the race: money already spent, conversion in flight.
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":        models.ITStatusConverting,
+		"conversion_id": "trf_inflight",
+	}).Error; err != nil {
+		t.Fatalf("simulate in-flight conversion: %v", err)
+	}
+
+	// The late price write still believes the intent is payment_received.
+	intent.ReceivedAmount = "16502500"
+	applied, err := s.priceStableBuy(context.Background(), intent, intent.ReceivedAmount,
+		models.ITStatusPaymentReceived, models.ITStatusPaymentReceived)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if applied {
+		t.Fatal("the late price write claimed to have applied")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusConverting {
+		t.Fatalf("status = %q, want converting — the intent was dragged backwards after the money was spent", got.Status)
+	}
+}

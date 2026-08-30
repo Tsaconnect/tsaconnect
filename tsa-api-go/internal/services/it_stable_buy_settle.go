@@ -51,12 +51,18 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		// lock the design removed, reappearing in a crash window. Redelivery
 		// finishes the job the interrupted attempt started.
 		if existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
-			if err := s.priceStableBuy(ctx, &existing); err != nil {
+			if _, err := s.priceStableBuy(ctx, &existing, existing.ReceivedAmount,
+				models.ITStatusPaymentReceived, models.ITStatusPaymentReceived); err != nil {
 				log.Printf("[it stable buy] ALARM charge=%s redelivery could not price: %v", chargeID, err)
-				if uErr := s.db.WithContext(ctx).Model(&existing).Updates(map[string]any{
-					"status":         models.ITStatusBuyAwaitingRate,
-					"failure_reason": "could not price at settlement: " + err.Error(),
-				}).Error; uErr != nil {
+				// Status-guarded like every other write on this path: a watcher
+				// tick that advanced the intent while we were on the rate call
+				// must not be dragged backwards into the park.
+				if uErr := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+					Where("id = ? AND status = ?", existing.ID, models.ITStatusPaymentReceived).
+					Updates(map[string]any{
+						"status":         models.ITStatusBuyAwaitingRate,
+						"failure_reason": "could not price at settlement: " + err.Error(),
+					}).Error; uErr != nil {
 					return false, uErr
 				}
 			}
@@ -89,15 +95,58 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, err
 	}
 
+	// Price BEFORE claiming, so that claiming and pricing are ONE write.
+	//
+	// Pricing in a second write left a window as wide as an HTTP round-trip to
+	// Flutterwave in which the intent sat at payment_received carrying its
+	// CREATION-TIME asset_amount. Anything that interrupted that window — a
+	// rolling deploy, a panic, a cancelled context — left the watcher to
+	// convert the real received_amount while delivering the stale figure: an
+	// overpayer silently loses the excess, and an underpayer's delivery is
+	// drawn from the POOLED merchant balance, i.e. another user's stablecoin.
+	// Quoting first costs one wasted quote if we then lose the claim race,
+	// which is far cheaper than the window.
+	claim := map[string]any{
+		"status":          models.ITStatusPaymentReceived,
+		"payment_ref":     chargeID,
+		"received_amount": amountMinor,
+	}
+	q, qErr := s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
+	if qErr != nil {
+		// The money is here and cannot be handed back, so this must NOT error
+		// the webhook — that would leave the charge unprocessed and re-driven
+		// forever. Park for an operator with the reason recorded, in the SAME
+		// write that claims: the charge is never recorded against an intent
+		// without either a price or a park. Covers an unusable rate and an
+		// underpayment below the provider floor alike — both mean "money
+		// landed, a human must decide".
+		//
+		// The park status is ITStatusBuyAwaitingRate, NOT the MCGP flow's
+		// awaiting_rate. Sharing that status would expose the intent to
+		// RepriceAndCreditAwaitingRate, which credits MCGP from company supply
+		// and then sets status back to pending_payment — re-opening the intent
+		// so the next incoming charge could claim it.
+		log.Printf("[it stable buy] ALARM charge=%s landed but could not be priced: %v", chargeID, qErr)
+		claim["status"] = models.ITStatusBuyAwaitingRate
+		claim["failure_reason"] = "could not price at settlement: " + qErr.Error()
+	} else {
+		// Priced at the LIVE rate on what actually landed. This is the binding
+		// price; the figure quoted at creation was indicative. Pricing on what
+		// arrived rather than what was quoted also handles under- and
+		// overpayment with no special case — the mirror of the sell leg's
+		// received/quoted.
+		claim["asset_amount"] = q.AssetUnits.String()
+		claim["locked_rate"] = q.RatePerUnitMinor.String()
+		claim["rate_minor"] = q.RatePerUnitMinor.String()
+		claim["rate_kobo"] = q.RatePerUnitMinor.String()
+		claim["repriced"] = true
+	}
+
 	// The status in the WHERE is the concurrency guard: two webhooks racing on
 	// the same intent, only one wins and the loser sees RowsAffected == 0.
 	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("id = ? AND status = ?", candidate.ID, models.ITStatusPendingPayment).
-		Updates(map[string]any{
-			"status":          models.ITStatusPaymentReceived,
-			"payment_ref":     chargeID,
-			"received_amount": amountMinor,
-		})
+		Updates(claim)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -119,67 +168,57 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, nil
 	}
 
-	var intent models.ITIntent
-	if err := s.db.WithContext(ctx).First(&intent, "id = ?", candidate.ID).Error; err != nil {
-		return false, err
+	if qErr == nil {
+		log.Printf("[it stable buy] charge=%s funded %s %s for user=%s",
+			chargeID, q.AssetUnits, candidate.Asset, userID)
 	}
-
-	// Price at the LIVE rate on what actually landed. This is the binding
-	// price; the figure quoted at creation was indicative. Pricing on what
-	// arrived rather than what was quoted also handles under- and overpayment
-	// with no special case — the mirror of the sell leg's received/quoted.
-	if err := s.priceStableBuy(ctx, &intent); err != nil {
-		// The money is here and cannot be handed back, so this must NOT error
-		// the webhook — that would leave the charge unprocessed and re-driven
-		// forever. Park for an operator with the reason recorded. Covers an
-		// unusable rate and an underpayment below the provider floor alike:
-		// both mean "money landed, a human must decide".
-		//
-		// The park status is ITStatusBuyAwaitingRate, NOT the MCGP flow's
-		// awaiting_rate. Sharing that status would expose the intent to
-		// RepriceAndCreditAwaitingRate, which credits MCGP from company supply
-		// and then sets status back to pending_payment — re-opening the intent
-		// so the next incoming charge could claim it.
-		log.Printf("[it stable buy] ALARM charge=%s landed but could not be priced: %v", chargeID, err)
-		if uErr := s.db.WithContext(ctx).Model(&intent).Updates(map[string]any{
-			"status":         models.ITStatusBuyAwaitingRate,
-			"failure_reason": "could not price at settlement: " + err.Error(),
-		}).Error; uErr != nil {
-			return false, uErr
-		}
-		return true, nil
-	}
-
-	log.Printf("[it stable buy] charge=%s funded %s %s for user=%s",
-		chargeID, intent.AssetAmount, intent.Asset, userID)
 	return true, nil
 }
 
-// priceStableBuy prices a claimed buy on what actually arrived
-// (intent.ReceivedAmount) and moves it to payment_received. Shared by first
-// settlement, by redelivery completing an interrupted settlement, and by the
-// operator recovery RepriceParkedStableBuy.
-func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent) error {
-	q, err := s.QuoteStableBuy(ctx, intent.Asset, intent.ReceivedAmount, intent.Currency)
+// priceStableBuy re-prices `intent` on `fiatMinor` at the CURRENT live rate,
+// moving it from `fromStatus` to `toStatus` in one status-guarded write.
+//
+// The status guard is not optional. Unguarded, a price write that lands late —
+// the rate call is an HTTP round-trip — drags an intent BACKWARDS out of
+// `converting` after the naira has already been spent; the next watcher tick
+// then re-enters ConvertStableBuy and converts a second time with the SAME
+// reference, leaving nothing but the provider's own idempotency between us and
+// moving real money twice.
+//
+// Returns false when no row matched: something else advanced the intent first,
+// and it is no longer ours to price.
+//
+// The amount is a parameter rather than a read of intent.ReceivedAmount so
+// that the first settlement can price BEFORE it claims — see
+// settleStableBuyFromCharge. Callers after the claim pass ReceivedAmount.
+func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent, fiatMinor, fromStatus, toStatus string) (bool, error) {
+	q, err := s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"status":         models.ITStatusPaymentReceived,
-		"asset_amount":   q.AssetUnits.String(),
-		"locked_rate":    q.RatePerUnitMinor.String(),
-		"rate_minor":     q.RatePerUnitMinor.String(),
-		"rate_kobo":      q.RatePerUnitMinor.String(),
-		"repriced":       true,
-		"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
-	}).Error; err != nil {
-		return err
+	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ?", intent.ID, fromStatus).
+		Updates(map[string]any{
+			"status":         toStatus,
+			"asset_amount":   q.AssetUnits.String(),
+			"locked_rate":    q.RatePerUnitMinor.String(),
+			"rate_minor":     q.RatePerUnitMinor.String(),
+			"rate_kobo":      q.RatePerUnitMinor.String(),
+			"repriced":       true,
+			"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
+		})
+	if res.Error != nil {
+		return false, res.Error
 	}
-	intent.Status = models.ITStatusPaymentReceived
+	if res.RowsAffected == 0 {
+		return false, nil
+	}
+	intent.Status = toStatus
 	intent.AssetAmount = q.AssetUnits.String()
+	intent.LockedRate = q.RatePerUnitMinor.String()
 	intent.Repriced = true
 	intent.FailureReason = ""
-	return nil
+	return true, nil
 }
 
 // RepriceParkedStableBuy is the operator recovery for a stablecoin buy parked
@@ -199,8 +238,14 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 		!IsStableAsset(intent.Asset) {
 		return nil, ErrITBadState
 	}
-	if err := s.priceStableBuy(ctx, intent); err != nil {
+	applied, err := s.priceStableBuy(ctx, intent, intent.ReceivedAmount,
+		models.ITStatusBuyAwaitingRate, models.ITStatusPaymentReceived)
+	if err != nil {
 		return nil, err
+	}
+	if !applied {
+		// Someone moved it out of the park between our read and our write.
+		return nil, ErrITBadState
 	}
 	return s.getIntent(ctx, intentID)
 }

@@ -294,6 +294,37 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 	default:
 		return ErrITBadState
 	}
+
+	// Never advance a claim that was never priced. settleStableBuyFromCharge
+	// now claims and prices in one write, so the only way to reach here with
+	// Repriced == false is a row claimed by an older build — a rolling deploy.
+	// Converting such a row spends the real received_amount while delivery
+	// still carries the CREATION-TIME asset_amount: an overpayer silently
+	// loses the excess, and an underpayer's delivery is drawn from the POOLED
+	// merchant balance, i.e. another user's stablecoin.
+	if !intent.Repriced {
+		priced, err := s.priceStableBuy(ctx, intent, intent.ReceivedAmount, intent.Status, intent.Status)
+		if err != nil {
+			// Money has landed and cannot be handed back: park it visibly for
+			// an operator rather than converting on terms we cannot stand by.
+			log.Printf("[it stable buy] ALARM intent=%s was claimed but never priced and cannot be priced now: %v",
+				intent.ID, err)
+			if uErr := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+				Where("id = ? AND status = ?", intent.ID, intent.Status).
+				Updates(map[string]any{
+					"status":         models.ITStatusBuyAwaitingRate,
+					"failure_reason": "could not price before conversion: " + err.Error(),
+				}).Error; uErr != nil {
+				return uErr
+			}
+			return err
+		}
+		if !priced {
+			// Another tick advanced it while we were on the rate call.
+			return nil
+		}
+	}
+
 	if intent.ConversionAttempts >= maxStableConversionAttempts {
 		log.Printf("[IT] it_stable_conversion_exhausted intent=%s attempts=%d", intent.ID, intent.ConversionAttempts)
 		return ErrStableConversionExhausted
