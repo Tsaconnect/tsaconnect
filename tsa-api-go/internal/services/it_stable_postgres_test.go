@@ -80,7 +80,7 @@ func newStablePostgresService(t *testing.T) *ITService {
 			_ = sqlDB.Close()
 		}
 	})
-	if err := db.AutoMigrate(&models.ITIntent{}); err != nil {
+	if err := db.AutoMigrate(&models.ITIntent{}, &models.FiatVirtualAccount{}); err != nil {
 		t.Fatalf("migrate it_intents: %v", err)
 	}
 
@@ -185,5 +185,31 @@ func TestCreateStableSellIntent_LeavesNoNumericColumnEmptyOnPostgres(t *testing.
 		if isNull {
 			t.Errorf("numeric column %q is NULL — a reader parsing it as a number gets nothing", col)
 		}
+	}
+}
+
+func TestCreateStableBuyIntent_InsertsOnPostgres(t *testing.T) {
+	// The sell leg shipped a broken INSERT because PlatformKeptKobo was left
+	// unset and GORM sent '' for it. The buy literal has the same shape and the
+	// same exposure — this is the only test in the package that can see it.
+	s := newStablePostgresService(t)
+	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+
+	userID := uuid.New()
+	va := &models.FiatVirtualAccount{
+		ID: uuid.New(), UserID: userID, Currency: "NGN",
+		AccountNumber: "1234567890", BankName: "Wema Bank", AccountName: "TSA / Ada Okafor",
+		Reference: "ITVA-" + userID.String(),
+	}
+	if err := s.db.Create(va).Error; err != nil {
+		t.Fatalf("seed va: %v", err)
+	}
+
+	intent, pay, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("INSERT failed on PostgreSQL: %v", err)
+	}
+	if intent.ID == uuid.Nil || pay.AccountNumber == "" {
+		t.Fatal("intent or pay-into details not populated")
 	}
 }
