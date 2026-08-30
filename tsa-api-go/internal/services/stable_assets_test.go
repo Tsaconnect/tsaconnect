@@ -115,10 +115,10 @@ func TestValidateBuyDelivery(t *testing.T) {
 	const sol = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
 
 	for _, tc := range []struct {
-		name          string
-		chain, asset  string
-		address       string
-		wantErr       error
+		name         string
+		chain, asset string
+		address      string
+		wantErr      error
 	}{
 		{"polygon usdc", "POLYGON", "USDC", evm, nil},
 		{"polygon usdt", "POLYGON", "USDT", evm, nil},
@@ -170,9 +170,13 @@ func TestDeliverableChains(t *testing.T) {
 
 	t.Run("usdt hides base", func(t *testing.T) {
 		got := DeliverableChains("USDT", map[string]string{"POLYGON": evm, "BASE": evm, "SOLANA": sol})
-		for _, c := range got {
-			if c == "BASE" {
-				t.Fatal("BASE offered for USDT; Flutterwave rejects that pair")
+		want := []string{"POLYGON", "SOLANA"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
 			}
 		}
 	})
