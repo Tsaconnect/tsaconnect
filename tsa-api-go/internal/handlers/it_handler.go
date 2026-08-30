@@ -878,11 +878,19 @@ func stableStatusFor(err error) int {
 		// parked) and CancelStableBuy (not pending_payment). Client-fixable in
 		// the sense that acting on the wrong id/state is the caller's mistake,
 		// not a server fault — a DB error below still falls through to 500.
-		errors.Is(err, services.ErrITBadState):
+		errors.Is(err, services.ErrITBadState),
+		errors.Is(err, services.ErrStableBuyBelowMinimum),
+		errors.Is(err, services.ErrStableBuyAlreadyOpen),
+		errors.Is(err, services.ErrStableBuyNoVA),
+		errors.Is(err, services.ErrStableBuyNoWallet),
+		errors.Is(err, services.ErrUnsupportedChainAsset):
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrStableQuoteUnavailable),
 		errors.Is(err, services.ErrStableNoDepositAddress),
-		errors.Is(err, services.ErrStableNoTokenAddress):
+		errors.Is(err, services.ErrStableNoTokenAddress),
+		// The stablecoin is safely in our Flutterwave balance, not lost — but
+		// it needs an operator, not a retry from the caller. Ours, not theirs.
+		errors.Is(err, services.ErrStableDeliveryExhausted):
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
@@ -919,6 +927,18 @@ func stableCodeFor(err error) string {
 		// CancelStableBuy (not pending_payment) — both are "this action does
 		// not apply to the intent's current state", one machine code for both.
 		return "stable_buy_bad_state"
+	case errors.Is(err, services.ErrStableBuyBelowMinimum):
+		return "stable_buy_below_minimum"
+	case errors.Is(err, services.ErrStableBuyAlreadyOpen):
+		return "stable_buy_already_open"
+	case errors.Is(err, services.ErrStableBuyNoVA):
+		return "stable_buy_no_va"
+	case errors.Is(err, services.ErrStableBuyNoWallet):
+		return "stable_buy_no_wallet"
+	case errors.Is(err, services.ErrUnsupportedChainAsset):
+		return "stable_unsupported_chain_asset"
+	case errors.Is(err, services.ErrStableDeliveryExhausted):
+		return "stable_delivery_exhausted"
 	default:
 		return ""
 	}
@@ -943,4 +963,99 @@ func (h *ITHandler) requireITAgreement(c *gin.Context, userID uuid.UUID) bool {
 	log.Printf("[it] agreement gate user=%s: %v", userID, err)
 	utils.ErrorResponse(c, http.StatusInternalServerError, "Could not verify the trading agreement")
 	return false
+}
+
+type stableBuyQuoteRequest struct {
+	Asset    string `json:"asset" binding:"required"`
+	Amount   string `json:"amount" binding:"required"` // fiat MINOR units
+	Currency string `json:"currency" binding:"required"`
+}
+
+type stableBuyRequest struct {
+	stableBuyQuoteRequest
+	DestChain string `json:"destChain" binding:"required"`
+}
+
+// PostStableBuyQuote — POST /api/it/stable/buy/quote — prices an indicative
+// stablecoin purchase.
+func (h *ITHandler) PostStableBuyQuote(c *gin.Context) {
+	var req stableBuyQuoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	q, err := h.it.QuoteStableBuy(c.Request.Context(), req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Quote", gin.H{
+		"asset":       q.Asset,
+		"currency":    q.Currency,
+		"fiatMinor":   q.FiatMinor.String(),
+		"grossUnits":  q.GrossAssetUnits.String(),
+		"assetUnits":  q.AssetUnits.String(),
+		"ratePerUnit": q.RatePerUnitMinor.String(),
+		"expiresAt":   q.ExpiresAt,
+		// Indicative, not locked: the binding price is struck when the naira
+		// lands. Say so in the payload so the app cannot present it as firm.
+		"indicative": true,
+	})
+}
+
+// PostStableBuy — POST /api/it/stable/buy — opens a purchase and returns
+// where to pay.
+func (h *ITHandler) PostStableBuy(c *gin.Context) {
+	var req stableBuyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if !h.requireITAgreement(c, user.ID) {
+		return
+	}
+	ctx := c.Request.Context()
+
+	q, err := h.it.QuoteStableBuy(ctx, req.Asset, req.Amount, req.Currency)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	// The address is OURS to supply, never the caller's to send: it is read
+	// from the user's wallet. There is deliberately no address field on the
+	// request body.
+	addr, err := h.it.UserDeliveryAddress(ctx, user.ID, req.DestChain)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	intent, payInto, err := h.it.CreateStableBuyIntent(ctx, user.ID, q, req.DestChain, addr)
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Purchase created", gin.H{
+		"intent": intent, "payInto": payInto,
+	})
+}
+
+// GetStableBuyChains — GET /api/it/stable/buy/chains?asset=USDC — the chains
+// this user can receive `asset` on.
+func (h *ITHandler) GetStableBuyChains(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	chains, err := h.it.DeliverableChainsForUser(c.Request.Context(), user.ID, c.Query("asset"))
+	if err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Chains", gin.H{"chains": chains})
 }

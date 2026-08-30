@@ -140,3 +140,135 @@ func TestCreateStableBuyIntent_RequiresAVirtualAccount(t *testing.T) {
 		t.Fatalf("err = %v, want ErrStableBuyNoVA", err)
 	}
 }
+
+// newStableBuyDeliveryTestDB wires a DB with a real `users` table (raw DDL,
+// not AutoMigrate — models.User's id column carries a PostgreSQL-only
+// `default:gen_random_uuid()` that SQLite's driver cannot parse; mirrors
+// referral_graph_service_test.go's setupReferralGraphTestDB) plus
+// wallet_addresses (AutoMigrate is fine there — no Postgres-only default).
+func newStableBuyDeliveryTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		username TEXT NOT NULL UNIQUE,
+		email TEXT NOT NULL UNIQUE,
+		password TEXT NOT NULL,
+		wallet_address TEXT
+	)`).Error; err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	if err := db.AutoMigrate(&models.WalletAddress{}); err != nil {
+		t.Fatalf("migrate wallet_addresses: %v", err)
+	}
+	return db
+}
+
+// TestDeliverableChainsForUser_ReadsBothAddressSources is the test the brief
+// calls out by name: it seeds BOTH delivery-address sources — a
+// users.wallet_address row (EVM) and a wallet_addresses row with
+// chain_key = "solana", lowercase, exactly as the real address-registration
+// path writes it (see wallet_nonevm handlers) — and proves DeliverableChainsForUser
+// reads both. A test seeding only one source would still pass against the dead
+// models.Wallet.Addresses column this replaces; seeding both is what catches it.
+func TestDeliverableChainsForUser_ReadsBothAddressSources(t *testing.T) {
+	db := newStableBuyDeliveryTestDB(t)
+	userID := uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address)
+		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?)`,
+		userID.String(), testBuyEVM).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	solRow := models.WalletAddress{
+		UserID:   userID,
+		WalletID: testBuyEVM,
+		ChainKey: "solana", // lowercase, as the real producer writes it
+		Family:   "solana",
+		Address:  "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+	}
+	if err := db.Create(&solRow).Error; err != nil {
+		t.Fatalf("seed solana address: %v", err)
+	}
+
+	s := NewITService(db, nil, stubFx{ngn: 1500})
+
+	usdc, err := s.DeliverableChainsForUser(context.Background(), userID, "USDC")
+	if err != nil {
+		t.Fatalf("USDC: unexpected error: %v", err)
+	}
+	wantUSDC := []string{"BASE", "ETHEREUM", "POLYGON", "SOLANA"}
+	if !slicesEqual(usdc, wantUSDC) {
+		t.Fatalf("USDC chains = %v, want %v (EVM address source + wallet_addresses solana source both required)", usdc, wantUSDC)
+	}
+
+	usdt, err := s.DeliverableChainsForUser(context.Background(), userID, "USDT")
+	if err != nil {
+		t.Fatalf("USDT: unexpected error: %v", err)
+	}
+	wantUSDT := []string{"ETHEREUM", "POLYGON", "SOLANA"}
+	if !slicesEqual(usdt, wantUSDT) {
+		t.Fatalf("USDT chains = %v, want %v (BASE only delivers USDC, must be absent)", usdt, wantUSDT)
+	}
+}
+
+// TestUserDeliveryAddress_ReadsEachSource proves UserDeliveryAddress resolves
+// an EVM chain from users.wallet_address and SOLANA from wallet_addresses —
+// the same two sources DeliverableChainsForUser draws on, exercised
+// individually so a regression in either lookup fails on its own chain.
+func TestUserDeliveryAddress_ReadsEachSource(t *testing.T) {
+	db := newStableBuyDeliveryTestDB(t)
+	userID := uuid.New()
+	if err := db.Exec(`INSERT INTO users (id, name, username, email, password, wallet_address)
+		VALUES (?, 'Ada Okafor', 'ada', 'ada@test.com', 'x', ?)`,
+		userID.String(), testBuyEVM).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	const solAddr = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+	if err := db.Create(&models.WalletAddress{
+		UserID: userID, WalletID: testBuyEVM, ChainKey: "solana", Family: "solana", Address: solAddr,
+	}).Error; err != nil {
+		t.Fatalf("seed solana address: %v", err)
+	}
+
+	s := NewITService(db, nil, stubFx{ngn: 1500})
+
+	for _, chain := range []string{"ETHEREUM", "POLYGON", "BASE"} {
+		got, err := s.UserDeliveryAddress(context.Background(), userID, chain)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", chain, err)
+		}
+		if got != testBuyEVM {
+			t.Fatalf("%s address = %q, want %q", chain, got, testBuyEVM)
+		}
+	}
+
+	got, err := s.UserDeliveryAddress(context.Background(), userID, "SOLANA")
+	if err != nil {
+		t.Fatalf("SOLANA: unexpected error: %v", err)
+	}
+	if got != solAddr {
+		t.Fatalf("SOLANA address = %q, want %q", got, solAddr)
+	}
+
+	if _, err := s.UserDeliveryAddress(context.Background(), uuid.New(), "SOLANA"); !errors.Is(err, ErrStableBuyNoWallet) {
+		t.Fatalf("unknown user: err = %v, want ErrStableBuyNoWallet", err)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -20,7 +20,89 @@ var (
 	ErrStableBuyAlreadyOpen = errors.New("it stable buy: this user already has a purchase awaiting payment")
 	// ErrStableBuyNoVA means the user has no standing virtual account yet.
 	ErrStableBuyNoVA = errors.New("it stable buy: user has no virtual account; activate one first")
+	// ErrStableBuyNoWallet means the user has no wallet to receive into.
+	ErrStableBuyNoWallet = errors.New("it stable buy: user has no wallet")
 )
+
+// userDeliveryAddresses maps CHAIN -> the user's own address.
+//
+// TWO sources, not one. An earlier draft read models.Wallet.Addresses; that is
+// a DEAD COLUMN — models.WalletAddrEntry occurs exactly once in this repo (its
+// own declaration) and nothing has written it since the Node/Mongo API was
+// retired. Reading it returns an empty map for every user, which would make
+// every buy fail with "no address on this chain".
+//
+//	ETHEREUM / POLYGON / BASE -> users.wallet_address (one EVM address serves all)
+//	SOLANA                    -> wallet_addresses where chain_key = 'solana'
+//
+// Keys are upper-cased on the way out: every chain-key producer in this repo is
+// lowercase ("polygon", "solana") while deliveryMatrix keys are uppercase, so a
+// case-sensitive lookup silently finds nothing.
+func (s *ITService) userDeliveryAddresses(ctx context.Context, userID uuid.UUID) (map[string]string, error) {
+	out := make(map[string]string, 4)
+
+	var user models.User
+	if err := s.db.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrStableBuyNoWallet
+		}
+		return nil, err
+	}
+	if evm := strings.TrimSpace(user.WalletAddress); evm != "" {
+		for _, chain := range []string{"ETHEREUM", "POLYGON", "BASE"} {
+			out[chain] = evm
+		}
+	}
+
+	var rows []models.WalletAddress
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		key := strings.ToUpper(strings.TrimSpace(r.ChainKey))
+		if addr := strings.TrimSpace(r.Address); addr != "" && key != "" {
+			out[key] = addr
+		}
+	}
+
+	if len(out) == 0 {
+		return nil, ErrStableBuyNoWallet
+	}
+	return out, nil
+}
+
+// UserDeliveryAddress returns the user's own address on `chain`.
+//
+// The address is never accepted from the request body. A typed address is the
+// single way this flow could lose funds irrecoverably, so there is no code
+// path that reads one from the caller.
+func (s *ITService) UserDeliveryAddress(ctx context.Context, userID uuid.UUID, chain string) (string, error) {
+	chain = strings.ToUpper(strings.TrimSpace(chain))
+	addrs, err := s.userDeliveryAddresses(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	addr := addrs[chain]
+	if addr == "" {
+		return "", fmt.Errorf("%w: you have no %s address to receive on", ErrBadDeliveryAddress, chain)
+	}
+	return addr, nil
+}
+
+// DeliverableChainsForUser lists the chains this user can be paid `asset` on.
+func (s *ITService) DeliverableChainsForUser(ctx context.Context, userID uuid.UUID, asset string) ([]string, error) {
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	if !IsStableAsset(asset) {
+		return nil, fmt.Errorf("%w: got %q", ErrStableNotAnAsset, asset)
+	}
+	addrs, err := s.userDeliveryAddresses(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return DeliverableChains(asset, addrs), nil
+}
 
 // StableBuyInstructions is where the user sends their naira: their own
 // standing virtual account, unchanged between purchases.
