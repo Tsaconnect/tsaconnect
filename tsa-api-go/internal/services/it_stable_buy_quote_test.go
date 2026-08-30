@@ -76,6 +76,27 @@ func TestQuoteStableBuy_EnforcesDeliveryMinimum(t *testing.T) {
 	}
 }
 
+// TestQuoteStableBuy_RejectedSpreadStillChargesMargin proves the fix for the
+// zero-margin hole: a rejected SetStableSpreadBps call must not leave the
+// service quoting at 0bps.
+func TestQuoteStableBuy_RejectedSpreadStillChargesMargin(t *testing.T) {
+	s := NewITService(nil, nil, stubFx{ngn: 1650})
+	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	s.SetStableRateLockTTL(15 * time.Minute)
+	if err := s.SetStableSpreadBps(10000); err == nil {
+		t.Fatal("spread of 10000bps accepted")
+	}
+
+	q, err := s.QuoteStableBuy(context.Background(), "USDC", "16502500", "NGN")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.AssetUnits.Cmp(q.GrossAssetUnits) >= 0 {
+		t.Fatalf("net = %s, gross = %s: a rejected spread configuration must not fall back to zero margin",
+			q.AssetUnits, q.GrossAssetUnits)
+	}
+}
+
 func TestQuoteStableBuy_RejectsBadInput(t *testing.T) {
 	s := newBuyQuoteTestService(t, &buyRateQuoter{ngnPerUnit: 1650.25})
 	for _, tc := range []struct {

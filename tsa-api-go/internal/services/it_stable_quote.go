@@ -119,18 +119,41 @@ func (s *ITService) stablePlausibilityRateFor(ctx context.Context, currency stri
 // independent FX feed before a quote is refused. 0 ⇒ 2500 (±25%).
 func (s *ITService) SetStableRateToleranceBps(bps int64) { s.stableRateTolBps = bps }
 
+// DefaultStableSpreadBps is the margin applied when none is configured, or
+// when a configured value is rejected.
+//
+// A zero spread must be unreachable: ApplySellSpread and ApplyBuySpread both
+// treat spreadBps<=0 as "no spread, pass the gross amount through unchanged",
+// so a rejected SetStableSpreadBps call — a config typo hitting the >=10000
+// guard — must not silently zero the company's entire margin on every
+// stablecoin trade. Mirrors DefaultStableMinSellMajor/stableMinSell below.
+const DefaultStableSpreadBps int64 = 155
+
 // SetStableSpreadBps wires the company margin for brokered stablecoin trades.
 //
 // Rejects >= 10000 bps: QuoteStableBuy's per-unit rate divides by
 // (10000-spread), and a 100%+ spread would either divide by zero or invert
 // the price. Unreachable via any configured value today, but this is the
 // single place that guards the money-path panic rather than each caller.
+// Rejecting leaves the previously configured value in place — see
+// stableSpread(), which falls back to DefaultStableSpreadBps rather than 0.
 func (s *ITService) SetStableSpreadBps(bps int64) error {
 	if bps >= 10000 {
 		return fmt.Errorf("it stable: spread must be less than 10000 bps, got %d", bps)
 	}
 	s.stableSpreadBps = bps
 	return nil
+}
+
+// stableSpread returns the configured spread, or the documented default when
+// none has been set (or a rejected value left the field at its zero value).
+// It never returns a spread <= 0, so margin cannot be lost by leaving config
+// unset or by a rejected SetStableSpreadBps call.
+func (s *ITService) stableSpread() int64 {
+	if s.stableSpreadBps > 0 {
+		return s.stableSpreadBps
+	}
+	return DefaultStableSpreadBps
 }
 
 // SetStableRateLockTTL bounds how long a quoted rate is honoured.
@@ -244,11 +267,11 @@ func (s *ITService) QuoteStableSell(ctx context.Context, asset, amountMajor, cur
 	grossRat.Quo(grossRat, new(big.Rat).SetInt(exp))
 	gross := new(big.Int).Quo(grossRat.Num(), grossRat.Denom())
 
-	net := ApplySellSpread(gross, s.stableSpreadBps)
+	net := ApplySellSpread(gross, s.stableSpread())
 
 	// Per-unit rate at the spread price, for the intent's rate lock.
 	perUnit := new(big.Rat).Mul(fiatPerUnit, new(big.Rat).SetInt64(100))
-	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000-s.stableSpreadBps, 10000))
+	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000-s.stableSpread(), 10000))
 	ratePerUnit := new(big.Int).Quo(perUnit.Num(), perUnit.Denom())
 
 	q := &StableSellQuote{

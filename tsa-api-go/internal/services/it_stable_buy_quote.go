@@ -77,7 +77,7 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 	grossRat.Mul(grossRat, new(big.Rat).SetInt(exp))
 	gross := new(big.Int).Quo(grossRat.Num(), grossRat.Denom())
 
-	net := ApplyBuySpread(gross, s.stableSpreadBps)
+	net := ApplyBuySpread(gross, s.stableSpread())
 
 	if net.Cmp(s.stableMinSell()) < 0 {
 		return nil, fmt.Errorf("%w: minimum delivery is %g %s",
@@ -88,10 +88,10 @@ func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, curren
 	//
 	// SetFrac64(10000, 10000-spread) divides by zero if the spread is ever
 	// configured to 10000 bps. Unreachable today (SetStableSpreadBps rejects
-	// that), but guarded there rather than leaving a latent panic on a money
-	// path.
+	// that, and stableSpread() never returns <= 0), but guarded there rather
+	// than leaving a latent panic on a money path.
 	perUnit := new(big.Rat).Mul(fiatPerUnit, new(big.Rat).SetInt64(100))
-	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000, 10000-s.stableSpreadBps))
+	perUnit.Mul(perUnit, new(big.Rat).SetFrac64(10000, 10000-s.stableSpread()))
 	ratePerUnit := new(big.Int).Quo(perUnit.Num(), perUnit.Denom())
 
 	return &StableBuyQuote{

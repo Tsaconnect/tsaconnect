@@ -416,3 +416,40 @@ func TestSetStableMinSell(t *testing.T) {
 		}
 	})
 }
+
+// TestSetStableSpreadBps guards against the fix in this round: a rejected or
+// unset spread must never collapse to 0, because ApplySellSpread/
+// ApplyBuySpread both treat spreadBps<=0 as "pass the gross amount through
+// unchanged" — a zero spread here means every stablecoin trade runs at zero
+// company margin. Mirrors TestSetStableMinSell's shape.
+func TestSetStableSpreadBps(t *testing.T) {
+	t.Run("rejected >=10000 leaves the default in force, not zero", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableSpreadBps(10000); err == nil {
+			t.Fatal("spread of 10000bps accepted")
+		}
+		if got := s.stableSpread(); got != DefaultStableSpreadBps {
+			t.Fatalf("effective spread = %d after a rejected value, want default %d", got, DefaultStableSpreadBps)
+		}
+	})
+
+	t.Run("unset (zero value) is never in force", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableSpreadBps(0); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := s.stableSpread(); got != DefaultStableSpreadBps {
+			t.Fatalf("effective spread = %d, want default %d — a zero spread must never be in force", got, DefaultStableSpreadBps)
+		}
+	})
+
+	t.Run("valid value applies", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableSpreadBps(200); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := s.stableSpread(); got != 200 {
+			t.Fatalf("effective spread = %d, want 200", got)
+		}
+	})
+}
