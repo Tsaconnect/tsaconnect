@@ -248,7 +248,6 @@ func TestSettleStableBuyFromCharge_RedeliveryCompletesUnfinishedPricing(t *testi
 	}
 }
 
-
 func TestSettleStableBuyFromCharge_DoesNotClaimAnAbandonedIntent(t *testing.T) {
 	// C2: nothing else expires or cancels a stablecoin buy, so an abandoned
 	// intent must stop claiming money on its own once it is old enough that
@@ -352,5 +351,62 @@ func TestCancelStableBuy_RefusesOnceMoneyHasLanded(t *testing.T) {
 
 	if err := s.CancelStableBuy(context.Background(), userID, intent.ID); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("err = %v, want ErrITBadState — money already landed, this must not cancel it", err)
+	}
+}
+
+func TestCreateStableBuyIntent_ExpiresAnAbandonedPurchase(t *testing.T) {
+	// Nothing retired a stale pending_payment buy. Past the claim window it
+	// could no longer claim a charge, but it still tripped
+	// ErrStableBuyAlreadyOpen and wedged the user out of buying — with no
+	// operator visibility either, since pending_payment is deliberately
+	// absent from the stuck list.
+	s, userID := newStableBuyDBService(t)
+	stale, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	old := time.Now().Add(-stableBuyClaimWindow - time.Hour)
+	if err := s.db.Model(stale).UpdateColumn("created_at", old).Error; err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	fresh, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("an abandoned purchase still wedged the user out: %v", err)
+	}
+	if fresh.ID == stale.ID {
+		t.Fatal("returned the stale intent instead of a new purchase")
+	}
+
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", stale.ID)
+	if got.Status != models.ITStatusCancelled {
+		t.Fatalf("stale intent status = %q, want cancelled", got.Status)
+	}
+	if got.FailureReason != "expired before payment" {
+		t.Fatalf("failure reason = %q, want it to say why", got.FailureReason)
+	}
+}
+
+func TestCreateStableBuyIntent_DoesNotExpireAPurchaseInsideTheWindow(t *testing.T) {
+	// The other side of the same guard: a slow but plausible bank transfer is
+	// still coming, so the intent must keep blocking a second one.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recent := time.Now().Add(-stableBuyClaimWindow + time.Hour)
+	if err := s.db.Model(intent).UpdateColumn("created_at", recent).Error; err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	if _, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM); !errors.Is(err, ErrStableBuyAlreadyOpen) {
+		t.Fatalf("err = %v, want ErrStableBuyAlreadyOpen", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusPendingPayment {
+		t.Fatalf("status = %q, want the in-window intent left alone", got.Status)
 	}
 }

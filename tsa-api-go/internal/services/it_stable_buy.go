@@ -175,6 +175,11 @@ func (s *ITService) CreateStableBuyIntent(
 		return nil, nil, err
 	}
 
+	// Retire this user's abandoned purchases before counting the open ones.
+	if err := s.expireStaleStableBuys(ctx, userID); err != nil {
+		return nil, nil, err
+	}
+
 	var open int64
 	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
@@ -243,6 +248,34 @@ func (s *ITService) CreateStableBuyIntent(
 		AccountName:   va.AccountName,
 		Reference:     va.Reference,
 	}, nil
+}
+
+// expireStaleStableBuys retires this user's abandoned purchases.
+//
+// Past stableBuyClaimWindow a pending_payment row can no longer claim a charge
+// (settleStableBuyFromCharge bounds its candidate query by age), but nothing
+// retired it either: it still trips ErrStableBuyAlreadyOpen and wedges the
+// user out of buying, and it is deliberately absent from the stuck list —
+// nothing has been paid, so no operator ever sees it. It also silently
+// diverted the user's late transfer to the MCGP path, handing them an
+// irreversible on-chain credit when they asked for stablecoin.
+//
+// Opportunistic rather than a periodic job: it runs on the user's next
+// attempt, which is exactly when the wedge is felt, and it needs no new
+// scheduler registration on a live boot path. Cancelling is safe against a
+// charge landing in the same instant — the claim query requires BOTH
+// pending_payment and an age inside the window, so a row this touches was
+// already unclaimable.
+func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID) error {
+	return s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ? AND created_at < ?",
+			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
+			[]string{models.ITAssetUSDC, models.ITAssetUSDT},
+			time.Now().Add(-stableBuyClaimWindow)).
+		Updates(map[string]any{
+			"status":         models.ITStatusCancelled,
+			"failure_reason": "expired before payment",
+		}).Error
 }
 
 // CancelStableBuy lets a user abandon their own stablecoin buy before money
