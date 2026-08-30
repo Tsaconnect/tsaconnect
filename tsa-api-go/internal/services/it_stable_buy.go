@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
@@ -138,4 +140,141 @@ func (s *ITService) CreateStableBuyIntent(
 		AccountName:   va.AccountName,
 		Reference:     va.Reference,
 	}, nil
+}
+
+// itBuyConversionRef mints the reference for a buy's NGN→asset conversion.
+//
+// Same length accounting as itConversionRef: Flutterwave rejects references
+// outside 6–42 chars. "ITBC-" (5) + hyphen-less UUID (32) = 37, leaving 5 for
+// "-" plus the attempt count.
+func itBuyConversionRef(intentID uuid.UUID, attempts int) string {
+	return fmt.Sprintf("ITBC-%s-%d", strings.ReplaceAll(intentID.String(), "-", ""), attempts)
+}
+
+// ConvertStableBuy converts the user's naira into the stablecoin they bought.
+//
+// The balance check is the invariant in code: we convert only once Flutterwave
+// reports the fiat as SPENDABLE. A charge.completed proves money was received,
+// not that it settled into available_balance — and available_balance is what
+// ConvertBalance actually draws on. If VA credits turn out to be immediately
+// spendable this check passes on the first tick and is invisible; if they wait
+// for T+1 it holds the intent correctly. That is the whole point of the state.
+func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	switch intent.Status {
+	case models.ITStatusConverting, models.ITStatusDelivering, models.ITStatusSettled:
+		return nil
+	case models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds:
+	default:
+		return ErrITBadState
+	}
+	if intent.ConversionAttempts >= maxStableConversionAttempts {
+		return ErrStableConversionExhausted
+	}
+	if s.stableConverter == nil {
+		return errors.New("it stable buy: converter not configured")
+	}
+
+	paid, ok := new(big.Int).SetString(strings.TrimSpace(intent.ReceivedAmount), 10)
+	if !ok || paid.Sign() <= 0 {
+		return errors.New("it stable buy: intent has no received amount")
+	}
+
+	// Read the spendable balance exactly as the sell leg does: FetchBalances
+	// reports major units and AvailableBalance is the post-settlement figure
+	// ConvertBalance actually draws on.
+	balances, err := s.stableConverter.FetchBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("it stable buy: %w", err)
+	}
+	var available float64
+	found := false
+	for _, b := range balances {
+		if strings.EqualFold(b.Currency, intent.Currency) {
+			available, found = b.AvailableBalance, true
+			break
+		}
+	}
+	if !found {
+		// Distinct from an ordinary not-yet-settled wait: a missing line can
+		// mean the integration itself is not surfacing this currency. Both
+		// fail the same way; the log makes them distinguishable.
+		log.Printf("[IT] it_stable_balance_line_missing currency=%s intent=%s", intent.Currency, intent.ID)
+	}
+	needed, _ := new(big.Rat).SetFrac(paid, big.NewInt(100)).Float64()
+	if !found || available < needed {
+		if intent.Status != models.ITStatusAwaitingFunds {
+			if err := s.db.WithContext(ctx).Model(intent).
+				Update("status", models.ITStatusAwaitingFunds).Error; err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("%w: %s spendable=%v needed=%v",
+			ErrStableCreditNotVisible, intent.Currency, available, needed)
+	}
+
+	ref := itBuyConversionRef(intent.ID, intent.ConversionAttempts)
+	tr, err := s.stableConverter.ConvertBalance(ctx, s.stableMerchantID,
+		intent.Currency, intent.Asset,
+		FWAmount{Value: needed, AppliesTo: "source_currency"}, ref)
+	if err != nil {
+		return fmt.Errorf("it stable buy convert: %w", err)
+	}
+
+	// Stop at converting. Flutterwave returns 201 {"status":"NEW"} and settles
+	// later, so the asset does not exist yet — delivering here would send
+	// stablecoin we have not bought.
+	return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"status":        models.ITStatusConverting,
+		"conversion_id": tr.ID,
+	}).Error
+}
+
+// FinalizeBuyConversion advances a buy once its NGN→asset conversion settles.
+//
+// FAILED drops back to awaiting_funds rather than a terminal state: the user's
+// naira is still in our balance, so retrying is both safe and correct. The
+// attempt counter is bumped alongside so the next call mints a fresh
+// reference — reusing the old one would hit Flutterwave's idempotency, return
+// the same FAILED transfer, and loop forever.
+func (s *ITService) FinalizeBuyConversion(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	switch intent.Status {
+	case models.ITStatusDelivering, models.ITStatusSettled:
+		return nil
+	case models.ITStatusConverting:
+	default:
+		return ErrITBadState
+	}
+	if intent.ConversionID == "" {
+		return errors.New("it stable buy: converting intent has no conversion id")
+	}
+	if s.stableTransfers == nil {
+		return errors.New("it stable buy: no transfer reader configured")
+	}
+
+	tr, err := s.stableTransfers.GetTransfer(ctx, intent.ConversionID)
+	if err != nil {
+		return fmt.Errorf("it stable buy: %w", err)
+	}
+	switch strings.ToUpper(tr.Status) {
+	case "SUCCESSFUL":
+		return s.db.WithContext(ctx).Model(intent).
+			Update("status", models.ITStatusDelivering).Error
+	case "FAILED":
+		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+			"status":              models.ITStatusAwaitingFunds,
+			"failure_reason":      "buy conversion failed: " + tr.ID,
+			"conversion_id":       "",
+			"conversion_attempts": intent.ConversionAttempts + 1,
+		}).Error
+	default:
+		return fmt.Errorf("%w: conversion %s is %s", ErrStableConversionPending, tr.ID, tr.Status)
+	}
 }
