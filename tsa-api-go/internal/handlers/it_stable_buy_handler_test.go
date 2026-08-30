@@ -31,6 +31,9 @@ func TestStableCodeFor_CoversBuyErrors(t *testing.T) {
 		{services.ErrStableDeliveryExhausted, "stable_delivery_exhausted"},
 		// The buy path raises this whenever HasStableBuy is unsatisfied.
 		{services.ErrStableQuoteUnavailable, "stable_not_configured"},
+		// Not buy-specific: it_stable_sell.go raises ErrITBadState at seven
+		// sites, so a buy-flavoured code here would mislabel a sell failure.
+		{services.ErrITBadState, "stable_bad_state"},
 	} {
 		if got := stableCodeFor(tc.err); got != tc.want {
 			t.Fatalf("code for %v = %q, want %q", tc.err, got, tc.want)
@@ -247,5 +250,31 @@ func TestPostStableBuyQuote_ResponseIsMarkedIndicative(t *testing.T) {
 	}
 	if !containsJSONString(w.Body.Bytes(), `"indicative":true`) {
 		t.Fatalf("response does not mark itself indicative: %s", w.Body.String())
+	}
+}
+
+// Phase B1 is NGN-only: the money arrives through the user's standing NGN
+// virtual account. An unsupported currency used to be priced and quoted first
+// and only failed at the VA lookup, reported as a missing virtual account.
+func TestPostStableBuy_RejectsANonNGNCurrencyUpFront(t *testing.T) {
+	r, db, userID := newStableBuyTestRouterWithIdempotency(t)
+
+	const body = `{"asset":"USDC","amount":"16502500","currency":"EUR","destChain":"POLYGON"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/it/stable/buy", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "buy-key-eur")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+	if !containsJSONString(w.Body.Bytes(), `"stable_buy_unsupported_currency"`) {
+		t.Fatalf("response carries no machine code the app can branch on: %s", w.Body.String())
+	}
+	var count int64
+	db.Model(&models.ITIntent{}).Where("user_id = ?", userID).Count(&count)
+	if count != 0 {
+		t.Fatalf("intent count = %d, want 0 — nothing may be written for an unsupported currency", count)
 	}
 }

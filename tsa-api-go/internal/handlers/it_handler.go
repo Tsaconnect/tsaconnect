@@ -948,10 +948,11 @@ func stableCodeFor(err error) string {
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"
 	case errors.Is(err, services.ErrITBadState):
-		// Shared by RepriceParkedStableBuy (not currently parked) and
-		// CancelStableBuy (not pending_payment) — both are "this action does
-		// not apply to the intent's current state", one machine code for both.
-		return "stable_buy_bad_state"
+		// "this action does not apply to the intent's current state", one
+		// machine code for every ramp endpoint that can raise it. NOT
+		// buy-specific: it_stable_sell.go raises ErrITBadState at seven sites,
+		// so a bad-state SELL deposit would otherwise report a BUY code.
+		return "stable_bad_state"
 	case errors.Is(err, services.ErrStableBuyBelowMinimum):
 		return "stable_buy_below_minimum"
 	case errors.Is(err, services.ErrStableBuyAlreadyOpen):
@@ -996,6 +997,21 @@ type stableBuyQuoteRequest struct {
 	Currency string `json:"currency" binding:"required"`
 }
 
+// stableBuyCurrency normalises the caller-supplied currency and rejects
+// anything Phase B1 does not support. NGN is the only one: the money arrives
+// through the user's standing NGN virtual account. Without this, a EUR request
+// is priced, quoted and only fails much later at the VA lookup, with a message
+// about a missing virtual account rather than an unsupported currency.
+func stableBuyCurrency(c *gin.Context, raw string) (string, bool) {
+	currency := strings.ToUpper(strings.TrimSpace(raw))
+	if currency != "NGN" {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"Stablecoin purchases are NGN-only", "stable_buy_unsupported_currency")
+		return "", false
+	}
+	return currency, true
+}
+
 type stableBuyRequest struct {
 	stableBuyQuoteRequest
 	DestChain string `json:"destChain" binding:"required"`
@@ -1009,7 +1025,11 @@ func (h *ITHandler) PostStableBuyQuote(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	q, err := h.it.QuoteStableBuy(c.Request.Context(), req.Asset, req.Amount, req.Currency)
+	currency, ok := stableBuyCurrency(c, req.Currency)
+	if !ok {
+		return
+	}
+	q, err := h.it.QuoteStableBuy(c.Request.Context(), req.Asset, req.Amount, currency)
 	if err != nil {
 		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
@@ -1041,12 +1061,16 @@ func (h *ITHandler) PostStableBuy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
+	currency, ok := stableBuyCurrency(c, req.Currency)
+	if !ok {
+		return
+	}
 	if !h.requireITAgreement(c, user.ID) {
 		return
 	}
 	ctx := c.Request.Context()
 
-	q, err := h.it.QuoteStableBuy(ctx, req.Asset, req.Amount, req.Currency)
+	q, err := h.it.QuoteStableBuy(ctx, req.Asset, req.Amount, currency)
 	if err != nil {
 		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return

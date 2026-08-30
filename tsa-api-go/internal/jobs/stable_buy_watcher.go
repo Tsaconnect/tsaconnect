@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,7 +50,9 @@ func (w *StableBuyWatcher) Run(ctx context.Context) error {
 
 	// Errors are logged and swallowed per intent, never returned: one user's
 	// unsettled conversion must not stop every other user from advancing.
-	for _, id := range append(received, awaiting...) {
+	// slices.Concat, not append: append would write into `received`'s backing
+	// array, which is not ours to reuse and says nothing about the intent.
+	for _, id := range slices.Concat(received, awaiting) {
 		if err := w.driver.ConvertStableBuy(ctx, id); err != nil {
 			log.Printf("[it-stable-buy-watcher] convert intent=%s: %v", id, err)
 		}

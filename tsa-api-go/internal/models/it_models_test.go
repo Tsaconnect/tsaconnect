@@ -53,6 +53,7 @@ func TestBuyStatusesAreDistinct(t *testing.T) {
 		ITStatusConverting,
 		ITStatusDelivering,
 		ITStatusSettled,
+		ITStatusBuyAwaitingRate,
 	}
 	seen := map[string]bool{}
 	for _, s := range all {
