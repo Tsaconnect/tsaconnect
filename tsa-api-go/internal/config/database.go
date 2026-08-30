@@ -364,6 +364,16 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_settled_tx_hash
 	    ON it_intents (settled_tx_hash) WHERE settled_tx_hash <> ''`)
 
+	// IT stablecoin-buy "one open purchase per user": CreateStableBuyIntent's
+	// Count-then-Create is not atomic, so a losing race must fail at the
+	// database rather than mint a second claimable intent for the same
+	// standing VA reference. Partial over pending_payment stablecoin buys.
+	// Idempotent.
+	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_stable_buy
+	    ON it_intents (user_id)
+	    WHERE direction = 'buy' AND status = 'pending_payment'
+	      AND asset IN ('USDC','USDT')`)
+
 	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
 	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
 	// flow. All other Service categories default to 'contact' (the AutoMigrate

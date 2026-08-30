@@ -119,12 +119,12 @@ func ValidateBuyDelivery(chain, asset, address string) error {
 // sorted for a stable UI ordering.
 //
 // Takes a plain chain->address map rather than the wallet itself so it stays
-// pure and testable; the service layer builds that map from the jsonb entry
-// list (see userDeliveryAddresses), filtering out external and inactive
-// addresses on the way.
+// pure and testable; the service layer builds that map from users.wallet_address
+// (one EVM address for ETHEREUM/POLYGON/BASE) plus the wallet_addresses table
+// (SOLANA) — see userDeliveryAddresses.
 //
 // A chain is offered ONLY when Flutterwave delivers the pair AND the user
-// actually holds an address on it. Wallet.Addresses is a sparse map — a Solana
+// actually holds an address on it. The caller's map is sparse — a Solana
 // address exists only if the wallet derived one — and offering a chain the
 // user cannot receive on would strand funds somewhere they cannot see.
 func DeliverableChains(asset string, addresses map[string]string) []string {

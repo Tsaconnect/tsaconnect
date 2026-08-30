@@ -852,6 +852,27 @@ func (h *ITHandler) GetStuckStableSells(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Stuck sells", gin.H{"stuck": rows, "thresholdMinutes": minutes})
 }
 
+// GetStuckStableBuys lists brokered buys that have not advanced.
+//
+// Every row here is user money we are holding mid-flight — naira not yet
+// converted, or a stablecoin transfer not yet settled. buy_awaiting_rate rows
+// are the most urgent: the watcher deliberately never auto-advances that
+// park, so this list is the only way an operator learns one exists.
+func (h *ITHandler) GetStuckStableBuys(c *gin.Context) {
+	minutes := 30
+	if raw := c.Query("minutes"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	rows, err := h.it.ListStuckStableBuys(c.Request.Context(), time.Duration(minutes)*time.Minute)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Stuck buys", gin.H{"stuck": rows, "thresholdMinutes": minutes})
+}
+
 // stableStatusFor maps ramp errors to HTTP codes. Anything the caller can fix
 // is a 400; a missing provider or unconfigured deposit address is a 503,
 // because the request was fine and the platform was not.

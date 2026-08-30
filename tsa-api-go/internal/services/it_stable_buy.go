@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -162,18 +163,12 @@ func (s *ITService) CreateStableBuyIntent(
 	if open > 0 {
 		return nil, nil, ErrStableBuyAlreadyOpen
 	}
-	// NOTE: this Count-then-Create is not atomic. Two concurrent requests can
-	// both see zero and both insert. Add the backing partial unique index in
-	// internal/config/database.go alongside the existing uq_it_intents_* ones:
-	//
-	//	CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_stable_buy
-	//	  ON it_intents (user_id)
-	//	  WHERE direction = 'buy' AND status = 'pending_payment'
-	//	    AND asset IN ('USDC','USDT');
-	//
-	// and translate its violation below to ErrStableBuyAlreadyOpen, so the race
-	// loses at the database rather than producing a second claimable intent.
-	// SQLite has no such index, which is why the check above stays as well.
+	// This Count-then-Create is still not atomic on its own: two concurrent
+	// requests can both see zero and both insert. The backing partial unique
+	// index uq_it_intents_open_stable_buy (config/database.go) closes that
+	// gap — a losing race trips it on Create below, translated to
+	// ErrStableBuyAlreadyOpen rather than a raw driver error. SQLite has no
+	// partial index, which is why the Count check above stays as well.
 
 	intent := &models.ITIntent{
 		ID:          uuid.New(),
@@ -213,6 +208,9 @@ func (s *ITService) CreateStableBuyIntent(
 		ReceivedAmount:   "0",
 	}
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
+		if isUniqueViolation(err) {
+			return nil, nil, ErrStableBuyAlreadyOpen
+		}
 		return nil, nil, err
 	}
 
@@ -637,4 +635,44 @@ func (s *ITService) PendingStableBuys(ctx context.Context) (received, awaiting, 
 		}
 	}
 	return received, awaiting, converting, delivering, nil
+}
+
+// StuckStableBuy is a buy holding user funds that has not advanced.
+type StuckStableBuy struct {
+	ID          uuid.UUID `json:"id"`
+	UserID      uuid.UUID `json:"userId"`
+	Status      string    `json:"status"`
+	Asset       string    `json:"asset"`
+	Currency    string    `json:"currency"`
+	DestChain   string    `json:"destChain"`
+	AmountMinor string    `json:"amountMinor"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// ListStuckStableBuys surfaces buys stalled longer than olderThan.
+//
+// Every non-terminal state is included, because each one is an intent where we
+// are holding either the user's naira or their stablecoin. pending_payment is
+// excluded: nothing has been paid, so there is nothing at risk.
+func (s *ITService) ListStuckStableBuys(ctx context.Context, olderThan time.Duration) ([]StuckStableBuy, error) {
+	var out []StuckStableBuy
+	err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Select("id", "user_id", "status", "asset", "currency", "dest_chain",
+			"received_amount AS amount_minor", "updated_at").
+		Where("direction = ? AND asset IN ? AND status IN ? AND updated_at < ?",
+			models.ITDirectionBuy,
+			[]string{models.ITAssetUSDC, models.ITAssetUSDT},
+			[]string{
+				models.ITStatusPaymentReceived,
+				models.ITStatusAwaitingFunds,
+				models.ITStatusConverting,
+				models.ITStatusDelivering,
+				// Money landed but unpriced — parked for a human. The watcher
+				// deliberately does NOT auto-advance these, so the stuck list
+				// is the only way anyone learns they exist.
+				models.ITStatusBuyAwaitingRate,
+			},
+			time.Now().Add(-olderThan)).
+		Scan(&out).Error
+	return out, err
 }

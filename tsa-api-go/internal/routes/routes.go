@@ -926,6 +926,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.GET("/intents", ith.AdminListIntents)
 			adminIT.GET("/stable/stuck", ith.GetStuckStableSells)
+			adminIT.GET("/stable/buy/stuck", ith.GetStuckStableBuys)
 			// Money-movement actions are super_admin only — a plain admin may
 			// view the orders console but not credit/reprice/settle/reverse.
 			// The admin UI hides these buttons for non-super_admins; this is the
