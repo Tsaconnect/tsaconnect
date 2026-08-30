@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -96,6 +97,50 @@ func StableToBaseUnits(major string) (*big.Int, error) {
 		return nil, fmt.Errorf("%w: %q", ErrStablePrecision, major)
 	}
 	return v, nil
+}
+
+// ValidateBuyDelivery gates a buy's delivery target before an intent exists.
+//
+// Delivery is the one irreversible step in the buy flow: Flutterwave rejects
+// an unsupported (chain, asset) pair, and a rejected transfer to a live
+// address is not recoverable. Both checks therefore run at intent creation,
+// not at delivery time.
+func ValidateBuyDelivery(chain, asset, address string) error {
+	chain = strings.ToUpper(strings.TrimSpace(chain))
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	if !SupportsDelivery(chain, asset) {
+		return fmt.Errorf("%w: Flutterwave does not deliver %s on %s",
+			ErrUnsupportedChainAsset, asset, chain)
+	}
+	return ValidateDeliveryAddress(chain, address)
+}
+
+// DeliverableChains returns the chains this user can be paid on for `asset`,
+// sorted for a stable UI ordering.
+//
+// Takes a plain chain->address map rather than the wallet itself so it stays
+// pure and testable; the service layer builds that map from the jsonb entry
+// list (see userDeliveryAddresses), filtering out external and inactive
+// addresses on the way.
+//
+// A chain is offered ONLY when Flutterwave delivers the pair AND the user
+// actually holds an address on it. Wallet.Addresses is a sparse map — a Solana
+// address exists only if the wallet derived one — and offering a chain the
+// user cannot receive on would strand funds somewhere they cannot see.
+func DeliverableChains(asset string, addresses map[string]string) []string {
+	asset = strings.ToUpper(strings.TrimSpace(asset))
+	out := make([]string, 0, len(deliveryMatrix))
+	for chain := range deliveryMatrix {
+		if !SupportsDelivery(chain, asset) {
+			continue
+		}
+		if strings.TrimSpace(addresses[chain]) == "" {
+			continue
+		}
+		out = append(out, chain)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // StableFromBaseUnits converts base units to the float Flutterwave's API takes.

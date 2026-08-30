@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -107,4 +108,79 @@ func TestStableFromBaseUnits(t *testing.T) {
 	if got := StableFromBaseUnits(big.NewInt(1500000)); got != 1.5 {
 		t.Fatalf("StableFromBaseUnits(1500000) = %v, want 1.5", got)
 	}
+}
+
+func TestValidateBuyDelivery(t *testing.T) {
+	const evm = "0x1111111111111111111111111111111111111111"
+	const sol = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+
+	for _, tc := range []struct {
+		name          string
+		chain, asset  string
+		address       string
+		wantErr       error
+	}{
+		{"polygon usdc", "POLYGON", "USDC", evm, nil},
+		{"polygon usdt", "POLYGON", "USDT", evm, nil},
+		{"ethereum usdt", "ETHEREUM", "USDT", evm, nil},
+		{"solana usdc", "SOLANA", "USDC", sol, nil},
+		{"base usdc", "BASE", "USDC", evm, nil},
+		// Flutterwave rejects Base+USDT. A rejected transfer to a live
+		// address is not recoverable, so this must fail before an intent.
+		{"base usdt rejected", "BASE", "USDT", evm, ErrUnsupportedChainAsset},
+		{"bsc rejected", "BSC", "USDC", evm, ErrUnsupportedChainAsset},
+		{"tron rejected", "TRON", "USDT", evm, ErrUnsupportedChainAsset},
+		{"evm address on solana", "SOLANA", "USDC", evm, ErrBadDeliveryAddress},
+		{"solana address on polygon", "POLYGON", "USDC", sol, ErrBadDeliveryAddress},
+		{"empty address", "POLYGON", "USDC", "", ErrBadDeliveryAddress},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateBuyDelivery(tc.chain, tc.asset, tc.address)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestDeliverableChains(t *testing.T) {
+	const evm = "0x1111111111111111111111111111111111111111"
+	const sol = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+
+	t.Run("only chains the user can actually receive on", func(t *testing.T) {
+		// No solana address → solana must not be offered, or funds land
+		// somewhere the user cannot see.
+		got := DeliverableChains("USDC", map[string]string{"POLYGON": evm, "BASE": evm})
+		want := []string{"BASE", "POLYGON"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("usdt hides base", func(t *testing.T) {
+		got := DeliverableChains("USDT", map[string]string{"POLYGON": evm, "BASE": evm, "SOLANA": sol})
+		for _, c := range got {
+			if c == "BASE" {
+				t.Fatal("BASE offered for USDT; Flutterwave rejects that pair")
+			}
+		}
+	})
+
+	t.Run("unsupported chains are dropped", func(t *testing.T) {
+		got := DeliverableChains("USDC", map[string]string{"BSC": evm, "SONIC": evm})
+		if len(got) != 0 {
+			t.Fatalf("got %v, want none", got)
+		}
+	})
 }
