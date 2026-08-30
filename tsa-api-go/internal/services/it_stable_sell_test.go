@@ -297,3 +297,33 @@ func TestQuoteStableSell_RealFeeQuoteServiceStaysProportional(t *testing.T) {
 		t.Fatalf("fee %s is >= 10%% of spread %s — looks like a major/minor unit bug (~100x)", got.FeeMinor, got.SpreadMinor)
 	}
 }
+
+func TestCreateStableSellIntent_RejectsBelowProviderMinimum(t *testing.T) {
+	// Defence in depth. PostStableSell re-quotes server-side, so a below-floor
+	// quote cannot arrive here over HTTP — but this method is exported, and a
+	// hand-built quote would otherwise mint an intent whose deposit address is
+	// handed to a user for a trade Flutterwave will refuse to convert.
+	s := newStableSellDBService(t)
+
+	q := testSellQuote()
+	q.AssetAmount = big.NewInt(9_999_999) // 9.999999 USDC — one unit under
+
+	_, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), q, "POLYGON", testSellBank())
+	if !errors.Is(err, ErrStableBelowMinimum) {
+		t.Fatalf("err = %v, want ErrStableBelowMinimum", err)
+	}
+}
+
+func TestCreateStableSellIntent_RejectsNilAssetAmount(t *testing.T) {
+	// A nil amount must not be read as "zero and therefore fine" — it reaches
+	// the floor comparison before any intent is written.
+	s := newStableSellDBService(t)
+
+	q := testSellQuote()
+	q.AssetAmount = nil
+
+	_, _, err := s.CreateStableSellIntent(context.Background(), uuid.New(), q, "POLYGON", testSellBank())
+	if !errors.Is(err, ErrStableBelowMinimum) {
+		t.Fatalf("err = %v, want ErrStableBelowMinimum", err)
+	}
+}

@@ -447,6 +447,12 @@ type Config struct {
 	// with what actually arrived, and an unbounded ratio would let a small
 	// quote claim an arbitrarily large deposit.
 	StableOverDeliveryTolBps int64
+	// StableMinSell is the provider floor for a stablecoin sell, in major
+	// units (e.g. "10"). Flutterwave rejects a conversion below its floor
+	// AFTER the user has irreversibly sent funds, so the quote refuses first.
+	// Empty leaves services.DefaultStableMinSellMajor in place; the floor
+	// cannot be removed by config, only raised or lowered.
+	StableMinSell string
 	// FWStableDepositAddressPolygon is Flutterwave's own Polygon address that
 	// user sell deposits are routed to. Flutterwave exposes it on the dashboard
 	// only, so it is fetched once by hand and configured here. The platform
@@ -760,6 +766,7 @@ func Load() *Config {
 	cfg.StableSpreadBps = getEnvInt64("IT_STABLE_SPREAD_BPS", 155)
 	cfg.StableRateLockTTL = time.Duration(getEnvInt64("IT_STABLE_RATE_LOCK_SECONDS", 900)) * time.Second
 	cfg.StableOverDeliveryTolBps = getEnvInt64("IT_STABLE_OVER_DELIVERY_TOL_BPS", 200)
+	cfg.StableMinSell = strings.TrimSpace(getEnv("IT_STABLE_MIN_SELL", "10"))
 	cfg.FWStableDepositAddressPolygon = strings.TrimSpace(getEnv("FW_STABLE_DEPOSIT_ADDRESS_POLYGON", ""))
 
 	// Deposit/withdrawal fee-quote engine (PM fee spec, batch 11). Two values

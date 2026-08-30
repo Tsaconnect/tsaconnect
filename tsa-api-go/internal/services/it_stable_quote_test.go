@@ -197,6 +197,13 @@ func TestQuoteStableSell_NeverExceedsGross(t *testing.T) {
 		Destination: FWMoney{Currency: "NGN", Amount: 1650.25},
 	}}
 	s := newStableSellTestService(t, q)
+	// The property under test is the ARITHMETIC, which must hold at every
+	// magnitude — including dust below the provider floor. Drop the floor so
+	// the sweep still reaches those inputs; the floor itself is covered by
+	// TestQuoteStableSell_EnforcesProviderMinimum.
+	if err := s.SetStableMinSell("0.000001"); err != nil {
+		t.Fatalf("SetStableMinSell: %v", err)
+	}
 	for _, amt := range []string{"0.000001", "1", "10.5", "100", "999999.999999"} {
 		got, err := s.QuoteStableSell(context.Background(), "USDC", amt, "NGN")
 		if err != nil {
@@ -314,4 +321,98 @@ func TestQuoteStableSell_WithoutAFeeQuoterChargesNoFeeLine(t *testing.T) {
 	if got.FeeMinor.Sign() != 0 || got.NetMinor.Cmp(got.SpreadMinor) != 0 {
 		t.Fatalf("fee=%s net=%s spread=%s, want no fee line", got.FeeMinor, got.NetMinor, got.SpreadMinor)
 	}
+}
+
+func TestQuoteStableSell_EnforcesProviderMinimum(t *testing.T) {
+	// Below Flutterwave's floor the conversion is rejected AFTER the user has
+	// irreversibly sent funds, so the quote is the last point where refusing
+	// costs nothing. The app enforces the same number, but a client-side check
+	// does not protect a direct API caller — this is the real gate.
+	q := &stubStableRateQuoter{rate: FWRate{
+		Source:      FWMoney{Currency: "USDC", Amount: 1},
+		Destination: FWMoney{Currency: "NGN", Amount: 1650.25},
+	}}
+
+	for _, tc := range []struct {
+		name    string
+		amount  string
+		wantErr bool
+	}{
+		{"dust", "0.000001", true},
+		{"just under the floor", "9.999999", true},
+		{"exactly the floor", "10", false},
+		{"above the floor", "10.000001", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStableSellTestService(t, q)
+			_, err := s.QuoteStableSell(context.Background(), "USDC", tc.amount, "NGN")
+			if tc.wantErr {
+				if !errors.Is(err, ErrStableBelowMinimum) {
+					t.Fatalf("err = %v, want ErrStableBelowMinimum", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestStableMinSell_DefaultsWhenUnset(t *testing.T) {
+	// A floor that vanishes when config is absent is the failure this guards:
+	// the ramp must not boot without one.
+	s := &ITService{}
+	want, err := StableToBaseUnits(DefaultStableMinSellMajor)
+	if err != nil {
+		t.Fatalf("default constant is unparseable: %v", err)
+	}
+	if got := s.stableMinSell(); got.Cmp(want) != 0 {
+		t.Fatalf("unconfigured floor = %s, want %s", got, want)
+	}
+}
+
+func TestSetStableMinSell(t *testing.T) {
+	def, err := StableToBaseUnits(DefaultStableMinSellMajor)
+	if err != nil {
+		t.Fatalf("default constant is unparseable: %v", err)
+	}
+
+	t.Run("empty keeps the default", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableMinSell("  "); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := s.stableMinSell(); got.Cmp(def) != 0 {
+			t.Fatalf("floor = %s, want the %s default", got, def)
+		}
+	})
+
+	t.Run("garbage errors and does NOT disable the floor", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableMinSell("not-a-number"); err == nil {
+			t.Fatal("malformed minimum accepted")
+		}
+		if got := s.stableMinSell(); got.Cmp(def) != 0 {
+			t.Fatalf("floor = %s after a bad value, want the %s default", got, def)
+		}
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableMinSell("-5"); err == nil {
+			t.Fatal("negative minimum accepted")
+		}
+	})
+
+	t.Run("valid value applies", func(t *testing.T) {
+		s := &ITService{}
+		if err := s.SetStableMinSell("25.5"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want, _ := StableToBaseUnits("25.5")
+		if got := s.stableMinSell(); got.Cmp(want) != 0 {
+			t.Fatalf("floor = %s, want %s", got, want)
+		}
+	})
 }

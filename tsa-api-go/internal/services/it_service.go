@@ -103,6 +103,12 @@ type ITService struct {
 	// stableOverDeliverBps bounds how far a deposit may exceed the quoted
 	// amount before it is parked for an operator. See it_stable_sell.go.
 	stableOverDeliverBps int64
+	// stableMinSellUnits is the provider's floor for a sell, in base units.
+	// Below it Flutterwave rejects the conversion — with the user's funds
+	// already irreversibly sent — so the quote must refuse first. Nil means
+	// unconfigured, which is treated as "no quote" rather than "no floor".
+	// See it_stable_quote.go.
+	stableMinSellUnits *big.Int
 
 	// stableDepositAddrs holds FLUTTERWAVE's own deposit addresses by chain —
 	// never ours. Sell deposits go straight from the user to the provider.

@@ -132,6 +132,48 @@ func (s *ITService) stableLockTTL() time.Duration {
 	return s.stableRateLockTTL
 }
 
+// DefaultStableMinSellMajor is the sell floor applied when none is configured.
+//
+// Flutterwave documents a 10 USDC/USDT floor. The app enforces the same number
+// (utils/stableSellQuote.ts), but a client-side check does not protect a direct
+// API caller — which is why this exists. Below the floor the provider rejects
+// the conversion AFTER the user has irreversibly sent funds, so the quote must
+// refuse first: this is the only point in the flow where refusing is still free.
+const DefaultStableMinSellMajor = "10"
+
+// SetStableMinSell wires the provider floor from config, in major units.
+// An empty or unparseable value leaves the default in place rather than
+// removing the floor — a money guard must not be disabled by a typo.
+func (s *ITService) SetStableMinSell(amountMajor string) error {
+	amountMajor = strings.TrimSpace(amountMajor)
+	if amountMajor == "" {
+		return nil
+	}
+	units, err := StableToBaseUnits(amountMajor)
+	if err != nil {
+		return fmt.Errorf("it stable minimum %q: %w", amountMajor, err)
+	}
+	if units.Sign() < 0 {
+		return fmt.Errorf("it stable minimum %q: must not be negative", amountMajor)
+	}
+	s.stableMinSellUnits = units
+	return nil
+}
+
+// stableMinSell returns the configured floor, or the documented default.
+// It never returns nil, so the floor cannot be lost by leaving config unset.
+func (s *ITService) stableMinSell() *big.Int {
+	if s.stableMinSellUnits != nil {
+		return s.stableMinSellUnits
+	}
+	units, err := StableToBaseUnits(DefaultStableMinSellMajor)
+	if err != nil {
+		// Unreachable: the constant is a valid 6dp decimal.
+		return big.NewInt(0)
+	}
+	return units
+}
+
 // QuoteStableSell prices selling `amountMajor` of `asset` for `currency`.
 //
 // The rate comes from Flutterwave because Flutterwave is who the trade actually
@@ -155,6 +197,14 @@ func (s *ITService) QuoteStableSell(ctx context.Context, asset, amountMajor, cur
 	}
 	if units.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount must be positive", ErrStableBelowMinimum)
+	}
+	// The provider floor. Checked here because QuoteStableSell is the single
+	// chokepoint: PostStableSell re-quotes server-side rather than trusting a
+	// client-supplied quote, so both /stable/quote and /stable/sell pass through
+	// this line and neither can route around it.
+	if min := s.stableMinSell(); units.Cmp(min) < 0 {
+		return nil, fmt.Errorf("%w: minimum sell is %g %s",
+			ErrStableBelowMinimum, StableFromBaseUnits(min), asset)
 	}
 
 	// Probe one whole destination unit and reuse the implied per-unit rate.
