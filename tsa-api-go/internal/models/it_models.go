@@ -192,10 +192,16 @@ type ITIntent struct {
 	// empty for buy intents and for sells that have not reported yet.
 	DepositTxHash string `gorm:"size:120;index" json:"depositTxHash,omitempty"`
 	SettledTxHash string `gorm:"size:66;index" json:"settledTxHash,omitempty"`
-	// ReceivedAmount is what actually arrived, in asset base units. The payout
-	// is computed from THIS, never from the quoted gross — quoting the payout
-	// would pay out more than was received whenever a bridge or provider fee
-	// came in above estimate.
+	// ReceivedAmount is overloaded across the two legs — same column, two
+	// different units:
+	//
+	//   sell: the asset base units that actually arrived at Flutterwave. The
+	//         payout is computed from THIS, never from the quoted gross —
+	//         quoting the payout would pay out more than was received
+	//         whenever a bridge or provider fee came in above estimate.
+	//   buy:  the FIAT MINOR UNITS the user actually paid, written at claim
+	//         time (see settleStableBuyFromCharge in it_stable_buy_settle.go).
+	//         Not asset base units on this leg.
 	ReceivedAmount string `gorm:"type:numeric(78,0)" json:"receivedAmount,omitempty"`
 
 	// LockedRate is fiat minor units per one whole asset unit, locked at intent
