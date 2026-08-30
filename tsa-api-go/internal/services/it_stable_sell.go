@@ -133,6 +133,13 @@ func (s *ITService) CreateStableSellIntent(
 	if time.Now().After(q.ExpiresAt) {
 		return nil, nil, ErrStableQuoteExpired
 	}
+	// Defence in depth. The handler re-quotes server-side so a below-floor quote
+	// cannot reach here over HTTP, but this method is exported and a hand-built
+	// quote would otherwise mint an intent the provider will refuse to convert.
+	if q.AssetAmount == nil || q.AssetAmount.Cmp(s.stableMinSell()) < 0 {
+		return nil, nil, fmt.Errorf("%w: minimum sell is %g %s",
+			ErrStableBelowMinimum, StableFromBaseUnits(s.stableMinSell()), q.Asset)
+	}
 	if bank == nil || (strings.TrimSpace(bank.Number) == "" && strings.TrimSpace(bank.MobileMsisdn) == "") {
 		return nil, nil, ErrStableNoDestination
 	}

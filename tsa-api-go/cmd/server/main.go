@@ -632,9 +632,17 @@ func main() {
 				},
 			)
 			itService.SetStableOverDeliveryToleranceBps(cfg.StableOverDeliveryTolBps)
+			// A malformed floor is loud but not fatal: the setter leaves the
+			// documented default in force, so the guard still holds. Booting
+			// with NO floor is the outcome worth preventing, and cannot happen.
+			if err := itService.SetStableMinSell(cfg.StableMinSell); err != nil {
+				log.Printf("[it stable] WARNING: IT_STABLE_MIN_SELL invalid (%v) — falling back to the %s default",
+					err, services.DefaultStableMinSellMajor)
+			}
 			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
 			stableRampEnabled = true
-			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps)", cfg.StableSpreadBps)
+			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps min=%s)",
+				cfg.StableSpreadBps, cfg.StableMinSell)
 		}
 	} else {
 		log.Printf("[it stable] dormant — set FW_STABLE_DEPOSIT_ADDRESS_POLYGON and FLUTTERWAVE_MERCHANT_ID to enable")
