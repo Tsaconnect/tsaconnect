@@ -922,7 +922,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminIT.POST("/rate", ith.AdminSetRate)
 			adminIT.GET("/intents", ith.AdminListIntents)
 			adminIT.GET("/stable/stuck", ith.GetStuckStableSells)
-			adminIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
 			// Money-movement actions are super_admin only — a plain admin may
 			// view the orders console but not credit/reprice/settle/reverse.
 			// The admin UI hides these buttons for non-super_admins; this is the
@@ -932,6 +931,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			superIT.POST("/reprice/:id", ith.AdminRepriceCredit)
 			superIT.POST("/settle/:id", ith.AdminSettle)
 			superIT.POST("/reverse/:id", ith.AdminReverse)
+			// RepriceParkedStableBuy resumes a purchase still holding the
+			// user's naira, same class of action as AdminRepriceCredit above —
+			// it belongs behind the same super_admin gate, not plain admin.
+			superIT.POST("/stable/buy/:id/reprice", ith.PostRepriceParkedStableBuy)
 		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
