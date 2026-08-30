@@ -25,6 +25,26 @@ var (
 	ErrStableBuyNoWallet = errors.New("it stable buy: user has no wallet")
 )
 
+// HasStableBuy reports whether everything the BUY leg needs is actually wired.
+//
+// Deliberately NOT the sell leg's prerequisites: buy never touches Polygon. It
+// needs the Flutterwave converter and merchant id (to turn the user's naira
+// into stablecoin), a live rate source (to price what lands) and the deliverer
+// (to send the asset on). Taking naira with any of these absent means holding
+// money that nothing in the process can fulfil — the charge is claimed, the
+// MCGP credit is suppressed, and no watcher exists to convert or deliver.
+//
+// Every entry point onto the buy path consults this: the quote, intent
+// creation, and — the load-bearing one — the webhook fork, which must fall
+// through to the MCGP credit rather than claim a charge it cannot fulfil.
+func (s *ITService) HasStableBuy() bool {
+	return s != nil &&
+		s.stableConverter != nil &&
+		strings.TrimSpace(s.stableMerchantID) != "" &&
+		s.rateQuoter != nil &&
+		s.stableDeliverer != nil
+}
+
 // userDeliveryAddresses maps CHAIN -> the user's own address.
 //
 // TWO sources, not one. An earlier draft read models.Wallet.Addresses; that is
@@ -126,6 +146,9 @@ func (s *ITService) CreateStableBuyIntent(
 	q *StableBuyQuote,
 	destChain, destAddress string,
 ) (*models.ITIntent, *StableBuyInstructions, error) {
+	if !s.HasStableBuy() {
+		return nil, nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
+	}
 	if q == nil {
 		return nil, nil, errors.New("it stable buy: nil quote")
 	}

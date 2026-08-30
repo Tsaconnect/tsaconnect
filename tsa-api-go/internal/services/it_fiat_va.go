@@ -229,7 +229,13 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 			// scoped to `direction = ?` = buy in the query above) `settled` is
 			// unreachable by MCGP, whose buy terminal is `credited` — it only
 			// occurs on a completed stablecoin delivery.
-			if models.ITIntentAsset(&existing) != models.ITAssetMCGP &&
+			//
+			// Gated on HasStableBuy for the same reason the fork below is: with
+			// buy unconfigured there is no fork to fall through TO, so control
+			// would reach the MCGP path holding a charge id a stablecoin intent
+			// already owns — and payment_ref carries a partial unique index.
+			if s.HasStableBuy() &&
+				models.ITIntentAsset(&existing) != models.ITAssetMCGP &&
 				existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
 				break
 			}
@@ -296,12 +302,22 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		// buy_awaiting_rate and burning its payment_ref for nothing.
 		return fmt.Errorf("it va credit: non-positive amount")
 	}
-	claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
-	if err != nil {
-		return fmt.Errorf("it va credit: stable buy: %w", err)
-	}
-	if claimed {
-		return nil
+	//
+	// HasStableBuy is the gate that matters most in this function. With the
+	// buy leg unconfigured — Flutterwave present but no converter, merchant
+	// id, rate source or deliverer — claiming here would suppress the MCGP
+	// credit and hand the money to a state machine no watcher is driving. The
+	// user's naira would sit indefinitely with nothing able to fulfil it. Fall
+	// through to the MCGP path instead: the user gets a credit rather than a
+	// hold, which is the recoverable failure of the two.
+	if s.HasStableBuy() {
+		claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
+		if err != nil {
+			return fmt.Errorf("it va credit: stable buy: %w", err)
+		}
+		if claimed {
+			return nil
+		}
 	}
 
 	wallet := strings.TrimSpace(user.WalletAddress)

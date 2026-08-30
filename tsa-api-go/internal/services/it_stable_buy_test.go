@@ -56,6 +56,13 @@ func newStableBuyDBService(t *testing.T) (*ITService, uuid.UUID) {
 	// implementation bug rather than a fixture gap. buyRateQuoter is defined in
 	// it_stable_buy_quote_test.go (Task 4) — same package, do not redefine it.
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	// The buy leg is gated on HasStableBuy (converter + merchant id + rate
+	// source + deliverer), so the fixture must satisfy all four or every quote
+	// and every intent creation refuses with "not enabled" — a fixture gap
+	// that would read as an implementation bug. Tests that care about the
+	// converter's balances or the deliverer's calls override these.
+	s.SetStableConverter(&stubConverter{}, "merchant_fixture")
+	s.SetStableDeliverer(&stubDeliverer{id: "trf_fixture"})
 	return s, userID
 }
 

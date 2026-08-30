@@ -194,6 +194,7 @@ func TestCreateStableBuyIntent_InsertsOnPostgres(t *testing.T) {
 	// same exposure — this is the only test in the package that can see it.
 	s := newStablePostgresService(t)
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	wireStableBuyPrereqs(s)
 
 	userID := uuid.New()
 	va := &models.FiatVirtualAccount{

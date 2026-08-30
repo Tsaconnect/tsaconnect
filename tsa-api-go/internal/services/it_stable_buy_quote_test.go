@@ -33,7 +33,16 @@ func newBuyQuoteTestService(t *testing.T, q FXRateQuoter) *ITService {
 	s.SetRateQuoter(q)
 	s.SetStableSpreadBps(155)
 	s.SetStableRateLockTTL(15 * time.Minute)
+	wireStableBuyPrereqs(s)
 	return s
+}
+
+// wireStableBuyPrereqs satisfies HasStableBuy — the gate every buy entry point
+// consults. Nothing here is exercised by the quote itself; without it the
+// quote refuses before it prices anything.
+func wireStableBuyPrereqs(s *ITService) {
+	s.SetStableConverter(&stubConverter{}, "merchant_fixture")
+	s.SetStableDeliverer(&stubDeliverer{id: "trf_fixture"})
 }
 
 func TestQuoteStableBuy_PricesAndAppliesSpread(t *testing.T) {
@@ -83,6 +92,7 @@ func TestQuoteStableBuy_RejectedSpreadStillChargesMargin(t *testing.T) {
 	s := NewITService(nil, nil, stubFx{ngn: 1650})
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
 	s.SetStableRateLockTTL(15 * time.Minute)
+	wireStableBuyPrereqs(s)
 	if err := s.SetStableSpreadBps(10000); err == nil {
 		t.Fatal("spread of 10000bps accepted")
 	}

@@ -29,6 +29,8 @@ func TestStableCodeFor_CoversBuyErrors(t *testing.T) {
 		{services.ErrStableBuyNoVA, "stable_buy_no_va"},
 		{services.ErrUnsupportedChainAsset, "stable_unsupported_chain_asset"},
 		{services.ErrStableDeliveryExhausted, "stable_delivery_exhausted"},
+		// The buy path raises this whenever HasStableBuy is unsatisfied.
+		{services.ErrStableQuoteUnavailable, "stable_not_configured"},
 	} {
 		if got := stableCodeFor(tc.err); got != tc.want {
 			t.Fatalf("code for %v = %q, want %q", tc.err, got, tc.want)
@@ -57,6 +59,31 @@ func TestStableStatusFor_BuyInputErrorsAre400(t *testing.T) {
 // which is how an earlier version of this fixture failed the independent-rate
 // plausibility check with a rate off by six orders of magnitude. Mirrors
 // buyRateQuoter in internal/services/it_stable_buy_quote_test.go.
+// The buy leg refuses everything unless HasStableBuy is satisfied — converter,
+// merchant id, rate source and deliverer all wired. These two stubs supply the
+// converter and deliverer halves; nothing in a handler test exercises them, but
+// without them every buy request is refused as "not enabled".
+type stubBuyConverter struct{}
+
+func (stubBuyConverter) FetchBalances(context.Context) ([]services.FWBalance, error) {
+	return nil, nil
+}
+
+func (stubBuyConverter) ConvertBalance(_ context.Context, _, _, _ string, _ services.FWAmount, _ string) (services.FWTransfer, error) {
+	return services.FWTransfer{}, nil
+}
+
+type stubBuyDeliverer struct{}
+
+func (stubBuyDeliverer) DirectTransfer(context.Context, services.FWDirectTransferRequest) (services.FWTransfer, error) {
+	return services.FWTransfer{}, nil
+}
+
+func wireStableBuyPrereqs(it *services.ITService) {
+	it.SetStableConverter(stubBuyConverter{}, "merchant_fixture")
+	it.SetStableDeliverer(stubBuyDeliverer{})
+}
+
 type stubBuyQuoter struct{}
 
 func (stubBuyQuoter) QuoteRate(_ context.Context, src, dst string, destAmount float64) (services.FWRate, error) {
@@ -134,6 +161,7 @@ func newStableBuyTestRouterWithIdempotency(t *testing.T) (*gin.Engine, *gorm.DB,
 	it.SetRateQuoter(stubBuyQuoter{})
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
+	wireStableBuyPrereqs(it)
 	if err := it.AcceptITAgreement(context.Background(), userID, "", ""); err != nil {
 		t.Fatalf("accept agreement: %v", err)
 	}
@@ -202,6 +230,7 @@ func TestPostStableBuyQuote_ResponseIsMarkedIndicative(t *testing.T) {
 	it.SetRateQuoter(stubBuyQuoter{})
 	it.SetStableSpreadBps(155)
 	it.SetStableRateLockTTL(15 * time.Minute)
+	wireStableBuyPrereqs(it)
 	h := NewITHandler(nil, it)
 
 	r := gin.New()

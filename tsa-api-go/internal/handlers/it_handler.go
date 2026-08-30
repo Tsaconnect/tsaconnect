@@ -939,7 +939,11 @@ func stableCodeFor(err error) string {
 	case errors.Is(err, services.ErrStableNotAnAsset):
 		return "stable_not_an_asset"
 	case errors.Is(err, services.ErrStableNoDepositAddress),
-		errors.Is(err, services.ErrStableNoTokenAddress):
+		errors.Is(err, services.ErrStableNoTokenAddress),
+		// Also raised by the whole buy path when HasStableBuy is not
+		// satisfied, so the app can say "not available right now" rather than
+		// showing a bare message on a money screen.
+		errors.Is(err, services.ErrStableQuoteUnavailable):
 		return "stable_not_configured"
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"

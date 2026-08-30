@@ -22,6 +22,7 @@ import (
 func TestAutoCreditFromVA_ConvertsNairaToMinorUnitsForStableBuy(t *testing.T) {
 	s, user, va := newVATestService(t)
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	wireStableBuyPrereqs(s)
 	ctx := context.Background()
 
 	intent, _, err := s.CreateStableBuyIntent(ctx, user.ID, testBuyQuote(), "POLYGON", testBuyEVM)
@@ -52,6 +53,7 @@ func TestAutoCreditFromVA_ConvertsNairaToMinorUnitsForStableBuy(t *testing.T) {
 func TestAutoCreditFromVA_ClaimsStableBuyWithNoWallet(t *testing.T) {
 	s, user, va := newVATestService(t)
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	wireStableBuyPrereqs(s)
 	ctx := context.Background()
 	if err := s.db.Exec(`UPDATE users SET wallet_address = '' WHERE id = ?`, user.ID).Error; err != nil {
 		t.Fatalf("clear wallet: %v", err)
@@ -75,6 +77,7 @@ func TestAutoCreditFromVA_ClaimsStableBuyWithNoWallet(t *testing.T) {
 func TestAutoCreditFromVA_RedeliveryCompletesUnfinishedStablecoinPricing(t *testing.T) {
 	s, user, va := newVATestService(t)
 	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	wireStableBuyPrereqs(s)
 	ctx := context.Background()
 
 	intent, _, err := s.CreateStableBuyIntent(ctx, user.ID, testBuyQuote(), "POLYGON", testBuyEVM)
@@ -102,5 +105,49 @@ func TestAutoCreditFromVA_RedeliveryCompletesUnfinishedStablecoinPricing(t *test
 	}
 	if got.AssetAmount != "98450000" {
 		t.Fatalf("asset amount = %q, want the priced figure", got.AssetAmount)
+	}
+}
+
+// C3 regression: with the buy leg unconfigured — Flutterwave present but no
+// converter, merchant id, rate source or deliverer — the fork must NOT claim
+// the charge. Claiming would suppress the MCGP credit and hand the money to a
+// state machine no watcher is driving: the naira is held indefinitely with
+// nothing able to convert or deliver it. Falling through to MCGP gives the
+// user a credit instead of a hold, which is the recoverable failure of the two.
+func TestAutoCreditFromVA_DoesNotClaimWhenBuyIsUnfulfillable(t *testing.T) {
+	s, user, va := newVATestService(t)
+	s.SetRateQuoter(&buyRateQuoter{ngnPerUnit: 1650.25})
+	wireStableBuyPrereqs(s)
+	ctx := context.Background()
+
+	intent, _, err := s.CreateStableBuyIntent(ctx, user.ID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// The deployment that can take the money but cannot deliver it: the
+	// outbound crypto payout is not wired.
+	s.SetStableDeliverer(nil)
+	if s.HasStableBuy() {
+		t.Fatal("HasStableBuy still true with no deliverer — the gate does not gate")
+	}
+
+	// Credit broadcast fails in tests (no chain), so the error is ignored the
+	// same way the existing MCGP settlement tests ignore it; what matters is
+	// where the charge went.
+	_ = s.AutoCreditFromVA(ctx, va.FwCustomerID, va.Reference, "chg_unfulfillable", "165025.00")
+
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusPendingPayment || got.PaymentRef != "" {
+		t.Fatalf("the stablecoin intent claimed the charge anyway: status=%q ref=%q", got.Status, got.PaymentRef)
+	}
+
+	var mcgp int64
+	s.db.Model(&models.ITIntent{}).
+		Where("payment_ref = ? AND direction = ?", "chg_unfulfillable", models.ITDirectionBuy).
+		Count(&mcgp)
+	if mcgp != 1 {
+		t.Fatalf("%d intents carry the charge, want 1 — the money did not reach the MCGP path", mcgp)
 	}
 }

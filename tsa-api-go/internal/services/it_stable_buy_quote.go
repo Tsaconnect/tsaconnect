@@ -41,13 +41,16 @@ type StableBuyQuote struct {
 // actually lands (see AutoCreditFromVA's buy branch), which is what removes
 // the rate lock and with it every "paid after the quote expired" state.
 func (s *ITService) QuoteStableBuy(ctx context.Context, asset, fiatMinor, currency string) (*StableBuyQuote, error) {
+	// The whole buy path is gated on the same check, quote included: showing a
+	// price for a purchase nothing can fulfil is the first step toward taking
+	// naira for one. See HasStableBuy.
+	if !s.HasStableBuy() {
+		return nil, fmt.Errorf("%w: stablecoin purchases are not enabled", ErrStableQuoteUnavailable)
+	}
 	asset = strings.ToUpper(strings.TrimSpace(asset))
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	if !IsStableAsset(asset) {
 		return nil, fmt.Errorf("%w: got %q", ErrStableNotAnAsset, asset)
-	}
-	if s.rateQuoter == nil {
-		return nil, ErrStableQuoteUnavailable
 	}
 
 	fiat, ok := new(big.Int).SetString(strings.TrimSpace(fiatMinor), 10)

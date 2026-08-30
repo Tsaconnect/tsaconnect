@@ -611,18 +611,58 @@ func main() {
 	// address AND our merchant id are both configured — a missing credential
 	// must leave the rest of IT bootable, matching how every other optional
 	// integration in this service degrades (Nomba, Didit KYC, LiFi).
-	stableRampEnabled := false
-	if itService != nil && fwClient != nil && cfg.FWStableDepositAddressPolygon != "" && cfg.FlutterwaveMerchantID != "" {
-		polygonClient := blockchainService.ClientForChain("polygon")
-		if polygonClient == nil {
-			log.Printf("[it stable] dormant — no Polygon RPC client configured")
+	//
+	// The two legs are gated SEPARATELY. They share the pricing knobs and the
+	// Flutterwave converter, but only SELL needs Polygon: the deposit address
+	// is where sell users send funds and the RPC client verifies those deposits
+	// on-chain. Buy needs neither. Gating buy behind sell's prerequisites is
+	// not the safe default it looks like — the buy routes, the rate quoter and
+	// the webhook fork all live outside this block, so a deployment with
+	// Flutterwave configured but no Polygon would have TAKEN naira, suppressed
+	// the MCGP credit, and had no watcher to convert or deliver it.
+	stableSellEnabled := false
+	stableBuyEnabled := false
+	if itService != nil && fwClient != nil && cfg.FlutterwaveMerchantID != "" {
+		if err := itService.SetStableSpreadBps(cfg.StableSpreadBps); err != nil {
+			log.Printf("[it stable] invalid STABLE_SPREAD_BPS: %v", err)
+		}
+		itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
+		itService.SetStableOverDeliveryToleranceBps(cfg.StableOverDeliveryTolBps)
+		// A malformed floor is loud but not fatal: the setter leaves the
+		// documented default in force, so the guard still holds. Booting
+		// with NO floor is the outcome worth preventing, and cannot happen.
+		if err := itService.SetStableMinSell(cfg.StableMinSell); err != nil {
+			log.Printf("[it stable] WARNING: IT_STABLE_MIN_SELL invalid (%v) — falling back to the %s default",
+				err, services.DefaultStableMinSellMajor)
+		}
+		itService.SetStableConverter(fwClient, cfg.FlutterwaveMerchantID)
+
+		// BUY: naira in, stablecoin out to the user's own address. Needs the
+		// converter and merchant id above, the rate quoter wired earlier, and
+		// the outbound deliverer. HasStableBuy is the same predicate the quote,
+		// intent creation and the webhook fork consult, so what boots and what
+		// the request path believes cannot drift apart.
+		itService.SetStableDeliverer(fwClient)
+		if itService.HasStableBuy() {
+			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second))
+			stableBuyEnabled = true
+			log.Printf("[it stable] brokered stablecoin BUY ready (spread=%dbps min=%s)",
+				cfg.StableSpreadBps, cfg.StableMinSell)
 		} else {
-			if err := itService.SetStableSpreadBps(cfg.StableSpreadBps); err != nil {
-				log.Printf("[it stable] invalid STABLE_SPREAD_BPS: %v", err)
-			}
-			itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
+			log.Printf("[it stable] BUY dormant — no live FX rate source wired")
+		}
+
+		// SELL: stablecoin in on Polygon, naira out. Additionally needs
+		// Flutterwave's own deposit address and a Polygon RPC client to prove
+		// the user's deposit on-chain.
+		polygonClient := blockchainService.ClientForChain("polygon")
+		switch {
+		case cfg.FWStableDepositAddressPolygon == "":
+			log.Printf("[it stable] SELL dormant — set FW_STABLE_DEPOSIT_ADDRESS_POLYGON to enable")
+		case polygonClient == nil:
+			log.Printf("[it stable] SELL dormant — no Polygon RPC client configured")
+		default:
 			itService.SetStableDepositAddress("POLYGON", cfg.FWStableDepositAddressPolygon)
-			itService.SetStableConverter(fwClient, cfg.FlutterwaveMerchantID)
 			itService.SetStableVerifier(
 				// li.quest/v1 is LiFi's public API base — same default the
 				// AllSwap handler uses (handlers/swap_lifi_handler.go).
@@ -633,23 +673,13 @@ func main() {
 					models.ITAssetUSDT: cfg.Networks["mainnet"].TokenAddresses["polygon:USDT"],
 				},
 			)
-			itService.SetStableOverDeliveryToleranceBps(cfg.StableOverDeliveryTolBps)
-			// A malformed floor is loud but not fatal: the setter leaves the
-			// documented default in force, so the guard still holds. Booting
-			// with NO floor is the outcome worth preventing, and cannot happen.
-			if err := itService.SetStableMinSell(cfg.StableMinSell); err != nil {
-				log.Printf("[it stable] WARNING: IT_STABLE_MIN_SELL invalid (%v) — falling back to the %s default",
-					err, services.DefaultStableMinSellMajor)
-			}
 			scheduler.Register(jobs.NewStableSellWatcher(itService, 30*time.Second))
-			itService.SetStableDeliverer(fwClient)
-			scheduler.Register(jobs.NewStableBuyWatcher(itService, 30*time.Second))
-			stableRampEnabled = true
-			log.Printf("[it stable] brokered stablecoin ramp ready (spread=%dbps min=%s)",
+			stableSellEnabled = true
+			log.Printf("[it stable] brokered stablecoin SELL ready (spread=%dbps min=%s)",
 				cfg.StableSpreadBps, cfg.StableMinSell)
 		}
 	} else {
-		log.Printf("[it stable] dormant — set FW_STABLE_DEPOSIT_ADDRESS_POLYGON and FLUTTERWAVE_MERCHANT_ID to enable")
+		log.Printf("[it stable] dormant — set FLUTTERWAVE_MERCHANT_ID (and Flutterwave credentials) to enable")
 	}
 
 	// Resolve the company customer that parents all FW virtual accounts. Uses
@@ -690,7 +720,9 @@ func main() {
 	// Gated on the ramp actually being live. Where it is dormant no trade is
 	// ever priced by the spread, so dropping the bps legs would hand out an
 	// unearned discount on a deployment this feature is switched off for.
-	feeQuoteService.SetBrokeredStableFlows(stableRampEnabled)
+	// EITHER leg being live is enough: each prices its own trades through the
+	// spread, so a buy-only deployment would double-bill without this.
+	feeQuoteService.SetBrokeredStableFlows(stableSellEnabled || stableBuyEnabled)
 	feeQuoteHandler := handlers.NewFeeQuoteHandler(
 		feeQuoteService,
 		services.NewP2PFxProvider(p2pService),
