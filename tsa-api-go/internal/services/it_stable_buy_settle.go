@@ -5,11 +5,21 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
+
+// stableBuyClaimWindow bounds how long an unpaid stablecoin buy intent may
+// claim an incoming charge. Nothing else expires or cancels one, so without
+// this an abandoned intent sits in pending_payment forever and hijacks a
+// later, unrelated payment from the SAME user — including a plain MCGP
+// purchase, which has no stablecoin asset filter to protect it. 24h, not the
+// (nonexistent) rate-lock TTL: there is deliberately no rate lock on buy, and
+// a bank transfer can reasonably take most of a day.
+const stableBuyClaimWindow = 24 * time.Hour
 
 // settleStableBuyFromCharge attributes an incoming naira charge to this user's
 // open stablecoin purchase, if they have one.
@@ -68,9 +78,9 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	// race would become a permanent webhook error instead of a claimed charge.
 	var candidate models.ITIntent
 	err = s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
+		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ? AND created_at >= ?",
 			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
-			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
+			[]string{models.ITAssetUSDC, models.ITAssetUSDT}, time.Now().Add(-stableBuyClaimWindow)).
 		Order("created_at ASC").
 		First(&candidate).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -92,6 +102,20 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return false, res.Error
 	}
 	if res.RowsAffected == 0 {
+		// Lost the race: another call (a concurrent redelivery, most likely)
+		// claimed this exact intent first — and may have claimed it with THIS
+		// chargeID, in which case falling through to MCGP would hand the
+		// winner's charge to the wrong path. Re-check by payment_ref rather
+		// than assuming "someone else, unrelated" was the cause.
+		var winner models.ITIntent
+		wErr := s.db.WithContext(ctx).
+			Where("payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).
+			First(&winner).Error
+		if wErr == nil {
+			return IsStableAsset(winner.Asset), nil
+		} else if !errors.Is(wErr, gorm.ErrRecordNotFound) {
+			return false, wErr
+		}
 		return false, nil
 	}
 
@@ -141,18 +165,20 @@ func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent)
 		return err
 	}
 	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
-		"status":       models.ITStatusPaymentReceived,
-		"asset_amount": q.AssetUnits.String(),
-		"locked_rate":  q.RatePerUnitMinor.String(),
-		"rate_minor":   q.RatePerUnitMinor.String(),
-		"rate_kobo":    q.RatePerUnitMinor.String(),
-		"repriced":     true,
+		"status":         models.ITStatusPaymentReceived,
+		"asset_amount":   q.AssetUnits.String(),
+		"locked_rate":    q.RatePerUnitMinor.String(),
+		"rate_minor":     q.RatePerUnitMinor.String(),
+		"rate_kobo":      q.RatePerUnitMinor.String(),
+		"repriced":       true,
+		"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
 	}).Error; err != nil {
 		return err
 	}
 	intent.Status = models.ITStatusPaymentReceived
 	intent.AssetAmount = q.AssetUnits.String()
 	intent.Repriced = true
+	intent.FailureReason = ""
 	return nil
 }
 

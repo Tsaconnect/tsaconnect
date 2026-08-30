@@ -914,6 +914,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			it.POST("/stable/quote", ith.PostStableQuote)
 			it.POST("/stable/sell", itIdem, ith.PostStableSell)
 			it.POST("/stable/sell/:id/deposit", itIdem, ith.PostStableDeposit)
+			it.POST("/stable/buy/:id/cancel", itIdem, ith.PostCancelStableBuy)
 		}
 		adminIT := api.Group("/it/admin")
 		adminIT.Use(adminAuth, middleware.RequireP2PAdmin())

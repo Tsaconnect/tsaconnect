@@ -213,9 +213,26 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 			return err
 		case models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds,
 			models.ITStatusConverting, models.ITStatusDelivering,
-			models.ITStatusBuyAwaitingRate:
+			models.ITStatusBuyAwaitingRate, models.ITStatusSettled:
 			// A stablecoin buy already claimed this charge. The buy watcher owns
-			// it from here; the webhook's job is done.
+			// it from here; the webhook's job is done — EXCEPT when the claim
+			// crashed before pricing: `payment_received` + `!Repriced` means the
+			// charge was claimed but never priced (see priceStableBuy). That
+			// intent still carries its creation-time quote, which is the rate
+			// lock the design removed — reappearing in exactly this crash
+			// window. `break` falls through to the fork below, which is
+			// idempotent for the already-priced case and completes pricing for
+			// the unpriced one.
+			//
+			// `ITStatusSettled` is safe to add here despite being shared with
+			// the MCGP sell/debit leg: for direction=buy (this whole switch is
+			// scoped to `direction = ?` = buy in the query above) `settled` is
+			// unreachable by MCGP, whose buy terminal is `credited` — it only
+			// occurs on a completed stablecoin delivery.
+			if models.ITIntentAsset(&existing) != models.ITAssetMCGP &&
+				existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+				break
+			}
 			return nil
 		case models.ITStatusCancelled:
 			// The order was superseded in the window between our reading it and
@@ -272,6 +289,13 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if err != nil {
 		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
 	}
+	if paidMinor.Sign() <= 0 {
+		// Checked before the fork, not just the MCGP path below: a "0.00"
+		// charge reaching settleStableBuyFromCharge would claim and then fail
+		// to price a legitimate open purchase, parking it in
+		// buy_awaiting_rate and burning its payment_ref for nothing.
+		return fmt.Errorf("it va credit: non-positive amount")
+	}
 	claimed, err := s.settleStableBuyFromCharge(ctx, va.UserID, chargeID, paidMinor.String())
 	if err != nil {
 		return fmt.Errorf("it va credit: stable buy: %w", err)
@@ -284,14 +308,6 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if wallet == "" {
 		log.Printf("[it va] ALARM credit with no wallet user=%s charge=%s — parking", va.UserID, chargeID)
 		return fmt.Errorf("it va credit: user %s has no wallet", va.UserID)
-	}
-
-	paidKobo, err := nairaToKobo(amountNGN)
-	if err != nil {
-		return fmt.Errorf("it va credit: bad amount %q: %w", amountNGN, err)
-	}
-	if paidKobo.Sign() <= 0 {
-		return fmt.Errorf("it va credit: non-positive amount")
 	}
 
 	buyRate, _, fx, err := s.EffectiveKoboRates(ctx)
@@ -337,7 +353,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		}
 		intent.Status = models.ITStatusAwaitingRate
 		intent.FailureReason = "fx stale at settlement — operator must reprice"
-		intent.NgnKobo = paidKobo.String()
+		intent.NgnKobo = paidMinor.String()
 		intent.PaymentRef = chargeID
 		intent.RateKobo = "0"
 		intent.McgpAmount = "0"
@@ -357,7 +373,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	}
 
 	// Fees come off the naira that landed; only the net buys MCGP.
-	mcgp, fees, err := s.creditableMcgp(ctx, paidKobo, buyRate, va.Currency)
+	mcgp, fees, err := s.creditableMcgp(ctx, paidMinor, buyRate, va.Currency)
 	if err != nil {
 		return fmt.Errorf("it va credit: %w", err)
 	}
@@ -365,7 +381,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 	if pendErr == nil {
 		if err := s.db.WithContext(ctx).Model(&pending).Updates(map[string]any{
 			"payment_ref":        chargeID,
-			"ngn_kobo":           paidKobo.String(),
+			"ngn_kobo":           paidMinor.String(),
 			"rate_kobo":          buyRate.String(),
 			"mcgp_amount":        mcgp.String(),
 			"fee_ngn_kobo":       fees.Fee.String(),
@@ -389,7 +405,7 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		Direction:     models.ITDirectionBuy,
 		Status:        models.ITStatusPendingPayment,
 		Currency:      va.Currency,
-		NgnKobo:       paidKobo.String(),
+		NgnKobo:       paidMinor.String(),
 		RateKobo:      buyRate.String(),
 		McgpAmount:    mcgp.String(),
 		PaymentRef:    chargeID,

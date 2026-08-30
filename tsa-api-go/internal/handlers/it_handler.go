@@ -546,7 +546,7 @@ func (h *ITHandler) PostRepriceParkedStableBuy(c *gin.Context) {
 	}
 	intent, err := h.it.RepriceParkedStableBuy(c.Request.Context(), id)
 	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": intent})
@@ -809,6 +809,28 @@ func (h *ITHandler) PostStableDeposit(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Deposit recorded", gin.H{"recorded": true})
 }
 
+// POST /api/it/stable/buy/:id/cancel — the user's own self-service exit from
+// a stablecoin buy still awaiting payment. Without this, an abandoned intent
+// has no way out of pending_payment short of the 24h claim window lapsing
+// (stableBuyClaimWindow) — see CancelStableBuy for why one is needed.
+func (h *ITHandler) PostCancelStableBuy(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "invalid intent id")
+		return
+	}
+	if err := h.it.CancelStableBuy(c.Request.Context(), user.ID, id); err != nil {
+		utils.ErrorResponseWithCode(c, stableStatusFor(err), err.Error(), stableCodeFor(err))
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Cancelled", gin.H{"cancelled": true})
+}
+
 // GetStuckStableSells lists brokered sells that have not advanced.
 //
 // The platform holds no float, so a stall never costs it money — but it does
@@ -851,7 +873,12 @@ func stableStatusFor(err error) int {
 		// live/valid to someone who doesn't own it. Same status, same shape
 		// as every other client-fixable input error.
 		errors.Is(err, services.ErrStableIntentNotFound),
-		errors.Is(err, services.ErrStableDepositAlreadyClaimed):
+		errors.Is(err, services.ErrStableDepositAlreadyClaimed),
+		// Shared bad-state guard for RepriceParkedStableBuy (not currently
+		// parked) and CancelStableBuy (not pending_payment). Client-fixable in
+		// the sense that acting on the wrong id/state is the caller's mistake,
+		// not a server fault — a DB error below still falls through to 500.
+		errors.Is(err, services.ErrITBadState):
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrStableQuoteUnavailable),
 		errors.Is(err, services.ErrStableNoDepositAddress),
@@ -887,6 +914,11 @@ func stableCodeFor(err error) string {
 		return "stable_not_configured"
 	case errors.Is(err, services.ErrStableFeeExceedsProceeds):
 		return "stable_fee_exceeds_proceeds"
+	case errors.Is(err, services.ErrITBadState):
+		// Shared by RepriceParkedStableBuy (not currently parked) and
+		// CancelStableBuy (not pending_payment) — both are "this action does
+		// not apply to the intent's current state", one machine code for both.
+		return "stable_buy_bad_state"
 	default:
 		return ""
 	}

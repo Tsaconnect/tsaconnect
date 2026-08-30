@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -246,3 +248,109 @@ func TestSettleStableBuyFromCharge_RedeliveryCompletesUnfinishedPricing(t *testi
 	}
 }
 
+
+func TestSettleStableBuyFromCharge_DoesNotClaimAnAbandonedIntent(t *testing.T) {
+	// C2: nothing else expires or cancels a stablecoin buy, so an abandoned
+	// intent must stop claiming money on its own once it is old enough that
+	// it can no longer plausibly be the bank transfer the user is completing
+	// — otherwise it hijacks a later, unrelated payment from the same user.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	old := time.Now().Add(-stableBuyClaimWindow - time.Hour)
+	if err := s.db.Model(intent).UpdateColumn("created_at", old).Error; err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	claimed, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_stale", "16502500")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if claimed {
+		t.Fatal("claimed a charge against an intent past the claim window")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusPendingPayment {
+		t.Fatalf("status = %q, want the abandoned intent left untouched", got.Status)
+	}
+}
+
+func TestSettleStableBuyFromCharge_ClaimsWithinTheWindow(t *testing.T) {
+	// The other side of the same guard: a legitimately slow (but plausible)
+	// bank transfer must still be claimable.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recent := time.Now().Add(-stableBuyClaimWindow + time.Hour)
+	if err := s.db.Model(intent).UpdateColumn("created_at", recent).Error; err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	claimed, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_still_open", "16502500")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claimed {
+		t.Fatal("did not claim a charge against an intent still inside the claim window")
+	}
+}
+
+func TestCancelStableBuy_CancelsAnOpenPurchase(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := s.CancelStableBuy(context.Background(), userID, intent.ID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusCancelled {
+		t.Fatalf("status = %q, want cancelled", got.Status)
+	}
+
+	// The self-service exit ErrStableBuyAlreadyOpen otherwise wedges a user
+	// behind: a cancelled intent must not block a new one.
+	if _, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM); err != nil {
+		t.Fatalf("cancelled intent still blocked a new purchase: %v", err)
+	}
+}
+
+func TestCancelStableBuy_RefusesAnotherUsersIntent(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := s.CancelStableBuy(context.Background(), uuid.New(), intent.ID); !errors.Is(err, ErrStableIntentNotFound) {
+		t.Fatalf("err = %v, want ErrStableIntentNotFound", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.Status != models.ITStatusPendingPayment {
+		t.Fatalf("status = %q, another user's cancel must not touch it", got.Status)
+	}
+}
+
+func TestCancelStableBuy_RefusesOnceMoneyHasLanded(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_landed", "16502500"); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	if err := s.CancelStableBuy(context.Background(), userID, intent.ID); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState — money already landed, this must not cancel it", err)
+	}
+}
