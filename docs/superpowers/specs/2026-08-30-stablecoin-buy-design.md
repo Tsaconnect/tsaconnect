@@ -66,8 +66,19 @@ the sell side.
 
 Three rules make a wrong delivery structurally hard rather than merely unlikely:
 
-- **The address is never typed.** It is the user's own wallet address, read from the database.
-  There is no field in which to make a typo and no paste to get wrong.
+- **The address is never typed — for EVM chains.** For Ethereum, Polygon and Base it is read
+  straight from `users.wallet_address`, server-held. There is no field in which to make a typo
+  and no paste to get wrong.
+
+  **This does not hold for Solana.** Its address comes from `wallet_addresses`, which the user
+  populates themselves through `POST /api/wallet/nonevm/register`. `RegisterNonEVMAddress`
+  (`internal/handlers/wallet_handler.go:964-1007`) validates the value for **shape only**
+  (`client.ValidateAddress`) and writes whatever well-formed address the caller sent. There is no
+  server-side derivation to check it against — Solana keys are derived client-side from a mnemonic
+  the server never sees — so a real ownership check is not available, and adding one that cannot
+  actually verify would be worse than none. The endpoint is correctly scoped to the caller's own
+  `user_id` (nobody can overwrite another user's row), but nothing stops a user from registering
+  an address they do not control as their own delivery target. See the risk table (§10).
 - **A chain is offered only if the user holds an address on it.** A chain the user cannot
   receive on never appears in the picker, so funds cannot be sent somewhere they cannot see.
 
@@ -303,3 +314,4 @@ that up, and should be designed with that stated rather than inherited.
 | **`ProviderFallbackBps` uncalibrated** | `/fees` is 501 in sandbox; the only real datapoint is 1% flat at one amount tier. |
 | **Solana delivery depends on wallet coverage** | Users without a row in `wallet_addresses` for `solana` are simply not offered Solana. Needs confirming against real wallet data — Solana addresses are written only by `RegisterNonEVMAddress`, so coverage may be thin. |
 | **EVM delivery depends on `users.wallet_address`** | A user who never completed wallet registration has no EVM address and can be offered no chain at all. The buy endpoint must fail clearly rather than opaquely. |
+| **Solana delivery address is user-registered and unverifiable** | Unlike the EVM chains, the Solana address is not server-held — it is whatever the user submitted to `POST /api/wallet/nonevm/register`, checked for format only. There is no server-side derivation to verify it against, so a user socially engineered into registering an attacker's address will have their purchased stablecoin delivered there, and nothing in the buy flow can detect it. Two mitigations exist short of that: registration is scoped to the registering user's own row (nobody can plant an address in someone else's), and the delivery allow-list keeps a `wallet_addresses` row from affecting the EVM chains (§2, Finding 2). The option not taken: dropping Solana from buy entirely, which would remove the exposure at the cost of a chain. |
