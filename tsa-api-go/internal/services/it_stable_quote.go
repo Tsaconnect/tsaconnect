@@ -120,7 +120,18 @@ func (s *ITService) stablePlausibilityRateFor(ctx context.Context, currency stri
 func (s *ITService) SetStableRateToleranceBps(bps int64) { s.stableRateTolBps = bps }
 
 // SetStableSpreadBps wires the company margin for brokered stablecoin trades.
-func (s *ITService) SetStableSpreadBps(bps int64) { s.stableSpreadBps = bps }
+//
+// Rejects >= 10000 bps: QuoteStableBuy's per-unit rate divides by
+// (10000-spread), and a 100%+ spread would either divide by zero or invert
+// the price. Unreachable via any configured value today, but this is the
+// single place that guards the money-path panic rather than each caller.
+func (s *ITService) SetStableSpreadBps(bps int64) error {
+	if bps >= 10000 {
+		return fmt.Errorf("it stable: spread must be less than 10000 bps, got %d", bps)
+	}
+	s.stableSpreadBps = bps
+	return nil
+}
 
 // SetStableRateLockTTL bounds how long a quoted rate is honoured.
 func (s *ITService) SetStableRateLockTTL(d time.Duration) { s.stableRateLockTTL = d }

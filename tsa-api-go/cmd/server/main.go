@@ -617,7 +617,9 @@ func main() {
 		if polygonClient == nil {
 			log.Printf("[it stable] dormant — no Polygon RPC client configured")
 		} else {
-			itService.SetStableSpreadBps(cfg.StableSpreadBps)
+			if err := itService.SetStableSpreadBps(cfg.StableSpreadBps); err != nil {
+				log.Printf("[it stable] invalid STABLE_SPREAD_BPS: %v", err)
+			}
 			itService.SetStableRateLockTTL(cfg.StableRateLockTTL)
 			itService.SetStableDepositAddress("POLYGON", cfg.FWStableDepositAddressPolygon)
 			itService.SetStableConverter(fwClient, cfg.FlutterwaveMerchantID)
