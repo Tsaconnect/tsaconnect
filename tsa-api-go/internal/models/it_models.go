@@ -45,6 +45,15 @@ const (
 	ITStatusConverting       = "converting"        // FW stablecoin→fiat conversion in flight
 )
 
+// ── Stablecoin buy (Phase B1) ──
+// pending_payment is reused from the MCGP buy flow: it means the same thing
+// here, and it is the ONLY state that can claim an incoming charge.
+const (
+	ITStatusPaymentReceived = "payment_received" // charge matched to this intent
+	ITStatusAwaitingFunds   = "awaiting_funds"   // naira not yet spendable at FW
+	ITStatusDelivering      = "delivering"       // crypto transfer accepted, not settled
+)
+
 // ITIntentAsset reads an intent's asset, treating rows written before the
 // column existed as MCGP. Like ITIntentCurrency, this fallback is scoped to
 // historical rows and lives in exactly one place so it cannot quietly become
@@ -218,6 +227,16 @@ type ITIntent struct {
 	// correct value for every historical row (unlike Asset, this needs no
 	// separate "treat empty as X" reader function).
 	ConversionAttempts int `gorm:"default:0" json:"conversionAttempts,omitempty"`
+
+	// DeliveryID is Flutterwave's transfer id for the OUTBOUND crypto payout
+	// (type:"crypto"). Persisted for the same reason ConversionID is: the
+	// transfer is asynchronous, so the poll that settles it needs the id, and
+	// an operator recovering a stuck delivery needs it too.
+	DeliveryID string `gorm:"size:64" json:"deliveryId,omitempty"`
+	// DeliveryAttempts bounds retries the same way ConversionAttempts does.
+	// A fresh attempt mints a fresh reference, so a retry cannot collide with
+	// Flutterwave's idempotency on the previous failed transfer.
+	DeliveryAttempts int `gorm:"default:0" json:"deliveryAttempts,omitempty"`
 
 	// Dynamic virtual-account details issued for this buy intent (Flutterwave
 	// collections); shown to the buyer as the pay-into account.

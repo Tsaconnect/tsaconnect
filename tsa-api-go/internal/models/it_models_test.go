@@ -42,3 +42,26 @@ func TestBeforeSave_LeavesAssetAmountAloneForStablecoins(t *testing.T) {
 		t.Fatalf("AssetAmount = %q, want it untouched", i.AssetAmount)
 	}
 }
+
+func TestBuyStatusesAreDistinct(t *testing.T) {
+	// A duplicated status string silently merges two states in every switch
+	// that drives the buy state machine.
+	all := []string{
+		ITStatusPendingPayment,
+		ITStatusPaymentReceived,
+		ITStatusAwaitingFunds,
+		ITStatusConverting,
+		ITStatusDelivering,
+		ITStatusSettled,
+	}
+	seen := map[string]bool{}
+	for _, s := range all {
+		if s == "" {
+			t.Fatal("empty status constant")
+		}
+		if seen[s] {
+			t.Fatalf("duplicate status %q", s)
+		}
+		seen[s] = true
+	}
+}
