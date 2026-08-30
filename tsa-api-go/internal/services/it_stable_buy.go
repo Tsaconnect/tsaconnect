@@ -278,3 +278,177 @@ func (s *ITService) FinalizeBuyConversion(ctx context.Context, intentID uuid.UUI
 		return fmt.Errorf("%w: conversion %s is %s", ErrStableConversionPending, tr.ID, tr.Status)
 	}
 }
+
+// maxStableDeliveryAttempts caps outbound delivery retries, mirroring
+// maxStableConversionAttempts. The intent is deliberately left non-terminal
+// when exhausted: the stuck list filters to non-terminal statuses, so marking
+// it terminal would hide the intent an operator most needs to see.
+const maxStableDeliveryAttempts = 10
+
+// ErrStableDeliveryExhausted means delivery failed too many times and needs an
+// operator. The stablecoin is in our Flutterwave balance — stuck, not lost.
+var ErrStableDeliveryExhausted = errors.New("it stable buy: delivery attempts exhausted; needs operator review")
+
+// ErrStableDeliveryPending means the outbound transfer has not reached a
+// terminal state yet. Distinct from ErrStableConversionPending so an operator
+// reading the watcher's log can tell which leg is waiting — the watcher polls
+// every 30s, so a misleading sentinel here would be the noisiest line in the
+// log and would point at the wrong hop.
+var ErrStableDeliveryPending = errors.New("it stable buy: delivery has not settled yet")
+
+// stableDeliverer is the slice of the Flutterwave client used to pay a user
+// their stablecoin.
+type stableDeliverer interface {
+	DirectTransfer(ctx context.Context, req FWDirectTransferRequest) (FWTransfer, error)
+}
+
+// SetStableDeliverer wires the outbound crypto payout path.
+func (s *ITService) SetStableDeliverer(d stableDeliverer) { s.stableDeliverer = d }
+
+// itBuyDeliveryRef mints the reference for a buy's outbound crypto transfer.
+// "ITBD-" (5) + hyphen-less UUID (32) = 37, inside Flutterwave's 6–42 range.
+func itBuyDeliveryRef(intentID uuid.UUID, attempts int) string {
+	return fmt.Sprintf("ITBD-%s-%d", strings.ReplaceAll(intentID.String(), "-", ""), attempts)
+}
+
+// DeliverStableBuy sends the purchased stablecoin to the user's own address.
+//
+// This is the one irreversible step in the flow, which is why the (chain,
+// asset, address) triple was validated at intent creation and the address was
+// never typed by the user. Reaching here means the conversion already settled
+// SUCCESSFUL, so the asset provably exists in our balance.
+func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Status == models.ITStatusSettled {
+		return nil
+	}
+	if intent.Status != models.ITStatusDelivering {
+		return ErrITBadState
+	}
+	// Already sent — never send twice.
+	if intent.DeliveryID != "" {
+		return nil
+	}
+	if intent.DeliveryAttempts >= maxStableDeliveryAttempts {
+		return ErrStableDeliveryExhausted
+	}
+	if s.stableDeliverer == nil {
+		return errors.New("it stable buy: no deliverer configured")
+	}
+
+	// Re-validate immediately before the irreversible call. The matrix is
+	// config-adjacent and an intent may have been created under an older one.
+	if err := ValidateBuyDelivery(intent.DestChain, intent.Asset, intent.DestAddress); err != nil {
+		return err
+	}
+
+	units, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
+	if !ok || units.Sign() <= 0 {
+		return errors.New("it stable buy: intent has no asset amount")
+	}
+	amountMajor, _ := new(big.Rat).SetFrac(units,
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(StableAssetDecimals), nil)).Float64()
+
+	// Prove we hold the stablecoin before spending it — the same gate
+	// ConvertStableBuy applies to the naira, and for the same reason. This is
+	// the step that actually moves crypto out, so skipping it here would be
+	// the one place the never-advance-before-funds-are-present invariant is
+	// dropped.
+	//
+	// AssetAmount came from the /transfers/rates PREVIEW at settlement;
+	// ConvertBalance later executes at its own rate minus a conversion fee the
+	// spec itself calls uncalibrated. If execution lands worse than the preview
+	// by more than the spread, this would ask Flutterwave to send stablecoin we
+	// do not hold: rejected transfer, delivery_attempts burning to the cap, and
+	// a permanently stuck intent.
+	if s.stableConverter == nil {
+		return errors.New("it stable buy: no balance reader configured")
+	}
+	balances, err := s.stableConverter.FetchBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("it stable buy: %w", err)
+	}
+	var available float64
+	found := false
+	for _, b := range balances {
+		if strings.EqualFold(b.Currency, intent.Asset) {
+			available, found = b.AvailableBalance, true
+			break
+		}
+	}
+	if !found {
+		log.Printf("[IT] it_stable_balance_line_missing asset=%s intent=%s", intent.Asset, intent.ID)
+	}
+	if !found || available < amountMajor {
+		// ErrStableCreditNotVisible, so the watcher treats it as a wait rather
+		// than a failure and does NOT burn a delivery attempt.
+		return fmt.Errorf("%w: %s available=%v needed=%v",
+			ErrStableCreditNotVisible, intent.Asset, available, amountMajor)
+	}
+
+	ref := itBuyDeliveryRef(intent.ID, intent.DeliveryAttempts)
+	tr, err := s.stableDeliverer.DirectTransfer(ctx, FWDirectTransferRequest{
+		Action:    "instant",
+		Type:      "crypto",
+		Reference: ref,
+		Narration: "TSA Connect stablecoin purchase",
+		PaymentInstruction: FWPaymentInstruction{
+			SourceCurrency:      intent.Asset,
+			DestinationCurrency: intent.Asset,
+			Amount:              FWAmount{Value: amountMajor, AppliesTo: "source_currency"},
+			Recipient: FWTransferRecipient{
+				Crypto: &FWRecipientCrypto{
+					Network: intent.DestChain,
+					Address: intent.DestAddress,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("it stable buy deliver: %w", err)
+	}
+	return s.db.WithContext(ctx).Model(intent).
+		Update("delivery_id", tr.ID).Error
+}
+
+// FinalizeBuyDelivery settles a buy once the outbound transfer completes.
+func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID) error {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return err
+	}
+	if intent.Status == models.ITStatusSettled {
+		return nil
+	}
+	if intent.Status != models.ITStatusDelivering || intent.DeliveryID == "" {
+		return ErrITBadState
+	}
+	if s.stableTransfers == nil {
+		return errors.New("it stable buy: no transfer reader configured")
+	}
+
+	tr, err := s.stableTransfers.GetTransfer(ctx, intent.DeliveryID)
+	if err != nil {
+		return fmt.Errorf("it stable buy: %w", err)
+	}
+	switch strings.ToUpper(tr.Status) {
+	case "SUCCESSFUL":
+		return s.db.WithContext(ctx).Model(intent).
+			Update("status", models.ITStatusSettled).Error
+	case "FAILED":
+		// Clear the id and bump the counter so the retry mints a fresh
+		// reference instead of colliding with Flutterwave's idempotency on the
+		// transfer that just failed. Stays in `delivering`: the asset is in our
+		// balance and the user has not been paid.
+		return s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+			"failure_reason":    "delivery failed: " + tr.ID,
+			"delivery_id":       "",
+			"delivery_attempts": intent.DeliveryAttempts + 1,
+		}).Error
+	default:
+		return fmt.Errorf("%w: delivery %s is %s", ErrStableDeliveryPending, tr.ID, tr.Status)
+	}
+}

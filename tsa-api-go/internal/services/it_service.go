@@ -123,6 +123,10 @@ type ITService struct {
 	stableConverter  stableConverter
 	stableTransfers  stableTransferReader
 	stableMerchantID string
+
+	// stableDeliverer sends the purchased stablecoin to the buyer's own
+	// address. See it_stable_buy.go.
+	stableDeliverer stableDeliverer
 }
 
 func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService {
