@@ -215,6 +215,7 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 		return ErrITBadState
 	}
 	if intent.ConversionAttempts >= maxStableConversionAttempts {
+		log.Printf("[IT] it_stable_conversion_exhausted intent=%s attempts=%d", intent.ID, intent.ConversionAttempts)
 		return ErrStableConversionExhausted
 	}
 	if s.stableConverter == nil {
@@ -259,11 +260,29 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 			ErrStableCreditNotVisible, intent.Currency, available, needed)
 	}
 
+	// Claim the intent before spending, so two concurrent ticks cannot both
+	// convert. A double conversion moves real money twice. Mirrors
+	// ConvertAndQueuePayout in it_stable_sell.go.
+	claimed, err := s.claim(ctx, intent.ID,
+		[]string{models.ITStatusPaymentReceived, models.ITStatusAwaitingFunds},
+		models.ITStatusConverting)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		// Another tick already claimed this intent; nothing more to do.
+		return nil
+	}
+
 	ref := itBuyConversionRef(intent.ID, intent.ConversionAttempts)
 	tr, err := s.stableConverter.ConvertBalance(ctx, s.stableMerchantID,
 		intent.Currency, intent.Asset,
 		FWAmount{Value: needed, AppliesTo: "source_currency"}, ref)
 	if err != nil {
+		// Release the claim so the next tick retries rather than stranding it
+		// in converting with no conversion id.
+		_ = s.db.WithContext(ctx).Model(intent).
+			Update("status", intent.Status).Error
 		return fmt.Errorf("it stable buy convert: %w", err)
 	}
 

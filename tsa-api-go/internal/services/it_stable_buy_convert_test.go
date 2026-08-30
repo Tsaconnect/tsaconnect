@@ -65,6 +65,34 @@ func TestConvertStableBuy_ConvertsOnceFundsAreSpendable(t *testing.T) {
 	}
 }
 
+func TestConvertStableBuy_ClaimStopsASecondConcurrentConvert(t *testing.T) {
+	// The database CAS in ConvertStableBuy (mirroring ConvertAndQueuePayout's
+	// s.claim) must be what stops a second tick from converting again, not
+	// merely the DB ending up in the right place. Assert on the stub's call
+	// count, not just status: a DB-only check would still pass even if a
+	// second ConvertBalance fired and its result was simply overwritten.
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	s.db.Model(intent).Updates(map[string]any{
+		"status": models.ITStatusPaymentReceived, "received_amount": "16502500",
+	})
+	conv := &stubConverter{
+		balances: []FWBalance{{Currency: "NGN", AvailableBalance: 200000}},
+		transfer: FWTransfer{ID: "trf_buy_race", Status: "NEW"},
+	}
+	s.SetStableConverter(conv, "merchant_1")
+
+	if err := s.ConvertStableBuy(context.Background(), intent.ID); err != nil {
+		t.Fatalf("first convert: %v", err)
+	}
+	if err := s.ConvertStableBuy(context.Background(), intent.ID); err != nil {
+		t.Fatalf("second (concurrent-style) convert: %v", err)
+	}
+	if len(conv.converted) != 1 {
+		t.Fatalf("ConvertBalance called %d times, want 1 — a double conversion moves real money twice", len(conv.converted))
+	}
+}
+
 func TestFinalizeBuyConversion_OnlySuccessfulAdvances(t *testing.T) {
 	for _, tc := range []struct {
 		name, fwStatus, wantStatus string
