@@ -410,3 +410,58 @@ func TestCreateStableBuyIntent_DoesNotExpireAPurchaseInsideTheWindow(t *testing.
 		t.Fatalf("status = %q, want the in-window intent left alone", got.Status)
 	}
 }
+
+func TestRepriceParkedStableBuy_RecoversADeliveringIntentJammedBySlippage(t *testing.T) {
+	// AssetAmount comes from the rates PREVIEW at settlement; the conversion
+	// executes at its own rate less a fee, and FinalizeBuyConversion advances
+	// on SUCCESSFUL without reading what it actually produced (FWTransfer does
+	// not carry that figure). Land worse than the spread cushion and
+	// DeliverStableBuy's balance gate refuses forever — with nothing able to
+	// reach the intent. The spec promises this state is recoverable.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Converted, not yet sent, and priced above what the conversion produced.
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusDelivering,
+		"delivery_id":     "",
+		"received_amount": "8251250",
+		"asset_amount":    "98450000",
+	}).Error; err != nil {
+		t.Fatalf("simulate jam: %v", err)
+	}
+
+	got, err := s.RepriceParkedStableBuy(context.Background(), intent.ID)
+	if err != nil {
+		t.Fatalf("a jammed delivery had no recovery: %v", err)
+	}
+	if got.Status != models.ITStatusDelivering {
+		t.Fatalf("status = %q, want delivering — the naira is already spent, so a return to payment_received would convert twice", got.Status)
+	}
+	if got.AssetAmount != "49225000" {
+		t.Fatalf("asset amount = %q, want it re-derived from received_amount at the current rate", got.AssetAmount)
+	}
+}
+
+func TestRepriceParkedStableBuy_RefusesADeliveryAlreadySent(t *testing.T) {
+	// delivery_id set means Flutterwave already has the outbound transfer.
+	// Repricing then would rewrite the amount of a payment in flight.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusDelivering,
+		"delivery_id":     "trf_already_sent",
+		"received_amount": "8251250",
+	}).Error; err != nil {
+		t.Fatalf("simulate sent delivery: %v", err)
+	}
+
+	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState", err)
+	}
+}

@@ -221,30 +221,56 @@ func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent,
 	return true, nil
 }
 
-// RepriceParkedStableBuy is the operator recovery for a stablecoin buy parked
-// as `buy_awaiting_rate` — money landed that could not be priced at the time.
+// RepriceParkedStableBuy is the operator recovery for a stablecoin buy that is
+// holding the user's money and cannot advance on its own terms. It reprices
+// what actually arrived at the CURRENT live rate. The watcher deliberately
+// never does this by itself: both states below mean something was wrong, and
+// resuming is a human's call.
 //
-// It reprices the naira that actually arrived at the CURRENT live rate and
-// returns the intent to payment_received, where the watcher picks it up again.
-// The watcher deliberately never does this by itself: the intent parked because
-// something was wrong, and resuming it is a human's call.
+// Two states qualify:
+//
+//	buy_awaiting_rate            money landed that could not be priced at the
+//	                             time. Returns to payment_received, where the
+//	                             watcher picks it up again.
+//	delivering, delivery_id = "" the naira was converted but the outbound
+//	                             transfer has not been sent. AssetAmount came
+//	                             from the /transfers/rates PREVIEW at
+//	                             settlement, while ConvertBalance executed at
+//	                             its own rate less a fee; if that landed worse
+//	                             than the spread cushion, DeliverStableBuy's
+//	                             balance gate refuses forever and no other
+//	                             endpoint can reach the intent. Stays in
+//	                             `delivering` — the naira is already spent, so
+//	                             sending it back to payment_received would have
+//	                             the watcher convert a second time.
+//
+// Repricing a `delivering` intent uses the rate NOW, not what the conversion
+// actually produced (FWTransfer carries no destination amount, so that figure
+// is not available to us). If the rate has moved the other way the new amount
+// can still exceed the balance; the call is safely repeatable.
 func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
 	intent, err := s.getIntent(ctx, intentID)
 	if err != nil {
 		return nil, err
 	}
-	if intent.Direction != models.ITDirectionBuy ||
-		intent.Status != models.ITStatusBuyAwaitingRate ||
-		!IsStableAsset(intent.Asset) {
+	if intent.Direction != models.ITDirectionBuy || !IsStableAsset(intent.Asset) {
 		return nil, ErrITBadState
 	}
-	applied, err := s.priceStableBuy(ctx, intent, intent.ReceivedAmount,
-		models.ITStatusBuyAwaitingRate, models.ITStatusPaymentReceived)
+	var to string
+	switch {
+	case intent.Status == models.ITStatusBuyAwaitingRate:
+		to = models.ITStatusPaymentReceived
+	case intent.Status == models.ITStatusDelivering && intent.DeliveryID == "":
+		to = models.ITStatusDelivering
+	default:
+		return nil, ErrITBadState
+	}
+	applied, err := s.priceStableBuy(ctx, intent, intent.ReceivedAmount, intent.Status, to)
 	if err != nil {
 		return nil, err
 	}
 	if !applied {
-		// Someone moved it out of the park between our read and our write.
+		// Someone moved it between our read and our write.
 		return nil, ErrITBadState
 	}
 	return s.getIntent(ctx, intentID)
