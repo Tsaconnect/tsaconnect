@@ -113,9 +113,15 @@ func (s *ITService) userDeliveryAddresses(ctx context.Context, userID uuid.UUID)
 
 // UserDeliveryAddress returns the user's own address on `chain`.
 //
-// The address is never accepted from the request body. A typed address is the
-// single way this flow could lose funds irrecoverably, so there is no code
-// path that reads one from the caller.
+// No address is ever accepted from THIS request body — there is no field in
+// the buy call to type one into. But that does not mean every address behind
+// it is safe from the user: the two sources in userDeliveryAddresses differ.
+// EVM chains (ETHEREUM, POLYGON, BASE) resolve from users.wallet_address,
+// server-held and untouched by anything the caller sends here. SOLANA
+// resolves from wallet_addresses, which the user themselves populated via
+// POST /api/wallet/nonevm/register — RegisterNonEVMAddress validates that
+// value for shape only, so it IS user-supplied, and there is no server-side
+// derivation to verify it against.
 func (s *ITService) UserDeliveryAddress(ctx context.Context, userID uuid.UUID, chain string) (string, error) {
 	chain = strings.ToUpper(strings.TrimSpace(chain))
 	addrs, err := s.userDeliveryAddresses(ctx, userID)
