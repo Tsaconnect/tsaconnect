@@ -530,6 +530,28 @@ func (h *ITHandler) AdminRepriceCredit(c *gin.Context) {
 	})
 }
 
+// POST /api/it/admin/stable/buy/:id/reprice — resume a stablecoin buy parked
+// as `buy_awaiting_rate` (money landed but could not be priced). Prices the
+// naira that arrived at the CURRENT live rate.
+//
+// Does not use adminIntentAction: a stablecoin buy is delivered to
+// intent.DestAddress, not users.wallet_address, so requiring the latter here
+// (as the MCGP admin actions do) would block recovery for a buyer who never
+// registered an on-chain MCGP wallet.
+func (h *ITHandler) PostRepriceParkedStableBuy(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
+	intent, err := h.it.RepriceParkedStableBuy(c.Request.Context(), id)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"intent": intent})
+}
+
 // POST /api/it/admin/settle/:id — finalize a sell after a confirmed NGN payout.
 func (h *ITHandler) AdminSettle(c *gin.Context) {
 	h.adminIntentAction(c, func(intentID uuid.UUID, wallet string) (*models.ITIntent, error) {

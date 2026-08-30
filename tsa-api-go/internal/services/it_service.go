@@ -474,7 +474,12 @@ func (s *ITService) RepriceAndCreditAwaitingRate(ctx context.Context, intentID u
 	if err != nil {
 		return nil, err
 	}
-	if intent.Direction != models.ITDirectionBuy || intent.Status != models.ITStatusAwaitingRate {
+	// Asset check, not just direction+status: crediting a non-MCGP buy here
+	// would issue MCGP from company supply for a purchase made in something
+	// else. Stablecoin buys have their own recovery, RepriceParkedStableBuy.
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusAwaitingRate ||
+		models.ITIntentAsset(intent) != models.ITAssetMCGP {
 		return nil, ErrITBadState
 	}
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(intent.NgnKobo), 10)

@@ -33,7 +33,25 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		Where("payment_ref = ? AND direction = ?", chargeID, models.ITDirectionBuy).
 		First(&existing).Error
 	if err == nil {
-		return IsStableAsset(existing.Asset), nil
+		if !IsStableAsset(existing.Asset) {
+			return false, nil
+		}
+		// A crash between claiming the charge (below) and pricing it would
+		// otherwise leave the creation-time quote in place forever — the rate
+		// lock the design removed, reappearing in a crash window. Redelivery
+		// finishes the job the interrupted attempt started.
+		if existing.Status == models.ITStatusPaymentReceived && !existing.Repriced {
+			if err := s.priceStableBuy(ctx, &existing); err != nil {
+				log.Printf("[it stable buy] ALARM charge=%s redelivery could not price: %v", chargeID, err)
+				if uErr := s.db.WithContext(ctx).Model(&existing).Updates(map[string]any{
+					"status":         models.ITStatusBuyAwaitingRate,
+					"failure_reason": "could not price at settlement: " + err.Error(),
+				}).Error; uErr != nil {
+					return false, uErr
+				}
+			}
+		}
+		return true, nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, err
 	}
@@ -86,8 +104,7 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 	// price; the figure quoted at creation was indicative. Pricing on what
 	// arrived rather than what was quoted also handles under- and overpayment
 	// with no special case — the mirror of the sell leg's received/quoted.
-	q, err := s.QuoteStableBuy(ctx, intent.Asset, amountMinor, intent.Currency)
-	if err != nil {
+	if err := s.priceStableBuy(ctx, &intent); err != nil {
 		// The money is here and cannot be handed back, so this must NOT error
 		// the webhook — that would leave the charge unprocessed and re-driven
 		// forever. Park for an operator with the reason recorded. Covers an
@@ -98,7 +115,7 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		// awaiting_rate. Sharing that status would expose the intent to
 		// RepriceAndCreditAwaitingRate, which credits MCGP from company supply
 		// and then sets status back to pending_payment — re-opening the intent
-		// so the next incoming charge could claim it. See Task 6a.
+		// so the next incoming charge could claim it.
 		log.Printf("[it stable buy] ALARM charge=%s landed but could not be priced: %v", chargeID, err)
 		if uErr := s.db.WithContext(ctx).Model(&intent).Updates(map[string]any{
 			"status":         models.ITStatusBuyAwaitingRate,
@@ -109,16 +126,55 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 		return true, nil
 	}
 
-	if err := s.db.WithContext(ctx).Model(&intent).Updates(map[string]any{
+	log.Printf("[it stable buy] charge=%s funded %s %s for user=%s",
+		chargeID, intent.AssetAmount, intent.Asset, userID)
+	return true, nil
+}
+
+// priceStableBuy prices a claimed buy on what actually arrived
+// (intent.ReceivedAmount) and moves it to payment_received. Shared by first
+// settlement, by redelivery completing an interrupted settlement, and by the
+// operator recovery RepriceParkedStableBuy.
+func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent) error {
+	q, err := s.QuoteStableBuy(ctx, intent.Asset, intent.ReceivedAmount, intent.Currency)
+	if err != nil {
+		return err
+	}
+	if err := s.db.WithContext(ctx).Model(intent).Updates(map[string]any{
+		"status":       models.ITStatusPaymentReceived,
 		"asset_amount": q.AssetUnits.String(),
 		"locked_rate":  q.RatePerUnitMinor.String(),
 		"rate_minor":   q.RatePerUnitMinor.String(),
 		"rate_kobo":    q.RatePerUnitMinor.String(),
+		"repriced":     true,
 	}).Error; err != nil {
-		return false, err
+		return err
 	}
+	intent.Status = models.ITStatusPaymentReceived
+	intent.AssetAmount = q.AssetUnits.String()
+	intent.Repriced = true
+	return nil
+}
 
-	log.Printf("[it stable buy] charge=%s funded %s %s for user=%s",
-		chargeID, q.AssetUnits, intent.Asset, userID)
-	return true, nil
+// RepriceParkedStableBuy is the operator recovery for a stablecoin buy parked
+// as `buy_awaiting_rate` — money landed that could not be priced at the time.
+//
+// It reprices the naira that actually arrived at the CURRENT live rate and
+// returns the intent to payment_received, where the watcher picks it up again.
+// The watcher deliberately never does this by itself: the intent parked because
+// something was wrong, and resuming it is a human's call.
+func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
+	intent, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	if intent.Direction != models.ITDirectionBuy ||
+		intent.Status != models.ITStatusBuyAwaitingRate ||
+		!IsStableAsset(intent.Asset) {
+		return nil, ErrITBadState
+	}
+	if err := s.priceStableBuy(ctx, intent); err != nil {
+		return nil, err
+	}
+	return s.getIntent(ctx, intentID)
 }

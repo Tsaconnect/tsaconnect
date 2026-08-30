@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -156,6 +157,92 @@ func TestSettleStableBuyFromCharge_IsIdempotent(t *testing.T) {
 	s.db.First(&got, "id = ?", intent.ID)
 	if got.Status != models.ITStatusPaymentReceived {
 		t.Fatalf("status = %q after redelivery, want payment_received", got.Status)
+	}
+}
+
+func TestRepriceAndCreditAwaitingRate_RefusesStablecoinBuys(t *testing.T) {
+	// A parked stablecoin buy has Direction=buy AND Status=awaiting_rate, so it
+	// satisfies the MCGP recovery's guard. Without an asset check an operator
+	// recovering it would credit MCGP from COMPANY SUPPLY — wrong asset to the
+	// user, company funds spent, and the stablecoin purchase still unfulfilled.
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	s.db.Model(intent).Update("status", models.ITStatusBuyAwaitingRate)
+
+	// newStableBuyDBService wires a nil swap (it never needs one for the
+	// stablecoin leg), so IsConfigured() is false and RepriceAndCreditAwaitingRate
+	// would return ErrITNotConfigured before ever reaching the guard under
+	// test. Configure one here, same pattern as newITTestService, so the
+	// asset check is what this test actually exercises.
+	swap := NewMCGPSwapService(nil, &config.Config{Env: "development", MCGPSwapBAddress: "0x00000000000000000000000000000000000bEEF0"})
+	swap.SetOperatorSigner(&fakeReleaseSigner{addr: "0x000000000000000000000000000000000000A11CE", hash: "0xdead"})
+	s.swap = swap
+
+	_, err := s.RepriceAndCreditAwaitingRate(context.Background(), intent.ID)
+	if !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState — the MCGP path must refuse a stablecoin intent", err)
+	}
+}
+
+func TestRepriceParkedStableBuy_ResumesAParkedPurchase(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusBuyAwaitingRate,
+		"received_amount": "16502500",
+	})
+
+	got, err := s.RepriceParkedStableBuy(context.Background(), intent.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status != models.ITStatusPaymentReceived {
+		t.Fatalf("status = %q, want payment_received so the watcher picks it up", got.Status)
+	}
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want the freshly priced figure", got.AssetAmount)
+	}
+}
+
+func TestRepriceParkedStableBuy_RefusesNonParkedOrNonStable(t *testing.T) {
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+
+	// Still pending_payment — nothing has landed, so there is nothing to reprice.
+	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState", err)
+	}
+}
+
+func TestSettleStableBuyFromCharge_RedeliveryCompletesUnfinishedPricing(t *testing.T) {
+	// A crash between claiming the charge and pricing it would otherwise leave
+	// the creation-time amount in place — the rate lock the design removed,
+	// reappearing in a crash window. Redelivery must finish the job.
+	s, userID := newStableBuyDBService(t)
+	intent, _, _ := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+
+	// Simulate the crash: claimed, but never priced.
+	s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusPaymentReceived,
+		"payment_ref":     "chg_crash",
+		"received_amount": "16502500",
+		"repriced":        false,
+	})
+
+	claimed, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_crash", "16502500")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claimed {
+		t.Fatal("redelivery did not claim the charge")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if !got.Repriced {
+		t.Fatal("redelivery left the intent unpriced")
+	}
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want the priced figure", got.AssetAmount)
 	}
 }
 
