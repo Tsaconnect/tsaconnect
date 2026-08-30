@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 func TestSettleStableBuyFromCharge_FundsAnOpenIntent(t *testing.T) {
@@ -463,5 +464,90 @@ func TestRepriceParkedStableBuy_RefusesADeliveryAlreadySent(t *testing.T) {
 
 	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("err = %v, want ErrITBadState", err)
+	}
+}
+
+// deliveryStampingQuoter simulates the watcher sending the outbound transfer
+// while the operator's reprice is on the rate call — the one window between
+// RepriceParkedStableBuy's read of delivery_id and priceStableBuy's write.
+type deliveryStampingQuoter struct {
+	db     *gorm.DB
+	id     uuid.UUID
+	quoter buyRateQuoter
+}
+
+func (q *deliveryStampingQuoter) QuoteRate(ctx context.Context, src, dst string, destAmount float64) (FWRate, error) {
+	q.db.Model(&models.ITIntent{}).Where("id = ?", q.id).Update("delivery_id", "trf_sent_midway")
+	return q.quoter.QuoteRate(ctx, src, dst, destAmount)
+}
+
+func TestRepriceParkedStableBuy_LosesToADeliverySentMidReprice(t *testing.T) {
+	// The delivery_id check is part of the CAS, not a prior read. The watcher
+	// calls DeliverStableBuy on every delivering intent every 30s and the
+	// slippage jam clears the moment the balance settles, so this interleaving
+	// is live. Checked outside the write, the reprice would rewrite
+	// asset_amount on a transfer already sent for the OLD figure — no double
+	// send, but the intent settles recording an amount that is not what was
+	// paid.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusDelivering,
+		"delivery_id":     "",
+		"received_amount": "8251250",
+		"asset_amount":    "98450000",
+	}).Error; err != nil {
+		t.Fatalf("simulate jam: %v", err)
+	}
+	// Stamps delivery_id between the read and the write.
+	s.SetRateQuoter(&deliveryStampingQuoter{
+		db: s.db, id: intent.ID, quoter: buyRateQuoter{ngnPerUnit: 1650.25},
+	})
+
+	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want ErrITBadState — the delivery went out mid-reprice", err)
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want it unchanged — a transfer was already sent for that figure", got.AssetAmount)
+	}
+}
+
+func TestPriceStableBuy_NeverRewritesADeliveryAlreadySent(t *testing.T) {
+	// The narrower property the CAS enforces, independent of any caller: a
+	// delivering intent with delivery_id set is not repriceable, whatever
+	// from/to pair is passed in.
+	s, userID := newStableBuyDBService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.db.Model(intent).Updates(map[string]any{
+		"status":          models.ITStatusDelivering,
+		"delivery_id":     "trf_already_out",
+		"received_amount": "8251250",
+		"asset_amount":    "98450000",
+	}).Error; err != nil {
+		t.Fatalf("simulate sent delivery: %v", err)
+	}
+	intent.Status = models.ITStatusDelivering
+	intent.ReceivedAmount = "8251250"
+
+	applied, err := s.priceStableBuy(context.Background(), intent, intent.ReceivedAmount,
+		models.ITStatusDelivering, models.ITStatusDelivering)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if applied {
+		t.Fatal("repriced a delivery that has already been sent")
+	}
+	var got models.ITIntent
+	s.db.First(&got, "id = ?", intent.ID)
+	if got.AssetAmount != "98450000" {
+		t.Fatalf("asset amount = %q, want it unchanged", got.AssetAmount)
 	}
 }

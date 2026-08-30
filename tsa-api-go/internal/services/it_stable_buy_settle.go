@@ -188,6 +188,16 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 // Returns false when no row matched: something else advanced the intent first,
 // and it is no longer ours to price.
 //
+// Repricing a `delivering` intent additionally requires delivery_id to still
+// be empty, and that condition is part of the CAS rather than a caller's prior
+// read. The watcher calls DeliverStableBuy on every delivering intent every
+// 30s, and the slippage jam this recovery exists for clears the moment the
+// balance settles — so "the watcher sends while the operator is mid-reprice"
+// is a live sequence, and the rate call is an HTTP round-trip wide. Checked
+// outside the write, it would rewrite asset_amount on a transfer already sent
+// for the old figure: no double send, but the intent settles recording an
+// amount that is not what was paid.
+//
 // The amount is a parameter rather than a read of intent.ReceivedAmount so
 // that the first settlement can price BEFORE it claims — see
 // settleStableBuyFromCharge. Callers after the claim pass ReceivedAmount.
@@ -196,17 +206,20 @@ func (s *ITService) priceStableBuy(ctx context.Context, intent *models.ITIntent,
 	if err != nil {
 		return false, err
 	}
-	res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("id = ? AND status = ?", intent.ID, fromStatus).
-		Updates(map[string]any{
-			"status":         toStatus,
-			"asset_amount":   q.AssetUnits.String(),
-			"locked_rate":    q.RatePerUnitMinor.String(),
-			"rate_minor":     q.RatePerUnitMinor.String(),
-			"rate_kobo":      q.RatePerUnitMinor.String(),
-			"repriced":       true,
-			"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
-		})
+	cas := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("id = ? AND status = ?", intent.ID, fromStatus)
+	if fromStatus == models.ITStatusDelivering {
+		cas = cas.Where("delivery_id = ?", "")
+	}
+	res := cas.Updates(map[string]any{
+		"status":         toStatus,
+		"asset_amount":   q.AssetUnits.String(),
+		"locked_rate":    q.RatePerUnitMinor.String(),
+		"rate_minor":     q.RatePerUnitMinor.String(),
+		"rate_kobo":      q.RatePerUnitMinor.String(),
+		"repriced":       true,
+		"failure_reason": "", // clear a stale "could not price at settlement" from a prior park
+	})
 	if res.Error != nil {
 		return false, res.Error
 	}
