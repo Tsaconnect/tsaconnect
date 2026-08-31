@@ -85,6 +85,32 @@ type ITIntent struct {
 	// rotation can't strand the intent (review M2).
 	WalletAddress string `gorm:"size:42" json:"walletAddress"`
 
+	// ── The numeric-column rule ──
+	// GORM puts every field WITHOUT a column `default:` tag into the INSERT
+	// whether or not it was set, so an unset Go string arrives at PostgreSQL as
+	// ''::numeric and the whole INSERT is rejected (SQLSTATE 22P02). SQLite's
+	// type affinity accepts it silently, so the SQLite-backed suite cannot see
+	// it — internal/services/it_stable_postgres_test.go is the counterweight.
+	//
+	// Every OPTIONAL numeric column below therefore carries `default:0`: GORM
+	// omits a zero-value field that has one and lets the database supply the
+	// value, which makes "a new write path forgot this column" structurally
+	// impossible instead of a thing each literal must remember.
+	//
+	// Five columns are deliberately EXCLUDED from that rule:
+	//
+	//   McgpAmount, NgnKobo, RateKobo (the `not null` trio) are the quote
+	//   itself. A path that fails to set them has not priced the trade, and a
+	//   default would turn that into a live intent quoting zero rather than an
+	//   INSERT that fails before any money moves.
+	//
+	//   NetNgnKobo and its NetMinor twin are the payout amount, and "" is
+	//   load-bearing there: payoutKobo (it_fees.go) reads an empty net as
+	//   "created before fee deduction shipped, settle at the gross". A default
+	//   of 0 would turn that legacy reading into "pay this person nothing".
+	//
+	// For all five, an unset value is a bug the INSERT should reject, not a
+	// value the database should invent.
 	McgpAmount string `gorm:"type:numeric(78,0);not null" json:"mcgpAmount"` // wei
 
 	// Asset selects which leg runs: MCGP moves company inventory on-chain,
@@ -96,7 +122,7 @@ type ITIntent struct {
 	// AssetAmount is the asset leg in its own base units (6 decimals for both
 	// stablecoins). For MCGP intents it mirrors McgpAmount via BeforeSave;
 	// McgpAmount stays authoritative until it is dropped.
-	AssetAmount string `gorm:"type:numeric(78,0)" json:"assetAmount,omitempty"`
+	AssetAmount string `gorm:"type:numeric(78,0);default:0" json:"assetAmount,omitempty"`
 
 	// Currency is the fiat leg's ISO 4217 code. Validated against the currency
 	// registry — never against display metadata.
@@ -122,8 +148,8 @@ type ITIntent struct {
 	NgnKobo  string `gorm:"type:numeric(38,0);not null" json:"ngnKobo"`  // naira*100
 	RateKobo string `gorm:"type:numeric(38,0);not null" json:"rateKobo"` // kobo per 1 MCGP, locked
 
-	AmountMinor string `gorm:"type:numeric(38,0)" json:"amountMinor,omitempty"`
-	RateMinor   string `gorm:"type:numeric(38,0)" json:"rateMinor,omitempty"`
+	AmountMinor string `gorm:"type:numeric(38,0);default:0" json:"amountMinor,omitempty"`
+	RateMinor   string `gorm:"type:numeric(38,0);default:0" json:"rateMinor,omitempty"`
 
 	// ── Fees (both directions) ──
 	// NgnKobo above stays the GROSS valuation of the MCGP leg — what the asset
@@ -137,19 +163,19 @@ type ITIntent struct {
 	// Empty on intents created before fee deduction shipped — readers must
 	// treat "" as "no fee taken, net == gross" so in-flight intents settle at
 	// the terms they were created under.
-	FeeNgnKobo string `gorm:"type:numeric(38,0)" json:"feeNgnKobo,omitempty"`
+	FeeNgnKobo string `gorm:"type:numeric(38,0);default:0" json:"feeNgnKobo,omitempty"`
 	NetNgnKobo string `gorm:"type:numeric(38,0)" json:"netNgnKobo,omitempty"`
 	// PlatformKeptKobo is the slice of FeeNgnKobo the platform actually retains
 	// (swap + platform fee) — the provider's pass-through and tax are excluded.
 	// This is the base the cashback/TP carve is computed from, recorded so a
 	// later rate change can't retro-explain an old payout.
-	PlatformKeptKobo string `gorm:"type:numeric(38,0)" json:"platformKeptKobo,omitempty"`
+	PlatformKeptKobo string `gorm:"type:numeric(38,0);default:0" json:"platformKeptKobo,omitempty"`
 
 	// Minor-unit twins of the three fee columns above. Same dual-write rule:
 	// written alongside the *Kobo fields, identical for NGN.
-	FeeMinor          string `gorm:"type:numeric(38,0)" json:"feeMinor,omitempty"`
+	FeeMinor          string `gorm:"type:numeric(38,0);default:0" json:"feeMinor,omitempty"`
 	NetMinor          string `gorm:"type:numeric(38,0)" json:"netMinor,omitempty"`
-	PlatformKeptMinor string `gorm:"type:numeric(38,0)" json:"platformKeptMinor,omitempty"`
+	PlatformKeptMinor string `gorm:"type:numeric(38,0);default:0" json:"platformKeptMinor,omitempty"`
 
 	// PaymentRef is the strong NGN attribution key: the minted "IT-…" reference
 	// at creation, overwritten with the provider charge id once VA settlement
@@ -202,12 +228,12 @@ type ITIntent struct {
 	//   buy:  the FIAT MINOR UNITS the user actually paid, written at claim
 	//         time (see settleStableBuyFromCharge in it_stable_buy_settle.go).
 	//         Not asset base units on this leg.
-	ReceivedAmount string `gorm:"type:numeric(78,0)" json:"receivedAmount,omitempty"`
+	ReceivedAmount string `gorm:"type:numeric(78,0);default:0" json:"receivedAmount,omitempty"`
 
 	// LockedRate is fiat minor units per one whole asset unit, locked at intent
 	// creation. RateExpiresAt bounds the lock; Repriced records that the lock
 	// lapsed and a live rate was used instead.
-	LockedRate    string     `gorm:"type:numeric(38,0)" json:"lockedRate,omitempty"`
+	LockedRate    string     `gorm:"type:numeric(38,0);default:0" json:"lockedRate,omitempty"`
 	RateExpiresAt *time.Time `json:"rateExpiresAt,omitempty"`
 	Repriced      bool       `gorm:"default:false" json:"repriced,omitempty"`
 

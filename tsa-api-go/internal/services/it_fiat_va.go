@@ -363,6 +363,12 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 				// have it repriced at the naira rate.
 				Currency: va.Currency,
 				PMID:     pmID,
+				// net_ngn_kobo carries no column default (see the numeric-column
+				// rule on models.ITIntent): "" there means "settle at the gross"
+				// and PostgreSQL rejects it outright. Nothing has been deducted
+				// from a parked credit, so net IS the gross until
+				// RepriceAndCreditAwaitingRate applies the real fee.
+				NetNgnKobo: paidMinor.String(),
 			}
 		} else if pendErr != nil {
 			return pendErr
@@ -427,6 +433,11 @@ func (s *ITService) AutoCreditFromVA(ctx context.Context, fwCustomerID, referenc
 		PaymentRef:    chargeID,
 		PMID:          pmID,
 	}
+	// The credited MCGP above is already NET of fees, so the fee columns must
+	// record what was taken — exactly as the update branch a few lines up does
+	// for an existing pending order. Without this the row credits net but reads
+	// as a fee-free purchase, and settleITFee has no platform-kept base.
+	applyFees(intent, fees)
 	if err := s.db.WithContext(ctx).Create(intent).Error; err != nil {
 		if isUniqueViolation(err) {
 			// A concurrent delivery of this charge won the race and owns the
