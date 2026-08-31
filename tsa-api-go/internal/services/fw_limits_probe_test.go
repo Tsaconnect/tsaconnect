@@ -107,3 +107,65 @@ func TestProbe_FlutterwaveLimits(t *testing.T) {
 
 	t.Log("── done. Record the findings, then delete this file. ──")
 }
+
+// Throwaway probe #2. Finds the TSA account details users would transfer INTO,
+// when the dashboard is unavailable.
+//
+// GET only — every path below is a read. Nothing is created, and no credential
+// is printed. Bodies are truncated: a wallet or account response can carry
+// identifiers we have no reason to spill into a terminal.
+//
+// The client has no "describe my own account" call today, which is the point:
+// this establishes whether one exists before anybody writes it.
+func TestProbe_FlutterwaveOwnAccount(t *testing.T) {
+	if os.Getenv("FW_PROBE") == "" {
+		t.Skip("set FW_PROBE=1 to run the live Flutterwave account probe")
+	}
+	_ = godotenv.Load(filepath.Join("..", "..", ".env"))
+
+	clientID := strings.TrimSpace(os.Getenv("FLUTTERWAVE_CLIENT_ID"))
+	clientSecret := strings.TrimSpace(os.Getenv("FLUTTERWAVE_CLIENT_SECRET"))
+	if clientID == "" || clientSecret == "" {
+		t.Skip("no Flutterwave credentials in the environment — skipping")
+	}
+	baseURL := strings.TrimSpace(os.Getenv("FLUTTERWAVE_BASE_URL"))
+	if baseURL == "" {
+		baseURL = "https://developersandbox-api.flutterwave.com"
+	}
+	t.Logf("BASE URL: %s", baseURL)
+
+	c := NewFlutterwaveClient(baseURL, strings.TrimSpace(os.Getenv("FLUTTERWAVE_IDP_URL")), clientID, clientSecret)
+	if c == nil {
+		t.Skip("Flutterwave client not constructible from this environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Candidates, most likely first. A 404 is a useful answer: it rules the path
+	// out. A 200 tells us what we can build on.
+	paths := []string{
+		"/virtual-accounts",     // may list the accounts already provisioned
+		"/wallets",              // sibling of the known /wallets/balances
+		"/wallets/balances",     // known-good; proves auth is working
+		"/merchants/me",
+		"/me",
+		"/profile",
+		"/accounts",
+		"/settlements",          // documented; also shows the settlement cycle
+	}
+
+	for _, p := range paths {
+		resp, body, err := c.authedRequest(ctx, "GET", p, nil, "")
+		if err != nil {
+			t.Logf("GET %-22s TRANSPORT ERROR: %v", p, err)
+			continue
+		}
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 600 {
+			snippet = snippet[:600] + "…(truncated)"
+		}
+		t.Logf("GET %-22s %d\n      %s", p, resp.StatusCode, snippet)
+	}
+
+	t.Log("── done. Record what answered, then delete this file. ──")
+}
