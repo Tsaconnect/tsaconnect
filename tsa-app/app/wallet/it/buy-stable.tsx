@@ -13,7 +13,7 @@
 // → create → one screen showing the estimate, the full delivery address, and
 // the pay-into account → the user pays → "I've sent the money" (no API call)
 // hands off to the intent detail screen, which the webhook drives from here.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
@@ -126,25 +126,48 @@ export default function ITBuyStable() {
   const [showChainPicker, setShowChainPicker] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [chainsError, setChainsError] = useState('');
 
   // Only chains this user actually holds a delivery address for come back —
   // a chain with no address is never in the list, so it can never be chosen.
+  //
+  // A FAILED fetch is not an empty one. Collapsing both to [] rendered "No
+  // delivery address on file" — false, and actionable-looking — for a dropped
+  // connection, a 500, or stable_not_configured, on the very first call this
+  // screen makes. The empty state is reserved for a list the server actually
+  // returned as empty; everything else is an error with a retry.
+  const chainsReqRef = useRef(0);
+  const loadChains = useCallback(async () => {
+    const gen = ++chainsReqRef.current;
+    setChainsLoading(true);
+    setChainsError('');
+    const res = await getStableBuyChains(asset);
+    if (gen !== chainsReqRef.current) return;
+    if (!res.success) {
+      setChains([]);
+      setChainsError(
+        res.code === IT_STABLE_NOT_CONFIGURED || res.status === 503
+          ? 'Buying is temporarily unavailable. Try again shortly.'
+          : "We couldn't load the chains you can receive on."
+      );
+      setChainsLoading(false);
+      return;
+    }
+    const list = res.data?.chains ?? [];
+    setChains(list);
+    setChain((prev) => prev || list[0] || '');
+    setChainsLoading(false);
+  }, [asset]);
+
   useEffect(() => {
     if (!checked || resuming) return;
-    let cancelled = false;
-    setChainsLoading(true);
-    (async () => {
-      const res = await getStableBuyChains(asset);
-      if (cancelled) return;
-      const list = res.success ? res.data?.chains ?? [] : [];
-      setChains(list);
-      setChain((prev) => prev || list[0] || '');
-      setChainsLoading(false);
-    })();
+    void loadChains();
+    // Invalidate the in-flight request on unmount or a dependency change, so a
+    // late response cannot overwrite newer state.
     return () => {
-      cancelled = true;
+      chainsReqRef.current += 1;
     };
-  }, [checked, resuming, asset]);
+  }, [checked, resuming, loadChains]);
 
   // --- Step 4/5: create, then one screen with the estimate + full address +
   // pay-into account. The delivery address does not exist until the intent
@@ -182,8 +205,18 @@ export default function ITBuyStable() {
   const applyErrorCode = async (code?: string, message?: string) => {
     switch (code) {
       case IT_STABLE_BUY_ALREADY_OPEN: {
-        // Step 0 should have caught this; fall back to the resume view.
+        // Step 0 should have caught this; fall back to the resume view. It can
+        // legitimately come back empty — listITIntents can fail, and the open
+        // intent can fall outside the server's page limit — and `submit`
+        // cleared `error` on entry, so without this the spinner would just stop
+        // and nothing at all would happen.
         const open = await checkResume();
+        if (!open) {
+          setError(
+            'You already have a purchase awaiting payment. Open it from your order history to pay or cancel it.'
+          );
+          return;
+        }
         setResuming(open);
         return;
       }
@@ -364,7 +397,12 @@ export default function ITBuyStable() {
 
           <SelectRow label="Asset" value={asset} leftIcon="wallet" onPress={() => {}} disabled />
 
-          {!chainsLoading && chains.length === 0 ? (
+          {chainsError ? (
+            <View style={{ gap: spacing.md }}>
+              <Text variant="bodySm" style={{ color: colors.danger }}>{chainsError}</Text>
+              <Button title="Retry" variant="secondary" loading={chainsLoading} onPress={loadChains} />
+            </View>
+          ) : !chainsLoading && chains.length === 0 ? (
             <EmptyState
               icon="wallet"
               title="No delivery address on file"
