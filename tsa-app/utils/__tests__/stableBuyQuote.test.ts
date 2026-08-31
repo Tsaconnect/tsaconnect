@@ -39,10 +39,18 @@ describe('buyStatusToHops', () => {
   it('maps EVERY backend buy status', () => {
     // An unmapped status renders a blank progress screen. buy_awaiting_rate
     // is the worst case: the user's naira is held pending an operator.
+    //
+    // `not.toBe('In progress')` is the part that actually enforces this:
+    // buyStatusLabel falls back to 'In progress' for any string it doesn't
+    // recognize, so a status added to STABLE_BUY_STATUSES without a LABELS
+    // entry would otherwise still pass — it degrades gracefully at runtime,
+    // but that means the length/non-empty checks alone don't catch a missing
+    // mapping. This assertion is what makes the gap fail here instead.
     for (const s of STABLE_BUY_STATUSES) {
       const hops = buyStatusToHops(s);
       expect(hops.length).toBeGreaterThan(0);
       expect(buyStatusLabel(s)).not.toBe('');
+      expect(buyStatusLabel(s)).not.toBe('In progress');
     }
   });
 

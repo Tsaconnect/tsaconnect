@@ -2,7 +2,7 @@
 //
 // Instant Transfer order detail — status progress for a single buy/sell intent.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, RefreshControl, View } from 'react-native';
+import { ScrollView, RefreshControl, View, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -11,9 +11,21 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
 import { Button, Card, Divider, Icon, Input, Spinner, SummaryCard, SummaryRow, Text } from '@/components/ui';
-import { getITIntent, reportStableDeposit, IT_STABLE_DEPOSIT_CLAIMED, type ITIntent } from '@/services/itApi';
+import {
+  getITIntent,
+  reportStableDeposit,
+  cancelStableBuy,
+  IT_STABLE_DEPOSIT_CLAIMED,
+  type ITIntent,
+} from '@/services/itApi';
 import { formatTokenAmount } from '@/services/p2p';
 import { formatKobo, isLikelyTxHash, isTerminalStableStatus, statusToHops } from '@/utils/stableSellQuote';
+// Buy equivalents of the sell mappings above — a stablecoin BUY intent has its
+// own status set (payment_received, awaiting_funds, delivering,
+// buy_awaiting_rate, …) that does not exist on the sell side, so statusToHops
+// / isTerminalStableStatus are simply the wrong functions for it, not merely
+// unused ones.
+import { buyStatusToHops, buyStatusLabel, isTerminalBuyStatus } from '@/utils/stableBuyQuote';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -108,6 +120,11 @@ export default function ITIntentDetail() {
   const [pendingHash, setPendingHash] = useState<string | null>(null);
   const [hashChecked, setHashChecked] = useState(false);
   const [addressCopied, setAddressCopied] = useState(false);
+  // Cancel-while-unpaid, for a stablecoin buy reached from history — the same
+  // escape hatch buy-stable.tsx's own resume view offers before this screen
+  // ever exists for the intent.
+  const [cancellingBuy, setCancellingBuy] = useState(false);
+  const [cancelBuyError, setCancelBuyError] = useState('');
   // Manual recovery: a hash the user pastes in themselves. A bridged sell has
   // no other route back — sell-stable.tsx's history lookup only sees Polygon,
   // and the app told the user to report the transfer against this order.
@@ -154,8 +171,21 @@ export default function ITIntentDetail() {
   // applying this poll to every asset would leave a completed MCGP buy
   // polling forever in the background, the exact bug this gate exists to
   // avoid.
+  //
+  // Which terminal SET applies depends on direction: a stablecoin buy's
+  // terminal set is {settled, cancelled, failed} (isTerminalBuyStatus) and
+  // deliberately excludes buy_awaiting_rate — money landed but could not be
+  // priced, and an operator can reprice it back to payment_received. Using
+  // the sell mapping's set here would treat buy_awaiting_rate as non-terminal
+  // too (it isn't in that set either) by coincidence, but would also be
+  // wrong on any future status the two mappings diverge on, so route on
+  // direction explicitly rather than relying on that coincidence.
   const isFocused = useIsFocused();
-  const pollingActive = isStableAsset && isFocused && !isTerminalStableStatus(intent?.status ?? '');
+  const isStableBuy = isStableAsset && intent?.direction === 'buy';
+  const pollingActive =
+    isStableAsset &&
+    isFocused &&
+    !(isStableBuy ? isTerminalBuyStatus(intent?.status ?? '') : isTerminalStableStatus(intent?.status ?? ''));
 
   useEffect(() => {
     if (!pollingActive) return;
@@ -263,6 +293,19 @@ export default function ITIntentDetail() {
     setTimeout(() => setAddressCopied(false), 2000);
   }, [intent?.depositAddress]);
 
+  const handleCancelBuy = useCallback(async () => {
+    if (!intent) return;
+    setCancelBuyError('');
+    setCancellingBuy(true);
+    const r = await cancelStableBuy(intent.id);
+    setCancellingBuy(false);
+    if (!r.success) {
+      setCancelBuyError(r.message || 'Could not cancel. Try again.');
+      return;
+    }
+    load();
+  }, [intent, load]);
+
   if (loading && !intent) {
     return (
       <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
@@ -283,6 +326,21 @@ export default function ITIntentDetail() {
 
   const isBuy = intent.direction === 'buy';
   const title = isBuy ? 'Buy' : 'Sell';
+
+  // statusLabel above is scoped to MCGP (both directions) + stablecoin SELL.
+  // A stablecoin BUY's own statuses (payment_received, awaiting_funds,
+  // delivering, buy_awaiting_rate, …) aren't in it and would fall through to
+  // the raw snake_case string, so route those through buyStatusLabel instead.
+  const displayStatus = (status: string) => (isBuy && isStableAsset ? buyStatusLabel(status) : statusLabel(status));
+
+  // buyStatusToHops's Hop (utils/stableBuyQuote.ts) carries no `key`, unlike
+  // the sell mapping's — synthesize one from the index so both feed the same
+  // render below without a union-typed `.key` access.
+  const hops = !isStableAsset
+    ? []
+    : isBuy
+      ? buyStatusToHops(intent.status).map((h, i) => ({ key: String(i), ...h }))
+      : statusToHops(intent.status);
 
   const bridgedSource = !!intent.sourceChain && intent.sourceChain.toUpperCase() !== 'POLYGON';
   // The payout is `received / quoted`, and a bridge delivers less than it was
@@ -322,12 +380,24 @@ export default function ITIntentDetail() {
             {title}
           </Text>
           <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-            {statusLabel(intent.status)}
+            {displayStatus(intent.status)}
           </Text>
           <SummaryCard>
-            <SummaryRow label="Status" value={statusLabel(intent.status)} />
+            <SummaryRow label="Status" value={displayStatus(intent.status)} />
             <Divider spacing="xs" />
-            {isStableAsset ? (
+            {isStableAsset && isBuy ? (
+              <>
+                <SummaryRow label="You pay" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+                <Divider spacing="xs" />
+                <SummaryRow label="You get" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
+                {intent.destChain ? (
+                  <>
+                    <Divider spacing="xs" />
+                    <SummaryRow label="On" value={intent.destChain} />
+                  </>
+                ) : null}
+              </>
+            ) : isStableAsset ? (
               <>
                 <SummaryRow label="You sell" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
                 <Divider spacing="xs" />
@@ -379,7 +449,7 @@ export default function ITIntentDetail() {
                 Progress
               </Text>
               <View style={{ gap: spacing.sm }}>
-                {statusToHops(intent.status).map((hop) => (
+                {hops.map((hop) => (
                   <View key={hop.key} style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                     {hop.state === 'done' ? (
                       <Icon name="checkCircle" size={20} color={colors.success} />
@@ -409,6 +479,29 @@ export default function ITIntentDetail() {
               </View>
             </View>
           ) : null}
+          {isBuy && isStableAsset && intent.destAddress ? (
+            <View style={{ marginTop: spacing.md }}>
+              {/* FULL address, never truncated, and never inside SummaryRow
+                  (which ellipsises) — same reasoning as the confirm step
+                  (buy-stable.tsx): a truncated address cannot be verified
+                  against, which is the only thing displaying it achieves. */}
+              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+                Sent to your wallet
+              </Text>
+              <Text
+                selectable
+                numberOfLines={0}
+                style={{
+                  color: colors.textPrimary,
+                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                  fontSize: 13,
+                  lineHeight: 18,
+                }}
+              >
+                {intent.destAddress}
+              </Text>
+            </View>
+          ) : null}
           {intent.failureReason ? (
             <View style={{ marginTop: spacing.md }}>
               <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
@@ -426,6 +519,29 @@ export default function ITIntentDetail() {
             </Text>
           ) : null}
         </Card>
+
+        {isBuy && isStableAsset && intent.status === 'pending_payment' ? (
+          <Card>
+            <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
+              Haven&apos;t paid yet?
+            </Text>
+            <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
+              You can cancel this purchase before paying. If you have already sent the transfer, do
+              not cancel — wait for it to be matched instead.
+            </Text>
+            {cancelBuyError ? (
+              <Text variant="bodySm" style={{ color: colors.danger, marginBottom: spacing.md }}>
+                {cancelBuyError}
+              </Text>
+            ) : null}
+            <Button
+              title="Cancel purchase"
+              variant="secondary"
+              loading={cancellingBuy}
+              onPress={handleCancelBuy}
+            />
+          </Card>
+        ) : null}
 
         {showResume ? (
           canResumeDirect ? (
@@ -490,8 +606,15 @@ export default function ITIntentDetail() {
         {/* Manual recovery. Offered whenever the deposit has not been recorded
             yet — a lost hash is the one failure this flow cannot undo for the
             user, and on a bridged sell there is no history lookup to fall back
-            on. Report is idempotent per (intent, hash). */}
-        {isStableAsset && !isTerminalStableStatus(intent.status) && !intent.depositTxHash ? (
+            on. Report is idempotent per (intent, hash).
+            SELL only — `!isBuy` — because "deposit" here means the user's own
+            on-chain send to Flutterwave, which has no equivalent on a
+            stablecoin buy. Without this gate a buy intent's own statuses
+            (payment_received, awaiting_funds, delivering, …) are all absent
+            from isTerminalStableStatus's set, so this card would show a
+            "paste your transaction hash" prompt to a buy that has no
+            transaction to paste. */}
+        {isStableAsset && !isBuy && !isTerminalStableStatus(intent.status) && !intent.depositTxHash ? (
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
               Already sent it?
