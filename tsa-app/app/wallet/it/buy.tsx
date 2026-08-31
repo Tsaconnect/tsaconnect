@@ -42,6 +42,14 @@ import { RAILS } from '@/constants/rails';
 type Screen = 'form' | 'activate' | 'submitting' | 'instructions' | 'error';
 type IdType = 'BVN' | 'NIN';
 
+// Stablecoins navigate away to the dedicated buy-stable screen rather than
+// being rendered here, so this form only ever needs to hold the MCGP asset.
+const ASSET_OPTIONS: PickerItem[] = [
+  { id: 'MCGP', label: 'MCGP', icon: 'wallet' },
+  { id: 'USDC', label: 'USDC', icon: 'wallet' },
+  { id: 'USDT', label: 'USDT', icon: 'wallet' },
+];
+
 const CURRENCY_OPTIONS: PickerItem[] = [
   { id: 'NGN', label: 'NGN · Nigerian Naira', icon: 'wallet' },
 ];
@@ -54,6 +62,10 @@ export default function ITBuy() {
   const { colors, spacing, radius, fonts, type } = useTheme();
   const { formatPrice, allRates, currency } = useCurrency();
   const [screen, setScreen] = useState<Screen>('form');
+  // The picker's selection. MCGP is the only value this screen ever holds;
+  // the stablecoins navigate away rather than being rendered here.
+  const [asset, setAsset] = useState<'MCGP'>('MCGP');
+  const [showAssetPicker, setShowAssetPicker] = useState(false);
   const [naira, setNaira] = useState('');
   const [error, setError] = useState('');
   const [quote, setQuote] = useState<ITBuyQuote | null>(null);
@@ -75,6 +87,14 @@ export default function ITBuy() {
     CURRENCY_OPTIONS.find((o) => o.id === paymentCurrency)?.label ?? paymentCurrency;
   const methodLabel =
     METHOD_OPTIONS.find((o) => o.id === paymentMethod)?.label ?? paymentMethod;
+
+  const onAssetChange = (next: string) => {
+    if (next === 'USDC' || next === 'USDT') {
+      router.push({ pathname: '/wallet/it/buy-stable', params: { asset: next } });
+      return;
+    }
+    setAsset('MCGP');
+  };
 
   const applyQuote = (q: ITBuyQuote, to: ITPayTo | null, nextIntent?: ITIntent | null) => {
     setQuote(q);
@@ -321,6 +341,12 @@ export default function ITBuy() {
         </Text>
 
         <SelectRow
+          label="Asset"
+          value={asset}
+          leftIcon="wallet"
+          onPress={() => setShowAssetPicker(true)}
+        />
+        <SelectRow
           label="Payment currency"
           value={currencyLabel}
           leftIcon="wallet"
@@ -360,6 +386,17 @@ export default function ITBuy() {
         </View>
       </ScrollView>
 
+      <PickerSheet
+        visible={showAssetPicker}
+        onClose={() => setShowAssetPicker(false)}
+        title="Asset"
+        items={ASSET_OPTIONS}
+        selectedId={asset}
+        onSelect={(item) => {
+          setShowAssetPicker(false);
+          onAssetChange(item.id);
+        }}
+      />
       <PickerSheet
         visible={showCurrencyPicker}
         onClose={() => setShowCurrencyPicker(false)}
