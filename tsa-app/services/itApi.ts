@@ -47,6 +47,11 @@ export interface ITIntent {
    *  so an abandoned sell can be resumed without minting a second intent. */
   depositAddress?: string;
   conversionAttempts?: number;
+
+  /** Buy-side delivery target. Resolved server-side from the user's wallet —
+   *  never sent by the client. */
+  destChain?: string;
+  destAddress?: string;
 }
 
 // code carries the backend's machine error code (e.g. "it_agreement_required")
@@ -363,3 +368,84 @@ export const createStableSell = (body: {
 
 export const reportStableDeposit = (intentId: string, txHash: string) =>
   req<{ recorded: boolean }>('POST', `/it/stable/sell/${intentId}/deposit`, { txHash });
+
+// ──────────────────────────── stablecoin buy (brokered) ───────────────────
+//
+// Users buy USDT/USDC with naira. They pay into their own standing virtual
+// account; Flutterwave converts and delivers to an address WE resolve from the
+// database — never one the caller sends. See
+// docs/superpowers/specs/2026-08-31-stablecoin-buy-app-design.md.
+
+/** Machine codes the buy endpoints return. Branch on these, not messages. */
+export const IT_STABLE_BUY_ALREADY_OPEN = 'stable_buy_already_open';
+export const IT_STABLE_BUY_NO_VA = 'stable_buy_no_va';
+export const IT_STABLE_BUY_NO_WALLET = 'stable_buy_no_wallet';
+export const IT_STABLE_NOT_CONFIGURED = 'stable_not_configured';
+
+export interface ITStableBuyQuote {
+  asset: string;
+  currency: string;
+  /** What the user pays, in fiat MINOR units. */
+  fiatMinor: string;
+  /** Asset base units (6dp) before the company spread. */
+  grossUnits: string;
+  /** Asset base units (6dp) the user receives — what to display. */
+  assetUnits: string;
+  /** Fiat minor units per one whole asset unit, spread applied. */
+  ratePerUnit: string;
+  expiresAt: string;
+  /** Always true today: the binding price is struck when the naira lands.
+   *  The screen keys off this rather than assuming. */
+  indicative: boolean;
+}
+
+/** Where the user sends their naira: their own standing virtual account.
+ *
+ *  NOT ITPayTo. That type names the field `bank`; this endpoint returns
+ *  `bankName` (StableBuyInstructions, it_stable_buy.go). Reusing ITPayTo
+ *  compiles and renders an empty bank at runtime. */
+export interface ITStableBuyPayInto {
+  accountNumber: string;
+  bankName: string;
+  accountName: string;
+  reference: string;
+}
+
+export interface ITStableBuyResult {
+  intent: ITIntent;
+  payInto: ITStableBuyPayInto;
+}
+
+/** Indicative price. amountMinor is fiat MINOR units as a string. */
+export const quoteStableBuy = (asset: string, amountMinor: string, currency: string) =>
+  req<ITStableBuyQuote>('POST', '/it/stable/buy/quote', {
+    asset,
+    amount: amountMinor,
+    currency,
+  });
+
+/** Opens a purchase. Pass a stable key so a retry of the SAME create is
+ *  deduped server-side rather than minting a second purchase. */
+export const createStableBuy = (
+  asset: string,
+  amountMinor: string,
+  currency: string,
+  destChain: string,
+  idempotencyKey?: string
+) =>
+  req<ITStableBuyResult>(
+    'POST',
+    '/it/stable/buy',
+    { asset, amount: amountMinor, currency, destChain },
+    { idempotencyKey }
+  );
+
+/** Chains this user can actually receive `asset` on. A chain they hold no
+ *  address for is never returned, so it can never be offered. */
+export const getStableBuyChains = (asset: string) =>
+  req<{ chains: string[] }>('GET', `/it/stable/buy/chains?asset=${encodeURIComponent(asset)}`);
+
+/** Abandon an unpaid purchase. Without this the user is blocked from buying
+ *  until the intent expires 24h later. */
+export const cancelStableBuy = (intentId: string) =>
+  req<{ cancelled: boolean }>('POST', `/it/stable/buy/${intentId}/cancel`);
