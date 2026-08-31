@@ -385,6 +385,20 @@ export default function ITIntentDetail() {
   // `reviewBridged = reviewChainKey !== 'polygon'`.
   const canResumeDirect = showResume && intent.sourceChain?.toUpperCase() === 'POLYGON' && !!intent.depositAddress;
 
+  // The backend never rewrites ngn_kobo on the buy leg — the claim map writes
+  // received_amount, asset_amount, locked_rate and rate_minor, so after an
+  // under- or overpayment the quoted naira and the repriced "You get" are
+  // mutually inconsistent. received_amount is documented for exactly this
+  // ("buy: the FIAT MINOR UNITS the user actually paid", it_models.go:195-205).
+  // Show the quote while it IS still a quote, the actual figure once there is
+  // one, and only relabel to "You paid" when it is genuinely the latter.
+  const buyPaidMinor = isStableBuy && intent.status !== 'pending_payment' ? intent.receivedAmount : undefined;
+  // Everything on a pending_payment buy is provisional: the binding price is
+  // struck when the naira lands, and settlement rewrites both the asset amount
+  // and the rate. Confirm already renders "≈"; dropping it here made the same
+  // number read as settled one tap later, then visibly change.
+  const buyIsEstimate = isStableBuy && intent.status === 'pending_payment';
+
   // "Transfer ANY amount" is true for an MCGP buy — that leg reprices whatever
   // lands. It is false for a stablecoin buy: settleStableBuyFromCharge prices
   // what landed and fails closed on an unusable rate OR an underpayment below
@@ -415,9 +429,15 @@ export default function ITIntentDetail() {
             <Divider spacing="xs" />
             {isStableAsset && isBuy ? (
               <>
-                <SummaryRow label="You pay" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+                <SummaryRow
+                  label={buyPaidMinor ? 'You paid' : 'You pay'}
+                  value={formatKobo(buyPaidMinor ?? intent.ngnKobo)}
+                />
                 <Divider spacing="xs" />
-                <SummaryRow label="You get" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
+                <SummaryRow
+                  label="You get"
+                  value={`${buyIsEstimate ? '≈ ' : ''}${fmtAsset(intent.assetAmount)} ${intent.asset}`}
+                />
                 {intent.destChain ? (
                   <>
                     <Divider spacing="xs" />
@@ -460,7 +480,11 @@ export default function ITIntentDetail() {
             <Divider spacing="xs" />
             <SummaryRow
               label="Rate"
-              value={isStableAsset ? `${formatKobo(intent.rateKobo)} / ${intent.asset}` : `₦${fmtRate(intent.rateKobo)} / MCGP`}
+              value={
+                isStableAsset
+                  ? `${buyIsEstimate ? '≈ ' : ''}${formatKobo(intent.rateKobo)} / ${intent.asset}`
+                  : `₦${fmtRate(intent.rateKobo)} / MCGP`
+              }
             />
             <Divider spacing="xs" />
             <SummaryRow label="Created" value={shortDate(intent.createdAt)} />
