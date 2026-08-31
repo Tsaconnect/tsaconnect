@@ -612,3 +612,146 @@ func TestQuoteRate_UnparseableAmountStringIsAnError(t *testing.T) {
 		t.Fatal("QuoteRate: want an error for an unparseable amount string, got nil")
 	}
 }
+
+// ─── FWFeeAmount / GetFees ──────────────────────────────────────────────────
+
+// TestFWFeeAmount_UnmarshalJSON exercises the type directly for the wire
+// shapes GetFees depends on: the historical scalar/numeric-string/null shape
+// must keep working unchanged, the production array shape (inferred: numeric
+// elements summed — see FWFeeAmount's doc comment) must decode instead of
+// failing the whole /fees response, and anything genuinely unparseable
+// (garbage string, or an array holding a non-numeric element such as an
+// object) must error rather than silently becoming a zero fee.
+func TestFWFeeAmount_UnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		wire    string
+		want    float64
+		wantErr bool
+	}{
+		{"scalar number (legacy shape)", `53.75`, 53.75, false},
+		{"numeric string", `"53.75"`, 53.75, false},
+		{"null", `null`, 0, false},
+		{"empty string", `""`, 0, false},
+		{"array of numbers (production shape, inferred)", `[10, 5.5]`, 15.5, false},
+		{"array of numeric strings", `["10", "5.5"]`, 15.5, false},
+		{"single-element array", `[53.75]`, 53.75, false},
+		{"empty array", `[]`, 0, false},
+		{"garbage string", `"abc"`, 0, true},
+		{"array with non-numeric element", `[10, {"amount": 5}]`, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a FWFeeAmount
+			err := json.Unmarshal([]byte(tc.wire), &a)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("wire %q: want error, got amount=%v", tc.wire, a.Float64())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wire %q: unexpected error: %v", tc.wire, err)
+			}
+			if a.Float64() != tc.want {
+				t.Fatalf("wire %q: got %v, want %v", tc.wire, a.Float64(), tc.want)
+			}
+		})
+	}
+}
+
+// TestGetFees_ScalarFeeShape pins the historical shape (fee/vat as bare
+// numbers) still decodes exactly as before — no regression from adding array
+// support.
+func TestGetFees_ScalarFeeShape(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": 53.75, "vat": 4.03}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 53.75 || fees[0].VAT.Float64() != 4.03 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_ArrayFeeShape pins the fix for the production bug: Flutterwave
+// production was observed returning "fee" as a JSON array (see FWFeeAmount's
+// doc comment for what was and wasn't directly observed), which previously
+// failed decode outright with "cannot unmarshal array into Go struct field
+// FWFee.fee of type float64" — silently falling back to the uncalibrated
+// config estimate on every live payout quote. It must now decode.
+func TestGetFees_ArrayFeeShape(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": [45, 8.75], "vat": [4.03]}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 53.75 || fees[0].VAT.Float64() != 4.03 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_NullFee pins that a null fee decodes to a usable zero rather
+// than failing the response, matching FWQuoteAmount's null handling.
+func TestGetFees_NullFee(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": null, "vat": ""}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	fees, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG")
+	if err != nil {
+		t.Fatalf("GetFees: %v", err)
+	}
+	if len(fees) != 1 || fees[0].Fee.Float64() != 0 || fees[0].VAT.Float64() != 0 {
+		t.Fatalf("fees wrong: %+v", fees)
+	}
+}
+
+// TestGetFees_UnparseableFeeIsAnError pins that a fee value which cannot be
+// interpreted as a number at all (not scalar, not numeric string, not a
+// numeric array) fails the decode rather than silently becoming a zero fee —
+// a zero provider fee is a plausible-looking number that would under-charge
+// a live payout.
+func TestGetFees_UnparseableFeeIsAnError(t *testing.T) {
+	var tokenCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/realms/flutterwave/protocol/openid-connect/token", fwTokenHandler(&tokenCalls))
+	mux.HandleFunc("/fees", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"currency": "NGN", "fee": "abc", "vat": 0}
+		}`))
+	})
+	c, _ := newFWTestServer(t, mux)
+
+	if _, err := c.GetFees(context.Background(), 1000, "NGN", "bank_transfer", "", "NG"); err == nil {
+		t.Fatal("GetFees: want an error for an unparseable fee, got nil")
+	}
+}

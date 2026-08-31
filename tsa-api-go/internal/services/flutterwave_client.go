@@ -780,10 +780,86 @@ func (c *FlutterwaveClient) GetCharge(ctx context.Context, id string) (FWCharge,
 
 // FWFee is a provider fee quote for a prospective transfer/collection.
 type FWFee struct {
-	Currency string  `json:"currency"`
-	Fee      float64 `json:"fee"`
-	VAT      float64 `json:"vat"`
+	Currency string      `json:"currency"`
+	Fee      FWFeeAmount `json:"fee"`
+	VAT      FWFeeAmount `json:"vat"`
 }
+
+// FWFeeAmount is a fee/VAT amount from Flutterwave's v4 GET /fees endpoint.
+//
+// PRODUCTION OBSERVED (2026-08-31): GET /fees?payment_method=bank_transfer
+// returned "fee" as a JSON ARRAY where the field was previously typed
+// float64, failing the whole response with "cannot unmarshal array into Go
+// struct field FWFee.fee of type float64" — silently, since GetFees' only
+// caller (fee_quote_service.go QuoteProviderFee) treats any error as "no live
+// quote" and falls back to the config percentage. This repo's Flutterwave
+// credentials are sandbox-only and returned 403/500 against production for
+// every endpoint tried (see fwfee-fix-report.md), so the array's ELEMENT
+// SHAPE could not be observed directly and is INFERRED here, not observed:
+// it assumes the array holds per-tier numeric fee components (bare numbers
+// or numeric strings, mirroring the scalar shape) and sums them into a
+// single total. If production's array elements turn out to be objects
+// instead, this decoder still does the safe thing — it ERRORs rather than
+// silently returning zero, which the next paragraph explains why that
+// matters.
+//
+// Accepts, like FWQuoteAmount: a number, a numeric string, or null/""
+// (-> 0). Additionally accepts an array of numbers/numeric strings, summed.
+// Any element that isn't itself a number/numeric string/array is a decode
+// ERROR, not a silent zero — a zero provider fee is a plausible-looking
+// number that would under-charge on a live payout, the same reasoning
+// FWQuoteAmount applies to a bad FX amount.
+type FWFeeAmount float64
+
+func (a *FWFeeAmount) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*a = 0
+		return nil
+	}
+	if b[0] == '[' {
+		var elems []json.RawMessage
+		if err := json.Unmarshal(b, &elems); err != nil {
+			return fmt.Errorf("FWFeeAmount: invalid array %s: %w", b, err)
+		}
+		var sum float64
+		for _, e := range elems {
+			var v FWFeeAmount
+			if err := v.UnmarshalJSON(e); err != nil {
+				return fmt.Errorf("FWFeeAmount: invalid array element %s: %w", e, err)
+			}
+			sum += float64(v)
+		}
+		*a = FWFeeAmount(sum)
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*a = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("FWFeeAmount: invalid numeric string %q: %w", s, err)
+		}
+		*a = FWFeeAmount(f)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return fmt.Errorf("FWFeeAmount: invalid value %s: %w", b, err)
+	}
+	*a = FWFeeAmount(f)
+	return nil
+}
+
+// Float64 returns the amount as a plain float64 for arithmetic call sites.
+func (a FWFeeAmount) Float64() float64 { return float64(a) }
 
 // GetFees quotes Flutterwave's own fee for a payment. paymentMethod follows
 // the v4 vocabulary (e.g. "bank_transfer", "mobile_money"); network/country

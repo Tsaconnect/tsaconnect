@@ -482,13 +482,13 @@ func (q *flutterwaveFeeQuoter) QuoteProviderFee(ctx context.Context, flow FeeFlo
 			break
 		}
 	}
-	if fee.Fee < 0 {
+	if fee.Fee.Float64() < 0 {
 		return nil, false
 	}
 	// Only the provider's own fee is passed through; its VAT figure is ignored
 	// because the tax line computes VAT per OUR config (basis + bps) — using
 	// both would double-count.
-	minor, err := nairaToKobo(strconv.FormatFloat(fee.Fee, 'f', 2, 64))
+	minor, err := nairaToKobo(strconv.FormatFloat(fee.Fee.Float64(), 'f', 2, 64))
 	if err != nil {
 		return nil, false
 	}
