@@ -19,8 +19,8 @@ func (q *buyRateQuoter) QuoteRate(_ context.Context, src, dst string, destAmount
 		return FWRate{}, q.err
 	}
 	return FWRate{
-		Source:      FWMoney{Currency: src, Amount: q.ngnPerUnit * destAmount},
-		Destination: FWMoney{Currency: dst, Amount: destAmount},
+		Source:      FWMoney{Currency: src, Amount: FWQuoteAmount(q.ngnPerUnit * destAmount)},
+		Destination: FWMoney{Currency: dst, Amount: FWQuoteAmount(destAmount)},
 	}, nil
 }
 

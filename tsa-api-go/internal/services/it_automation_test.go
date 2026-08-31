@@ -315,9 +315,8 @@ type stubRateQuoter struct{ ngnPerDestUnit float64 }
 
 func (q stubRateQuoter) QuoteRate(_ context.Context, sourceCurrency, destCurrency string, destAmount float64) (FWRate, error) {
 	return FWRate{
-		Rate:        q.ngnPerDestUnit,
-		Source:      FWMoney{Currency: sourceCurrency, Amount: q.ngnPerDestUnit * destAmount},
-		Destination: FWMoney{Currency: destCurrency, Amount: destAmount},
+		Source:      FWMoney{Currency: sourceCurrency, Amount: FWQuoteAmount(q.ngnPerDestUnit * destAmount)},
+		Destination: FWMoney{Currency: destCurrency, Amount: FWQuoteAmount(destAmount)},
 	}, nil
 }
 

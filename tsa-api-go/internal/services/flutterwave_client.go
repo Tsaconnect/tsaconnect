@@ -830,16 +830,71 @@ func (c *FlutterwaveClient) GetFees(ctx context.Context, amount float64, currenc
 }
 
 // FWRate is an FX quote between two currencies (incl. stablecoins).
+//
+// The vendor's top-level "rate" field is deliberately not modeled: nothing
+// in this codebase reads it — DeriveFiatPerUnit/DeriveBuyFiatPerUnit (see
+// stable_spread.go) compute the rate from Source/Destination instead, since
+// FW's own docs never define the field's unit direction and the example is
+// self-contradictory. Keeping an unused field around only to fight its wire
+// type (see FWQuoteAmount) isn't worth it.
 type FWRate struct {
-	Rate        float64 `json:"rate"`
 	Source      FWMoney `json:"source"`
 	Destination FWMoney `json:"destination"`
 }
 
 type FWMoney struct {
-	Currency string  `json:"currency"`
-	Amount   float64 `json:"amount"`
+	Currency string        `json:"currency"`
+	Amount   FWQuoteAmount `json:"amount"`
 }
+
+// FWQuoteAmount is a monetary amount from Flutterwave's v4 API. Observed in
+// production on 2026-08-31: POST /transfers/rates returns "amount" (and
+// "rate") as a JSON STRING, while the sandbox returns a JSON number for the
+// same field — decoding straight into float64 fails the whole response with
+// "cannot unmarshal string into Go struct field". FWQuoteAmount accepts either
+// wire shape so a provider inconsistency on one field doesn't take down
+// every quote.
+//
+// null and "" both decode to zero — a missing optional amount must not fail
+// the whole response — but a non-numeric string (e.g. "abc") is a genuine
+// decode error, not a silent zero: DeriveFiatPerUnit/DeriveBuyFiatPerUnit
+// reject a non-positive amount via ErrBadFxProbe, and that guard only works
+// if a bad value can't arrive disguised as a plausible zero.
+type FWQuoteAmount float64
+
+func (a *FWQuoteAmount) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*a = 0
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*a = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("FWQuoteAmount: invalid numeric string %q: %w", s, err)
+		}
+		*a = FWQuoteAmount(f)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*a = FWQuoteAmount(f)
+	return nil
+}
+
+// Float64 returns the amount as a plain float64 for arithmetic call sites.
+func (a FWQuoteAmount) Float64() float64 { return float64(a) }
 
 // QuoteRate previews the FX applied to a cross-currency transfer via
 // POST /transfers/rates.

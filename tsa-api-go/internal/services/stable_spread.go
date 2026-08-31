@@ -33,18 +33,19 @@ func ApplySellSpread(gross *big.Int, spreadBps int64) *big.Int {
 // DeriveFiatPerUnit returns the fiat units per one whole asset unit, computed
 // from the amounts Flutterwave echoes back.
 //
-// FWRate.Rate is ignored on purpose. Its unit direction is undocumented and the
-// vendor's own example is self-contradictory, whereas the Source/Destination
-// pair is unambiguous: "to receive Destination.Amount of the destination
-// currency you pay Source.Amount of the source currency". This mirrors the
-// derivation ITService.QuoteWithdrawal already relies on.
+// The top-level rate field FW also returns is not modeled at all (see
+// FWRate's doc comment): its unit direction is undocumented and the vendor's
+// own example is self-contradictory, whereas the Source/Destination pair is
+// unambiguous: "to receive Destination.Amount of the destination currency
+// you pay Source.Amount of the source currency". This mirrors the derivation
+// ITService.QuoteWithdrawal already relies on.
 func DeriveFiatPerUnit(rate FWRate) (*big.Rat, error) {
-	if rate.Source.Amount <= 0 || rate.Destination.Amount <= 0 {
-		return nil, fmt.Errorf("%w: source=%v destination=%v",
-			ErrBadFxProbe, rate.Source.Amount, rate.Destination.Amount)
+	srcAmt, dstAmt := rate.Source.Amount.Float64(), rate.Destination.Amount.Float64()
+	if srcAmt <= 0 || dstAmt <= 0 {
+		return nil, fmt.Errorf("%w: source=%v destination=%v", ErrBadFxProbe, srcAmt, dstAmt)
 	}
-	src := new(big.Rat).SetFloat64(rate.Source.Amount)
-	dst := new(big.Rat).SetFloat64(rate.Destination.Amount)
+	src := new(big.Rat).SetFloat64(srcAmt)
+	dst := new(big.Rat).SetFloat64(dstAmt)
 	if src == nil || dst == nil {
 		return nil, ErrBadFxProbe
 	}
@@ -60,12 +61,12 @@ func DeriveFiatPerUnit(rate FWRate) (*big.Rat, error) {
 // the real rate, which for NGN/USDC is wrong by roughly six orders of
 // magnitude in the user's favour.
 func DeriveBuyFiatPerUnit(rate FWRate) (*big.Rat, error) {
-	if rate.Source.Amount <= 0 || rate.Destination.Amount <= 0 {
-		return nil, fmt.Errorf("%w: source=%v destination=%v",
-			ErrBadFxProbe, rate.Source.Amount, rate.Destination.Amount)
+	srcAmt, dstAmt := rate.Source.Amount.Float64(), rate.Destination.Amount.Float64()
+	if srcAmt <= 0 || dstAmt <= 0 {
+		return nil, fmt.Errorf("%w: source=%v destination=%v", ErrBadFxProbe, srcAmt, dstAmt)
 	}
-	src := new(big.Rat).SetFloat64(rate.Source.Amount)
-	dst := new(big.Rat).SetFloat64(rate.Destination.Amount)
+	src := new(big.Rat).SetFloat64(srcAmt)
+	dst := new(big.Rat).SetFloat64(dstAmt)
 	if src == nil || dst == nil {
 		return nil, ErrBadFxProbe
 	}

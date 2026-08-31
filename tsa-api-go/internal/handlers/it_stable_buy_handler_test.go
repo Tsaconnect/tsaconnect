@@ -91,8 +91,8 @@ type stubBuyQuoter struct{}
 
 func (stubBuyQuoter) QuoteRate(_ context.Context, src, dst string, destAmount float64) (services.FWRate, error) {
 	return services.FWRate{
-		Source:      services.FWMoney{Currency: src, Amount: 1650.25 * destAmount},
-		Destination: services.FWMoney{Currency: dst, Amount: destAmount},
+		Source:      services.FWMoney{Currency: src, Amount: services.FWQuoteAmount(1650.25 * destAmount)},
+		Destination: services.FWMoney{Currency: dst, Amount: services.FWQuoteAmount(destAmount)},
 	}, nil
 }
 

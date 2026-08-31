@@ -39,11 +39,11 @@ func TestApplySellSpread_DoesNotMutateItsInput(t *testing.T) {
 }
 
 func TestDeriveFiatPerUnit_UsesAmountsNotTheRateField(t *testing.T) {
-	// FWRate.Rate is deliberately absurd here: the vendor's own docs give a
-	// self-contradictory example and never define its unit direction, so the
-	// derivation must ignore it entirely.
+	// FWRate has no top-level "rate" field at all (see its doc comment): the
+	// vendor's own docs give a self-contradictory example and never define
+	// its unit direction, so the derivation is computed from Source/Destination
+	// only.
 	r := FWRate{
-		Rate:        0.000707,
 		Source:      FWMoney{Currency: "USDC", Amount: 1},
 		Destination: FWMoney{Currency: "NGN", Amount: 1650.25},
 	}
