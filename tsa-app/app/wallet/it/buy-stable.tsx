@@ -38,13 +38,11 @@ import {
   getStableBuyChains,
   listITIntents,
   makeIdempotencyKey,
-  quoteStableBuy,
   IT_STABLE_BUY_ALREADY_OPEN,
   IT_STABLE_BUY_NO_VA,
   IT_STABLE_BUY_NO_WALLET,
   IT_STABLE_NOT_CONFIGURED,
   type ITIntent,
-  type ITStableBuyQuote,
   type ITStableBuyResult,
   type StableAsset,
 } from '@/services/itApi';
@@ -134,7 +132,15 @@ export default function ITBuyStable() {
   // --- Step 4/5: create, then one screen with the estimate + full address +
   // pay-into account. The delivery address does not exist until the intent
   // does, so this can only ever run after a successful create. ---------------
-  const [quote, setQuote] = useState<ITStableBuyQuote | null>(null);
+  //
+  // The confirm screen displays result.intent.assetAmount / .ngnKobo, NOT a
+  // client-side quote. PostStableBuy re-quotes independently server-side
+  // (it_handler.go PostStableBuy calls QuoteStableBuy itself) and
+  // CreateStableBuyIntent writes AssetAmount from THAT quote — a separate
+  // client quoteStableBuy call, sequenced before create, prices a DIFFERENT
+  // moment and can disagree with what actually got stored on the intent
+  // under rate movement. Reading the intent is the only way this screen and
+  // the progress screen a moment later can ever show the same number.
   const [result, setResult] = useState<ITStableBuyResult | null>(null);
 
   // Mint ONE idempotency key per submitted form snapshot and reuse it for
@@ -191,19 +197,12 @@ export default function ITBuyStable() {
     if (!idempotencyKeyRef.current) idempotencyKeyRef.current = makeIdempotencyKey();
 
     setSubmitting(true);
-    const q = await quoteStableBuy(asset, amountMinor, 'NGN');
-    if (!q.success || !q.data) {
-      setSubmitting(false);
-      await applyErrorCode(q.code, q.message);
-      return;
-    }
     const res = await createStableBuy(asset, amountMinor, 'NGN', chain, idempotencyKeyRef.current);
     setSubmitting(false);
     if (!res.success || !res.data) {
       await applyErrorCode(res.code, res.message);
       return;
     }
-    setQuote(q.data);
     setResult(res.data);
   };
 
@@ -244,9 +243,10 @@ export default function ITBuyStable() {
     );
   }
 
-  if (result && quote) {
+  if (result) {
     const destChain = result.intent.destChain || chain;
     const destAddress = result.intent.destAddress || '';
+    const gotAsset = result.intent.asset || asset;
     return (
       <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
@@ -255,9 +255,12 @@ export default function ITBuyStable() {
               Pay into this account
             </Text>
             <SummaryCard>
+              {/* Always an estimate: the binding price is struck when the
+                  naira lands, so even the amount just written to the intent
+                  is provisional until settlement. */}
               <SummaryRow
                 label="You'll receive"
-                value={`${quote.indicative ? '≈ ' : ''}${formatAssetUnits(quote.assetUnits)} ${quote.asset}`}
+                value={`≈ ${formatAssetUnits(result.intent.assetAmount || '0')} ${gotAsset}`}
               />
               <SummaryRow label="On" value={destChain} />
             </SummaryCard>
@@ -290,7 +293,7 @@ export default function ITBuyStable() {
             </Text>
 
             <SummaryCard>
-              <SummaryRow label="You pay" value={`₦${formatMinorAsNaira(quote.fiatMinor)}`} />
+              <SummaryRow label="You pay" value={`₦${formatMinorAsNaira(result.intent.ngnKobo)}`} />
             </SummaryCard>
 
             <View style={{ marginTop: spacing.md }}>

@@ -67,6 +67,7 @@ export default function ITLayout() {
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ title: railLabel('it') }} />
       <Stack.Screen name="buy" options={{ title: 'Deposit · Buy' }} />
+      <Stack.Screen name="buy-stable" options={{ title: 'Deposit · Buy' }} />
       <Stack.Screen name="sell" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="sell-stable" options={{ title: 'Withdraw · Sell' }} />
       <Stack.Screen name="intent/[id]" options={{ title: 'Order' }} />
