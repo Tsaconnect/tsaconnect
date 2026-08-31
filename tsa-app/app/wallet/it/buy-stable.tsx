@@ -14,7 +14,7 @@
 // the pay-into account → the user pays → "I've sent the money" (no API call)
 // hands off to the intent detail screen, which the webhook drives from here.
 import React, { useEffect, useRef, useState } from 'react';
-import { View, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -88,7 +88,7 @@ export default function ITBuyStable() {
     };
   }, []);
 
-  const onCancelResume = async () => {
+  const cancelResume = async () => {
     if (!resuming) return;
     setResumeError('');
     setCancelling(true);
@@ -99,6 +99,23 @@ export default function ITBuyStable() {
       return;
     }
     setResuming(null);
+  };
+
+  // This is the more dangerous of the two cancel affordances, because it is
+  // the one a returning buyer lands on: they paid, backgrounded the app,
+  // reopened Buy, and this screen greets them with the button. With no open
+  // buy intent left, the incoming charge no longer settles this purchase and
+  // the naira is auto-credited as a DIFFERENT asset — so the risk gets named,
+  // and the tap gets confirmed.
+  const onCancelResume = () => {
+    Alert.alert(
+      'Cancel this purchase?',
+      'If you have already sent the transfer, cancelling can route your money to a different asset. Only cancel if you have not paid.',
+      [
+        { text: 'Keep purchase', style: 'cancel' },
+        { text: 'Cancel purchase', style: 'destructive', onPress: () => { void cancelResume(); } },
+      ]
+    );
   };
 
   // --- Step 3: the form ------------------------------------------------------
@@ -225,7 +242,9 @@ export default function ITBuyStable() {
               You have a pending purchase
             </Text>
             <Text variant="bodySm" style={{ color: colors.textSecondary, marginBottom: spacing.md }}>
-              Finish or cancel it before starting a new one.
+              Finish or cancel it before starting a new one. You can cancel this purchase before
+              paying. If you have already sent the transfer, do not cancel — wait for it to be
+              matched instead.
             </Text>
             <SummaryCard>
               <SummaryRow label="Asset" value={resuming.asset || asset} />
@@ -292,9 +311,20 @@ export default function ITBuyStable() {
               Delivery is irreversible. Check this is your address.
             </Text>
 
+            {/* "exactly", not a bare "You pay": settleStableBuyFromCharge
+                prices whatever actually lands and fails closed on an
+                underpayment below the provider floor, parking the intent in
+                buy_awaiting_rate — an operator-only state with no user-facing
+                recovery (spec §10). */}
             <SummaryCard>
-              <SummaryRow label="You pay" value={`₦${formatMinorAsNaira(result.intent.ngnKobo)}`} />
+              <SummaryRow
+                label="Transfer exactly"
+                value={`₦${formatMinorAsNaira(result.intent.ngnKobo)}`}
+              />
             </SummaryCard>
+            <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
+              Sending a different amount can hold your purchase for review.
+            </Text>
 
             <View style={{ marginTop: spacing.md }}>
               <SummaryCard>

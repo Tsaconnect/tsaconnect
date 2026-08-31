@@ -2,7 +2,7 @@
 //
 // Instant Transfer order detail — status progress for a single buy/sell intent.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, RefreshControl, View, Platform } from 'react-native';
+import { ScrollView, RefreshControl, View, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -293,7 +293,7 @@ export default function ITIntentDetail() {
     setTimeout(() => setAddressCopied(false), 2000);
   }, [intent?.depositAddress]);
 
-  const handleCancelBuy = useCallback(async () => {
+  const cancelBuy = useCallback(async () => {
     if (!intent) return;
     setCancelBuyError('');
     setCancellingBuy(true);
@@ -305,6 +305,22 @@ export default function ITIntentDetail() {
     }
     load();
   }, [intent, load]);
+
+  // Cancelling after the transfer has been sent is the one unrecoverable
+  // mistake on this screen: with no open buy intent left, the settlement path
+  // no longer matches the incoming charge and the naira is auto-credited as a
+  // DIFFERENT asset. A one-tap destructive action with that consequence gets a
+  // confirmation, not just body copy above it.
+  const handleCancelBuy = useCallback(() => {
+    Alert.alert(
+      'Cancel this purchase?',
+      'If you have already sent the transfer, cancelling can route your money to a different asset. Only cancel if you have not paid.',
+      [
+        { text: 'Keep purchase', style: 'cancel' },
+        { text: 'Cancel purchase', style: 'destructive', onPress: () => { void cancelBuy(); } },
+      ]
+    );
+  }, [cancelBuy]);
 
   if (loading && !intent) {
     return (
@@ -368,6 +384,18 @@ export default function ITIntentDetail() {
   // by ConfirmStableDeposit. sell-stable.tsx encodes the same distinction as
   // `reviewBridged = reviewChainKey !== 'polygon'`.
   const canResumeDirect = showResume && intent.sourceChain?.toUpperCase() === 'POLYGON' && !!intent.depositAddress;
+
+  // "Transfer ANY amount" is true for an MCGP buy — that leg reprices whatever
+  // lands. It is false for a stablecoin buy: settleStableBuyFromCharge prices
+  // what landed and fails closed on an unusable rate OR an underpayment below
+  // the provider floor alike, parking the intent in buy_awaiting_rate — an
+  // operator-only state with no user-facing recovery (spec §10). Telling a
+  // stablecoin buyer to send any amount instructs them into it.
+  const exactNaira = formatKobo(intent.ngnKobo);
+  const stableBuyPayCopy =
+    exactNaira === '—'
+      ? 'Transfer the exact amount of this purchase into your Instant Transfer account. Sending less can hold your purchase for review.'
+      : `Transfer exactly ${exactNaira} into your Instant Transfer account. Sending less can hold your purchase for review.`;
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
@@ -514,8 +542,9 @@ export default function ITIntentDetail() {
           ) : null}
           {intent.status === 'pending_payment' ? (
             <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-              Transfer any Naira amount into your Instant Transfer account. This order updates when
-              payment is confirmed at the live rate.
+              {isStableBuy
+                ? stableBuyPayCopy
+                : 'Transfer any Naira amount into your Instant Transfer account. This order updates when payment is confirmed at the live rate.'}
             </Text>
           ) : null}
         </Card>
