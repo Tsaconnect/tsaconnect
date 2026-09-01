@@ -262,17 +262,35 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		return nil, ErrFeeQuoteBadAmount
 	}
 
-	// Platform fee — the platform's own cut, priced two different ways:
+	// Platform fee — the platform's own cut, priced three different ways:
+	//   brokered stable  NOTHING. The margin is the RATE SPREAD.
 	//   MCGP ramps       a percentage tiered by payment currency (0.5% NGN,
 	//                    2% every other currency), on BOTH legs
 	//   stablecoin ramps the legacy flat USD amount, converted via fx
-	// The stablecoin rails are deliberately untouched by the 28/07 currency
-	// tiering — the PM specified the MCGP fiat ramps and has not ruled on the
-	// stable ones; charging both would silently double the PM-side fee.
+	//
+	// The brokered case is the same rule the bps legs already follow (see
+	// feeBps): on the Flutterwave ramp the company takes its entire margin as
+	// the spread baked into QuoteStableSell/QuoteStableBuy, so any additional
+	// platform line double-charges. The bps legs were dropped for that reason
+	// and the flat fee was not, only because the PM had ruled on neither.
+	//
+	// A FLAT fee is not a small fraction of anything: at ~₦1,406/USDT a $2 fee
+	// is roughly TWICE a 1 USDT sell, so the viability guard rejected the trade
+	// outright rather than merely overpricing it. It made small trades
+	// impossible while looking like a provider limit.
+	//
+	// Skipping the block also drops the FX requirement, so a brokered stable
+	// quote no longer fails with ErrFeeQuoteNeedFx when the feed is down.
+	//
+	// Non-brokered stable rails stay untouched by the 28/07 currency tiering —
+	// the PM specified the MCGP fiat ramps and has not ruled on the stable ones.
 	platformCents := int64(0)
 	platformBps := int64(0)
 	platformMinor := big.NewInt(0)
-	if asset.IsStable() {
+	switch {
+	case asset.IsStable() && s.brokeredStable:
+		// No platform fee; the spread is the margin.
+	case asset.IsStable():
 		platformCents = s.cfg.PlatformStableUSD * 100
 		fx := in.FxMinorPerUSD
 		if fx == nil && currency == "USD" {
@@ -286,7 +304,7 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 			platformMinor = new(big.Int).Mul(big.NewInt(platformCents), fx)
 			platformMinor.Div(platformMinor, big.NewInt(100))
 		}
-	} else {
+	default:
 		platformBps = s.platformBps(payCurrency)
 		platformMinor = bpsShare(amount, platformBps)
 	}

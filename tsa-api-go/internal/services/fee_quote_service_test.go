@@ -624,3 +624,62 @@ func TestSwapLegs_BrokeredFlagStillZeroesTheWithdrawLeg(t *testing.T) {
 		t.Fatalf("brokered stablecoin withdraw = %d bps %v, want 0 and no legs", bps, legs)
 	}
 }
+
+// TestFeeQuote_BrokeredStableChargesNoPlatformFee pins the rule that made a
+// 1 USDT sell impossible: on the brokered ramp the company margin is the RATE
+// SPREAD, so no platform fee line may be added on top.
+//
+// A FLAT fee is what made this fatal rather than merely expensive. At
+// ~₦1,406/USDT the $2 fee is roughly TWICE a 1 USDT sell, so the viability
+// guard rejected the trade outright — surfacing as "fees exceed the trade
+// proceeds" and reading like a provider limit.
+func TestFeeQuote_BrokeredStableChargesNoPlatformFee(t *testing.T) {
+	// Both legs: the spread is applied to buy AND sell, so both would double-charge.
+	for _, flow := range []FeeFlow{FeeFlowWithdraw, FeeFlowDeposit} {
+		s := newBrokeredFeeService(t, true)
+		q, err := s.Quote(context.Background(), FeeQuoteInput{
+			Flow: flow, Asset: FeeAssetUSDC, Amount: "1", Currency: "NGN",
+			Chain:         feeChainPolygon,
+			FxMinorPerUSD: big.NewInt(140642), // ₦1,406.42/USD, the observed rate
+		})
+		if err != nil {
+			t.Fatalf("flow=%v quote: %v", flow, err)
+		}
+		if q.PlatformFee.USDCents != 0 {
+			t.Fatalf("flow=%v platform USD cents = %d, want 0 — the spread is the margin",
+				flow, q.PlatformFee.USDCents)
+		}
+		assertMinor(t, "platformFee", q.PlatformFee.InCurrency, "0")
+	}
+}
+
+// The flag must not need FX. Skipping the platform block removes the only
+// caller of ErrFeeQuoteNeedFx on this path, so a brokered stable quote keeps
+// working when the FX feed is down — previously a 503.
+func TestFeeQuote_BrokeredStableNeedsNoFx(t *testing.T) {
+	s := newBrokeredFeeService(t, true)
+	if _, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetUSDC, Amount: "10", Currency: "NGN",
+		Chain: feeChainPolygon,
+	}); err != nil {
+		t.Fatalf("brokered stable quote without FX: %v", err)
+	}
+}
+
+// Regression guard in the other direction: WITHOUT the flag the flat fee is
+// unchanged. The brokered carve-out must not become a silent global discount
+// on a deployment where the ramp is switched off.
+func TestFeeQuote_UnbrokeredStableStillChargesTheFlatFee(t *testing.T) {
+	s := newBrokeredFeeService(t, false)
+	q, err := s.Quote(context.Background(), FeeQuoteInput{
+		Flow: FeeFlowWithdraw, Asset: FeeAssetUSDC, Amount: "10", Currency: "NGN",
+		Chain:         feeChainPolygon,
+		FxMinorPerUSD: big.NewInt(140642),
+	})
+	if err != nil {
+		t.Fatalf("quote: %v", err)
+	}
+	if q.PlatformFee.USDCents != 200 {
+		t.Fatalf("platform USD cents = %d, want 200 ($2 flat)", q.PlatformFee.USDCents)
+	}
+}
