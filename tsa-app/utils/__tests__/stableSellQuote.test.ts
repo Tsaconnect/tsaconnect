@@ -34,18 +34,19 @@ import {
 
 describe('belowMinimum', () => {
   it('rejects amounts under the provider floor', () => {
-    // Flutterwave's documented outbound floor is 10 USDC/USDT. Quoting under
-    // it lets a user broadcast irreversibly and only then be rejected, with
-    // the funds already at Flutterwave.
-    expect(belowMinimum('USDC', '1')).toBe(true);
-    expect(belowMinimum('USDC', '9.999999')).toBe(true);
+    // Quoting under the floor lets a user broadcast irreversibly and only then
+    // be rejected, with the funds already at Flutterwave. Derived from
+    // STABLE_MIN_SEND rather than hardcoded: the floor is our own assumption
+    // and gets tuned, and a test that pins the number would either fail on
+    // every change or, worse, be "fixed" by deleting the case.
+    const justUnder = (Number(STABLE_MIN_SEND.USDC) - 0.000001).toFixed(6);
+    expect(belowMinimum('USDC', justUnder)).toBe(true);
     expect(belowMinimum('USDT', '0')).toBe(true);
   });
 
   it('accepts the floor exactly and above', () => {
     expect(belowMinimum('USDC', STABLE_MIN_SEND.USDC)).toBe(false);
-    expect(belowMinimum('USDC', '10')).toBe(false);
-    expect(belowMinimum('USDT', '100.5')).toBe(false);
+    expect(belowMinimum('USDT', String(Number(STABLE_MIN_SEND.USDT) + 90.5))).toBe(false);
   });
 
   it('treats junk as below the minimum rather than throwing', () => {
@@ -87,14 +88,18 @@ describe('exceedsStablePrecision', () => {
 
 describe('belowMinimum applied to the ARRIVAL', () => {
   it('catches a bridged send that clears the floor but lands under it', () => {
-    // The floor is Flutterwave's OUTBOUND minimum, so it governs what ARRIVES.
-    // 10.00 sent from BSC clears it; 9.88 delivered does not, and by then the
-    // funds are at Flutterwave and nothing app-side can undo the send. The
-    // screen composes the quote against the arrival for exactly this reason —
-    // the floor has to follow the same rule.
-    const arrival = estimateArrival('10', '9880000', POLYGON_STABLE_DECIMALS);
-    expect(arrival).toBe('9.88');
-    expect(belowMinimum('USDC', '10')).toBe(false);
+    // The floor is the OUTBOUND minimum, so it governs what ARRIVES. Sending
+    // exactly the floor from BSC clears it; a 1.2% bridge shortfall does not,
+    // and by then the funds are at Flutterwave and nothing app-side can undo
+    // the send. The screen composes the quote against the arrival for exactly
+    // this reason — the floor has to follow the same rule.
+    //
+    // Derived from STABLE_MIN_SEND so the case keeps its meaning at any floor.
+    const floor = STABLE_MIN_SEND.USDC;
+    const shortfall = String(Math.round(Number(floor) * 0.988 * 1e6));
+    const arrival = estimateArrival(floor, shortfall, POLYGON_STABLE_DECIMALS);
+    expect(Number(arrival)).toBeLessThan(Number(floor));
+    expect(belowMinimum('USDC', floor)).toBe(false);
     expect(belowMinimum('USDC', arrival)).toBe(true);
   });
 });

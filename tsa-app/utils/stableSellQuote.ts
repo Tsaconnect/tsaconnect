@@ -56,17 +56,24 @@ export function exceedsStablePrecision(amountMajor: string): boolean {
 }
 
 /**
- * Flutterwave's documented outbound floor is 10 USDC/USDT.
+ * The outbound floor, in major units.
+ *
+ * TEMPORARILY 1 FOR TESTING. The long-standing value was 10, attributed to
+ * Flutterwave's documentation — but that figure appears in no artifact we
+ * hold, and a production probe found NO minimum enforced: GET /fees returns
+ * 400 REQUEST_NOT_VALID for crypto and carries no minimum field, while
+ * POST /transfers/rates quoted successfully all the way down. The real floor,
+ * if any, only surfaces at conversion — after funds are irreversibly sent.
+ * Restore a conservative value once a live conversion has settled the question.
  *
  * This is a USABILITY guard, not the enforcement point: a client-side check
- * is bypassable and does not protect a direct API caller. The backend's own
- * minimum (its review finding I5) is the real fix and is still open. Without
- * either, a 1 USDC sell quotes cleanly, the user broadcasts irreversibly, and
- * the provider rejects the conversion with the funds already at Flutterwave.
+ * is bypassable and does not protect a direct API caller. The backend floor
+ * (IT_STABLE_MIN_SELL) is the real one and must be lowered to match, or the
+ * server rejects what this screen accepts.
  */
 export const STABLE_MIN_SEND: Record<StableAsset, string> = {
-  USDC: '10',
-  USDT: '10',
+  USDC: '1',
+  USDT: '1',
 };
 
 /** True when the amount is unusable or under the provider floor. */
