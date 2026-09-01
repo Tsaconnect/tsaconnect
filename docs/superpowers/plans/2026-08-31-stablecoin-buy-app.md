@@ -19,7 +19,12 @@
 - **The quote is indicative.** Display `≈` before the asset amount. No explanatory paragraph — the `≈` carries it.
 - **The destination address is shown on the confirm step for every chain**, with an irreversibility warning. It is the only control on the Solana path, which the server cannot verify.
 - **`buy-stable.tsx` target: under ~500 lines.** Money math and status mapping live in `utils/stableBuyQuote.ts` from the first commit, not extracted later.
-- Run `npx tsc --noEmit` and `npm test` before every commit.
+- Run `npx tsc --noEmit` and `npm test` before every commit. **The repo has 17 PRE-EXISTING
+  `tsc` errors** in unrelated files (ActivityFeed, FocusedStatusBar, designs, CustomDatePicker
+  and others). A clean run is not achievable and is not the bar. The bar is: **no NEW error in
+  a file you touched.** Check with
+  `npx tsc --noEmit 2>&1 | grep <your-file>` — that must print nothing. Do not "fix" the
+  pre-existing errors; they are outside this plan's scope.
 
 ---
 
@@ -572,7 +577,20 @@ Asset (from the route param), naira amount, and a chain picker populated from `g
 
 Handle the empty case explicitly: no chains means the user has no wallet address at all. Show a message directing them to wallet setup, not a raw error.
 
-- [ ] **Step 4: The confirm step — show the address**
+- [ ] **Step 4: Create, THEN confirm — the address does not exist until the intent does**
+
+`GET /it/stable/buy/chains` returns chain NAMES only (handler at `it_handler.go:1104-1109`). The
+delivery address is resolved server-side inside `CreateStableBuyIntent` and first appears on the
+created intent. So confirm CANNOT precede create — there would be no address to show.
+
+The order is: **form → create → one screen showing the estimate, the chain, the FULL address with
+its warning, AND the pay-into account → the user pays.** This satisfies the spec, whose actual
+requirement is that the address appear before the user *pays*, not before the intent exists.
+Creating moves no money and is cancellable, and the resume view already surfaces an abandoned
+intent with a Cancel button.
+
+Steps 4 and 5 below therefore render on the same screen; keep them as separate blocks in the
+file, but do not put a navigation step between them.
 
 ```tsx
 <SummaryRow label="You'll receive" value={`≈ ${formatAssetUnits(quote.assetUnits)} ${quote.asset}`} />
@@ -598,9 +616,9 @@ The `≈` is required and carries the "this is an estimate" signal on its own �
 
 The address comes from the created intent's `destAddress`. If it is only available after create, show the confirm step post-create and before the user pays — it must appear before any money moves.
 
-- [ ] **Step 5: Create and show the pay-into account**
+- [ ] **Step 5: Show the pay-into account (same screen as Step 4)**
 
-Mint ONE idempotency key when the user enters the confirm step and reuse it for every retry of that same create, mirroring `sell-stable.tsx`. A retried create must not mint a second purchase.
+Mint ONE idempotency key when the user submits the form and reuse it for every retry of that same create, mirroring `sell-stable.tsx`. A retried create must not mint a second purchase.
 
 Render `payInto` with the existing `CopyableField` for the account number and `SummaryRow` for bank and account name. **Use `payInto.bankName`** — not `bank`.
 
