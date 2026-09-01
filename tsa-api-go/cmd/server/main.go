@@ -64,9 +64,23 @@ func main() {
 		"run database migrations and exit; used by the deploy between build and restart")
 	flag.Parse()
 
-	// Load .env file (ignore error if file doesn't exist)
+	// Load .env from the PROCESS WORKING DIRECTORY, and say which one that was.
+	//
+	// Naming the directory is the whole point of these two lines. Under systemd
+	// the unit sets WorkingDirectory=/srv/tsa-api/current and supplies config
+	// through EnvironmentFile=/srv/tsa-api/shared/env, so no .env is expected
+	// there — but an operator who edits a .env inside their own clone gets no
+	// signal that nothing reads it. The file is real, the edit looks applied,
+	// and the service keeps running on the old value. "No .env file found" did
+	// not distinguish that case from a normal systemd boot; the path does.
+	//
+	// Precedence, for the same reason: godotenv NEVER overrides a variable that
+	// is already set, so wherever both exist, systemd's EnvironmentFile wins.
+	wd, _ := os.Getwd()
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
+		log.Printf("[config] no .env in %q — using the process environment", wd)
+	} else {
+		log.Printf("[config] loaded .env from %q (does not override variables already set)", wd)
 	}
 
 	// Load configuration
