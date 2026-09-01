@@ -50,7 +50,9 @@ async function registerForPush(): Promise<void> {
   const tokenResp = await Notifications.getExpoPushTokenAsync(
     projectId ? { projectId } : undefined,
   );
-  await registerDevice(tokenResp.data, Platform.OS);
+  if (!(await registerDevice(tokenResp.data, Platform.OS))) {
+    throw new Error(`backend rejected device token for ${Platform.OS}`);
+  }
 }
 
 export function usePushRegistration(): void {
@@ -62,7 +64,11 @@ export function usePushRegistration(): void {
     if (!isAuthenticated) return;
     let cancelled = false;
     registerForPush().catch((e) => {
-      if (!cancelled) console.warn('[push] registration skipped:', e?.message ?? e);
+      // Anything reaching here is a genuine failure: the unsupported-runtime and
+      // denied-permission paths both return early without throwing. On Android
+      // the usual cause is a missing/mismatched google-services.json, which makes
+      // getExpoPushTokenAsync throw — log it loudly so it can't rot unnoticed.
+      if (!cancelled) console.error('[push] registration FAILED:', e?.message ?? e);
     });
     return () => {
       cancelled = true;
