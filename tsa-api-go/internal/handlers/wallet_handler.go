@@ -27,8 +27,12 @@ import (
 var ethAddressRegex = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 // registerWalletRequest is the request body for RegisterWalletAddress.
+//
+// WalletAddress is deliberately NOT `binding:"required"`: an empty value is the
+// explicit unlink signal (the user deleted their last wallet), and `required`
+// rejects the empty string before the handler can act on it.
 type registerWalletRequest struct {
-	WalletAddress string `json:"walletAddress" binding:"required"`
+	WalletAddress string `json:"walletAddress"`
 }
 
 // prepareTxRequest is the request body for PrepareSendTransaction.
@@ -125,6 +129,25 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 	var req registerWalletRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "walletAddress is required")
+		return
+	}
+
+	// An empty address is an explicit UNLINK — the app sends it when the user
+	// deletes their last wallet. It was previously rejected as malformed and the
+	// rejection was swallowed client-side, so the account kept pointing at a
+	// wallet whose key had just been erased from the device: every balance read
+	// then answered for an address nobody could sign for.
+	if req.WalletAddress == "" {
+		if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).
+			Update("wallet_address", "").Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to unlink wallet address")
+			return
+		}
+		log.Printf("User %s unlinked wallet %s", user.ID, user.WalletAddress)
+		user.WalletAddress = ""
+		utils.SuccessResponse(c, http.StatusOK, "Wallet address unlinked", gin.H{
+			"walletAddress": "",
+		})
 		return
 	}
 

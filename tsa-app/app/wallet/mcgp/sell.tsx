@@ -16,6 +16,7 @@ import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getMcgpQuote } from '@/services/mcgpSwapApi';
 import { executeSellPremium } from '@/services/mcgpFlow';
 import { useMcgpBalances } from '@/hooks/useMcgpBalances';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
@@ -23,7 +24,7 @@ const fromUsdc = (b: string) => Number(ethers.formatUnits(b || '0', 6)).toFixed(
 
 export default function SellMcgp() {
   const { colors, spacing } = useTheme();
-  const { usdc, mcgpPremium, mcgpPremiumStr } = useMcgpBalances();
+  const { usdc, mcgpPremium, mcgpPremiumStr, loading: balLoading, walletMissing } = useMcgpBalances();
   const [screen, setScreen] = useState<Screen>('form');
   const [amount, setAmount] = useState('');
   const [usdcOut, setUsdcOut] = useState('0');
@@ -130,6 +131,9 @@ export default function SellMcgp() {
       </SafeAreaView>
     );
   }
+
+  // No signing key here — never render a balance the user cannot spend.
+  if (!balLoading && walletMissing) return <NoLocalWalletScreen action="sell MCGP" />;
 
   // form
   return (

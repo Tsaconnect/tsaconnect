@@ -6,10 +6,13 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+import { getSignableWallet } from '@/services/wallet';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Spinner, Text } from '@/components/ui';
 import { getMcgpBalance, type McgpBalance } from '@/services/mcgpSwapApi';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 
 const fmtMcgp = (base?: string) => {
   try {
@@ -26,9 +29,11 @@ export default function McgpHub() {
   const [bal, setBal] = useState<McgpBalance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { address: signer, ready: signerReady } = useSignableWallet();
 
   const load = useCallback(async () => {
     setError('');
+    if (!(await getSignableWallet())) { setLoading(false); return; }
     const r = await getMcgpBalance();
     if (r.success && r.data) setBal(r.data);
     else setError(r.message || 'Failed to load balance');
@@ -40,6 +45,10 @@ export default function McgpHub() {
       load();
     }, [load]),
   );
+
+  // The hub's whole content is a balance and the actions that spend it, so
+  // without a local key there is nothing honest to show.
+  if (signerReady && !signer) return <NoLocalWalletScreen action="spend MCGP" />;
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>

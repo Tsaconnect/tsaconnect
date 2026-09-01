@@ -56,6 +56,26 @@ export async function setActiveWallet(address: string): Promise<void> {
   await AsyncStorage.setItem('walletAddress', address);
 }
 
+/**
+ * The active wallet, but only when this device actually holds its signing key.
+ *
+ * `getActiveWallet` reads AsyncStorage, which survives a reinstall-and-restore,
+ * a logout, and a wallet the user removed — none of which leave the SecureStore
+ * key behind. So an address alone proves nothing about whether we can spend
+ * from it, and treating it as proof is what made a fresh device render MCGP
+ * the user had no way to touch, as if we were holding it for them.
+ *
+ * Use this anywhere a balance is about to be SHOWN or an action offered. Use
+ * `getActiveWallet` only where a bare address is genuinely enough (a receive
+ * QR, a label).
+ */
+export async function getSignableWallet(): Promise<string | null> {
+  const address = await getActiveWallet();
+  if (!address) return null;
+  const privateKey = await getPrivateKey(address);
+  return privateKey ? address : null;
+}
+
 // ---------------------------------------------------------------------------
 // Add / remove / update wallets
 // ---------------------------------------------------------------------------
