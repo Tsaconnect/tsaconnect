@@ -305,7 +305,19 @@ const WalletManage = () => {
         style: 'destructive',
         onPress: async () => {
           await removeWallet(wallet.address);
+          // removeWallet promotes the next wallet when any remain, so a null
+          // here means there genuinely is none left. Distinguish that from the
+          // deliberate unlink: coercing null to '' would silently detach an
+          // account that still has wallets, purely because a read failed.
           const newActive = isOnly ? '' : await getActiveWallet();
+          if (!isOnly && !newActive) {
+            Alert.alert(
+              'Wallet removed, account not updated',
+              'Could not determine which wallet is now active. Reopen this screen to retry.',
+            );
+            await loadWallets();
+            return;
+          }
           const registered = await registerWalletAddress(newActive ?? '');
           if (!registered.success) {
             Alert.alert(

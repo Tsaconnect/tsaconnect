@@ -6,7 +6,6 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import { getSignableWallet } from '@/services/wallet';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Spinner, Text } from '@/components/ui';
@@ -33,12 +32,15 @@ export default function McgpHub() {
 
   const load = useCallback(async () => {
     setError('');
-    if (!(await getSignableWallet())) { setLoading(false); return; }
+    // useSignableWallet already resolved this; re-reading SecureStore here
+    // would be a second keychain round trip for an answer we hold.
+    if (!signerReady) return;
+    if (!signer) { setLoading(false); return; }
     const r = await getMcgpBalance();
     if (r.success && r.data) setBal(r.data);
     else setError(r.message || 'Failed to load balance');
     setLoading(false);
-  }, []);
+  }, [signer, signerReady]);
 
   useFocusEffect(
     useCallback(() => {

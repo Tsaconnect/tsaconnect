@@ -51,6 +51,13 @@ import { loadSolanaWallet } from '../services/chains/solanaWallet';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { type SpotCategory } from '../services/spotApi';
 import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
+import {
+  allSourcesReported,
+  combineSourceAssets,
+  emptySourceAssets,
+  type AssetSource,
+  type SourceAssets,
+} from '../utils/walletAssets';
 import { useSpotListings } from '../hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
 import { RAILS, RAIL_ROUTES, railLabel } from '../constants/rails';
@@ -117,21 +124,23 @@ function getManageTokenMeta(asset: WalletAsset): string {
   return `${name} · ${chain}`;
 }
 
-// mergeDiscoveredTokens fetches the auto-discovery list and appends any
-// rows that aren't already in `existing` (matched by chainKey+symbol or
-// chainKey+contract). Returns null when there's nothing to add or the
-// indexer is offline, so the caller can skip a useless setState.
+// mergeDiscoveredTokens fetches the auto-discovery list and returns the rows
+// that aren't already in `existing` (matched by chainKey+symbol or
+// chainKey+contract). Returns ONLY the additions, never the combined list: the
+// caller holds the per-source rows separately and a stale combined list would
+// shadow balances that had since been refreshed. Empty when there is nothing to
+// add or the indexer is offline.
 async function mergeDiscoveredTokens(
   existing: WalletAsset[],
   address: string | undefined,
-): Promise<WalletAsset[] | null> {
+): Promise<WalletAsset[]> {
   try {
     const result = await getDiscoveredTokens(undefined, address);
     if (!result.success || !result.data || !result.data.providerAvailable) {
-      return null;
+      return [];
     }
     const discovered: DiscoveredToken[] = result.data.tokens || [];
-    if (discovered.length === 0) return null;
+    if (discovered.length === 0) return [];
 
     // Index existing rows by chainKey+symbol AND chainKey+contract so we
     // don't duplicate either USDC-on-base (matched by symbol) or a custom
@@ -173,11 +182,10 @@ async function mergeDiscoveredTokens(
         details: { type: 'Discovered', chain: chain.name, chainKey },
       });
     }
-    if (additions.length === 0) return null;
-    return [...existing, ...additions];
+    return additions;
   } catch (err) {
     console.warn('[wallet] discovery merge failed:', err);
-    return null;
+    return [];
   }
 }
 
@@ -190,8 +198,8 @@ async function mergeCustomTokens(
   existing: WalletAsset[],
   address: string | undefined,
   customTokens: CustomToken[],
-): Promise<WalletAsset[] | null> {
-  if (customTokens.length === 0) return null;
+): Promise<WalletAsset[]> {
+  if (customTokens.length === 0) return [];
   try {
     const seenContract = new Set(
       existing
@@ -247,11 +255,10 @@ async function mergeCustomTokens(
       });
     });
 
-    if (additions.length === 0) return null;
-    return [...existing, ...additions];
+    return additions;
   } catch (err) {
     console.warn('[wallet] custom-token merge failed:', err);
-    return null;
+    return [];
   }
 }
 
@@ -262,22 +269,6 @@ const QUICK_ACTIONS = [
   { key: 'send', label: 'Withdraw', icon: 'send' as const },
   { key: 'instant-pay', label: 'Instant Pay', icon: 'bolt' as const },
 ] as const;
-
-// ── Asset sources ──
-// The independent origins of wallet rows. Each is a separate network call with
-// its own latency and its own failure mode, so they are fetched concurrently
-// and stored separately; the combined list is derived in render order, which is
-// this array's order.
-type AssetSource = 'evm' | 'tron' | 'btc' | 'solana' | 'premium';
-
-const ASSET_SOURCES: readonly AssetSource[] = ['evm', 'tron', 'btc', 'solana', 'premium'] as const;
-
-type SourceAssets = Record<AssetSource, WalletAsset[] | null>;
-
-/** null means "not reported yet" — distinct from [], which means "none held". */
-const emptySourceAssets = (): SourceAssets => ({
-  evm: null, tron: null, btc: null, solana: null, premium: null,
-});
 
 // ── Balance Card ──
 const WalletBalanceCard: React.FC<{
@@ -764,26 +755,26 @@ const WalletScreen: React.FC = () => {
   // Esplora BTC read is nothing like the EVM fan-out). Keyed this way, each one
   // paints the moment it lands and a slow chain cannot hold up a fast one.
   // Combined in render order below, which preserves the previous ordering.
-  const [sourceAssets, setSourceAssets] = useState<SourceAssets>(emptySourceAssets);
-  // Sources still in flight. Drives the total's shimmer — see WalletBalanceCard.
-  // Starts FULL, not empty: an empty set reads as "everything reported", so the
-  // first frame would render a $0.00 total before the fetch had begun.
-  const [pendingSources, setPendingSources] = useState<Set<AssetSource>>(() => new Set(ASSET_SOURCES));
-  // Result of the custom-token and discovery merges, which need the full list
-  // and so run once every source has settled. Null until then.
-  const [mergedAssets, setMergedAssets] = useState<WalletAsset[] | null>(null);
+  const [sourceAssets, setSourceAssets] = useState<SourceAssets<WalletAsset>>(
+    emptySourceAssets<WalletAsset>,
+  );
+  // Rows contributed by custom-token import and auto-discovery. Held apart from
+  // the sources so a merge computed against an earlier snapshot can never
+  // shadow a balance that has since been refreshed.
+  const [extraAssets, setExtraAssets] = useState<WalletAsset[]>([]);
+  // Which wallet the rows above belong to. A refetch for the SAME wallet keeps
+  // showing them while it revalidates; only a different wallet clears them.
+  const loadedForRef = useRef<string | null>(null);
 
-  useEffect(() => { sourceAssetsRef.current = sourceAssets; }, [sourceAssets]);
-
-  // The list the screen renders: the per-source rows in a stable order until
-  // the custom-token/discovery merges land, then their combined result.
   const assets = useMemo<WalletAsset[]>(
-    () => mergedAssets ?? ASSET_SOURCES.flatMap(src => sourceAssets[src] ?? []),
-    [mergedAssets, sourceAssets]
+    () => combineSourceAssets(sourceAssets, extraAssets),
+    [sourceAssets, extraAssets]
   );
 
   // A partial sum is a wrong number, not a smaller one — see WalletBalanceCard.
-  const isTotalPending = pendingSources.size > 0;
+  // Only true before the FIRST complete load: on a revalidation the previous
+  // total keeps showing rather than blanking every time the tab regains focus.
+  const isTotalPending = !allSourcesReported(sourceAssets);
   const [isValuesHidden, setIsValuesHidden] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -841,10 +832,6 @@ const WalletScreen: React.FC = () => {
   // in-flight discovery from a previous fetch can't overwrite newer state
   // (e.g., user pulls to refresh while discovery is mid-flight).
   const fetchTokenRef = useRef(0);
-  // Mirrors sourceAssets for the phase-2 merges, which run after the fan-out
-  // and need the complete list. Reading state directly there would close over
-  // the value captured when fetchBalances started — i.e. empty.
-  const sourceAssetsRef = useRef<SourceAssets>(emptySourceAssets());
 
   // Only native tokens form the skeleton — ERC-20s are added dynamically
   // from balance responses and discovery (balance > 0 only).
@@ -1094,37 +1081,43 @@ const WalletScreen: React.FC = () => {
     setIsLoading(false);
 
     if (!addr) {
-      setSourceAssets(emptySourceAssets());
-      setMergedAssets(null);
-      setPendingSources(new Set());
+      loadedForRef.current = null;
+      setSourceAssets(emptySourceAssets<WalletAsset>());
+      setExtraAssets([]);
       setIsRefreshing(false);
       return;
     }
 
     // ── Phase 1: independent sources, in parallel ──
-    setMergedAssets(null);
-    setPendingSources(new Set(ASSET_SOURCES));
-    // Seed the EVM slot with the native rows so every supported chain is listed
-    // (at zero) from the first frame, then filled in when balances arrive.
-    setSourceAssets({ ...emptySourceAssets(), evm: buildNativeAssets() });
+    //
+    // Rows are only CLEARED when the wallet actually changed. A refetch for the
+    // same wallet — which is every focus of this tab — revalidates in place, so
+    // the list and total stay on screen instead of collapsing to a skeleton and
+    // rebuilding each time the user navigates back.
+    const isDifferentWallet = loadedForRef.current !== addr;
+    loadedForRef.current = addr;
+    if (isDifferentWallet) {
+      setExtraAssets([]);
+      // Seed the EVM slot with the native rows so every supported chain is
+      // listed (at zero) from the first frame, then filled in as balances land.
+      setSourceAssets({ ...emptySourceAssets<WalletAsset>(), evm: buildNativeAssets() });
+    }
 
-    const commit = (source: AssetSource, rows: WalletAsset[]) => {
-      if (!isCurrent()) return;
-      setSourceAssets(prev => ({ ...prev, [source]: rows }));
-      setPendingSources(prev => {
-        const next = new Set(prev);
-        next.delete(source);
-        return next;
-      });
-    };
+    // Collected locally as well as committed to state. Phase 2 needs the
+    // complete list the instant the fan-out finishes, and React state is not
+    // readable then — the updates are scheduled, not applied — so reading it
+    // back would silently drop whichever source landed last.
+    const collected = emptySourceAssets<WalletAsset>();
 
     const run = async (source: AssetSource, load: () => Promise<WalletAsset[]>) => {
+      let rows: WalletAsset[] = [];
       try {
-        commit(source, await load());
+        rows = await load();
       } catch (err) {
         console.error(`Wallet: ${source} balances failed`, err);
-        commit(source, []);
       }
+      collected[source] = rows;
+      if (isCurrent()) setSourceAssets(prev => ({ ...prev, [source]: rows }));
     };
 
     await Promise.all([
@@ -1138,18 +1131,19 @@ const WalletScreen: React.FC = () => {
 
     // ── Phase 2: merges that need the complete list ──
     // Deliberately after the fan-out: both dedupe against everything already
-    // present, so running them per-source would drop rows that had not arrived.
-    const base = ASSET_SOURCES.flatMap(src => sourceAssetsRef.current[src] ?? []);
+    // present, so running them per-source would re-add rows that had not
+    // arrived yet. Each returns only its OWN rows, which are kept separate from
+    // the sources so the next revalidation cannot be shadowed by a stale list.
+    const base = combineSourceAssets(collected);
     try {
-      const withCustom = await mergeCustomTokens(base, addr, customTokens);
-      const baseAssets = withCustom ?? base;
-      if (isCurrent()) setMergedAssets(baseAssets);
+      const custom = await mergeCustomTokens(base, addr, customTokens);
+      if (isCurrent()) setExtraAssets(custom);
 
       // Discovery is deliberately NOT awaited: it is the slowest merge and the
       // list is already complete without it, so blocking the refresh spinner on
       // it would make pull-to-refresh feel broken.
-      void mergeDiscoveredTokens(baseAssets, addr).then((merged) => {
-        if (merged && isCurrent()) setMergedAssets(merged);
+      void mergeDiscoveredTokens([...base, ...custom], addr).then((discovered) => {
+        if (discovered.length && isCurrent()) setExtraAssets([...custom, ...discovered]);
       });
     } catch (err) {
       console.error('Wallet: token merge failed', err);
