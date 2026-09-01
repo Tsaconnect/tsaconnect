@@ -23,7 +23,9 @@ internal/
     config.go                  # Config struct from env vars, multi-chain config
     database.go                # PostgreSQL connection (GORM), AutoMigrate
     cloudinary.go              # Cloudinary client init
-  models/                      # GORM models (User, Product, Asset, Cart, Category, Portfolio, Transaction, Wallet, WalletTransaction, SupportedToken, VerificationLog)
+  models/                      # GORM models (User, Product, Cart, Category, Transaction, Wallet, WalletTransaction, SupportedToken, VerificationLog)
+                               # NOTE: no model stores a crypto balance. Wallet balances are read from
+                               # the chain per request; the Asset/Portfolio mirrors were removed 2026-09-01.
   blockchain/
     client.go                  # EVMClient - chain-agnostic Ethereum RPC wrapper
     token.go                   # ERC-20 token operations, native transfer prep
@@ -45,14 +47,12 @@ internal/
     product_handler.go         # Product CRUD, marketplace, category filtering
     category_handler.go        # Category CRUD with tree structure
     cart_handler.go            # Cart operations, checkout, coupon, shipping
-    asset_handler.go           # Asset CRUD with real-time pricing
-    transaction_handler.go     # Deposit/withdrawal/swap with fee calculation
-    portfolio_handler.go       # Portfolio analytics, goals
-    market_handler.go          # Market overview, price history, watchlist
+    transaction_handler.go     # Transaction history (read-only)
+    market_handler.go          # Market overview, price history, search
     upload_handler.go          # File upload handlers
     wallet_handler.go          # Multi-chain wallet: register, balances, send, history
     wallet_handler_test.go     # Wallet handler unit tests (SQLite in-memory)
-    common.go                  # getUserFromContext helper
+    common.go                  # getUserFromContext + callerWallet (device/account wallet reconciliation)
   services/
     price_service.go           # CoinGecko API with 60s cache
     blockchain_service.go      # Multi-chain BlockchainService registry
@@ -78,7 +78,7 @@ All routes prefixed with `/api/`:
 - `/users` - user profile management
 - `/verification` - document/identity verification
 - `/upload` - image uploads via Cloudinary
-- `/assets`, `/transactions`, `/portfolio`, `/market` - trading/asset features
+- `/transactions` (read-only), `/market` - transaction history, market data
 - `/products`, `/cart` - marketplace/e-commerce features
 - `/wallet` - multi-chain wallet (register address, balances, send, history, supported tokens)
 - `/health` - health check (root level)
@@ -91,6 +91,13 @@ All routes prefixed with `/api/`:
 - **Handler structure**: `WalletHandler` has its own struct with `DB`, `Config`, `BlockchainService` fields. Other handlers use `*Handlers` struct.
 - **ORM**: GORM with PostgreSQL driver
 - **Wallet tests**: Use SQLite in-memory DB (raw DDL, not AutoMigrate) to avoid PostgreSQL-specific defaults
+- **Balances are never stored**: crypto balances come from the chain on every request and
+  entitlement balances from the swap contract. Endpoints that display one take the caller's
+  device wallet address and reconcile it against `users.wallet_address` via `callerWallet`
+  (409 on mismatch) — never silently substitute the registered address, which makes a device
+  with no key look as though the platform is custodying the user's assets.
+- **Destructive DDL**: never in `AutoMigrate` (enforced by `TestAutoMigrateHasNoDestructiveDDL`).
+  It goes in `deploy/one-off/`, run deliberately by an operator after the release is live.
 
 ## Environment Variables
 

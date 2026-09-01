@@ -189,8 +189,6 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		wallet = models.Wallet{
 			ID:               uuid.New(),
 			UserID:           user.ID,
-			TotalBalance:     0,
-			TotalUSDValue:    0,
 			TransactionLimit: models.DefaultTransactionLimit,
 			DailyLimit:       models.DefaultDailyLimit,
 			CreatedAt:        now,

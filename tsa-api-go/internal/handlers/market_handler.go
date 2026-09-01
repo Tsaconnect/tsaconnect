@@ -8,9 +8,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/config"
-	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -155,119 +152,7 @@ func (h *Handlers) SearchAssets(c *gin.Context) {
 	})
 }
 
-// GetWatchlist returns the user's watchlist (user assets as watchlist).
-// GET /api/market/watchlist — auth.
-func (h *Handlers) GetWatchlist(c *gin.Context) {
-	user := getUserFromContext(c)
-	if user == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
-		return
-	}
 
-	var assets []models.Asset
-	if err := config.DB.Where("user_id = ?", user.ID).Find(&assets).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to fetch watchlist"})
-		return
-	}
-
-	// Fetch current prices for watchlist assets
-	symbols := make([]string, 0, len(assets))
-	for _, a := range assets {
-		symbols = append(symbols, a.Symbol)
-	}
-
-	watchlist := make([]gin.H, 0, len(assets))
-	if len(symbols) > 0 {
-		prices, _ := h.PriceService.GetPrices(symbols)
-		for _, a := range assets {
-			entry := gin.H{
-				"symbol":  a.Symbol,
-				"name":    a.Name,
-				"balance": a.Balance,
-			}
-			if prices != nil {
-				if pd, ok := prices[a.Symbol]; ok {
-					entry["price"] = pd.USD
-					entry["change24h"] = pd.USD24hChange
-					entry["usdValue"] = a.Balance * pd.USD
-				}
-			}
-			watchlist = append(watchlist, entry)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Watchlist retrieved successfully",
-		"data": gin.H{
-			"watchlist": watchlist,
-			"count":     len(watchlist),
-		},
-	})
-}
-
-// AddToWatchlist adds an asset to the user's watchlist.
-// POST /api/market/watchlist — auth.
-func (h *Handlers) AddToWatchlist(c *gin.Context) {
-	user := getUserFromContext(c)
-	if user == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
-		return
-	}
-
-	var body struct {
-		Symbol string `json:"symbol" binding:"required"`
-		Name   string `json:"name"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Symbol is required"})
-		return
-	}
-
-	symbol := strings.ToUpper(body.Symbol)
-	name := body.Name
-	if name == "" {
-		name = getAssetName(symbol)
-	}
-
-	// Check if already exists
-	var count int64
-	if err := config.DB.Model(&models.Asset{}).Where("user_id = ? AND symbol = ?", user.ID, symbol).Count(&count).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to check watchlist"})
-		return
-	}
-	if count > 0 {
-		c.JSON(http.StatusConflict, gin.H{"success": false, "message": "Asset already in watchlist"})
-		return
-	}
-
-	now := time.Now()
-	asset := models.Asset{
-		ID:        uuid.New(),
-		UserID:    user.ID,
-		Symbol:    symbol,
-		Name:      name,
-		Balance:   0,
-		USDValue:  0,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	asset.SetDetails(&models.AssetDetails{
-		Type:  models.AssetTypeToken,
-		Chain: models.ChainEthereum,
-	})
-
-	if err := config.DB.Create(&asset).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to add to watchlist"})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
-		"message": "Asset added to watchlist successfully",
-		"data":    asset,
-	})
-}
 
 // --- Helper functions ---
 

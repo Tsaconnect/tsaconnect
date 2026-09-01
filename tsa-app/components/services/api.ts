@@ -204,53 +204,6 @@ export interface CategoryWithDetails extends Category {
 }
 
 
-// Dashboard-specific interfaces
-export interface Asset {
-  _id: string;
-  id: string;
-  symbol: string;
-  name: string;
-  balance: number;
-  usdValue: number;
-  isSelected: boolean;
-  isHidden: boolean;
-  details?: {
-    type: string;
-    chain?: string;
-    address?: string;
-  };
-  currentPrice?: number;
-  priceChange24h?: number;
-}
-
-export interface PortfolioTotals {
-  balance: number;
-  usdValue: number;
-  dailyChange: number;
-}
-
-export interface AssetsResponse {
-  assets: Asset[];
-  totals: PortfolioTotals;
-  lastUpdated: string;
-}
-
-export interface SelectAssetRequest {
-  assetId: string;
-}
-
-export interface RefreshResponse {
-  success: boolean;
-  message: string;
-  data?: any;
-}
-
-export interface AssetVisibilityResponse {
-  success: boolean;
-  message: string;
-  data?: any;
-}
-
 export interface Notification {
   id: string;
   userId: string;
@@ -432,83 +385,6 @@ class APIService {
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
-  }
-
-  // ==================== DASHBOARD ENDPOINTS ====================
-
-  // Get portfolio assets
-  async getPortfolioAssets(): Promise<ApiResponse<AssetsResponse>> {
-    this.getHeaders();
-    console.log('Fetching portfolio assets with headers:', this.getHeaders());
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets`, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<AssetsResponse>(response);
-    } catch (error: any) {
-      console.error('Get portfolio assets error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to load portfolio data.',
-      };
-    }
-  }
-
-  // Refresh portfolio assets
-  async refreshPortfolioAssets(): Promise<ApiResponse<RefreshResponse>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/refresh`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<RefreshResponse>(response);
-    } catch (error: any) {
-      console.error('Refresh portfolio assets error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to refresh assets.',
-      };
-    }
-  }
-
-  // Select an asset
-  async selectAsset(assetId: string): Promise<ApiResponse<SelectAssetRequest>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/select`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({ assetId }),
-      });
-
-      return this.handleResponse<SelectAssetRequest>(response);
-    } catch (error: any) {
-      console.error('Select asset error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to select asset.',
-      };
-    }
-  }
-
-  // Toggle asset visibility
-  async toggleAssetVisibility(assetId: string): Promise<ApiResponse<AssetVisibilityResponse>> {
-    try {
-      const response = await fetch(`${API_BASE_URL}/assets/${assetId}/visibility`, {
-        method: 'PUT',
-        headers: this.getHeaders(),
-      });
-
-      return this.handleResponse<AssetVisibilityResponse>(response);
-    } catch (error: any) {
-      console.error('Toggle asset visibility error:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to update asset visibility.',
-      };
-    }
   }
 
   // ==================== AUTH ENDPOINTS ====================
