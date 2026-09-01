@@ -10,6 +10,8 @@ import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import { AccentCard, Button, Spinner, Text } from '@/components/ui';
 import { getMcgpBalance, type McgpBalance } from '@/services/mcgpSwapApi';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 
 const fmtMcgp = (base?: string) => {
   try {
@@ -26,20 +28,29 @@ export default function McgpHub() {
   const [bal, setBal] = useState<McgpBalance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { address: signer, ready: signerReady } = useSignableWallet();
 
   const load = useCallback(async () => {
     setError('');
+    // useSignableWallet already resolved this; re-reading SecureStore here
+    // would be a second keychain round trip for an answer we hold.
+    if (!signerReady) return;
+    if (!signer) { setLoading(false); return; }
     const r = await getMcgpBalance();
     if (r.success && r.data) setBal(r.data);
     else setError(r.message || 'Failed to load balance');
     setLoading(false);
-  }, []);
+  }, [signer, signerReady]);
 
   useFocusEffect(
     useCallback(() => {
       load();
     }, [load]),
   );
+
+  // The hub's whole content is a balance and the actions that spend it, so
+  // without a local key there is nothing honest to show.
+  if (signerReady && !signer) return <NoLocalWalletScreen action="spend MCGP" />;
 
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>

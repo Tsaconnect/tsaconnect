@@ -252,30 +252,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		uploadGroup.POST("/base64", h.UploadBase64)
 	}
 
-	// Asset routes
-	assetGroup := api.Group("/assets")
-	assetGroup.Use(auth)
-	{
-		assetGroup.GET("", h.GetAssets)
-		assetGroup.GET("/:id", h.GetAssetByID)
-		assetGroup.POST("", h.CreateAsset)
-	}
-
-	// Transaction routes
+	// Transaction routes. Read-only: the write paths debited a DB-held balance
+	// and were removed with the assets table — crypto balances live on-chain.
 	transactionGroup := api.Group("/transactions")
 	transactionGroup.Use(auth)
 	{
 		transactionGroup.GET("", h.GetTransactions)
 		transactionGroup.GET("/:id", h.GetTransactionByID)
-		transactionGroup.POST("", h.CreateTransaction)
-	}
-
-	// Portfolio routes
-	portfolioGroup := api.Group("/portfolio")
-	portfolioGroup.Use(auth)
-	{
-		portfolioGroup.GET("", h.GetPortfolio)
-		portfolioGroup.GET("/summary", h.GetPortfolioSummary)
 	}
 
 	// Market routes (mix of public and authenticated)
@@ -285,8 +268,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		marketGroup.GET("/history/:symbol", h.GetAssetPriceHistory)
 		marketGroup.GET("/assets/:symbol", h.GetAssetMarketDetails)
 		marketGroup.GET("/search/:query", h.SearchAssets)
-		marketGroup.GET("/watchlist", auth, h.GetWatchlist)
-		marketGroup.POST("/watchlist", auth, h.AddToWatchlist)
 	}
 
 	// Fee configuration (public)

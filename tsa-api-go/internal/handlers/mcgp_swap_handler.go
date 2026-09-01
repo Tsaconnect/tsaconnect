@@ -103,23 +103,23 @@ func (h *MCGPSwapHandler) GetBalance(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, c.Query("address"))
+	if !ok {
 		return
 	}
-	premium, err := h.swap.PremiumBalance(user.WalletAddress)
+	premium, err := h.swap.PremiumBalance(wallet)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Failed to read premium balance: "+err.Error())
 		return
 	}
-	legacyRemaining, err := h.swap.LegacyRemaining(user.WalletAddress)
+	legacyRemaining, err := h.swap.LegacyRemaining(wallet)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Failed to read legacy entitlement: "+err.Error())
 		return
 	}
-	legacyEntitlement, _ := h.swap.LegacyEntitlement(user.WalletAddress)
+	legacyEntitlement, _ := h.swap.LegacyEntitlement(wallet)
 	utils.SuccessResponse(c, http.StatusOK, "Balance", gin.H{
-		"walletAddress":     user.WalletAddress,
+		"walletAddress":     wallet,
 		"premiumBalance":    premium.String(),
 		"legacyEntitlement": bigOrZero(legacyEntitlement),
 		"legacyRemaining":   legacyRemaining.String(),
@@ -157,6 +157,9 @@ func (h *MCGPSwapHandler) GetQuote(c *gin.Context) {
 type approveReq struct {
 	Token  string `json:"token"`  // "usdc" (for buy) | "mcgp" (for legacy sell)
 	Amount string `json:"amount"` // base units
+	// FromAddress is the wallet the device holds a signing key for. Checked
+	// against the account's registered address — see callerWallet.
+	FromAddress string `json:"fromAddress"`
 }
 
 // POST /api/mcgp/approve/prepare — unsigned ERC-20 approve(swap, amount) tx +
@@ -178,16 +181,16 @@ func (h *MCGPSwapHandler) PrepareApprove(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, req.FromAddress)
+	if !ok {
 		return
 	}
-	allowance, err := h.swap.Allowance(req.Token, user.WalletAddress)
+	allowance, err := h.swap.Allowance(req.Token, wallet)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Allowance read failed: "+err.Error())
 		return
 	}
-	tx, err := h.swap.PrepareApprove(user.WalletAddress, req.Token, amount)
+	tx, err := h.swap.PrepareApprove(wallet, req.Token, amount)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
 		return
@@ -199,8 +202,9 @@ func (h *MCGPSwapHandler) PrepareApprove(c *gin.Context) {
 }
 
 type buyReq struct {
-	McgpAmount string `json:"mcgpAmount"`
-	MaxUsdc    string `json:"maxUsdc"`
+	McgpAmount  string `json:"mcgpAmount"`
+	MaxUsdc     string `json:"maxUsdc"`
+	FromAddress string `json:"fromAddress"`
 }
 
 // POST /api/mcgp/buy/prepare — unsigned buyPremium tx.
@@ -225,11 +229,11 @@ func (h *MCGPSwapHandler) PrepareBuy(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid maxUsdc")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, req.FromAddress)
+	if !ok {
 		return
 	}
-	tx, err := h.swap.PrepareBuyPremium(user.WalletAddress, mcgpAmt, maxUsdc)
+	tx, err := h.swap.PrepareBuyPremium(wallet, mcgpAmt, maxUsdc)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
 		return
@@ -238,8 +242,9 @@ func (h *MCGPSwapHandler) PrepareBuy(c *gin.Context) {
 }
 
 type sellReq struct {
-	McgpAmount string `json:"mcgpAmount"`
-	MinUsdc    string `json:"minUsdc"`
+	McgpAmount  string `json:"mcgpAmount"`
+	MinUsdc     string `json:"minUsdc"`
+	FromAddress string `json:"fromAddress"`
 }
 
 // POST /api/mcgp/sell/prepare — unsigned sellPremium tx.
@@ -269,8 +274,8 @@ func (h *MCGPSwapHandler) prepareSell(c *gin.Context, legacy bool) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid minUsdc")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, req.FromAddress)
+	if !ok {
 		return
 	}
 	var (
@@ -278,9 +283,9 @@ func (h *MCGPSwapHandler) prepareSell(c *gin.Context, legacy bool) {
 		err error
 	)
 	if legacy {
-		tx, err = h.swap.PrepareSellLegacy(user.WalletAddress, mcgpAmt, minUsdc)
+		tx, err = h.swap.PrepareSellLegacy(wallet, mcgpAmt, minUsdc)
 	} else {
-		tx, err = h.swap.PrepareSellPremium(user.WalletAddress, mcgpAmt, minUsdc)
+		tx, err = h.swap.PrepareSellPremium(wallet, mcgpAmt, minUsdc)
 	}
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
@@ -290,7 +295,8 @@ func (h *MCGPSwapHandler) prepareSell(c *gin.Context, legacy bool) {
 }
 
 type withdrawReq struct {
-	McgpAmount string `json:"mcgpAmount"`
+	McgpAmount  string `json:"mcgpAmount"`
+	FromAddress string `json:"fromAddress"`
 }
 
 // POST /api/mcgp/withdraw/prepare — unsigned withdrawPremiumToWallet tx.
@@ -310,11 +316,11 @@ func (h *MCGPSwapHandler) PrepareWithdraw(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid mcgpAmount")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, req.FromAddress)
+	if !ok {
 		return
 	}
-	tx, err := h.swap.PrepareWithdrawPremium(user.WalletAddress, mcgpAmt)
+	tx, err := h.swap.PrepareWithdrawPremium(wallet, mcgpAmt)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
 		return
@@ -328,6 +334,7 @@ type payReq struct {
 	// IdempotencyKey makes the derived `ref` stable across retries of one
 	// payment intent. Also accepted as the `Idempotency-Key` header.
 	IdempotencyKey string `json:"idempotencyKey"`
+	FromAddress    string `json:"fromAddress"`
 }
 
 // payRef derives the single-use `ref` for a spend.
@@ -380,8 +387,8 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Cannot pay yourself")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, req.FromAddress)
+	if !ok {
 		return
 	}
 	var target models.User
@@ -400,11 +407,11 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 	if idem == "" {
 		idem = req.IdempotencyKey
 	}
-	ref := payRef(user.WalletAddress, idem)
+	ref := payRef(wallet, idem)
 	var ref32 [32]byte
 	copy(ref32[:], ref.Bytes())
 
-	tx, err := h.swap.PrepareSpend(user.WalletAddress, target.WalletAddress, amount, ref32)
+	tx, err := h.swap.PrepareSpend(wallet, target.WalletAddress, amount, ref32)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "Prepare failed: "+err.Error())
 		return
@@ -430,7 +437,7 @@ func (h *MCGPSwapHandler) PreparePay(c *gin.Context) {
 		// three extra RPC round trips on the hot path of every payment, purely to
 		// recompute bytes we already hold.
 		if callData := spendCallData(tx); len(callData) > 0 {
-			if scaffold, sErr := h.relay.Scaffold(c.Request.Context(), user.WalletAddress, h.swapAddress, callData, 0); sErr == nil {
+			if scaffold, sErr := h.relay.Scaffold(c.Request.Context(), wallet, h.swapAddress, callData, 0); sErr == nil {
 				payload["forwardRequest"] = scaffold
 			}
 		}

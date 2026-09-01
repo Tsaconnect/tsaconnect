@@ -14,6 +14,8 @@ import {
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { resolveUsername, type ResolvedUser } from '@/services/walletApi';
 import { executePay } from '@/services/mcgpFlow';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 
 type Screen = 'form' | 'confirm' | 'sending' | 'success' | 'failure';
 
@@ -26,6 +28,7 @@ export default function PayMcgp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showAuth, setShowAuth] = useState(false);
+  const { address: signer, ready: signerReady } = useSignableWallet();
 
   const handleReview = async () => {
     setError('');
@@ -129,6 +132,11 @@ export default function PayMcgp() {
       </SafeAreaView>
     );
   }
+
+  // Paying spends premium MCGP, which needs a local key to sign spend().
+  // Blocked here rather than at broadcast, after the user has entered a
+  // recipient and an amount and pressed confirm.
+  if (signerReady && !signer) return <NoLocalWalletScreen action="pay other users" />;
 
   // form
   return (

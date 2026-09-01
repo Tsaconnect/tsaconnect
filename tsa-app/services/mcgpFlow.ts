@@ -4,7 +4,7 @@
 // broadcast → confirm) so the screens stay thin. All signing happens with the
 // device wallet key; the backend only prepares unsigned txs and confirms events.
 
-import { signTransaction, broadcastTransaction, getActiveWallet, ensureGas } from '@/services/wallet';
+import { signTransaction, broadcastTransaction, getSignableWallet, ensureGas } from '@/services/wallet';
 import { unsignedTxToTxLike } from '@/services/p2p';
 import {
   prepareMcgpApprove,
@@ -63,7 +63,7 @@ async function signBroadcast(tx: McgpUnsignedTx, from: string): Promise<string> 
 // Ensure the swap contract is approved to pull `amount` of USDC; broadcasts
 // an exact-amount approve and waits for it to mine when the allowance is short.
 async function ensureApprove(amount: string, from: string): Promise<void> {
-  const r = await prepareMcgpApprove('usdc', amount);
+  const r = await prepareMcgpApprove('usdc', amount, from);
   if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare approval');
   if (gte(r.data.currentAllowance, amount)) return; // already covered
   const signed = await signTransaction(unsignedTxToTxLike(r.data.tx as any), from);
@@ -71,9 +71,16 @@ async function ensureApprove(amount: string, from: string): Promise<void> {
   await waitMined(resp); // buy gas-estimate reverts if the allowance isn't set yet
 }
 
+// The signing wallet, or a hard stop. Checks for the KEY, not just a stored
+// address: without it every flow below would prepare a tx it cannot sign and
+// fail at broadcast instead of here, after the user has already confirmed.
 async function requireWallet(): Promise<string> {
-  const from = await getActiveWallet();
-  if (!from) throw new Error('No wallet found. Set up your wallet first.');
+  const from = await getSignableWallet();
+  if (!from) {
+    throw new Error(
+      'No wallet on this device. Import your recovery phrase to buy, sell or spend MCGP.',
+    );
+  }
   return from;
 }
 
@@ -103,7 +110,7 @@ export async function executeBuy(mcgpAmount: string, maxUsdc: string): Promise<s
   const from = await requireWallet();
   await requireGas(from);
   await ensureApprove(maxUsdc, from);
-  const r = await prepareMcgpBuy(mcgpAmount, maxUsdc);
+  const r = await prepareMcgpBuy(mcgpAmount, maxUsdc, from);
   if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare buy');
   const hash = await signBroadcast(r.data, from);
   await confirmBestEffort(confirmMcgpSwap(hash, 'buy_premium'), 'buy_premium');
@@ -114,7 +121,7 @@ export async function executeBuy(mcgpAmount: string, maxUsdc: string): Promise<s
 export async function executeSellPremium(mcgpAmount: string, minUsdc: string): Promise<string> {
   const from = await requireWallet();
   await requireGas(from);
-  const r = await prepareMcgpSell(mcgpAmount, minUsdc);
+  const r = await prepareMcgpSell(mcgpAmount, minUsdc, from);
   if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare sell');
   const hash = await signBroadcast(r.data, from);
   await confirmBestEffort(confirmMcgpSwap(hash, 'sell_premium'), 'sell_premium');
@@ -125,7 +132,7 @@ export async function executeSellPremium(mcgpAmount: string, minUsdc: string): P
 export async function executeWithdraw(mcgpAmount: string): Promise<string> {
   const from = await requireWallet();
   await requireGas(from);
-  const r = await prepareMcgpWithdraw(mcgpAmount);
+  const r = await prepareMcgpWithdraw(mcgpAmount, from);
   if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare withdraw');
   const hash = await signBroadcast(r.data, from);
   await confirmBestEffort(confirmMcgpSwap(hash, 'withdraw'), 'withdraw');
@@ -136,7 +143,7 @@ export async function executeWithdraw(mcgpAmount: string): Promise<string> {
 export async function executePay(username: string, mcgpAmount: string): Promise<string> {
   const from = await requireWallet();
   await requireGas(from);
-  const r = await prepareMcgpPay(username, mcgpAmount);
+  const r = await prepareMcgpPay(username, mcgpAmount, from);
   if (!r.success || !r.data) throw new Error(r.message || 'Failed to prepare payment');
   const hash = await signBroadcast(r.data.tx, from);
   await confirmBestEffort(confirmMcgpPay(hash, r.data.ref, r.data.recipient), 'pay');

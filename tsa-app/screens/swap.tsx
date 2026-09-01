@@ -25,12 +25,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { CHAINS } from '@/constants/chains';
-import { signTransaction, withRpcFallback, getActiveWallet } from '@/services/wallet';
+import { signTransaction, withRpcFallback } from '@/services/wallet';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
 import {
   getSwapPrice, prepareSwap, submitTransaction, getWalletBalances, normalizeWalletBalances,
   getOtcSettings, type OtcSettings, type WalletBalance,
 } from '@/services/walletApi';
 import { useTheme } from '@/theme';
+import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 import {
   Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
   ScreenHeader,
@@ -198,6 +200,10 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loadingBal, setLoadingBal] = useState(true);
+  // Balances are only ever read for the wallet this device holds a key for.
+  // Falling back to the account's registered address would render MCGP the
+  // user cannot sign for — the screen that made us look custodial.
+  const { address: signer, ready: signerReady } = useSignableWallet();
   const [priceLoading, setPriceLoading] = useState(false);
   const [quote, setQuote] = useState<{ mcgp: string; usdc: string; rate: string } | null>(null);
   const [priceErr, setPriceErr] = useState('');
@@ -221,11 +227,12 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const direction = fromSymbol === 'MCGP' ? 'sell' as const : 'buy' as const;
 
   const loadBalances = useCallback(async () => {
+    if (!signer) { setBalances([]); setLoadingBal(false); return; }
     try {
       setLoadingBal(true);
       // Query Sonic chain specifically since swaps happen on Sonic
       const sonicChainId = CHAINS.sonic.chainId;
-      const r = await getWalletBalances(sonicChainId);
+      const r = await getWalletBalances(sonicChainId, signer);
       if (r.success && r.data) {
         const fetched: WalletBalance[] = normalizeWalletBalances(r.data, 'sonic').map(
           ({ chainKey, chainName, ...balance }) => balance
@@ -244,7 +251,7 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
     } catch (err) {
       console.error('Swap: load balances error:', err);
     } finally { setLoadingBal(false); }
-  }, []);
+  }, [signer]);
 
   // Refresh balances every time the screen gains focus
   useFocusEffect(useCallback(() => { loadBalances(); }, [loadBalances]));
@@ -336,8 +343,8 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
       const params = direction === 'buy'
         ? { usdcAmount: toWei(amount, fromToken.decimals).toString() }
         : { mcgpAmount: toWei(amount, fromToken.decimals).toString() };
-      const from = await getActiveWallet();
-      if (!from) throw new Error('No wallet found. Set up your wallet first.');
+      const from = signer;
+      if (!from) throw new Error('No wallet on this device. Import your recovery phrase to swap.');
       const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare swap');
       setPrepared(prep.data);
@@ -381,8 +388,8 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
       let from = preparedFor;
       if (!prepData || !from) {
         setStatus('Preparing swap...');
-        from = (await getActiveWallet()) || '';
-        if (!from) throw new Error('No wallet found. Set up your wallet first.');
+        from = signer || '';
+        if (!from) throw new Error('No wallet on this device. Import your recovery phrase to swap.');
         const prep = await prepareSwap(direction, { ...params, slippageBps: 50 }, from);
         if (!prep.success || !prep.data) throw new Error(prep.message || 'Failed to prepare');
         prepData = prep.data;
@@ -601,6 +608,16 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
       </ScrollView>
     </SafeAreaView>
   );
+
+  // ── No wallet on this device ──
+  // Deliberately not a zero balance: a zero reads as "your wallet is empty",
+  // which sends the user looking for missing funds instead of for their seed
+  // phrase. MCGP lives on-chain against a key we do not have here.
+  //
+  // The shared component, not the inline copy this screen used to carry: that
+  // copy existed only to keep the OTC tab header above it, and this branch
+  // removed those tabs. Every other MCGP screen already gates this way.
+  if (signerReady && !signer) return <NoLocalWalletScreen action="swap" />;
 
   // ── Form ──
   return (

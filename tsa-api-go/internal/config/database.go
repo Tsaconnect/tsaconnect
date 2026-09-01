@@ -43,7 +43,6 @@ func AutoMigrate() error {
 		// balance; both are written until the legacy columns are dropped.
 		&models.PMBalance{},
 		&models.User{},
-		&models.Asset{},
 		&models.Product{},
 		&models.Cart{},
 		&models.Category{},
@@ -55,7 +54,6 @@ func AutoMigrate() error {
 		&models.ServiceAvailability{},
 		&models.ServiceBooking{},
 		&models.BookingRequest{},
-		&models.Portfolio{},
 		&models.Transaction{},
 		&models.Wallet{},
 		&models.WalletTransaction{},
@@ -229,6 +227,14 @@ func AutoMigrate() error {
 		DB.Exec("ALTER TABLE users DROP COLUMN persona_inquiry_id")
 		DB.Exec("UPDATE users SET verification_status = 'pending', didit_session_id = '' WHERE verification_status = 'in_review'")
 	}
+
+	// NOTE: the `assets` and `portfolios` tables and the wallets balance columns
+	// are retired by deploy/one-off/2026-09-01-drop-db-balance-mirrors.sql, NOT
+	// here. Crypto balances are read from the chain, so the mirrors are dead —
+	// but dropping them at boot would break the older release still serving from
+	// this database mid-deploy. The models are gone, so AutoMigrate simply stops
+	// maintaining them; leftover tables are inert until an operator runs that
+	// script.
 
 	// Replace the default unique index on wallet_address with a partial
 	// unique index that only enforces uniqueness for non-empty values.

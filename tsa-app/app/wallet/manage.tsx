@@ -125,10 +125,20 @@ const WalletManage = () => {
 
   const handleSwitchWallet = async (address: string) => {
     if (address === activeAddress) return;
+    const previous = activeAddress;
     setActionLoading(true);
     try {
       await setActiveWallet(address);
-      await registerWalletAddress(address);
+      // registerWalletAddress resolves with {success:false} rather than
+      // throwing, so this result MUST be checked. Leaving it unchecked is what
+      // let the account stay registered to the old wallet while the device
+      // signed with the new one — the balance screens then answer for an
+      // address this device cannot sign for.
+      const registered = await registerWalletAddress(address);
+      if (!registered.success) {
+        if (previous) await setActiveWallet(previous);
+        throw new Error(registered.message || 'Could not switch to this wallet.');
+      }
       setActiveAddress(address);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to switch wallet');
@@ -142,9 +152,14 @@ const WalletManage = () => {
     setError('');
     try {
       const wallet = await generateWallet();
+      const registered = await registerWalletAddress(wallet.address);
+      if (!registered.success) {
+        throw new Error(
+          registered.message || 'Could not link this wallet to your account. Please try again.',
+        );
+      }
       const label = `Wallet ${wallets.length + 1}`;
       await addWallet(wallet, label);
-      await registerWalletAddress(wallet.address);
       await loadWallets();
       router.push('/wallet/seedphrase');
     } catch (err: any) {
@@ -257,10 +272,15 @@ const WalletManage = () => {
     setError('');
     try {
       const walletInfo = await importWalletFromMnemonic(phrase);
+      const registered = await registerWalletAddress(walletInfo.address);
+      if (!registered.success) {
+        throw new Error(
+          registered.message || 'Could not link this wallet to your account. Please try again.',
+        );
+      }
       const label = `Wallet ${wallets.length + 1}`;
       await addWallet(walletInfo, label);
       await markWalletBackedUp(walletInfo.address);
-      await registerWalletAddress(walletInfo.address);
       setWordInputs(Array(SEED_LENGTH).fill(''));
       setShowWords(false);
       setMode('menu');
@@ -285,11 +305,26 @@ const WalletManage = () => {
         style: 'destructive',
         onPress: async () => {
           await removeWallet(wallet.address);
-          if (isOnly) {
-            await registerWalletAddress('');
-          } else {
-            const newActive = await getActiveWallet();
-            if (newActive) await registerWalletAddress(newActive);
+          // removeWallet promotes the next wallet when any remain, so a null
+          // here means there genuinely is none left. Distinguish that from the
+          // deliberate unlink: coercing null to '' would silently detach an
+          // account that still has wallets, purely because a read failed.
+          const newActive = isOnly ? '' : await getActiveWallet();
+          if (!isOnly && !newActive) {
+            Alert.alert(
+              'Wallet removed, account not updated',
+              'Could not determine which wallet is now active. Reopen this screen to retry.',
+            );
+            await loadWallets();
+            return;
+          }
+          const registered = await registerWalletAddress(newActive ?? '');
+          if (!registered.success) {
+            Alert.alert(
+              'Wallet removed, account not updated',
+              registered.message ||
+                'Your account still points at the deleted wallet. Reopen this screen to retry.',
+            );
           }
           await loadWallets();
         },

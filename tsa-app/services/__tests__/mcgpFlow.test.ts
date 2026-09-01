@@ -10,13 +10,13 @@
 
 const mockSignTransaction = jest.fn();
 const mockBroadcastTransaction = jest.fn();
-const mockGetActiveWallet = jest.fn();
+const mockGetSignableWallet = jest.fn();
 const mockEnsureGas = jest.fn();
 
 jest.mock('../wallet', () => ({
   signTransaction: (...a: any[]) => mockSignTransaction(...a),
   broadcastTransaction: (...a: any[]) => mockBroadcastTransaction(...a),
-  getActiveWallet: (...a: any[]) => mockGetActiveWallet(...a),
+  getSignableWallet: (...a: any[]) => mockGetSignableWallet(...a),
   ensureGas: (...a: any[]) => mockEnsureGas(...a),
 }));
 
@@ -48,7 +48,7 @@ const USDC = '20000'; // 0.02 USDC
 
 // Happy on-chain world: gas ok, approve needed, everything signs/mines fast.
 function arrangeHappyChain() {
-  mockGetActiveWallet.mockResolvedValue(FROM);
+  mockGetSignableWallet.mockResolvedValue(FROM);
   mockEnsureGas.mockResolvedValue(true);
   mockSignTransaction.mockResolvedValue('0xsigned');
   mockBroadcastTransaction.mockResolvedValue({
@@ -171,5 +171,42 @@ describe('executeSellPremium — shares the guards', () => {
 
     await expect(executeSellPremium(MCGP, USDC)).rejects.toThrow(/gas|S /i);
     expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+});
+
+// ── The wallet gate ───────────────────────────────────────────────────────
+//
+// These flows sign with a key held only on this device. Resolving the wallet
+// from a stored ADDRESS (which survives a reinstall, a logout, and a deleted
+// wallet) let the app prepare a tx it could never sign, so the failure landed
+// at broadcast — after the user had confirmed — instead of before anything was
+// prepared.
+describe('the signing wallet must actually be signable', () => {
+  it('refuses to prepare anything when this device holds no key', async () => {
+    arrangeHappyChain();
+    mockGetSignableWallet.mockResolvedValue(null);
+
+    await expect(executeBuy(MCGP, USDC)).rejects.toThrow(/No wallet on this device/i);
+
+    expect(mockPrepareApprove).not.toHaveBeenCalled();
+    expect(mockPrepareBuy).not.toHaveBeenCalled();
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('names the signing wallet on every prepare, so the backend can reject a mismatch', async () => {
+    arrangeHappyChain();
+
+    await executeBuy(MCGP, USDC);
+
+    expect(mockPrepareApprove).toHaveBeenCalledWith('usdc', USDC, FROM);
+    expect(mockPrepareBuy).toHaveBeenCalledWith(MCGP, USDC, FROM);
+  });
+
+  it('names the signing wallet when selling too', async () => {
+    arrangeHappyChain();
+
+    await executeSellPremium(MCGP, USDC);
+
+    expect(mockPrepareSell).toHaveBeenCalledWith(MCGP, USDC, FROM);
   });
 });

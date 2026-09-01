@@ -43,10 +43,11 @@ type WalletSettings struct {
 
 // Wallet represents a user's wallet.
 type Wallet struct {
-	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	UserID           uuid.UUID      `gorm:"type:uuid;uniqueIndex" json:"userId"`
-	TotalBalance     float64        `json:"totalBalance"`
-	TotalUSDValue    float64        `json:"totalUsdValue"`
+	ID     uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"userId"`
+	// No balance fields here on purpose. Crypto balances are read from the
+	// chain on every request (see handlers.GetWalletBalances); a stored copy
+	// can only ever be a number that disagrees with the chain.
 	SelectedAsset    string         `json:"selectedAsset,omitempty"`
 	Addresses        datatypes.JSON `gorm:"type:jsonb" json:"addresses,omitempty"`
 	Security         datatypes.JSON `gorm:"type:jsonb" json:"security"`

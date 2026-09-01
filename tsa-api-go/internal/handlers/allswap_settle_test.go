@@ -51,7 +51,7 @@ func doSettle(t *testing.T, h *SwapLiFiHandler, user models.User, body map[strin
 // (a) accrues the VERIFIED fee (3% of the re-queried fromAmountUSD), idempotent.
 func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true) // LiFi reachable, $1000 from-amount
 	user := mkWUser(t, db, "asuser", nil)
 
@@ -96,7 +96,7 @@ func TestAllSwap_AccruesVerifiedFee(t *testing.T) {
 // (b) rejects (422) a FORGED client fee that deviates >10% from the verified fee.
 func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true) // verified fee = $30
 	user := mkWUser(t, db, "asforge", nil)
 
@@ -119,7 +119,7 @@ func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 // value; still accrues the verified (conservative) fee.
 func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
 	user := mkWUser(t, db, "asdown", nil)
 
@@ -149,7 +149,7 @@ func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 // exact decimal string, and the verified fee must accrue like any EVM route.
 func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	db := setupWithdrawalTestDB(t)
+	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 1000.0, true)
 	user := mkWUser(t, db, "assol", nil)
 

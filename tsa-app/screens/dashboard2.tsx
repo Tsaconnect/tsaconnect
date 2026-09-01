@@ -20,6 +20,7 @@ import {
   normalizeWalletBalances,
 } from '../services/walletApi';
 import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
+import { getSignableWallet } from '@/services/wallet';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
 import { RWMWidget } from '@/components/dashboard/RWMWidget';
@@ -111,8 +112,13 @@ const Dashboard: React.FC = () => {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
-      // Fetch balances from active network
-      const balResult = await getWalletBalances();
+      // Balances for the wallet this device holds a key for. Without one the
+      // backend would answer for the account's REGISTERED address, and the home
+      // total would show funds the user cannot touch on this device.
+      const signer = await getSignableWallet();
+      const balResult = signer
+        ? await getWalletBalances(undefined, signer)
+        : { success: false as const, data: undefined };
       // Flatten all chains into symbol -> usdValue
       const usdBySymbol: Record<string, number> = {};
       if (balResult.success && balResult.data) {
@@ -131,14 +137,6 @@ const Dashboard: React.FC = () => {
       } catch { /* MCGP swap unavailable — leave at 0 */ }
 
       setTotalUsdValue(BALANCE_SYMBOLS.reduce((s, sym) => s + (usdBySymbol[sym] || 0), 0));
-
-      // Try portfolio API for dailyChange
-      try {
-        const portRes = await api.getPortfolioAssets();
-        if (portRes.success && portRes.data?.totals?.dailyChange) {
-          setDailyChange(portRes.data.totals.dailyChange);
-        }
-      } catch {}
 
       // Fetch TP and cashback balances
       try {

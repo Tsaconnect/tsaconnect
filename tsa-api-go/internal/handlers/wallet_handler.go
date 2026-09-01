@@ -27,8 +27,15 @@ import (
 var ethAddressRegex = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
 // registerWalletRequest is the request body for RegisterWalletAddress.
+//
+// WalletAddress is a POINTER so the handler can tell an absent field from an
+// explicit empty one. Empty means unlink (the user deleted their last wallet),
+// and unlinking is destructive — clearing users.wallet_address on a request
+// that simply forgot the field would silently detach the account from its
+// wallet. `binding:"required"` cannot express this: it rejects "" as well as
+// absent, which is what made the unlink path unreachable before.
 type registerWalletRequest struct {
-	WalletAddress string `json:"walletAddress" binding:"required"`
+	WalletAddress *string `json:"walletAddress"`
 }
 
 // prepareTxRequest is the request body for PrepareSendTransaction.
@@ -127,8 +134,32 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "walletAddress is required")
 		return
 	}
+	if req.WalletAddress == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "walletAddress is required")
+		return
+	}
+	walletAddress := strings.TrimSpace(*req.WalletAddress)
 
-	if !isValidEthAddress(req.WalletAddress) {
+	// An explicit empty address is an UNLINK — the app sends it when the user
+	// deletes their last wallet. It was previously rejected as malformed and the
+	// rejection was swallowed client-side, so the account kept pointing at a
+	// wallet whose key had just been erased from the device: every balance read
+	// then answered for an address nobody could sign for.
+	if walletAddress == "" {
+		if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).
+			Update("wallet_address", "").Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to unlink wallet address")
+			return
+		}
+		log.Printf("User %s unlinked wallet %s", user.ID, user.WalletAddress)
+		user.WalletAddress = ""
+		utils.SuccessResponse(c, http.StatusOK, "Wallet address unlinked", gin.H{
+			"walletAddress": "",
+		})
+		return
+	}
+
+	if !isValidEthAddress(walletAddress) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid wallet address format. Must be a valid Ethereum address (0x followed by 40 hex characters)")
 		return
 	}
@@ -136,25 +167,25 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 	// Check if user already has a wallet address set.
 	if user.WalletAddress != "" {
 		// If the new address is the same, no-op.
-		if user.WalletAddress == req.WalletAddress {
+		if user.WalletAddress == walletAddress {
 			utils.SuccessResponse(c, http.StatusOK, "Wallet address already registered", gin.H{
 				"walletAddress": user.WalletAddress,
 			})
 			return
 		}
 		// Allow update to a different address; log the change for audit.
-		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, req.WalletAddress)
+		log.Printf("User %s changed wallet from %s to %s", user.ID, user.WalletAddress, walletAddress)
 	}
 
 	// Check if the address is already taken by another user.
 	var existingUser models.User
-	if err := config.DB.Where("wallet_address = ?", req.WalletAddress).First(&existingUser).Error; err == nil {
+	if err := config.DB.Where("wallet_address = ?", walletAddress).First(&existingUser).Error; err == nil {
 		utils.ErrorResponse(c, http.StatusConflict, "Wallet address already in use by another account")
 		return
 	}
 
 	// Update user's wallet address.
-	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", req.WalletAddress).Error; err != nil {
+	if err := config.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("wallet_address", walletAddress).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to register wallet address")
 		return
 	}
@@ -166,8 +197,6 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		wallet = models.Wallet{
 			ID:               uuid.New(),
 			UserID:           user.ID,
-			TotalBalance:     0,
-			TotalUSDValue:    0,
 			TransactionLimit: models.DefaultTransactionLimit,
 			DailyLimit:       models.DefaultDailyLimit,
 			CreatedAt:        now,
@@ -178,7 +207,7 @@ func (h *Handlers) RegisterWalletAddress(c *gin.Context) {
 		}
 	}
 
-	user.WalletAddress = req.WalletAddress
+	user.WalletAddress = walletAddress
 	utils.SuccessResponse(c, http.StatusOK, "Wallet address registered successfully", gin.H{
 		"walletAddress": user.WalletAddress,
 	})

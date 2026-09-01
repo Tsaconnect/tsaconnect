@@ -122,15 +122,15 @@ func (h *ITHandler) GetBalance(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if user.WalletAddress == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Set up a wallet first")
+	wallet, ok := callerWallet(c, user, c.Query("address"))
+	if !ok {
 		return
 	}
 	swap := h.it.Swap()
-	bought, _ := swap.PremiumBought(user.WalletAddress)
-	credited, _ := swap.PremiumCredited(user.WalletAddress)
-	pending, _ := swap.PendingSettle(user.WalletAddress)
-	legacy, _ := swap.LegacyRemaining(user.WalletAddress)
+	bought, _ := swap.PremiumBought(wallet)
+	credited, _ := swap.PremiumCredited(wallet)
+	pending, _ := swap.PendingSettle(wallet)
+	legacy, _ := swap.LegacyRemaining(wallet)
 	utils.SuccessResponse(c, http.StatusOK, "Balance", gin.H{
 		"premiumBought":   bigOrZero(bought),   // self-exitable (USDC-bought)
 		"premiumCredited": bigOrZero(credited), // IT/NGN-credited
