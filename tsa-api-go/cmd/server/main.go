@@ -1096,8 +1096,34 @@ func main() {
 	// Override health check with DB status
 	router.GET("/health", healthHandler(sqlDB.Ping, buildCommit))
 
+	// ─── Paycrest ramp ─────────────────────────────────────────────────────
+	// Dormant unless PAYCREST_API_KEY is set: no key, nil client, routes never
+	// registered. Quoting works without a key (the rate endpoints are public),
+	// but there is no point offering a quote we cannot turn into an order.
+	paycrestClient := services.NewPaycrestClient(
+		os.Getenv("PAYCREST_BASE_URL"), os.Getenv("PAYCREST_API_KEY"))
+	var paycrestHandler *handlers.PaycrestHandler
+	if paycrestClient.IsEnabled() {
+		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
+		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
+		paycrestOrders := services.NewPaycrestOrderService(
+			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
+			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
+		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		if paycrestOrders != nil {
+			// No public webhook endpoint yet, so orders only advance because
+			// something polls them.
+			scheduler.Register(jobs.NewPaycrestOrderPoller(paycrestOrders, 20*time.Second))
+			log.Printf("[paycrest] ramp ready (poller 20s)")
+		} else {
+			log.Printf("[paycrest] client configured but order service could not be built — routes dormant")
+		}
+	} else {
+		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
+	}
+
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

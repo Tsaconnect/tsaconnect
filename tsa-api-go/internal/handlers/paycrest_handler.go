@@ -1,0 +1,241 @@
+package handlers
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/services"
+	"github.com/ojimcy/tsa-api-go/internal/utils"
+)
+
+// paycrest_handler.go — the app-facing ramp.
+//
+// The user's own connected wallet is the delivery target on a buy and the
+// funding source on a sell, so every mutating route reconciles the address the
+// device claims against the one registered to the account (callerWallet). A
+// device holding a different key must not be able to point a purchase at it.
+
+type PaycrestHandler struct {
+	orders *services.PaycrestOrderService
+	quotes *services.PaycrestQuoteService
+	dir    *services.PaycrestDirectory
+}
+
+func NewPaycrestHandler(orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, dir *services.PaycrestDirectory) *PaycrestHandler {
+	return &PaycrestHandler{orders: orders, quotes: quotes, dir: dir}
+}
+
+// Enabled reports whether the routes should be registered at all.
+func (h *PaycrestHandler) Enabled() bool {
+	return h != nil && h.orders != nil && h.quotes != nil
+}
+
+// paycrestError maps service sentinels onto status codes. Everything a user
+// can act on is a 4xx with the sentinel's own wording — these strings are
+// written to be shown, not logged.
+func paycrestError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, services.ErrPaycrestDisabled):
+		utils.ErrorResponse(c, http.StatusServiceUnavailable,
+			"Bank transfers are temporarily unavailable")
+	case errors.Is(err, services.ErrPaycrestBelowMinimum):
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"That amount is below the minimum for this route. Try a larger amount.")
+	case errors.Is(err, services.ErrPaycrestNoVenue), errors.Is(err, services.ErrPaycrestNoProvider):
+		// Liquidity, not breakage. Say so plainly so the user retries rather
+		// than assuming the feature is broken.
+		utils.ErrorResponse(c, http.StatusConflict,
+			"No provider can fill that amount right now. Try a different amount or network.")
+	case errors.Is(err, services.ErrPaycrestOrderOpen):
+		utils.ErrorResponse(c, http.StatusConflict,
+			"You already have an order awaiting payment. Finish or let it expire first.")
+	case errors.Is(err, services.ErrPaycrestBankUnsupported):
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"That bank can't receive payouts on this route. Choose another account.")
+	case errors.Is(err, services.ErrPaycrestOrderNotYours), errors.Is(err, services.ErrPaycrestOrderNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+	default:
+		utils.ErrorResponse(c, http.StatusBadGateway,
+			"Could not reach the transfer provider. Please try again.")
+	}
+}
+
+// GET /api/paycrest/quote?side=buy&amount=1000&currency=NGN
+//
+// Returns only venues that can actually fill this amount right now, cheapest
+// first. The app renders this as the network picker, so a network the user can
+// see is always one the order will succeed on.
+func (h *PaycrestHandler) Quote(c *gin.Context) {
+	side := c.DefaultQuery("side", "buy")
+	amount := c.Query("amount")
+	currency := c.DefaultQuery("currency", "NGN")
+	if amount == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
+		return
+	}
+	res, err := h.quotes.Quote(c.Request.Context(), side, currency, amount)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Quote", res)
+}
+
+// GET /api/paycrest/banks — banks that can actually receive a payout on this
+// route, in NIBSS codes the app already speaks.
+func (h *PaycrestHandler) Banks(c *gin.Context) {
+	if h.dir == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Bank list unavailable")
+		return
+	}
+	m, err := h.dir.BankMap(c.Request.Context(), c.DefaultQuery("currency", "NGN"))
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	codes := make([]string, 0, len(m.NIBSSToPaycrest))
+	for nibss := range m.NIBSSToPaycrest {
+		codes = append(codes, nibss)
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Supported banks", gin.H{"bankCodes": codes})
+}
+
+type paycrestBuyBody struct {
+	Amount        string `json:"amount" binding:"required"`
+	Currency      string `json:"currency"`
+	Chain         string `json:"chain" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+	WalletAddress string `json:"walletAddress"`
+	// Refund destination — where naira returns if the order fails. The app
+	// prefills this from the user's saved payout account.
+	RefundBankCode    string `json:"refundBankCode" binding:"required"`
+	RefundAccount     string `json:"refundAccount" binding:"required"`
+	RefundAccountName string `json:"refundAccountName"`
+}
+
+// POST /api/paycrest/buy — opens an onramp and returns the provider's bank
+// account for the user to pay.
+func (h *PaycrestHandler) Buy(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var body paycrestBuyBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	wallet, ok := callerWallet(c, user, body.WalletAddress)
+	if !ok {
+		return
+	}
+	row, err := h.orders.CreateBuy(c.Request.Context(), services.PaycrestBuyRequest{
+		UserID:            user.ID,
+		WalletAddress:     wallet,
+		FiatCode:          body.Currency,
+		FiatAmount:        body.Amount,
+		ChainKey:          body.Chain,
+		Token:             body.Token,
+		RefundBankCode:    body.RefundBankCode,
+		RefundAccount:     body.RefundAccount,
+		RefundAccountName: body.RefundAccountName,
+	})
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusCreated, "Transfer to the account shown to complete your purchase", row)
+}
+
+type paycrestSellBody struct {
+	Amount        string `json:"amount" binding:"required"`
+	Currency      string `json:"currency"`
+	Chain         string `json:"chain" binding:"required"`
+	Token         string `json:"token" binding:"required"`
+	WalletAddress string `json:"walletAddress"`
+	BankCode      string `json:"bankCode" binding:"required"`
+	AccountNumber string `json:"accountNumber" binding:"required"`
+	AccountName   string `json:"accountName"`
+}
+
+// POST /api/paycrest/sell — opens an offramp and returns the address the user
+// must send stablecoin to from their own wallet.
+func (h *PaycrestHandler) Sell(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	var body paycrestSellBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	wallet, ok := callerWallet(c, user, body.WalletAddress)
+	if !ok {
+		return
+	}
+	row, err := h.orders.CreateSell(c.Request.Context(), services.PaycrestSellRequest{
+		UserID:        user.ID,
+		WalletAddress: wallet,
+		FiatCode:      body.Currency,
+		FiatAmount:    body.Amount,
+		ChainKey:      body.Chain,
+		Token:         body.Token,
+		BankCode:      body.BankCode,
+		AccountNo:     body.AccountNumber,
+		AccountName:   body.AccountName,
+	})
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusCreated, "Send the amount shown to complete your sale", row)
+}
+
+// GET /api/paycrest/orders/:id — a single order, refreshed from the provider.
+//
+// The refresh is deliberate: with no webhook endpoint yet, a user opening this
+// screen is the fastest signal we get that something has moved.
+func (h *PaycrestHandler) GetOrder(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order id")
+		return
+	}
+	row, err := h.orders.Get(c.Request.Context(), user.ID, id)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	// A sync failure must not hide the order we already have.
+	if fresh, err := h.orders.Sync(c.Request.Context(), row); err == nil && fresh != nil {
+		row = fresh
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Order", row)
+}
+
+// GET /api/paycrest/orders — the user's recent orders.
+func (h *PaycrestHandler) ListOrders(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
+	rows, err := h.orders.List(c.Request.Context(), user.ID, limit)
+	if err != nil {
+		paycrestError(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Orders", rows)
+}
