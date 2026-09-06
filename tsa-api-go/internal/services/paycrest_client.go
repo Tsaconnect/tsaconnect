@@ -638,3 +638,56 @@ func (o *PaycrestOrder) UnmatchedDeposit() bool {
 	paid := strings.TrimSpace(o.AmountPaid)
 	return paid == "" || paid == "0"
 }
+
+// ─── Markets ───────────────────────────────────────────────────────────────
+
+// PaycrestBookEntry is one provider's standing offer for a (side, token,
+// network, fiat), with the order-size band it will fill.
+type PaycrestBookEntry struct {
+	ProviderID     string `json:"providerId"`
+	Side           string `json:"side"` // "buy" (onramp) | "sell" (offramp)
+	Token          string `json:"token"`
+	Fiat           string `json:"fiat"`
+	Network        string `json:"network"`
+	Rate           string `json:"rate"`
+	RateType       string `json:"rateType"`
+	Min            string `json:"min"`
+	Max            string `json:"max"`
+	BalanceUsd     string `json:"balanceUsd"`
+	SuccessPercent string `json:"successPercent"`
+}
+
+// PaycrestMarkets is the protocol-wide order book plus headline aggregates.
+type PaycrestMarkets struct {
+	AsOf string              `json:"asOf"`
+	Book []PaycrestBookEntry `json:"book"`
+}
+
+// Markets returns the whole order book in ONE call.
+//
+// This exists because /v2/rates is both slow and concurrency-throttled:
+// measured from production, a single rates call takes 1.8-5.4s, and ten fired
+// concurrently take 28-35s EACH. /v2/markets returns the entire book — every
+// provider, token, network and order-size band — in about 0.2s.
+//
+// So the venue list is derived from here, and /v2/rates is spent only on the
+// one venue the user actually picked, at order time, where an authoritative
+// price matters. Public: no key required.
+func (c *PaycrestClient) Markets(ctx context.Context) (*PaycrestMarkets, error) {
+	resp, raw, err := c.do(ctx, http.MethodGet, "/v2/markets", nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("paycrest markets: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, paycrestError("markets", resp.StatusCode, raw)
+	}
+	var env paycrestEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("paycrest markets decode: %w", err)
+	}
+	var out PaycrestMarkets
+	if err := json.Unmarshal(env.Data, &out); err != nil {
+		return nil, fmt.Errorf("paycrest markets decode data: %w", err)
+	}
+	return &out, nil
+}

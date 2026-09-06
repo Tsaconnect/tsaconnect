@@ -72,6 +72,12 @@ var ErrPaycrestBelowMinimum = errors.New("paycrest: amount is below the minimum 
 
 // PaycrestQuoter is the rate surface the quote service needs.
 type PaycrestQuoter interface {
+	// Markets is the whole order book in one fast call — the venue list comes
+	// from here.
+	Markets(ctx context.Context) (*PaycrestMarkets, error)
+	// Rates is the authoritative per-order price. Slow and
+	// concurrency-throttled upstream, so it is spent on ONE venue at order
+	// time, never fanned out.
 	Rates(ctx context.Context, network, token string, amount float64, fiat string) (*PaycrestRates, error)
 	MarketRate(ctx context.Context, fiat, side string) (float64, error)
 }
@@ -88,6 +94,10 @@ type PaycrestQuoteService struct {
 
 	marketMu   sync.Mutex
 	marketRate map[string]marketRateEntry
+
+	bookMu sync.Mutex
+	book   *PaycrestMarkets
+	bookAt time.Time
 }
 
 type marketRateEntry struct {
@@ -103,7 +113,10 @@ const paycrestMarketRateTTL = 60 * time.Second
 // paycrestQuoteFanoutTimeout bounds the whole venue sweep. Generous enough for
 // a slow upstream, short enough that a user is never left waiting on one
 // unresponsive provider — the venues that answered are still a usable quote.
-const paycrestQuoteFanoutTimeout = 8 * time.Second
+// paycrestBookTTL keeps the order book fresh enough to reflect a provider
+// leaving without re-fetching it on every keystroke. Short, because the whole
+// reason this service re-quotes constantly is that the book moves.
+const paycrestBookTTL = 20 * time.Second
 
 // NewPaycrestQuoteService returns nil when the client is unavailable so
 // callers gate on `!= nil`, consistent with the rest of the package.
@@ -168,71 +181,78 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 		QuotedAt:   time.Now(),
 	}
 
-	// Fan out CONCURRENTLY. Sequentially this is tokens x networks upstream
-	// calls — 10 by default at ~2.5s each, which measured 25-30s end to end on
-	// production and made the screen unusable, since the app re-quotes on every
-	// amount change. Concurrently it costs about one call.
-	//
-	// Bounded by a whole-fan-out deadline rather than per call: a user waiting
-	// on a quote would rather see the venues that answered than wait for the
-	// slowest one, and a venue that cannot answer in time is not one we should
-	// be offering anyway.
-	fanCtx, cancel := context.WithTimeout(ctx, paycrestQuoteFanoutTimeout)
-	defer cancel()
+	book, err := s.cachedBook(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	for _, token := range s.tokens {
-		for _, chainKey := range s.chainKeys {
-			network, ok := PaycrestNetwork(chainKey)
-			if !ok {
-				// A chain we serve that Paycrest does not. Skipping silently is
-				// correct: it is a configuration fact, not a live condition.
-				continue
-			}
-			wg.Add(1)
-			go func(token, chainKey, network string) {
-				defer wg.Done()
-				rates, err := s.pc.Rates(fanCtx, network, token, tokenAmt, fiatCode)
-				if err != nil {
-					// "No provider" is the most common answer here and is not an
-					// error worth failing the whole quote over — the point of
-					// fanning out is that some venues decline. A transport
-					// failure on one venue likewise must not deny the user the
-					// venues that did answer.
-					return
-				}
-				var q *PaycrestQuote
-				if side == "buy" {
-					q = rates.Buy
-				} else {
-					q = rates.Sell
-				}
-				if q == nil || strings.TrimSpace(q.Rate) == "" {
-					return // one-sided book: this direction is unavailable here
-				}
-				rate, err := strconv.ParseFloat(q.Rate, 64)
-				if err != nil || rate <= 0 {
-					return
-				}
-				v := PaycrestVenue{
-					ChainKey:      chainKey,
-					Network:       network,
-					Token:         token,
-					Rate:          q.Rate,
-					SpreadPercent: (rate/mkt - 1) * 100,
-					ProviderIDs:   q.ProviderIDs,
-					TokenAmount:   amt / rate,
-				}
-				mu.Lock()
-				res.Venues = append(res.Venues, v)
-				mu.Unlock()
-			}(token, chainKey, network)
+	// Which of OUR chains Paycrest serves, so the book can be filtered without
+	// asking about chains that could never appear.
+	networkFor := map[string]string{}
+	for _, chainKey := range s.chainKeys {
+		if network, ok := PaycrestNetwork(chainKey); ok {
+			networkFor[network] = chainKey
 		}
 	}
-	wg.Wait()
+	wanted := map[string]bool{}
+	for _, t := range s.tokens {
+		wanted[strings.ToUpper(t)] = true
+	}
+
+	// Best entry per (token, network). A venue can have several providers
+	// quoting different bands; the user only cares about the best one that
+	// covers their size.
+	type key struct{ token, chainKey string }
+	best := map[key]PaycrestBookEntry{}
+	for _, e := range book.Book {
+		if !strings.EqualFold(e.Fiat, fiatCode) || !strings.EqualFold(e.Side, side) {
+			continue
+		}
+		token := strings.ToUpper(e.Token)
+		if !wanted[token] {
+			continue
+		}
+		chainKey, ok := networkFor[strings.ToLower(e.Network)]
+		if !ok {
+			continue
+		}
+		// The size band is the whole point of reading the book: an entry that
+		// cannot fill this amount must never reach the picker, or the user
+		// selects a route the order then refuses.
+		min, err1 := strconv.ParseFloat(e.Min, 64)
+		max, err2 := strconv.ParseFloat(e.Max, 64)
+		if err1 != nil || err2 != nil || tokenAmt < min || tokenAmt > max {
+			continue
+		}
+		rate, err := strconv.ParseFloat(e.Rate, 64)
+		if err != nil || rate <= 0 {
+			continue
+		}
+		k := key{token, chainKey}
+		cur, seen := best[k]
+		if !seen {
+			best[k] = e
+			continue
+		}
+		curRate, _ := strconv.ParseFloat(cur.Rate, 64)
+		if (side == "buy" && rate < curRate) || (side == "sell" && rate > curRate) {
+			best[k] = e
+		}
+	}
+
+	for k, e := range best {
+		rate, _ := strconv.ParseFloat(e.Rate, 64)
+		network, _ := PaycrestNetwork(k.chainKey)
+		res.Venues = append(res.Venues, PaycrestVenue{
+			ChainKey:      k.chainKey,
+			Network:       network,
+			Token:         k.token,
+			Rate:          e.Rate,
+			SpreadPercent: (rate/mkt - 1) * 100,
+			ProviderIDs:   []string{e.ProviderID},
+			TokenAmount:   amt / rate,
+		})
+	}
 
 	if len(res.Venues) == 0 {
 		return nil, fmt.Errorf("%w (%s %s %s)", ErrPaycrestNoVenue, fiatAmount, res.FiatCode, side)
@@ -261,23 +281,71 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	return res, nil
 }
 
-// VenueFor re-checks one specific venue immediately before creating an order.
-// The user may have sat on a quote for minutes and providers move; binding the
-// order to a re-confirmed price is what stops us promising a rate the order
-// will not carry.
+// VenueFor binds the price for one venue immediately before an order is
+// created. This is where the single authoritative /v2/rates call is spent.
+//
+// The picker is built from the order book, which is fast but is a standing
+// offer rather than a quote. Before money moves we ask the provider what it
+// will actually do with THIS amount — the book can be seconds stale, and a
+// venue that has since left must fail here rather than at Paycrest with the
+// user already committed.
 func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string) (*PaycrestVenue, error) {
 	res, err := s.Quote(ctx, side, fiatCode, fiatAmount)
 	if err != nil {
 		return nil, err
 	}
+	var venue *PaycrestVenue
 	for i := range res.Venues {
 		if strings.EqualFold(res.Venues[i].ChainKey, chainKey) &&
 			strings.EqualFold(res.Venues[i].Token, token) {
-			return &res.Venues[i], nil
+			venue = &res.Venues[i]
+			break
 		}
 	}
-	return nil, fmt.Errorf("%w: %s on %s is no longer fillable at this size",
-		ErrPaycrestNoVenue, strings.ToUpper(token), chainKey)
+	if venue == nil {
+		return nil, fmt.Errorf("%w: %s on %s is no longer fillable at this size",
+			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey)
+	}
+
+	amt, err := strconv.ParseFloat(strings.TrimSpace(fiatAmount), 64)
+	if err != nil || amt <= 0 {
+		return nil, fmt.Errorf("paycrest venue: unusable amount %q", fiatAmount)
+	}
+	rates, err := s.pc.Rates(ctx, venue.Network, venue.Token, venue.TokenAmount, fiatCode)
+	if err != nil {
+		// The book said this venue was live and the provider now disagrees.
+		// Surfacing it as "no venue" is right: the user should pick again
+		// rather than be told something broke.
+		if errors.Is(err, ErrPaycrestNoProvider) {
+			return nil, fmt.Errorf("%w: %s on %s stopped quoting",
+				ErrPaycrestNoVenue, strings.ToUpper(token), chainKey)
+		}
+		return nil, err
+	}
+	var q *PaycrestQuote
+	if side == "buy" {
+		q = rates.Buy
+	} else {
+		q = rates.Sell
+	}
+	if q == nil || strings.TrimSpace(q.Rate) == "" {
+		return nil, fmt.Errorf("%w: %s on %s has no %s side right now",
+			ErrPaycrestNoVenue, strings.ToUpper(token), chainKey, side)
+	}
+	rate, err := strconv.ParseFloat(q.Rate, 64)
+	if err != nil || rate <= 0 {
+		return nil, fmt.Errorf("paycrest venue: unusable rate %q", q.Rate)
+	}
+
+	// Bind to what the provider just said, not to the book.
+	bound := *venue
+	bound.Rate = q.Rate
+	bound.TokenAmount = amt / rate
+	bound.SpreadPercent = (rate/res.MarketRate - 1) * 100
+	if len(q.ProviderIDs) > 0 {
+		bound.ProviderIDs = q.ProviderIDs
+	}
+	return &bound, nil
 }
 
 func (s *PaycrestQuoteService) cachedMarketRate(ctx context.Context, fiat, side string) (float64, error) {
@@ -297,4 +365,34 @@ func (s *PaycrestQuoteService) cachedMarketRate(ctx context.Context, fiat, side 
 	s.marketRate[key] = marketRateEntry{rate: rate, at: time.Now()}
 	s.marketMu.Unlock()
 	return rate, nil
+}
+
+// cachedBook fetches the order book at most once per TTL. The book is public
+// and identical for every caller, so one fetch serves every concurrent quote.
+func (s *PaycrestQuoteService) cachedBook(ctx context.Context) (*PaycrestMarkets, error) {
+	s.bookMu.Lock()
+	if s.book != nil && time.Since(s.bookAt) < paycrestBookTTL {
+		b := s.book
+		s.bookMu.Unlock()
+		return b, nil
+	}
+	s.bookMu.Unlock()
+
+	b, err := s.pc.Markets(ctx)
+	if err != nil {
+		// Serve a stale book rather than denying every quote: a book from a
+		// minute ago is far more useful than an error, and the order still
+		// re-prices against /v2/rates before anything is created.
+		s.bookMu.Lock()
+		stale := s.book
+		s.bookMu.Unlock()
+		if stale != nil {
+			return stale, nil
+		}
+		return nil, err
+	}
+	s.bookMu.Lock()
+	s.book, s.bookAt = b, time.Now()
+	s.bookMu.Unlock()
+	return b, nil
 }

@@ -10,18 +10,63 @@ import (
 	"time"
 )
 
-// stubQuoter answers per (network, token) so a test can model a real book:
-// some venues quote, some have no provider, some are one-sided.
+// stubQuoter models both halves of the real thing: a fast order book that the
+// picker is built from, and the slow per-order rate call that binds a price.
 type stubQuoter struct {
 	mu     sync.Mutex
 	market float64
 	// rates keyed "network|TOKEN"; a missing key means no provider.
-	rates      map[string]*PaycrestRates
-	rateCalls  int
-	marketCall int
-	marketErr  error
-	transient  map[string]bool // venues that fail with a transport error
-	delay      time.Duration   // simulated upstream latency
+	rates        map[string]*PaycrestRates
+	rateCalls    int
+	marketCall   int
+	marketErr    error
+	transient    map[string]bool // venues that fail with a transport error
+	delay        time.Duration   // simulated upstream latency
+	marketsCalls int
+	marketsErr   error
+	bookOverride []PaycrestBookEntry
+}
+
+// entries turns the rates fixture into a book, so existing tests keep
+// expressing "these venues quote at these prices" without restating it twice.
+func (s *stubQuoter) Markets(context.Context) (*PaycrestMarkets, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marketsCalls++
+	if s.marketsErr != nil {
+		return nil, s.marketsErr
+	}
+	if s.bookOverride != nil {
+		return &PaycrestMarkets{Book: s.bookOverride}, nil
+	}
+	var book []PaycrestBookEntry
+	for k, r := range s.rates {
+		parts := strings.SplitN(k, "|", 2)
+		network, token := parts[0], parts[1]
+		if r.Buy != nil {
+			book = append(book, PaycrestBookEntry{
+				ProviderID: firstProvider(r.Buy), Side: "buy", Token: token, Fiat: "NGN",
+				Network: network, Rate: r.Buy.Rate, Min: "0.5", Max: "100000",
+			})
+		}
+		if r.Sell != nil {
+			book = append(book, PaycrestBookEntry{
+				ProviderID: firstProvider(r.Sell), Side: "sell", Token: token, Fiat: "NGN",
+				Network: network, Rate: r.Sell.Rate, Min: "0.5", Max: "100000",
+			})
+		}
+	}
+	return &PaycrestMarkets{Book: book}, nil
+}
+
+func firstProvider(q *PaycrestQuote) string {
+	if len(q.ProviderIDs) > 0 {
+		return q.ProviderIDs[0]
+	}
+	return "stub"
 }
 
 func (s *stubQuoter) Rates(_ context.Context, network, token string, _ float64, _ string) (*PaycrestRates, error) {
@@ -201,11 +246,11 @@ func TestPaycrestQuote_NeverAsksAboutUnsupportedChains(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
-	if q.rateCalls != 1 {
-		t.Errorf("made %d rate calls, want 1 — sonic and optimism should never be asked", q.rateCalls)
-	}
-	if len(res.Venues) != 1 {
-		t.Fatalf("venues = %#v", res.Venues)
+	// Chains Paycrest does not serve must not surface as venues at all. Asking
+	// anyway would come back "no provider" and read as a liquidity problem
+	// rather than the configuration fact it is.
+	if len(res.Venues) != 1 || res.Venues[0].ChainKey != "base" {
+		t.Fatalf("venues = %#v, want only base", res.Venues)
 	}
 }
 
@@ -221,44 +266,81 @@ func TestPaycrestQuote_MarketRateIsCachedAcrossQuotes(t *testing.T) {
 	if q.marketCall != 1 {
 		t.Errorf("market rate fetched %d times, want 1 (cached)", q.marketCall)
 	}
-	// The per-order rate must NOT be cached — it is what binds the order.
-	if q.rateCalls != 4 {
-		t.Errorf("rate calls = %d, want 4: a quote must re-price every time", q.rateCalls)
+	// Quoting must not touch the throttled per-order endpoint at all.
+	if q.rateCalls != 0 {
+		t.Errorf("rate calls = %d, want 0 from quoting alone", q.rateCalls)
 	}
 }
 
-// Sequentially this sweep is tokens x networks upstream calls. On production
-// that measured 25-30s and made the screen unusable, because the app re-quotes
-// on every amount change. This asserts the fan-out stays concurrent: ten venues
-// that each take 100ms must finish in about 100ms, not a second.
-func TestPaycrestQuote_FansOutConcurrently(t *testing.T) {
-	const perCall = 100 * time.Millisecond
+// The reason the picker reads the book instead of fanning out: measured from
+// production, one /v2/rates call takes 1.8-5.4s and ten fired concurrently take
+// 28-35s EACH — Paycrest throttles them. /v2/markets returns the whole book in
+// about 0.2s. A quote must therefore cost ONE upstream call regardless of how
+// many venues it covers.
+func TestPaycrestQuote_CostsOneUpstreamCallRegardlessOfVenueCount(t *testing.T) {
 	rates := map[string]*PaycrestRates{}
 	for _, tok := range []string{"USDC", "USDT"} {
 		for _, net := range []string{"base", "polygon", "bnb-smart-chain", "arbitrum-one", "ethereum"} {
 			rates[net+"|"+tok] = buy("1390.64")
 		}
 	}
-	q := &stubQuoter{market: 1377.91, rates: rates, delay: perCall}
+	q := &stubQuoter{market: 1377.91, rates: rates}
 	s := NewPaycrestQuoteService(q, []string{"USDC", "USDT"},
 		[]string{"base", "polygon", "bsc", "arbitrum", "ethereum"})
 
-	start := time.Now()
 	res, err := s.Quote(context.Background(), "buy", "NGN", "800")
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
 	if len(res.Venues) != 10 {
 		t.Fatalf("want 10 venues, got %d", len(res.Venues))
 	}
-	// Half the sequential total is a wide margin that still fails loudly if the
-	// loop ever goes back to blocking on each call.
-	if limit := perCall * 5; elapsed > limit {
-		t.Fatalf("fan-out took %v for 10 venues at %v each — looks sequential (limit %v)",
-			elapsed, perCall, limit)
+	if q.marketsCalls != 1 {
+		t.Errorf("book fetched %d times, want 1", q.marketsCalls)
 	}
-	t.Logf("10 venues in %v (sequential would be ~%v)", elapsed.Round(time.Millisecond), perCall*10)
+	if q.rateCalls != 0 {
+		t.Errorf("quote spent %d rate calls; the picker must cost none", q.rateCalls)
+	}
+}
+
+// A venue whose size band excludes this order must never reach the picker —
+// otherwise the user selects a route the order then refuses.
+func TestPaycrestQuote_ExcludesVenuesOutsideTheirSizeBand(t *testing.T) {
+	q := &stubQuoter{market: 1377.91, bookOverride: []PaycrestBookEntry{
+		{ProviderID: "small", Side: "buy", Token: "USDC", Fiat: "NGN", Network: "base",
+			Rate: "1390.64", Min: "0.5", Max: "2"},
+		{ProviderID: "big", Side: "buy", Token: "USDC", Fiat: "NGN", Network: "polygon",
+			Rate: "1381.22", Min: "100", Max: "2000"},
+	}}
+	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base", "polygon"})
+
+	// NGN 800 is about 0.58 tokens: inside base's band, far below polygon's.
+	res, err := s.Quote(context.Background(), "buy", "NGN", "800")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if len(res.Venues) != 1 || res.Venues[0].ChainKey != "base" {
+		t.Fatalf("venues = %#v, want only base", res.Venues)
+	}
+}
+
+// A stale book beats no quote at all, and the order re-prices anyway.
+func TestPaycrestQuote_ServesAStaleBookWhenTheFetchFails(t *testing.T) {
+	q := &stubQuoter{market: 1377.91, rates: map[string]*PaycrestRates{"base|USDC": buy("1390.64")}}
+	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base"})
+	if _, err := s.Quote(context.Background(), "buy", "NGN", "800"); err != nil {
+		t.Fatalf("warm-up: %v", err)
+	}
+	s.bookAt = time.Now().Add(-time.Hour) // force a refetch
+	q.marketsErr = errors.New("upstream down")
+
+	res, err := s.Quote(context.Background(), "buy", "NGN", "800")
+	if err != nil {
+		t.Fatalf("a failed refresh should fall back to the cached book, got %v", err)
+	}
+	if len(res.Venues) != 1 {
+		t.Fatalf("venues = %#v", res.Venues)
+	}
 }
 
 // Providers routinely quote one rate across every network. Without a tie-break
@@ -327,6 +409,10 @@ func TestPaycrestVenueFor_RefusesAVenueThatHasGoneAway(t *testing.T) {
 	}
 	if v.Rate != "1390.64" {
 		t.Errorf("rate = %s, want the freshly re-quoted 1390.64", v.Rate)
+	}
+	// Exactly one authoritative call, spent on the chosen venue only.
+	if q.rateCalls != 1 {
+		t.Errorf("rate calls = %d, want exactly 1", q.rateCalls)
 	}
 	// The user sat on a picker showing USDT/polygon; it is no longer fillable.
 	if _, err := s.VenueFor(context.Background(), "buy", "NGN", "800", "polygon", "USDT"); !errors.Is(err, ErrPaycrestNoVenue) {
