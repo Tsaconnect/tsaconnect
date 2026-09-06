@@ -524,3 +524,66 @@ func parsePaycrestTime(s string) *time.Time {
 	}
 	return nil
 }
+
+// ─── Webhooks ──────────────────────────────────────────────────────────────
+
+// ErrPaycrestOrderUnknown means an event named an order we have no row for.
+// Not retryable: a redelivery cannot make the row appear, and the likeliest
+// cause is an order created by another environment sharing the API key.
+var ErrPaycrestOrderUnknown = errors.New("paycrest: webhook names an order we do not have")
+
+// HandleWebhook advances an order from a verified webhook.
+//
+// The event is a HINT, never an authority. It tells us which order moved; Sync
+// then re-reads that order from the API and decides. That matters here more
+// than usual: the failure this integration must never mishandle is an expired
+// order whose deposit was never registered, and only the API's amountPaid can
+// distinguish it from an ordinary expiry.
+//
+// Looking up by OUR reference rather than their order id is deliberate — the
+// reference exists on our row from the moment we create it, whereas their id
+// only arrives with the response, so a webhook racing our own persist still
+// finds its order.
+func (s *PaycrestOrderService) HandleWebhook(ctx context.Context, ev *PaycrestWebhookEvent) error {
+	if s == nil {
+		return ErrPaycrestDisabled
+	}
+	if ev == nil {
+		return errors.New("paycrest webhook: nil event")
+	}
+
+	var row models.PaycrestOrderRecord
+	q := s.db.WithContext(ctx)
+	var err error
+	switch {
+	case strings.TrimSpace(ev.Reference) != "":
+		err = q.Where("reference = ?", ev.Reference).First(&row).Error
+	case strings.TrimSpace(ev.OrderID) != "":
+		err = q.Where("paycrest_id = ?", ev.OrderID).First(&row).Error
+	default:
+		return errors.New("paycrest webhook: event carries no identifier")
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("%w (ref=%q id=%q)", ErrPaycrestOrderUnknown, ev.Reference, ev.OrderID)
+	}
+	if err != nil {
+		return err
+	}
+
+	// An event can arrive before our own create call has finished persisting
+	// the provider's id. Fill it in so the poller and any later event agree on
+	// which remote order this row is.
+	if row.PaycrestID == "" && strings.TrimSpace(ev.OrderID) != "" {
+		row.PaycrestID = ev.OrderID
+		if err := s.db.WithContext(ctx).Model(&row).
+			Update("paycrest_id", ev.OrderID).Error; err != nil {
+			return err
+		}
+	}
+	if models.PaycrestOrderTerminal(row.Status) {
+		return nil // nothing an event can add
+	}
+
+	_, err = s.Sync(ctx, &row)
+	return err
+}

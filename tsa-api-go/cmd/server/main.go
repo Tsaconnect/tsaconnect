@@ -1103,6 +1103,7 @@ func main() {
 	paycrestClient := services.NewPaycrestClient(
 		os.Getenv("PAYCREST_BASE_URL"), os.Getenv("PAYCREST_API_KEY"))
 	var paycrestHandler *handlers.PaycrestHandler
+	var paycrestWebhookHandler *handlers.PaycrestWebhookHandler
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes := services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1110,6 +1111,15 @@ func main() {
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
+		// Webhooks need their own secret. Without it the verifier is nil and the
+		// route answers 503 — fail closed rather than accept unsigned events.
+		if v := services.NewPaycrestWebhookVerifier(os.Getenv("PAYCREST_API_SECRET")); v != nil && paycrestOrders != nil {
+			paycrestWebhookHandler = handlers.NewPaycrestWebhookHandler(
+				v, services.NewWebhookStoreForProvider(config.DB, services.ProviderPaycrest), paycrestOrders)
+			log.Printf("[paycrest] webhook endpoint ready")
+		} else {
+			log.Printf("[paycrest] webhook DORMANT — set PAYCREST_API_SECRET; orders advance by polling only")
+		}
 		if paycrestOrders != nil {
 			// No public webhook endpoint yet, so orders only advance because
 			// something polls them.
@@ -1123,7 +1133,7 @@ func main() {
 	}
 
 	// Setup all routes
-	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler)
+	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler)
 
 	// Configure HTTP server
 	port := cfg.Port
