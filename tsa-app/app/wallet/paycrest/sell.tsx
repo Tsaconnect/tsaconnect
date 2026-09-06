@@ -212,9 +212,7 @@ export default function PaycrestSellScreen() {
       (quote?.venues ?? []).map((v) => ({
         id: venueId(v),
         label: venueLabel(v),
-        sublabel: `Send ${v.tokenAmount.toFixed(4)} ${v.token} · ${
-          v.spreadPercent >= 0 ? '+' : ''
-        }${v.spreadPercent.toFixed(2)}% vs market`,
+        sublabel: `Send ${v.tokenAmount.toFixed(4)} ${v.token}`,
       })),
     [quote],
   );
@@ -392,10 +390,6 @@ export default function PaycrestSellScreen() {
                 value={`${venue.tokenAmount.toFixed(6)} ${venue.token}`}
               />
               <SummaryRow label="Rate" value={`₦${venue.rate} / ${venue.token}`} />
-              <SummaryRow
-                label="Cost vs market"
-                value={`${venue.spreadPercent >= 0 ? '+' : ''}${venue.spreadPercent.toFixed(2)}%`}
-              />
             </SummaryCard>
           )}
 

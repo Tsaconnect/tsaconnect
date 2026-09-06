@@ -217,9 +217,7 @@ export default function PaycrestBuyScreen() {
       (quote?.venues ?? []).map((v) => ({
         id: venueId(v),
         label: venueLabel(v),
-        sublabel: `${v.tokenAmount.toFixed(4)} ${v.token} · ${
-          v.spreadPercent >= 0 ? '+' : ''
-        }${v.spreadPercent.toFixed(2)}% vs market`,
+        sublabel: `${v.tokenAmount.toFixed(4)} ${v.token}`,
       })),
     [quote],
   );
@@ -367,9 +365,7 @@ export default function PaycrestBuyScreen() {
                     {venue.tokenAmount.toFixed(6)} {venue.token}
                   </Text>
                   <Text variant="caption" style={{ color: colors.textMuted }}>
-                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · ₦{venue.rate} per {venue.token} ·{' '}
-                    {venue.spreadPercent >= 0 ? '+' : ''}
-                    {venue.spreadPercent.toFixed(2)}% vs market
+                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · ₦{venue.rate} per {venue.token}
                   </Text>
                   {/* Only offer a choice when there is one. A picker with a
                       single option is noise. */}
