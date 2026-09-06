@@ -17,7 +17,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AmountInput,
@@ -33,6 +33,7 @@ import {
   Text,
 } from '@/components/ui';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
+import { useCountdown } from '@/hooks/useCountdown';
 import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import {
   createSell,
@@ -45,6 +46,9 @@ import {
 } from '@/services/paycrestApi';
 
 const QUOTE_DEBOUNCE_MS = 450;
+/** Warn while the user can still act. An on-chain send needs gas, a signature
+ *  and confirmations — more steps than a bank transfer, so warn earlier. */
+const EXPIRY_WARNING_SECONDS = 420;
 /** NUBAN length — resolve the account name only once it can possibly match. */
 const NUBAN_LENGTH = 10;
 
@@ -62,6 +66,7 @@ const venueLabel = (v: PaycrestVenue) => `${v.token} on ${CHAIN_LABELS[v.chain] 
 export default function PaycrestSellScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
+  const { asset } = useLocalSearchParams<{ asset?: string }>();
 
   const [amount, setAmount] = useState('');
   const [quote, setQuote] = useState<PaycrestQuote | null>(null);
@@ -82,6 +87,13 @@ export default function PaycrestSellScreen() {
   const [creating, setCreating] = useState(false);
 
   const quoteSeq = useRef(0);
+
+  // An offramp expires exactly like an onramp does. Sending after the window
+  // closes puts crypto at a provider address for an order that no longer
+  // exists — the same stranded-funds failure as a late bank transfer, and just
+  // as unrecoverable, so the deadline has to be on screen.
+  const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
+  const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
   // Only banks Paycrest can actually pay out to. Showing the full national
   // list and failing at submit would waste the user's time on a choice that
@@ -127,7 +139,10 @@ export default function PaycrestSellScreen() {
         setQuoteError(null);
         setVenue((prev) => {
           const kept = prev && q.venues.find((v) => venueId(v) === venueId(prev));
-          return kept ?? q.best ?? null;
+          const preferred = asset
+            ? q.venues.find((v) => v.token.toUpperCase() === asset.toUpperCase())
+            : undefined;
+          return kept ?? preferred ?? q.best ?? null;
         });
       } catch (e) {
         if (seq !== quoteSeq.current) return;
@@ -141,7 +156,7 @@ export default function PaycrestSellScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount]);
+  }, [amount, asset]);
 
   // Resolve the account name so the user sees who they are actually paying
   // before any crypto leaves their wallet.
@@ -229,6 +244,44 @@ export default function PaycrestSellScreen() {
             </Text>
           </Card>
 
+          <Card
+            style={{
+              borderWidth: 1,
+              borderColor: expired ? colors.danger : expiringSoon ? colors.warning : colors.border,
+            }}
+          >
+            {expired ? (
+              <>
+                <Text variant="bodyMed" weight="700" style={{ color: colors.danger }}>
+                  This order has expired
+                </Text>
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  Do not send to this address. Start a new sale instead.
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text
+                  variant="bodySm"
+                  style={{ color: expiringSoon ? colors.warning : colors.textSecondary }}
+                >
+                  Time left to send
+                </Text>
+                <Text
+                  variant="title1"
+                  weight="700"
+                  style={{ color: expiringSoon ? colors.warning : colors.textPrimary }}
+                >
+                  {countdown}
+                </Text>
+                <Text variant="caption" style={{ color: colors.textMuted }}>
+                  Sending after this runs out leaves your crypto at the provider with no order to
+                  match it to.
+                </Text>
+              </>
+            )}
+          </Card>
+
           <Card>
             <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
               To this address
@@ -252,6 +305,7 @@ export default function PaycrestSellScreen() {
           <Button
             title="I've sent it"
             onPress={() => router.replace(`/wallet/paycrest/order/${order.id}` as never)}
+            disabled={expired}
             fullWidth
           />
         </ScrollView>

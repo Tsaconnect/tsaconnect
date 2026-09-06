@@ -22,7 +22,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, ScrollView, KeyboardAvoidingView, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AmountInput,
@@ -37,6 +37,7 @@ import {
   SummaryRow,
   Text,
 } from '@/components/ui';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getNigerianBanks, type NgBank } from '@/services/ngBanks';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCountdown } from '@/hooks/useCountdown';
@@ -69,6 +70,11 @@ const CHAIN_LABELS: Record<string, string> = {
 /** NUBAN length. */
 const NUBAN_LENGTH = 10;
 
+/** The refund account is insurance against a rare failure, not part of the
+ *  purchase — asking for it on every buy is friction for something most users
+ *  will never use. Remembered after the first time and shown as one line. */
+const REFUND_STORE_KEY = 'paycrest.refundAccount.v1';
+
 const venueId = (v: PaycrestVenue) => `${v.token}:${v.chain}`;
 const venueLabel = (v: PaycrestVenue) =>
   `${v.token} on ${CHAIN_LABELS[v.chain] ?? v.chain}`;
@@ -76,6 +82,10 @@ const venueLabel = (v: PaycrestVenue) =>
 export default function PaycrestBuyScreen() {
   const { colors, spacing } = useTheme();
   const { address, ready: walletReady } = useSignableWallet();
+  // The asset the user picked upstream. A PREFERENCE, not a filter: a token
+  // with no provider today must not leave them with an empty screen, so we
+  // fall back to whatever the book can actually fill.
+  const { asset } = useLocalSearchParams<{ asset?: string }>();
 
   const [amount, setAmount] = useState('');
   const [quote, setQuote] = useState<PaycrestQuote | null>(null);
@@ -101,10 +111,31 @@ export default function PaycrestBuyScreen() {
   // pick something that cannot fill their current amount.
   const quoteSeq = useRef(0);
 
+  const [editingRefund, setEditingRefund] = useState(false);
+
   useEffect(() => {
-    getNigerianBanks().then(setBanks).catch(() => {
-      /* picker stays empty; the user cannot proceed without a refund account */
-    });
+    getNigerianBanks()
+      .then(async (list) => {
+        setBanks(list);
+        try {
+          const saved = await AsyncStorage.getItem(REFUND_STORE_KEY);
+          if (!saved) {
+            setEditingRefund(true); // first time: ask
+            return;
+          }
+          const { code, account } = JSON.parse(saved) as { code: string; account: string };
+          const found = list.find((b) => b.code === code);
+          if (found && account) {
+            setRefundBank(found);
+            setRefundAccount(account);
+          } else {
+            setEditingRefund(true);
+          }
+        } catch {
+          setEditingRefund(true);
+        }
+      })
+      .catch(() => setEditingRefund(true));
   }, []);
 
   useEffect(() => {
@@ -127,7 +158,10 @@ export default function PaycrestBuyScreen() {
         // the amount change.
         setVenue((prev) => {
           const kept = prev && q.venues.find((v) => venueId(v) === venueId(prev));
-          return kept ?? q.best ?? null;
+          const preferred = asset
+            ? q.venues.find((v) => v.token.toUpperCase() === asset.toUpperCase())
+            : undefined;
+          return kept ?? preferred ?? q.best ?? null;
         });
       } catch (e) {
         if (seq !== quoteSeq.current) return;
@@ -145,7 +179,7 @@ export default function PaycrestBuyScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount]);
+  }, [amount, asset]);
 
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
@@ -162,6 +196,11 @@ export default function PaycrestBuyScreen() {
         refundBankCode: refundBank.code,
         refundAccount,
       });
+      // Remember it only once an order actually succeeded with it.
+      AsyncStorage.setItem(
+        REFUND_STORE_KEY,
+        JSON.stringify({ code: refundBank.code, account: refundAccount }),
+      ).catch(() => {});
       setOrder(created);
     } catch (e) {
       Alert.alert(
@@ -303,74 +342,79 @@ export default function PaycrestBuyScreen() {
             autoFocus
           />
 
-          {quoting && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-              <Spinner size="small" />
-              <Text variant="caption" style={{ color: colors.textMuted }}>
-                Checking live rates…
-              </Text>
-            </View>
-          )}
-
-          {quoteError && !quoting && (
-            <Card style={{ borderWidth: 1, borderColor: colors.warning }}>
-              <Text variant="bodySm" style={{ color: colors.warning }}>
-                {quoteError}
-              </Text>
+          {/* The payoff sits directly under the input, because "what do I get"
+              is the question the amount field is asking. Everything else on
+              this screen is secondary to it. */}
+          {(quoting || venue || quoteError) && (
+            <Card>
+              {quoting ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Spinner size="small" />
+                  <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                    Finding the best rate…
+                  </Text>
+                </View>
+              ) : quoteError ? (
+                <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+                  {quoteError}
+                </Text>
+              ) : venue ? (
+                <>
+                  <Text variant="bodySm" style={{ color: colors.textSecondary }}>
+                    You receive
+                  </Text>
+                  <Text variant="title1" weight="700" style={{ color: colors.textPrimary }}>
+                    {venue.tokenAmount.toFixed(6)} {venue.token}
+                  </Text>
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    on {CHAIN_LABELS[venue.chain] ?? venue.chain} · ₦{venue.rate} per {venue.token} ·{' '}
+                    {venue.spreadPercent >= 0 ? '+' : ''}
+                    {venue.spreadPercent.toFixed(2)}% vs market
+                  </Text>
+                  {/* Only offer a choice when there is one. A picker with a
+                      single option is noise. */}
+                  {quote && quote.venues.length > 1 && (
+                    <Button
+                      title={`Change route (${quote.venues.length} available)`}
+                      variant="ghost"
+                      size="sm"
+                      onPress={() => setPickerOpen(true)}
+                    />
+                  )}
+                </>
+              ) : null}
             </Card>
           )}
 
-          {quote && quote.venues.length > 0 && (
+          {/* Demoted: insurance, not part of the purchase. One line once known. */}
+          {!editingRefund && refundBank ? (
+            <SelectRow
+              label="Refund account"
+              value={`${refundBank.name} · ${refundAccount}`}
+              onPress={() => setEditingRefund(true)}
+            />
+          ) : (
             <>
-              {/* Only routes that can fill THIS amount are listed — the set is
-                  rebuilt on every amount change for exactly that reason. */}
               <SelectRow
-                label="Route"
-                value={venue ? venueLabel(venue) : undefined}
-                placeholder="Choose a network"
-                onPress={() => setPickerOpen(true)}
+                label="Refund account"
+                value={refundBank?.name}
+                placeholder="Where should we refund you?"
+                onPress={() => setRefundOpen(true)}
+              />
+              <Input
+                label="Account number"
+                value={refundAccount}
+                onChangeText={(v: string) =>
+                  setRefundAccount(v.replace(/\D/g, '').slice(0, NUBAN_LENGTH))
+                }
+                keyboardType="number-pad"
+                placeholder="0123456789"
               />
               <Text variant="caption" style={{ color: colors.textMuted }}>
-                {quote.venues.length} route{quote.venues.length === 1 ? '' : 's'} can fill this
-                amount right now.
+                Used only if your order fails. Pay from this account so a refund reaches you.
               </Text>
             </>
           )}
-
-          {venue && (
-            <SummaryCard>
-              <SummaryRow
-                label="You receive"
-                value={`${venue.tokenAmount.toFixed(6)} ${venue.token}`}
-              />
-              <SummaryRow label="Rate" value={`₦${venue.rate} / ${venue.token}`} />
-              <SummaryRow
-                label="Cost vs market"
-                value={`${venue.spreadPercent >= 0 ? '+' : ''}${venue.spreadPercent.toFixed(2)}%`}
-              />
-            </SummaryCard>
-          )}
-
-          {/* Required by the protocol, and worth surfacing plainly: if the
-              order fails this is the only account the money can come back to. */}
-          <SelectRow
-            label="Refund account"
-            value={refundBank?.name}
-            placeholder="Where should we refund you?"
-            onPress={() => setRefundOpen(true)}
-          />
-          <Input
-            label="Account number"
-            value={refundAccount}
-            onChangeText={(v: string) =>
-              setRefundAccount(v.replace(/\D/g, '').slice(0, NUBAN_LENGTH))
-            }
-            keyboardType="number-pad"
-            placeholder="0123456789"
-          />
-          <Text variant="caption" style={{ color: colors.textMuted }}>
-            Used only if your order fails. Pay from this account so a refund reaches you.
-          </Text>
 
           <Button
             title="Continue"

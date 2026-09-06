@@ -650,7 +650,9 @@ export default function ITIntentDetail() {
               <Button
                 title="Start again"
                 variant="secondary"
-                onPress={() => router.push(`/wallet/it/sell-stable?asset=${intent.asset}`)}
+                onPress={() =>
+                  router.push(`/wallet/paycrest/sell?asset=${intent.asset}` as never)
+                }
               />
             </Card>
           )
