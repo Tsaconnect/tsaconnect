@@ -35,6 +35,14 @@ export interface SendBtcParams {
   amount: string; // integer string, sats (8 decimals)
   symbol: string; // always 'BTC'
   walletAddress: string; // EVM wallet id used to look up the mnemonic
+  /**
+   * Optional bridge memo (hex, no 0x) the backend attaches as a zero-value
+   * OP_RETURN output. Used by LiFi's Bitcoin swap routes, where the memo is the
+   * only thing tying a deposit to the user's swap; plain sends leave it unset.
+   * The backend prices the extra output into the fee and rejects a memo it
+   * cannot encode, so a bad one fails before any BTC moves.
+   */
+  memoHex?: string;
 }
 
 async function readJson(res: Response): Promise<any> {
@@ -57,6 +65,7 @@ export async function prepareBtc(params: SendBtcParams): Promise<BtcPrepared> {
   const body = {
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: '',
+    ...(params.memoHex ? { memoHex: params.memoHex } : {}),
   };
   const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${getNetwork()}`, {
     method: 'POST', headers, body: JSON.stringify(body),

@@ -86,6 +86,9 @@ func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (c
 }
 
 func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
+	if req.MemoHex != "" {
+		return chains.PreparedTx{}, fmt.Errorf("tron transfers cannot carry a bridge memo")
+	}
 	if err := c.ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

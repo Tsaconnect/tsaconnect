@@ -26,6 +26,13 @@ const defaultLiFiBaseURL = "https://li.quest/v1"
 const (
 	lifiDefaultSlippage = "0.005"
 
+	// lifiChainTypes is the VM families we expose to the app: EVM, Solana
+	// (SVM) and Bitcoin (UTXO). LiFi defaults to EVM only, so every chain and
+	// token call has to name them explicitly or Bitcoin/Solana silently
+	// vanish from the picker. Widen this only alongside an app-side signer for
+	// the family — a chain the app cannot sign for is a dead route in the UI.
+	lifiChainTypes = "EVM,SVM,UTXO"
+
 	allTokensDefaultLimit = 100
 	allTokensMaxLimit     = 500
 )
@@ -176,7 +183,8 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 }
 
 // GetChains handles GET /api/swap/lifi/chains
-// Proxies the LiFi chain list (EVM + Solana) with a 24-hour in-memory cache.
+// Proxies the LiFi chain list (EVM + Solana + Bitcoin) with a 24-hour
+// in-memory cache.
 func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	h.mu.Lock()
 	if h.chainsCache != nil && time.Since(h.chainsCache.fetchedAt) < 24*time.Hour {
@@ -187,7 +195,7 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes=EVM,SVM")
+	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes="+lifiChainTypes)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -387,10 +395,10 @@ func (h *SwapLiFiHandler) getOrFetchAllTokens() ([]tokenWithChain, error) {
 // Sort by symbol then chainId so paginated results are deterministic across
 // requests.
 func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
-	// LiFi's /tokens defaults to chainTypes=EVM — Solana's SPL tokens only
-	// arrive when SVM is requested explicitly, so the all-chains search can
-	// surface them.
-	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes=EVM,SVM")
+	// LiFi's /tokens defaults to chainTypes=EVM — Solana's SPL tokens and
+	// Bitcoin only arrive when SVM/UTXO are requested explicitly, so the
+	// all-chains search can surface them.
+	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes="+lifiChainTypes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reach LiFi")
 	}

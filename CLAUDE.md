@@ -49,6 +49,16 @@ The **P2P trading feature** is the clearest example of all three working togethe
   `eth_chainId` at boot and uses that for the voucher domain, *not* the configured `SONIC_CHAIN_ID`
   — a mismatch makes every `ecrecover` resolve to a wrong address and rejects all signatures with
   "recovered 0x… expected 0x…". When touching P2P signing, preserve this.
+- **Bitcoin swap deposits are memo-or-nothing.** A LiFi Bitcoin route is a *deposit*: the quote
+  names an address, the exact sats, and (THORChain-style bridges) an OP_RETURN memo that is the
+  only link between that payment and the user's swap. `internal/chains/btc` attaches the memo as a
+  zero-value nulldata output and prices it into the fee; families that cannot carry one reject a
+  non-empty `TransferRequest.MemoHex` instead of dropping it. The app
+  (`tsa-app/services/chains/btcLifi.ts`) refuses to broadcast when the route's amount differs from
+  the quoted one, or when its memo is not encodable — a wrong or memo-less deposit to a bridge is
+  unrecoverable. LiFi's exact UTXO `transactionRequest` shape is verified by
+  `tsa-api-go/scripts/lifi-btc-probe.sh`; run it from a host that can reach li.quest before
+  enabling Bitcoin swaps in a new environment.
 - **Money invariant.** Sum of `token_amount` over active `p2p_trades` must equal on-chain
   `P2PEscrow.balanceOf(token)` minus the live ad-pool `remaining`. Drift is logged as
   `p2p_reconciler_drift_total`.

@@ -1,4 +1,7 @@
-import { getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata, SOLANA_LIFI_CHAIN_ID } from './lifi';
+import {
+  getLiFiTokens, getLiFiQuote, getLiFiChains, buildERC20ApproveCalldata,
+  isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID,
+} from './lifi';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn().mockResolvedValue('Bearer test-token'),
@@ -36,21 +39,47 @@ describe('getLiFiChains', () => {
     chains: [
       { id: 56, name: 'BSC', key: 'bsc', coin: 'BNB', chainType: 'EVM' },
       { id: SOLANA_LIFI_CHAIN_ID, name: 'Solana', key: 'sol', coin: 'SOL', chainType: 'SVM' },
+      { id: BTC_LIFI_CHAIN_ID, name: 'Bitcoin', key: 'btc', coin: 'BTC', chainType: 'UTXO' },
     ],
   };
 
-  it('fetches through the backend proxy and includes Solana on mainnet', async () => {
+  it('fetches through the backend proxy and includes Solana and Bitcoin on mainnet', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
     const chains = await getLiFiChains();
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/swap/lifi/chains'), expect.any(Object));
-    expect(chains.map(c => c.id)).toEqual([56, SOLANA_LIFI_CHAIN_ID]);
+    expect(chains.map(c => c.id)).toEqual([56, SOLANA_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID]);
   });
 
-  it('hides Solana in testnet mode (swaps are mainnet-only)', async () => {
+  it('hides both non-EVM chains in testnet mode (swaps are mainnet-only)', async () => {
     mockGetNetwork.mockReturnValue('testnet');
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => CHAINS_BODY });
     const chains = await getLiFiChains();
     expect(chains.map(c => c.id)).toEqual([56]);
+  });
+
+  // The Bitcoin chain id is a LiFi-side constant, so trust LiFi's own answer
+  // over ours: a UTXO chain we did not know about must still route down the
+  // Bitcoin signer rather than be treated as an EVM chain.
+  it('learns UTXO chain ids from the chain list', async () => {
+    const UNKNOWN_UTXO = 20000000000009;
+    expect(isBtcLiFiChain(UNKNOWN_UTXO)).toBe(false);
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ chains: [{ id: UNKNOWN_UTXO, name: 'Bitcoin', key: 'btc', coin: 'BTC', chainType: 'UTXO' }] }),
+    });
+    await getLiFiChains();
+    expect(isBtcLiFiChain(UNKNOWN_UTXO)).toBe(true);
+    expect(isNonEVMLiFiChain(UNKNOWN_UTXO)).toBe(true);
+  });
+});
+
+describe('chain family helpers', () => {
+  it('separates EVM chains from the families that sign off-chain', () => {
+    expect(isBtcLiFiChain(BTC_LIFI_CHAIN_ID)).toBe(true);
+    expect(isBtcLiFiChain(56)).toBe(false);
+    expect(isNonEVMLiFiChain(SOLANA_LIFI_CHAIN_ID)).toBe(true);
+    expect(isNonEVMLiFiChain(BTC_LIFI_CHAIN_ID)).toBe(true);
+    expect(isNonEVMLiFiChain(1)).toBe(false);
   });
 });
 

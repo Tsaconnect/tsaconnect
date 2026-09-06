@@ -243,6 +243,9 @@ func buildFeeQuote(solBalance uint64, isToken, needsATA bool, nativeAmount uint6
 }
 
 func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
+	if req.MemoHex != "" {
+		return chains.PreparedTx{}, fmt.Errorf("solana transfers cannot carry a bridge memo")
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

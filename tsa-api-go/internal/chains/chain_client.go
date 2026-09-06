@@ -25,6 +25,13 @@ type TransferRequest struct {
 	Amount    string `json:"amount"`    // integer string, base units
 	Symbol    string `json:"symbol"`    // native symbol or token symbol
 	TokenAddr string `json:"tokenAddr"` // empty for native sends
+
+	// MemoHex is an optional bridge memo (hex, no 0x) the send must carry
+	// on-chain. Bitcoin bridge deposits (LiFi's UTXO routes) identify the swap
+	// solely by this memo — a deposit that drops it is an unrecoverable send to
+	// the bridge's address. Families that cannot carry one MUST reject a
+	// non-empty value rather than silently ignore it.
+	MemoHex string `json:"memoHex,omitempty"`
 }
 
 // FeeQuote is the result of the mandatory pre-send gas check.
