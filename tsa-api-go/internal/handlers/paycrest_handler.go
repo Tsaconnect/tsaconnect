@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -96,11 +97,32 @@ func (h *PaycrestHandler) Banks(c *gin.Context) {
 		paycrestError(c, err)
 		return
 	}
+	type bank struct {
+		Code string `json:"code"`
+		Name string `json:"name"`
+	}
 	codes := make([]string, 0, len(m.NIBSSToPaycrest))
+	banks := make([]bank, 0, len(m.NIBSSToPaycrest))
 	for nibss := range m.NIBSSToPaycrest {
 		codes = append(codes, nibss)
+		banks = append(banks, bank{Code: nibss, Name: m.Names[nibss]})
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Supported banks", gin.H{"bankCodes": codes})
+	sort.Slice(banks, func(i, j int) bool { return banks[i].Name < banks[j].Name })
+
+	// Unmatched is deliberately in the response, not just a log line. A bank
+	// Paycrest carries that we could not tie to a local code is a gap in OUR
+	// matcher, and the only way anyone notices is by being able to see it.
+	unmatched := make([]bank, 0, len(m.Unmatched))
+	for _, u := range m.Unmatched {
+		unmatched = append(unmatched, bank{Code: u.Code, Name: u.Name})
+	}
+	sort.Slice(unmatched, func(i, j int) bool { return unmatched[i].Name < unmatched[j].Name })
+
+	utils.SuccessResponse(c, http.StatusOK, "Supported banks", gin.H{
+		"bankCodes": codes, // kept for the existing client
+		"banks":     banks,
+		"unmatched": unmatched,
+	})
 }
 
 type paycrestBuyBody struct {

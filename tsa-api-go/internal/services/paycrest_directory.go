@@ -95,9 +95,15 @@ type PaycrestBankMap struct {
 	NIBSSToPaycrest map[string]string
 	// PaycrestToNIBSS turns an order or webhook back into our vocabulary.
 	PaycrestToNIBSS map[string]string
+	// Names carries the local bank name for each mapped NIBSS code, so callers
+	// can render a picker without a second lookup — and so an operator can see
+	// WHICH banks mapped rather than a list of opaque codes.
+	Names map[string]string
 	// Unmatched are Paycrest institutions we could not tie to a NIBSS code.
 	// Surfaced rather than dropped: a user whose bank is here gets a clear
-	// "not supported for this payout method" instead of a silent failure.
+	// "not supported for this payout method" instead of a silent failure, and
+	// a big name appearing here is a bug in the matcher, not a fact about
+	// Paycrest's coverage.
 	Unmatched  []PaycrestInstitution
 	ResolvedAt time.Time
 }
@@ -182,7 +188,12 @@ func buildPaycrestBankMap(pcBanks []PaycrestInstitution, ours []NombaBank) *Payc
 	m := &PaycrestBankMap{
 		NIBSSToPaycrest: make(map[string]string, len(pcBanks)),
 		PaycrestToNIBSS: make(map[string]string, len(pcBanks)),
+		Names:           make(map[string]string, len(pcBanks)),
 		ResolvedAt:      time.Now(),
+	}
+	localName := make(map[string]string, len(ours))
+	for _, b := range ours {
+		localName[b.Code] = b.Name
 	}
 
 	// Overrides win outright, before any name matching.
@@ -197,6 +208,7 @@ func buildPaycrestBankMap(pcBanks []PaycrestInstitution, ours []NombaBank) *Payc
 		}
 		m.NIBSSToPaycrest[nibss] = pcCode
 		m.PaycrestToNIBSS[pcCode] = nibss
+		m.Names[nibss] = localName[nibss]
 		claimed[pcCode] = true
 	}
 
@@ -263,6 +275,7 @@ func buildPaycrestBankMap(pcBanks []PaycrestInstitution, ours []NombaBank) *Payc
 		}
 		m.NIBSSToPaycrest[bestCode] = p.Code
 		m.PaycrestToNIBSS[p.Code] = bestCode
+		m.Names[bestCode] = localName[bestCode]
 	}
 	return m
 }
