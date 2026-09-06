@@ -1,21 +1,25 @@
 // app/wallet/it/index.tsx
 //
-// Instant Transfer hub: buy and sell crypto with Naira.
+// Instant Transfer hub: buy and sell crypto with your local currency.
 //
-// IT covers two very different assets and the hub has to be honest about that:
+// One asset list rather than "MCGP, plus some others" — the split was the
+// screen's main problem. What differs between the assets is real, though, and
+// the design has to carry it honestly:
 //
-//   MCGP        an entitlement we hold for the user, at an admin-set rate. It
-//               has a spendable balance and a single published buy/sell price,
-//               so both are worth showing.
-//   USDC/USDT   brokered through Paycrest to the user's OWN wallet. There is no
-//               custodial balance to show, and no single rate either — pricing
-//               depends on order size and on which providers are live. A number
-//               on this screen would be a promise the quote screen might not
-//               keep, so we show none and let the buy screen quote.
+//   MCGP        an entitlement WE hold for the user, at an admin-set rate, so
+//               it has a spendable balance and a single published buy/sell
+//               price worth showing.
+//   USDC/USDT   brokered to the user's OWN wallet. The balance shown is theirs
+//               on-chain, not ours. There is no single rate either — pricing
+//               moves with order size and with which providers are live, so a
+//               figure here could be one the quote screen cannot honour.
 //
-// Recent activity merges both sides. They are separate tables behind separate
-// APIs, and a user who buys USDC does not care about that — omitting Paycrest
-// orders here would mean their purchase simply vanished from the hub.
+// Currency support is not uniform and the rows say so rather than failing
+// later (see currencySupport):
+//   NGN   stablecoins route through Paycrest
+//   GHS   deposit-enabled at Flutterwave, so stablecoins use the legacy path
+//   USD/EUR/GBP  payout-only — there is no virtual-account product for them, so
+//               collecting is impossible and the row says "not available"
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -24,7 +28,6 @@ import { useFocusEffect } from '@react-navigation/native';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
-  AccentCard,
   Button,
   Card,
   Divider,
@@ -48,12 +51,24 @@ import {
   statusLabel as paycrestStatusLabel,
   type PaycrestOrder,
 } from '@/services/paycrestApi';
+import { getWalletBalances, normalizeWalletBalances } from '@/services/walletApi';
+import { useSignableWallet } from '@/hooks/useSignableWallet';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { ngnToUsd } from '@/utils/currencyDisplay';
 
-/** Stablecoins routed through Paycrest. MCGP is deliberately not in this list —
- *  it is a different product with a different screen. */
-const STABLES = ['USDC', 'USDT'] as const;
+/**
+ * Where a currency can buy stablecoins, if anywhere.
+ *
+ * Source of truth is the backend currency registry
+ * (services/currency_registry.go): NGN and GHS are deposit-enabled; USD, EUR
+ * and GBP are payout-only because no virtual-account product exists for them.
+ * Paycrest's live corridors cover NGN but not GHS, hence the split.
+ */
+function currencySupport(code: string): 'paycrest' | 'flutterwave' | 'none' {
+  if (code === 'NGN') return 'paycrest';
+  if (code === 'GHS') return 'flutterwave';
+  return 'none';
+}
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -78,6 +93,8 @@ const fmtNaira = (kobo?: string) => {
     return '0';
   }
 };
+const fmtToken = (n: number) =>
+  n.toLocaleString(undefined, { maximumFractionDigits: n >= 1 ? 4 : 6 });
 
 function itStatusLabel(status: string, direction: string): string {
   switch (status) {
@@ -86,11 +103,10 @@ function itStatusLabel(status: string, direction: string): string {
     case 'processing':
       return 'Processing';
     case 'credited':
+    case 'settled':
       return 'Complete';
     case 'debited':
       return 'Payout in progress';
-    case 'settled':
-      return 'Complete';
     case 'awaiting_rate':
       return 'Awaiting rate';
     case 'failed':
@@ -104,7 +120,6 @@ function itStatusLabel(status: string, direction: string): string {
   }
 }
 
-/** One row of activity, whichever system produced it. */
 type Activity = {
   key: string;
   title: string;
@@ -136,43 +151,77 @@ function paycrestActivity(o: PaycrestOrder): Activity {
   const amt = o.direction === 'buy' ? `₦${o.amount}` : `${o.tokenAmount ?? o.amount} ${o.token}`;
   return {
     key: `pc-${o.id}`,
-    // Name the asset on a buy too — otherwise "Buy · ₦1,000" is
-    // indistinguishable from an MCGP purchase in the same list.
-    title: `${o.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}${o.direction === 'buy' ? ` ${o.token}` : ''}`,
+    // Name the asset on a buy too, or "Buy · ₦1,000" is indistinguishable from
+    // an MCGP purchase sitting next to it in the same list.
+    title: `${o.direction === 'buy' ? 'Buy' : 'Sell'} · ${amt}${
+      o.direction === 'buy' ? ` ${o.token}` : ''
+    }`,
     status: paycrestStatusLabel(o),
     at: o.createdAt,
     onPress: () => router.push(`/wallet/paycrest/order/${o.id}` as never),
   };
 }
 
+/** One row of the asset list. */
+type AssetRow = {
+  token: string;
+  /** Formatted holding, or null while loading. */
+  balance: string | null;
+  /** Where the balance lives — the distinction matters to the user. */
+  balanceNote: string;
+  /** Price line, only where a single published rate actually exists. */
+  rateLine?: string;
+  onBuy?: () => void;
+  onSell?: () => void;
+  /** Set when the selected currency cannot trade this asset at all. */
+  unavailable?: string;
+};
+
 export default function ITHub() {
   const { colors, spacing } = useTheme();
-  const { formatPrice, allRates } = useCurrency();
+  const { formatPrice, allRates, currency } = useCurrency();
+  const { address } = useSignableWallet();
+
   const [bal, setBal] = useState<ITBalance | null>(null);
   const [rate, setRate] = useState<ITRate | null>(null);
   const [intents, setIntents] = useState<ITIntent[]>([]);
   const [orders, setOrders] = useState<PaycrestOrder[]>([]);
+  const [stable, setStable] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setError('');
-    // Paycrest is settled separately: it is dormant without a server key, and a
-    // hub that fails to load because one optional rail is off would be worse
-    // than one that quietly shows no stablecoin history.
-    const [b, r, list, pc] = await Promise.all([
+    // Each optional source degrades on its own. Paycrest is dormant without a
+    // server key and the balance call needs a wallet on this device — a hub
+    // that fails wholesale because one of those is missing would be worse than
+    // one showing a dash.
+    const [b, r, list, pc, balances] = await Promise.all([
       getITBalance(),
       getITRate(),
       listITIntents(),
       listPaycrestOrders(20).catch(() => [] as PaycrestOrder[]),
+      address ? getWalletBalances(undefined, address).catch(() => null) : Promise.resolve(null),
     ]);
     if (b.success && b.data) setBal(b.data);
     else setError(b.message || 'Failed to load balance');
     if (r.success && r.data) setRate(r.data);
     if (list.success && list.data?.intents) setIntents(list.data.intents);
     setOrders(pc);
+
+    if (balances?.success && balances.data) {
+      // Stablecoins live on several chains at once, and the user thinks in
+      // "how much USDC do I have", not "how much on Base". Sum across chains.
+      const totals: Record<string, number> = {};
+      for (const row of normalizeWalletBalances(balances.data)) {
+        const sym = (row.symbol || '').toUpperCase();
+        if (sym !== 'USDC' && sym !== 'USDT') continue;
+        totals[sym] = (totals[sym] ?? 0) + (Number(row.balance) || 0);
+      }
+      setStable(totals);
+    }
     setLoading(false);
-  }, []);
+  }, [address]);
 
   useFocusEffect(
     useCallback(() => {
@@ -187,11 +236,53 @@ export default function ITHub() {
   const ngnRate = allRates.NGN?.midRate ?? null;
   const buyUsd = rate ? ngnToUsd(Number(rate.buyRateKobo) / 100, ngnRate) : null;
   const sellUsd = rate ? ngnToUsd(Number(rate.sellRateKobo) / 100, ngnRate) : null;
-  const rateLine = rate
+  const mcgpRateLine = rate
     ? buyUsd != null && sellUsd != null
-      ? `Buy ${formatPrice(buyUsd)} · Sell ${formatPrice(sellUsd)} per MCGP`
-      : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)} per MCGP`
-    : null;
+      ? `Buy ${formatPrice(buyUsd)} · Sell ${formatPrice(sellUsd)}`
+      : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)}`
+    : undefined;
+
+  const code = currency?.code ?? 'NGN';
+  const support = currencySupport(code);
+
+  const assets: AssetRow[] = useMemo(() => {
+    const stableRow = (token: 'USDC' | 'USDT'): AssetRow => {
+      const base: AssetRow = {
+        token,
+        balance: loading && !address ? null : fmtToken(stable[token] ?? 0),
+        balanceNote: address ? 'in your wallet' : 'connect a wallet',
+      };
+      if (!address) return { ...base, unavailable: 'Connect a wallet to trade' };
+      switch (support) {
+        case 'paycrest':
+          return {
+            ...base,
+            onBuy: () => router.push(`/wallet/paycrest/buy?asset=${token}` as never),
+            onSell: () => router.push(`/wallet/paycrest/sell?asset=${token}` as never),
+          };
+        case 'flutterwave':
+          return {
+            ...base,
+            onBuy: () => router.push(`/wallet/it/buy-stable?asset=${token}` as never),
+            onSell: () => router.push(`/wallet/it/sell-stable?asset=${token}` as never),
+          };
+        default:
+          return { ...base, unavailable: `Not available in ${code}` };
+      }
+    };
+    return [
+      {
+        token: 'MCGP',
+        balance: loading ? null : fmtMcgp(spendable),
+        balanceNote: 'spendable',
+        rateLine: mcgpRateLine,
+        onBuy: () => router.push('/wallet/it/buy'),
+        onSell: () => router.push('/wallet/it/sell'),
+      },
+      stableRow('USDC'),
+      stableRow('USDT'),
+    ];
+  }, [loading, address, stable, support, code, spendable, mcgpRateLine]);
 
   const recent = useMemo(() => {
     const rows = [
@@ -212,43 +303,14 @@ export default function ITHub() {
           <RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />
         }
       >
-        <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+        <View
+          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+        >
+          <Text variant="bodySm" style={{ color: colors.textMuted }}>
+            Buy and sell with {code}
+          </Text>
           <CurrencySelector variant="header" />
         </View>
-
-        {/* MCGP keeps the prominent card: it is the only asset here with a
-            balance we hold and a single published price. */}
-        <AccentCard>
-          <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-            Spendable MCGP
-          </Text>
-          <Text
-            variant="title1"
-            weight="700"
-            numeric
-            style={{ color: colors.textPrimary, marginTop: spacing.xs }}
-          >
-            {loading ? '—' : fmtMcgp(spendable)} MCGP
-          </Text>
-          {rateLine ? (
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.xs }}>
-              {rateLine}
-            </Text>
-          ) : null}
-          <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.md }}>
-            <View style={{ flex: 1 }}>
-              <Button title="Buy" size="sm" onPress={() => router.push('/wallet/it/buy')} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Sell"
-                size="sm"
-                variant="secondary"
-                onPress={() => router.push('/wallet/it/sell')}
-              />
-            </View>
-          </View>
-        </AccentCard>
 
         {error ? (
           <Text variant="bodySm" style={{ color: colors.danger }}>
@@ -256,48 +318,51 @@ export default function ITHub() {
           </Text>
         ) : null}
 
-        {/* Stablecoins get their own section rather than hiding behind an asset
-            picker inside Buy. No rate shown: it depends on order size and on
-            which providers are live, so any figure here could be one the quote
-            screen cannot honour. */}
+        {/* One list, so no asset reads as an afterthought. Balance is the
+            anchor on each row; the actions sit under it rather than competing
+            with it for the eye. */}
         <Card>
-          <Text
-            variant="title3"
-            weight="700"
-            style={{ color: colors.textPrimary, marginBottom: spacing.xs }}
-          >
-            Stablecoins
-          </Text>
-          <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-            Bought and sold with Naira, straight to and from your own wallet.
-          </Text>
-          {STABLES.map((token, idx) => (
-            <View key={token}>
-              {idx > 0 ? <Divider spacing="sm" /> : null}
+          {assets.map((a, idx) => (
+            <View key={a.token}>
+              {idx > 0 ? <Divider spacing="md" /> : null}
               <View
                 style={{
                   flexDirection: 'row',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   justifyContent: 'space-between',
                   gap: spacing.md,
                 }}
               >
-                <Text variant="bodyMed" weight="600" style={{ color: colors.textPrimary }}>
-                  {token}
-                </Text>
-                <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-                  <Button
-                    title="Buy"
-                    size="sm"
-                    onPress={() => router.push(`/wallet/paycrest/buy?asset=${token}` as never)}
-                  />
-                  <Button
-                    title="Sell"
-                    size="sm"
-                    variant="secondary"
-                    onPress={() => router.push(`/wallet/paycrest/sell?asset=${token}` as never)}
-                  />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+                    {a.token}
+                  </Text>
+                  <Text
+                    variant="title3"
+                    weight="700"
+                    numeric
+                    style={{ color: colors.textPrimary }}
+                  >
+                    {a.balance ?? '—'}
+                  </Text>
+                  <Text variant="caption" style={{ color: colors.textMuted }}>
+                    {a.balanceNote}
+                    {a.rateLine ? ` · ${a.rateLine}` : ''}
+                  </Text>
                 </View>
+                {a.unavailable ? (
+                  <Text
+                    variant="caption"
+                    style={{ color: colors.textMuted, maxWidth: 120, textAlign: 'right' }}
+                  >
+                    {a.unavailable}
+                  </Text>
+                ) : (
+                  <View style={{ flexDirection: 'row', gap: spacing.sm, paddingTop: spacing.xs }}>
+                    <Button title="Buy" size="sm" onPress={a.onBuy} />
+                    <Button title="Sell" size="sm" variant="secondary" onPress={a.onSell} />
+                  </View>
+                )}
               </View>
             </View>
           ))}
@@ -329,7 +394,7 @@ export default function ITHub() {
           </Card>
         ) : !loading ? (
           <Text variant="bodySm" style={{ color: colors.textMuted }}>
-            No Instant Transfer orders yet. Buy opens an order you can track until payment clears.
+            No orders yet. Buying opens an order you can track until payment clears.
           </Text>
         ) : null}
 
