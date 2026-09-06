@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // stubQuoter answers per (network, token) so a test can model a real book:
@@ -20,9 +21,15 @@ type stubQuoter struct {
 	marketCall int
 	marketErr  error
 	transient  map[string]bool // venues that fail with a transport error
+	delay      time.Duration   // simulated upstream latency
 }
 
 func (s *stubQuoter) Rates(_ context.Context, network, token string, _ float64, _ string) (*PaycrestRates, error) {
+	if s.delay > 0 {
+		// Outside the lock, or the "concurrent" test would serialise on it and
+		// pass even when the caller is sequential.
+		time.Sleep(s.delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rateCalls++
@@ -217,6 +224,73 @@ func TestPaycrestQuote_MarketRateIsCachedAcrossQuotes(t *testing.T) {
 	// The per-order rate must NOT be cached — it is what binds the order.
 	if q.rateCalls != 4 {
 		t.Errorf("rate calls = %d, want 4: a quote must re-price every time", q.rateCalls)
+	}
+}
+
+// Sequentially this sweep is tokens x networks upstream calls. On production
+// that measured 25-30s and made the screen unusable, because the app re-quotes
+// on every amount change. This asserts the fan-out stays concurrent: ten venues
+// that each take 100ms must finish in about 100ms, not a second.
+func TestPaycrestQuote_FansOutConcurrently(t *testing.T) {
+	const perCall = 100 * time.Millisecond
+	rates := map[string]*PaycrestRates{}
+	for _, tok := range []string{"USDC", "USDT"} {
+		for _, net := range []string{"base", "polygon", "bnb-smart-chain", "arbitrum-one", "ethereum"} {
+			rates[net+"|"+tok] = buy("1390.64")
+		}
+	}
+	q := &stubQuoter{market: 1377.91, rates: rates, delay: perCall}
+	s := NewPaycrestQuoteService(q, []string{"USDC", "USDT"},
+		[]string{"base", "polygon", "bsc", "arbitrum", "ethereum"})
+
+	start := time.Now()
+	res, err := s.Quote(context.Background(), "buy", "NGN", "800")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if len(res.Venues) != 10 {
+		t.Fatalf("want 10 venues, got %d", len(res.Venues))
+	}
+	// Half the sequential total is a wide margin that still fails loudly if the
+	// loop ever goes back to blocking on each call.
+	if limit := perCall * 5; elapsed > limit {
+		t.Fatalf("fan-out took %v for 10 venues at %v each — looks sequential (limit %v)",
+			elapsed, perCall, limit)
+	}
+	t.Logf("10 venues in %v (sequential would be ~%v)", elapsed.Round(time.Millisecond), perCall*10)
+}
+
+// Providers routinely quote one rate across every network. Without a tie-break
+// the concurrent fan-out would reorder the picker between keystrokes.
+func TestPaycrestQuote_OrderIsStableWhenRatesTie(t *testing.T) {
+	rates := map[string]*PaycrestRates{}
+	for _, net := range []string{"base", "polygon", "bnb-smart-chain"} {
+		rates[net+"|USDC"] = buy("1390.64")
+		rates[net+"|USDT"] = buy("1390.64")
+	}
+	q := &stubQuoter{market: 1377.91, rates: rates}
+	s := NewPaycrestQuoteService(q, []string{"USDC", "USDT"}, []string{"base", "polygon", "bsc"})
+
+	var first []string
+	for i := 0; i < 8; i++ {
+		res, err := s.Quote(context.Background(), "buy", "NGN", "800")
+		if err != nil {
+			t.Fatalf("Quote: %v", err)
+		}
+		got := make([]string, len(res.Venues))
+		for j, v := range res.Venues {
+			got[j] = v.Token + ":" + v.ChainKey
+		}
+		if first == nil {
+			first = got
+			continue
+		}
+		for j := range got {
+			if got[j] != first[j] {
+				t.Fatalf("run %d reordered: %v vs %v", i, got, first)
+			}
+		}
 	}
 }
 

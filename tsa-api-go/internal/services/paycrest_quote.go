@@ -100,6 +100,11 @@ type marketRateEntry struct {
 // price an order — only the per-order Rates() call does that.
 const paycrestMarketRateTTL = 60 * time.Second
 
+// paycrestQuoteFanoutTimeout bounds the whole venue sweep. Generous enough for
+// a slow upstream, short enough that a user is never left waiting on one
+// unresponsive provider — the venues that answered are still a usable quote.
+const paycrestQuoteFanoutTimeout = 8 * time.Second
+
 // NewPaycrestQuoteService returns nil when the client is unavailable so
 // callers gate on `!= nil`, consistent with the rest of the package.
 func NewPaycrestQuoteService(pc PaycrestQuoter, tokens, chainKeys []string) *PaycrestQuoteService {
@@ -163,6 +168,22 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 		QuotedAt:   time.Now(),
 	}
 
+	// Fan out CONCURRENTLY. Sequentially this is tokens x networks upstream
+	// calls — 10 by default at ~2.5s each, which measured 25-30s end to end on
+	// production and made the screen unusable, since the app re-quotes on every
+	// amount change. Concurrently it costs about one call.
+	//
+	// Bounded by a whole-fan-out deadline rather than per call: a user waiting
+	// on a quote would rather see the venues that answered than wait for the
+	// slowest one, and a venue that cannot answer in time is not one we should
+	// be offering anyway.
+	fanCtx, cancel := context.WithTimeout(ctx, paycrestQuoteFanoutTimeout)
+	defer cancel()
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
 	for _, token := range s.tokens {
 		for _, chainKey := range s.chainKeys {
 			network, ok := PaycrestNetwork(chainKey)
@@ -171,47 +192,47 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 				// correct: it is a configuration fact, not a live condition.
 				continue
 			}
-			rates, err := s.pc.Rates(ctx, network, token, tokenAmt, fiatCode)
-			if err != nil {
-				// "No provider" is the single most common answer here and is
-				// not an error worth failing the whole quote over — the point
-				// of fanning out is that some venues will decline.
-				if errors.Is(err, ErrPaycrestNoProvider) {
-					continue
+			wg.Add(1)
+			go func(token, chainKey, network string) {
+				defer wg.Done()
+				rates, err := s.pc.Rates(fanCtx, network, token, tokenAmt, fiatCode)
+				if err != nil {
+					// "No provider" is the most common answer here and is not an
+					// error worth failing the whole quote over — the point of
+					// fanning out is that some venues decline. A transport
+					// failure on one venue likewise must not deny the user the
+					// venues that did answer.
+					return
 				}
-				// A transport failure on one venue likewise should not deny the
-				// user the venues that did answer.
-				continue
-			}
-			var q *PaycrestQuote
-			if side == "buy" {
-				q = rates.Buy
-			} else {
-				q = rates.Sell
-			}
-			if q == nil || strings.TrimSpace(q.Rate) == "" {
-				continue // one-sided book: this direction is unavailable here
-			}
-			rate, err := strconv.ParseFloat(q.Rate, 64)
-			if err != nil || rate <= 0 {
-				continue
-			}
-			v := PaycrestVenue{
-				ChainKey:      chainKey,
-				Network:       network,
-				Token:         token,
-				Rate:          q.Rate,
-				SpreadPercent: (rate/mkt - 1) * 100,
-				ProviderIDs:   q.ProviderIDs,
-			}
-			if side == "buy" {
-				v.TokenAmount = amt / rate // fiat in, token out
-			} else {
-				v.TokenAmount = amt / rate // token needed to realise this fiat
-			}
-			res.Venues = append(res.Venues, v)
+				var q *PaycrestQuote
+				if side == "buy" {
+					q = rates.Buy
+				} else {
+					q = rates.Sell
+				}
+				if q == nil || strings.TrimSpace(q.Rate) == "" {
+					return // one-sided book: this direction is unavailable here
+				}
+				rate, err := strconv.ParseFloat(q.Rate, 64)
+				if err != nil || rate <= 0 {
+					return
+				}
+				v := PaycrestVenue{
+					ChainKey:      chainKey,
+					Network:       network,
+					Token:         token,
+					Rate:          q.Rate,
+					SpreadPercent: (rate/mkt - 1) * 100,
+					ProviderIDs:   q.ProviderIDs,
+					TokenAmount:   amt / rate,
+				}
+				mu.Lock()
+				res.Venues = append(res.Venues, v)
+				mu.Unlock()
+			}(token, chainKey, network)
 		}
 	}
+	wg.Wait()
 
 	if len(res.Venues) == 0 {
 		return nil, fmt.Errorf("%w (%s %s %s)", ErrPaycrestNoVenue, fiatAmount, res.FiatCode, side)
@@ -222,10 +243,19 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	sort.SliceStable(res.Venues, func(i, j int) bool {
 		a, _ := strconv.ParseFloat(res.Venues[i].Rate, 64)
 		b, _ := strconv.ParseFloat(res.Venues[j].Rate, 64)
-		if side == "buy" {
-			return a < b
+		if a != b {
+			if side == "buy" {
+				return a < b // fewer naira per token is better on a buy
+			}
+			return a > b // more naira per token is better on a sell
 		}
-		return a > b
+		// Providers routinely quote one rate across every network, so without a
+		// tie-break the concurrent fan-out would reorder the picker on each
+		// keystroke. Token then chain keeps it stable.
+		if res.Venues[i].Token != res.Venues[j].Token {
+			return res.Venues[i].Token < res.Venues[j].Token
+		}
+		return res.Venues[i].ChainKey < res.Venues[j].ChainKey
 	})
 	res.Best = &res.Venues[0]
 	return res, nil
