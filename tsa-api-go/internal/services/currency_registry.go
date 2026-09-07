@@ -43,9 +43,6 @@ const (
 // to run BEFORE the code is a deploy hazard nobody remembers at 3am.
 var defaultRampProviders = map[string]string{
 	"NGN": RampProviderPaycrest,
-	"KES": RampProviderPaycrest,
-	"UGX": RampProviderPaycrest,
-	"TZS": RampProviderPaycrest,
 	"GHS": RampProviderFlutterwave,
 }
 
@@ -86,15 +83,22 @@ func DefaultCurrencies() []models.Currency {
 			MinPayoutMinor:     0, // unconfirmed — sandbox-verify before enabling GHS payouts
 			RampProvider:       RampProviderFlutterwave,
 		},
-		// Paycrest corridors. Payout-enabled because Paycrest pays out in them;
-		// DepositEnabled stays false because that flag is about Flutterwave's
-		// virtual-account product, which nothing here uses.
+		// East African corridors. Payout-enabled because Paycrest pays out in
+		// them, but RampProvider is deliberately left empty (RampProviderNone) —
+		// buy.tsx/sell.tsx are not currency-aware yet (they call getQuote and
+		// createBuy/createSell with no currency, which server-defaults to NGN),
+		// so advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
+		// user a naira order: a ₦ amount field, a Nigerian refund-bank picker,
+		// and instructions to wire naira to a Nigerian account. The row stays —
+		// it is a valid payout currency and the per-currency institution list
+		// already works — only the ramp claim goes. Enabling it later is one
+		// UPDATE plus currency-aware screens.
 		//
 		// MinPayoutMinor is 0 (ungated) because no floor has been confirmed for
 		// these rails — same position GHS is in. Confirm before volume.
-		{Code: "KES", Exponent: 2, PayoutEnabled: true, RampProvider: RampProviderPaycrest, HasMarketAnchor: true},
-		{Code: "UGX", Exponent: 0, PayoutEnabled: true, RampProvider: RampProviderPaycrest},
-		{Code: "TZS", Exponent: 2, PayoutEnabled: true, RampProvider: RampProviderPaycrest},
+		{Code: "KES", Exponent: 2, PayoutEnabled: true, HasMarketAnchor: true},
+		{Code: "UGX", Exponent: 0, PayoutEnabled: true},
+		{Code: "TZS", Exponent: 2, PayoutEnabled: true},
 		// USD/EUR/GBP: payout-only, permanently. Flutterwave has no virtual
 		// account product for them, so DepositEnabled can never become true
 		// here — a balance in these arrives by settlement or treasury wire.

@@ -1110,6 +1110,12 @@ func main() {
 		paycrestOrders := services.NewPaycrestOrderService(
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
 			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
+		if paycrestOrders != nil {
+			// Server-side kill switch: an operator can now stop the rail for a
+			// currency by flipping its ramp_provider column, not just change
+			// what the app is told. See PaycrestOrderService.SetCurrencyRegistry.
+			paycrestOrders.SetCurrencyRegistry(currencyRegistry)
+		}
 		paycrestHandler = handlers.NewPaycrestHandler(paycrestOrders, paycrestQuotes, paycrestDir)
 		// Webhooks need their own secret. Without it the verifier is nil and the
 		// route answers 503 — fail closed rather than accept unsigned events.

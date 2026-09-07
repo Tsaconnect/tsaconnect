@@ -166,7 +166,7 @@ type AssetRow = {
 
 export default function ITHub() {
   const { colors, spacing } = useTheme();
-  const { formatPrice, allRates, currency } = useCurrency();
+  const { formatPrice, allRates } = useCurrency();
   const { address } = useSignableWallet();
 
   const [bal, setBal] = useState<ITBalance | null>(null);
@@ -235,7 +235,19 @@ export default function ITHub() {
       : `Buy ₦${fmtNairaPerMcgp(rate.buyRateKobo)} · Sell ₦${fmtNairaPerMcgp(rate.sellRateKobo)}`
     : undefined;
 
-  const code = currency?.code ?? 'NGN';
+  // The ramp's settlement currency is deliberately NOT `currency` from
+  // useCurrency() — that context is the price-FORMATTING preference (default
+  // USD, persisted in AsyncStorage, auto-derived from device country), not
+  // the currency an order actually settles in. Before this screen read
+  // `currency` at all, buy/sell here always meant NGN, which is still the
+  // only currency the screens (buy.tsx/sell.tsx, Paycrest buy/sell) can
+  // transact in. Deriving the ramp from the display preference regressed any
+  // user who ever switched it to USD to read prices in dollars: they would
+  // see "Not available in USD" where the working NGN ramp used to be. Keep
+  // these two independent — CurrencySelector below still governs price
+  // formatting, which is its job, but must never gate what currency Buy/Sell
+  // actually uses.
+  const code = 'NGN';
   const support = rampProviderFor(currencies, code);
 
   const assets: AssetRow[] = useMemo(() => {

@@ -277,8 +277,15 @@ func TestDefaultCurrencies_EastAfricanCorridors(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s missing from DefaultCurrencies", code)
 		}
-		if c.RampProvider != RampProviderPaycrest {
-			t.Errorf("%s ramp = %q, want paycrest", code, c.RampProvider)
+		// RampProvider must be empty (RampProviderNone), NOT paycrest: buy.tsx
+		// and sell.tsx are not currency-aware (they call getQuote/createBuy/
+		// createSell with no currency, which server-defaults to NGN), so
+		// advertising a live ramp here would hand a Kenyan/Ugandan/Tanzanian
+		// user a naira order — a ₦ amount field, a Nigerian refund-bank
+		// picker, and instructions to wire naira to a Nigerian account. The
+		// row itself stays a valid payout currency; only the ramp claim goes.
+		if c.RampProvider != RampProviderNone {
+			t.Errorf("%s ramp = %q, want none (screens are NGN-only)", code, c.RampProvider)
 		}
 		if !c.PayoutEnabled {
 			t.Errorf("%s must be payout-enabled — Paycrest pays out in it", code)

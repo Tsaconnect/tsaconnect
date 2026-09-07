@@ -59,10 +59,36 @@ type PaycrestOrderService struct {
 	quotes *PaycrestQuoteService
 	dir    *PaycrestDirectory
 
+	// currencies gates order creation against the live ramp-provider column —
+	// see SetCurrencyRegistry.
+	currencies *CurrencyRegistry
+
 	// senderFeePercent is our margin. Empty defers to the dashboard profile
 	// default, which is what produced the 0.5% observed on live orders.
 	senderFeePercent string
 	senderFeeAddress string
+}
+
+// SetCurrencyRegistry wires the server-side kill switch: CreateBuy and
+// CreateSell refuse with ErrPaycrestDisabled when the order's currency does
+// not resolve to RampProviderPaycrest. Optional — without it (nil), no gate
+// is applied, so existing tests and any other construction site keep
+// working. This is what makes flipping a currency's ramp_provider column
+// actually stop the rail during an incident, rather than only changing what
+// GET /it/currencies advertises to not-yet-updated app builds.
+func (s *PaycrestOrderService) SetCurrencyRegistry(r *CurrencyRegistry) { s.currencies = r }
+
+// requirePaycrestEnabled refuses when the registry says this currency's ramp
+// provider is not (or no longer) paycrest. A nil registry is "no gate" —
+// see SetCurrencyRegistry.
+func (s *PaycrestOrderService) requirePaycrestEnabled(fiat string) error {
+	if s.currencies == nil {
+		return nil
+	}
+	if s.currencies.RampProvider(fiat) != RampProviderPaycrest {
+		return ErrPaycrestDisabled
+	}
+	return nil
 }
 
 // NewPaycrestOrderService returns nil unless everything it needs is wired, so
@@ -122,6 +148,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
 	if fiat == "" {
 		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
 	}
 	venue, err := s.quotes.VenueFor(ctx, "buy", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
@@ -231,6 +260,9 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 	fiat := strings.ToUpper(strings.TrimSpace(req.FiatCode))
 	if fiat == "" {
 		fiat = "NGN"
+	}
+	if err := s.requirePaycrestEnabled(fiat); err != nil {
+		return nil, err
 	}
 	venue, err := s.quotes.VenueFor(ctx, "sell", fiat, req.FiatAmount, req.ChainKey, req.Token)
 	if err != nil {
