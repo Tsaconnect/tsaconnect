@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,17 +118,25 @@ func TestAllSwap_RejectsForgedClientFee(t *testing.T) {
 
 // (c) LiFi unreachable → conservative default (3.5%), NOT 0 and NOT the client
 // value; still accrues the verified (conservative) fee.
+//
+// The basis used to be `fromAmount` read as dollars. It is base units, so that
+// is only ever right by accident — see TestAllSwap_UnreachableLiFiPricesTheBasis.
+// The conservative charge now comes off a priced basis; what this test still
+// pins is that the client's own number is ignored either way.
 func TestAllSwap_LiFiUnreachableUsesConservativeDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupFeeLedgerTestDB(t)
 	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
+	h.PriceService = services.NewPriceService()
+	h.PriceService.SeedPriceForTest("USDC", services.PriceData{USD: 1.0})
 	user := mkWUser(t, db, "asdown", nil)
 
 	// Client claims $1 (tiny). LiFi down → we ignore the client and charge the
-	// conservative 3.5% of the face from-amount ($1000) = $35.
+	// conservative 3.5% of the priced from-amount (1,000 USDC = $1000) = $35.
 	w := doSettle(t, h, user, map[string]interface{}{
 		"quoteId": "down-1", "fromToken": "USDC", "toToken": "ETH",
-		"fromAmount": "1000", "chainId": 1, "clientFeeUsd": 1.0,
+		"fromAmount": "1000000000", "fromSymbol": "USDC", "fromDecimals": 6,
+		"chainId": 1, "clientFeeUsd": 1.0,
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("settle status=%d body=%s", w.Code, w.Body.String())
@@ -173,6 +182,82 @@ func TestAllSwap_SolanaChainIDSettles(t *testing.T) {
 	sourceID := deterministicUUID("allswap:sol-1")
 	if got := waitForGuardHandler(t, db, "allswap", sourceID, 1); got != 1 {
 		t.Fatalf("want 1 allswap guard row, got %d", got)
+	}
+}
+
+// FromAmount is in base units. Reading it as dollars — which the conservative
+// fallback used to do — turns a 1,000 USDC swap (fromAmount "1000000000") into
+// a $35,000,000 fee event, and every split, TP award and reward computed from
+// it inherits that. With a price available the basis is priced properly.
+func TestAllSwap_UnreachableLiFiPricesTheBasis(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 0, false) // LiFi unreachable
+	h.PriceService = services.NewPriceService()
+	h.PriceService.SeedPriceForTest("USDC", services.PriceData{USD: 1.0})
+	user := mkWUser(t, db, "asprice", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "priced-1", "fromToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+		"toToken": "ETH", "fromAmount": "1000000000", "chainId": 42161,
+		"fromSymbol": "USDC", "fromDecimals": 6,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 1,000 USDC at $1 → conservative 3.5% → $35. NOT $35,000,000.
+	if got := settledFee(t, db, "priced-1").FeeUSD; got < 34.999 || got > 35.001 {
+		t.Fatalf("feeUSD=%v, want 35 (3.5%% of a $1,000 basis)", got)
+	}
+}
+
+// With neither LiFi nor a price, there is no honest basis. Accruing a guess
+// would corrupt the ledger, so nothing is accrued and the caller is told.
+func TestAllSwap_UnpricedFeeIsDeferredNotInvented(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 0, false)
+	h.PriceService = services.NewPriceService() // no seeded price for WOOF
+	user := mkWUser(t, db, "asunpriced", nil)
+
+	w := doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "unpriced-1", "fromToken": "0xdead", "toToken": "ETH",
+		"fromAmount": "2000000000000000000000000", "chainId": 1,
+		"fromSymbol": "WOOF", "fromDecimals": 18,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"deferred":true`) {
+		t.Errorf("response should say the fee was deferred: %s", w.Body.String())
+	}
+	sourceID := deterministicUUID("allswap:unpriced-1")
+	if got := feeGuardCount(db, "allswap", sourceID); got != 0 {
+		t.Fatalf("an unpriced settle must accrue nothing, got %d rows", got)
+	}
+}
+
+// LiFi refuses a quote without fromAddress, so the re-query has to carry the
+// route's endpoints or it fails 400 every time — silently sending every settle
+// down the unreachable path.
+func TestAllSwap_RequeryCarriesRouteAddresses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFeeLedgerTestDB(t)
+	h := newAllSwapHandler(t, db, 1000.0, true)
+	user := mkWUser(t, db, "asaddr", nil)
+
+	var got settleQuoteParams
+	h.requeryQuoteUSD = func(p settleQuoteParams) (float64, bool) {
+		got = p
+		return 1000.0, true
+	}
+	doSettle(t, h, user, map[string]interface{}{
+		"quoteId": "addr-1", "fromToken": "bitcoin", "toToken": "USDC",
+		"fromAmount": "200000", "chainId": 20000000000001, "toChainId": 42161,
+		"fromAddress": "bc1qsender", "toAddress": "0xrecipient",
+	})
+	if got.FromAddress != "bc1qsender" || got.ToAddress != "0xrecipient" {
+		t.Fatalf("re-query lost the route addresses: %+v", got)
 	}
 }
 

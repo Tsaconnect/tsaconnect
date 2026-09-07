@@ -208,6 +208,9 @@ export default function SpotTrade() {
         fromAmount: ethers.parseUnits(amount, fromToken.decimals).toString(),
         toAmount: q.toAmount,
         fromSymbol: fromToken.symbol,
+        fromDecimals: fromToken.decimals,
+        fromAddress: wallet,
+        toAddress: wallet,
         feature: 'spot',
       }).catch(e => console.error('[spot] fee settle failed', { txHash: hash, e }));
     } catch (e: any) {

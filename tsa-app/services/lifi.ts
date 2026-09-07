@@ -240,6 +240,14 @@ export interface SettleSwapFeeParams {
   toAmount?: string;
   /** Settlement token symbol for the fee ledger (the address means nothing there). */
   fromSymbol: string;
+  /**
+   * Route endpoints. LiFi rejects a quote without fromAddress, so the backend
+   * cannot re-query — and cannot verify the fee — without them.
+   */
+  fromAddress: string;
+  toAddress: string;
+  /** Lets the backend turn fromAmount (base units) back into whole tokens. */
+  fromDecimals: number;
   /** Fee bucket: the cross-chain bridge, or the same-chain trading desk. */
   feature: 'allswap' | 'spot';
 }
@@ -269,6 +277,9 @@ export async function settleSwapFee(params: SettleSwapFeeParams): Promise<void> 
       toChainId: params.toChainId,
       fromSymbol: params.fromSymbol,
       feature: params.feature,
+      fromAddress: params.fromAddress,
+      toAddress: params.toAddress,
+      fromDecimals: params.fromDecimals,
     }),
   });
   if (!res.ok) {

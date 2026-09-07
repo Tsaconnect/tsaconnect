@@ -423,6 +423,11 @@ export default function AllSwapScreen() {
         fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
         toAmount: quote.toAmount,
         fromSymbol: fromToken.symbol,
+        fromDecimals: fromToken.decimals,
+        // The same endpoints the quote used — LiFi will not re-quote without
+        // them, and a UTXO route needs the funded sender specifically.
+        fromAddress: addressForChain(fromChainId) ?? walletAddress,
+        toAddress: addressForChain(toChainId) ?? walletAddress,
         feature: 'allswap',
       }).catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
     } catch (e: any) {

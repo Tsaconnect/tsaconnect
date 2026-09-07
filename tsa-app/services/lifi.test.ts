@@ -83,6 +83,9 @@ describe('settleSwapFee', () => {
     fromAmount: '1000000000',
     toAmount: '250957',
     fromSymbol: 'USDC',
+    fromDecimals: 6,
+    fromAddress: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
+    toAddress: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
     feature: 'allswap' as const,
   };
 
@@ -101,8 +104,13 @@ describe('settleSwapFee', () => {
       fromToken: params.fromToken,
       fromAmount: '1000000000',
       fromSymbol: 'USDC',
+      fromDecimals: 6,
       feature: 'allswap',
     });
+    // LiFi refuses to quote without fromAddress, so the backend cannot verify
+    // the fee without the route's endpoints.
+    expect(body.fromAddress).toBe(params.fromAddress);
+    expect(body.toAddress).toBe(params.toAddress);
     // The server recomputes the fee from a fresh quote; a number from here is
     // precisely what it is built not to trust.
     expect(body).not.toHaveProperty('clientFeeUsd');

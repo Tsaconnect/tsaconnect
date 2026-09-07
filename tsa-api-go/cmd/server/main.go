@@ -456,6 +456,9 @@ func main() {
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
 	slh.Config = cfg
+	// Values the from-amount when LiFi cannot be re-queried; without it that
+	// path has no USD basis and defers the fee rather than guessing one.
+	slh.PriceService = priceService
 	if cfg.FeeModelV2Enabled {
 		slh.FeeService = feeDistributionService
 	}
