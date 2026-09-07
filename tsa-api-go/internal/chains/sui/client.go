@@ -281,6 +281,12 @@ func buildFeeQuote(suiBalance *big.Int, isNative bool, nativeAmount uint64, symb
 }
 
 func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
+	if req.MemoHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("sui transfers cannot carry a bridge memo")
+	}
+	if req.PSBTHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a PSBT is a Bitcoin transaction; it cannot be signed on sui")
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

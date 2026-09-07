@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,13 @@ const defaultLiFiBaseURL = "https://li.quest/v1"
 
 const (
 	lifiDefaultSlippage = "0.005"
+
+	// lifiChainTypes is the VM families we expose to the app: EVM, Solana
+	// (SVM) and Bitcoin (UTXO). LiFi defaults to EVM only, so every chain and
+	// token call has to name them explicitly or Bitcoin/Solana silently
+	// vanish from the picker. Widen this only alongside an app-side signer for
+	// the family — a chain the app cannot sign for is a dead route in the UI.
+	lifiChainTypes = "EVM,SVM,UTXO"
 
 	allTokensDefaultLimit = 100
 	allTokensMaxLimit     = 500
@@ -82,6 +90,9 @@ type SwapLiFiHandler struct {
 	// configured"; the accrual runs whenever FeeService is wired.
 	Config     *config.Config
 	FeeService *services.FeeDistributionService
+	// PriceService values the from-amount when LiFi cannot be re-queried. Without
+	// it that path has no USD basis and the fee is deferred rather than guessed.
+	PriceService *services.PriceService
 
 	// requeryQuoteUSD re-queries LiFi for the supplied route and returns the
 	// from-amount USD value LiFi reports (estimate.fromAmountUSD). Split out as a
@@ -176,7 +187,8 @@ func (h *SwapLiFiHandler) GetTokens(c *gin.Context) {
 }
 
 // GetChains handles GET /api/swap/lifi/chains
-// Proxies the LiFi chain list (EVM + Solana) with a 24-hour in-memory cache.
+// Proxies the LiFi chain list (EVM + Solana + Bitcoin) with a 24-hour
+// in-memory cache.
 func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	h.mu.Lock()
 	if h.chainsCache != nil && time.Since(h.chainsCache.fetchedAt) < 24*time.Hour {
@@ -187,7 +199,7 @@ func (h *SwapLiFiHandler) GetChains(c *gin.Context) {
 	}
 	h.mu.Unlock()
 
-	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes=EVM,SVM")
+	resp, err := h.lifiGet(liFiHTTPClient, "/chains?chainTypes="+lifiChainTypes)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadGateway, "failed to reach LiFi")
 		return
@@ -387,10 +399,10 @@ func (h *SwapLiFiHandler) getOrFetchAllTokens() ([]tokenWithChain, error) {
 // Sort by symbol then chainId so paginated results are deterministic across
 // requests.
 func (h *SwapLiFiHandler) fetchAndFlattenAllTokens() ([]tokenWithChain, error) {
-	// LiFi's /tokens defaults to chainTypes=EVM — Solana's SPL tokens only
-	// arrive when SVM is requested explicitly, so the all-chains search can
-	// surface them.
-	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes=EVM,SVM")
+	// LiFi's /tokens defaults to chainTypes=EVM — Solana's SPL tokens and
+	// Bitcoin only arrive when SVM/UTXO are requested explicitly, so the
+	// all-chains search can surface them.
+	resp, err := h.lifiGet(liFiBulkHTTPClient, "/tokens?chainTypes="+lifiChainTypes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reach LiFi")
 	}
@@ -506,11 +518,13 @@ func (h *SwapLiFiHandler) GetQuote(c *gin.Context) {
 // settleQuoteParams is the route the client claims it swapped on, used to
 // re-query LiFi server-side.
 type settleQuoteParams struct {
-	FromChain  string
-	ToChain    string
-	FromToken  string
-	ToToken    string
-	FromAmount string
+	FromChain   string
+	ToChain     string
+	FromToken   string
+	ToToken     string
+	FromAmount  string
+	FromAddress string
+	ToAddress   string
 }
 
 // allSwapSettleRequest is the body of POST /api/swap/lifi/settle. The client
@@ -526,6 +540,75 @@ type allSwapSettleRequest struct {
 	ChainID      int64   `json:"chainId"`
 	ToChainID    int64   `json:"toChainId"`
 	ClientFeeUSD float64 `json:"clientFeeUsd"`
+	// FromSymbol labels the fee event's settlement token. FromToken is a
+	// contract address (what LiFi resolves most reliably on the re-query), and
+	// an address in this field would reach SP5 payout resolution as the token
+	// symbol. Optional: falls back to FromToken when absent.
+	FromSymbol string `json:"fromSymbol"`
+	// Feature is the fee bucket to book against: "allswap" (cross-chain, the
+	// default) or "spot" (the same-chain trading desk). Both are configured at
+	// the same rate, but they are reported separately, so a spot trade booked
+	// as allswap is a wrong line in the P&L, not a rounding difference.
+	Feature string `json:"feature"`
+	// FromAddress/ToAddress are the route's endpoints. LiFi REQUIRES fromAddress
+	// on /quote — without it the re-query is a 400, which used to mean every
+	// settle silently took the unreachable path — and UTXO routes need it to be
+	// an address holding coins, since the quote is built from its UTXOs.
+	FromAddress string `json:"fromAddress"`
+	ToAddress   string `json:"toAddress"`
+	// FromDecimals converts FromAmount (base units) to whole tokens for the
+	// price-service fallback. Without it there is no way back to a USD figure.
+	FromDecimals int `json:"fromDecimals"`
+}
+
+// settleFeature validates the requested fee bucket. Only the two swap features
+// may be booked here; anything else (a typo, or a client reaching for a bucket
+// this endpoint has no business writing to) falls back to allswap.
+func settleFeature(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case models.FeatureSpot:
+		return models.FeatureSpot
+	default:
+		return models.FeatureAllswap
+	}
+}
+
+// fromAmountUSDFromPrices values the from-amount in dollars using our own
+// price service, for when LiFi cannot be re-queried. Reports false when the
+// amount cannot be converted to whole tokens or the symbol has no price — a
+// missing basis has to stay missing, because the only alternative is inventing
+// one and every downstream number (fee splits, TP, rewards) inherits it.
+func (h *SwapLiFiHandler) fromAmountUSDFromPrices(req allSwapSettleRequest) (float64, bool) {
+	if h.PriceService == nil || req.FromDecimals <= 0 {
+		return 0, false
+	}
+	symbol := settlementSymbol(req)
+	if symbol == "" || strings.HasPrefix(symbol, "0X") {
+		return 0, false // an address is not a symbol the price service knows
+	}
+	base := parseFloatOr0(req.FromAmount)
+	if base <= 0 {
+		return 0, false
+	}
+	whole := base / math.Pow(10, float64(req.FromDecimals))
+	prices, err := h.PriceService.GetPrices([]string{symbol})
+	if err != nil {
+		return 0, false
+	}
+	price, ok := prices[symbol]
+	if !ok || price.USD <= 0 {
+		return 0, false
+	}
+	return whole * price.USD, true
+}
+
+// settlementSymbol is the token label for the fee event: the caller's symbol
+// when it sent one, else whatever it used to name the token.
+func settlementSymbol(req allSwapSettleRequest) string {
+	if s := strings.TrimSpace(req.FromSymbol); s != "" {
+		return strings.ToUpper(s)
+	}
+	return strings.ToUpper(req.FromToken)
 }
 
 // SettleAllSwap handles POST /api/swap/lifi/settle (authenticated user — NOT
@@ -562,11 +645,13 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	// fee is a percentage of the from-amount value; the verified fee is
 	// fromAmountUSD × the integrator-fee rate.
 	fromAmountUSD, reachable := h.requeryQuoteUSD(settleQuoteParams{
-		FromChain:  strconv.FormatInt(req.ChainID, 10),
-		ToChain:    strconv.FormatInt(orChain(req.ToChainID, req.ChainID), 10),
-		FromToken:  req.FromToken,
-		ToToken:    req.ToToken,
-		FromAmount: req.FromAmount,
+		FromChain:   strconv.FormatInt(req.ChainID, 10),
+		ToChain:     strconv.FormatInt(orChain(req.ToChainID, req.ChainID), 10),
+		FromToken:   req.FromToken,
+		ToToken:     req.ToToken,
+		FromAmount:  req.FromAmount,
+		FromAddress: req.FromAddress,
+		ToAddress:   req.ToAddress,
 	})
 
 	var verifiedFeeUSD float64
@@ -588,17 +673,31 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 			}
 		}
 	} else {
-		// LiFi unreachable: do NOT charge 0 and do NOT trust the client. Charge a
-		// conservative configured default of the from-amount value. We need a USD
-		// basis even without LiFi — fall back to treating the from-amount as its
-		// face value (the AllSwap from-token is typically a stablecoin; this is a
-		// deliberately conservative over-estimate, not the client number).
-		face := parseFloatOr0(req.FromAmount)
+		// LiFi unreachable: do NOT trust the client, and do NOT invent a number.
+		// FromAmount is in BASE UNITS — reading it as dollars turns a 1,000 USDC
+		// swap into a $35,000,000 fee — so the conservative charge is applied to
+		// a USD basis priced here, from our own price service.
 		consRate := float64(h.Config.AllSwapConservativeFeeBpsOrDefault()) / 10000.0
-		verifiedFeeUSD = face * consRate
+		basisUSD, priced := h.fromAmountUSDFromPrices(req)
+		if !priced {
+			// No trustworthy basis exists. Accruing a guess would corrupt the fee
+			// ledger, the TP pool and every reward computed from them, so the fee
+			// is left unrecorded and flagged for reconciliation instead.
+			log.Printf("[allswap] ALERT allswap_fee_unpriced_total=1 quote=%s feature=%s token=%s "+
+				"amount=%s decimals=%d — LiFi unreachable AND no price; NO fee accrued, reconcile manually",
+				req.QuoteID, settleFeature(req.Feature), settlementSymbol(req), req.FromAmount, req.FromDecimals)
+			utils.SuccessResponse(c, http.StatusOK, "Swap fee deferred", gin.H{
+				"quoteId":        req.QuoteID,
+				"verifiedFeeUsd": 0.0,
+				"lifiReachable":  false,
+				"deferred":       true,
+			})
+			return
+		}
+		verifiedFeeUSD = basisUSD * consRate
 		log.Printf("[allswap] ALERT allswap_lifi_unreachable_total=1 LiFi unreachable for quote %s — "+
-			"charging conservative %d bps (=$%.6f), NOT the client value",
-			req.QuoteID, h.Config.AllSwapConservativeFeeBpsOrDefault(), verifiedFeeUSD)
+			"charging conservative %d bps of a priced $%.2f basis (=$%.6f), NOT the client value",
+			req.QuoteID, h.Config.AllSwapConservativeFeeBpsOrDefault(), basisUSD, verifiedFeeUSD)
 	}
 
 	// Idempotency key (allswap, quoteId). The quoteId is a string; derive a
@@ -607,10 +706,11 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 	sourceID := deterministicUUID("allswap:" + req.QuoteID)
 
 	// Accrue the VERIFIED fee (never the client value).
+	feature := settleFeature(req.Feature)
 	if h.FeeService != nil && verifiedFeeUSD > 0 {
 		h.FeeService.EnqueueFeeSettled(services.FeeEvent{
-			Feature:    models.FeatureAllswap,
-			Token:      strings.ToUpper(req.FromToken),
+			Feature:    feature,
+			Token:      settlementSymbol(req),
 			FeeUSD:     verifiedFeeUSD,
 			UserID:     user.ID,
 			SourceType: "allswap",
@@ -618,10 +718,16 @@ func (h *SwapLiFiHandler) SettleAllSwap(c *gin.Context) {
 		})
 	}
 
-	utils.SuccessResponse(c, http.StatusOK, "AllSwap fee settled", gin.H{
+	// The debt recorded at submit time is now paid; clear it so the sweeper
+	// does not revisit it. (The fee engine's guard makes a double settle a
+	// no-op anyway — this just keeps the queue honest.)
+	markPendingSwapFeeSettled(req.QuoteID)
+
+	utils.SuccessResponse(c, http.StatusOK, "Swap fee settled", gin.H{
 		"quoteId":        req.QuoteID,
 		"verifiedFeeUsd": verifiedFeeUSD,
 		"lifiReachable":  reachable,
+		"feature":        feature,
 	})
 }
 
@@ -653,8 +759,18 @@ func deterministicUUID(key string) uuid.UUID {
 // the from-amount USD (estimate.fromAmountUSD). reachable=false on any transport
 // or decode failure so the caller falls back to the conservative default.
 func (h *SwapLiFiHandler) liveRequeryQuoteUSD(p settleQuoteParams) (float64, bool) {
+	// fromAddress is REQUIRED by LiFi ("querystring must have required property
+	// 'fromAddress'"), and a UTXO route additionally needs it to hold coins,
+	// since the quote is built from that address's UTXOs. Omitting it made every
+	// re-query a 400 — i.e. every settle silently took the unreachable path.
 	q := fmt.Sprintf("/quote?fromChain=%s&toChain=%s&fromToken=%s&toToken=%s&fromAmount=%s&slippage=%s",
 		p.FromChain, p.ToChain, p.FromToken, p.ToToken, p.FromAmount, lifiDefaultSlippage)
+	if p.FromAddress != "" {
+		q += "&fromAddress=" + url.QueryEscape(p.FromAddress)
+	}
+	if p.ToAddress != "" {
+		q += "&toAddress=" + url.QueryEscape(p.ToAddress)
+	}
 	if h.integratorID != "" && h.integratorFee != "" {
 		q += "&fee=" + h.integratorFee + "&integrator=" + h.integratorID
 	}

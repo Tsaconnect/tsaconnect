@@ -456,6 +456,9 @@ func main() {
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.
 	slh.Config = cfg
+	// Values the from-amount when LiFi cannot be re-queried; without it that
+	// path has no USD basis and defers the fee rather than guessing one.
+	slh.PriceService = priceService
 	if cfg.FeeModelV2Enabled {
 		slh.FeeService = feeDistributionService
 	}
@@ -504,6 +507,20 @@ func main() {
 		log.Printf("[fee-manager] drift reconciler registered (interval=1h, chains=%d)", len(cfg.FeeManagerChains))
 	} else {
 		log.Printf("[fee-manager] dormant: no FeeManager chain configured with a reachable RPC — admin set-fee flow + drift reconciler off")
+	}
+
+	// Collects platform fees for swaps whose client never called settle. Without
+	// it, a swap whose app was killed between broadcast and settle owes a fee
+	// that nothing in the system would ever notice.
+	if cfg.FeeModelV2Enabled && feeDistributionService != nil {
+		scheduler.Register(&jobs.SwapFeeSweeper{
+			DB:              config.DB,
+			FeeService:      feeDistributionService,
+			PriceService:    priceService,
+			ConservativeBps: cfg.AllSwapConservativeFeeBpsOrDefault(),
+		})
+		log.Printf("[fees] swap-fee sweeper registered (grace=10m, conservative=%d bps)",
+			cfg.AllSwapConservativeFeeBpsOrDefault())
 	}
 
 	// SP7 admin claim-eligibility handler — reward-flag CRUD + eligibility review.

@@ -1,6 +1,23 @@
 package chains
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// InvalidRequestError marks a TransferRequest the caller can fix — a malformed
+// memo, a bad address, an amount below dust — as opposed to an upstream RPC or
+// indexer failure. Handlers surface its Reason to the client verbatim and keep
+// everything else generic, so an actionable message is not lost behind "fee
+// estimate failed" on a path that moves money.
+type InvalidRequestError struct{ Reason string }
+
+func (e *InvalidRequestError) Error() string { return e.Reason }
+
+// Invalid builds an InvalidRequestError with a formatted reason.
+func Invalid(format string, a ...any) error {
+	return &InvalidRequestError{Reason: fmt.Sprintf(format, a...)}
+}
 
 type Curve string
 
@@ -25,6 +42,22 @@ type TransferRequest struct {
 	Amount    string `json:"amount"`    // integer string, base units
 	Symbol    string `json:"symbol"`    // native symbol or token symbol
 	TokenAddr string `json:"tokenAddr"` // empty for native sends
+
+	// MemoHex is an optional bridge memo (hex, no 0x) the send must carry
+	// on-chain. Some Bitcoin bridges identify a deposit solely by this memo — a
+	// deposit that drops it is an unrecoverable send to the bridge's address.
+	// Families that cannot carry one MUST reject a non-empty value rather than
+	// silently ignore it.
+	MemoHex string `json:"memoHex,omitempty"`
+
+	// PSBTHex is an optional pre-built Bitcoin transaction (BIP-174, hex) to
+	// sign instead of building one. Aggregators whose UTXO routes construct the
+	// whole spend — inputs, bridge deposit, tag and change — hand it back this
+	// way, and the exact output set is what makes the deposit creditable, so it
+	// is signed as given rather than reconstructed. It is NOT trusted: see
+	// prepareFromPSBT for what has to hold before a digest is handed out.
+	// Families other than Bitcoin MUST reject a non-empty value.
+	PSBTHex string `json:"psbtHex,omitempty"`
 }
 
 // FeeQuote is the result of the mandatory pre-send gas check.

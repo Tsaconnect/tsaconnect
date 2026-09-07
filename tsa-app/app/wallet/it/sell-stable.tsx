@@ -1008,6 +1008,10 @@ export default function ITSellStable() {
             fromAmount: reviewAmount,
             walletAddress,
             fromChainId: getChain(reviewChainKey).chainId,
+            // The brokered ramp charges no platform fee, so this swap owes
+            // nothing — say so explicitly, or the server records a debt the
+            // sweeper would later collect on a flow that is meant to be free.
+            feeFeature: 'none',
             onStage: setSigningStatus,
           });
         } catch (e: any) {

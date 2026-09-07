@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -450,5 +451,126 @@ func TestGetTxStatusConfirmations(t *testing.T) {
 	}
 	if st.Found {
 		t.Fatalf("want Found=false for 404, got %+v", st)
+	}
+}
+
+// A bridge deposit (LiFi's Bitcoin routes) is only matched to the user's swap
+// by its OP_RETURN memo, so the memo must survive prepare as a real zero-value
+// nulldata output AND be paid for in the fee estimate.
+func TestPrepareAttachesBridgeMemo(t *testing.T) {
+	_, sender := testKey(t)
+	utxos := []UTXO{
+		{Txid: utxoTxid, Vout: 0, Value: 60_000},
+		{Txid: utxoTxid, Vout: 1, Value: 50_000},
+	}
+	srv := mockEsplora(t, sender, utxos, nil)
+	defer srv.Close()
+
+	req := transferReq(sender, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "80000")
+	req.MemoHex = "1234abcd"
+
+	c := newTestClient(srv.URL, "mainnet")
+	prepared, err := c.PrepareTransfer(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PrepareTransfer: %v", err)
+	}
+	var raw rawTx
+	if err := json.Unmarshal([]byte(prepared.Raw), &raw); err != nil {
+		t.Fatalf("raw: %v", err)
+	}
+	if len(raw.Outputs) != 3 {
+		t.Fatalf("want recipient + memo + change outputs, got %d", len(raw.Outputs))
+	}
+	// OP_RETURN (0x6a) + 4-byte push (0x04) + the memo bytes, value 0.
+	if raw.Outputs[1].PkScript != "6a041234abcd" || raw.Outputs[1].ValueSat != 0 {
+		t.Fatalf("bad memo output: %+v", raw.Outputs[1])
+	}
+	// Same 2-in/2-out tx as TestPrepareBuildsChangeAndPayloads (fee 2090) plus
+	// the 15 vB memo output at 10 sat/vB.
+	fee := 110_000 - 80_000 - raw.Outputs[2].ValueSat
+	if fee != 2240 {
+		t.Fatalf("fee want 2240 (2090 + 15vB memo), got %d", fee)
+	}
+
+	quote, err := c.EstimateFee(context.Background(), req)
+	if err != nil {
+		t.Fatalf("EstimateFee: %v", err)
+	}
+	if quote.EstFeeRaw != "2240" {
+		t.Fatalf("EstimateFee must price the memo too, got %s", quote.EstFeeRaw)
+	}
+}
+
+// A memo we cannot encode must fail the send, never be dropped: a memo-less
+// deposit to a bridge address is an unrecoverable loss.
+func TestPrepareRejectsUnusableMemo(t *testing.T) {
+	_, sender := testKey(t)
+	srv := mockEsplora(t, sender, []UTXO{{Txid: utxoTxid, Vout: 0, Value: 200_000}}, nil)
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "mainnet")
+	to := "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	for name, memo := range map[string]string{
+		"not hex":  "zzzz",
+		"odd hex":  "abc",
+		"too long": strings.Repeat("ab", maxMemoBytes+1),
+	} {
+		req := transferReq(sender, to, "80000")
+		req.MemoHex = memo
+		prepErr := func() error { _, err := c.PrepareTransfer(context.Background(), req); return err }()
+		if prepErr == nil {
+			t.Fatalf("%s: want error, got none", name)
+		}
+		// The reason has to survive as a caller-fixable error: the prepare
+		// handler flattens anything else into "fee estimate failed", which
+		// tells a user staring at a stuck swap nothing at all.
+		var invalid *chains.InvalidRequestError
+		if !errors.As(prepErr, &invalid) {
+			t.Fatalf("%s: want a chains.InvalidRequestError, got %T (%v)", name, prepErr, prepErr)
+		}
+		// EstimateFee runs first in the handler, so it must classify identically.
+		if _, err := c.EstimateFee(context.Background(), req); !errors.As(err, &invalid) {
+			t.Fatalf("%s: EstimateFee must reject it the same way, got %T (%v)", name, err, err)
+		}
+	}
+}
+
+// The memo output must not disturb signing: digests are computed over the whole
+// tx, so a memo added after the fact would invalidate every signature.
+func TestAssembleAndBroadcastWithMemo(t *testing.T) {
+	priv, sender := testKey(t)
+	var broadcast string
+	srv := mockEsplora(t, sender, []UTXO{{Txid: utxoTxid, Vout: 0, Value: 200_000}},
+		func(rawHex string) { broadcast = rawHex })
+	defer srv.Close()
+
+	req := transferReq(sender, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", "80000")
+	req.MemoHex = "0x" + hex.EncodeToString([]byte("=:ETH.ETH:0xdead"))
+
+	c := newTestClient(srv.URL, "mainnet")
+	prepared, err := c.PrepareTransfer(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PrepareTransfer: %v", err)
+	}
+	sigs := make([]chains.Signature, 0, len(prepared.Payloads))
+	for _, p := range prepared.Payloads {
+		sigs = append(sigs, chains.Signature{Index: p.Index, SigHex: signAppStyle(t, priv, p.HashHex)})
+	}
+	if _, err := c.AssembleAndBroadcast(context.Background(), prepared, sigs); err != nil {
+		t.Fatalf("AssembleAndBroadcast: %v", err)
+	}
+
+	rawBytes, err := hex.DecodeString(broadcast)
+	if err != nil {
+		t.Fatalf("broadcast hex: %v", err)
+	}
+	var tx wire.MsgTx
+	if err := tx.Deserialize(bytes.NewReader(rawBytes)); err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	memoScript := hex.EncodeToString(tx.TxOut[1].PkScript)
+	want := "6a10" + hex.EncodeToString([]byte("=:ETH.ETH:0xdead"))
+	if memoScript != want || tx.TxOut[1].Value != 0 {
+		t.Fatalf("broadcast tx lost the memo: script=%s value=%d", memoScript, tx.TxOut[1].Value)
 	}
 }

@@ -49,6 +49,20 @@ The **P2P trading feature** is the clearest example of all three working togethe
   `eth_chainId` at boot and uses that for the voucher domain, *not* the configured `SONIC_CHAIN_ID`
   — a mismatch makes every `ecrecover` resolve to a wrong address and rejects all signatures with
   "recovered 0x… expected 0x…". When touching P2P signing, preserve this.
+- **A Bitcoin swap route is signed as given, never reconstructed.** Probed live 2026-09-07: LiFi's
+  UTXO routes (Layerswap) return `transactionRequest.data` as a **whole PSBT** built from the
+  user's own UTXOs — deposit output, an OP_RETURN tag identifying the swap, the bridge's own
+  output, and change. `value` is the total leaving the wallet, which is *more* than the deposit
+  output alone, so paying `value` to `to` and calling it a deposit drops outputs the bridge is
+  looking for and strands the funds. Other tools may still return a bare memo, so
+  `tsa-app/services/chains/btcLifi.ts` identifies the payload by its BIP-174 magic and
+  `internal/chains/btc` supports both shapes. A PSBT is validated before a single digest is handed
+  out (`prepareFromPSBT`): every input must be ours with its witness value supplied, nothing
+  pre-signed, the quoted deposit address actually paid, everything leaving the wallet exactly the
+  quoted amount, and the fee inside the normal ceiling. Families that cannot carry a memo or sign
+  a PSBT reject those fields rather than ignoring them. Re-run
+  `tsa-api-go/scripts/lifi-btc-probe.sh` (needs a `fromAddress` holding UTXOs — LiFi builds the
+  spend from them) whenever LiFi changes UTXO tools.
 - **Money invariant.** Sum of `token_amount` over active `p2p_trades` must equal on-chain
   `P2PEscrow.balanceOf(token)` minus the live ad-pool `remaining`. Drift is logged as
   `p2p_reconciler_drift_total`.

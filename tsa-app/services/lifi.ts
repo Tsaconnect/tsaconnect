@@ -16,6 +16,29 @@ export function isSolanaLiFiChain(chainId: number): boolean {
   return chainId === SOLANA_LIFI_CHAIN_ID;
 }
 
+// LiFi's non-numeric chain id for Bitcoin (UTXO family). Safe as a JS number
+// (2e13 < 2^53) and, like Solana's, absent from the EVM CHAINS map — branch on
+// it before any getChainByChainId lookup.
+export const BTC_LIFI_CHAIN_ID = 20000000000001;
+
+// Ids LiFi reports as chainType 'UTXO'. Seeded with the known Bitcoin id and
+// re-learned from every /chains response (see getLiFiChains) so the app follows
+// LiFi's own answer rather than a constant that can go stale.
+const utxoChainIds = new Set<number>([BTC_LIFI_CHAIN_ID]);
+
+export function isBtcLiFiChain(chainId: number): boolean {
+  return utxoChainIds.has(chainId);
+}
+
+/**
+ * True for any chain the swap flow signs through the non-EVM path (Bitcoin or
+ * Solana). These have no entry in the EVM CHAINS map and no ERC-20 balances, so
+ * every EVM-shaped lookup must be guarded by this.
+ */
+export function isNonEVMLiFiChain(chainId: number): boolean {
+  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId);
+}
+
 export interface LiFiChain {
   id: number;
   name: string;
@@ -84,10 +107,16 @@ export async function getLiFiChains(): Promise<LiFiChain[]> {
   if (!res.ok) throw new Error('Failed to fetch LiFi chains');
   const data = await res.json();
   const chains: LiFiChain[] = Array.isArray(data?.chains) ? data.chains : [];
+  // Learn LiFi's UTXO chain ids from its own answer so isBtcLiFiChain stays
+  // right even if the id changes or a second UTXO chain is added upstream.
+  for (const c of chains) {
+    if (c.chainType === 'UTXO' && typeof c.id === 'number') utxoChainIds.add(c.id);
+  }
   // Swaps are mainnet-only (LiFi has no testnets). In testnet mode the wallet's
-  // Solana side points at devnet, so hide Solana from the swap surface rather
-  // than let a mainnet swap draw on a devnet-displayed balance.
-  return getNetwork() === 'testnet' ? chains.filter(c => !isSolanaLiFiChain(c.id)) : chains;
+  // Solana side points at devnet and its BTC address is a tb1… testnet one, so
+  // hide both from the swap surface rather than let a mainnet swap draw on a
+  // testnet-displayed balance.
+  return getNetwork() === 'testnet' ? chains.filter(c => !isNonEVMLiFiChain(c.id)) : chains;
 }
 
 export async function getLiFiTokens(chainId: number): Promise<LiFiToken[]> {
@@ -192,6 +221,71 @@ export async function getLiFiQuote(params: LiFiQuoteParams): Promise<LiFiQuote> 
     approvalToken: data.action?.fromToken?.address || undefined,
     validUntil: data.estimate?.validUntil ?? undefined,
   };
+}
+
+export interface SettleSwapFeeParams {
+  /**
+   * What makes this swap unique, for idempotency. The source-chain tx hash:
+   * it exists only once the swap actually happened, is stable across retries
+   * of this call, and differs for every execution — so a retry never
+   * double-charges and two real swaps are never collapsed into one.
+   */
+  quoteId: string;
+  /** Route as quoted — the backend re-queries LiFi with exactly these. */
+  fromChainId: number;
+  toChainId: number;
+  fromToken: string; // contract address (what LiFi resolves reliably)
+  toToken: string;
+  fromAmount: string; // base units
+  toAmount?: string;
+  /** Settlement token symbol for the fee ledger (the address means nothing there). */
+  fromSymbol: string;
+  /**
+   * Route endpoints. LiFi rejects a quote without fromAddress, so the backend
+   * cannot re-query — and cannot verify the fee — without them.
+   */
+  fromAddress: string;
+  toAddress: string;
+  /** Lets the backend turn fromAmount (base units) back into whole tokens. */
+  fromDecimals: number;
+  /** Fee bucket: the cross-chain bridge, or the same-chain trading desk. */
+  feature: 'allswap' | 'spot';
+}
+
+/**
+ * Report an executed swap so the backend can accrue its platform fee.
+ *
+ * The fee is computed server-side from a fresh LiFi quote — we deliberately
+ * send no fee figure, because the client's opinion of it is exactly what the
+ * endpoint is designed not to trust.
+ *
+ * The swap has already happened on-chain by the time this runs, so a failure
+ * here must never reach the user as a failed swap; callers fire it and log.
+ */
+export async function settleSwapFee(params: SettleSwapFeeParams): Promise<void> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}/swap/lifi/settle`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      quoteId: params.quoteId,
+      fromToken: params.fromToken,
+      toToken: params.toToken,
+      fromAmount: params.fromAmount,
+      toAmount: params.toAmount ?? '',
+      chainId: params.fromChainId,
+      toChainId: params.toChainId,
+      fromSymbol: params.fromSymbol,
+      feature: params.feature,
+      fromAddress: params.fromAddress,
+      toAddress: params.toAddress,
+      fromDecimals: params.fromDecimals,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`settle failed (${res.status}): ${body.slice(0, 200)}`);
+  }
 }
 
 /** ABI-encodes approve(address,uint256) calldata for ERC-20 token approval. */

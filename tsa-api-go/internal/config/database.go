@@ -79,6 +79,7 @@ func AutoMigrate() error {
 		&models.CashbackEarning{},
 		// Fee/TP overhaul (SP3) — tables for the fee/TP engine.
 		&models.FeeDistribution{},
+		&models.PendingSwapFee{},
 		&models.GlobalTPPool{},
 		&models.GlobalTPAccrual{},
 		// SP4 — global-pool cumulative-index settlement ledger. The new

@@ -23,11 +23,17 @@ jest.mock('../walletApi', () => ({
 jest.mock('../lifi', () => ({
   buildERC20ApproveCalldata: () => '0xapprovecalldata',
   isSolanaLiFiChain: (id: number) => id === 1151111081099710,
+  isBtcLiFiChain: (id: number) => id === 20000000000001,
 }));
 
 const mockExecuteLiFiSolanaSwap = jest.fn();
 jest.mock('../chains/solanaLifi', () => ({
   executeLiFiSolanaSwap: (...a: any[]) => mockExecuteLiFiSolanaSwap(...a),
+}));
+
+const mockExecuteLiFiBtcSwap = jest.fn();
+jest.mock('../chains/btcLifi', () => ({
+  executeLiFiBtcSwap: (...a: any[]) => mockExecuteLiFiBtcSwap(...a),
 }));
 
 jest.mock('../swapErrors', () => ({
@@ -166,6 +172,76 @@ describe('executeLiFiSwap — Solana source routes', () => {
     const hash = await executeLiFiSwap(params({ fromChainId: 56 }));
     expect(hash).toBe('0xswaphash');
     expect(mockExecuteLiFiSolanaSwap).not.toHaveBeenCalled();
+  });
+});
+
+// The backend's submit-time fee fallback multiplies `amount` by 1% as though
+// it were dollars. For a swap that amount is a quantity of the from-token, so
+// the guess is wrong by whatever the token is worth — pennies on WETH,
+// thousands on a memecoin. Swaps defer it and settle a verified figure.
+describe('executeLiFiSwap — fee handling', () => {
+  it('marks the swap submission fee-deferred', async () => {
+    await executeLiFiSwap(params());
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    // Defaults to the cross-chain bucket when the caller names none.
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'allswap' });
+  });
+
+  // The backend records the debt under this label at submit time, so the fee
+  // survives a client that never calls settle.
+  it('names the fee bucket so the debt can be recorded server-side', async () => {
+    await executeLiFiSwap(params({ feeFeature: 'spot' }));
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'spot' });
+  });
+
+  // The brokered stablecoin ramp charges no platform fee. It must say so, or
+  // the sweeper later collects on a flow that is meant to be free.
+  it('passes through "none" for a swap that owes nothing', async () => {
+    await executeLiFiSwap(params({ feeFeature: 'none' }));
+    const swapCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'swap');
+    expect(swapCall?.[7]).toEqual({ feeDeferred: true, feeFeature: 'none' });
+  });
+
+  it('leaves the approval alone — it never accrued a fee', async () => {
+    mockSubmitTransaction.mockResolvedValue({ success: true, data: { txHash: '0xapprovehash' } });
+    mockWithRpcFallback.mockResolvedValue({ status: 1 });
+    await executeLiFiSwap(params({
+      quote: quote({ approvalAddress: '0xspender', approvalToken: '0xtoken' }),
+    }));
+    const approveCall = mockSubmitTransaction.mock.calls.find(c => c[1] === 'approve');
+    expect(approveCall).toBeDefined();
+    expect(approveCall?.[7]).toBeUndefined();
+  });
+});
+
+describe('executeLiFiSwap — Bitcoin source routes', () => {
+  const BTC_CHAIN_ID = 20000000000001;
+
+  it('delegates to the Bitcoin executor with the deposit request and sats, skipping the EVM path', async () => {
+    mockExecuteLiFiBtcSwap.mockResolvedValue('btctxid');
+    // A UTXO route carries deposit instructions, not EVM calldata.
+    const q = quote({ transactionRequest: { to: 'bc1qdeposit', value: '0x1e848', data: '0xmemo' } });
+
+    const hash = await executeLiFiSwap(params({
+      quote: q, fromSymbol: 'BTC', fromDecimals: 8, fromAmount: '0.00125', fromChainId: BTC_CHAIN_ID,
+    }));
+
+    expect(hash).toBe('btctxid');
+    expect(mockExecuteLiFiBtcSwap).toHaveBeenCalledWith(expect.objectContaining({
+      txRequest: q.transactionRequest,
+      fromAmountRaw: '125000', // 0.00125 BTC in sats
+      walletAddress: WALLET,
+    }));
+    expect(mockFetchPendingNonce).not.toHaveBeenCalled();
+    expect(mockSignLiFiTransaction).not.toHaveBeenCalled();
+    expect(mockSubmitTransaction).not.toHaveBeenCalled();
+  });
+
+  it('still runs the EVM path when fromChainId is an EVM chain (EVM→BTC direction)', async () => {
+    const hash = await executeLiFiSwap(params({ fromChainId: 56 }));
+    expect(hash).toBe('0xswaphash');
+    expect(mockExecuteLiFiBtcSwap).not.toHaveBeenCalled();
   });
 });
 

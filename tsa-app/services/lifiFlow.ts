@@ -5,15 +5,18 @@
 // from screens/all-swap.tsx handleSwap so the All Swap screen and the Spot
 // Trade desk share one implementation). Solana source: ed25519-sign LiFi's
 // pre-built tx and broadcast via the nonevm path — no approve, no nonce
-// (services/chains/solanaLifi.ts). Throws Error with a user-facing message on
-// any failure; resolves with the swap tx hash on success.
+// (services/chains/solanaLifi.ts). Bitcoin source: pay LiFi's deposit address
+// the quoted sats with the route's OP_RETURN memo attached
+// (services/chains/btcLifi.ts). Throws Error with a user-facing message on any
+// failure; resolves with the source-chain tx hash on success.
 
 import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
-import { submitTransaction } from '@/services/walletApi';
-import { buildERC20ApproveCalldata, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
+import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
+import { buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, type LiFiQuote } from '@/services/lifi';
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
+import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
 import { mapSubmitError } from '@/services/swapErrors';
 
 export interface ExecuteLiFiSwapParams {
@@ -25,10 +28,17 @@ export interface ExecuteLiFiSwapParams {
   fromAmount: string;
   walletAddress: string;
   /**
-   * LiFi chain id the from-token lives on. Required to route Solana-source
-   * swaps — a Solana quote's transactionRequest has no chainId to branch on.
+   * LiFi chain id the from-token lives on. Required to route non-EVM source
+   * swaps — neither a Solana nor a Bitcoin quote's transactionRequest carries a
+   * chainId to branch on.
    */
   fromChainId?: number;
+  /**
+   * Fee bucket this swap will be booked to, recorded server-side at submit so
+   * the fee is collectable even if the settle call never lands. 'none' is for
+   * a swap that owes no platform fee at all (the brokered stablecoin ramp).
+   */
+  feeFeature?: SwapFeeFeature;
   /** Progress labels ("Step 1 of 2: Approving token…", …). */
   onStage?: (label: string) => void;
 }
@@ -40,6 +50,7 @@ export async function executeLiFiSwap({
   fromAmount,
   walletAddress,
   fromChainId,
+  feeFeature = 'allswap',
   onStage,
 }: ExecuteLiFiSwapParams): Promise<string> {
   if (fromChainId !== undefined && isSolanaLiFiChain(fromChainId)) {
@@ -48,6 +59,17 @@ export async function executeLiFiSwap({
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       fromSymbol,
       walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
+      onStage,
+    });
+  }
+
+  if (fromChainId !== undefined && isBtcLiFiChain(fromChainId)) {
+    return executeLiFiBtcSwap({
+      txRequest: quote.transactionRequest,
+      fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,
     });
   }
@@ -151,7 +173,14 @@ export async function executeLiFiSwap({
   const signedSwap = await signLiFiTransaction(swapTx);
   let res;
   try {
-    res = await submitTransaction(signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress);
+    // feeDeferred: `humanAmount` is a quantity of fromSymbol, and the backend's
+    // submit-time fallback would read it as dollars. The caller settles the fee
+    // against a re-queried USD value instead (see settleSwapFee) — or, for the
+    // brokered stablecoin ramp, charges no platform fee at all.
+    res = await submitTransaction(
+      signedSwap, 'swap', fromSymbol, evmTo, humanAmount, evmChainId, walletAddress,
+      { feeDeferred: true, feeFeature },
+    );
   } catch (e) {
     console.error('[swap] swap submitTransaction threw', { chainKey, e });
     throw new Error('Swap broadcast failed. The network may be congested — try again.');

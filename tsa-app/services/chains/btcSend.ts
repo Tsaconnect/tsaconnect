@@ -8,7 +8,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
-import { deriveBtcPrivateKey } from './derivation';
+import { deriveBtcPrivateKey, type BtcNetwork } from './derivation';
 import { signSecpDigest } from './sign';
 
 async function authHeaders() {
@@ -35,6 +35,41 @@ export interface SendBtcParams {
   amount: string; // integer string, sats (8 decimals)
   symbol: string; // always 'BTC'
   walletAddress: string; // EVM wallet id used to look up the mnemonic
+  /**
+   * Optional bridge memo (hex, no 0x) the backend attaches as a zero-value
+   * OP_RETURN output. Used by LiFi's Bitcoin swap routes, where the memo is the
+   * only thing tying a deposit to the user's swap; plain sends leave it unset.
+   * The backend prices the extra output into the fee and rejects a memo it
+   * cannot encode, so a bad one fails before any BTC moves.
+   */
+  memoHex?: string;
+  /**
+   * Optional pre-built transaction (BIP-174, hex) to sign instead of building
+   * one. Aggregator Bitcoin routes that construct the whole spend send it
+   * here; the backend validates it against `from`, `to` and `amount` before
+   * handing back anything to sign.
+   */
+  psbtHex?: string;
+  /**
+   * Fee bucket + human-units amount for an aggregator swap, recorded
+   * server-side at broadcast so the platform fee survives a client that never
+   * calls settle. Absent on a plain send, which owes no swap fee.
+   */
+  fee?: { feature: string; amountHuman: string; chainId?: number };
+  /**
+   * Network to build, sign and broadcast on. Defaults to the app's current
+   * toggle, which is what a wallet send wants. A caller pinned to one network —
+   * swaps, which LiFi only quotes on mainnet — MUST pass it explicitly: the
+   * address, the signing key and the broadcast all have to agree, and a caller
+   * that merely checks the toggle before it starts is one reordering away from
+   * signing a mainnet route with a testnet key.
+   */
+  network?: BtcNetwork;
+}
+
+/** The network a send acts on: the caller's pin, else the app's toggle. */
+function networkFor(params: SendBtcParams): BtcNetwork {
+  return params.network ?? (getNetwork() as BtcNetwork);
 }
 
 async function readJson(res: Response): Promise<any> {
@@ -57,8 +92,10 @@ export async function prepareBtc(params: SendBtcParams): Promise<BtcPrepared> {
   const body = {
     from: params.from, to: params.to, amount: params.amount,
     symbol: params.symbol, tokenAddr: '',
+    ...(params.memoHex ? { memoHex: params.memoHex } : {}),
+    ...(params.psbtHex ? { psbtHex: params.psbtHex } : {}),
   };
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/prepare-tx?chain=btc&network=${networkFor(params)}`, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
   const json = await readJson(res);
@@ -85,15 +122,24 @@ export async function broadcastBtc(
   }
   const mnemonic = await getMnemonic(params.walletAddress);
   if (!mnemonic) throw new Error('no key for wallet');
-  const btcKey = deriveBtcPrivateKey(mnemonic, getNetwork());
+  const btcKey = deriveBtcPrivateKey(mnemonic, networkFor(params));
   const sigs = payloads.map((p) => ({ index: p.index, sigHex: signSecpDigest(p.hashHex, btcKey) }));
 
   const headers = await authHeaders();
-  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=btc&network=${getNetwork()}`, {
+  const res = await fetch(`${API_BASE_URL}/wallet/nonevm/submit-tx?chain=btc&network=${networkFor(params)}`, {
     method: 'POST', headers,
     body: JSON.stringify({
       prepared, sigs,
       from: params.from, amount: params.amount, symbol: params.symbol,
+      // `amount` is sats; the fee amount is whole BTC, hence a separate field.
+      ...(params.fee && params.fee.feature !== 'none'
+        ? {
+            feeDeferred: true,
+            feeFeature: params.fee.feature,
+            feeAmountHuman: params.fee.amountHuman,
+            feeChainId: params.fee.chainId ?? 0,
+          }
+        : {}),
     }),
   });
   const json = await readJson(res);

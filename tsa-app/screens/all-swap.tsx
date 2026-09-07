@@ -22,13 +22,15 @@ import { getChainByChainId, CHAINS, NONEVM_CHAINS, txExplorerUrl } from '@/const
 import { getWalletBalances, normalizeWalletBalances, type WalletBalanceWithChain } from '@/services/walletApi';
 import { getActiveWallet, readErc20BalanceOf, getProvider } from '@/services/wallet';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
+import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { ethers } from 'ethers';
 import {
-  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote,
-  isSolanaLiFiChain, SOLANA_NATIVE_ADDRESS,
+  getLiFiTokens, getLiFiAllChainTokens, getLiFiQuote, settleSwapFee,
+  isSolanaLiFiChain, isBtcLiFiChain, isNonEVMLiFiChain, SOLANA_NATIVE_ADDRESS,
   type LiFiToken, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSwap } from '@/services/lifiFlow';
+import { missingAddressNotice } from '@/utils/swapAddresses';
 import TokenPickerModal from '@/components/swap/TokenPickerModal';
 import { useTheme } from '@/theme';
 import {
@@ -96,9 +98,16 @@ export default function AllSwapScreen() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Derived Solana address for the active wallet — the from/to address on
-  // Solana-side routes. null until derived (or when no mnemonic exists).
+  // Derived non-EVM addresses for the active wallet — the from/to address on
+  // Solana- and Bitcoin-side routes. All three families come off the same
+  // mnemonic, so a cross-VM swap needs no address input from the user.
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
+  const [btcAddress, setBtcAddress] = useState<string | null>(null);
+  // Whether derivation has finished. A null address means "still deriving"
+  // before this flips and "this wallet has no key for that chain" after — a
+  // key-only or watch-only wallet has no mnemonic to derive from, and telling
+  // that user we are still preparing an address is a promise we never keep.
+  const [addressesDerived, setAddressesDerived] = useState(false);
 
   useEffect(() => {
     getActiveWallet()
@@ -109,11 +118,29 @@ export default function AllSwapScreen() {
   useEffect(() => {
     if (!walletAddress) return;
     let cancelled = false;
-    getSolanaAddress(walletAddress)
-      .then(addr => { if (!cancelled) setSolanaAddress(addr); })
-      .catch(() => {});
+    setAddressesDerived(false);
+    Promise.allSettled([getSolanaAddress(walletAddress), getBtcAddress(walletAddress)])
+      .then(([sol, btc]) => {
+        if (cancelled) return;
+        setSolanaAddress(sol.status === 'fulfilled' ? sol.value : null);
+        setBtcAddress(btc.status === 'fulfilled' ? btc.value : null);
+        setAddressesDerived(true);
+      });
     return () => { cancelled = true; };
   }, [walletAddress]);
+
+  /**
+   * The address that signs (and receives) on a given LiFi chain. Each VM family
+   * derives its own key from the one mnemonic, so this is the single place the
+   * screen decides "whose address is this route's side". null while a non-EVM
+   * address is still deriving, or when the wallet has no mnemonic to derive it —
+   * `addressesDerived` tells those two apart.
+   */
+  const addressForChain = useCallback((chainId: number): string | null => {
+    if (isSolanaLiFiChain(chainId)) return solanaAddress;
+    if (isBtcLiFiChain(chainId)) return btcAddress;
+    return walletAddress || null;
+  }, [walletAddress, solanaAddress, btcAddress]);
 
   // Lazy-load all-chain tokens paginated. Initial page is fetched the first
   // time the picker is opened in "All" mode (see `loadAllChainsPage`); we don't
@@ -166,7 +193,7 @@ export default function AllSwapScreen() {
   useFocusEffect(useCallback(() => {
     loadBalances();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fromChainId, solanaAddress]));
+  }, [fromChainId, solanaAddress, btcAddress]));
 
   useEffect(() => {
     let active = true;
@@ -190,13 +217,18 @@ export default function AllSwapScreen() {
 
   const loadBalances = async () => {
     try {
-      // /wallet/balances is EVM-only — it 400s on the Solana pseudo chain-id
+      // /wallet/balances is EVM-only — it 400s on the Solana/Bitcoin pseudo chain-id
       // and would leave the previous EVM chain's rows in place, which the
       // picker's "your tokens" section then matches BY SYMBOL against SPL
       // tokens. Read the SPL rows instead (or clear while the address derives).
       if (isSolanaLiFiChain(fromChainId)) {
         if (!solanaAddress) { setBalances([]); return; }
         setBalances(await getSolanaBalances(solanaAddress));
+        return;
+      }
+      if (isBtcLiFiChain(fromChainId)) {
+        if (!btcAddress) { setBalances([]); return; }
+        setBalances(await getBtcBalances(btcAddress));
         return;
       }
       const res = await getWalletBalances(fromChainId);
@@ -232,6 +264,15 @@ export default function AllSwapScreen() {
           setLiveFromBalance(row?.balance ?? '0');
           return;
         }
+        if (isBtcLiFiChain(fromChainId)) {
+          if (!btcAddress) return;
+          // Bitcoin carries exactly one asset, so there is no token row to
+          // match — the native balance IS the from-token balance.
+          const rows = await getBtcBalances(btcAddress);
+          if (cancelled) return;
+          setLiveFromBalance(rows[0]?.balance ?? '0');
+          return;
+        }
         const chain = getChainByChainId(fromChainId);
         if (!chain) return;
         const addr = fromToken.address.toLowerCase();
@@ -250,7 +291,7 @@ export default function AllSwapScreen() {
     return () => {
       cancelled = true;
     };
-  }, [fromToken, fromChainId, walletAddress, solanaAddress, refreshKey]);
+  }, [fromToken, fromChainId, walletAddress, solanaAddress, btcAddress, refreshKey]);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -258,11 +299,11 @@ export default function AllSwapScreen() {
       setQuote(null); setQuoteStatus('idle'); setQuoteError('');
       return;
     }
-    // Solana-side routes quote against the derived Solana address; skip until
-    // it's available (derivation is near-instant once the wallet loads).
-    const fromSolana = isSolanaLiFiChain(fromChainId);
-    const toSolana = isSolanaLiFiChain(toChainId);
-    if ((fromSolana || toSolana) && !solanaAddress) {
+    // Each side quotes against the address of its own VM family; skip until
+    // both have derived (near-instant once the wallet loads).
+    const fromAddress = addressForChain(fromChainId);
+    const toAddress = addressForChain(toChainId);
+    if (!fromAddress || !toAddress) {
       setQuote(null); setQuoteStatus('idle'); setQuoteError('');
       return;
     }
@@ -270,18 +311,18 @@ export default function AllSwapScreen() {
     timer.current = setTimeout(async () => {
       try {
         const amountWei = ethers.parseUnits(fromAmount, fromToken.decimals).toString();
-        // Cross-VM routes must name the destination-chain recipient explicitly;
-        // both sides derive from the same mnemonic, so no user input needed.
+        // Cross-VM routes (EVM↔Solana, EVM↔Bitcoin, Solana↔Bitcoin) must name
+        // the destination-chain recipient explicitly — the sending address
+        // cannot receive there. Both sides derive from the same mnemonic, so no
+        // user input is needed.
         const q = await getLiFiQuote({
           fromChain: fromChainId,
           toChain: toChainId,
           fromToken: fromToken.address,
           toToken: toToken.address,
           fromAmount: amountWei,
-          fromAddress: fromSolana ? solanaAddress! : walletAddress,
-          ...(fromSolana !== toSolana
-            ? { toAddress: toSolana ? solanaAddress! : walletAddress }
-            : {}),
+          fromAddress,
+          ...(toAddress !== fromAddress ? { toAddress } : {}),
           slippage: slippageAuto ? '0.005' : slippage,
         });
         setQuote(q); setQuoteStatus('quoted'); setQuoteError('');
@@ -313,7 +354,7 @@ export default function AllSwapScreen() {
       if (timer.current) clearTimeout(timer.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, solanaAddress, slippageAuto, slippage, refreshKey]);
+  }, [fromToken, toToken, fromAmount, fromChainId, toChainId, walletAddress, addressForChain, slippageAuto, slippage, refreshKey]);
 
   const swapDirection = () => {
     const [nf, nfc, nt, ntc] = [toToken, toChainId, fromToken, fromChainId];
@@ -322,11 +363,12 @@ export default function AllSwapScreen() {
     setFromAmount(''); setQuote(null); setQuoteStatus('idle');
   };
 
-  // `balances` holds EVM rows from /wallet/balances — never let a Solana
-  // from-token fall through to them by symbol (EVM USDC ≠ SPL USDC).
+  // `balances` holds EVM rows from /wallet/balances — never let a non-EVM
+  // from-token fall through to them by symbol (EVM USDC ≠ SPL USDC, and an
+  // EVM-wrapped BTC ≠ real BTC).
   const fromBalance =
     liveFromBalance ??
-    (isSolanaLiFiChain(fromChainId)
+    (isNonEVMLiFiChain(fromChainId)
       ? '0'
       : balances.find(b => b.symbol === fromToken?.symbol)?.balance ?? '0');
 
@@ -334,6 +376,13 @@ export default function AllSwapScreen() {
     if (!fromToken) return 'Select a token to send';
     if (!toToken) return 'Select a token to receive';
     if (!fromAmount || Number(fromAmount) <= 0) return 'Enter an amount';
+    // A non-EVM side needs its own derived address before LiFi can be quoted;
+    // say so rather than sit on "Waiting for price…" forever.
+    const addressNotice = missingAddressNotice([
+      { chainName: chainName(fromChainId), address: addressForChain(fromChainId) },
+      { chainName: chainName(toChainId), address: addressForChain(toChainId) },
+    ], addressesDerived);
+    if (addressNotice) return addressNotice;
     try {
       const amountUnits = ethers.parseUnits(fromAmount, fromToken.decimals);
       const balanceUnits = ethers.parseUnits(fromBalance || '0', fromToken.decimals);
@@ -349,10 +398,32 @@ export default function AllSwapScreen() {
   // Approve→wait→swap execution lives in services/lifiFlow (shared with the
   // Spot Trade desk); this handler only owns the screen-state wiring.
   const handleSwap = async () => {
-    if (!quote || !fromToken || !walletAddress) return;
+    if (!quote || !fromToken || !toToken || !walletAddress) return;
     setScreen('signing'); setError('');
+
+    // Built BEFORE the swap runs, so that nothing about reporting the fee can
+    // throw after the swap is on-chain — a completed swap must never land on
+    // the failure screen. The backend also records the fee as owed at submit
+    // time, so this call is the fast path, not the only one.
+    const feeReport = {
+      fromChainId,
+      toChainId,
+      fromToken: fromToken.address,
+      toToken: toToken.address,
+      fromAmount: ethers.parseUnits(fromAmount, fromToken.decimals).toString(),
+      toAmount: quote.toAmount,
+      fromSymbol: fromToken.symbol,
+      fromDecimals: fromToken.decimals,
+      // The same endpoints the quote used — LiFi will not re-quote without
+      // them, and a UTXO route needs the funded sender specifically.
+      fromAddress: addressForChain(fromChainId) ?? walletAddress,
+      toAddress: addressForChain(toChainId) ?? walletAddress,
+      feature: 'allswap' as const,
+    };
+
+    let swapHash: string;
     try {
-      const swapHash = await executeLiFiSwap({
+      swapHash = await executeLiFiSwap({
         quote,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
@@ -361,11 +432,15 @@ export default function AllSwapScreen() {
         fromChainId,
         onStage: setSigningStatus,
       });
-      setTxHash(swapHash); setScreen('success');
     } catch (e: any) {
       console.error('[swap] handleSwap failed', e);
       setError(e?.message || 'Swap failed'); setScreen('failure');
+      return;
     }
+
+    setTxHash(swapHash); setScreen('success');
+    settleSwapFee({ ...feeReport, quoteId: swapHash })
+      .catch(e => console.error('[swap] fee settle failed', { txHash: swapHash, e }));
   };
 
   const outputAmount = quote && toToken
@@ -395,6 +470,7 @@ export default function AllSwapScreen() {
 
   const chainName = (chainId: number) => {
     if (isSolanaLiFiChain(chainId)) return NONEVM_CHAINS.solana.shortName;
+    if (isBtcLiFiChain(chainId)) return NONEVM_CHAINS.btc.shortName;
     const entry = Object.values(CHAINS).find(c => c.chainId === chainId);
     return entry?.shortName ?? String(chainId);
   };
@@ -894,8 +970,8 @@ function SwapSuccessScreen({ fromToken, toToken, fromAmount, outputAmount, txHas
           </Card>
 
           {txHash ? (() => {
-            const url = isSolanaLiFiChain(chainId)
-              ? txExplorerUrl(txHash, { chainKey: 'solana' }) ?? null
+            const url = isNonEVMLiFiChain(chainId)
+              ? txExplorerUrl(txHash, { chainKey: isSolanaLiFiChain(chainId) ? 'solana' : 'btc' }) ?? null
               : (() => {
                   const explorerUrl = getChainByChainId(chainId)?.explorerUrl;
                   return explorerUrl ? `${explorerUrl}/tx/${txHash}` : null;
