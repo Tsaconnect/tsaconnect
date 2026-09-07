@@ -16,8 +16,12 @@ package sui
 // digest is ever handed out:
 //
 //   - the simulation must succeed (a transaction that would abort is not signed)
-//   - every coin type leaving OUR address must leave by no more than the amount
-//     the user approved
+//   - the coin being swapped may leave by no more than the amount approved
+//   - SUI may additionally leave to pay for gas, by no more than the gas the
+//     simulation itself reported — Sui charges gas to the sender's SUI coin, so
+//     it shows up in the balance changes like any other outflow
+//   - no other coin type may leave at all: a swap the user asked for in one
+//     coin has no business touching a second one
 //   - nothing may leave any address that is not ours — we are the only signer,
 //     but a transaction that moves someone else's funds is not one we want to
 //     put our name on either
@@ -31,6 +35,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"math/big"
 	"strings"
 
@@ -58,7 +64,13 @@ func (c *Client) prepareFromTxBytes(ctx context.Context, req chains.TransferRequ
 	if err != nil {
 		// A transaction we cannot simulate is one we cannot vouch for. Refusing
 		// costs the user a swap; signing blind can cost them the wallet.
-		return chains.PreparedTx{}, chains.Invalid("the route's transaction could not be checked against the network: %v", err)
+		//
+		// The detail stays in the log rather than the response: a failed call
+		// wraps net/http's error, which quotes the endpoint URL — and for a
+		// keyed provider that URL is a credential. It is also not the caller's
+		// mistake, so it must not come back as a 400.
+		log.Printf("sui: dry-run failed for %s: %v", req.From, err)
+		return chains.PreparedTx{}, fmt.Errorf("the route could not be checked against the network")
 	}
 	if !strings.EqualFold(sim.Effects.Status.Status, "success") {
 		return chains.PreparedTx{}, chains.Invalid("the route's transaction would fail on-chain: %s",
@@ -69,7 +81,13 @@ func (c *Client) prepareFromTxBytes(ctx context.Context, req chains.TransferRequ
 	if !ok || approved.Sign() <= 0 {
 		return chains.PreparedTx{}, chains.Invalid("bad amount")
 	}
-	if err := checkBalanceChanges(sim.BalanceChanges, req.From, approved); err != nil {
+	// An empty TokenAddr means the swap is denominated in the native coin, the
+	// same convention the normal send path uses (see isNativeSend).
+	fromCoin := strings.TrimSpace(req.TokenAddr)
+	if fromCoin == "" {
+		fromCoin = nativeCoinType
+	}
+	if err := checkBalanceChanges(sim.BalanceChanges, req.From, fromCoin, approved, sim.Effects.GasUsed.NetGas()); err != nil {
 		return chains.PreparedTx{}, err
 	}
 
@@ -88,12 +106,13 @@ func (c *Client) prepareFromTxBytes(ctx context.Context, req chains.TransferRequ
 // checkBalanceChanges enforces that the simulated transaction only takes from
 // `owner`, and takes no more than `approved` of any single coin type.
 //
-// The per-coin-type bound is what stops a route quoted as "swap 1 SUI" from
-// also sweeping an unrelated coin: each outflow is measured on its own, so a
-// second coin type leaving is judged against the same ceiling rather than
-// hidden inside a net total.
-func checkBalanceChanges(changes []DryRunBalanceChange, owner string, approved *big.Int) error {
+// The per-coin-type allowance is what stops a route quoted as "swap 1 SUI" from
+// also sweeping an unrelated coin: each outflow is measured against what that
+// particular coin is allowed to lose, rather than against one shared ceiling
+// that a net total could hide a second withdrawal inside.
+func checkBalanceChanges(changes []DryRunBalanceChange, owner, fromCoinType string, approved, gasAllowance *big.Int) error {
 	ownerLower := strings.ToLower(strings.TrimSpace(owner))
+	fromCoin := normalizeCoinType(strings.TrimSpace(fromCoinType))
 	for _, ch := range changes {
 		amount, ok := new(big.Int).SetString(strings.TrimSpace(ch.Amount), 10)
 		if !ok {
@@ -109,12 +128,42 @@ func checkBalanceChanges(changes []DryRunBalanceChange, owner string, approved *
 		if !strings.EqualFold(addr, ownerLower) {
 			return chains.Invalid("the route moves funds out of an address that is not yours")
 		}
-		if outflow := new(big.Int).Neg(amount); outflow.Cmp(approved) > 0 {
-			return chains.Invalid("the route would spend %s of %s but %s was approved",
-				outflow, shortCoinType(ch.CoinType), approved)
+		coin := normalizeCoinType(strings.TrimSpace(ch.CoinType))
+		allowance := outflowAllowance(coin, fromCoin, approved, gasAllowance)
+		outflow := new(big.Int).Neg(amount)
+		if outflow.Cmp(allowance) <= 0 {
+			continue
+		}
+		switch {
+		case allowance.Sign() == 0:
+			return chains.Invalid("the route would move %s out of your wallet, which this swap does not involve",
+				shortCoinType(ch.CoinType))
+		case coin != fromCoin:
+			// Native SUI leaving a swap it is not the subject of is gas, and
+			// the only gas we vouch for is the amount the node just quoted.
+			return chains.Invalid("the route would take %s MIST for gas but the network estimated only %s",
+				outflow, allowance)
+		default:
+			return chains.Invalid("the route would spend %s of %s but only %s was approved",
+				outflow, shortCoinType(ch.CoinType), allowance)
 		}
 	}
 	return nil
+}
+
+// outflowAllowance is how much of one coin type may leave the user's address:
+// what they approved for the coin being swapped, plus the simulation's own gas
+// for SUI (both at once when the swap is itself denominated in SUI), and
+// nothing whatsoever for any other coin.
+func outflowAllowance(coin, fromCoin string, approved, gasAllowance *big.Int) *big.Int {
+	allowance := new(big.Int)
+	if coin == fromCoin {
+		allowance.Add(allowance, approved)
+	}
+	if isNativeCoinType(coin) {
+		allowance.Add(allowance, gasAllowance)
+	}
+	return allowance
 }
 
 // balanceChangeOwner pulls the address out of Sui's Owner enum, which is a

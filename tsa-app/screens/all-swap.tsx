@@ -447,6 +447,7 @@ export default function AllSwapScreen() {
         quote,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
+        fromTokenAddress: fromToken.address,
         fromAmount,
         walletAddress,
         fromChainId,

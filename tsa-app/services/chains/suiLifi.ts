@@ -27,6 +27,13 @@ export interface ExecuteLiFiSuiSwapParams {
   /** Base units the user authorized; the backend bounds the spend by this. */
   fromAmountRaw: string;
   fromSymbol: string;
+  /**
+   * Coin type of the token being sold ("0x…::usdc::USDC"; empty for native
+   * SUI). The backend needs it to know WHICH coin `fromAmountRaw` bounds:
+   * gas is paid in SUI and shows up as a second outflow, so without this the
+   * two get measured against the same ceiling and every swap is refused.
+   */
+  fromTokenAddr?: string;
   /** EVM wallet id — used to look up the mnemonic + derived Sui address. */
   walletAddress: string;
   /** Fee bucket + human-units amount; see SendSuiParams.fee. */
@@ -42,6 +49,7 @@ export async function executeLiFiSuiSwap({
   txBytesB64,
   fromAmountRaw,
   fromSymbol,
+  fromTokenAddr,
   walletAddress,
   fee,
   onStage,
@@ -68,6 +76,7 @@ export async function executeLiFiSuiSwap({
     to: suiAddress,
     amount: fromAmountRaw,
     symbol: fromSymbol,
+    tokenAddr: fromTokenAddr ?? '',
     walletAddress,
     txBytesB64,
     network: SWAP_NETWORK,

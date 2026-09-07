@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -268,14 +270,47 @@ type DryRunBalanceChange struct {
 	Amount string `json:"amount"`
 }
 
+// DryRunGasUsed is the simulation's own gas accounting, in MIST.
+type DryRunGasUsed struct {
+	ComputationCost string `json:"computationCost"`
+	StorageCost     string `json:"storageCost"`
+	StorageRebate   string `json:"storageRebate"`
+}
+
+// NetGas is computationCost + storageCost - storageRebate: what the sender
+// actually pays, and exactly the amount the node subtracts from their SUI
+// balance change. (Confirmed against mainnet: a transaction that did nothing
+// but pay gas reports a sender balance change of precisely -netGas.) That
+// makes it the allowance the spend check must grant SUI on top of the swap,
+// or every Sui swap is refused for spending its own gas.
+//
+// A storage rebate larger than the cost makes the total negative — a refund,
+// which arrives as an inflow rather than an outflow — so it floors at zero.
+func (g DryRunGasUsed) NetGas() *big.Int {
+	total := new(big.Int)
+	for _, v := range []string{g.ComputationCost, g.StorageCost} {
+		if n, ok := new(big.Int).SetString(strings.TrimSpace(v), 10); ok {
+			total.Add(total, n)
+		}
+	}
+	if n, ok := new(big.Int).SetString(strings.TrimSpace(g.StorageRebate), 10); ok {
+		total.Sub(total, n)
+	}
+	if total.Sign() < 0 {
+		return new(big.Int)
+	}
+	return total
+}
+
 // DryRunResult is the part of a simulation we act on: whether it would succeed,
-// and what it would move.
+// what it would move, and what it would cost to run.
 type DryRunResult struct {
 	Effects struct {
 		Status struct {
 			Status string `json:"status"`
 			Error  string `json:"error"`
 		} `json:"status"`
+		GasUsed DryRunGasUsed `json:"gasUsed"`
 	} `json:"effects"`
 	BalanceChanges []DryRunBalanceChange `json:"balanceChanges"`
 }

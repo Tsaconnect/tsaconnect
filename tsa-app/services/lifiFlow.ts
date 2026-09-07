@@ -27,6 +27,12 @@ export interface ExecuteLiFiSwapParams {
   /** Symbol + decimals of the token being paid (the quote's from side). */
   fromSymbol: string;
   fromDecimals: number;
+  /**
+   * Address of the token being paid, in the source chain's own form (a Sui
+   * coin type, an ERC-20 address). Only the Sui path reads it today, to tell
+   * the swapped coin apart from the SUI that pays for gas.
+   */
+  fromTokenAddress?: string;
   /** Human-units amount the user entered (what the quote was fetched for). */
   fromAmount: string;
   walletAddress: string;
@@ -51,6 +57,7 @@ export async function executeLiFiSwap({
   fromSymbol,
   fromDecimals,
   fromAmount,
+  fromTokenAddress,
   walletAddress,
   fromChainId,
   feeFeature = 'allswap',
@@ -72,6 +79,7 @@ export async function executeLiFiSwap({
       txBytesB64: quote.transactionRequest.data,
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
       fromSymbol,
+      fromTokenAddr: fromTokenAddress,
       walletAddress,
       fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,
